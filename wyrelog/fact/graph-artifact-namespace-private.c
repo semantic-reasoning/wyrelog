@@ -780,6 +780,8 @@ static wyrelog_error_t duckdb_temp_child_binding_revalidate_unlocked
     (WylFactDuckdbTempChildBinding *);
 static wyrelog_error_t duckdb_temp_child_binding_revalidate_fd_unlocked
     (WylFactDuckdbTempChildBinding *, gint);
+static wyrelog_error_t duckdb_temp_set_orphan_evidence (const gchar *,
+    WylFactDuckdbTempOrphanEvidence **);
 static void release_lock_domain (WylFactArtifactNamespace *);
 static wyrelog_error_t namespace_test_substitute_regular
     (WylFactArtifactNamespace *, const gchar *, gboolean);
@@ -796,7 +798,8 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
-      <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_PRE_IDENTITY)
+      <=
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_BINDING_POST_OPEN_IDENTITY)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1409,8 +1412,12 @@ duckdb_temp_child_binding_new (WylFactDuckdbTempChild *child, gint fd,
     binding->io_open = TRUE;
     child->io_revoked = FALSE;
     g_ptr_array_add (child->bindings, binding);
-    if (duckdb_temp_child_binding_revalidate_fd_unlocked (binding, fd)
-        != WYRELOG_E_OK) {
+    gboolean fault = namespace_fault_take
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_BINDING_POST_OPEN_IDENTITY);
+    if (fault || duckdb_temp_child_binding_revalidate_fd_unlocked (binding,
+            fd) != WYRELOG_E_OK) {
+      if (fault)
+        duckdb_temp_child_binding_revoke_unlocked (binding);
       g_ptr_array_remove_fast (child->bindings, binding);
       wyl_fact_duckdb_temp_child_free (binding->child);
       g_free (binding);
@@ -1454,6 +1461,16 @@ wyl_fact_duckdb_temp_root_create_child_binding (WylFactDuckdbTempRoot *root,
     close (fd);
     WylFactDuckdbTempRetireResult retired;
     (void) wyl_fact_duckdb_temp_child_retire (child, &retired);
+    /* Binding construction can fail after durable child creation.  If its
+     * terminal revoke barrier prevents exact cleanup, preserve the only safe
+     * recovery telemetry instead of losing the otherwise unnameable orphan. */
+    if (retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED) {
+      g_autofree gchar *logical_name = g_strdup_printf ("%s/%s",
+          root->logical_name, name);
+      if (!logical_name || duckdb_temp_set_orphan_evidence (logical_name,
+              out_evidence) != WYRELOG_E_OK)
+        result = WYRELOG_E_NOMEM;
+    }
     wyl_fact_duckdb_temp_child_free (child);
     return result;
   }
@@ -1546,6 +1563,11 @@ wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *b)
   WylFactDuckdbTempChild *child = b->child;
   if (child && child->root && child->root->lease) {
     g_mutex_lock (&child->root->lease->mutex);
+    /* Free never closes a caller-owned issued descriptor.  A still-live one
+     * must nevertheless block retirement until a fresh verified lifecycle
+     * operation re-establishes the child. */
+    if (b->io_open)
+      child->io_revoked = TRUE;
     if (child->bindings)
       g_ptr_array_remove_fast (child->bindings, b);
     g_mutex_unlock (&child->root->lease->mutex);
