@@ -384,6 +384,23 @@ wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *root,
 }
 
 wyrelog_error_t
+wyl_fact_duckdb_temp_root_foreach_child (WylFactDuckdbTempRoot *root,
+    WylFactDuckdbTempChildVisitor visitor, gpointer data)
+{
+  (void) root;
+  (void) visitor;
+  (void) data;
+  return closed ();
+}
+
+gchar *
+wyl_fact_duckdb_temp_child_dup_logical_name (WylFactDuckdbTempChild *child)
+{
+  (void) child;
+  return NULL;
+}
+
+wyrelog_error_t
 wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
     const gchar *name, WylFactDuckdbTempChild **out_child, gint *out_fd)
 {
@@ -2569,6 +2586,40 @@ wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *root,
   }
   g_mutex_unlock (&lease->mutex);
   return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_foreach_child (WylFactDuckdbTempRoot *root,
+    WylFactDuckdbTempChildVisitor visitor, gpointer data)
+{
+  if (!root || !visitor)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_root_audit_unlocked (root);
+  if (result == WYRELOG_E_OK)
+    for (guint i = 0; i < root->children->len; i++) {
+      WylFactDuckdbTempChild *child = g_ptr_array_index (root->children, i);
+      if (!child->active || !visitor (child, child->name, data)) {
+        result = WYRELOG_E_POLICY;
+        break;
+      }
+    }
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+gchar *
+wyl_fact_duckdb_temp_child_dup_logical_name (WylFactDuckdbTempChild *child)
+{
+  if (!child)
+    return NULL;
+  WylFactArtifactMutationLease *lease = child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  gchar *copy = duckdb_temp_child_matches_unlocked (child) == WYRELOG_E_OK
+      ? g_strdup (child->name) : NULL;
+  g_mutex_unlock (&lease->mutex);
+  return copy;
 }
 
 wyrelog_error_t
