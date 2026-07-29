@@ -131,6 +131,35 @@ open_namespace (const WylFactGraphDirectory *directory,
   return result;
 }
 
+static wyrelog_error_t
+open_readonly_namespace (const WylFactGraphDirectory *directory,
+    WylFactArtifactNamespace **out_namespace)
+{
+  if (out_namespace)
+    *out_namespace = NULL;
+  if (!directory || !out_namespace)
+    return WYRELOG_E_INVALID;
+  gint fd = openat (directory->graph_fd, "facts.duckdb",
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0)
+    return WYRELOG_E_IO;
+  struct stat stat_;
+  if (fstat (fd, &stat_) != 0 || !S_ISREG (stat_.st_mode)
+      || stat_.st_nlink != 1 || (stat_.st_mode & 07777) != 0600) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  WylFactGraphRegularFile main = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  main.fd = fd;
+  main.device = stat_.st_dev;
+  main.inode = stat_.st_ino;
+  main.size_bytes = stat_.st_size;
+  wyrelog_error_t result = wyl_fact_artifact_namespace_open (directory,
+      &main, out_namespace);
+  wyl_fact_graph_regular_file_clear (&main);
+  return result;
+}
+
 typedef struct
 {
   pid_t pid;
@@ -616,6 +645,170 @@ test_mutation_leases (void)
   wyl_fact_graph_directory_clear (&d);
   wyl_fact_graph_locator_clear (&l);
   wyl_fact_graph_resolver_clear (&r);
+#endif
+}
+
+static void
+test_main_binding (void)
+{
+#ifdef G_OS_WIN32
+  WylFactArtifactMainBinding *binding = (gpointer) 0x1;
+  gint fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (NULL,
+          &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+#else
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  WylFactArtifactMutationLease *reader = NULL;
+  WylFactArtifactMutationLease *lease = NULL;
+  WylFactArtifactMainBinding *binding = NULL;
+  g_autofree gchar *base = make_root ();
+  g_assert_cmpint (wyl_fact_graph_resolver_open (base, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+          TRUE, &directory), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path
+      (&directory);
+  /* First create the artifact, then import only a read-only caller fd. */
+  g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_namespace_free (namespace_);
+  namespace_ = NULL;
+  g_assert_cmpint (open_readonly_namespace (&directory, &namespace_), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader), ==, WYRELOG_E_OK);
+  gint fd = 42;
+  WylFactArtifactMainBinding *rejected = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (reader,
+          &rejected, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (fd, ==, -1);
+  wyl_fact_artifact_mutation_lease_free (reader);
+  reader = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &binding, &fd), ==, WYRELOG_E_OK);
+  g_assert_nonnull (binding);
+  g_assert_cmpint (fcntl (fd, F_GETFD) & FD_CLOEXEC, !=, 0);
+  g_assert_cmpint (pwrite (fd, "main", 4, 0), ==, 4);
+  g_assert_cmpint (ftruncate (fd, 4), ==, 0);
+  g_assert_cmpint (fsync (fd), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+  char contents[5] = { 0 };
+  g_assert_cmpint (pread (fd, contents, 4, 0), ==, 4);
+  g_assert_cmpstr (contents, ==, "main");
+  close (fd);
+  /* The binding itself retains the lease after the caller drops its handle. */
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+  WylFactArtifactNamespace *contender = NULL;
+  g_assert_cmpint (open_namespace (&directory, &contender), ==, WYRELOG_E_OK);
+  WylFactArtifactMutationLease *contender_lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (contender, &contender_lease), ==, WYRELOG_E_BUSY);
+  g_assert_null (contender_lease);
+  wyl_fact_artifact_namespace_free (contender);
+
+  /* A renamed/replaced canonical name revokes the capability permanently and
+   * does not write the foreign replacement. */
+  g_autofree gchar *main_path = g_build_filename (graph_path,
+      "facts.duckdb", NULL);
+  g_autofree gchar *saved_path = g_build_filename (graph_path,
+      "facts.duckdb.saved", NULL);
+  g_assert_cmpint (rename (main_path, saved_path), ==, 0);
+  g_assert_true (g_file_set_contents (main_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (unlink (main_path), ==, 0);
+  g_assert_cmpint (rename (saved_path, main_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_main_binding_free (binding);
+  binding = NULL;
+
+  /* Fresh namespace: links and mode changes prevent minting with no mutation
+   * by the authority itself. */
+  wyl_fact_artifact_namespace_free (namespace_);
+  namespace_ = NULL;
+  g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_autofree gchar *hard = g_build_filename (graph_path, "main-hard", NULL);
+  g_assert_cmpint (link (main_path, hard), ==, 0);
+  fd = 42;
+  rejected = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &rejected, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (unlink (hard), ==, 0);
+  g_assert_cmpint (g_chmod (main_path, 0644), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &rejected, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  /* A missing fixed name is distinguishable; malformed replacements are not
+   * adopted and remain untouched by the binding authority. */
+  g_assert_cmpint (rename (main_path, saved_path), ==, 0);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &rejected, &fd), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (rejected);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (rename (saved_path, main_path), ==, 0);
+  g_assert_cmpint (rename (main_path, saved_path), ==, 0);
+  g_assert_cmpint (symlink ("/dev/null", main_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &rejected, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (unlink (main_path), ==, 0);
+  g_assert_cmpint (rename (saved_path, main_path), ==, 0);
+  g_assert_cmpint (rename (main_path, saved_path), ==, 0);
+  g_assert_cmpint (mkdir (main_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &rejected, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (rmdir (main_path), ==, 0);
+  g_assert_cmpint (rename (saved_path, main_path), ==, 0);
+  /* The deterministic post-open ABA seam replaces the pathname after the RW
+   * descriptor exists.  Minting rejects it and has not written the foreign
+   * replacement.  The original remains only in namespace-held descriptors. */
+  fd = 42;
+  rejected = (gpointer) 0x1;
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &rejected, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (fd, ==, -1);
+  struct stat foreign_stat;
+  g_assert_cmpint (stat (main_path, &foreign_stat), ==, 0);
+  g_assert_cmpint (foreign_stat.st_size, ==, 0);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  wyl_fact_artifact_namespace_free (namespace_);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_MAIN);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_LOCK);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_autofree gchar *tenant_path = g_path_get_dirname (graph_path);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
 #endif
 }
 
@@ -2284,6 +2477,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-artifact-namespace/basic", test_namespace);
   g_test_add_func ("/fact-artifact-namespace/mutation-leases",
       test_mutation_leases);
+  g_test_add_func ("/fact-artifact-namespace/main-binding", test_main_binding);
   g_test_add_func ("/fact-artifact-namespace/existing-sidecar-reopen",
       test_existing_sidecar_reopen);
   g_test_add_func ("/fact-artifact-namespace/duckdb-temp-root",
