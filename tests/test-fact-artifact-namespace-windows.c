@@ -26,6 +26,48 @@ identity_for (HANDLE handle)
   return identity;
 }
 
+static gboolean
+identity_matches (const WylFactGraphWinIdentity *a,
+    const WylFactGraphWinIdentity *b)
+{
+  return a->volume_serial == b->volume_serial
+      && memcmp (a->file_id, b->file_id, sizeof a->file_id) == 0;
+}
+
+/* Resolves a name to whatever object it currently addresses.  Observations
+ * about the namespace must come from a fresh open, never from a HANDLE the
+ * test already holds: a replaced name and a superseded object are exactly
+ * what these scenarios have to tell apart. */
+static WylFactGraphWinIdentity
+identity_for_path (const gchar *path)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  HANDLE handle = CreateFileW (wide, FILE_READ_ATTRIBUTES, FILE_SHARE_READ
+      | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, NULL);
+  WylFactGraphWinIdentity identity;
+
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  identity = identity_for (handle);
+  g_assert_true (CloseHandle (handle));
+  return identity;
+}
+
+static void
+read_named_file_prefix (const gchar *path, gchar *out, gsize length)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  HANDLE handle = CreateFileW (wide, GENERIC_READ, FILE_SHARE_READ
+      | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, NULL);
+  DWORD read = 0;
+
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  g_assert_true (ReadFile (handle, out, (DWORD) length, &read, NULL));
+  g_assert_cmpuint (read, ==, (DWORD) length);
+  g_assert_true (CloseHandle (handle));
+}
+
 typedef struct
 {
   WylFactArtifactWinNamespace *namespace_;
@@ -700,6 +742,65 @@ test_locator_relative_entry_lifecycle (void)
   g_clear_pointer (&wide, g_free);
   wide = g_utf8_to_utf16 (renamed, -1, NULL, NULL, NULL);
   g_assert_false (GetFileAttributesW (wide) != INVALID_FILE_ATTRIBUTES);
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (graph));
+  directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (directory_wide));
+  g_free (path);
+}
+
+/* Replacement has to linearize while the destination's own HANDLE is still
+ * open, and has to leave that HANDLE addressing the same, now nameless,
+ * object.  Classic FileRenameInformation can do neither: the kernel refuses
+ * it on the target's open count alone, whatever the share modes. */
+static void
+test_locator_replace_open_destination (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph,
+      &graph_identity);
+  WylFactArtifactWinEntry *source = NULL;
+  WylFactArtifactWinEntry *target = NULL;
+  WylFactArtifactWinEntry *resolved = NULL;
+  WylFactGraphWinIdentity source_identity = { 0 };
+  WylFactGraphWinIdentity target_identity = { 0 };
+  WylFactGraphWinIdentity held_identity = { 0 };
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  HANDLE held = INVALID_HANDLE_VALUE;
+  g_autofree wchar_t *directory_wide = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "tmp-source",
+          GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &source), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "target",
+          GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &target), ==,
+      WYRELOG_E_OK);
+  source_identity = *wyl_fact_artifact_win_entry_identity (source);
+  target_identity = *wyl_fact_artifact_win_entry_identity (target);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (locator,
+          target, &held), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_rename_replace_verified
+      (locator, source, "target", &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  /* The replaced object outlives its only link and stays reachable through
+   * the HANDLE its holder already owns, while the name now answers with the
+   * source. */
+  held_identity = identity_for (held);
+  g_assert_true (identity_matches (&held_identity, &target_identity));
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "target",
+          GENERIC_READ, FALSE, &resolved), ==, WYRELOG_E_OK);
+  g_assert_true (identity_matches (wyl_fact_artifact_win_entry_identity
+          (resolved), &source_identity));
+  wyl_fact_artifact_win_entry_free (resolved);
+  g_assert_true (CloseHandle (held));
+  g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator, source,
+          &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  wyl_fact_artifact_win_entry_free (source);
+  wyl_fact_artifact_win_entry_free (target);
   wyl_fact_artifact_win_locator_free (locator);
   g_assert_true (CloseHandle (graph));
   directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
@@ -1553,12 +1654,31 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
   replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
-      (sidecar, &session), ==, WYRELOG_E_OK);
+  {
+    /* A live destination session is a barrier taken before any mutation, not
+     * a rename that was attempted and refused.  The reported code alone
+     * cannot tell those apart, so observe the namespace: the staging name is
+     * still occupied and the destination name still resolves to the
+     * superseded content. */
+    g_autofree gchar *staged_path = g_build_filename (path,
+        "tmp-replace-sidecar", NULL);
+    g_autofree wchar_t *staged_wide = g_utf8_to_utf16 (staged_path, -1, NULL,
+        NULL, NULL);
+    g_autofree gchar *published_path = g_build_filename (path,
+        "facts.duckdb.wal", NULL);
+    gchar rejected_readback[4] = { 0 };
+
+    g_assert_true (GetFileAttributesW (staged_wide) !=
+        INVALID_FILE_ATTRIBUTES);
+    read_named_file_prefix (published_path, rejected_readback, 3);
+    g_assert_cmpstr (rejected_readback, ==, "old");
+  }
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
@@ -1624,7 +1744,10 @@ test_native_namespace_main_sidecar_lifecycle (void)
   /* Native Windows replacement has no target-FileId CAS.  The exclusive
    * lease serializes sanctioned writers, while a deterministic substitution
    * immediately before the final destination revalidation proves that the
-   * sanctioned path fails closed without moving its source. */
+   * sanctioned path fails closed without moving its source.  The substitute
+   * genuinely takes the destination name -- its FileId is observable there
+   * afterwards -- so this proves the sanctioned path lost a destination it
+   * had already validated, not merely that two names still exist. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, &sidecar), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
@@ -1637,16 +1760,24 @@ test_native_namespace_main_sidecar_lifecycle (void)
       (replacement_source, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
+  g_autofree gchar *pre_source_path = g_build_filename (path, "tmp-pre-final",
+      NULL);
+  g_autofree gchar *pre_destination_path = g_build_filename (path,
+      "facts.duckdb.wal.checkpoint", NULL);
+  WylFactGraphWinIdentity validated_destination =
+      identity_for_path (pre_destination_path);
   wyl_fact_artifact_win_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_PRE_FINAL_DESTINATION_SUBSTITUTE);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
-  g_autofree gchar *pre_source_path = g_build_filename (path, "tmp-pre-final",
-      NULL);
-  g_autofree gchar *pre_destination_path = g_build_filename (path,
-      "facts.duckdb.wal.checkpoint", NULL);
+  {
+    WylFactGraphWinIdentity substituted =
+        identity_for_path (pre_destination_path);
+
+    g_assert_false (identity_matches (&validated_destination, &substituted));
+  }
   g_autofree wchar_t *pre_source_wide = g_utf8_to_utf16 (pre_source_path, -1,
       NULL, NULL, NULL);
   g_autofree wchar_t *pre_destination_wide = g_utf8_to_utf16
@@ -1963,6 +2094,9 @@ main (int argc, char **argv)
       test_session_retains_mutation_lease_until_finish);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
       test_locator_relative_entry_lifecycle);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/locator/replace-open-destination",
+      test_locator_replace_open_destination);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/nested-transport",
       test_locator_nested_directory_transport);
   g_test_add_func

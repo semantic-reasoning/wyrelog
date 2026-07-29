@@ -64,7 +64,16 @@ wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator *
  * no target-FileId CAS here: this is serialized by the caller's cooperative
  * exclusive lease, and same-authority nonparticipants are outside that
  * contract.  Transport reports the kernel's linearization separately from
- * post-mutation durability/reconciliation. */
+ * post-mutation durability/reconciliation.
+ *
+ * Replacement uses POSIX rename semantics, so the replaced target link is
+ * removed in the same operation even while its file is still open.  Any
+ * HANDLE the caller still holds to the replaced object stays valid against a
+ * now nameless file and must be closed through that object's terminal
+ * destructor.  A kernel or filesystem without the class fails closed as
+ * POLICY with NOT_APPLIED and never degrades to a non-atomic path; that
+ * capability gap is labelled in the log so it remains distinguishable from
+ * an authority violation, which reports the same code. */
 wyrelog_error_t
 wyl_fact_artifact_win_entry_rename_replace_verified (WylFactArtifactWinLocator *
     locator, WylFactArtifactWinEntry * entry, const gchar * destination,
