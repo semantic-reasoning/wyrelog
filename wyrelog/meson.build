@@ -47,6 +47,7 @@ wyrelog_sources = files(
   'audit/event.c',
   'daemon/auth-registry-private.c',
   'fact/graph-locator-private.c',
+  'fact/graph-artifact-windows-handle-private.c',
   'fact/graph-artifact-namespace-private.c',
   'fact/reconcile-private.c',
   'fact/root-writer-lease-private.c',

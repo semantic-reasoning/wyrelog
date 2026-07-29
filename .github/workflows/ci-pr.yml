@@ -352,7 +352,7 @@ jobs:
           builddir\wyrelog\wyctl.exe --help >NUL
           builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
           if "${{ matrix.secure_bridge }}"=="enabled" (
-            meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem --print-errorlogs
+            meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem fact-artifact-namespace-windows --print-errorlogs
           ) else (
             meson test -C builddir --print-errorlogs --suite wyrelog
           )

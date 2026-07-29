@@ -747,6 +747,20 @@ test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
 )
 test('fact-artifact-namespace', test_fact_artifact_namespace)
 
+if host_machine.system() == 'windows'
+  # This is intentionally separate from test-fact-artifact-namespace: that
+  # historical POSIX test is compiled out on Windows and cannot prove native
+  # HANDLE ownership or runtime behavior.
+  test_fact_artifact_namespace_windows = executable(
+    'test-fact-artifact-namespace-windows',
+    'test-fact-artifact-namespace-windows.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+  test('fact-artifact-namespace-windows',
+    test_fact_artifact_namespace_windows)
+endif
+
 subprocess_test_env = environment()
 if host_machine.system() == 'windows'
   glib_genmarshal = glib_dep.get_variable(
