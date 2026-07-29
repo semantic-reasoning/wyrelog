@@ -1128,6 +1128,47 @@ test_publish_retries_converge (void)
   remove_tree_no_follow (root);
 }
 
+static void
+test_exact_stage_creation_mints_operation_evidence (void)
+{
+  static const gchar operation[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphStage reopened = WYL_FACT_GRAPH_STAGE_INIT;
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (stage.stage_basename, ==,
+      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite");
+  g_assert_cmpstr (stage.final_basename, ==, "facts.duckdb");
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
+          &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (evidence.version, ==,
+      WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION);
+  g_assert_cmpint (memcmp (&evidence.graph_identity, &graph.graph_identity,
+          sizeof evidence.graph_identity), ==, 0);
+  g_assert_cmpint (memcmp (&evidence.artifact_identity, &stage.identity,
+          sizeof evidence.artifact_identity), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          operation, &reopened), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          operation, &reopened), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          "01890f47-3c4b-6cc2-b8c4-dc0c0c070544", &reopened), ==,
+      WYRELOG_E_INVALID);
+  wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree_no_follow (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1154,6 +1195,8 @@ main (int argc, char **argv)
       test_stage_attack_bindings);
   g_test_add_func ("/fact-graph-locator/windows/publish-retry",
       test_publish_retries_converge);
+  g_test_add_func ("/fact-graph-locator/windows/exact-stage-evidence",
+      test_exact_stage_creation_mints_operation_evidence);
   return g_test_run ();
 }
 #endif
