@@ -1426,9 +1426,12 @@ test_native_namespace_main_sidecar_lifecycle (void)
           &temp_retire), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (temp_retire, ==,
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
-  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
-      WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_session_abort (session);
   session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
+          &temp_retire), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (temp_retire, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
   wyl_fact_artifact_win_temp_child_binding_free (temp_binding);
   temp_binding = NULL;
   g_autofree gchar *raw_root_name = g_strdup (raw_logical
@@ -1445,8 +1448,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
   temp_child = NULL;
   wyl_fact_artifact_win_temp_root_free (temp_root);
   temp_root = NULL;
-  /* Closing the session releases the live-I/O barrier; external test cleanup
-   * removes the now-unowned artifact. */
+  /* An aborted session is terminal authority; only external test cleanup
+   * removes the untouched child. */
   g_assert_true (DeleteFileW (raw_child_wide));
   g_assert_true (RemoveDirectoryW (raw_root_wide));
 
