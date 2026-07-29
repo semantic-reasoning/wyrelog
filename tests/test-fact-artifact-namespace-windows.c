@@ -1503,11 +1503,11 @@ test_native_namespace_main_sidecar_lifecycle (void)
     g_assert_cmpstr (replacement_readback, ==, "new");
     g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
         WYRELOG_E_OK);
+    session = NULL;
   }
-  sidecar_handle = (HANDLE) 1;
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
       (replacement_source, &session), ==, WYRELOG_E_POLICY);
-  g_assert_true (sidecar_handle == INVALID_HANDLE_VALUE);
+  g_assert_null (session);
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
           &retire), ==, WYRELOG_E_OK);
   g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
