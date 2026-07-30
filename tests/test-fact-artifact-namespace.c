@@ -418,6 +418,162 @@ revalidate_sidecar_binding_worker (gpointer data)
 
 typedef struct
 {
+  WylFactGraphResolver resolver;
+  WylFactGraphLocator locator;
+  WylFactGraphDirectory directory;
+  WylFactArtifactNamespace *namespace_;
+  WylFactArtifactMutationLease *lease;
+  gchar *base;
+  gchar *graph_path;
+} FixedSidecarReplaceFixture;
+
+typedef struct
+{
+  WylFactArtifactSidecarBinding *source;
+  WylFactArtifactSidecarBinding *destination;
+  wyrelog_error_t error;
+  WylFactArtifactSidecarReplaceResult result;
+} FixedSidecarReplaceWorker;
+
+static const gchar *
+fixed_artifact_name_for_test (WylFactArtifactName name)
+{
+  static const gchar *const names[] = { "facts.duckdb", "facts.duckdb.wal",
+    "facts.duckdb.wal.checkpoint", "facts.duckdb.wal.recovery",
+    "facts.duckdb.lock"
+  };
+  g_assert_cmpint (name >= WYL_FACT_ARTIFACT_MAIN
+      && name <= WYL_FACT_ARTIFACT_LOCK, ==, TRUE);
+  return names[name];
+}
+
+static gchar *
+fixed_artifact_path_for_test (FixedSidecarReplaceFixture *fixture,
+    WylFactArtifactName name)
+{
+  return g_build_filename (fixture->graph_path,
+      fixed_artifact_name_for_test (name), NULL);
+}
+
+static void
+fixed_sidecar_replace_fixture_init (FixedSidecarReplaceFixture *fixture)
+{
+  *fixture = (FixedSidecarReplaceFixture) {
+  .resolver = WYL_FACT_GRAPH_RESOLVER_INIT,.directory =
+        WYL_FACT_GRAPH_DIRECTORY_INIT};
+  fixture->base = make_root ();
+  g_assert_cmpint (wyl_fact_graph_resolver_open (fixture->base,
+          &fixture->resolver), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&fixture->locator, "tenant",
+          "graph"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&fixture->resolver,
+          &fixture->locator, TRUE, &fixture->directory), ==, WYRELOG_E_OK);
+  fixture->graph_path =
+      wyl_fact_graph_directory_descriptive_path (&fixture->directory);
+  g_assert_cmpint (open_namespace (&fixture->directory, &fixture->namespace_),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (fixture->namespace_, &fixture->lease), ==, WYRELOG_E_OK);
+}
+
+static void
+fixed_sidecar_replace_fixture_reopen (FixedSidecarReplaceFixture *fixture)
+{
+  wyl_fact_artifact_mutation_lease_free (fixture->lease);
+  fixture->lease = NULL;
+  wyl_fact_artifact_namespace_free (fixture->namespace_);
+  fixture->namespace_ = NULL;
+  g_assert_cmpint (open_namespace (&fixture->directory, &fixture->namespace_),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (fixture->namespace_, &fixture->lease), ==, WYRELOG_E_OK);
+}
+
+static void
+fixed_sidecar_replace_fixture_clear (FixedSidecarReplaceFixture *fixture)
+{
+  wyl_fact_artifact_mutation_lease_free (fixture->lease);
+  wyl_fact_artifact_namespace_free (fixture->namespace_);
+  for (WylFactArtifactName name = WYL_FACT_ARTIFACT_MAIN;
+      name <= WYL_FACT_ARTIFACT_LOCK; name++) {
+    g_autofree gchar *path = fixed_artifact_path_for_test (fixture, name);
+    if (unlink (path) != 0)
+      g_assert_cmpint (errno, ==, ENOENT);
+  }
+  wyl_fact_graph_directory_clear (&fixture->directory);
+  wyl_fact_graph_locator_clear (&fixture->locator);
+  wyl_fact_graph_resolver_clear (&fixture->resolver);
+  g_autofree gchar *tenant_path = g_path_get_dirname (fixture->graph_path);
+  g_assert_cmpint (g_rmdir (fixture->graph_path), ==, 0);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+  g_assert_cmpint (g_rmdir (fixture->base), ==, 0);
+  g_clear_pointer (&fixture->graph_path, g_free);
+  g_clear_pointer (&fixture->base, g_free);
+}
+
+static WylFactArtifactSidecarBinding *
+create_closed_sidecar (FixedSidecarReplaceFixture *fixture,
+    WylFactArtifactName name, const gchar *contents, struct stat *out_identity,
+    gint *out_observer)
+{
+  WylFactArtifactSidecarBinding *binding = NULL;
+  gint fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (fixture->lease, name, TRUE, TRUE, &binding, &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (ftruncate (fd, 0), ==, 0);
+  g_assert_true (write_exact (fd, contents, strlen (contents)));
+  g_assert_cmpint (fstat (fd, out_identity), ==, 0);
+  if (out_observer) {
+    *out_observer = fcntl (fd, F_DUPFD_CLOEXEC, 3);
+    g_assert_cmpint (*out_observer, >=, 0);
+  }
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (binding, &fd), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (fd, ==, -1);
+  return binding;
+}
+
+static void
+assert_fixed_artifact (FixedSidecarReplaceFixture *fixture,
+    WylFactArtifactName name, const struct stat *identity,
+    const gchar *contents)
+{
+  g_autofree gchar *path = fixed_artifact_path_for_test (fixture, name);
+  struct stat actual;
+  g_assert_cmpint (lstat (path, &actual), ==, 0);
+  g_assert_true (S_ISREG (actual.st_mode));
+  g_assert_cmpuint ((guint64) actual.st_dev, ==, (guint64) identity->st_dev);
+  g_assert_cmpuint ((guint64) actual.st_ino, ==, (guint64) identity->st_ino);
+  g_autofree gchar *actual_contents = NULL;
+  gsize actual_size = 0;
+  g_assert_true (g_file_get_contents (path, &actual_contents, &actual_size,
+          NULL));
+  g_assert_cmpuint (actual_size, ==, strlen (contents));
+  g_assert_cmpmem (actual_contents, actual_size, contents, strlen (contents));
+}
+
+static gpointer
+replace_fixed_sidecar_worker (gpointer data)
+{
+  FixedSidecarReplaceWorker *worker = data;
+  worker->result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  worker->error = wyl_fact_artifact_sidecar_binding_replace_existing_wal
+      (worker->source, worker->destination, &worker->result);
+  return NULL;
+}
+
+static void
+retire_closed_sidecar (WylFactArtifactSidecarBinding *binding)
+{
+  WylFactArtifactSidecarRetireResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (binding, &result),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+}
+
+typedef struct
+{
   WylFactArtifactMutationLease *lease;
   WylFactArtifactName name;
   wyrelog_error_t result;
@@ -1745,6 +1901,484 @@ test_sidecar_retirement_result_contract (void)
   g_assert_cmpint
       (wyl_fact_artifact_sidecar_binding_replace_existing_wal (NULL, NULL,
           NULL), ==, WYRELOG_E_POLICY);
+}
+
+static void
+test_fixed_sidecar_replacement_success (void)
+{
+#ifdef G_OS_WIN32
+  WylFactArtifactSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal
+      ((WylFactArtifactSidecarBinding *) 0x1,
+          (WylFactArtifactSidecarBinding *) 0x2, &result), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+#else
+  gint baseline_fds = count_open_fds ();
+  FixedSidecarReplaceFixture fixture;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  const WylFactArtifactName sources[] = {
+    WYL_FACT_ARTIFACT_CHECKPOINT, WYL_FACT_ARTIFACT_RECOVERY
+  };
+  const gchar *const contents[] = { "checkpoint-bytes", "recovery-bytes" };
+  for (guint i = 0; i < G_N_ELEMENTS (sources); i++) {
+    struct stat source_identity, old_wal_identity, unlinked_old_wal;
+    gint old_wal_observer = -1;
+    WylFactArtifactSidecarBinding *destination =
+        create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_WAL, "old-wal",
+        &old_wal_identity, &old_wal_observer);
+    WylFactArtifactSidecarBinding *source =
+        create_closed_sidecar (&fixture, sources[i], contents[i],
+        &source_identity, NULL);
+    WylFactArtifactSidecarReplaceResult result =
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+    g_assert_cmpint
+        (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+            destination, &result), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==,
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE);
+    g_assert_cmpint (fstat (old_wal_observer, &unlinked_old_wal), ==, 0);
+    g_assert_cmpuint ((guint64) unlinked_old_wal.st_dev, ==,
+        (guint64) old_wal_identity.st_dev);
+    g_assert_cmpuint ((guint64) unlinked_old_wal.st_ino, ==,
+        (guint64) old_wal_identity.st_ino);
+    g_assert_cmpuint (unlinked_old_wal.st_nlink, ==, 0);
+    close (old_wal_observer);
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL, &source_identity,
+        contents[i]);
+    g_autofree gchar *source_path =
+        fixed_artifact_path_for_test (&fixture, sources[i]);
+    g_assert_false (g_file_test (source_path, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (source), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (destination),
+        ==, WYRELOG_E_OK);
+    result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+    g_assert_cmpint
+        (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+            destination, &result), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (result, ==,
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+    wyl_fact_artifact_sidecar_binding_free (source);
+    wyl_fact_artifact_sidecar_binding_free (destination);
+
+    /* A fresh namespace classifies only the post-replacement WAL and can bind
+     * the transferred identity; the fixed recovery source is not rediscovered. */
+    fixed_sidecar_replace_fixture_reopen (&fixture);
+    WylFactArtifactSidecarBinding *reopened = NULL;
+    gint fd = -1;
+    g_assert_cmpint
+        (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+        (fixture.lease, WYL_FACT_ARTIFACT_WAL, TRUE, &reopened, &fd), ==,
+        WYRELOG_E_OK);
+    gchar actual[32] = { 0 };
+    g_assert_cmpint (pread (fd, actual, strlen (contents[i]), 0), ==,
+        (gssize) strlen (contents[i]));
+    g_assert_cmpmem (actual, strlen (contents[i]), contents[i],
+        strlen (contents[i]));
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (reopened, &fd),
+        ==, WYRELOG_E_OK);
+    WylFactArtifactSidecarBinding *absent = (gpointer) 0x1;
+    fd = 42;
+    g_assert_cmpint
+        (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+        (fixture.lease, sources[i], TRUE, &absent, &fd), ==,
+        WYRELOG_E_NOT_FOUND);
+    g_assert_null (absent);
+    g_assert_cmpint (fd, ==, -1);
+    retire_closed_sidecar (reopened);
+    wyl_fact_artifact_sidecar_binding_free (reopened);
+  }
+  fixed_sidecar_replace_fixture_clear (&fixture);
+  g_assert_cmpint (count_open_fds (), ==, baseline_fds);
+#endif
+}
+
+#ifndef G_OS_WIN32
+static void
+run_fixed_sidecar_replace_fault (WylFactArtifactNamespaceTestFault fault,
+    gboolean after_linearization)
+{
+  FixedSidecarReplaceFixture fixture;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  struct stat source_identity, destination_identity;
+  WylFactArtifactSidecarBinding *destination =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_WAL, "old",
+      &destination_identity, NULL);
+  WylFactArtifactSidecarBinding *source =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_CHECKPOINT, "new",
+      &source_identity, NULL);
+  wyl_fact_artifact_namespace_set_test_fault (fault);
+  WylFactArtifactSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  wyrelog_error_t error =
+      wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+      destination, &result);
+  g_assert_cmpint (error, !=, WYRELOG_E_OK);
+  if (after_linearization) {
+    g_assert_cmpint (result, ==,
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (source), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (destination),
+        ==, WYRELOG_E_OK);
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL, &source_identity,
+        "new");
+    g_autofree gchar *source_path = fixed_artifact_path_for_test (&fixture,
+        WYL_FACT_ARTIFACT_CHECKPOINT);
+    g_assert_false (g_file_test (source_path, G_FILE_TEST_EXISTS));
+    retire_closed_sidecar (destination);
+  } else {
+    g_assert_cmpint (result, ==,
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (source), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (destination),
+        ==, WYRELOG_E_OK);
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_CHECKPOINT,
+        &source_identity, "new");
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL,
+        &destination_identity, "old");
+    retire_closed_sidecar (source);
+    retire_closed_sidecar (destination);
+  }
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+}
+#endif
+
+static void
+test_fixed_sidecar_replacement_faults (void)
+{
+#ifndef G_OS_WIN32
+  const WylFactArtifactNamespaceTestFault before[] = {
+    WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_SOURCE_FSYNC,
+    WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_PRE_RENAME,
+    WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME,
+  };
+  const WylFactArtifactNamespaceTestFault after[] = {
+    WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_LINEARIZATION,
+    WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_DIRECTORY_FSYNC,
+    WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (before); i++)
+    run_fixed_sidecar_replace_fault (before[i], FALSE);
+  for (guint i = 0; i < G_N_ELEMENTS (after); i++)
+    run_fixed_sidecar_replace_fault (after[i], TRUE);
+#endif
+}
+
+#ifndef G_OS_WIN32
+typedef enum
+{
+  FIXED_REPLACE_MALFORM_SOURCE_MODE,
+  FIXED_REPLACE_MALFORM_SOURCE_HARD_LINK,
+  FIXED_REPLACE_MALFORM_SOURCE_SUBSTITUTE,
+  FIXED_REPLACE_MALFORM_SOURCE_SYMLINK,
+  FIXED_REPLACE_MALFORM_SOURCE_DIRECTORY,
+  FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE,
+  FIXED_REPLACE_MALFORM_DESTINATION_MISSING,
+} FixedReplaceMalformation;
+
+static void
+run_fixed_sidecar_replace_malformation (FixedReplaceMalformation malformation)
+{
+  FixedSidecarReplaceFixture fixture;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  struct stat source_identity, destination_identity;
+  WylFactArtifactSidecarBinding *destination =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_WAL, "old",
+      &destination_identity, NULL);
+  WylFactArtifactSidecarBinding *source =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_RECOVERY, "new",
+      &source_identity, NULL);
+  g_autofree gchar *source_path = fixed_artifact_path_for_test (&fixture,
+      WYL_FACT_ARTIFACT_RECOVERY);
+  g_autofree gchar *destination_path = fixed_artifact_path_for_test (&fixture,
+      WYL_FACT_ARTIFACT_WAL);
+  g_autofree gchar *saved_path = g_build_filename (fixture.graph_path,
+      "saved-fixed-sidecar", NULL);
+  g_autofree gchar *alias_path = g_build_filename (fixture.graph_path,
+      "fixed-sidecar-alias", NULL);
+
+  switch (malformation) {
+    case FIXED_REPLACE_MALFORM_SOURCE_MODE:
+      g_assert_cmpint (chmod (source_path, 0644), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_HARD_LINK:
+      g_assert_cmpint (link (source_path, alias_path), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_SUBSTITUTE:
+      g_assert_cmpint (rename (source_path, saved_path), ==, 0);
+      g_assert_true (g_file_set_contents (source_path, "foreign", -1, NULL));
+      g_assert_cmpint (chmod (source_path, 0600), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_SYMLINK:
+      g_assert_cmpint (rename (source_path, saved_path), ==, 0);
+      g_assert_cmpint (symlink ("facts.duckdb", source_path), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_DIRECTORY:
+      g_assert_cmpint (rename (source_path, saved_path), ==, 0);
+      g_assert_cmpint (mkdir (source_path, 0700), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE:
+      g_assert_cmpint (rename (destination_path, saved_path), ==, 0);
+      g_assert_true (g_file_set_contents (destination_path, "foreign", -1,
+              NULL));
+      g_assert_cmpint (chmod (destination_path, 0600), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_MISSING:
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      break;
+  }
+
+  WylFactArtifactSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  if (malformation != FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE
+      && malformation != FIXED_REPLACE_MALFORM_DESTINATION_MISSING)
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL,
+        &destination_identity, "old");
+
+  switch (malformation) {
+    case FIXED_REPLACE_MALFORM_SOURCE_MODE:
+      g_assert_cmpint (chmod (source_path, 0600), ==, 0);
+      g_assert_cmpint (unlink (source_path), ==, 0);
+      retire_closed_sidecar (destination);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_HARD_LINK:
+      g_assert_cmpint (unlink (alias_path), ==, 0);
+      g_assert_cmpint (unlink (source_path), ==, 0);
+      retire_closed_sidecar (destination);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_SUBSTITUTE:
+    case FIXED_REPLACE_MALFORM_SOURCE_SYMLINK:
+      g_assert_cmpint (unlink (source_path), ==, 0);
+      g_assert_cmpint (rename (saved_path, source_path), ==, 0);
+      g_assert_cmpint (unlink (source_path), ==, 0);
+      retire_closed_sidecar (destination);
+      break;
+    case FIXED_REPLACE_MALFORM_SOURCE_DIRECTORY:
+      g_assert_cmpint (rmdir (source_path), ==, 0);
+      g_assert_cmpint (rename (saved_path, source_path), ==, 0);
+      g_assert_cmpint (unlink (source_path), ==, 0);
+      retire_closed_sidecar (destination);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE:
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      g_assert_cmpint (rename (saved_path, destination_path), ==, 0);
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      retire_closed_sidecar (source);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_MISSING:
+      retire_closed_sidecar (source);
+      break;
+  }
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+}
+#endif
+
+static void
+test_fixed_sidecar_replacement_rejections (void)
+{
+#ifndef G_OS_WIN32
+  gint baseline_fds = count_open_fds ();
+  FixedSidecarReplaceFixture fixture;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  WylFactArtifactSidecarBinding *destination = NULL, *source = NULL;
+  gint destination_fd = -1, source_fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &destination,
+          &destination_fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &source,
+          &source_fd), ==, WYRELOG_E_OK);
+  g_assert_true (write_exact (destination_fd, "old", 3));
+  g_assert_true (write_exact (source_fd, "new", 3));
+  WylFactArtifactSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  /* Both real working descriptors are still live. */
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (source, &source_fd),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (destination,
+          &destination_fd), ==, WYRELOG_E_OK);
+  result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  /* Argument identity and direction are closed: same binding and WAL as
+   * source cannot accidentally become generic rename authority. */
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source, source,
+          &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (destination,
+          source, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  retire_closed_sidecar (source);
+  retire_closed_sidecar (destination);
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+
+  /* Raw close plus exact descriptor-number reuse revokes the source without
+   * closing the foreign descriptor or renaming either sidecar. */
+  fixed_sidecar_replace_fixture_init (&fixture);
+  struct stat ignored;
+  destination = create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_WAL, "old",
+      &ignored, NULL);
+  source = NULL;
+  source_fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &source,
+          &source_fd), ==, WYRELOG_E_OK);
+  g_assert_true (write_exact (source_fd, "new", 3));
+  gint foreign_fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  g_assert_cmpint (foreign_fd, >=, 0);
+  g_assert_cmpint (dup2 (foreign_fd, source_fd), ==, source_fd);
+  if (foreign_fd != source_fd)
+    close (foreign_fd);
+  result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  g_assert_cmpint (fcntl (source_fd, F_GETFD), !=, -1);
+  close (source_fd);
+  g_autofree gchar *source_path = fixed_artifact_path_for_test (&fixture,
+      WYL_FACT_ARTIFACT_CHECKPOINT);
+  g_assert_cmpint (unlink (source_path), ==, 0);
+  retire_closed_sidecar (destination);
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+
+  /* The destination working descriptor has the same checked-close contract;
+   * replacement must not close a reused foreign descriptor or consume source. */
+  fixed_sidecar_replace_fixture_init (&fixture);
+  source = create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_RECOVERY, "new",
+      &ignored, NULL);
+  destination = NULL;
+  destination_fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &destination,
+          &destination_fd), ==, WYRELOG_E_OK);
+  g_assert_true (write_exact (destination_fd, "old", 3));
+  foreign_fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  g_assert_cmpint (foreign_fd, >=, 0);
+  g_assert_cmpint (dup2 (foreign_fd, destination_fd), ==, destination_fd);
+  if (foreign_fd != destination_fd)
+    close (foreign_fd);
+  result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  g_assert_cmpint (fcntl (destination_fd, F_GETFD), !=, -1);
+  close (destination_fd);
+  g_autofree gchar *destination_path = fixed_artifact_path_for_test (&fixture,
+      WYL_FACT_ARTIFACT_WAL);
+  g_assert_cmpint (unlink (destination_path), ==, 0);
+  retire_closed_sidecar (source);
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+
+  for (FixedReplaceMalformation malformation =
+      FIXED_REPLACE_MALFORM_SOURCE_MODE;
+      malformation <= FIXED_REPLACE_MALFORM_DESTINATION_MISSING; malformation++)
+    run_fixed_sidecar_replace_malformation (malformation);
+
+  /* Bindings from separate exact lease/namespace domains cannot be combined. */
+  FixedSidecarReplaceFixture other;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  fixed_sidecar_replace_fixture_init (&other);
+  source = create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_RECOVERY, "new",
+      &ignored, NULL);
+  destination = create_closed_sidecar (&other, WYL_FACT_ARTIFACT_WAL, "old",
+      &ignored, NULL);
+  result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  retire_closed_sidecar (source);
+  retire_closed_sidecar (destination);
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+  fixed_sidecar_replace_fixture_clear (&other);
+  g_assert_cmpint (count_open_fds (), ==, baseline_fds);
+#endif
+}
+
+static void
+test_fixed_sidecar_replacement_concurrency (void)
+{
+#ifndef G_OS_WIN32
+  FixedSidecarReplaceFixture fixture;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  struct stat source_identity, ignored;
+  WylFactArtifactSidecarBinding *destination =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_WAL, "old", &ignored,
+      NULL);
+  WylFactArtifactSidecarBinding *source =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_RECOVERY, "winner",
+      &source_identity, NULL);
+  FixedSidecarReplaceWorker workers[2] = {
+    {source, destination, WYRELOG_E_INTERNAL,
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED},
+    {source, destination, WYRELOG_E_INTERNAL,
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED},
+  };
+  GThread *first = g_thread_new ("fixed-replace-a",
+      replace_fixed_sidecar_worker, &workers[0]);
+  GThread *second = g_thread_new ("fixed-replace-b",
+      replace_fixed_sidecar_worker, &workers[1]);
+  g_thread_join (first);
+  g_thread_join (second);
+  guint replaced = 0, rejected = 0;
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++) {
+    if (workers[i].error == WYRELOG_E_OK
+        && workers[i].result ==
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE)
+      replaced++;
+    else if (workers[i].error == WYRELOG_E_POLICY
+        && workers[i].result ==
+        WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED)
+      rejected++;
+  }
+  g_assert_cmpuint (replaced, ==, 1);
+  g_assert_cmpuint (rejected, ==, 1);
+  assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL, &source_identity,
+      "winner");
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (source), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (destination),
+      ==, WYRELOG_E_OK);
+  retire_closed_sidecar (destination);
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+#endif
 }
 
 #ifdef G_OS_WIN32
@@ -3197,6 +3831,16 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact-artifact-namespace/sidecar-retirement-result-contract",
       test_sidecar_retirement_result_contract);
+  g_test_add_func ("/fact-artifact-namespace/fixed-sidecar-replacement/success",
+      test_fixed_sidecar_replacement_success);
+  g_test_add_func ("/fact-artifact-namespace/fixed-sidecar-replacement/faults",
+      test_fixed_sidecar_replacement_faults);
+  g_test_add_func
+      ("/fact-artifact-namespace/fixed-sidecar-replacement/rejections",
+      test_fixed_sidecar_replacement_rejections);
+  g_test_add_func
+      ("/fact-artifact-namespace/fixed-sidecar-replacement/concurrency",
+      test_fixed_sidecar_replacement_concurrency);
   g_test_add_func ("/fact-artifact-namespace/basic", test_namespace);
   g_test_add_func ("/fact-artifact-namespace/mutation-leases",
       test_mutation_leases);
