@@ -388,15 +388,62 @@ test_wal_replacement_source_substitution_fails_closed (void)
     filesystem.MoveFile ("facts.duckdb.wal.checkpoint",
         "facts.duckdb.wal", nullptr);
     g_assert_not_reached ();
-  } catch (const WylSecureDuckdbAuthorityException &exception)
+  } catch (const duckdb::IOException &)
   {
-    g_assert_cmpint (exception.error, ==, WYRELOG_E_POLICY);
   }
   g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
       WYRELOG_E_POLICY);
   assert_file_contents (wal_path, "old-wal");
   assert_file_contents (outside_path, "outside-sentinel");
   wal->Close ();
+}
+
+static void
+test_wal_replacement_destination_substitution_fails_closed (void)
+{
+  Fixture fixture;
+  WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+  auto wal = filesystem.OpenFile ("facts.duckdb.wal",
+          writer_sidecar_flags (), nullptr);
+  write_sidecar (filesystem, *wal, "old-wal");
+  auto source = filesystem.OpenFile ("facts.duckdb.wal.checkpoint",
+          writer_sidecar_flags (), nullptr);
+  write_sidecar (filesystem, *source, "new-wal");
+  source->Close ();
+
+  g_autofree gchar *wal_path =
+      g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
+  g_autofree gchar *source_path =
+      g_build_filename (fixture.graph_path, "facts.duckdb.wal.checkpoint",
+          nullptr);
+  g_autofree gchar *saved_path =
+      g_build_filename (fixture.graph_path, "facts.duckdb.wal.saved", nullptr);
+  g_autofree gchar *outside_path =
+      g_build_filename (fixture.root, "outside-destination-wal", nullptr);
+  g_assert_true (g_file_set_contents (outside_path, "outside-sentinel", -1,
+      nullptr));
+  g_assert_cmpint (g_rename (wal_path, saved_path), ==, 0);
+  g_assert_cmpint (symlink (outside_path, wal_path), ==, 0);
+
+  try {
+    filesystem.MoveFile ("facts.duckdb.wal.checkpoint",
+        "facts.duckdb.wal", nullptr);
+    g_assert_not_reached ();
+  } catch (const duckdb::IOException &)
+  {
+  }
+  g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+      WYRELOG_E_POLICY);
+  assert_file_contents (outside_path, "outside-sentinel");
+  assert_file_contents (saved_path, "old-wal");
+  assert_file_contents (source_path, "new-wal");
+  g_assert_true (g_file_test (wal_path, G_FILE_TEST_IS_SYMLINK));
+  try {
+    wal->Close ();
+    g_assert_not_reached ();
+  } catch (const duckdb::IOException &)
+  {
+  }
 }
 
 static void
@@ -418,6 +465,125 @@ test_live_sidecar_retirement_detaches_handle (void)
   recovery->Close ();
   recovery->Close ();
   g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+}
+
+static void
+test_pending_binding_allocation_failure_is_not_clean (void)
+{
+  Fixture fixture;
+  {
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    wyl_secure_duckdb_filesystem_set_test_faults (
+      WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION);
+    try {
+      (void) filesystem.OpenFile ("facts.duckdb",
+          duckdb::FileOpenFlags (2307, duckdb::FileLockType::WRITE_LOCK,
+          duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+      g_assert_not_reached ();
+    } catch (const std::bad_alloc &)
+    {
+    }
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+        WYRELOG_E_NOMEM);
+  }
+
+  /* A checked pending-binding close leaves no provider retirement barrier. */
+  WylSecureDuckdbFileSystem retry (fixture.namespace_, false);
+  auto main = retry.OpenFile ("facts.duckdb",
+          duckdb::FileOpenFlags (2307, duckdb::FileLockType::WRITE_LOCK,
+          duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+  main->Close ();
+}
+
+static void
+test_pending_binding_close_failure_poison_is_terminal (void)
+{
+  Fixture fixture;
+  WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+  wyl_secure_duckdb_filesystem_set_test_faults (
+    WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION
+    | WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION);
+  try {
+    (void) filesystem.OpenFile ("facts.duckdb",
+        duckdb::FileOpenFlags (2307, duckdb::FileLockType::WRITE_LOCK,
+        duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+    g_assert_not_reached ();
+  } catch (const std::bad_alloc &)
+  {
+  }
+  g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+      WYRELOG_E_POLICY);
+  try {
+    (void) filesystem.FileExists ("facts.duckdb", nullptr);
+    g_assert_not_reached ();
+  } catch (const WylSecureDuckdbAuthorityException &exception)
+  {
+    g_assert_cmpint (exception.error, ==, WYRELOG_E_POLICY);
+  }
+}
+
+static void
+test_temp_registration_failure_rolls_back_durable_child (void)
+{
+  Fixture fixture;
+  {
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    const auto temp_path = filesystem.TemporaryDirectory ()
+        + "/duckdb_temp_storage_S32K-0.tmp";
+    wyl_secure_duckdb_filesystem_set_test_faults (
+      WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_TEMP_REGISTRATION);
+    try {
+      (void) filesystem.OpenFile (temp_path,
+          duckdb::FileOpenFlags (11, duckdb::FileLockType::NO_LOCK,
+          duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+      g_assert_not_reached ();
+    } catch (const std::bad_alloc &)
+    {
+    }
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+        WYRELOG_E_NOMEM);
+    g_assert_cmpuint (filesystem.TempChildrenCreatedForTest (), ==, 0);
+  }
+  g_autoptr (GDir) graph = g_dir_open (fixture.graph_path, 0, nullptr);
+  g_assert_nonnull (graph);
+  for (const gchar *name; (name = g_dir_read_name (graph)) != nullptr;)
+    g_assert_false (g_str_has_prefix (name, ".duckdb-private-temp-"));
+}
+
+static void
+test_bridge_construction_allocation_failure_rolls_back (void)
+{
+  Fixture fixture (false);
+  WylSecureDuckdbBridge *bridge = nullptr;
+  wyl_secure_duckdb_filesystem_set_test_faults (
+    WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_new_with_namespace
+        (fixture.namespace_, WYL_SECURE_DUCKDB_INIT_EMPTY, &bridge), ==,
+      WYRELOG_E_NOMEM);
+  g_assert_null (bridge);
+
+  g_autoptr (GDir) graph = g_dir_open (fixture.graph_path, 0, nullptr);
+  g_assert_nonnull (graph);
+  for (const gchar *name; (name = g_dir_read_name (graph)) != nullptr;)
+    g_assert_false (g_str_has_prefix (name, ".duckdb-private-temp-"));
+}
+
+static void
+test_handle_destructor_poison_reaches_bridge_finalize (void)
+{
+  Fixture fixture (false);
+  g_autoptr (WylSecureDuckdbBridge) bridge = nullptr;
+  g_assert_cmpint (wyl_secure_duckdb_bridge_new_with_namespace
+        (fixture.namespace_, WYL_SECURE_DUCKDB_INIT_EMPTY, &bridge), ==,
+      WYRELOG_E_OK);
+  wyl_secure_duckdb_filesystem_set_test_faults (
+    WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_finalize (bridge), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_health (bridge), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_finalize (bridge), ==,
+      WYRELOG_E_POLICY);
 }
 
 static void
@@ -576,6 +742,15 @@ test_denial_and_numeric_no_mutation (void)
       original_cursor = filesystem.SeekPosition (*main);
   unsigned char
       sentinel = 0x5a;
+  const auto ssize_max = static_cast < int64_t > (SSIZE_MAX);
+  try {
+    filesystem.Write (*main, nullptr, ssize_max, 0);
+    g_assert_not_reached ();
+  } catch (const duckdb::IOException &)
+  {
+  }
+  g_assert_cmpint (filesystem.GetFileSize (*main), ==, original_size);
+  g_assert_cmpuint (filesystem.SeekPosition (*main), ==, original_cursor);
   try {
     filesystem.Read (*main, &sentinel, -1, 0);
     g_assert_not_reached ();
@@ -778,8 +953,21 @@ main (int argc, char **argv)
       test_terminal_wal_replacement_poison_has_no_retry);
   g_test_add_func ("/secure-duckdb-filesystem/replacement-substitution",
       test_wal_replacement_source_substitution_fails_closed);
+  g_test_add_func (
+    "/secure-duckdb-filesystem/replacement-destination-substitution",
+    test_wal_replacement_destination_substitution_fails_closed);
   g_test_add_func ("/secure-duckdb-filesystem/live-sidecar-retirement",
       test_live_sidecar_retirement_detaches_handle);
+  g_test_add_func ("/secure-duckdb-filesystem/pending-allocation-cleanup",
+      test_pending_binding_allocation_failure_is_not_clean);
+  g_test_add_func ("/secure-duckdb-filesystem/pending-close-poison",
+      test_pending_binding_close_failure_poison_is_terminal);
+  g_test_add_func ("/secure-duckdb-filesystem/temp-registration-rollback",
+      test_temp_registration_failure_rolls_back_durable_child);
+  g_test_add_func ("/secure-duckdb-filesystem/bridge-construction-allocation",
+      test_bridge_construction_allocation_failure_rolls_back);
+  g_test_add_func ("/secure-duckdb-filesystem/destructor-finalize-poison",
+      test_handle_destructor_poison_reaches_bridge_finalize);
   g_test_add_func ("/secure-duckdb-filesystem/checked-finalize",
       test_checked_finalize_reports_cleanup_failure);
   g_test_add_func ("/secure-duckdb-filesystem/wal-crash-recovery-locking",

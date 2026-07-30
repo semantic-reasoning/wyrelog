@@ -11,6 +11,17 @@
 #include "fact/graph-artifact-namespace-private.h"
 #include "fact/secure-duckdb-file-handle-private.hpp"
 
+enum WylSecureDuckdbFilesystemTestFault : guint
+{
+  WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_NONE = 0,
+  WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION = 1U << 0,
+  WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_TEMP_REGISTRATION = 1U << 1,
+  WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION = 1U << 2,
+};
+
+void wyl_secure_duckdb_filesystem_set_test_faults (guint);
+bool wyl_secure_duckdb_filesystem_take_test_fault (guint);
+
 class WylSecureDuckdbAuthorityException final: public
 duckdb::IOException
 {
@@ -273,6 +284,9 @@ private:
   FreeSidecarBindings ();
   WylFactDuckdbTempChild *
   FindTempChild (const duckdb::string &) const;
+  void
+  RollbackTempChild (WylFactDuckdbTempChild *,
+      WylSecureDuckdbPendingBinding &, wyrelog_error_t) noexcept;
   void
   RetireTempChild (const duckdb::string &);
 

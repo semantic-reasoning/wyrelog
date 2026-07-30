@@ -29,6 +29,74 @@ enum class WylSecureDuckdbBindingKind
   TEMP_CHILD,
 };
 
+/* Own the provider-issued descriptor/binding pair until FileHandle
+ * construction has completed.  In particular, duckdb::make_uniq may throw
+ * before the FileHandle constructor is entered. */
+class WylSecureDuckdbPendingBinding final
+{
+public:
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylFactArtifactMainBinding *, int) noexcept;
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylFactArtifactReaderMainBinding *, int) noexcept;
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylFactArtifactSidecarBinding *, int) noexcept;
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylFactArtifactReaderWalBinding *, int) noexcept;
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylFactDuckdbTempChildBinding *, int) noexcept;
+  ~WylSecureDuckdbPendingBinding ();
+  WylSecureDuckdbPendingBinding (
+    const WylSecureDuckdbPendingBinding &) = delete;
+  WylSecureDuckdbPendingBinding &
+  operator = (const WylSecureDuckdbPendingBinding &) = delete;
+
+  wyrelog_error_t
+  Reset () noexcept;
+
+private:
+  friend class WylSecureDuckdbFileHandle;
+
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylSecureDuckdbBindingKind, int) noexcept;
+  void
+  Release () noexcept;
+  wyrelog_error_t
+  RevalidateFd () const noexcept;
+  bool
+  HasBinding () const noexcept;
+  wyrelog_error_t
+  CheckedClose () noexcept;
+  void
+  FreeBinding () noexcept;
+
+  std::shared_ptr<WylSecureDuckdbHealth>
+  health_;
+  WylSecureDuckdbBindingKind
+      kind_;
+  int
+      fd_;
+  union
+  {
+    WylFactArtifactMainBinding *
+        writer_main;
+    WylFactArtifactReaderMainBinding *
+        reader_main;
+    WylFactArtifactSidecarBinding *
+        writer_sidecar;
+    WylFactArtifactReaderWalBinding *
+        reader_wal;
+    WylFactDuckdbTempChildBinding *
+        temp_child;
+  } binding_;
+};
+
 /* A DuckDB working descriptor is useful only together with its provider
  * binding.  This class never closes a raw descriptor behind the provider:
  * every I/O boundary and the terminal close validate the actual descriptor
@@ -39,20 +107,8 @@ duckdb::FileHandle
 public:
   WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
       const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylFactArtifactMainBinding *);
-  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
-      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylFactArtifactReaderMainBinding *);
-  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
-      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylFactArtifactName,
-      WylFactArtifactSidecarBinding *);
-  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
-      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylFactArtifactReaderWalBinding *);
-  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
-      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylFactDuckdbTempChildBinding *);
+      duckdb::FileOpenFlags, WylFactArtifactName,
+      WylSecureDuckdbPendingBinding &&);
   ~
   WylSecureDuckdbFileHandle ()
   override;
@@ -91,9 +147,6 @@ public:
 private:
   friend class WylSecureDuckdbFileSystem;
 
-  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
-      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylSecureDuckdbBindingKind);
   wyrelog_error_t
   RevalidateFd () const;
   void
