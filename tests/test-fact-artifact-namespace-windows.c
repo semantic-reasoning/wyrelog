@@ -733,6 +733,77 @@ test_locator_directory_flush_capability_mapping (void)
   g_free (path);
 }
 
+/* These two cases are a pair and the second is only meaningful while it runs
+ * immediately after the first.  GLib does not honour registration order across
+ * the whole binary: g_test_run_suite_internal drains a suite's own cases
+ * before it recurses into child suites, so insertion order holds only among
+ * siblings of one suite.  What keeps these adjacent is therefore that both are
+ * registered under the same /fact/artifact-namespace/windows/locator/ suite
+ * path with no other sibling registered between them -- not their adjacency in
+ * the table.  Moving either one under a different prefix, or registering
+ * another /locator/ case between them, silently separates them. */
+static void
+test_locator_leaked_flush_fault (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphWinIdentity identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph, &identity);
+  WylFactArtifactWinEntry *entry = NULL;
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  g_autofree wchar_t *wide = NULL;
+
+  /* Arm both process-wide faults, then do transport work that consumes
+   * neither: locator_open goes straight to NtCreateFile and no operation on
+   * this path flushes the directory, and the namespace fault is taken only on
+   * the sidecar-replace path, which this case never enters.  Both are still
+   * armed when the body returns, which is exactly what this row's declared
+   * teardown expectation requires -- so the fixture, not this body, is where
+   * "an unconsumed fault is detectable" is asserted. */
+  wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
+      (ERROR_NOT_SUPPORTED);
+  wyl_fact_artifact_win_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+          "tmp-leak-probe", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE,
+          &entry), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator, entry,
+          &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  wyl_fact_artifact_win_entry_free (entry);
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (graph));
+  wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (wide));
+  g_free (path);
+}
+
+/* Corroboration for the row above, and the target of its mutation test: this
+ * is an ordinary flush on a fresh locator that must succeed.  Without the
+ * fixture's disarm it would instead consume the flush fault the previous case
+ * left armed and report WYRELOG_E_POLICY -- indistinguishable from a real
+ * authority violation.  Removing only one of the fixture's two takes does not
+ * reproduce that: set_up's take is unconditional and destructive, so it would
+ * absorb the leak (and fail there) before this body ran. */
+static void
+test_locator_flush_after_leaked_fault (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphWinIdentity identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph, &identity);
+  g_autofree wchar_t *wide = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_locator_flush_directory (locator), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (graph));
+  wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (wide));
+  g_free (path);
+}
+
 static void
 test_locator_relative_entry_lifecycle (void)
 {
@@ -2293,6 +2364,14 @@ static const WinGuardedCase win_guarded_cases[] = {
       test_native_namespace_cross_process_leases_and_crash_release},
   {"/fact/artifact-namespace/windows/locator/directory-flush-capability",
       test_locator_directory_flush_capability_mapping},
+  /* Keep these two adjacent and both under /locator/; see the comment above
+   * test_locator_leaked_flush_fault for why the suite path, not this table
+   * position, is what actually orders them. */
+  {"/fact/artifact-namespace/windows/locator/leaked-flush-fault",
+        test_locator_leaked_flush_fault, ERROR_NOT_SUPPORTED,
+      WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN},
+  {"/fact/artifact-namespace/windows/locator/flush-after-leaked-fault",
+      test_locator_flush_after_leaked_fault},
   {"/fact/artifact-namespace/windows/namespace/main-sidecar",
       test_native_namespace_main_sidecar_lifecycle},
   {"/fact/artifact-namespace/windows/namespace/substitution",
