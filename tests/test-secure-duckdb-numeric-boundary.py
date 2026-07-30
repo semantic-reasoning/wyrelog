@@ -107,6 +107,8 @@ for token in (
     "/secure-duckdb-filesystem/denial-numeric",
     "#define _DARWIN_C_SOURCE 1",
     "O_NOFOLLOW",
+    "fs::canonical (created_root)",
+    "root = g_strdup (canonical_root.c_str ());",
     "static_cast < int64_t > (SSIZE_MAX)",
     "static_cast < duckdb::idx_t > (LLONG_MAX)",
     "std::numeric_limits < off_t >::max ()",
