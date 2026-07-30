@@ -8540,6 +8540,17 @@ check_service_principal_management_contract (void)
   }
   g_mutex_unlock (&barrier.mutex);
 
+  /* This fixture mutates the service-authority store directly while testing
+   * the management routes.  Keep its background retirement writer out of
+   * those deterministic mutations; suspend waits for any in-flight tick. */
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
+  guint maintenance_ticks = 0;
+  if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
+          &maintenance_ticks)) {
+    rc = 2164;
+    goto cleanup;
+  }
+
   uris = soup_server_get_uris (http.server);
   if (uris == NULL) {
     rc = 1978;
