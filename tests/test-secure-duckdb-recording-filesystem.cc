@@ -15,6 +15,14 @@
 #include <duckdb.hpp>
 
 #include <algorithm>
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <thread>
+#endif
 #include <filesystem>
 #include <cstdio>
 #include <cerrno>
@@ -4282,6 +4290,232 @@ assert_explicit_checkpoint_full_stream (const std::vector<Event> &events,
   assert_explicit_checkpoint_exact_trace (events, database);
 }
 
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
+struct AfterWalStartLatch {
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::shared_ptr<RecorderState> recorder;
+  gboolean entered = FALSE;
+  gboolean release = FALSE;
+  gboolean callback_timed_out = FALSE;
+  guint callback_count = 0;
+  std::string phase;
+  size_t event_boundary = 0;
+};
+
+static void
+after_wal_start_latch_callback (const char *phase, void *context)
+{
+  auto &latch = *static_cast<AfterWalStartLatch *> (context);
+  std::unique_lock<std::mutex> lock (latch.mutex);
+  latch.callback_count++;
+  latch.phase = phase == nullptr ? std::string () : phase;
+  latch.event_boundary = latch.recorder->events.size ();
+  latch.entered = TRUE;
+  latch.condition.notify_all ();
+  if (!latch.condition.wait_for (lock, std::chrono::seconds (10),
+          [&latch] { return latch.release != FALSE; }))
+    latch.callback_timed_out = TRUE;
+}
+
+static gboolean
+wait_for_after_wal_start (AfterWalStartLatch *latch)
+{
+  std::unique_lock<std::mutex> lock (latch->mutex);
+  const gboolean entered = latch->condition.wait_for (lock,
+      std::chrono::seconds (5), [latch] {
+        return latch->entered != FALSE;
+      });
+  if (!entered) {
+    latch->release = TRUE;
+    latch->condition.notify_all ();
+  }
+  return entered;
+}
+
+static void
+release_after_wal_start (AfterWalStartLatch *latch)
+{
+  std::lock_guard<std::mutex> lock (latch->mutex);
+  latch->release = TRUE;
+  latch->condition.notify_all ();
+}
+
+static void
+count_after_wal_start_callback (const char *phase, void *context)
+{
+  auto &count = *static_cast<std::atomic<guint> *> (context);
+  if (g_strcmp0 (phase, "AFTER_WAL_START") == 0)
+    count.fetch_add (1);
+  else
+    count.fetch_add (1000);
+}
+
+static void
+test_recording_filesystem_after_wal_start_no_wal (void)
+{
+  assert_duckdb_155 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox =
+      g_dir_make_tmp ("wyl-duckdb-no-wal-seam-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder, {
+        source_155_open_flags (129),
+        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    auto create = connection.Query ("CREATE TABLE facts(value INTEGER)");
+    g_assert_false (create->HasError ());
+  }
+
+  std::atomic<guint> callback_count { 0 };
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder, {
+        source_155_open_flags (129),
+        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    config.options.test_after_wal_start = count_after_wal_start_callback;
+    config.options.test_after_wal_start_context = &callback_count;
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    auto checkpoint = connection.Query ("CHECKPOINT");
+    g_assert_false (checkpoint->HasError ());
+  }
+  g_assert_cmpuint (callback_count.load (), ==, 0);
+  remove_tree (sandbox);
+}
+
+static void
+test_recording_filesystem_after_wal_start_rendezvous (void)
+{
+  assert_duckdb_155 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox =
+      g_dir_make_tmp ("wyl-duckdb-walstart-seam-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+  const std::string checkpoint =
+      path_with_suffix (database, ".wal.checkpoint");
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder, {
+        source_155_open_flags (129),
+        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    auto create = connection.Query (
+        "CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
+    g_assert_false (create->HasError ());
+  }
+
+  auto recorder = std::make_shared<RecorderState> ();
+  AfterWalStartLatch latch;
+  latch.recorder = recorder;
+  std::string checkpoint_error;
+  gboolean entered = FALSE;
+  gboolean commit_finished = FALSE;
+  gboolean commit_succeeded = FALSE;
+  size_t commit_end = 0;
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder, {
+        source_155_open_flags (129),
+        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    config.options.checkpoint_on_shutdown = false;
+    config.SetOptionByName ("debug_checkpoint_abort",
+        duckdb::Value ("BEFORE_HEADER"));
+    config.options.test_after_wal_start = after_wal_start_latch_callback;
+    config.options.test_after_wal_start_context = &latch;
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection checkpoint_connection (db);
+    duckdb::Connection writer_connection (db);
+    auto first_commit =
+        writer_connection.Query ("INSERT INTO facts VALUES (99)");
+    g_assert_false (first_commit->HasError ());
+    auto prepare = writer_connection.Query (
+        "BEGIN TRANSACTION; INSERT INTO facts VALUES (100)");
+    g_assert_false (prepare->HasError ());
+
+    std::thread checkpoint_thread ([&checkpoint_connection,
+                                    &checkpoint_error] {
+      auto result = checkpoint_connection.Query ("CHECKPOINT");
+      if (result->HasError ())
+        checkpoint_error = result->GetError ();
+    });
+    entered = wait_for_after_wal_start (&latch);
+    if (entered) {
+      std::promise<gboolean> commit_promise;
+      auto commit_future = commit_promise.get_future ();
+      std::thread commit_thread ([&writer_connection, &commit_promise] {
+        auto commit = writer_connection.Query ("COMMIT");
+        commit_promise.set_value (!commit->HasError ());
+      });
+      commit_finished = commit_future.wait_for (std::chrono::seconds (5))
+          == std::future_status::ready;
+      if (!commit_finished)
+        g_error ("checkpoint-WAL commit did not finish within 5000 ms");
+      commit_succeeded = commit_future.get ();
+      commit_end = recorder->events.size ();
+      release_after_wal_start (&latch);
+      commit_thread.join ();
+    }
+    checkpoint_thread.join ();
+  }
+
+  g_assert_true (entered);
+  g_assert_false (latch.callback_timed_out);
+  g_assert_cmpuint (latch.callback_count, ==, 1);
+  g_assert_cmpstr (latch.phase.c_str (), ==, "AFTER_WAL_START");
+  g_assert_true (commit_finished);
+  g_assert_true (commit_succeeded);
+  g_assert_true (fs::exists (path_from_utf8 (checkpoint)));
+  g_assert_cmpstr (checkpoint_error.c_str (), ==,
+      "FATAL Error: Failed to create checkpoint because of error: "
+      "Checkpoint aborted before header write because of PRAGMA "
+      "checkpoint_abort flag");
+
+  std::vector<const Event *> checkpoint_events;
+  for (size_t i = latch.event_boundary; i < commit_end; i++) {
+    const auto &event = recorder->events[i];
+    if (event.path == checkpoint)
+      checkpoint_events.push_back (&event);
+  }
+  const std::vector<const char *> expected_operations {
+    "open", "size", "size", "size", "size", "write", "sync", "size"
+  };
+  g_assert_cmpuint (checkpoint_events.size (), ==,
+      expected_operations.size ());
+  for (size_t i = 0; i < checkpoint_events.size (); i++) {
+    const auto *event = checkpoint_events[i];
+    g_assert_cmpstr (event->operation.c_str (), ==,
+        expected_operations[i]);
+    g_assert_cmpint (event->outcome, ==, -1);
+    g_assert_cmpuint (event->flags, ==, i == 0 ? 2090 : 0);
+    g_assert_true (event->lock == (i == 0
+        ? duckdb::FileLockType::WRITE_LOCK
+        : duckdb::FileLockType::NO_LOCK));
+    g_assert_true (
+        event->compression == duckdb::FileCompressionType::UNCOMPRESSED);
+    g_assert_true (event->error_class.empty ());
+  }
+  remove_tree (sandbox);
+}
+#endif
+
 static void
 test_recording_filesystem_explicit_checkpoint_discovery (void)
 {
@@ -4542,5 +4776,11 @@ main (int argc, char **argv)
       test_recording_filesystem_explicit_checkpoint_discovery);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/checkpoint-crash-phase-a",
       test_recording_filesystem_checkpoint_crash_phase_a);
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-no-wal",
+      test_recording_filesystem_after_wal_start_no_wal);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-rendezvous",
+      test_recording_filesystem_after_wal_start_rendezvous);
+#endif
   return g_test_run ();
 }
