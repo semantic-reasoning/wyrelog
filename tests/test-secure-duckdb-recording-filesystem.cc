@@ -6,7 +6,8 @@
  * subsystems: protocol, compression, subsystem, and ambient-path requests are
  * rejected before they can reach LocalFileSystem.
  * The fixture is source/version pinned; changing DuckDB requires deliberate
- * fixture regeneration and review.
+ * regeneration and review of every event, handle-lifecycle, and fixed WAL
+ * replacement grammar below.
  */
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -15,13 +16,11 @@
 #include <duckdb.hpp>
 
 #include <algorithm>
-#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
 #include <future>
-#include <mutex>
-#include <thread>
 #endif
 #include <filesystem>
 #include <cstdio>
@@ -32,7 +31,9 @@
 #include <limits>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <regex>
+#include <thread>
 #include <sys/stat.h>
 #ifndef G_OS_WIN32
 #include <unistd.h>
@@ -159,6 +160,52 @@ struct Event {
 struct ControlEvent {
   std::string operation;
   std::string path;
+};
+
+enum class FixedHandleRole : uint8_t {
+  OTHER,
+  MAIN,
+  WAL,
+  CHECKPOINT,
+  RECOVERY,
+};
+
+enum class RecordedHandleState : uint8_t {
+  OPENING,
+  OPEN,
+  CLOSED,
+};
+
+struct HandleLifecycleEvent {
+  uint64_t sequence = 0;
+  std::string operation;
+  uint64_t handle_id = 0;
+  FixedHandleRole role = FixedHandleRole::OTHER;
+  std::string path;
+  duckdb::idx_t flags = 0;
+  duckdb::FileLockType lock = duckdb::FileLockType::NO_LOCK;
+  duckdb::FileCompressionType compression = duckdb::FileCompressionType::UNCOMPRESSED;
+  duckdb::CachingMode caching = duckdb::CachingMode::NO_CACHING;
+  int outcome = -1;
+};
+
+struct LiveHandleSnapshot {
+  uint64_t handle_id = 0;
+  FixedHandleRole role = FixedHandleRole::OTHER;
+  std::string path;
+  duckdb::idx_t flags = 0;
+  duckdb::FileLockType lock = duckdb::FileLockType::NO_LOCK;
+  duckdb::FileCompressionType compression = duckdb::FileCompressionType::UNCOMPRESSED;
+  duckdb::CachingMode caching = duckdb::CachingMode::NO_CACHING;
+  RecordedHandleState state = RecordedHandleState::OPENING;
+  std::string active_operation;
+};
+
+struct MoveHandleSnapshot {
+  uint64_t sequence = 0;
+  std::string source;
+  std::string destination;
+  std::vector<LiveHandleSnapshot> live_handles;
 };
 
 /* This protocol is deliberately test-only.  It is not an authority layer for
@@ -288,7 +335,42 @@ struct RecorderState {
   std::vector<ForwardExpectation> forwarding_expectations;
   std::vector<ForwardCompletion> forwarding_completions;
   size_t forwarding_cursor = 0;
-  guint local_forwards = 0;
+  std::atomic<guint> local_forwards = 0;
+
+  struct LiveHandle {
+    FixedHandleRole role;
+    std::string path;
+    duckdb::idx_t flags;
+    duckdb::FileLockType lock;
+    duckdb::FileCompressionType compression;
+    duckdb::CachingMode caching;
+    RecordedHandleState state;
+    std::string active_operation;
+  };
+  std::mutex observation_mutex;
+  uint64_t next_handle_id = 1;
+  uint64_t next_lifecycle_sequence = 1;
+  std::map<uint64_t, LiveHandle> live_handles;
+  std::vector<HandleLifecycleEvent> handle_lifecycle;
+  std::vector<MoveHandleSnapshot> move_snapshots;
+  bool fixed_artifacts_bound = false;
+  std::string fixed_main;
+  std::string fixed_wal;
+  std::string fixed_checkpoint;
+  std::string fixed_recovery;
+  bool move_active = false;
+  uint64_t active_move_sequence = 0;
+  guint move_overlap_rejections = 0;
+
+  std::mutex replacement_gate_mutex;
+  std::condition_variable replacement_gate_cv;
+  bool replacement_gate_armed = false;
+  bool replacement_gate_sidecar_seen = false;
+  bool replacement_gate_reached = false;
+  bool replacement_gate_release = false;
+  std::string replacement_gate_main;
+  std::string replacement_gate_checkpoint;
+  std::string replacement_gate_operation;
 };
 
 static void write_trace_or_exit (const RecorderState &recorder, int error_code);
@@ -303,18 +385,15 @@ class RecordingFileHandle final : public duckdb::FileHandle {
 public:
   RecordingFileHandle (RecordingFileSystem &owner, std::string path,
       duckdb::FileOpenFlags flags, duckdb::unique_ptr<duckdb::FileHandle> inner,
-      std::string forwarding_handle = {});
+      uint64_t handle_id, FixedHandleRole role, std::string forwarding_handle = {});
 
   void Close () override;
-  ~RecordingFileHandle () override
-  {
-    if (!closed)
-      Close ();
-  }
+  ~RecordingFileHandle () override;
 
   duckdb::unique_ptr<duckdb::FileHandle> inner;
   RecordingFileSystem &owner;
-  bool closed = false;
+  uint64_t handle_id;
+  FixedHandleRole role;
   std::string forwarding_handle;
 };
 
@@ -336,9 +415,46 @@ public:
   {
   }
 
-  const std::vector<Event> &events () const { return recorder_->events; }
+  void BindFixedArtifactsForScenario (const fs::path &database)
+  {
+    const auto main = path_to_utf8 (check_path (path_to_utf8 (database)));
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    g_assert_true (recorder_->live_handles.empty ());
+    if (recorder_->fixed_artifacts_bound) {
+      g_assert_cmpstr (recorder_->fixed_main.c_str (), ==, main.c_str ());
+      return;
+    }
+    recorder_->fixed_artifacts_bound = true;
+    recorder_->fixed_main = main;
+    recorder_->fixed_wal = path_with_suffix (path_from_utf8 (main), ".wal");
+    recorder_->fixed_checkpoint =
+        path_with_suffix (path_from_utf8 (main), ".wal.checkpoint");
+    recorder_->fixed_recovery =
+        path_with_suffix (path_from_utf8 (main), ".wal.recovery");
+  }
+
+  std::vector<Event> events () const
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    return recorder_->events;
+  }
+  std::vector<HandleLifecycleEvent> handle_lifecycle () const
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    return recorder_->handle_lifecycle;
+  }
+  std::vector<MoveHandleSnapshot> move_snapshots () const
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    return recorder_->move_snapshots;
+  }
+  guint move_overlap_rejections () const
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    return recorder_->move_overlap_rejections;
+  }
   guint rejected () const { return recorder_->rejected; }
-  guint local_forwards () const { return recorder_->local_forwards; }
+  guint local_forwards () const { return recorder_->local_forwards.load (); }
   const std::vector<ForwardCompletion> &forwarding_completions () const
   {
     return recorder_->forwarding_completions;
@@ -376,6 +492,12 @@ public:
     (void) check_list_entry (check_path (directory), entry);
   }
   void CloseHandle (RecordingFileHandle &handle);
+  void DestroyHandle (RecordingFileHandle &handle);
+  bool HandleIsClosed (const RecordingFileHandle &handle) const;
+  void BeginHandleOperation (const RecordingFileHandle &handle,
+      const std::string &operation);
+  void RecordHandleObservation (const RecordingFileHandle &handle,
+      const std::string &operation, int outcome, std::string error_class = {});
   [[noreturn]] void RejectClosedHandle (const RecordingFileHandle &handle);
   void AuthorizeOpenForScenario (duckdb::FileOpenFlags flags)
   {
@@ -389,22 +511,28 @@ public:
     const auto checked = check_path (path);
     validate_open_flags (path_to_utf8 (checked), flags);
     const auto token = preflight ("open", path, flags);
+    const auto pending = BeginOpenHandle (path_to_utf8 (checked), flags);
     try {
       ++recorder_->local_forwards;
       auto inner = local_->OpenFile (path_to_utf8 (checked), flags, nullptr);
       complete (token, inner ? 1 : 0, {});
-      record ("open", checked, flags);
-      if (!inner)
+      if (!inner) {
+        CompleteOpenHandle (pending.first, flags, 0, -1, {});
         return nullptr;
-      return duckdb::make_uniq<RecordingFileHandle> (*this, path_to_utf8 (checked),
-          flags, std::move (inner), handle_for_token (token));
+      }
+      auto result = duckdb::make_uniq<RecordingFileHandle> (*this,
+          path_to_utf8 (checked), flags, std::move (inner), pending.first,
+          pending.second,
+          handle_for_token (token));
+      CompleteOpenHandle (pending.first, flags, 1, -1, {});
+      return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("open", checked, flags, 0, "IOException");
+      CompleteOpenHandle (pending.first, flags, 0, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("open", checked, flags, 0, "DuckDBException");
+      CompleteOpenHandle (pending.first, flags, 0, 0, "DuckDBException");
       throw;
     }
   }
@@ -415,18 +543,19 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("read-at", recording.GetPath (), {},
         { (uint64_t) bytes, (uint64_t) location }, recording.forwarding_handle);
+    BeginHandleOperation (recording, "read-at");
     try {
       ++recorder_->local_forwards;
       local_->Read (*recording.inner, buffer, bytes, location);
       complete (token, 1, {});
-      record ("read-at", recording.GetPath ());
+      record_handle ("read-at", recording);
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("read-at", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("read-at", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("read-at", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("read-at", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -437,18 +566,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("write-at", recording.GetPath (), {},
         { (uint64_t) bytes, (uint64_t) location }, recording.forwarding_handle);
+    BeginHandleOperation (recording, "write-at");
     try {
       ++recorder_->local_forwards;
       local_->Write (*recording.inner, buffer, bytes, location);
       complete (token, 1, {});
-      record ("write-at", recording.GetPath ());
+      record_handle ("write-at", recording);
+      PauseCheckpointMainOperation (recording, "write-at");
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("write-at", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("write-at", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("write-at", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("write-at", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -458,19 +589,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("read", recording.GetPath (), {},
         { (uint64_t) bytes }, recording.forwarding_handle);
+    BeginHandleOperation (recording, "read");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->Read (*recording.inner, buffer, bytes);
       complete (token, 1, {}, { (uint64_t) result });
-      record ("read", recording.GetPath ());
+      record_handle ("read", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("read", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("read", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("read", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("read", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -480,19 +612,21 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("write", recording.GetPath (), {},
         { (uint64_t) bytes }, recording.forwarding_handle);
+    BeginHandleOperation (recording, "write");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->Write (*recording.inner, buffer, bytes);
       complete (token, 1, {}, { (uint64_t) result });
-      record ("write", recording.GetPath ());
+      record_handle ("write", recording);
+      PauseCheckpointMainOperation (recording, "write");
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("write", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("write", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("write", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("write", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -503,19 +637,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("trim", recording.GetPath (), {},
         { (uint64_t) offset, (uint64_t) length }, recording.forwarding_handle);
+    BeginHandleOperation (recording, "trim");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->Trim (*recording.inner, offset, length);
       complete (token, result ? 1 : 0, {});
-      record ("trim", recording.GetPath ());
+      record_handle ("trim", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("trim", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("trim", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("trim", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("trim", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -525,19 +660,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("size", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "size");
     try {
       ++recorder_->local_forwards;
       const auto size = local_->GetFileSize (*recording.inner);
       complete (token, 1, {}, { (uint64_t) size });
-      record ("size", recording.GetPath ());
+      record_handle ("size", recording);
       return size;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("size", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("size", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("size", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("size", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -547,19 +683,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("last-modified", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "last-modified");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->GetLastModifiedTime (*recording.inner);
       complete (token, 1, {});
-      record ("last-modified", recording.GetPath ());
+      record_handle ("last-modified", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("last-modified", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("last-modified", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("last-modified", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("last-modified", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -569,19 +706,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("version", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "version");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->GetVersionTag (*recording.inner);
       complete (token, 1, {});
-      record ("version", recording.GetPath ());
+      record_handle ("version", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("version", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("version", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("version", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("version", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -591,19 +729,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("type", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "type");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->GetFileType (*recording.inner);
       complete (token, 1, {});
-      record ("type", recording.GetPath ());
+      record_handle ("type", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("type", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("type", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("type", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("type", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -613,19 +752,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("stats", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "stats");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->Stats (*recording.inner);
       complete (token, 1, {});
-      record ("stats", recording.GetPath ());
+      record_handle ("stats", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("stats", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("stats", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("stats", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("stats", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -635,18 +775,19 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("truncate", recording.GetPath (), {},
         { (uint64_t) size }, recording.forwarding_handle);
+    BeginHandleOperation (recording, "truncate");
     try {
       ++recorder_->local_forwards;
       local_->Truncate (*recording.inner, size);
       complete (token, 1, {});
-      record ("truncate", recording.GetPath ());
+      record_handle ("truncate", recording);
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("truncate", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("truncate", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("truncate", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("truncate", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -812,19 +953,21 @@ public:
     const auto source_checked = check_path (source);
     const auto target_checked = check_path (target);
     const auto token = preflight ("move", source, {}, {}, {}, { target });
+    BeginMoveObservation (path_to_utf8 (source_checked),
+        path_to_utf8 (target_checked));
     try {
       ++recorder_->local_forwards;
       local_->MoveFile (path_to_utf8 (source_checked), path_to_utf8 (target_checked), nullptr);
       complete (token, 1, {});
-      record ("move", source_checked);
-      record ("move-target", target_checked);
+      CompleteMoveObservation (source_checked, target_checked, 1, {});
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("move", source_checked, {}, 0, "IOException");
+      CompleteMoveObservation (source_checked, target_checked, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("move", source_checked, {}, 0, "DuckDBException");
+      CompleteMoveObservation (source_checked, target_checked, 0,
+          "DuckDBException");
       throw;
     }
   }
@@ -930,6 +1073,7 @@ public:
       throw;
     }
     record ("try-remove", checked, {}, removed ? 1 : 0);
+    ObserveCheckpointSidecarRemoval (path_to_utf8 (checked));
     if (recorder_->checkpoint_fault_armed && recorder_->checkpoint_fault_stage == 1
         && path_to_utf8 (checked) == path_with_suffix (
             path_from_utf8 (recorder_->checkpoint_wal), ".checkpoint") && !removed)
@@ -972,18 +1116,20 @@ public:
     /* Inject only after the OS reports this file's sync complete. */
     const auto token = preflight ("sync", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "sync");
     try {
       ++recorder_->local_forwards;
       local_->FileSync (*recording.inner);
       complete (token, 1, {});
-      record ("sync", recording.GetPath ());
+      record_handle ("sync", recording);
+      PauseCheckpointMainOperation (recording, "sync");
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("sync", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("sync", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("sync", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("sync", recording, 0, "DuckDBException");
       throw;
     }
     if (!recorder_->checkpoint_fault_armed)
@@ -1084,18 +1230,19 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("seek", recording.GetPath (), {}, { (uint64_t) location },
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "seek");
     try {
       ++recorder_->local_forwards;
       local_->Seek (*recording.inner, location);
       complete (token, 1, {});
-      record ("seek", recording.GetPath ());
+      record_handle ("seek", recording);
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("seek", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("seek", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("seek", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("seek", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -1104,18 +1251,19 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("reset", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "reset");
     try {
       ++recorder_->local_forwards;
       local_->Reset (*recording.inner);
       complete (token, 1, {});
-      record ("reset", recording.GetPath ());
+      record_handle ("reset", recording);
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("reset", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("reset", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("reset", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("reset", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -1124,19 +1272,20 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("seek-position", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "seek-position");
     try {
       ++recorder_->local_forwards;
       const auto result = local_->SeekPosition (*recording.inner);
       complete (token, 1, {}, { (uint64_t) result });
-      record ("seek-position", recording.GetPath ());
+      record_handle ("seek-position", recording);
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
-      record ("seek-position", recording.GetPath (), {}, 0, "IOException");
+      record_handle ("seek-position", recording, 0, "IOException");
       throw;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("seek-position", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("seek-position", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -1159,15 +1308,16 @@ public:
     auto &recording = unwrap (handle);
     const auto token = preflight ("on-disk", recording.GetPath (), {}, {},
         recording.forwarding_handle);
+    BeginHandleOperation (recording, "on-disk");
     try {
       ++recorder_->local_forwards;
       const bool result = local_->OnDiskFile (*recording.inner);
       complete (token, result ? 1 : 0, {});
-      record ("on-disk", recording.GetPath ());
+      record_handle ("on-disk", recording);
       return result;
     } catch (const duckdb::Exception &) {
       complete (token, 0, "DuckDBException");
-      record ("on-disk", recording.GetPath (), {}, 0, "DuckDBException");
+      record_handle ("on-disk", recording, 0, "DuckDBException");
       throw;
     }
   }
@@ -1277,9 +1427,134 @@ private:
   RecordingFileHandle &unwrap (duckdb::FileHandle &handle)
   {
     auto &recording = handle.Cast<RecordingFileHandle> ();
-    if (recording.closed)
+    if (HandleIsClosed (recording))
       reject ("stale closed handle", recording.GetPath (), recording.GetFlags ());
     return recording;
+  }
+
+  FixedHandleRole FixedRoleForPathUnlocked (const std::string &path) const
+  {
+    if (!recorder_->fixed_artifacts_bound)
+      return FixedHandleRole::OTHER;
+    if (path == recorder_->fixed_checkpoint)
+      return FixedHandleRole::CHECKPOINT;
+    if (path == recorder_->fixed_recovery)
+      return FixedHandleRole::RECOVERY;
+    if (path == recorder_->fixed_wal)
+      return FixedHandleRole::WAL;
+    if (path == recorder_->fixed_main)
+      return FixedHandleRole::MAIN;
+    return FixedHandleRole::OTHER;
+  }
+
+  void ObserveCheckpointSidecarRemoval (const std::string &path)
+  {
+    std::lock_guard<std::mutex> lock (recorder_->replacement_gate_mutex);
+    if (recorder_->replacement_gate_armed
+        && path == recorder_->replacement_gate_checkpoint)
+      recorder_->replacement_gate_sidecar_seen = true;
+  }
+
+  void PauseCheckpointMainOperation (const RecordingFileHandle &handle,
+      const std::string &operation)
+  {
+    if (handle.role != FixedHandleRole::MAIN)
+      return;
+    std::unique_lock<std::mutex> lock (recorder_->replacement_gate_mutex);
+    if (!recorder_->replacement_gate_armed
+        || !recorder_->replacement_gate_sidecar_seen
+        || recorder_->replacement_gate_reached
+        || handle.GetPath () != recorder_->replacement_gate_main)
+      return;
+    recorder_->replacement_gate_reached = true;
+    recorder_->replacement_gate_operation = operation;
+    recorder_->replacement_gate_cv.notify_all ();
+    recorder_->replacement_gate_cv.wait (lock, [this] {
+      return recorder_->replacement_gate_release;
+    });
+    recorder_->replacement_gate_armed = false;
+  }
+
+  std::pair<uint64_t, FixedHandleRole> BeginOpenHandle (
+      const std::string &path, duckdb::FileOpenFlags flags)
+  {
+    std::unique_lock<std::mutex> lock (recorder_->observation_mutex);
+    const auto role = FixedRoleForPathUnlocked (path);
+    if (recorder_->move_active && role != FixedHandleRole::OTHER) {
+      recorder_->move_overlap_rejections++;
+      lock.unlock ();
+      reject ("fixed handle open overlaps active move", path, flags);
+    }
+    const auto id = recorder_->next_handle_id++;
+    recorder_->live_handles.emplace (id, RecorderState::LiveHandle {
+        role, path, flags.GetFlagsInternal (), flags.Lock (),
+        flags.Compression (), flags.GetCachingMode (),
+        RecordedHandleState::OPENING, "open" });
+    return { id, role };
+  }
+
+  void CompleteOpenHandle (uint64_t id, duckdb::FileOpenFlags flags,
+      int outcome, int legacy_outcome, std::string error_class)
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    const auto found = recorder_->live_handles.find (id);
+    g_assert_true (found != recorder_->live_handles.end ());
+    g_assert_true (found->second.state == RecordedHandleState::OPENING);
+    g_assert_cmpstr (found->second.active_operation.c_str (), ==, "open");
+    AppendEventUnlocked ("open", path_from_utf8 (found->second.path),
+        flags.GetFlagsInternal (), flags.Lock (), flags.Compression (),
+        legacy_outcome, std::move (error_class));
+    recorder_->handle_lifecycle.push_back ({
+        recorder_->next_lifecycle_sequence++, "open", id, found->second.role,
+        found->second.path, flags.GetFlagsInternal (), flags.Lock (),
+        flags.Compression (), flags.GetCachingMode (), outcome });
+    if (outcome == 1) {
+      found->second.state = RecordedHandleState::OPEN;
+      found->second.active_operation.clear ();
+    } else {
+      recorder_->live_handles.erase (found);
+    }
+  }
+
+  void BeginMoveObservation (const std::string &source,
+      const std::string &destination)
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    g_assert_false (recorder_->move_active);
+    MoveHandleSnapshot snapshot;
+    snapshot.sequence = recorder_->next_lifecycle_sequence++;
+    snapshot.source = source;
+    snapshot.destination = destination;
+    for (const auto &entry : recorder_->live_handles) {
+      const auto &handle = entry.second;
+      if (handle.role == FixedHandleRole::OTHER)
+        continue;
+      snapshot.live_handles.push_back ({
+          entry.first, handle.role, handle.path, handle.flags, handle.lock,
+          handle.compression, handle.caching, handle.state,
+          handle.active_operation });
+    }
+    recorder_->move_active = true;
+    recorder_->active_move_sequence = snapshot.sequence;
+    recorder_->move_snapshots.push_back (std::move (snapshot));
+  }
+
+  void CompleteMoveObservation (const fs::path &source,
+      const fs::path &destination, int outcome, std::string error_class)
+  {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+    g_assert_true (recorder_->move_active);
+    g_assert_cmpuint (recorder_->active_move_sequence, !=, 0);
+    AppendEventUnlocked ("move", source, 0, duckdb::FileLockType::NO_LOCK,
+        duckdb::FileCompressionType::UNCOMPRESSED,
+        outcome == 1 ? -1 : outcome, std::move (error_class));
+    if (outcome == 1) {
+      AppendEventUnlocked ("move-target", destination, 0,
+          duckdb::FileLockType::NO_LOCK,
+          duckdb::FileCompressionType::UNCOMPRESSED, -1, {});
+    }
+    recorder_->move_active = false;
+    recorder_->active_move_sequence = 0;
   }
 
   [[noreturn]] void reject (const std::string &reason, const std::string &path = {},
@@ -1289,8 +1564,11 @@ private:
      * recorded before throwing, and never delegates the rejected request to
      * LocalFileSystem.  Keep the raw spelling: it proves that an ambient or
      * traversal path was stopped before canonicalization could hide it. */
-    recorder_->events.push_back ({ "deny", path, flags.GetFlagsInternal (), flags.Lock (),
-        flags.Compression (), 0, "PermissionException:" + reason });
+    {
+      std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+      recorder_->events.push_back ({ "deny", path, flags.GetFlagsInternal (), flags.Lock (),
+          flags.Compression (), 0, "PermissionException:" + reason });
+    }
     ++recorder_->rejected;
     throw duckdb::PermissionException ("test recording filesystem rejected " + reason);
   }
@@ -1380,6 +1658,15 @@ private:
       duckdb::idx_t flags, duckdb::FileLockType lock,
       duckdb::FileCompressionType compression, int outcome, std::string error_class)
   {
+    std::lock_guard<std::mutex> observation_lock (recorder_->observation_mutex);
+    AppendEventUnlocked (operation, path, flags, lock, compression, outcome,
+        std::move (error_class));
+  }
+  void AppendEventUnlocked (const std::string &operation,
+      const fs::path &path, duckdb::idx_t flags, duckdb::FileLockType lock,
+      duckdb::FileCompressionType compression, int outcome,
+      std::string error_class)
+  {
     recorder_->events.push_back ({ operation, path_to_utf8 (path), flags, lock,
         compression, outcome, std::move (error_class) });
     if (g_getenv ("WYL_DUCKDB_RECORDING_TRACE") != NULL) {
@@ -1394,12 +1681,21 @@ private:
   {
     record (operation, check_path (path));
   }
+  void record_handle (const std::string &operation,
+      const RecordingFileHandle &handle, int outcome = -1,
+      std::string error_class = {})
+  {
+    RecordHandleObservation (handle, operation, outcome == -1 ? 1 : outcome,
+        std::move (error_class));
+  }
   void record_control (const std::string &operation)
   {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
     recorder_->controls.push_back ({ operation, "" });
   }
   void record_control (const std::string &operation, const std::string &path)
   {
+    std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
     recorder_->controls.push_back ({ operation, path });
   }
 
@@ -1413,47 +1709,187 @@ private:
 RecordingFileHandle::RecordingFileHandle (RecordingFileSystem &owner,
     std::string path, duckdb::FileOpenFlags flags,
     duckdb::unique_ptr<duckdb::FileHandle> inner_handle,
+    uint64_t stable_handle_id, FixedHandleRole fixed_role,
     std::string protocol_handle)
     : FileHandle (owner, std::move (path), flags), inner (std::move (inner_handle)), owner (owner),
+      handle_id (stable_handle_id), role (fixed_role),
       forwarding_handle (std::move (protocol_handle))
 {
+}
+
+RecordingFileHandle::~RecordingFileHandle ()
+{
+  if (!owner.HandleIsClosed (*this))
+    Close ();
+  inner.reset ();
+  owner.DestroyHandle (*this);
 }
 
 void
 RecordingFileHandle::Close ()
 {
-  if (closed)
-    owner.RejectClosedHandle (*this);
-  closed = true;
   owner.CloseHandle (*this);
 }
 
 void
 RecordingFileSystem::CloseHandle (RecordingFileHandle &handle)
 {
-  const auto checked = check_path (handle.GetPath ());
+  if (HandleIsClosed (handle))
+    RejectClosedHandle (handle);
   const auto token = preflight ("close", handle.GetPath (), handle.GetFlags (), {},
       handle.forwarding_handle);
+  BeginHandleOperation (handle, "close");
   try {
     ++recorder_->local_forwards;
     handle.inner->Close ();
     complete (token, 1, {});
-    record ("close", checked, handle.GetFlags ());
+    RecordHandleObservation (handle, "close", 1);
   } catch (const duckdb::IOException &) {
     complete (token, 0, "IOException");
-    record ("close", checked, handle.GetFlags (), 0, "IOException");
+    RecordHandleObservation (handle, "close", 0, "IOException");
     throw;
   } catch (const duckdb::Exception &) {
     complete (token, 0, "DuckDBException");
-    record ("close", checked, handle.GetFlags (), 0, "DuckDBException");
+    RecordHandleObservation (handle, "close", 0, "DuckDBException");
     throw;
   }
+}
+
+bool
+RecordingFileSystem::HandleIsClosed (
+    const RecordingFileHandle &handle) const
+{
+  std::lock_guard<std::mutex> lock (recorder_->observation_mutex);
+  const auto found = recorder_->live_handles.find (handle.handle_id);
+  g_assert_true (found != recorder_->live_handles.end ());
+  return found->second.state == RecordedHandleState::CLOSED;
+}
+
+void
+RecordingFileSystem::BeginHandleOperation (
+    const RecordingFileHandle &handle, const std::string &operation)
+{
+  std::unique_lock<std::mutex> lock (recorder_->observation_mutex);
+  if (recorder_->move_active && handle.role != FixedHandleRole::OTHER) {
+    recorder_->move_overlap_rejections++;
+    lock.unlock ();
+    reject ("fixed handle operation overlaps active move", handle.GetPath (),
+        handle.GetFlags ());
+  }
+  const auto found = recorder_->live_handles.find (handle.handle_id);
+  if (found == recorder_->live_handles.end ()
+      || found->second.state != RecordedHandleState::OPEN
+      || !found->second.active_operation.empty ()) {
+    lock.unlock ();
+    reject ("invalid handle operation begin", handle.GetPath (),
+        handle.GetFlags ());
+  }
+  found->second.active_operation = operation;
+}
+
+void
+RecordingFileSystem::RecordHandleObservation (
+    const RecordingFileHandle &handle, const std::string &operation,
+    int outcome, std::string error_class)
+{
+  std::unique_lock<std::mutex> lock (recorder_->observation_mutex);
+  const auto found = recorder_->live_handles.find (handle.handle_id);
+  if (found == recorder_->live_handles.end ()) {
+    lock.unlock ();
+    reject ("operation on destroyed handle", handle.GetPath (), handle.GetFlags ());
+  }
+  if (found->second.state != RecordedHandleState::OPEN
+      || found->second.active_operation != operation) {
+    lock.unlock ();
+    reject ("invalid handle operation completion", handle.GetPath (),
+        handle.GetFlags ());
+  }
+  found->second.active_operation.clear ();
+  if (operation == "close") {
+    found->second.state = RecordedHandleState::CLOSED;
+  }
+  const bool closing = operation == "close";
+  AppendEventUnlocked (operation, path_from_utf8 (handle.GetPath ()),
+      closing ? handle.GetFlags ().GetFlagsInternal () : 0,
+      closing ? handle.GetFlags ().Lock () : duckdb::FileLockType::NO_LOCK,
+      closing ? handle.GetFlags ().Compression () :
+      duckdb::FileCompressionType::UNCOMPRESSED,
+      outcome == 1 ? -1 : outcome, std::move (error_class));
+  recorder_->handle_lifecycle.push_back ({
+      recorder_->next_lifecycle_sequence++, operation, handle.handle_id,
+      handle.role, handle.GetPath (), handle.GetFlags ().GetFlagsInternal (),
+      handle.GetFlags ().Lock (), handle.GetFlags ().Compression (),
+      handle.GetFlags ().GetCachingMode (), outcome });
+}
+
+void
+RecordingFileSystem::DestroyHandle (RecordingFileHandle &handle)
+{
+  std::unique_lock<std::mutex> lock (recorder_->observation_mutex);
+  const auto found = recorder_->live_handles.find (handle.handle_id);
+  if (found == recorder_->live_handles.end ()
+      || found->second.state != RecordedHandleState::CLOSED
+      || !found->second.active_operation.empty ()) {
+    lock.unlock ();
+    reject ("invalid handle destruction", handle.GetPath (),
+        handle.GetFlags ());
+  }
+  recorder_->handle_lifecycle.push_back ({
+      recorder_->next_lifecycle_sequence++, "destroy", handle.handle_id,
+      handle.role, handle.GetPath (), handle.GetFlags ().GetFlagsInternal (),
+      handle.GetFlags ().Lock (), handle.GetFlags ().Compression (),
+      handle.GetFlags ().GetCachingMode (), 1 });
+  recorder_->live_handles.erase (found);
 }
 
 [[noreturn]] void
 RecordingFileSystem::RejectClosedHandle (const RecordingFileHandle &handle)
 {
   reject ("double close", handle.GetPath (), handle.GetFlags ());
+}
+
+static void
+arm_replacement_gate (const std::shared_ptr<RecorderState> &recorder,
+    const fs::path &database)
+{
+  std::lock_guard<std::mutex> lock (recorder->replacement_gate_mutex);
+  g_assert_false (recorder->replacement_gate_armed);
+  recorder->replacement_gate_armed = true;
+  recorder->replacement_gate_sidecar_seen = false;
+  recorder->replacement_gate_reached = false;
+  recorder->replacement_gate_release = false;
+  recorder->replacement_gate_main = path_to_utf8 (database);
+  recorder->replacement_gate_checkpoint =
+      path_with_suffix (database, ".wal.checkpoint");
+  recorder->replacement_gate_operation.clear ();
+}
+
+static std::string
+wait_for_replacement_gate (const std::shared_ptr<RecorderState> &recorder)
+{
+  std::unique_lock<std::mutex> lock (recorder->replacement_gate_mutex);
+  const bool reached = recorder->replacement_gate_cv.wait_for (lock,
+      std::chrono::seconds (5), [&recorder] {
+        return recorder->replacement_gate_reached;
+      });
+  if (!reached) {
+    recorder->replacement_gate_release = true;
+    recorder->replacement_gate_cv.notify_all ();
+  }
+  const auto operation = recorder->replacement_gate_operation;
+  lock.unlock ();
+  g_assert_true (reached);
+  return operation;
+}
+
+static void
+release_replacement_gate (const std::shared_ptr<RecorderState> &recorder)
+{
+  std::lock_guard<std::mutex> lock (recorder->replacement_gate_mutex);
+  g_assert_true (recorder->replacement_gate_reached);
+  g_assert_false (recorder->replacement_gate_release);
+  recorder->replacement_gate_release = true;
+  recorder->replacement_gate_cv.notify_all ();
 }
 
 static void
@@ -1497,8 +1933,9 @@ assert_rejected_without_forwarding (RecordingFileSystem &filesystem,
   } catch (const duckdb::Exception &) {
   }
   g_assert_cmpuint (filesystem.rejected (), ==, rejected + 1);
-  g_assert_cmpuint (filesystem.events ().size (), ==, event_count + 1);
-  const auto &denied = filesystem.events ().back ();
+  const auto events = filesystem.events ();
+  g_assert_cmpuint (events.size (), ==, event_count + 1);
+  const auto &denied = events.back ();
   g_assert_cmpstr (denied.operation.c_str (), ==, "deny");
   g_assert_cmpstr (denied.path.c_str (), ==, path.c_str ());
   g_assert_cmpuint (denied.flags, ==, 0);
@@ -1521,8 +1958,9 @@ assert_open_flags_rejected_without_forwarding (RecordingFileSystem &filesystem,
   } catch (const duckdb::PermissionException &) {
   }
   g_assert_cmpuint (filesystem.rejected (), ==, rejected + 1);
-  g_assert_cmpuint (filesystem.events ().size (), ==, event_count + 1);
-  const auto &denied = filesystem.events ().back ();
+  const auto events = filesystem.events ();
+  g_assert_cmpuint (events.size (), ==, event_count + 1);
+  const auto &denied = events.back ();
   g_assert_cmpstr (denied.operation.c_str (), ==, "deny");
   g_assert_cmpstr (denied.path.c_str (), ==, path.c_str ());
   g_assert_cmpuint (denied.flags, ==, flags.GetFlagsInternal ());
@@ -1635,6 +2073,7 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
 
   auto recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem filesystem (path_to_utf8 (root), recorder);
+  filesystem.BindFixedArtifactsForScenario (database);
   filesystem.AuthorizeOpenForScenario (flags);
   filesystem.EnableForwardingProtocolForTest ({
       direct_fwd ("open", database_utf8, flags.GetFlagsInternal (), flags.Lock (),
@@ -1683,6 +2122,28 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
   handle->Close ();
   filesystem.AssertForwardingProtocolCompleteForTest ();
   g_assert_cmpuint (filesystem.local_forwards (), ==, 14);
+  handle.reset ();
+  static const char *const expected_lifecycle[] = {
+    "open", "write", "sync", "read-at", "size", "last-modified", "version",
+    "type", "stats", "on-disk", "close", "destroy"
+  };
+  const auto lifecycle = filesystem.handle_lifecycle ();
+  g_assert_cmpuint (lifecycle.size (), ==, G_N_ELEMENTS (expected_lifecycle));
+  for (size_t i = 0; i < lifecycle.size (); i++) {
+    const auto &event = lifecycle[i];
+    g_assert_cmpuint (event.sequence, ==, i + 1);
+    g_assert_cmpstr (event.operation.c_str (), ==, expected_lifecycle[i]);
+    g_assert_cmpuint (event.handle_id, ==, 1);
+    g_assert_true (event.role == FixedHandleRole::MAIN);
+    g_assert_cmpstr (event.path.c_str (), ==, database_utf8.c_str ());
+    g_assert_cmpuint (event.flags, ==, flags.GetFlagsInternal ());
+    g_assert_true (event.lock == flags.Lock ());
+    g_assert_true (event.compression == flags.Compression ());
+    g_assert_true (event.caching == flags.GetCachingMode ());
+    g_assert_cmpint (event.outcome, ==, 1);
+  }
+  g_assert_cmpuint (filesystem.move_snapshots ().size (), ==, 0);
+  g_assert_cmpuint (filesystem.move_overlap_rejections (), ==, 0);
 
   /* Exhaustion is a pre-forward failure, even though the preceding token was
    * valid and fully completed. */
@@ -1704,7 +2165,11 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
   const std::string nested_directory_utf8 = path_to_utf8 (nested_directory);
   auto names_recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem names (path_to_utf8 (root), names_recorder);
+  names.BindFixedArtifactsForScenario (database);
+  names.AuthorizeOpenForScenario (flags);
   names.EnableForwardingProtocolForTest ({
+      direct_fwd ("open", database_utf8, flags.GetFlagsInternal (), flags.Lock (),
+          flags.Compression (), {}, "names-main", {}, 1, "", {}),
       direct_fwd ("directory-exists", directory_utf8, 0, no_lock, plain, {}, {}, {},
           0, "", {}),
       direct_fwd ("create-directory", directory_utf8, 0, no_lock, plain, {}, {}, {},
@@ -1713,28 +2178,58 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
           1, "", {}),
       direct_fwd ("move", source_utf8, 0, no_lock, plain, {}, {}, { target_utf8 }, 1,
           "", {}),
+      direct_fwd ("close", database_utf8, flags.GetFlagsInternal (), flags.Lock (),
+          flags.Compression (), {}, "names-main", {}, 1, "", {}),
       direct_fwd ("remove", target_utf8, 0, no_lock, plain, {}, {}, {}, 1, "", {}),
       direct_fwd ("remove-directory", nested_directory_utf8, 0, no_lock, plain, {}, {}, {},
           1, "", {}),
       direct_fwd ("remove-directory", directory_utf8, 0, no_lock, plain, {}, {}, {},
           1, "", {}),
   });
+  auto names_handle = names.OpenFile (database_utf8, flags, nullptr);
   g_assert_false (names.DirectoryExists (directory_utf8, nullptr));
   names.CreateDirectory (directory_utf8, nullptr);
   names.CreateDirectoriesRecursive (nested_directory_utf8, nullptr);
   g_assert_true (g_file_set_contents (source_utf8.c_str (), "x", -1, &error));
   g_assert_no_error (error);
   names.MoveFile (source_utf8, target_utf8, nullptr);
+  names_handle->Close ();
+  names_handle.reset ();
   names.RemoveFile (target_utf8, nullptr);
   names.RemoveDirectory (nested_directory_utf8, nullptr);
   names.RemoveDirectory (directory_utf8, nullptr);
   names.AssertForwardingProtocolCompleteForTest ();
-  g_assert_cmpuint (names.local_forwards (), ==, 7);
+  g_assert_cmpuint (names.local_forwards (), ==, 9);
+  const auto direct_moves = names.move_snapshots ();
+  g_assert_cmpuint (direct_moves.size (), ==, 1);
+  const auto &direct_move = direct_moves.front ();
+  g_assert_cmpstr (direct_move.source.c_str (), ==, source_utf8.c_str ());
+  g_assert_cmpstr (direct_move.destination.c_str (), ==, target_utf8.c_str ());
+  g_assert_cmpuint (direct_move.live_handles.size (), ==, 1);
+  const auto &live = direct_move.live_handles.front ();
+  g_assert_cmpuint (live.handle_id, ==, 1);
+  g_assert_true (live.role == FixedHandleRole::MAIN);
+  g_assert_cmpstr (live.path.c_str (), ==, database_utf8.c_str ());
+  g_assert_cmpuint (live.flags, ==, flags.GetFlagsInternal ());
+  g_assert_true (live.lock == flags.Lock ());
+  g_assert_true (live.compression == flags.Compression ());
+  g_assert_true (live.caching == flags.GetCachingMode ());
+  g_assert_true (live.state == RecordedHandleState::OPEN);
+  g_assert_true (live.active_operation.empty ());
+  const auto names_lifecycle = names.handle_lifecycle ();
+  g_assert_cmpuint (names_lifecycle.size (), ==, 3);
+  g_assert_cmpstr (names_lifecycle[0].operation.c_str (), ==, "open");
+  g_assert_cmpuint (names_lifecycle[0].sequence, <, direct_move.sequence);
+  g_assert_cmpstr (names_lifecycle[1].operation.c_str (), ==, "close");
+  g_assert_cmpuint (names_lifecycle[1].sequence, >, direct_move.sequence);
+  g_assert_cmpstr (names_lifecycle[2].operation.c_str (), ==, "destroy");
+  g_assert_cmpuint (names.move_overlap_rejections (), ==, 0);
 
   /* The public OpenFileInfo overload reaches this protected virtual hook;
    * prove it takes the same preflighted, exact-forward path as OpenFile. */
   auto extended_recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem extended (path_to_utf8 (root), extended_recorder);
+  extended.BindFixedArtifactsForScenario (database);
   extended.AuthorizeOpenForScenario (flags);
   extended.EnableForwardingProtocolForTest ({
       direct_fwd ("open", database_utf8, flags.GetFlagsInternal (), flags.Lock (),
@@ -1927,6 +2422,7 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
 
   auto recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem filesystem (path_to_utf8 (root), recorder);
+  filesystem.BindFixedArtifactsForScenario (database);
   filesystem.AuthorizeOpenForScenario (flags);
   filesystem.EnableForwardingProtocolForTest ({
       direct_fwd ("open", database_utf8, flags.GetFlagsInternal (), flags.Lock (),
@@ -1947,6 +2443,7 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
 
   auto denied_recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem denied (path_to_utf8 (root), denied_recorder);
+  denied.BindFixedArtifactsForScenario (database);
   denied.AuthorizeOpenForScenario (flags);
   denied.EnableForwardingProtocolForTest ({
       direct_fwd ("open", database_utf8 + ".other", flags.GetFlagsInternal (), flags.Lock (),
@@ -1959,11 +2456,13 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
   }
   g_assert_cmpuint (denied.local_forwards (), ==, 0);
   g_assert_cmpuint (denied.forwarding_completions ().size (), ==, 0);
-  g_assert_cmpuint (denied.events ().size (), ==, 1);
-  g_assert_cmpstr (denied.events ().back ().operation.c_str (), ==, "deny");
+  const auto denied_events = denied.events ();
+  g_assert_cmpuint (denied_events.size (), ==, 1);
+  g_assert_cmpstr (denied_events.back ().operation.c_str (), ==, "deny");
 
   auto io_recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem io (path_to_utf8 (root), io_recorder);
+  io.BindFixedArtifactsForScenario (database);
   io.AuthorizeOpenForScenario (flags);
   io.EnableForwardingProtocolForTest ({
       direct_fwd ("open", database_utf8, flags.GetFlagsInternal (), flags.Lock (), flags.Compression (), {}, "main-io", {}, 1, "", {}),
@@ -2799,10 +3298,11 @@ source_155_open_flags (duckdb::idx_t flags,
  * part of the scenario's evidence, just like its exact event grammar. */
 static void
 configure_test_database (duckdb::DBConfig *config, const fs::path &root,
-    std::shared_ptr<RecorderState> recorder,
+    const fs::path &database, std::shared_ptr<RecorderState> recorder,
     std::initializer_list<duckdb::FileOpenFlags> open_authorizations)
 {
   auto filesystem = duckdb::make_uniq<RecordingFileSystem> (path_to_utf8 (root), recorder);
+  filesystem->BindFixedArtifactsForScenario (database);
   for (const auto &flags : open_authorizations)
     filesystem->AuthorizeOpenForScenario (flags);
   config->file_system = std::move (filesystem);
@@ -2829,7 +3329,7 @@ crash_writer_child (const gchar *sandbox)
   const fs::path database = root / "facts.duckdb";
   auto recorder = std::make_shared<RecorderState> ();
   duckdb::DBConfig config;
-  configure_test_database (&config, root, recorder, {
+  configure_test_database (&config, root, database, recorder, {
       source_155_open_flags (129),
       source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
       source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -2906,7 +3406,7 @@ hold_writer_child (const gchar *sandbox)
   auto recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
@@ -2960,7 +3460,7 @@ contend_writer_child (const gchar *sandbox)
   gboolean rejected = FALSE;
   try {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
@@ -2993,7 +3493,7 @@ checkpoint_crash_child (const gchar *sandbox)
   const fs::path database = root / "facts.duckdb";
   auto recorder = std::make_shared<RecorderState> ();
   duckdb::DBConfig config;
-  configure_test_database (&config, root, recorder, {
+  configure_test_database (&config, root, database, recorder, {
       source_155_open_flags (129),
       source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
       source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -3541,9 +4041,10 @@ test_recording_filesystem_persistent_database (void)
       g_assert_not_reached ();
     } catch (const duckdb::PermissionException &) {
     }
-    g_assert_cmpuint (filesystem.events ().size (), ==, events_before + 2);
-    const auto &recorded = filesystem.events ()[events_before];
-    const auto &denied = filesystem.events ().back ();
+    const auto events = filesystem.events ();
+    g_assert_cmpuint (events.size (), ==, events_before + 2);
+    const auto &recorded = events[events_before];
+    const auto &denied = events.back ();
     g_assert_cmpstr (recorded.operation.c_str (), ==, "glob");
     g_assert_cmpstr (recorded.path.c_str (), ==, database_utf8.c_str ());
     g_assert_cmpstr (denied.operation.c_str (), ==, "deny");
@@ -3564,9 +4065,10 @@ test_recording_filesystem_persistent_database (void)
     } catch (const duckdb::PermissionException &) {
     }
     g_assert_cmpuint (filesystem.rejected (), ==, rejected_before + 1);
-    g_assert_cmpuint (filesystem.events ().size (), ==, events_before + 2);
-    const auto &extended = filesystem.events ()[events_before];
-    const auto &denied = filesystem.events ()[events_before + 1];
+    const auto events = filesystem.events ();
+    g_assert_cmpuint (events.size (), ==, events_before + 2);
+    const auto &extended = events[events_before];
+    const auto &denied = events[events_before + 1];
     g_assert_cmpstr (extended.operation.c_str (), ==, "glob-extended");
     g_assert_cmpstr (extended.path.c_str (), ==, database_utf8.c_str ());
     g_assert_cmpuint (extended.flags, ==, 0);
@@ -3586,7 +4088,7 @@ test_recording_filesystem_persistent_database (void)
 
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -3597,7 +4099,7 @@ test_recording_filesystem_persistent_database (void)
   }
   {
     duckdb::DBConfig reopen_config;
-    configure_test_database (&reopen_config, root, recorder, {
+    configure_test_database (&reopen_config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &reopen_config);
@@ -3636,7 +4138,7 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   auto recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (11), source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -3667,7 +4169,7 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   size_t workload_end = 0;
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (11), source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -3708,7 +4210,7 @@ test_recording_filesystem_temporary_spill_absent_root (void)
   auto recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (11), source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -3830,7 +4332,8 @@ test_recording_filesystem_list_callback_trace (void)
       g_assert_not_reached ();
     } catch (const duckdb::PermissionException &) {
     }
-    const auto &denied = filesystem.events ().back ();
+    const auto events = filesystem.events ();
+    const auto &denied = events.back ();
     g_assert_cmpstr (denied.operation.c_str (), ==, "deny");
     g_assert_cmpstr (denied.path.c_str (), ==, entry.c_str ());
     g_assert_cmpint (denied.outcome, ==, 0);
@@ -3857,7 +4360,7 @@ test_recording_filesystem_list_forwarding_protocol (void)
 
   const auto assert_callback_failure = [&entry_utf8, &root_utf8] (const RecordingFileSystem &subject,
       const char *error_class, gboolean nested_rejection) {
-    const auto &events = subject.events ();
+    const auto events = subject.events ();
     /* The entry token retains the callback type; the paired completion adds
      * its terminal result/error and must be emitted even when user code
      * throws. */
@@ -3943,6 +4446,7 @@ test_recording_filesystem_utf8_path_boundary (void)
   const std::string database_utf8 = path_to_utf8 (database);
   auto recorder = std::make_shared<RecorderState> ();
   RecordingFileSystem filesystem (path_to_utf8 (root), recorder);
+  filesystem.BindFixedArtifactsForScenario (database);
   filesystem.AuthorizeOpenForScenario (duckdb::FileOpenFlags (11));
   {
     auto handle = filesystem.OpenFile (database_utf8, duckdb::FileOpenFlags (11), nullptr);
@@ -3984,7 +4488,7 @@ test_recording_filesystem_utf8_lifecycle (void)
   auto recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (11), source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4100,7 +4604,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4140,7 +4644,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   gchar *read_only_error = NULL;
   try {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, read_only_recorder, {
+    configure_test_database (&config, root, database, read_only_recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2433, duckdb::FileLockType::READ_LOCK) });
     config.options.access_mode = duckdb::AccessMode::READ_ONLY;
@@ -4167,7 +4671,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   auto recovery_recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recovery_recorder, {
+    configure_test_database (&config, root, database, recovery_recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4199,7 +4703,7 @@ test_recording_filesystem_rw_writer_contention (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4262,7 +4766,7 @@ test_recording_filesystem_rw_writer_contention (void)
   auto restored_recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, restored_recorder, {
+    configure_test_database (&config, root, database, restored_recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4532,7 +5036,7 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4544,7 +5048,7 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4568,7 +5072,7 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   ArtifactSet post_checkpoint;
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4625,7 +5129,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   const fs::path wal = path_from_utf8 (path_with_suffix (database, ".wal"));
   {
     auto state = std::make_shared<RecorderState> (); duckdb::DBConfig config;
-    configure_test_database (&config, root, state, {
+    configure_test_database (&config, root, database, state, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) }); duckdb::DuckDB db (path_to_utf8 (database), &config);
@@ -4633,7 +5137,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   }
   {
     auto state = std::make_shared<RecorderState> (); duckdb::DBConfig config;
-    configure_test_database (&config, root, state, {
+    configure_test_database (&config, root, database, state, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) }); config.options.checkpoint_on_shutdown = false;
@@ -4682,7 +5186,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   auto recovery_recorder = std::make_shared<RecorderState> ();
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recovery_recorder, {
+    configure_test_database (&config, root, database, recovery_recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
