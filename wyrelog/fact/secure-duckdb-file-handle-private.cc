@@ -2,164 +2,418 @@
 #ifndef G_OS_WIN32
 #define _POSIX_C_SOURCE 200809L
 #endif
+
 #include "fact/secure-duckdb-file-handle-private.hpp"
+
 #include <cerrno>
-#include <fcntl.h>
+#include <climits>
+#include <cstdint>
+#include <limits>
 #include <sys/stat.h>
 #include <unistd.h>
 
-WylSecureDuckdbFileHandle::WylSecureDuckdbFileHandle (duckdb::FileSystem &fs,
-    WylFactArtifactNamespace *ns, WylFactArtifactName artifact,
-    const duckdb::string &path, duckdb::FileOpenFlags flags, int owned_fd,
-    int owned_lock_fd)
-    : duckdb::FileHandle (fs, path, flags), namespace_ (ns),
-      artifact_ (artifact), fd_ (owned_fd), device_ (0), inode_ (0),
-      lock_fd_ (owned_lock_fd), offset_ (0)
+namespace {
+
+  static_assert (std::numeric_limits < duckdb::idx_t >::is_integer
+      && !std::numeric_limits < duckdb::idx_t >::is_signed,
+      "DuckDB idx_t must remain an unsigned integer");
+  static_assert (std::numeric_limits < off_t >::is_integer
+      && std::numeric_limits < off_t >::is_signed,
+      "POSIX off_t must remain a signed integer");
+  static_assert (sizeof (duckdb::idx_t) >= sizeof (off_t),
+      "DuckDB idx_t must represent every nonnegative off_t");
+  static_assert (sizeof (size_t) >= sizeof (ssize_t),
+      "size_t must represent every positive ssize_t");
+  static_assert (sizeof (int64_t) >= sizeof (off_t),
+      "adapter metadata requires int64_t to represent off_t");
+
+  [[noreturn]] void io_reject (const char *operation)
+  {
+    throw duckdb::IOException ("bounded DuckDB file handle rejected %s",
+        operation);
+  }
+
+  struct CheckedRange
+  {
+    size_t bytes;
+    off_t offset;
+  };
+
+/* This is the single adapter conversion boundary.  Validate a complete
+ * request before buffer access, syscall, or cursor mutation. */
+  CheckedRange checked_range (int64_t byte_count, duckdb::idx_t location)
+  {
+    if (byte_count < 0 || static_cast < uint64_t > (byte_count)
+        > static_cast < uint64_t > (SSIZE_MAX)
+        || location
+        > static_cast < duckdb::idx_t > (std::numeric_limits < off_t >::max ()))
+      io_reject ("numeric conversion");
+    const auto bytes = static_cast < uint64_t > (byte_count);
+    const auto offset = static_cast < uint64_t > (location);
+    if (bytes
+        > static_cast < uint64_t > (std::numeric_limits <
+            off_t >::max ()) - offset)
+      io_reject ("numeric endpoint");
+    return {
+    static_cast < size_t >(bytes), static_cast < off_t > (offset)};
+  }
+
+  off_t checked_size (int64_t size)
+  {
+    if (size < 0 || static_cast < uint64_t > (size)
+        > static_cast < uint64_t > (std::numeric_limits < off_t >::max ()))
+      io_reject ("truncate conversion");
+    return static_cast < off_t > (size);
+  }
+
+  int64_t checked_stat_size (off_t size)
+  {
+    if (size < 0 || static_cast < uint64_t > (size)
+        > static_cast < uint64_t > (std::numeric_limits < int64_t >::max ()))
+      io_reject ("file-size conversion");
+    return static_cast < int64_t > (size);
+  }
+
+  int64_t checked_timestamp (int64_t seconds, long nanoseconds)
+  {
+    constexpr int64_t scale = 1000000;
+    if (nanoseconds < 0 || nanoseconds >= 1000000000L
+        || seconds > (std::numeric_limits < int64_t >::max ()
+            - nanoseconds / 1000) / scale
+        || seconds < std::numeric_limits < int64_t >::min () / scale)
+      io_reject ("timestamp conversion");
+    return seconds * scale + nanoseconds / 1000;
+  }
+
+  void require_ok (wyrelog_error_t result, const char *operation)
+  {
+    if (result != WYRELOG_E_OK)
+      io_reject (operation);
+  }
+
+}                               // namespace
+
+WylSecureDuckdbFileHandle::
+WylSecureDuckdbFileHandle (duckdb::FileSystem & filesystem,
+    const duckdb::string & path, duckdb::FileOpenFlags flags, int fd,
+    WylSecureDuckdbBindingKind kind)
+    :
+duckdb::FileHandle (filesystem, path, flags),
+kind_ (kind),
+fd_ (fd),
+    binding_
 {
-  if (ns == nullptr || fd_ < 0 || wyl_fact_artifact_namespace_revalidate (ns)
-      != WYRELOG_E_OK) {
-    if (fd_ >= 0)
-      close (fd_);
-    if (lock_fd_ >= 0)
-      close (lock_fd_);
-    fd_ = -1;
-    lock_fd_ = -1;
-    return;
-  }
-  struct stat st;
-  if (fstat (fd_, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
-      || wyl_fact_artifact_namespace_revalidate (ns) != WYRELOG_E_OK) {
-    close (fd_); fd_ = -1;
-    if (lock_fd_ >= 0) close (lock_fd_);
-    lock_fd_ = -1;
-    return;
-  }
-  device_ = st.st_dev; inode_ = st.st_ino;
+}, offset_ (0)
+{
 }
 
-WylSecureDuckdbFileHandle::~WylSecureDuckdbFileHandle ()
-{ Close (); }
+#define WYL_HANDLE_CONSTRUCTOR(type, member, kind_value)                       \
+  WylSecureDuckdbFileHandle::WylSecureDuckdbFileHandle (                      \
+      duckdb::FileSystem &filesystem, const duckdb::string &path,              \
+      duckdb::FileOpenFlags flags, int fd, type *binding)                      \
+      : WylSecureDuckdbFileHandle (filesystem, path, flags, fd, kind_value)    \
+  {                                                                            \
+    binding_.member = binding;                                                  \
+    if (fd_ < 0 || binding == nullptr || RevalidateFd () != WYRELOG_E_OK) {     \
+      if (fd_ >= 0 && binding != nullptr)                                       \
+        (void) CheckedClose ();                                                 \
+      FreeBinding ();                                                           \
+      io_reject ("new binding");                                                \
+    }                                                                           \
+  }
 
-bool WylSecureDuckdbFileHandle::Revalidate () const
+WYL_HANDLE_CONSTRUCTOR (WylFactArtifactMainBinding, writer_main,
+    WylSecureDuckdbBindingKind::WRITER_MAIN)
+    WYL_HANDLE_CONSTRUCTOR (WylFactArtifactReaderMainBinding, reader_main,
+    WylSecureDuckdbBindingKind::READER_MAIN)
+    WYL_HANDLE_CONSTRUCTOR (WylFactArtifactSidecarBinding, writer_sidecar,
+    WylSecureDuckdbBindingKind::WRITER_SIDECAR)
+    WYL_HANDLE_CONSTRUCTOR (WylFactArtifactReaderWalBinding, reader_wal,
+    WylSecureDuckdbBindingKind::READER_WAL)
+    WYL_HANDLE_CONSTRUCTOR (WylFactDuckdbTempChildBinding, temp_child,
+    WylSecureDuckdbBindingKind::TEMP_CHILD)
+#undef WYL_HANDLE_CONSTRUCTOR
+    WylSecureDuckdbFileHandle::~WylSecureDuckdbFileHandle ()
 {
-  if (fd_ < 0 || namespace_ == nullptr
-      || wyl_fact_artifact_namespace_revalidate (namespace_) != WYRELOG_E_OK)
-    return false;
-  if (artifact_ != WYL_FACT_ARTIFACT_MAIN
-      && wyl_fact_artifact_namespace_revalidate_main (namespace_)
-          != WYRELOG_E_OK)
-    return false;
-  struct stat st;
-  return fstat (fd_, &st) == 0 && S_ISREG (st.st_mode) && st.st_nlink == 1
-      && st.st_dev == device_ && st.st_ino == inode_;
+  try {
+    Close ();
+  } catch ( ...) {
+    /* A provider that cannot prove descriptor identity deliberately leaves it
+     * open; a destructor must not raw-close a possibly reused foreign fd. */
+  }
+  FreeBinding ();
 }
 
-bool WylSecureDuckdbFileHandle::ReadAt (void *buffer, duckdb::idx_t bytes,
+wyrelog_error_t
+WylSecureDuckdbFileHandle::RevalidateFd () const
+{
+  switch (kind_) {
+    case WylSecureDuckdbBindingKind::WRITER_MAIN:
+      return wyl_fact_artifact_main_binding_revalidate_fd (binding_.writer_main,
+          fd_);
+    case WylSecureDuckdbBindingKind::READER_MAIN:
+      return
+          wyl_fact_artifact_reader_main_binding_revalidate_fd
+          (binding_.reader_main, fd_);
+    case WylSecureDuckdbBindingKind::WRITER_SIDECAR:
+      return
+          wyl_fact_artifact_sidecar_binding_revalidate_fd
+          (binding_.writer_sidecar, fd_);
+    case WylSecureDuckdbBindingKind::READER_WAL:
+      return
+          wyl_fact_artifact_reader_wal_binding_revalidate_fd
+          (binding_.reader_wal, fd_);
+    case WylSecureDuckdbBindingKind::TEMP_CHILD:
+      return
+          wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding_.temp_child,
+          fd_);
+  }
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+WylSecureDuckdbFileHandle::CheckedClose ()
+{
+  switch (kind_) {
+    case WylSecureDuckdbBindingKind::WRITER_MAIN:
+      return wyl_fact_artifact_main_binding_close (binding_.writer_main, &fd_);
+    case WylSecureDuckdbBindingKind::READER_MAIN:
+      return wyl_fact_artifact_reader_main_binding_close (binding_.reader_main,
+          &fd_);
+    case WylSecureDuckdbBindingKind::WRITER_SIDECAR:
+      return wyl_fact_artifact_sidecar_binding_close (binding_.writer_sidecar,
+          &fd_);
+    case WylSecureDuckdbBindingKind::READER_WAL:
+      return wyl_fact_artifact_reader_wal_binding_close (binding_.reader_wal,
+          &fd_);
+    case WylSecureDuckdbBindingKind::TEMP_CHILD:
+      return wyl_fact_duckdb_temp_child_binding_close (binding_.temp_child,
+          &fd_);
+  }
+  return WYRELOG_E_POLICY;
+}
+
+void
+WylSecureDuckdbFileHandle::FreeBinding ()
+{
+  switch (kind_) {
+    case WylSecureDuckdbBindingKind::WRITER_MAIN:
+      g_clear_pointer (&binding_.writer_main,
+          wyl_fact_artifact_main_binding_free);
+      break;
+    case WylSecureDuckdbBindingKind::READER_MAIN:
+      g_clear_pointer (&binding_.reader_main,
+          wyl_fact_artifact_reader_main_binding_free);
+      break;
+    case WylSecureDuckdbBindingKind::WRITER_SIDECAR:
+      g_clear_pointer (&binding_.writer_sidecar,
+          wyl_fact_artifact_sidecar_binding_free);
+      break;
+    case WylSecureDuckdbBindingKind::READER_WAL:
+      g_clear_pointer (&binding_.reader_wal,
+          wyl_fact_artifact_reader_wal_binding_free);
+      break;
+    case WylSecureDuckdbBindingKind::TEMP_CHILD:
+      g_clear_pointer (&binding_.temp_child,
+          wyl_fact_duckdb_temp_child_binding_free);
+      break;
+  }
+}
+
+void
+WylSecureDuckdbFileHandle::Revalidate () const
+{
+  std::lock_guard < std::mutex > lock (mutex_);
+  RevalidateUnlocked ();
+}
+
+void
+WylSecureDuckdbFileHandle::RevalidateUnlocked () const
+{
+  if (fd_ < 0)
+    io_reject ("closed handle");
+  require_ok (RevalidateFd (), "working descriptor identity");
+}
+
+void
+WylSecureDuckdbFileHandle::ReadAt (void *buffer, int64_t byte_count,
     duckdb::idx_t location)
 {
-  if (!Revalidate ())
-    return false;
-  auto *cursor = static_cast<unsigned char *> (buffer);
-  duckdb::idx_t done = 0;
-  while (done < bytes) {
-    const ssize_t n = pread (fd_, cursor + done, bytes - done,
-        static_cast<off_t> (location + done));
-    if (n <= 0)
-      return false;
-    done += static_cast<duckdb::idx_t> (n);
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (!flags.OpenForReading ())
+    io_reject ("read without read flag");
+  const auto range = checked_range (byte_count, location);
+  if (range.bytes != 0 && buffer == nullptr)
+    io_reject ("null read buffer");
+  RevalidateUnlocked ();
+  auto *cursor = static_cast < unsigned char *>(buffer);
+  size_t done = 0;
+  while (done < range.bytes) {
+    const auto offset = static_cast < off_t > (range.offset
+        + static_cast < off_t > (done));
+    const ssize_t amount =
+        pread (fd_, cursor + done, range.bytes - done, offset);
+    if (amount <= 0)
+      io_reject ("positioned read");
+    done += static_cast < size_t >(amount);
   }
-  return Revalidate ();
+  RevalidateUnlocked ();
 }
 
-bool WylSecureDuckdbFileHandle::WriteAt (void *buffer, duckdb::idx_t bytes,
+void
+WylSecureDuckdbFileHandle::WriteAt (void *buffer, int64_t byte_count,
     duckdb::idx_t location)
 {
-  if (!Revalidate ())
-    return false;
-  auto *cursor = static_cast<unsigned char *> (buffer);
-  duckdb::idx_t done = 0;
-  while (done < bytes) {
-    const ssize_t n = pwrite (fd_, cursor + done, bytes - done,
-        static_cast<off_t> (location + done));
-    if (n <= 0)
-      return false;
-    done += static_cast<duckdb::idx_t> (n);
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (!flags.OpenForWriting ())
+    io_reject ("write without write flag");
+  const auto range = checked_range (byte_count, location);
+  if (range.bytes != 0 && buffer == nullptr)
+    io_reject ("null write buffer");
+  RevalidateUnlocked ();
+  auto *cursor = static_cast < unsigned char *>(buffer);
+  size_t done = 0;
+  while (done < range.bytes) {
+    const auto offset = static_cast < off_t > (range.offset
+        + static_cast < off_t > (done));
+    const ssize_t amount =
+        pwrite (fd_, cursor + done, range.bytes - done, offset);
+    if (amount <= 0)
+      io_reject ("positioned write");
+    done += static_cast < size_t >(amount);
   }
-  return Revalidate ();
+  RevalidateUnlocked ();
 }
 
-bool WylSecureDuckdbFileHandle::Sync ()
-{ return Revalidate () && fsync (fd_) == 0 && Revalidate (); }
-
-bool WylSecureDuckdbFileHandle::TruncateTo (int64_t size)
-{ return size >= 0 && Revalidate () && ftruncate (fd_, size) == 0
-      && Revalidate (); }
-
-int64_t WylSecureDuckdbFileHandle::ReadSome (void *buffer, int64_t bytes)
+int64_t
+WylSecureDuckdbFileHandle::ReadSome (void *buffer, int64_t byte_count)
 {
-  if (bytes < 0 || !buffer)
-    return -1;
-  std::lock_guard<std::mutex> lock (mutex_);
-  if (!Revalidate ()) return -1;
-  const ssize_t n = pread (fd_, buffer, (size_t) bytes, (off_t) offset_);
-  if (n < 0 || !Revalidate ()) return -1;
-  offset_ += (duckdb::idx_t) n;
-  return n;
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (!flags.OpenForReading ())
+    io_reject ("read without read flag");
+  const auto range = checked_range (byte_count, offset_);
+  if (range.bytes != 0 && buffer == nullptr)
+    io_reject ("null read buffer");
+  RevalidateUnlocked ();
+  const ssize_t amount = pread (fd_, buffer, range.bytes, range.offset);
+  if (amount < 0)
+    io_reject ("read");
+  RevalidateUnlocked ();
+  offset_ += static_cast < duckdb::idx_t > (amount);
+  return static_cast < int64_t > (amount);
 }
 
-int64_t WylSecureDuckdbFileHandle::WriteSome (void *buffer, int64_t bytes)
+int64_t
+WylSecureDuckdbFileHandle::WriteSome (void *buffer, int64_t byte_count)
 {
-  if (bytes < 0 || !buffer)
-    return -1;
-  std::lock_guard<std::mutex> lock (mutex_);
-  if (!Revalidate ()) return -1;
-  const ssize_t n = pwrite (fd_, buffer, (size_t) bytes, (off_t) offset_);
-  if (n < 0 || !Revalidate ()) return -1;
-  offset_ += (duckdb::idx_t) n;
-  return n;
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (!flags.OpenForWriting ())
+    io_reject ("write without write flag");
+  const auto range = checked_range (byte_count, offset_);
+  if (range.bytes != 0 && buffer == nullptr)
+    io_reject ("null write buffer");
+  RevalidateUnlocked ();
+  const ssize_t amount = pwrite (fd_, buffer, range.bytes, range.offset);
+  if (amount < 0)
+    io_reject ("write");
+  RevalidateUnlocked ();
+  offset_ += static_cast < duckdb::idx_t > (amount);
+  return static_cast < int64_t > (amount);
 }
 
-bool WylSecureDuckdbFileHandle::SeekTo (duckdb::idx_t offset)
+void
+WylSecureDuckdbFileHandle::Sync ()
 {
-  std::lock_guard<std::mutex> lock (mutex_);
-  if (!Revalidate ()) return false;
-  offset_ = offset;
-  return true;
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (!flags.OpenForWriting ())
+    io_reject ("sync without write flag");
+  RevalidateUnlocked ();
+  if (fsync (fd_) != 0)
+    io_reject ("sync");
+  RevalidateUnlocked ();
 }
 
-duckdb::idx_t WylSecureDuckdbFileHandle::SeekPosition () const
+void
+WylSecureDuckdbFileHandle::TruncateTo (int64_t size)
 {
-  std::lock_guard<std::mutex> lock (mutex_);
-  return Revalidate () ? offset_ : 0;
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (!flags.OpenForWriting ())
+    io_reject ("truncate without write flag");
+  const off_t checked = checked_size (size);
+  RevalidateUnlocked ();
+  if (ftruncate (fd_, checked) != 0)
+    io_reject ("truncate");
+  RevalidateUnlocked ();
 }
 
-int64_t WylSecureDuckdbFileHandle::Size () const
+void
+WylSecureDuckdbFileHandle::SeekTo (duckdb::idx_t location)
 {
-  if (!Revalidate ()) return -1;
-  struct stat st;
-  return fstat (fd_, &st) == 0 && Revalidate () ? st.st_size : -1;
+  (void) checked_range (0, location);
+  std::lock_guard < std::mutex > lock (mutex_);
+  RevalidateUnlocked ();
+  offset_ = location;
 }
 
-duckdb::timestamp_t WylSecureDuckdbFileHandle::LastModifiedTime () const
+duckdb::idx_t WylSecureDuckdbFileHandle::SeekPosition ()const
 {
-  if (!Revalidate ()) return duckdb::timestamp_t::ninfinity ();
-  struct stat st;
-  if (fstat (fd_, &st) != 0 || !Revalidate ())
-    return duckdb::timestamp_t::ninfinity ();
+  std::lock_guard < std::mutex > lock (mutex_);
+  RevalidateUnlocked ();
+  return offset_;
+}
+
+int64_t
+WylSecureDuckdbFileHandle::Size () const
+{
+  std::lock_guard < std::mutex > lock (mutex_);
+  RevalidateUnlocked ();
+  struct stat status;
+  if (fstat (fd_, &status) != 0)
+    io_reject ("file size");
+  RevalidateUnlocked ();
+  return checked_stat_size (status.st_size);
+}
+
+duckdb::timestamp_t WylSecureDuckdbFileHandle::LastModifiedTime ()const
+{
+  std::lock_guard < std::mutex > lock (mutex_);
+  RevalidateUnlocked ();
+  struct stat
+      status;
+  if (fstat (fd_, &status) != 0)
+    io_reject ("last modified time");
+  RevalidateUnlocked ();
 #if defined(__APPLE__)
-  return duckdb::timestamp_t ((int64_t) st.st_mtimespec.tv_sec * 1000000
-      + st.st_mtimespec.tv_nsec / 1000);
+  return duckdb::timestamp_t (checked_timestamp (status.st_mtimespec.tv_sec,
+          status.st_mtimespec.tv_nsec));
 #else
-  return duckdb::timestamp_t ((int64_t) st.st_mtim.tv_sec * 1000000
-      + st.st_mtim.tv_nsec / 1000);
+  return duckdb::timestamp_t (checked_timestamp (status.st_mtim.tv_sec,
+          status.st_mtim.tv_nsec));
 #endif
 }
 
-void WylSecureDuckdbFileHandle::Close ()
+duckdb::string WylSecureDuckdbFileHandle::VersionTag ()const
 {
-  std::lock_guard<std::mutex> lock (mutex_);
-  if (fd_ >= 0) close (fd_);
-  if (lock_fd_ >= 0) close (lock_fd_);
-  fd_ = -1;
-  lock_fd_ = -1;
+  std::lock_guard < std::mutex > lock (mutex_);
+  RevalidateUnlocked ();
+  struct stat
+      status;
+  if (fstat (fd_, &status) != 0)
+    io_reject ("version tag");
+  RevalidateUnlocked ();
+  const
+      auto
+      size = checked_stat_size (status.st_size);
+  return std::to_string (static_cast < uint64_t > (status.st_dev)) + ":"
+      + std::to_string (static_cast < uint64_t > (status.st_ino)) + ":"
+      + std::to_string (size);
+}
+
+void
+WylSecureDuckdbFileHandle::Close ()
+{
+  std::lock_guard < std::mutex > lock (mutex_);
+  if (fd_ < 0)
+    return;
+  require_ok (CheckedClose (), "checked close");
 }

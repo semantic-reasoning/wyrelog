@@ -2,47 +2,104 @@
 #pragma once
 
 #include <duckdb.hpp>
-#include <memory>
 #include <mutex>
-#ifndef G_OS_WIN32
-#include <sys/types.h>
-#endif
+
 #include "fact/graph-artifact-namespace-private.h"
 
-/* Private POSIX handle used by the bounded DuckDB filesystem.  It owns a
- * duplicated descriptor and never resolves the logical name as a pathname. */
-class WylSecureDuckdbFileHandle final : public duckdb::FileHandle
+enum class WylSecureDuckdbBindingKind
+{
+  WRITER_MAIN,
+  READER_MAIN,
+  WRITER_SIDECAR,
+  READER_WAL,
+  TEMP_CHILD,
+};
+
+/* A DuckDB working descriptor is useful only together with its provider
+ * binding.  This class never closes a raw descriptor behind the provider:
+ * every I/O boundary and the terminal close validate the actual descriptor
+ * number through the authority that issued it. */
+class WylSecureDuckdbFileHandle final:public
+    duckdb::FileHandle
 {
 public:
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, WylFactArtifactNamespace *,
-      WylFactArtifactName, const duckdb::string &, duckdb::FileOpenFlags,
-      int owned_fd, int owned_lock_fd = -1);
-  ~WylSecureDuckdbFileHandle () override;
+  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylFactArtifactMainBinding *);
+  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylFactArtifactReaderMainBinding *);
+  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylFactArtifactSidecarBinding *);
+  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylFactArtifactReaderWalBinding *);
+  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylFactDuckdbTempChildBinding *);
+   ~
+  WylSecureDuckdbFileHandle ()
+  override;
   WylSecureDuckdbFileHandle (const WylSecureDuckdbFileHandle &) = delete;
-  WylSecureDuckdbFileHandle &operator =
-      (const WylSecureDuckdbFileHandle &) = delete;
+  WylSecureDuckdbFileHandle &
+  operator = (const WylSecureDuckdbFileHandle &) = delete;
 
-  bool ReadAt (void *, duckdb::idx_t, duckdb::idx_t);
-  bool WriteAt (void *, duckdb::idx_t, duckdb::idx_t);
-  int64_t ReadSome (void *, int64_t);
-  int64_t WriteSome (void *, int64_t);
-  bool Sync (); bool TruncateTo (int64_t);
-  bool Revalidate () const;
-  bool SeekTo (duckdb::idx_t);
-  duckdb::idx_t SeekPosition () const;
-  int64_t Size () const;
-  duckdb::timestamp_t LastModifiedTime () const;
-  void Close () override;
-  int Fd () const { return fd_; }
-  bool LockHeld () const { return lock_fd_ >= 0; }
+  void
+  ReadAt (void *, int64_t, duckdb::idx_t);
+  void
+  WriteAt (void *, int64_t, duckdb::idx_t);
+  int64_t
+  ReadSome (void *, int64_t);
+  int64_t
+  WriteSome (void *, int64_t);
+  void
+  Sync ();
+  void
+  TruncateTo (int64_t);
+  void
+  Revalidate () const;
+  void
+  SeekTo (duckdb::idx_t);
+  duckdb::idx_t
+  SeekPosition () const;
+  int64_t
+  Size () const;
+  duckdb::timestamp_t
+  LastModifiedTime () const;
+  duckdb::string
+  VersionTag () const;
+  void
+  Close ()
+  override;
 
 private:
-  WylFactArtifactNamespace *namespace_;
-  WylFactArtifactName artifact_;
-  int fd_;
-  dev_t device_;
-  ino_t inode_;
-  int lock_fd_;
-  mutable std::mutex mutex_;
-  duckdb::idx_t offset_;
+  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylSecureDuckdbBindingKind);
+  wyrelog_error_t
+  RevalidateFd () const;
+  void
+  RevalidateUnlocked () const;
+  wyrelog_error_t
+  CheckedClose ();
+  void
+  FreeBinding ();
+
+  WylSecureDuckdbBindingKind
+      kind_;
+  int
+      fd_;
+  union
+  {
+    WylFactArtifactMainBinding *
+        writer_main;
+    WylFactArtifactReaderMainBinding *
+        reader_main;
+    WylFactArtifactSidecarBinding *
+        writer_sidecar;
+    WylFactArtifactReaderWalBinding *
+        reader_wal;
+    WylFactDuckdbTempChildBinding *
+        temp_child;
+  } binding_;
+  mutable
+      std::mutex
+      mutex_;
+  duckdb::idx_t
+      offset_;
 };
