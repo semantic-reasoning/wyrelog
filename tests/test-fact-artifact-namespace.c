@@ -857,6 +857,172 @@ test_main_binding (void)
 }
 
 static void
+test_reader_main_binding (void)
+{
+#ifdef G_OS_WIN32
+  WylFactArtifactReaderMainBinding *binding = (gpointer) 0x1;
+  gint fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (NULL,
+          &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate_fd (NULL,
+          42), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (NULL, &fd),
+      ==, WYRELOG_E_POLICY);
+#else
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  WylFactArtifactMutationLease *reader_a = NULL;
+  WylFactArtifactMutationLease *reader_b = NULL;
+  WylFactArtifactMutationLease *writer = NULL;
+  WylFactArtifactReaderMainBinding *binding = NULL;
+  g_autofree gchar *base = make_root ();
+  g_assert_cmpint (wyl_fact_graph_resolver_open (base, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+          TRUE, &directory), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path
+      (&directory);
+  g_autofree gchar *main_path = g_build_filename (graph_path,
+      "facts.duckdb", NULL);
+  g_autofree gchar *saved_path = g_build_filename (graph_path,
+      "facts.duckdb.saved", NULL);
+  g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_namespace_free (namespace_);
+  namespace_ = NULL;
+  g_assert_true (g_file_set_contents (main_path, "read", 4, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (open_readonly_namespace (&directory, &namespace_), ==,
+      WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_b), ==, WYRELOG_E_OK);
+  gint fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (reader_a,
+          &binding, &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fcntl (fd, F_GETFL) & O_ACCMODE, ==, O_RDONLY);
+  g_assert_cmpint (fcntl (fd, F_GETFD) & FD_CLOEXEC, !=, 0);
+  char contents[5] = { 0 };
+  g_assert_cmpint (pread (fd, contents, 4, 0), ==, 4);
+  g_assert_cmpstr (contents, ==, "read");
+  errno = 0;
+  g_assert_cmpint (pwrite (fd, "x", 1, 0), ==, -1);
+  g_assert_cmpint (errno, ==, EBADF);
+  errno = 0;
+  g_assert_cmpint (ftruncate (fd, 0), ==, -1);
+  /* A valid read-only fd is rejected as EINVAL on Linux; some POSIX hosts
+   * report EBADF instead. */
+  g_assert_true (errno == EINVAL || errno == EBADF);
+  /* fsync may legally succeed for a read-only descriptor; it has no mutation
+   * authority, so the byte check below is the relevant contract. */
+  (void) fsync (fd);
+  memset (contents, 0, sizeof contents);
+  g_assert_cmpint (pread (fd, contents, 4, 0), ==, 4);
+  g_assert_cmpstr (contents, ==, "read");
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  reader_a = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer);
+  wyl_fact_artifact_mutation_lease_free (reader_b);
+  reader_b = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (binding, &fd),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate_fd
+      (binding, fd), ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_reader_main_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_OK);
+  binding = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (writer,
+          &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  wyl_fact_artifact_mutation_lease_free (writer);
+  writer = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (reader_a,
+          &binding, &fd), ==, WYRELOG_E_OK);
+  gint foreign_fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  g_assert_cmpint (foreign_fd, >=, 0);
+  g_assert_cmpint (dup2 (foreign_fd, fd), ==, fd);
+  if (foreign_fd != fd)
+    close (foreign_fd);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate_fd
+      (binding, fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (binding, &fd),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, >=, 0);
+  close (fd);
+  wyl_fact_artifact_reader_main_binding_free (binding);
+  binding = NULL;
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  reader_a = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (reader_a,
+          &binding, &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (rename (main_path, saved_path), ==, 0);
+  g_assert_true (g_file_set_contents (main_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate_fd
+      (binding, fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (binding, &fd),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, >=, 0);
+  close (fd);
+  wyl_fact_artifact_reader_main_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint (unlink (main_path), ==, 0);
+  g_assert_cmpint (rename (saved_path, main_path), ==, 0);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  reader_a = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  binding = (gpointer) 0x1;
+  fd = 42;
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO);
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (reader_a,
+          &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  wyl_fact_artifact_namespace_free (namespace_);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_MAIN);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_LOCK);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_autofree gchar *tenant_path = g_path_get_dirname (graph_path);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+#endif
+}
+
+static void
 test_existing_sidecar_reopen (void)
 {
 #ifdef G_OS_WIN32
@@ -2842,6 +3008,8 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-artifact-namespace/mutation-leases",
       test_mutation_leases);
   g_test_add_func ("/fact-artifact-namespace/main-binding", test_main_binding);
+  g_test_add_func ("/fact-artifact-namespace/reader-main-binding",
+      test_reader_main_binding);
   g_test_add_func ("/fact-artifact-namespace/existing-sidecar-reopen",
       test_existing_sidecar_reopen);
   g_test_add_func ("/fact-artifact-namespace/duckdb-temp-root",
