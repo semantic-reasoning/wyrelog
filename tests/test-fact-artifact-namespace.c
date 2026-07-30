@@ -2030,7 +2030,6 @@ run_fixed_sidecar_replace_fault (WylFactArtifactNamespaceTestFault fault,
     g_autofree gchar *source_path = fixed_artifact_path_for_test (&fixture,
         WYL_FACT_ARTIFACT_CHECKPOINT);
     g_assert_false (g_file_test (source_path, G_FILE_TEST_EXISTS));
-    retire_closed_sidecar (destination);
   } else {
     g_assert_cmpint (result, ==,
         WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
@@ -2042,11 +2041,47 @@ run_fixed_sidecar_replace_fault (WylFactArtifactNamespaceTestFault fault,
         &source_identity, "new");
     assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL,
         &destination_identity, "old");
-    retire_closed_sidecar (source);
-    retire_closed_sidecar (destination);
   }
   wyl_fact_artifact_sidecar_binding_free (source);
   wyl_fact_artifact_sidecar_binding_free (destination);
+
+  /* Model process restart at every deterministic crash seam.  Re-minting
+   * authority must classify exactly the complete pre-pair or the complete
+   * post-replacement WAL, never an intermediate namespace. */
+  fixed_sidecar_replace_fixture_reopen (&fixture);
+  WylFactArtifactSidecarBinding *reopened_destination = NULL;
+  gint fd = -1;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_WAL, TRUE, &reopened_destination,
+          &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close
+      (reopened_destination, &fd), ==, WYRELOG_E_OK);
+  assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL,
+      after_linearization ? &source_identity : &destination_identity,
+      after_linearization ? "new" : "old");
+  WylFactArtifactSidecarBinding *reopened_source = (gpointer) 0x1;
+  fd = 42;
+  wyrelog_error_t source_open =
+      wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, &reopened_source,
+      &fd);
+  if (after_linearization) {
+    g_assert_cmpint (source_open, ==, WYRELOG_E_NOT_FOUND);
+    g_assert_null (reopened_source);
+    g_assert_cmpint (fd, ==, -1);
+  } else {
+    g_assert_cmpint (source_open, ==, WYRELOG_E_OK);
+    g_assert_nonnull (reopened_source);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (reopened_source,
+            &fd), ==, WYRELOG_E_OK);
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_CHECKPOINT,
+        &source_identity, "new");
+    retire_closed_sidecar (reopened_source);
+    wyl_fact_artifact_sidecar_binding_free (reopened_source);
+  }
+  retire_closed_sidecar (reopened_destination);
+  wyl_fact_artifact_sidecar_binding_free (reopened_destination);
   fixed_sidecar_replace_fixture_clear (&fixture);
 }
 #endif
@@ -2080,6 +2115,10 @@ typedef enum
   FIXED_REPLACE_MALFORM_SOURCE_SUBSTITUTE,
   FIXED_REPLACE_MALFORM_SOURCE_SYMLINK,
   FIXED_REPLACE_MALFORM_SOURCE_DIRECTORY,
+  FIXED_REPLACE_MALFORM_DESTINATION_MODE,
+  FIXED_REPLACE_MALFORM_DESTINATION_HARD_LINK,
+  FIXED_REPLACE_MALFORM_DESTINATION_SYMLINK,
+  FIXED_REPLACE_MALFORM_DESTINATION_DIRECTORY,
   FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE,
   FIXED_REPLACE_MALFORM_DESTINATION_MISSING,
 } FixedReplaceMalformation;
@@ -2125,6 +2164,20 @@ run_fixed_sidecar_replace_malformation (FixedReplaceMalformation malformation)
       g_assert_cmpint (rename (source_path, saved_path), ==, 0);
       g_assert_cmpint (mkdir (source_path, 0700), ==, 0);
       break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_MODE:
+      g_assert_cmpint (chmod (destination_path, 0644), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_HARD_LINK:
+      g_assert_cmpint (link (destination_path, alias_path), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_SYMLINK:
+      g_assert_cmpint (rename (destination_path, saved_path), ==, 0);
+      g_assert_cmpint (symlink ("facts.duckdb", destination_path), ==, 0);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_DIRECTORY:
+      g_assert_cmpint (rename (destination_path, saved_path), ==, 0);
+      g_assert_cmpint (mkdir (destination_path, 0700), ==, 0);
+      break;
     case FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE:
       g_assert_cmpint (rename (destination_path, saved_path), ==, 0);
       g_assert_true (g_file_set_contents (destination_path, "foreign", -1,
@@ -2143,10 +2196,17 @@ run_fixed_sidecar_replace_malformation (FixedReplaceMalformation malformation)
           destination, &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (result, ==,
       WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
-  if (malformation != FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE
-      && malformation != FIXED_REPLACE_MALFORM_DESTINATION_MISSING)
+  if (malformation < FIXED_REPLACE_MALFORM_DESTINATION_MODE) {
     assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_WAL,
         &destination_identity, "old");
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (destination),
+        ==, WYRELOG_E_OK);
+  } else {
+    assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_RECOVERY,
+        &source_identity, "new");
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (source), ==,
+        WYRELOG_E_OK);
+  }
 
   switch (malformation) {
     case FIXED_REPLACE_MALFORM_SOURCE_MODE:
@@ -2171,6 +2231,28 @@ run_fixed_sidecar_replace_malformation (FixedReplaceMalformation malformation)
       g_assert_cmpint (rename (saved_path, source_path), ==, 0);
       g_assert_cmpint (unlink (source_path), ==, 0);
       retire_closed_sidecar (destination);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_MODE:
+      g_assert_cmpint (chmod (destination_path, 0600), ==, 0);
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      retire_closed_sidecar (source);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_HARD_LINK:
+      g_assert_cmpint (unlink (alias_path), ==, 0);
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      retire_closed_sidecar (source);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_SYMLINK:
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      g_assert_cmpint (rename (saved_path, destination_path), ==, 0);
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      retire_closed_sidecar (source);
+      break;
+    case FIXED_REPLACE_MALFORM_DESTINATION_DIRECTORY:
+      g_assert_cmpint (rmdir (destination_path), ==, 0);
+      g_assert_cmpint (rename (saved_path, destination_path), ==, 0);
+      g_assert_cmpint (unlink (destination_path), ==, 0);
+      retire_closed_sidecar (source);
       break;
     case FIXED_REPLACE_MALFORM_DESTINATION_SUBSTITUTE:
       g_assert_cmpint (unlink (destination_path), ==, 0);
