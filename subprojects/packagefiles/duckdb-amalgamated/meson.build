@@ -89,10 +89,11 @@ if host_machine.system() != 'windows'
   duckdb_test_seam_compile_args = duckdb_compile_args + [
     '-DWYL_DUCKDB_TEST_AFTER_WAL_START=1',
   ]
+  duckdb_test_seam_optimization = host_machine.system() == 'linux' ? '0' : '2'
   duckdb_test_seam_lib = static_library('duckdb-test-after-wal-start',
     'duckdb.cpp',
     override_options : [
-      'optimization=2',
+      'optimization=' + duckdb_test_seam_optimization,
       'debug=false',
       'b_lto=false',
       'cpp_std=gnu++17',
