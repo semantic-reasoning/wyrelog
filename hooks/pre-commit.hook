@@ -1,52 +1,62 @@
 #!/bin/sh
-# pre-commit hook: check C source formatting with gst-indent style
+# pre-commit hook: check staged C source formatting with uncrustify
 # Skip with: git commit -n
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TOOLS_DIR="$(cd "$SCRIPT_DIR/../../tools" 2>/dev/null && pwd)"
+REPO_ROOT=$(git rev-parse --show-toplevel) || exit 1
+CONFIG="$REPO_ROOT/tools/uncrustify.cfg"
 
-if [ -z "$TOOLS_DIR" ] || [ ! -x "$TOOLS_DIR/gst-indent" ]; then
-  # Try from repo root
-  REPO_ROOT="$(git rev-parse --show-toplevel)"
-  TOOLS_DIR="$REPO_ROOT/tools"
-fi
+FILES=$(mktemp) || exit 1
+INPUT=
+OUTPUT=
+trap 'rm -f "$FILES" "$INPUT" "$OUTPUT"' EXIT HUP INT TERM
 
-if [ ! -x "$TOOLS_DIR/gst-indent" ]; then
-  echo "gst-indent not found at $TOOLS_DIR/gst-indent" >&2
+# Determine whether formatting is needed before checking the dependency or config.
+git diff --cached --name-only --diff-filter=ACM -- '*.c' '*.h' > "$FILES" ||
   exit 1
-fi
-
-# Get staged C source files
-FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.[ch]$')
-
-if [ -z "$FILES" ]; then
+if [ ! -s "$FILES" ]; then
   exit 0
 fi
 
-ERRORS=""
+if ! command -v uncrustify > /dev/null 2>&1; then
+  echo "uncrustify not found in PATH" >&2
+  exit 1
+fi
 
-for f in $FILES; do
-  # Get the staged version
-  TMP=$(mktemp)
-  git show ":$f" > "$TMP"
+if [ ! -f "$CONFIG" ]; then
+  echo "uncrustify config not found at $CONFIG" >&2
+  exit 1
+fi
 
-  # Format a copy
-  TMP_FMT=$(mktemp)
-  cp "$TMP" "$TMP_FMT"
-  "$TOOLS_DIR/gst-indent" "$TMP_FMT"
+ERRORS=
+while IFS= read -r f; do
+  INPUT=$(mktemp) || exit 1
+  OUTPUT=$(mktemp) || exit 1
 
-  # Compare
-  if ! diff -q "$TMP" "$TMP_FMT" > /dev/null 2>&1; then
-    ERRORS="$ERRORS\n  $f"
+  if ! git show ":$f" > "$INPUT"; then
+    echo "Unable to read staged file: $f" >&2
+    exit 1
   fi
 
-  rm -f "$TMP" "$TMP_FMT" "${TMP_FMT}~"
-done
+  if ! uncrustify -q -c "$CONFIG" -l C -f "$INPUT" -o "$OUTPUT"; then
+    echo "uncrustify failed while formatting staged file: $f" >&2
+    exit 1
+  fi
+
+  if ! diff -q "$INPUT" "$OUTPUT" > /dev/null 2>&1; then
+    ERRORS="${ERRORS}
+  $f"
+  fi
+
+  rm -f "$INPUT" "$OUTPUT"
+  INPUT=
+  OUTPUT=
+done < "$FILES"
 
 if [ -n "$ERRORS" ]; then
   echo "Code style error in:$ERRORS"
   echo ""
-  echo "Fix with: ./tools/gst-indent <file>"
+  echo "Fix with: uncrustify -c tools/uncrustify.cfg -l C --replace <file>"
+  echo "Then stage only the intended formatting hunks (for example: git add -p)."
   exit 1
 fi
 
