@@ -141,8 +141,19 @@ fixture_clear (Fixture *fixture)
     }
     (void) g_rmdir (fixture->operation_root);
   }
-  if (fixture->publication_root != NULL)
+  if (fixture->publication_root != NULL) {
+    GDir *dir = g_dir_open (fixture->publication_root, 0, NULL);
+    if (dir != NULL) {
+      const gchar *name;
+      while ((name = g_dir_read_name (dir)) != NULL) {
+        g_autofree gchar *path = g_build_filename (fixture->publication_root,
+            name, NULL);
+        (void) g_remove (path);
+      }
+      g_dir_close (dir);
+    }
     (void) g_rmdir (fixture->publication_root);
+  }
   if (fixture->db_path != NULL) {
     (void) g_remove (fixture->db_path);
     g_autofree gchar *clear = g_strdup_printf ("%s.wyrelog-clear",
