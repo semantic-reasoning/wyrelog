@@ -51,7 +51,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config \
+            meson ninja-build pkg-config time \
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
             libtss2-dev
 
@@ -111,13 +111,32 @@ jobs:
             -Denable_audit=enabled -Dduckdb_source=prebuilt
           meson compile -C build-fact wyrelogd
 
+      - name: Provision secure DuckDB compile swap
+        if: runner.os == 'Linux'
+        run: |
+          bash .github/scripts/duckdb-compile-swap.sh provision secure
+
       - name: Build secure DuckDB backend from pinned source
         run: |
-          meson setup build-secure-duckdb \
-            -Denable_fact_store=enabled \
-            -Dduckdb_source=subproject \
-            -Denable_secure_duckdb_bridge=enabled
-          meson compile -C build-secure-duckdb -j 1 \
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            CC=cc CXX=c++ meson setup build-secure-duckdb \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=enabled
+          else
+            meson setup build-secure-duckdb \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=enabled
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            time_args=(-v)
+          else
+            time_args=(-l)
+          fi
+          /usr/bin/time "${time_args[@]}" \
+            meson compile -C build-secure-duckdb -j 1 \
             test-secure-duckdb-bridge \
             test-secure-duckdb-filesystem \
             test-secure-duckdb-recording-filesystem
@@ -133,6 +152,11 @@ jobs:
             exit 1
           fi
 
+      - name: Remove secure DuckDB compile swap
+        if: always() && runner.os == 'Linux'
+        run: |
+          bash .github/scripts/duckdb-compile-swap.sh cleanup secure
+
       - name: Show sccache statistics
         if: always()
         run: |
@@ -147,7 +171,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: meson-logs-${{ matrix.os }}
-          path: builddir/meson-logs/
+          path: |
+            builddir/meson-logs/
+            build-secure-duckdb/meson-logs/
           if-no-files-found: ignore
 
   duckdb-checkpoint-seam:
@@ -192,41 +218,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          set -euo pipefail
-          swap_path="$(realpath -m \
-            "$RUNNER_TEMP/wyrelog-duckdb-seam.swap")"
-          workspace_path="$(realpath "$GITHUB_WORKSPACE")"
-          case "$swap_path" in
-            "$workspace_path"|"$workspace_path"/*)
-              echo "swap must remain outside the checkout: $swap_path"
-              exit 1
-              ;;
-          esac
-          test ! -e "$swap_path"
-          for target in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
-            available="$(df -B1 --output=avail "$target" | tail -1)"
-            test "$available" -ge 12000000000
-          done
-          sudo fallocate -l 8G "$swap_path"
-          sudo chmod 600 "$swap_path"
-          sudo mkswap "$swap_path"
-          sudo swapon "$swap_path"
-          active_size="$(sudo swapon --show=NAME,SIZE --bytes \
-            --noheadings | awk -v path="$swap_path" \
-            '$1 == path { print $2 }')"
-          test -n "$active_size"
-          test "$active_size" -ge 8000000000
-          mem_kib="$(awk '$1 == "MemTotal:" { print $2 }' \
-            /proc/meminfo)"
-          swap_kib="$(awk '$1 == "SwapTotal:" { print $2 }' \
-            /proc/meminfo)"
-          combined_bytes="$(( (mem_kib + swap_kib) * 1024 ))"
-          test "$combined_bytes" -ge 24000000000
-          for target in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
-            available="$(df -B1 --output=avail "$target" | tail -1)"
-            test "$available" -ge 4000000000
-          done
-          echo "WYL_DUCKDB_SEAM_SWAP=$swap_path" >> "$GITHUB_ENV"
+          bash .github/scripts/duckdb-compile-swap.sh provision seam
 
       - name: Configure focused checkpoint seam
         run: |
@@ -287,20 +279,7 @@ jobs:
         if: always() && runner.os == 'Linux'
         shell: bash
         run: |
-          set -euo pipefail
-          swap_path="${WYL_DUCKDB_SEAM_SWAP:-$RUNNER_TEMP/wyrelog-duckdb-seam.swap}"
-          swap_path="$(realpath -m "$swap_path")"
-          if sudo swapon --show=NAME --noheadings \
-              | grep -Fxq "$swap_path"; then
-            sudo swapoff "$swap_path"
-          fi
-          sudo rm -f "$swap_path"
-          if sudo swapon --show=NAME --noheadings \
-              | grep -Fxq "$swap_path"; then
-            echo "swap remains active after cleanup: $swap_path"
-            exit 1
-          fi
-          test ! -e "$swap_path"
+          bash .github/scripts/duckdb-compile-swap.sh cleanup seam
 
       - name: Upload seam meson logs on failure
         if: failure()

@@ -2202,6 +2202,12 @@ test('secure-duckdb-ci-wiring', python3,
   args : [files('test-secure-duckdb-ci-wiring.py'),
     meson.project_source_root()])
 
+if host_machine.system() == 'linux'
+  test('duckdb-compile-swap', python3,
+    args : [files('test-duckdb-compile-swap.py'),
+      meson.project_source_root()])
+endif
+
 if host_machine.system() != 'windows'
   test('duckdb-numeric-boundary', python3,
     args : [files('test-secure-duckdb-numeric-boundary.py'),
