@@ -62,12 +62,25 @@ void wyl_win_child_unlock
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, HANDLE handle);
 void wyl_win_child_fail_next_directory_flush_for_test (DWORD error);
+/* Test-only clean-run helper: atomically returns the pending fault and
+ * pre-clears it to ERROR_SUCCESS. */
+DWORD wyl_win_child_take_next_directory_flush_error_for_test (void);
 void wyl_win_child_set_before_rename_hook_for_test
     (WylWinChildBeforeRenameHookForTest hook, gpointer user_data);
+/* Test-only clean-run helper: initializes non-NULL outputs to NULL, then
+ * takes and clears the paired hook/data snapshot under one lock. */
+void wyl_win_child_take_before_rename_hook_for_test
+    (WylWinChildBeforeRenameHookForTest * out_hook, gpointer * out_user_data);
 G_GNUC_INTERNAL void
     wyl_win_child_set_before_exact_delete_hook_for_test
     (WylServiceCredentialOperationBeforeExactDeleteHookForTest hook,
     gpointer user_data);
+/* Test-only clean-run helper: initializes non-NULL outputs to NULL, then
+ * takes and clears the paired hook/data snapshot under one lock. */
+G_GNUC_INTERNAL void
+    wyl_win_child_take_before_exact_delete_hook_for_test
+    (WylServiceCredentialOperationBeforeExactDeleteHookForTest * out_hook,
+    gpointer * out_user_data);
 wyrelog_error_t wyl_win_child_classify_nt_create_status_for_test (LONG status);
 
 G_END_DECLS
