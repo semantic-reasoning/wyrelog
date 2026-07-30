@@ -922,33 +922,6 @@ test_main_binding (void)
 static void
 test_reader_main_binding (void)
 {
-#ifdef G_OS_WIN32
-  WylFactArtifactReaderMainBinding *binding = (gpointer) 0x1;
-  gint fd = 42;
-  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (NULL,
-          &binding, &fd), ==, WYRELOG_E_POLICY);
-  g_assert_null (binding);
-  g_assert_cmpint (fd, ==, -1);
-  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate (NULL), ==,
-      WYRELOG_E_POLICY);
-  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate_fd (NULL,
-          42), ==, WYRELOG_E_POLICY);
-  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (NULL, &fd),
-      ==, WYRELOG_E_POLICY);
-  WylFactArtifactReaderWalBinding *wal = (gpointer) 0x1;
-  fd = 42;
-  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
-      (NULL, &wal, &fd), ==, WYRELOG_E_POLICY);
-  g_assert_null (wal);
-  g_assert_cmpint (fd, ==, -1);
-  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate (NULL), ==,
-      WYRELOG_E_POLICY);
-  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate_fd (NULL,
-          42), ==, WYRELOG_E_POLICY);
-  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_close (NULL, &fd), ==,
-      WYRELOG_E_POLICY);
-  wyl_fact_artifact_reader_wal_binding_free (NULL);
-#else
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
@@ -1200,7 +1173,6 @@ test_reader_main_binding (void)
   g_assert_cmpint (g_rmdir (graph_path), ==, 0);
   g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
   g_assert_cmpint (g_rmdir (base), ==, 0);
-#endif
 }
 
 static void
@@ -1719,6 +1691,36 @@ test_main_binding (void)
   g_assert_cmpint (wyl_fact_artifact_main_binding_close (NULL, &fd), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, 42);
+}
+
+static void
+test_reader_main_binding (void)
+{
+  WylFactArtifactReaderMainBinding *binding = (gpointer) 0x1;
+  gint fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_main_binding (NULL,
+          &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_revalidate_fd (NULL,
+          42), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (NULL, &fd),
+      ==, WYRELOG_E_POLICY);
+  WylFactArtifactReaderWalBinding *wal = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (NULL, &wal, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (wal);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate_fd (NULL,
+          42), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_close (NULL, &fd), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_reader_wal_binding_free (NULL);
 }
 #endif
 
