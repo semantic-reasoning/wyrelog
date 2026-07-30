@@ -132,6 +132,150 @@ jobs:
           path: builddir/meson-logs/
           if-no-files-found: ignore
 
+  duckdb-checkpoint-seam:
+    name: duckdb-checkpoint-seam-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
+          sudo apt-get install -y --no-install-recommends time
+          sudo apt-get clean
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+        run: |
+          brew update
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium
+
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@v5
+        with:
+          path: subprojects/packagecache
+          key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            ${{ runner.os }}-packagecache-
+
+      - name: Provision bounded Linux compile swap
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          swap_path="$(realpath -m \
+            "$RUNNER_TEMP/wyrelog-duckdb-seam.swap")"
+          workspace_path="$(realpath "$GITHUB_WORKSPACE")"
+          case "$swap_path" in
+            "$workspace_path"|"$workspace_path"/*)
+              echo "swap must remain outside the checkout: $swap_path"
+              exit 1
+              ;;
+          esac
+          test ! -e "$swap_path"
+          for target in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            available="$(df -B1 --output=avail "$target" | tail -1)"
+            test "$available" -ge 12000000000
+          done
+          sudo fallocate -l 8G "$swap_path"
+          sudo chmod 600 "$swap_path"
+          sudo mkswap "$swap_path"
+          sudo swapon "$swap_path"
+          active_size="$(sudo swapon --show=NAME,SIZE --bytes \
+            --noheadings | awk -v path="$swap_path" \
+            '$1 == path { print $2 }')"
+          test -n "$active_size"
+          test "$active_size" -ge 8000000000
+          mem_kib="$(awk '$1 == "MemTotal:" { print $2 }' \
+            /proc/meminfo)"
+          swap_kib="$(awk '$1 == "SwapTotal:" { print $2 }' \
+            /proc/meminfo)"
+          combined_bytes="$(( (mem_kib + swap_kib) * 1024 ))"
+          test "$combined_bytes" -ge 24000000000
+          for target in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            available="$(df -B1 --output=avail "$target" | tail -1)"
+            test "$available" -ge 4000000000
+          done
+          echo "WYL_DUCKDB_SEAM_SWAP=$swap_path" >> "$GITHUB_ENV"
+
+      - name: Configure focused checkpoint seam
+        run: |
+          CC=cc CXX=c++ meson setup build-duckdb-seam \
+            -Denable_tpm=disabled \
+            -Denable_fact_store=enabled \
+            -Dduckdb_source=subproject \
+            -Denable_secure_duckdb_bridge=enabled
+
+      - name: Build focused checkpoint seam
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(find build-duckdb-seam -name libduckdb.a \
+            -print -quit)"
+          if [ "$RUNNER_OS" = Linux ]; then
+            for target in "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+              available="$(df -B1 --output=avail "$target" | tail -1)"
+              test "$available" -ge 4000000000
+            done
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            /usr/bin/time -v meson compile -C build-duckdb-seam \
+              -j 1 test-duckdb-after-walstart
+          else
+            /usr/bin/time -l meson compile -C build-duckdb-seam \
+              -j 1 test-duckdb-after-walstart
+          fi
+          test -z "$(find build-duckdb-seam -name libduckdb.a \
+            -print -quit)"
+
+      - name: Test focused checkpoint seam
+        run: |
+          meson test -C build-duckdb-seam --no-rebuild \
+            duckdb-after-walstart-no-wal \
+            duckdb-after-walstart-rendezvous \
+            duckdb-after-walstart-boundary \
+            duckdb-test-seam-wiring \
+            --print-errorlogs
+
+      - name: Remove bounded Linux compile swap
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          swap_path="${WYL_DUCKDB_SEAM_SWAP:-$RUNNER_TEMP/wyrelog-duckdb-seam.swap}"
+          swap_path="$(realpath -m "$swap_path")"
+          if sudo swapon --show=NAME --noheadings \
+              | grep -Fxq "$swap_path"; then
+            sudo swapoff "$swap_path"
+          fi
+          sudo rm -f "$swap_path"
+          if sudo swapon --show=NAME --noheadings \
+              | grep -Fxq "$swap_path"; then
+            echo "swap remains active after cleanup: $swap_path"
+            exit 1
+          fi
+          test ! -e "$swap_path"
+
+      - name: Upload seam meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: duckdb-checkpoint-seam-logs-${{ matrix.os }}
+          path: build-duckdb-seam/meson-logs/
+          if-no-files-found: ignore
+
   build-windows:
     name: build-windows${{ matrix.job_suffix }}
     runs-on: windows-latest
