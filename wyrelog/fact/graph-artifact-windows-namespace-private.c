@@ -16,6 +16,18 @@ void wyl_fact_artifact_win_namespace_set_test_fault
   g_atomic_int_set (&win_namespace_test_fault, fault);
 }
 
+WylFactArtifactWinNamespaceTestFault
+wyl_fact_artifact_win_namespace_take_test_fault (void)
+{
+  /* g_atomic_int_and returns the pre-AND value and ..._FAULT_NONE is zero, so
+   * AND-with-zero is an atomic exchange-to-zero.  g_atomic_int_exchange would
+   * say this directly but is newer, and the constraint that matters is the
+   * GLib actually installed on the builder, not a version macro this tree
+   * never sets. */
+  return (WylFactArtifactWinNamespaceTestFault)
+      g_atomic_int_and (&win_namespace_test_fault, 0);
+}
+
 static gboolean
 win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
 {
