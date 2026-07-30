@@ -10,17 +10,22 @@ G_BEGIN_DECLS;
 
 typedef struct WylSecureDuckdbBridge WylSecureDuckdbBridge;
 typedef enum
-{ WYL_SECURE_DUCKDB_INIT_EMPTY = 0, WYL_SECURE_DUCKDB_VALIDATE_ONLY = 1
+{ WYL_SECURE_DUCKDB_INIT_EMPTY = 0,
+  WYL_SECURE_DUCKDB_VALIDATE_ONLY = 1
 } WylSecureDuckdbMode;
 
-/* This experimental lifecycle bridge owns only an in-memory DuckDB instance
- * and connection.  It deliberately accepts and exposes no paths, file
- * descriptors, C API handles, or C++ implementation types. */
+/* This experimental lifecycle bridge owns a DuckDB instance and connection.
+ * The namespace constructor injects the bounded filesystem without exposing
+ * paths, descriptors, C API handles, or C++ implementation types.  Call
+ * finalize when terminal cleanup success must be observed; free remains a
+ * best-effort cleanup for C ownership conventions. */
 wyrelog_error_t wyl_secure_duckdb_bridge_new (WylSecureDuckdbBridge ** out);
 wyrelog_error_t
 wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace *,
     WylSecureDuckdbMode, WylSecureDuckdbBridge **);
 wyrelog_error_t wyl_secure_duckdb_bridge_health (WylSecureDuckdbBridge * self);
+wyrelog_error_t
+wyl_secure_duckdb_bridge_finalize (WylSecureDuckdbBridge * self);
 void wyl_secure_duckdb_bridge_free (WylSecureDuckdbBridge * self);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylSecureDuckdbBridge,
