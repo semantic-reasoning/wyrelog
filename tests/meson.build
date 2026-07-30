@@ -2199,6 +2199,10 @@ test('duckdb-fixed-wal-lifecycle-boundary', python3,
     meson.project_source_root()])
 
 if host_machine.system() != 'windows'
+  test('duckdb-numeric-boundary', python3,
+    args : [files('test-secure-duckdb-numeric-boundary.py'),
+      meson.project_source_root()])
+
   valgrind_gate = find_program(
     '../tools/run-valgrind-gate.sh',
   )
