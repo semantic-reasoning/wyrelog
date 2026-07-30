@@ -45,6 +45,20 @@ typedef enum
   WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED,
 } WylFactArtifactSidecarRetireResult;
 
+/* The replacement result is separate from the error return because an error
+ * after rename has linearized must never be interpreted as retry authority.
+ * NOT_REPLACED leaves both bindings unchanged.  REPLACED_DURABLE consumes the
+ * source and retargets the destination to the replacement with directory
+ * durability and postconditions verified.  RECONCILE_REQUIRED records the
+ * same terminal ownership transfer, but durability or reconciliation proof
+ * did not complete. */
+typedef enum
+{
+  WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED = 0,
+  WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE,
+  WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED,
+} WylFactArtifactSidecarReplaceResult;
+
 /* The DuckDB spill directory is a separate, opaque authority.  It is not a
  * general directory capability: its root is minted internally, child names
  * are accepted only when they match the source-pinned DuckDB 1.5.5 grammar,
@@ -239,6 +253,17 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_close
  * the binding identifies destination even if durability reporting fails. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
     (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
+/* Atomically replaces an existing bound WAL with an exact bound checkpoint or
+ * recovery artifact.  Both bindings must belong to the same exclusive lease
+ * and both issued working descriptors must have been consumed by checked
+ * _close calls.  The source becomes terminal at the rename linearization
+ * point; the destination immediately assumes the source identity.  The output
+ * is initialized on every entry, and RECONCILE_REQUIRED is terminal rather
+ * than permission to retry. */
+wyrelog_error_t wyl_fact_artifact_sidecar_binding_replace_existing_wal
+    (WylFactArtifactSidecarBinding * source,
+    WylFactArtifactSidecarBinding * destination,
+    WylFactArtifactSidecarReplaceResult * out_result);
 /* Retires only the exact currently-bound WAL/checkpoint/recovery artifact.
  * This API is intentionally the sole fixed-sidecar deletion authority.  Its
  * result output is initialized to NOT_RETIRED on every entry.  It requires
