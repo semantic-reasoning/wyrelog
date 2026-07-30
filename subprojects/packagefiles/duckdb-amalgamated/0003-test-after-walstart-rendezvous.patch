@@ -1,0 +1,40 @@
+diff --git a/duckdb.hpp b/duckdb.hpp
+--- a/duckdb.hpp
++++ b/duckdb.hpp
+@@ -40172,3 +40172,10 @@ struct DBConfigOptions {
+-	AccessMode access_mode = AccessMode::AUTOMATIC;
+-	//! Checkpoint when WAL reaches this size (default: 16MiB)
+-	idx_t checkpoint_wal_size = 1 << 24;
++	AccessMode access_mode = AccessMode::AUTOMATIC;
++	//! Checkpoint when WAL reaches this size (default: 16MiB)
++	idx_t checkpoint_wal_size = 1 << 24;
++#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
++	//! Wyrelog's source-pinned test seam. This field is absent from regular
++	//! DuckDB builds and is not a SQL- or user-visible checkpoint control.
++	using after_wal_start_callback_t = void (*)(const char *phase, void *context);
++	after_wal_start_callback_t test_after_wal_start = nullptr;
++	void *test_after_wal_start_context = nullptr;
++#endif
+diff --git a/duckdb.cpp b/duckdb.cpp
+--- a/duckdb.cpp
++++ b/duckdb.cpp
+@@ -392624,6 +392624,13 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
+-	ActiveCheckpointWrapper active_checkpoint(transaction_manager);
+-	auto has_wal = storage_manager.WALStartCheckpoint(meta_block, options);
+-
+-	catalog_entry_vector_t catalog_entries;
+-
+-	auto checkpoint_sleep_ms = Settings::Get<DebugCheckpointSleepMsSetting>(db.GetDatabase());
++	ActiveCheckpointWrapper active_checkpoint(transaction_manager);
++	auto has_wal = storage_manager.WALStartCheckpoint(meta_block, options);
++
++#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
++	auto &test_options = DBConfig::GetConfig(db.GetDatabase()).options;
++	if (has_wal && test_options.test_after_wal_start) {
++		test_options.test_after_wal_start("AFTER_WAL_START", test_options.test_after_wal_start_context);
++	}
++#endif
++
++	catalog_entry_vector_t catalog_entries;
++
++	auto checkpoint_sleep_ms = Settings::Get<DebugCheckpointSleepMsSetting>(db.GetDatabase());
