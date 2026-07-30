@@ -50,6 +50,13 @@ void wyl_fact_artifact_namespace_set_test_fault
   (void) fault;
 }
 
+gboolean
+    wyl_fact_artifact_namespace_test_fault_was_consumed
+    (WylFactArtifactNamespaceTestFault fault) {
+  (void) fault;
+  return FALSE;
+}
+
 wyrelog_error_t
 wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
     const WylFactGraphRegularFile *main_file, WylFactArtifactNamespace **o)
@@ -891,6 +898,7 @@ static const gchar *names[] =
 static GMutex lock_domains_mutex;
 static GPtrArray *lock_domains;
 static gint namespace_test_fault;
+static gint namespace_consumed_test_fault;
 static WylFactDuckdbTempChild *duckdb_temp_child_ref (WylFactDuckdbTempChild *);
 static wyrelog_error_t duckdb_temp_child_matches_unlocked
     (WylFactDuckdbTempChild *);
@@ -911,8 +919,12 @@ static wyrelog_error_t namespace_test_substitute_fifo
 static gboolean
 namespace_fault_take (WylFactArtifactNamespaceTestFault fault)
 {
-  return g_atomic_int_compare_and_exchange (&namespace_test_fault, fault,
+  gboolean consumed =
+      g_atomic_int_compare_and_exchange (&namespace_test_fault, fault,
       WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
+  if (consumed)
+    g_atomic_int_set (&namespace_consumed_test_fault, fault);
+  return consumed;
 }
 
 void wyl_fact_artifact_namespace_set_test_fault
@@ -920,8 +932,20 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
-      <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION)
+      <=
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION) {
+    g_atomic_int_set (&namespace_consumed_test_fault,
+        WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
     g_atomic_int_set (&namespace_test_fault, fault);
+  }
+}
+
+gboolean
+    wyl_fact_artifact_namespace_test_fault_was_consumed
+    (WylFactArtifactNamespaceTestFault fault) {
+  return fault != WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
+      && g_atomic_int_compare_and_exchange (&namespace_consumed_test_fault,
+      fault, WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
 }
 
 static const gchar *
@@ -1748,6 +1772,11 @@ wyrelog_error_t
   result = lease_revalidate_unlocked (lease);
   if (result != WYRELOG_E_OK)
     goto done;
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
+    result = namespace_test_main_open_aba (lease->namespace_);
+    goto done;
+  }
   gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
       O_RDWR | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
@@ -1925,6 +1954,11 @@ wyrelog_error_t
     if (result != WYRELOG_E_OK)
       goto done;
   }
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
+    result = namespace_test_main_open_aba (lease->namespace_);
+    goto done;
+  }
   gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
       O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
@@ -1932,6 +1966,16 @@ wyrelog_error_t
         : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
         || errno == EACCES ? WYRELOG_E_POLICY : WYRELOG_E_IO);
     goto done;
+  }
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE))
+  {
+    result = namespace_test_substitute_regular (lease->namespace_,
+        name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
+    if (result != WYRELOG_E_OK) {
+      close (fd);
+      goto done;
+    }
   }
   gint pin_fd = duplicate_cloexec (fd);
   struct stat pinned;

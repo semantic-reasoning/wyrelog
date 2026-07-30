@@ -2216,6 +2216,10 @@ if host_machine.system() == 'linux'
       meson.project_source_root()])
 endif
 
+test('fact-store-pinned-boundary', python3,
+  args : [files('test-fact-store-pinned-boundary.py'),
+    meson.project_source_root()])
+
 if host_machine.system() != 'windows'
   test('duckdb-numeric-boundary', python3,
     args : [files('test-secure-duckdb-numeric-boundary.py'),

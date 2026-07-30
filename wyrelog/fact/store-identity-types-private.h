@@ -50,4 +50,30 @@ typedef enum
   WYL_FACT_STORE_IDENTITY_TEST_FAULT_COMMIT_AND_ROLLBACK,
 } WylFactStoreIdentityTestFault;
 
+typedef enum
+{
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT = 0,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R1_POSTCONSTRUCT,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R2_PREIDENTITY,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R3_POSTIDENTITY,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R4_PREFINALIZE,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE,
+} WylFactStorePinnedRendezvous;
+
+typedef void (*WylFactStorePinnedTestHook) (WylFactStorePinnedRendezvous,
+    gpointer user_data);
+
+/* The one-shot pinned API consumes only a caller-held artifact namespace,
+ * returns no live DuckDB handle, and is the storage handoff intended for
+ * #611/#544. */
+wyrelog_error_t wyl_fact_store_open_identified_pinned
+    (WylFactArtifactNamespace * namespace_,
+    const WylFactStoreIdentity * identity,
+    WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
+void wyl_fact_store_pinned_set_test_hook
+    (WylFactStorePinnedTestHook hook, gpointer user_data);
+void wyl_fact_store_pinned_set_test_stage_errors
+    (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+    wyrelog_error_t r5_error);
+
 G_END_DECLS;

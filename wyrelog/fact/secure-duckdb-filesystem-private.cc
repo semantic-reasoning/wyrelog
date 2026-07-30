@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -196,7 +198,7 @@ wyl_secure_duckdb_filesystem_take_test_fault (guint fault)
 }
 
 WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
-    *namespace_, bool read_only)
+    *namespace_, bool read_only, bool create_temporary_storage)
   :
   lease_ (nullptr),
   temp_root_ (nullptr),
@@ -211,7 +213,7 @@ WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
       : wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,
           &lease_);
   require_ok (lease_result, "acquire storage lease");
-  if (!read_only_) {
+  if (!read_only_ && create_temporary_storage) {
     WylFactDuckdbTempOrphanEvidence *evidence = nullptr;
     const auto result =
         wyl_fact_duckdb_temp_root_create_with_orphan_evidence (lease_,
@@ -279,7 +281,17 @@ WylSecureDuckdbFileSystem::~WylSecureDuckdbFileSystem ()
       health_->Poison (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result);
     wyl_fact_duckdb_temp_root_free (temp_root_);
   }
-  wyl_fact_artifact_mutation_lease_free (lease_);
+  if (owns_lease_)
+    wyl_fact_artifact_mutation_lease_free (lease_);
+}
+
+WylFactArtifactMutationLease *
+WylSecureDuckdbFileSystem::DetachLeaseOwnership ()
+{
+  if (!owns_lease_)
+    return nullptr;
+  owns_lease_ = false;
+  return lease_;
 }
 
 void
@@ -875,6 +887,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     io_reject ("lock pathname observation");
   int fd = -1;
   wyrelog_error_t result;
+  bool provisioned_empty_main = false;
   if (logical.kind == LogicalKind::MAIN) {
     if (read_only_) {
       WylFactArtifactReaderMainBinding *binding = nullptr;
@@ -891,7 +904,18 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
           wyl_fact_artifact_mutation_lease_open_main_binding (lease_, &binding,
               &fd);
       if (result == WYRELOG_E_OK) {
+        struct stat status;
+        if (fstat (fd, &status) != 0)
+          result = WYRELOG_E_IO;
+        else
+          provisioned_empty_main = status.st_size == 0;
+      }
+      if (result == WYRELOG_E_OK) {
         result = wyl_fact_artifact_main_binding_close (binding, &fd);
+        wyl_fact_artifact_main_binding_free (binding);
+      } else {
+        if (fd >= 0)
+          close (fd);
         wyl_fact_artifact_main_binding_free (binding);
       }
     }
@@ -918,7 +942,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
   }
   if (result == WYRELOG_E_OK) {
     RequireLease ("post-exists lease revalidation");
-    return true;
+    return !provisioned_empty_main;
   }
   if (is_missing (result)) {
     RequireLease ("post-exists lease revalidation");
@@ -1267,8 +1291,8 @@ WylSecureDuckdbFileSystem::SupportsGlobExtended () const
 
 duckdb::unique_ptr < WylSecureDuckdbFileSystem >
 wyl_secure_duckdb_filesystem_new (WylFactArtifactNamespace *namespace_,
-    bool read_only)
+    bool read_only, bool create_temporary_storage)
 {
   return duckdb::make_uniq < WylSecureDuckdbFileSystem > (namespace_,
-         read_only);
+         read_only, create_temporary_storage);
 }
