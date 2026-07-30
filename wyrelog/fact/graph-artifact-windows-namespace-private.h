@@ -47,6 +47,17 @@ typedef enum
 
 void wyl_fact_artifact_win_namespace_set_test_fault
     (WylFactArtifactWinNamespaceTestFault);
+/* Disarms the hook above and reports what was armed, ..._FAULT_NONE when
+ * nothing was.  An armed fault is consumed only when the replacement step it
+ * names is actually reached, so a caller that arms it and then never reaches
+ * that step leaves it armed for every later operation in the process; a test
+ * binary uses this to disarm unconditionally between cases and to prove that
+ * nothing leaked out of one.  Read and disarm are a single atomic exchange,
+ * so this never races an arming caller into a partially updated state.  It
+ * can only establish a clean-run property: a caller that aborts never reaches
+ * its own disarm. */
+WylFactArtifactWinNamespaceTestFault
+wyl_fact_artifact_win_namespace_take_test_fault (void);
 
 /* Opens only an already-provisioned main and lock pair.  It never creates
  * either artifact; callers that need initial main provisioning must use the

@@ -92,6 +92,16 @@ wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator *
  * publication.  The test hook only substitutes the next native result. */
 void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
     (DWORD error);
+/* Disarms the hook above and reports what was armed, ERROR_SUCCESS when
+ * nothing was.  The substitution is consumed only when a directory flush is
+ * actually reached, so a caller that arms it and then never flushes leaves it
+ * armed for every later operation in the process; a test binary uses this to
+ * disarm unconditionally between cases and to prove that nothing leaked out
+ * of one.  Read and disarm are a single atomic exchange, so this never races
+ * an arming caller into a partially updated state.  It can only establish a
+ * clean-run property: a caller that aborts never reaches its own disarm. */
+DWORD wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test
+    (void);
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
 const gchar *wyl_fact_artifact_win_entry_name (const WylFactArtifactWinEntry *);

@@ -90,6 +90,13 @@ wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test (DWORD error)
   InterlockedExchange (&next_directory_flush_error, (LONG) error);
 }
 
+DWORD
+wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test (void)
+{
+  return (DWORD) InterlockedExchange (&next_directory_flush_error,
+      ERROR_SUCCESS);
+}
+
 static WylNtCreateFile
 nt_create_file (void)
 {

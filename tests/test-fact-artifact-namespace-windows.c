@@ -2157,76 +2157,158 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_free (path);
 }
 
+/* Both native Windows artifact modules keep their forced-fault state in a
+ * process-wide global that is consumed only when the faulted step is actually
+ * reached.  A case that arms one and returns without reaching that step
+ * leaves it armed for every later case in the same binary, and both faults
+ * surface as WYRELOG_E_POLICY -- the very code a genuine authority violation
+ * returns -- so the leak presents as an unrelated later case failing a policy
+ * assertion.  Every case therefore runs inside this fixture: set_up disarms
+ * both globals before the body, and tear_down disarms them again and requires
+ * what it found to match the row's declared expectation.
+ *
+ * The guarantee is a clean-run property only.  A case that aborts never
+ * reaches its tear_down, so a passing run proves nothing about a failing
+ * one. */
+typedef struct
+{
+  /* The guard holds no per-case state.  g_test_add passes the same row to
+   * set_up, the body and tear_down, so tear_down already has everything it
+   * needs from its own |user_data| argument and a member here would only
+   * duplicate it.  C17 has no empty struct, so this placeholder exists to
+   * make the type legal and is never read. */
+  gchar unused;
+} WinFaultGuard;
+
+typedef struct
+{
+  const gchar *path;
+  void (*run) (void);
+  /* What the body is permitted to leave armed. */
+  DWORD expected_flush_error;
+  WylFactArtifactWinNamespaceTestFault expected_namespace_fault;
+} WinGuardedCase;
+
+static void
+win_fault_guard_set_up (WinFaultGuard *guard, gconstpointer user_data)
+{
+  DWORD flush_error =
+      wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test ();
+  WylFactArtifactWinNamespaceTestFault fault =
+      wyl_fact_artifact_win_namespace_take_test_fault ();
+
+  (void) guard;
+  (void) user_data;
+  /* Unreachable while every case goes through this fixture: a case that runs
+   * set_up also runs tear_down unless the process aborts, and no later case
+   * runs after an abort.  Its real value is as the only defence against a
+   * future case registered with g_test_add_func, which bypasses the fixture
+   * entirely and would silently stop being guarded. */
+  g_assert_cmpuint (flush_error, ==, ERROR_SUCCESS);
+  g_assert_cmpint (fault, ==, WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE);
+}
+
+static void
+win_fault_guard_run (WinFaultGuard *guard, gconstpointer user_data)
+{
+  const WinGuardedCase *guarded = user_data;
+
+  (void) guard;
+  guarded->run ();
+}
+
+static void
+win_fault_guard_tear_down (WinFaultGuard *guard, gconstpointer user_data)
+{
+  const WinGuardedCase *guarded = user_data;
+  DWORD flush_error =
+      wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test ();
+  WylFactArtifactWinNamespaceTestFault fault =
+      wyl_fact_artifact_win_namespace_take_test_fault ();
+
+  (void) guard;
+  /* Both globals are already disarmed by the takes above, so the process is
+   * clean here and every later case is safe to run.  Fail only this case
+   * rather than aborting the binary: with g_error one leaking case would
+   * decide whether the remaining cases ever report at all, which is the same
+   * ordering-dependent blast radius this fixture exists to remove, just moved
+   * up a level.  g_test_fail is effective from teardown because test_case_run
+   * reads its success flag after fixture_teardown returns. */
+  if (flush_error != guarded->expected_flush_error
+      || fault != guarded->expected_namespace_fault) {
+    g_test_message ("%s left an unexpected Windows artifact test fault armed: "
+        "flush=%lu want %lu, namespace=%d want %d", guarded->path,
+        (gulong) flush_error, (gulong) guarded->expected_flush_error,
+        (gint) fault, (gint) guarded->expected_namespace_fault);
+    g_test_fail ();
+  }
+}
+
+G_STATIC_ASSERT (ERROR_SUCCESS == 0
+    && WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE == 0);
+
+/* A row that must leave nothing armed omits both expectation fields; the
+ * assertion above pins the two clean values to the zero that the omitted
+ * initializers supply. */
+static const WinGuardedCase win_guarded_cases[] = {
+  {"/fact/artifact-namespace/windows/working-handle/adopt-close",
+      test_working_handle_adopt_noninherit_close_once},
+  {"/fact/artifact-namespace/windows/io-session/lifetime-singleton",
+      test_private_io_session_lifetime_and_singleton},
+  {"/fact/artifact-namespace/windows/io-session/guardian-policy",
+      test_io_session_guardian_failure_is_policy},
+  {"/fact/artifact-namespace/windows/io-session/mutation-gate",
+      test_session_blocks_mutation_until_finish},
+  {"/fact/artifact-namespace/windows/io-session/retains-lease",
+      test_session_retains_mutation_lease_until_finish},
+  {"/fact/artifact-namespace/windows/locator/entry-lifecycle",
+      test_locator_relative_entry_lifecycle},
+  {"/fact/artifact-namespace/windows/locator/replace-open-destination",
+      test_locator_replace_open_destination},
+  {"/fact/artifact-namespace/windows/locator/nested-transport",
+      test_locator_nested_directory_transport},
+  {"/fact/artifact-namespace/windows/namespace/captured-owner-binding",
+      test_native_namespace_captured_owner_acl_binding},
+  {"/fact/artifact-namespace/windows/namespace/release-binding-stress",
+      test_native_namespace_release_binding_stress},
+  {"/fact/artifact-namespace/windows/namespace/generic-reader-lock-domain",
+      test_generic_reader_session_blocks_cross_namespace_mutation},
+  {"/fact/artifact-namespace/windows/io-session/source-substitution",
+      test_live_session_source_substitution_is_policy},
+  {"/fact/artifact-namespace/windows/working-handle/identity-output",
+      test_working_handle_identity_mismatch_initializes_output},
+  {"/fact/artifact-namespace/windows/working-handle/free-reused-handle",
+      test_working_handle_free_never_closes_reused_handle},
+  {"/fact/artifact-namespace/windows/working-handle/free-unlinked-object",
+      test_working_handle_free_closes_unlinked_object},
+  {"/fact/artifact-namespace/windows/working-handle/source-reuse-guardian",
+      test_working_handle_source_reuse_cannot_revoke_guardian},
+  {"/fact/artifact-namespace/windows/io-session/abort-terminal",
+      test_session_abort_is_terminal},
+  {"/fact/artifact-namespace/windows/lock-domain/alias-contention",
+      test_native_lock_domain_alias_reader_writer_contention},
+  {"/fact/artifact-namespace/windows/lock-domain/concurrent-release",
+      test_native_lock_domain_concurrent_acquire_release},
+  {"/fact/artifact-namespace/windows/lock-domain/cross-process",
+      test_native_namespace_cross_process_leases_and_crash_release},
+  {"/fact/artifact-namespace/windows/locator/directory-flush-capability",
+      test_locator_directory_flush_capability_mapping},
+  {"/fact/artifact-namespace/windows/namespace/main-sidecar",
+      test_native_namespace_main_sidecar_lifecycle},
+  {"/fact/artifact-namespace/windows/namespace/substitution",
+      test_native_namespace_reparse_and_hardlink_substitution},
+};
+
 int
 main (int argc, char **argv)
 {
   if (argc == 4 && strcmp (argv[1], "--win-lease-child") == 0)
     return run_lease_child (argv[2], argv[3]);
   g_test_init (&argc, &argv, NULL);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/adopt-close",
-      test_working_handle_adopt_noninherit_close_once);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/io-session/lifetime-singleton",
-      test_private_io_session_lifetime_and_singleton);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/io-session/guardian-policy",
-      test_io_session_guardian_failure_is_policy);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/io-session/mutation-gate",
-      test_session_blocks_mutation_until_finish);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/io-session/retains-lease",
-      test_session_retains_mutation_lease_until_finish);
-  g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
-      test_locator_relative_entry_lifecycle);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/locator/replace-open-destination",
-      test_locator_replace_open_destination);
-  g_test_add_func ("/fact/artifact-namespace/windows/locator/nested-transport",
-      test_locator_nested_directory_transport);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/namespace/captured-owner-binding",
-      test_native_namespace_captured_owner_acl_binding);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/namespace/release-binding-stress",
-      test_native_namespace_release_binding_stress);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/namespace/generic-reader-lock-domain",
-      test_generic_reader_session_blocks_cross_namespace_mutation);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/io-session/source-substitution",
-      test_live_session_source_substitution_is_policy);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/identity-output",
-      test_working_handle_identity_mismatch_initializes_output);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/free-reused-handle",
-      test_working_handle_free_never_closes_reused_handle);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/free-unlinked-object",
-      test_working_handle_free_closes_unlinked_object);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/source-reuse-guardian",
-      test_working_handle_source_reuse_cannot_revoke_guardian);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/io-session/abort-terminal",
-      test_session_abort_is_terminal);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/lock-domain/alias-contention",
-      test_native_lock_domain_alias_reader_writer_contention);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/lock-domain/concurrent-release",
-      test_native_lock_domain_concurrent_acquire_release);
-  g_test_add_func ("/fact/artifact-namespace/windows/lock-domain/cross-process",
-      test_native_namespace_cross_process_leases_and_crash_release);
-  g_test_add_func
-      ("/fact/artifact-namespace/windows/locator/directory-flush-capability",
-      test_locator_directory_flush_capability_mapping);
-  g_test_add_func ("/fact/artifact-namespace/windows/namespace/main-sidecar",
-      test_native_namespace_main_sidecar_lifecycle);
-  g_test_add_func ("/fact/artifact-namespace/windows/namespace/substitution",
-      test_native_namespace_reparse_and_hardlink_substitution);
+  for (gsize i = 0; i < G_N_ELEMENTS (win_guarded_cases); i++)
+    g_test_add (win_guarded_cases[i].path, WinFaultGuard,
+        &win_guarded_cases[i], win_fault_guard_set_up, win_fault_guard_run,
+        win_fault_guard_tear_down);
   return g_test_run ();
 }
 #else
