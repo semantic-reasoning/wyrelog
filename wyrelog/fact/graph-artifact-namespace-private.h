@@ -12,6 +12,7 @@ typedef struct WylFactArtifactSidecarBinding WylFactArtifactSidecarBinding;
 typedef struct WylFactArtifactMainBinding WylFactArtifactMainBinding;
 typedef struct WylFactArtifactReaderMainBinding
     WylFactArtifactReaderMainBinding;
+typedef struct WylFactArtifactReaderWalBinding WylFactArtifactReaderWalBinding;
 typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
@@ -70,6 +71,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_WAL_BINDING_PRE_OPEN_FIFO,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE,
@@ -143,6 +145,20 @@ wyrelog_error_t wyl_fact_artifact_reader_main_binding_close
     (WylFactArtifactReaderMainBinding *, gint * working_fd);
 void wyl_fact_artifact_reader_main_binding_free
     (WylFactArtifactReaderMainBinding *);
+/* Binds the existing fixed live WAL only for validate-only reader I/O.  It
+ * accepts a reader guard, never creates a sidecar, and returns a pinned
+ * O_RDONLY/CLOEXEC/NOFOLLOW/NONBLOCK descriptor for facts.duckdb.wal. */
+wyrelog_error_t wyl_fact_artifact_reader_guard_open_existing_wal_binding
+    (WylFactArtifactMutationLease *,
+    WylFactArtifactReaderWalBinding ** out_binding, gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_reader_wal_binding_revalidate
+    (WylFactArtifactReaderWalBinding *);
+wyrelog_error_t wyl_fact_artifact_reader_wal_binding_revalidate_fd
+    (WylFactArtifactReaderWalBinding *, gint working_fd);
+wyrelog_error_t wyl_fact_artifact_reader_wal_binding_close
+    (WylFactArtifactReaderWalBinding *, gint * working_fd);
+void wyl_fact_artifact_reader_wal_binding_free
+    (WylFactArtifactReaderWalBinding *);
 /* Binds the already-imported canonical facts.duckdb for in-place DuckDB I/O.
  * This is deliberately not a pathname capability: it requires an exclusive
  * lease, opens only the existing fixed name with O_RDWR/CLOEXEC/NOFOLLOW, and

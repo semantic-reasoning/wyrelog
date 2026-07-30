@@ -872,6 +872,19 @@ test_reader_main_binding (void)
           42), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_reader_main_binding_close (NULL, &fd),
       ==, WYRELOG_E_POLICY);
+  WylFactArtifactReaderWalBinding *wal = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (NULL, &wal, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (wal);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate_fd (NULL,
+          42), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_close (NULL, &fd), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_reader_wal_binding_free (NULL);
 #else
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
@@ -901,6 +914,93 @@ test_reader_main_binding (void)
   g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
   g_assert_cmpint (open_readonly_namespace (&directory, &namespace_), ==,
       WYRELOG_E_OK);
+  g_autofree gchar *wal_path = g_build_filename (graph_path,
+      "facts.duckdb.wal", NULL);
+  g_autofree gchar *saved_wal_path = g_build_filename (graph_path,
+      "facts.duckdb.wal.saved", NULL);
+
+  WylFactArtifactReaderWalBinding *reader_wal = (gpointer) 0x1;
+  gint wal_fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (reader_a, &reader_wal, &wal_fd), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (reader_wal);
+  g_assert_cmpint (wal_fd, ==, -1);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  reader_a = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_OK);
+  WylFactArtifactSidecarBinding *writer_wal = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (writer, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &writer_wal, &wal_fd), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (pwrite (wal_fd, "wal", 3, 0), ==, 3);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (writer_wal,
+          &wal_fd), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_sidecar_binding_free (writer_wal);
+  wyl_fact_artifact_mutation_lease_free (writer);
+  writer = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (reader_a, &reader_wal, &wal_fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fcntl (wal_fd, F_GETFL) & O_ACCMODE, ==, O_RDONLY);
+  g_assert_cmpint (fcntl (wal_fd, F_GETFD) & FD_CLOEXEC, !=, 0);
+  char wal_contents[4] = { 0 };
+  g_assert_cmpint (pread (wal_fd, wal_contents, 3, 0), ==, 3);
+  g_assert_cmpstr (wal_contents, ==, "wal");
+  errno = 0;
+  g_assert_cmpint (pwrite (wal_fd, "x", 1, 0), ==, -1);
+  g_assert_cmpint (errno, ==, EBADF);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_close (reader_wal,
+          &wal_fd), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_reader_wal_binding_free (reader_wal);
+  reader_wal = NULL;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (reader_a, &reader_wal, &wal_fd), ==, WYRELOG_E_OK);
+  gint foreign_wal_fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  g_assert_cmpint (foreign_wal_fd, >=, 0);
+  g_assert_cmpint (dup2 (foreign_wal_fd, wal_fd), ==, wal_fd);
+  if (foreign_wal_fd != wal_fd)
+    close (foreign_wal_fd);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate_fd
+      (reader_wal, wal_fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_close (reader_wal,
+          &wal_fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wal_fd, >=, 0);
+  close (wal_fd);
+  wyl_fact_artifact_reader_wal_binding_free (reader_wal);
+  reader_wal = NULL;
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (reader_a, &reader_wal, &wal_fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (rename (wal_path, saved_wal_path), ==, 0);
+  g_assert_true (g_file_set_contents (wal_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (wal_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_revalidate_fd
+      (reader_wal, wal_fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_reader_wal_binding_close (reader_wal,
+          &wal_fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wal_fd, >=, 0);
+  close (wal_fd);
+  wyl_fact_artifact_reader_wal_binding_free (reader_wal);
+  reader_wal = NULL;
+  g_assert_cmpint (unlink (wal_path), ==, 0);
+  g_assert_cmpint (rename (saved_wal_path, wal_path), ==, 0);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  reader_a = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader_a), ==, WYRELOG_E_OK);
+  reader_wal = (gpointer) 0x1;
+  wal_fd = 42;
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_WAL_BINDING_PRE_OPEN_FIFO);
+  g_assert_cmpint (wyl_fact_artifact_reader_guard_open_existing_wal_binding
+      (reader_a, &reader_wal, &wal_fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader_wal);
+  g_assert_cmpint (wal_fd, ==, -1);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
+  reader_a = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
       (namespace_, &reader_a), ==, WYRELOG_E_OK);
@@ -1011,6 +1111,7 @@ test_reader_main_binding (void)
   wyl_fact_artifact_mutation_lease_free (reader_a);
   wyl_fact_artifact_namespace_free (namespace_);
   test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_MAIN);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_WAL);
   test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_LOCK);
   wyl_fact_graph_directory_clear (&directory);
   wyl_fact_graph_locator_clear (&locator);
