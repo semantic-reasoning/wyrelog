@@ -224,6 +224,69 @@ stop_lease_holder_process (LeaseHolderProcess holder)
   g_assert_true (WIFEXITED (status) && WEXITSTATUS (status) == 0);
 }
 
+static LeaseHolderProcess
+start_reader_binding_holder (const WylFactGraphDirectory *directory,
+    gboolean crash_after_ready)
+{
+  gint ready[2], release[2];
+  g_assert_cmpint (pipe (ready), ==, 0);
+  g_assert_cmpint (pipe (release), ==, 0);
+  pid_t pid = fork ();
+  g_assert_cmpint (pid >= 0, ==, TRUE);
+  if (pid == 0) {
+    close (ready[0]);
+    close (release[1]);
+    WylFactArtifactNamespace *namespace_ = NULL;
+    WylFactArtifactMutationLease *reader = NULL;
+    WylFactArtifactReaderMainBinding *main = NULL;
+    WylFactArtifactReaderWalBinding *wal = NULL;
+    gint main_fd = -1, wal_fd = -1;
+    wyrelog_error_t result = open_namespace (directory, &namespace_);
+    if (result == WYRELOG_E_OK)
+      result = wyl_fact_artifact_namespace_acquire_reader_guard (namespace_,
+          &reader);
+    if (result == WYRELOG_E_OK)
+      result = wyl_fact_artifact_reader_guard_open_main_binding (reader, &main,
+          &main_fd);
+    if (result == WYRELOG_E_OK)
+      result = wyl_fact_artifact_reader_guard_open_existing_wal_binding (reader,
+          &wal, &wal_fd);
+    if (!write_exact (ready[1], &result, sizeof result))
+      _exit (95);
+    close (ready[1]);
+    if (result != WYRELOG_E_OK || crash_after_ready)
+      _exit (result == WYRELOG_E_OK ? 0 : 96);
+    guint8 token;
+    if (!read_exact (release[0], &token, sizeof token)) {
+      close (release[0]);
+      _exit (97);
+    }
+    close (release[0]);
+    if (wyl_fact_artifact_reader_wal_binding_close (wal, &wal_fd)
+        != WYRELOG_E_OK || wal_fd != -1
+        || wyl_fact_artifact_reader_main_binding_close (main, &main_fd)
+        != WYRELOG_E_OK || main_fd != -1)
+      _exit (98);
+    wyl_fact_artifact_reader_wal_binding_free (wal);
+    wyl_fact_artifact_reader_main_binding_free (main);
+    wyl_fact_artifact_mutation_lease_free (reader);
+    wyl_fact_artifact_namespace_free (namespace_);
+    _exit (0);
+  }
+  close (ready[1]);
+  close (release[0]);
+  wyrelog_error_t result = WYRELOG_E_INTERNAL;
+  g_assert_true (read_exact (ready[0], &result, sizeof result));
+  close (ready[0]);
+  g_assert_cmpint (result, ==, WYRELOG_E_OK);
+  if (crash_after_ready) {
+    close (release[1]);
+    release[1] = -1;
+  }
+  return (LeaseHolderProcess) {
+  pid, release[1]};
+}
+
 static wyrelog_error_t
 attempt_lease_in_fresh_process (const WylFactGraphDirectory *directory,
     gboolean exclusive)
@@ -939,6 +1002,23 @@ test_reader_main_binding (void)
   g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (writer_wal,
           &wal_fd), ==, WYRELOG_E_OK);
   wyl_fact_artifact_sidecar_binding_free (writer_wal);
+  wyl_fact_artifact_mutation_lease_free (writer);
+  writer = NULL;
+  LeaseHolderProcess holder = start_reader_binding_holder (&directory, FALSE);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer);
+  stop_lease_holder_process (holder);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_mutation_lease_free (writer);
+  writer = NULL;
+  holder = start_reader_binding_holder (&directory, TRUE);
+  gint child_status = 0;
+  g_assert_cmpint (waitpid (holder.pid, &child_status, 0), ==, holder.pid);
+  g_assert_true (WIFEXITED (child_status) && WEXITSTATUS (child_status) == 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &writer), ==, WYRELOG_E_OK);
   wyl_fact_artifact_mutation_lease_free (writer);
   writer = NULL;
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
