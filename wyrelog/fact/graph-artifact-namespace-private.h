@@ -46,12 +46,14 @@ typedef enum
 } WylFactArtifactSidecarRetireResult;
 
 /* The replacement result is separate from the error return because an error
- * after rename has linearized must never be interpreted as retry authority.
- * NOT_REPLACED leaves both bindings unchanged.  REPLACED_DURABLE consumes the
- * source and retargets the destination to the replacement with directory
- * durability and postconditions verified.  RECONCILE_REQUIRED records the
- * same terminal ownership transfer, but durability or reconciliation proof
- * did not complete. */
+ * must never be mistaken for retry authority.  NOT_REPLACED means this call
+ * did not replace the namespace entry.  Ordinary pre-rename failures leave
+ * valid bindings unchanged, but validation or raw-descriptor failures may
+ * terminally revoke an invalid binding.  REPLACED_DURABLE consumes the source
+ * and retargets the destination to the replacement with directory durability
+ * and postconditions verified.  RECONCILE_REQUIRED is terminal: rename may
+ * have linearized, or its error left an unclassifiable namespace state whose
+ * bindings were revoked. */
 typedef enum
 {
   WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED = 0,
@@ -100,6 +102,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_SOURCE_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_PRE_RENAME,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME_AMBIGUOUS,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_LINEARIZATION,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION,
@@ -264,8 +267,11 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
  * and both issued working descriptors must have been consumed by checked
  * _close calls.  The source becomes terminal at the rename linearization
  * point; the destination immediately assumes the source identity.  The output
- * is initialized on every entry, and RECONCILE_REQUIRED is terminal rather
- * than permission to retry. */
+ * is initialized on every entry.  NOT_REPLACED says only that this call did
+ * not replace the namespace entry, not that bindings which failed validation
+ * remain valid.  RECONCILE_REQUIRED is terminal rather than permission to
+ * retry, including when a rename error cannot be classified as the exact pre-
+ * or post-replacement namespace state. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_replace_existing_wal
     (WylFactArtifactSidecarBinding * source,
     WylFactArtifactSidecarBinding * destination,

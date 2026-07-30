@@ -3083,9 +3083,23 @@ wyrelog_error_t
     result = WYRELOG_E_IO;
     goto done;
   }
-  if (renameat (lease->namespace_->fd, source_name, lease->namespace_->fd,
-          destination_name) != 0) {
-    gint rename_error = errno;
+  gboolean ambiguous_rename_fault = namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME_AMBIGUOUS);
+  gint rename_result;
+  gint rename_error;
+  if (ambiguous_rename_fault) {
+    /* Deterministic test-only model of a replacing rename which reports an
+     * error after the destination unexpectedly disappears while source
+     * remains.  Production never removes the WAL outside the rename. */
+    rename_result = unlinkat (lease->namespace_->fd, destination_name, 0);
+    rename_error = rename_result == 0 ? EIO : errno;
+    rename_result = -1;
+  } else {
+    rename_result = renameat (lease->namespace_->fd, source_name,
+        lease->namespace_->fd, destination_name);
+    rename_error = errno;
+  }
+  if (rename_result != 0) {
     struct stat named_source, named_destination;
     gboolean unchanged =
         fstatat (lease->namespace_->fd, source_name, &named_source,
@@ -3120,6 +3134,8 @@ wyrelog_error_t
         sidecar_binding_revoke_unlocked (source);
         sidecar_binding_revoke_unlocked (destination);
         result = rename_error == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+        *out_result =
+            WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
         goto done;
       }
       result = WYRELOG_E_IO;
