@@ -104,7 +104,12 @@ jobs:
             -Denable_fact_store=enabled \
             -Dduckdb_source=subproject \
             -Denable_secure_duckdb_bridge=enabled
-          meson test -C build-secure-duckdb secure-duckdb-bridge \
+          meson compile -C build-secure-duckdb -j 1 \
+            test-secure-duckdb-bridge \
+            test-secure-duckdb-filesystem \
+            test-secure-duckdb-recording-filesystem
+          meson test -C build-secure-duckdb --no-rebuild \
+            secure-duckdb-bridge \
             secure-duckdb-filesystem secure-duckdb-recording-filesystem \
             --print-errorlogs
           if meson setup build-secure-duckdb-prebuilt \

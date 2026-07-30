@@ -2198,6 +2198,10 @@ test('duckdb-fixed-wal-lifecycle-boundary', python3,
   args : [files('test-duckdb-fixed-wal-lifecycle-boundary.py'),
     meson.project_source_root()])
 
+test('secure-duckdb-ci-wiring', python3,
+  args : [files('test-secure-duckdb-ci-wiring.py'),
+    meson.project_source_root()])
+
 if host_machine.system() != 'windows'
   test('duckdb-numeric-boundary', python3,
     args : [files('test-secure-duckdb-numeric-boundary.py'),
