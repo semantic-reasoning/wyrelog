@@ -69,9 +69,9 @@ option('duckdb_source',
 option('enable_secure_duckdb_bridge',
   type : 'feature',
   value : 'disabled',
-  description : 'Build the experimental, source-pinned C++ DuckDB lifecycle '
-              + 'bridge. Requires enable_fact_store=enabled and '
-              + 'duckdb_source=subproject; it has no artifact or VFS authority.'
+  description : 'Build the experimental, source-pinned DuckDB C++ secure '
+              + 'storage backend and held-binding C bridge. Requires '
+              + 'enable_fact_store=enabled and duckdb_source=subproject.'
 )
 
 option('wyrelog_log_max_level',
