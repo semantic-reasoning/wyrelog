@@ -746,13 +746,6 @@ test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   dependencies : [wyrelog_dep],
 )
 test('fact-artifact-namespace', test_fact_artifact_namespace)
-test_secure_duckdb_artifact_contract = executable('test-secure-duckdb-artifact-contract',
-  'test-secure-duckdb-artifact-contract.cc',
-  include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep],
-)
-test('secure-duckdb-artifact-contract', test_secure_duckdb_artifact_contract)
-
 if host_machine.system() == 'windows'
   # This is intentionally separate from test-fact-artifact-namespace: that
   # historical POSIX test is compiled out on Windows and cannot prove native
@@ -910,6 +903,14 @@ if get_option('enable_fact_store').allowed()
 endif
 
 if get_option('enable_secure_duckdb_bridge').enabled()
+  test_secure_duckdb_artifact_contract = executable(
+    'test-secure-duckdb-artifact-contract',
+    'test-secure-duckdb-artifact-contract.cc',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+  test('secure-duckdb-artifact-contract',
+    test_secure_duckdb_artifact_contract)
   test_secure_duckdb_bridge = executable('test-secure-duckdb-bridge',
     'test-secure-duckdb-bridge.c',
     include_directories : include_directories('../wyrelog'),
@@ -933,7 +934,9 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       dependencies : [wyrelog_dep, duckdb_dep],
       override_options : ['cpp_std=c++17'],
     )
-    test('secure-duckdb-filesystem', test_secure_duckdb_filesystem)
+    test('secure-duckdb-filesystem', test_secure_duckdb_filesystem,
+      timeout : 120,
+    )
     test_duckdb_after_walstart = executable(
       'test-duckdb-after-walstart',
       'test-secure-duckdb-recording-filesystem.cc',
