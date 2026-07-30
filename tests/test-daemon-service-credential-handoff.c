@@ -64,11 +64,11 @@ count_delivered (sqlite3 *db, const gchar *request_id)
 {
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT count(*) FROM service_credential_handoff_dispositions"
-          " WHERE original_request_id=? AND reason='delivered';", -1, &stmt,
-          NULL), ==, SQLITE_OK);
+      "SELECT count(*) FROM service_credential_handoff_dispositions"
+      " WHERE original_request_id=? AND reason='delivered';", -1, &stmt,
+      NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, request_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -80,12 +80,12 @@ prepare_authority (WylHandle *handle, const gchar *subject_id)
 {
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, subject_id,
-          subject_id, "admin", "principal-create", &principal), ==,
+      subject_id, "admin", "principal-create", &principal), ==,
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
-          "tenant-a", &created), ==, WYRELOG_E_OK);
+      "tenant-a", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
 }
 
@@ -114,13 +114,13 @@ authorize_session (WylHandle *handle, const gchar *actor, WylSession *session)
   wyl_policy_store_t *store = store_of (handle);
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store, actor,
-          "wr.service_credential.manage", session_id), ==, WYRELOG_E_OK);
+      "wr.service_credential.manage", session_id), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_principal_state (store, actor,
-          "authenticated"), ==, WYRELOG_E_OK);
+      "authenticated"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_session_state (store, session_id,
-          "active"), ==, WYRELOG_E_OK);
+      "active"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_permission_state (store, actor,
-          "wr.service_credential.manage", session_id, "armed"), ==,
+      "wr.service_credential.manage", session_id, "armed"), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
 }
@@ -135,7 +135,7 @@ fixture_clear (Fixture *fixture)
       const gchar *name;
       while ((name = g_dir_read_name (dir)) != NULL) {
         g_autofree gchar *path = g_build_filename (fixture->operation_root,
-            name, NULL);
+                name, NULL);
         (void) g_remove (path);
       }
       g_dir_close (dir);
@@ -148,7 +148,7 @@ fixture_clear (Fixture *fixture)
       const gchar *name;
       while ((name = g_dir_read_name (dir)) != NULL) {
         g_autofree gchar *path = g_build_filename (fixture->publication_root,
-            name, NULL);
+                name, NULL);
         (void) g_remove (path);
       }
       g_dir_close (dir);
@@ -158,9 +158,9 @@ fixture_clear (Fixture *fixture)
   if (fixture->db_path != NULL) {
     (void) g_remove (fixture->db_path);
     g_autofree gchar *clear = g_strdup_printf ("%s.wyrelog-clear",
-        fixture->db_path);
+            fixture->db_path);
     g_autofree gchar *lock = g_strdup_printf ("%s.wyrelog-lock",
-        fixture->db_path);
+            fixture->db_path);
     (void) g_remove (clear);
     (void) g_remove (lock);
   }
@@ -192,16 +192,16 @@ fixture_init (Fixture *fixture)
   fixture->key_path = g_build_filename (fixture->dir, "policy.key", NULL);
   fixture->audit_path = g_build_filename (fixture->dir, "audit.db", NULL);
   fixture->operation_root = service_credential_operation_root_for_test
-      (fixture->dir, "daemon-handoff-operations");
+        (fixture->dir, "daemon-handoff-operations");
   fixture->publication_root = g_build_filename (fixture->dir, "publication",
-      NULL);
+          NULL);
   g_assert_cmpint (g_mkdir_with_parents (fixture->publication_root, 0700), ==,
       0);
   guint8 key[32];
   for (guint i = 0; i < sizeof key; i++)
     key[i] = (guint8) (i + 1);
   g_assert_true (g_file_set_contents (fixture->key_path,
-          (const gchar *) key, sizeof key, NULL));
+      (const gchar *) key, sizeof key, NULL));
   fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
   WylHandleOpenOptions options = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
@@ -239,11 +239,12 @@ copy_plan_for_test (const WyctlPublicationPlan *source,
     WyctlPublicationPlan *out)
 {
   *out = (WyctlPublicationPlan) {
-  .version = source->version,.destination =
+    .version = source->version,.destination =
         g_strdup (source->destination),.reservation_id =
         g_strdup (source->reservation_id),.parent_identity =
         g_strdup (source->parent_identity),.stage_basename =
-        g_strdup (source->stage_basename),};
+        g_strdup (source->stage_basename),
+  };
 }
 
 static wyrelog_error_t
@@ -268,15 +269,17 @@ handoff_test_stage (gpointer data, const WyctlPublicationPlan *plan,
   g_assert_cmpuint (secret->len, ==, WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
   backend->stage_calls++;
   *out_receipt = (WyctlPublicationReceipt) {
-  .version = WYCTL_PUBLICATION_RECEIPT_VERSION,.destination =
+    .version = WYCTL_PUBLICATION_RECEIPT_VERSION,.destination =
         g_strdup (plan->destination),.reservation_id =
         g_strdup (plan->reservation_id),.parent_identity =
         g_strdup (plan->parent_identity),.stage_basename =
         g_strdup (plan->stage_basename),.stage_identity =
-        g_strdup ("test-stage-identity"),};
+        g_strdup ("test-stage-identity"),
+  };
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
-        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,};
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,
+  };
   *out_replayed = FALSE;
   return WYRELOG_E_OK;
 }
@@ -323,8 +326,9 @@ handoff_test_target_commit (gpointer data,
   backend->published = TRUE;
   lease->destination_target = TRUE;
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
-        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,};
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -341,11 +345,12 @@ handoff_test_target_inspect (gpointer data,
   g_assert_cmpuint (secret->len, ==, WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
   backend->inspect_calls++;
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         lease->destination_target ?
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
         WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED,.exact_identity =
-        TRUE,.cleanup_required = !lease->destination_target,};
+        TRUE,.cleanup_required = !lease->destination_target,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -388,23 +393,26 @@ context_for (Fixture *fixture, WylSession *session, const gchar *request_id,
     HandoffPublication *publication)
 {
   return (WylDaemonServiceCredentialHandoffContext) {
-  .handle = fixture->handle,.session =
-        session,.authenticated_actor_subject_id = "admin",.guard_timestamp =
-        g_get_real_time (),.guard_loc_class = "trusted",.guard_risk =
-        0,.decision_request_id = request_id,.operation_root =
-        fixture->operation_root,.credential_publication_root =
-        fixture->publication_root,.publication_override =
-        &handoff_test_vtable,.publication_override_data = publication,};
+           .handle = fixture->handle,.session =
+               session,.authenticated_actor_subject_id = "admin",
+           .guard_timestamp =
+               g_get_real_time (),.guard_loc_class = "trusted",.guard_risk =
+               0,.decision_request_id = request_id,.operation_root =
+               fixture->operation_root,.credential_publication_root =
+               fixture->publication_root,.publication_override =
+               &handoff_test_vtable,.publication_override_data = publication,
+  };
 }
 
 static WylDaemonServiceCredentialHandoffInputs
 issue_inputs_for (const gchar *request_id)
 {
   return (WylDaemonServiceCredentialHandoffInputs) {
-  .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE,.request_id =
-        request_id,.subject_id = "svc:handoff:executor",.tenant_id =
-        "tenant-a",.destination = "credentials.json",.expires_at_us =
-        g_get_real_time () + G_TIME_SPAN_HOUR,};
+           .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE,.request_id =
+               request_id,.subject_id = "svc:handoff:executor",.tenant_id =
+               "tenant-a",.destination = "credentials.json",.expires_at_us =
+               g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
 }
 
 static WylDaemonServiceCredentialHandoffInputs
@@ -412,11 +420,13 @@ rotate_inputs_for (const gchar *request_id, const gchar *subject_id,
     const gchar *old_credential_id, guint64 expected_generation)
 {
   return (WylDaemonServiceCredentialHandoffInputs) {
-  .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE,.request_id =
-        request_id,.subject_id = subject_id,.old_credential_id =
-        old_credential_id,.expected_generation =
-        expected_generation,.destination = "rotated.json",.expires_at_us =
-        g_get_real_time () + G_TIME_SPAN_HOUR,};
+           .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE,.request_id =
+               request_id,.subject_id = subject_id,.old_credential_id =
+               old_credential_id,.expected_generation =
+               expected_generation,.destination = "rotated.json",
+           .expires_at_us =
+               g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
 }
 
 /* A configured issue emits a non-secret JSON receipt, mints one credential and
@@ -428,7 +438,7 @@ test_daemon_handoff_issue (void)
   fixture_init (&fixture);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+          "tenant-a");
   authorize_session (fixture.handle, "admin", session);
 
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -469,15 +479,15 @@ test_daemon_handoff_rotate (void)
   fixture_init (&fixture);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+          "tenant-a");
   authorize_session (fixture.handle, "admin", session);
 
   /* Seed the rotate target directly through the library; the module rotates an
    * existing credential regardless of how it was first minted. */
   wyl_service_credential_issue_result_t seed = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (fixture.handle,
-          "svc:handoff:executor", "tenant-a", "admin", "rotate-seed-request",
-          g_get_real_time () + G_TIME_SPAN_HOUR, &seed), ==, WYRELOG_E_OK);
+      "svc:handoff:executor", "tenant-a", "admin", "rotate-seed-request",
+      g_get_real_time () + G_TIME_SPAN_HOUR, &seed), ==, WYRELOG_E_OK);
   g_autofree gchar *old_id = g_strdup (seed.credential.credential_id);
   guint64 old_generation = seed.credential.generation;
   gint64 old_expires_at = seed.credential.expires_at_us / G_USEC_PER_SEC;
@@ -502,16 +512,16 @@ test_daemon_handoff_rotate (void)
   };
   gboolean changed = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-          &reservation), ==, WYRELOG_E_OK);
+      &reservation), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry,
-          &reservation, &changed), ==, WYRELOG_E_OK);
+      &reservation, &changed), ==, WYRELOG_E_OK);
   g_assert_true (changed);
   WylDaemonServiceCredentialHandoffContext ctx =
       context_for (&fixture, session, request_id, &publication);
   ctx.registry = registry;
   WylDaemonServiceCredentialHandoffInputs inputs =
       rotate_inputs_for (request_id, "svc:handoff:executor", old_id,
-      old_generation);
+          old_generation);
 
   g_autofree gchar *json = NULL;
   g_assert_cmpint (wyl_daemon_service_credential_handoff (&ctx, &inputs, &json),
@@ -531,7 +541,7 @@ test_daemon_handoff_rotate (void)
   WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
   gboolean found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          reservation.session_id, reservation.jti, &copy, &state, &found),
+      reservation.session_id, reservation.jti, &copy, &state, &found),
       ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpint (state, ==, WYL_SERVICE_AUTH_REVOKED);
@@ -548,7 +558,7 @@ test_daemon_handoff_retry_is_replay (void)
   fixture_init (&fixture);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+          "tenant-a");
   authorize_session (fixture.handle, "admin", session);
 
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -561,12 +571,12 @@ test_daemon_handoff_retry_is_replay (void)
 
   g_autofree gchar *first = NULL;
   g_assert_cmpint (wyl_daemon_service_credential_handoff (&ctx, &inputs,
-          &first), ==, WYRELOG_E_OK);
+      &first), ==, WYRELOG_E_OK);
   guint commit_after_first = publication.commit_calls;
 
   g_autofree gchar *second = NULL;
   g_assert_cmpint (wyl_daemon_service_credential_handoff (&ctx, &inputs,
-          &second), ==, WYRELOG_E_OK);
+      &second), ==, WYRELOG_E_OK);
   g_assert_cmpstr (second, ==, first);
   g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
   g_assert_cmpint (count_delivered (db_of (fixture.handle), request_id), ==, 1);
@@ -581,7 +591,7 @@ test_daemon_handoff_malformed (void)
   fixture_init (&fixture);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+          "tenant-a");
   authorize_session (fixture.handle, "admin", session);
 
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -609,7 +619,7 @@ test_daemon_handoff_unconfigured (void)
   fixture_init (&fixture);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+          "tenant-a");
   authorize_session (fixture.handle, "admin", session);
 
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -623,7 +633,7 @@ test_daemon_handoff_unconfigured (void)
   no_operation.operation_root = NULL;
   g_autofree gchar *json_a = NULL;
   g_assert_cmpint (wyl_daemon_service_credential_handoff (&no_operation,
-          &inputs, &json_a), ==, WYRELOG_E_NOT_FOUND);
+      &inputs, &json_a), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (json_a);
 
   WylDaemonServiceCredentialHandoffContext no_publication =
@@ -631,7 +641,7 @@ test_daemon_handoff_unconfigured (void)
   no_publication.credential_publication_root = "";
   g_autofree gchar *json_b = NULL;
   g_assert_cmpint (wyl_daemon_service_credential_handoff (&no_publication,
-          &inputs, &json_b), ==, WYRELOG_E_NOT_FOUND);
+      &inputs, &json_b), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (json_b);
 
   g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 0);
@@ -646,13 +656,8 @@ test_daemon_handoff_unconfigured (void)
  * divergence trips the executor's plan/record parent_identity assertion and
  * fails closed with POLICY. This is the sole regression guard for the crux on
  * either platform: the mock path cannot catch an accessor != plan divergence,
- * and root_identity has no other runtime coverage anywhere in the suite.
- *
- * A POLICY failure here is not automatically a divergence. The Windows backend
- * re-derives parent_identity from independent root-anchor opens and refuses
- * when two observations disagree; that was seen once in 74 runs (issue #661).
- * A real divergence fails every run, a #661 flake does not -- re-run before
- * bisecting. */
+ * and the focused Windows backend suite separately pins the cached-identity
+ * and pathname-substitution behavior (issue #661). */
 static void
 test_daemon_handoff_issue_real_publication (void)
 {
@@ -661,7 +666,7 @@ test_daemon_handoff_issue_real_publication (void)
   publication_root_stamp_owner_only (fixture.publication_root);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+          "tenant-a");
   authorize_session (fixture.handle, "admin", session);
 
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -675,12 +680,11 @@ test_daemon_handoff_issue_real_publication (void)
 
   g_autofree gchar *json = NULL;
   wyrelog_error_t rc = wyl_daemon_service_credential_handoff (&ctx, &inputs,
-      &json);
+          &json);
   if (rc == WYRELOG_E_POLICY)
-    g_test_message ("POLICY here is usually an accessor/plan parent_identity "
-        "divergence (fails every run) or the known Windows root-anchor "
-        "re-derivation race, issue #661 (seen once in 74). Re-run before "
-        "bisecting.");
+    g_test_message ("POLICY here indicates a publication security or "
+        "pathname-substitution rejection; accessor and plan share the held "
+        "root identity (issue #661).");
   g_assert_cmpint (rc, ==, WYRELOG_E_OK);
   g_assert_nonnull (json);
   g_assert_nonnull (strstr (json, "\"state\":\"terminal\""));
