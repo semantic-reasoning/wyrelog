@@ -4993,6 +4993,18 @@ release_after_wal_start (AfterWalStartLatch *latch)
   latch->condition.notify_all ();
 }
 
+template<typename Result>
+static gboolean
+drain_thread_until (std::future<Result> *future, std::thread *thread,
+    std::chrono::steady_clock::time_point deadline, Result *result)
+{
+  if (future->wait_until (deadline) != std::future_status::ready)
+    return FALSE;
+  *result = future->get ();
+  thread->join ();
+  return TRUE;
+}
+
 static void
 count_after_wal_start_callback (const char *phase, void *context)
 {
@@ -5102,11 +5114,13 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
         "BEGIN TRANSACTION; INSERT INTO facts VALUES (100)");
     g_assert_false (prepare->HasError ());
 
+    std::promise<std::string> checkpoint_promise;
+    auto checkpoint_future = checkpoint_promise.get_future ();
     std::thread checkpoint_thread ([&checkpoint_connection,
-                                    &checkpoint_error] {
+                                    &checkpoint_promise] {
       auto result = checkpoint_connection.Query ("CHECKPOINT");
-      if (result->HasError ())
-        checkpoint_error = result->GetError ();
+      checkpoint_promise.set_value (
+          result->HasError () ? result->GetError () : std::string ());
     });
     entered = wait_for_after_wal_start (&latch);
     if (entered) {
@@ -5118,14 +5132,33 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
       });
       commit_finished = commit_future.wait_for (std::chrono::seconds (5))
           == std::future_status::ready;
-      if (!commit_finished)
+      if (!commit_finished) {
+        release_after_wal_start (&latch);
+        const auto cleanup_deadline =
+            std::chrono::steady_clock::now () + std::chrono::seconds (5);
+        const gboolean commit_drained = drain_thread_until (
+            &commit_future, &commit_thread, cleanup_deadline,
+            &commit_succeeded);
+        const gboolean checkpoint_drained = drain_thread_until (
+            &checkpoint_future, &checkpoint_thread, cleanup_deadline,
+            &checkpoint_error);
+        if (!commit_drained || !checkpoint_drained)
+          g_error ("checkpoint rendezvous threads did not drain within "
+              "5000 ms after latch release");
         g_error ("checkpoint-WAL commit did not finish within 5000 ms");
-      commit_succeeded = commit_future.get ();
+      }
+      g_assert_true (drain_thread_until (&commit_future, &commit_thread,
+          std::chrono::steady_clock::now (), &commit_succeeded));
       commit_end = recorder->events.size ();
       release_after_wal_start (&latch);
-      commit_thread.join ();
     }
-    checkpoint_thread.join ();
+    const gboolean checkpoint_drained = drain_thread_until (
+        &checkpoint_future, &checkpoint_thread,
+        std::chrono::steady_clock::now () + std::chrono::seconds (5),
+        &checkpoint_error);
+    if (!checkpoint_drained)
+      g_error ("checkpoint query did not drain within 5000 ms after "
+          "latch release");
   }
 
   g_assert_true (entered);
@@ -5193,13 +5226,16 @@ checkpoint_with_concurrent_commit (duckdb::Connection &checkpoint_connection,
   auto prepare = writer_connection.Query (
       "BEGIN TRANSACTION; INSERT INTO facts VALUES (100)");
   g_assert_false (prepare->HasError ());
-  std::string checkpoint_error;
-  std::thread checkpoint_thread ([&checkpoint_connection, &checkpoint_error] {
+  std::promise<std::string> checkpoint_promise;
+  auto checkpoint_future = checkpoint_promise.get_future ();
+  std::thread checkpoint_thread ([&checkpoint_connection,
+                                  &checkpoint_promise] {
     auto result = checkpoint_connection.Query ("CHECKPOINT");
-    if (result->HasError ())
-      checkpoint_error = result->GetError ();
+    checkpoint_promise.set_value (
+        result->HasError () ? result->GetError () : std::string ());
   });
   const gboolean entered = wait_for_after_wal_start (latch);
+  std::string checkpoint_error;
   if (entered) {
     std::promise<gboolean> commit_promise;
     auto commit_future = commit_promise.get_future ();
@@ -5207,17 +5243,48 @@ checkpoint_with_concurrent_commit (duckdb::Connection &checkpoint_connection,
       auto commit = writer_connection.Query ("COMMIT");
       commit_promise.set_value (!commit->HasError ());
     });
-    if (commit_future.wait_for (std::chrono::seconds (5))
-        != std::future_status::ready)
+    const gboolean commit_finished =
+        commit_future.wait_for (std::chrono::seconds (5))
+        == std::future_status::ready;
+    gboolean commit_succeeded = FALSE;
+    if (!commit_finished) {
+      release_after_wal_start (latch);
+      const auto cleanup_deadline =
+          std::chrono::steady_clock::now () + std::chrono::seconds (5);
+      const gboolean commit_drained = drain_thread_until (
+          &commit_future, &commit_thread, cleanup_deadline,
+          &commit_succeeded);
+      const gboolean checkpoint_drained = drain_thread_until (
+          &checkpoint_future, &checkpoint_thread, cleanup_deadline,
+          &checkpoint_error);
+      if (!commit_drained || !checkpoint_drained)
+        g_error ("checkpoint concurrency threads did not drain within "
+            "5000 ms after latch release");
       g_error ("checkpoint-WAL commit did not finish within 5000 ms");
-    const gboolean commit_succeeded = commit_future.get ();
-    commit_thread.join ();
-    g_assert_true (commit_succeeded);
-    g_assert_true (fs::exists (path_from_utf8 (
-        path_with_suffix (database, ".wal.checkpoint"))));
+    }
+    g_assert_true (drain_thread_until (&commit_future, &commit_thread,
+        std::chrono::steady_clock::now (), &commit_succeeded));
+    const gboolean checkpoint_exists = fs::exists (path_from_utf8 (
+        path_with_suffix (database, ".wal.checkpoint")));
     release_after_wal_start (latch);
+    const gboolean checkpoint_drained = drain_thread_until (
+        &checkpoint_future, &checkpoint_thread,
+        std::chrono::steady_clock::now () + std::chrono::seconds (5),
+        &checkpoint_error);
+    if (!checkpoint_drained)
+      g_error ("checkpoint query did not drain within 5000 ms after "
+          "latch release");
+    g_assert_true (commit_succeeded);
+    g_assert_true (checkpoint_exists);
+  } else {
+    const gboolean checkpoint_drained = drain_thread_until (
+        &checkpoint_future, &checkpoint_thread,
+        std::chrono::steady_clock::now () + std::chrono::seconds (5),
+        &checkpoint_error);
+    if (!checkpoint_drained)
+      g_error ("checkpoint query did not drain within 5000 ms after "
+          "latch release");
   }
-  checkpoint_thread.join ();
   g_assert_true (entered);
   g_assert_false (latch->callback_timed_out);
   g_assert_cmpuint (latch->callback_count, ==, 1);
