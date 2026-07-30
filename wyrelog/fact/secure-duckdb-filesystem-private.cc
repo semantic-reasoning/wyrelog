@@ -8,14 +8,15 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <optional>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace {
 
   constexpr const char *virtual_home = "/__wyrelog_duckdb_home__";
+  constexpr duckdb::idx_t writer_main_existing_flag_bits = 2307;
+  constexpr duckdb::idx_t writer_main_create_flag_bits = 2315;
   std::atomic<guint> test_faults { 0 };
 
   enum class LogicalKind
@@ -127,6 +128,14 @@ namespace {
            && flags.GetCachingMode () == duckdb::CachingMode::NO_CACHING;
   }
 
+  duckdb::FileOpenFlags
+  writer_main_existing_flags ()
+  {
+    return duckdb::FileOpenFlags (writer_main_existing_flag_bits,
+        duckdb::FileLockType::WRITE_LOCK,
+        duckdb::FileCompressionType::UNCOMPRESSED);
+  }
+
   void validate_flags (const LogicalPath & logical, duckdb::FileOpenFlags flags,
       bool read_only)
   {
@@ -136,8 +145,10 @@ namespace {
           || (read_only
           && exact_flags (flags, 2433, duckdb::FileLockType::READ_LOCK))
           || (!read_only
-          && (exact_flags (flags, 2307, duckdb::FileLockType::WRITE_LOCK)
-          || exact_flags (flags, 2315, duckdb::FileLockType::WRITE_LOCK)));
+          && (exact_flags (flags, writer_main_existing_flag_bits,
+              duckdb::FileLockType::WRITE_LOCK)
+          || exact_flags (flags, writer_main_create_flag_bits,
+              duckdb::FileLockType::WRITE_LOCK)));
     } else if (logical.kind == LogicalKind::SIDECAR) {
       accepted = exact_flags (flags, 129, duckdb::FileLockType::NO_LOCK)
           || (logical.artifact == WYL_FACT_ARTIFACT_WAL
@@ -903,21 +914,35 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
       result =
           wyl_fact_artifact_mutation_lease_open_main_binding (lease_, &binding,
               &fd);
-      if (result == WYRELOG_E_OK) {
-        struct stat status;
-        if (fstat (fd, &status) != 0)
-          result = WYRELOG_E_IO;
-        else
-          provisioned_empty_main = status.st_size == 0;
+      WylSecureDuckdbPendingBinding pending (health_, binding, fd);
+      RequireOk (result, "open writer main for existence");
+      duckdb::unique_ptr<WylSecureDuckdbFileHandle> handle;
+      try {
+        if (wyl_secure_duckdb_filesystem_take_test_fault (
+              WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION))
+          throw std::bad_alloc ();
+        handle = duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_,
+               path, writer_main_existing_flags (),
+               WYL_FACT_ARTIFACT_MAIN, std::move (pending));
       }
-      if (result == WYRELOG_E_OK) {
-        result = wyl_fact_artifact_main_binding_close (binding, &fd);
-        wyl_fact_artifact_main_binding_free (binding);
-      } else {
-        if (fd >= 0)
-          close (fd);
-        wyl_fact_artifact_main_binding_free (binding);
+      catch (const std::bad_alloc &)
+      {
+        (void) pending.Reset ();
+        health_->Poison (WYRELOG_E_NOMEM);
+        throw;
       }
+      int64_t size = 0;
+      std::exception_ptr size_error;
+      try {
+        size = handle->Size ();
+      } catch (...)
+      {
+        size_error = std::current_exception ();
+      }
+      handle->Close ();
+      if (size_error != nullptr)
+        std::rethrow_exception (size_error);
+      provisioned_empty_main = size == 0;
     }
   } else if (read_only_) {
     if (logical.artifact != WYL_FACT_ARTIFACT_WAL)
