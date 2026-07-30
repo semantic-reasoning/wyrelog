@@ -2108,6 +2108,71 @@ test_fixed_sidecar_replacement_faults (void)
 }
 
 #ifndef G_OS_WIN32
+static void
+test_fixed_sidecar_replacement_ambiguous_rename_error (void)
+{
+  FixedSidecarReplaceFixture fixture;
+  fixed_sidecar_replace_fixture_init (&fixture);
+  struct stat source_identity, destination_identity;
+  WylFactArtifactSidecarBinding *destination =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_WAL, "old",
+      &destination_identity, NULL);
+  WylFactArtifactSidecarBinding *source =
+      create_closed_sidecar (&fixture, WYL_FACT_ARTIFACT_CHECKPOINT, "new",
+      &source_identity, NULL);
+
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME_AMBIGUOUS);
+  WylFactArtifactSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_IO);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (source), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (destination),
+      ==, WYRELOG_E_POLICY);
+
+  /* The terminal result revokes retry authority even though a fresh namespace
+   * can later classify the exact source as intact. */
+  result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (source,
+          destination, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  wyl_fact_artifact_sidecar_binding_free (source);
+  wyl_fact_artifact_sidecar_binding_free (destination);
+
+  fixed_sidecar_replace_fixture_reopen (&fixture);
+  WylFactArtifactSidecarBinding *reopened_source = NULL;
+  gint fd = -1;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, &reopened_source,
+          &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (reopened_source,
+          &fd), ==, WYRELOG_E_OK);
+  assert_fixed_artifact (&fixture, WYL_FACT_ARTIFACT_CHECKPOINT,
+      &source_identity, "new");
+
+  WylFactArtifactSidecarBinding *missing_wal = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+      (fixture.lease, WYL_FACT_ARTIFACT_WAL, TRUE, &missing_wal, &fd), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_null (missing_wal);
+  g_assert_cmpint (fd, ==, -1);
+  retire_closed_sidecar (reopened_source);
+  wyl_fact_artifact_sidecar_binding_free (reopened_source);
+  fixed_sidecar_replace_fixture_clear (&fixture);
+}
+#endif
+
+#ifndef G_OS_WIN32
 typedef enum
 {
   FIXED_REPLACE_MALFORM_SOURCE_MODE,
@@ -3917,6 +3982,11 @@ main (int argc, char **argv)
       test_fixed_sidecar_replacement_success);
   g_test_add_func ("/fact-artifact-namespace/fixed-sidecar-replacement/faults",
       test_fixed_sidecar_replacement_faults);
+#ifndef G_OS_WIN32
+  g_test_add_func
+      ("/fact-artifact-namespace/fixed-sidecar-replacement/ambiguous-rename-error",
+      test_fixed_sidecar_replacement_ambiguous_rename_error);
+#endif
   g_test_add_func
       ("/fact-artifact-namespace/fixed-sidecar-replacement/rejections",
       test_fixed_sidecar_replacement_rejections);
