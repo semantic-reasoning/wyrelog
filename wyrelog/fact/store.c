@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "compound-private.h"
+#include "store-identity-private.h"
 
 struct wyl_fact_store_t
 {
@@ -17,15 +18,9 @@ struct wyl_fact_store_t
   guint64 identity_path_encoding_version;
 };
 
-static gint identity_test_fault;
-G_LOCK_DEFINE_STATIC (identity_open);
 static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
 static gpointer identity_validation_test_hook_data;
 G_LOCK_DEFINE_STATIC (identity_validation_test_hook);
-
-#define WYL_FACT_STORE_KIND "wyrelog.fact"
-#define WYL_FACT_STORE_FORMAT_VERSION 1
-#define WYL_FACT_STORE_PATH_ENCODING_VERSION 1
 
 static wyrelog_error_t
 open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
@@ -423,412 +418,6 @@ validate_store_scope_unlocked (wyl_fact_store_t *store, const gchar *tenant_id,
       WYRELOG_E_POLICY;
 }
 
-static gboolean
-identity_uuid_is_canonical (const gchar *value)
-{
-  if (value == NULL || strlen (value) != 36 || value[8] != '-'
-      || value[13] != '-' || value[18] != '-' || value[23] != '-')
-    return FALSE;
-  for (gsize i = 0; i < 36; i++) {
-    if (i == 8 || i == 13 || i == 18 || i == 23)
-      continue;
-    if (!g_ascii_isdigit (value[i])
-        && !(value[i] >= 'a' && value[i] <= 'f'))
-      return FALSE;
-  }
-  return TRUE;
-}
-
-static gboolean
-identity_input_is_valid (const WylFactStoreIdentity *identity)
-{
-  return identity != NULL
-      && identity->tenant_id != NULL && identity->tenant_id[0] != '\0'
-      && g_utf8_validate (identity->tenant_id, -1, NULL)
-      && identity->graph_id != NULL && identity->graph_id[0] != '\0'
-      && g_utf8_validate (identity->graph_id, -1, NULL)
-      && identity_uuid_is_canonical (identity->store_uuid)
-      && identity->format_version > 0
-      && identity->format_version <= G_MAXINT64
-      && identity->path_encoding_version > 0
-      && identity->path_encoding_version <= G_MAXINT64;
-}
-
-static gboolean
-canonical_decimal (const gchar *value, guint64 *out_value)
-{
-  guint64 parsed = 0;
-
-  if (value == NULL || value[0] == '\0'
-      || (value[0] == '0' && value[1] != '\0'))
-    return FALSE;
-  for (const gchar * p = value; *p != '\0'; p++) {
-    if (!g_ascii_isdigit (*p))
-      return FALSE;
-    guint digit = (guint) (*p - '0');
-    if (parsed > (G_MAXUINT64 - digit) / 10)
-      return FALSE;
-    parsed = parsed * 10 + digit;
-  }
-  if (parsed == 0 || parsed > G_MAXINT64)
-    return FALSE;
-  *out_value = parsed;
-  return TRUE;
-}
-
-static wyrelog_error_t
-query_single_count (duckdb_connection conn, const gchar *sql, gint64 *out_count)
-{
-  duckdb_result result = { 0 };
-  if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_row_count (&result) != 1 || duckdb_column_count (&result) != 1
-      || duckdb_value_is_null (&result, 0, 0)) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-  *out_count = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-identity_metadata_exists (wyl_fact_store_t *store, gboolean *out_exists)
-{
-  gint64 count = 0;
-  wyrelog_error_t rc = query_single_count (store->conn,
-      "SELECT COUNT(*) FROM duckdb_tables() "
-      "WHERE database_name=current_database() AND schema_name='main' "
-      "AND table_name='fact_store_metadata' AND NOT internal;", &count);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  *out_exists = count == 1;
-  return count <= 1 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
-}
-
-static wyrelog_error_t
-identity_catalog_is_empty (wyl_fact_store_t *store, gboolean *out_empty)
-{
-  static const gchar *sql =
-      "SELECT SUM(n) FROM ("
-      " SELECT COUNT(*) AS n FROM duckdb_tables()"
-      "  WHERE database_name=current_database() AND NOT internal"
-      " UNION ALL SELECT COUNT(*) FROM duckdb_views()"
-      "  WHERE database_name=current_database() AND NOT internal"
-      " UNION ALL SELECT COUNT(*) FROM duckdb_sequences()"
-      "  WHERE database_name=current_database()"
-      " UNION ALL SELECT COUNT(*) FROM duckdb_types()"
-      "  WHERE database_name=current_database() AND NOT internal"
-      " UNION ALL SELECT COUNT(*) FROM duckdb_functions()"
-      "  WHERE database_name=current_database() AND NOT internal"
-      " UNION ALL SELECT COUNT(*) FROM duckdb_schemas()"
-      "  WHERE database_name=current_database() AND NOT internal"
-      "    AND schema_name NOT IN ('main','information_schema','pg_catalog')"
-      ") objects;";
-  gint64 count = 0;
-  wyrelog_error_t rc = query_single_count (store->conn, sql, &count);
-  if (rc == WYRELOG_E_OK)
-    *out_empty = count == 0;
-  return rc;
-}
-
-static wyrelog_error_t
-validate_identity_schema (wyl_fact_store_t *store)
-{
-  duckdb_result result = { 0 };
-  static const gchar *names[] = { "key", "value" };
-  static const gchar *sql =
-      "SELECT column_name,data_type,is_nullable,column_default,"
-      "ordinal_position,collation_name FROM information_schema.columns "
-      "WHERE table_catalog=current_database() AND table_schema='main' "
-      "AND table_name='fact_store_metadata' ORDER BY ordinal_position;";
-
-  if (duckdb_query (store->conn, sql, &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_row_count (&result) != G_N_ELEMENTS (names)) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_POLICY;
-  }
-  for (idx_t row = 0; row < G_N_ELEMENTS (names); row++) {
-    gchar *name = duckdb_value_varchar (&result, 0, row);
-    gchar *type = duckdb_value_varchar (&result, 1, row);
-    gchar *nullable = duckdb_value_varchar (&result, 2, row);
-    gboolean valid = name != NULL && type != NULL && nullable != NULL
-        && strcmp (name, names[row]) == 0 && strcmp (type, "VARCHAR") == 0
-        && strcmp (nullable, "NO") == 0
-        && duckdb_value_is_null (&result, 3, row)
-        && duckdb_value_int64 (&result, 4, row) == (gint64) row + 1
-        && duckdb_value_is_null (&result, 5, row);
-    duckdb_free (name);
-    duckdb_free (type);
-    duckdb_free (nullable);
-    if (!valid) {
-      duckdb_destroy_result (&result);
-      return WYRELOG_E_POLICY;
-    }
-  }
-  duckdb_destroy_result (&result);
-
-  gint64 primary_key_count = 0;
-  gint64 not_null_count = 0;
-  gint64 total_count = 0;
-  gint64 table_shape_count = 0;
-  wyrelog_error_t rc = query_single_count (store->conn,
-      "SELECT COUNT(*) FROM duckdb_constraints() "
-      "WHERE database_name=current_database() AND schema_name='main' "
-      "AND table_name='fact_store_metadata' "
-      "AND constraint_type='PRIMARY KEY' "
-      "AND len(constraint_column_names)=1 "
-      "AND list_contains(constraint_column_names,'key');", &primary_key_count);
-  if (rc == WYRELOG_E_OK)
-    rc = query_single_count (store->conn,
-        "SELECT COUNT(*) FROM duckdb_constraints() "
-        "WHERE database_name=current_database() AND schema_name='main' "
-        "AND table_name='fact_store_metadata' "
-        "AND constraint_type='NOT NULL' "
-        "AND len(constraint_column_names)=1 "
-        "AND (list_contains(constraint_column_names,'key') "
-        "OR list_contains(constraint_column_names,'value'));", &not_null_count);
-  if (rc == WYRELOG_E_OK)
-    rc = query_single_count (store->conn,
-        "SELECT COUNT(*) FROM duckdb_constraints() "
-        "WHERE database_name=current_database() AND schema_name='main' "
-        "AND table_name='fact_store_metadata';", &total_count);
-  if (rc == WYRELOG_E_OK)
-    rc = query_single_count (store->conn,
-        "SELECT COUNT(*) FROM duckdb_tables() "
-        "WHERE database_name=current_database() AND schema_name='main' "
-        "AND table_name='fact_store_metadata' AND NOT internal "
-        "AND has_primary_key AND column_count=2 AND index_count=1 "
-        "AND check_constraint_count=0;", &table_shape_count);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (primary_key_count != 1 || not_null_count != 2 || total_count != 3
-      || table_shape_count != 1)
-    return WYRELOG_E_POLICY;
-
-  if (duckdb_query (store->conn,
-          "SELECT sql FROM duckdb_tables() "
-          "WHERE database_name=current_database() AND schema_name='main' "
-          "AND table_name='fact_store_metadata' AND NOT internal;", &result)
-      != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_row_count (&result) != 1 || duckdb_value_is_null (&result, 0, 0)) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_POLICY;
-  }
-  gchar *ddl = duckdb_value_varchar (&result, 0, 0);
-  g_autofree gchar *lower_ddl = ddl != NULL ? g_ascii_strdown (ddl, -1) : NULL;
-  duckdb_free (ddl);
-  duckdb_destroy_result (&result);
-  return lower_ddl != NULL && strstr (lower_ddl, "collate") == NULL ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
-}
-
-static gchar *
-identity_result_string (duckdb_result *result, idx_t column, idx_t row,
-    gboolean *out_valid)
-{
-  *out_valid = FALSE;
-  if (duckdb_value_is_null (result, column, row))
-    return NULL;
-  duckdb_string value = duckdb_value_string (result, column, row);
-  if (value.data == NULL || value.size == 0
-      || memchr (value.data, '\0', value.size) != NULL
-      || !g_utf8_validate (value.data, value.size, NULL)) {
-    if (value.data != NULL)
-      duckdb_free (value.data);
-    return NULL;
-  }
-  gchar *copy = g_strndup (value.data, value.size);
-  duckdb_free (value.data);
-  *out_valid = copy != NULL;
-  return copy;
-}
-
-static wyrelog_error_t
-validate_identity_values (wyl_fact_store_t *store,
-    const WylFactStoreIdentity *identity,
-    WylFactStoreIdentityResult *out_result)
-{
-  static const gchar *keys[] = {
-    "store_kind", "format_version", "store_uuid", "path_encoding_version",
-    "tenant_id", "graph_id"
-  };
-  gchar *values[G_N_ELEMENTS (keys)] = { NULL };
-  gboolean seen[G_N_ELEMENTS (keys)] = { FALSE };
-  duckdb_result result = { 0 };
-  wyrelog_error_t rc = WYRELOG_E_POLICY;
-
-  if (duckdb_query (store->conn,
-          "SELECT key,value FROM main.fact_store_metadata;", &result)
-      != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_row_count (&result) != G_N_ELEMENTS (keys)) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA;
-    goto out;
-  }
-  for (idx_t row = 0; row < duckdb_row_count (&result); row++) {
-    gboolean key_valid = FALSE;
-    gboolean value_valid = FALSE;
-    g_autofree gchar *key = identity_result_string (&result, 0, row,
-        &key_valid);
-    gchar *value = identity_result_string (&result, 1, row, &value_valid);
-    if (!key_valid || !value_valid) {
-      g_free (value);
-      *out_result = WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA;
-      goto out;
-    }
-    gsize slot = G_N_ELEMENTS (keys);
-    for (gsize i = 0; i < G_N_ELEMENTS (keys); i++)
-      if (strcmp (key, keys[i]) == 0) {
-        slot = i;
-        break;
-      }
-    if (slot == G_N_ELEMENTS (keys) || seen[slot]) {
-      g_free (value);
-      *out_result = WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA;
-      goto out;
-    }
-    seen[slot] = TRUE;
-    values[slot] = value;
-  }
-
-  if (strcmp (values[0], WYL_FACT_STORE_KIND) != 0
-      || !identity_uuid_is_canonical (values[2])
-      || values[4][0] == '\0' || values[5][0] == '\0'
-      || strcmp (values[2], identity->store_uuid) != 0
-      || strcmp (values[4], identity->tenant_id) != 0
-      || strcmp (values[5], identity->graph_id) != 0) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY;
-    goto out;
-  }
-
-  guint64 path_version = 0;
-  if (!canonical_decimal (values[3], &path_version)
-      || path_version != identity->path_encoding_version
-      || path_version != WYL_FACT_STORE_PATH_ENCODING_VERSION) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING;
-    goto out;
-  }
-
-  guint64 format_version = 0;
-  if (!canonical_decimal (values[1], &format_version)
-      || format_version != identity->format_version
-      || format_version != WYL_FACT_STORE_FORMAT_VERSION) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_FORMAT;
-    goto out;
-  }
-
-  *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
-  rc = WYRELOG_E_OK;
-
-out:
-  for (gsize i = 0; i < G_N_ELEMENTS (values); i++)
-    g_free (values[i]);
-  duckdb_destroy_result (&result);
-  return rc;
-}
-
-static wyrelog_error_t
-validate_identity_unlocked (wyl_fact_store_t *store,
-    const WylFactStoreIdentity *identity, gboolean *out_missing,
-    WylFactStoreIdentityResult *out_result)
-{
-  gboolean exists = FALSE;
-  *out_missing = FALSE;
-  wyrelog_error_t rc = identity_metadata_exists (store, &exists);
-  if (rc != WYRELOG_E_OK) {
-    *out_result = rc == WYRELOG_E_POLICY ?
-        WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA :
-        WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    return rc;
-  }
-  if (!exists) {
-    *out_missing = TRUE;
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA;
-    return WYRELOG_E_POLICY;
-  }
-  rc = validate_identity_schema (store);
-  if (rc != WYRELOG_E_OK) {
-    *out_result = rc == WYRELOG_E_POLICY ?
-        WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA :
-        WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    return rc;
-  }
-  WylFactStoreIdentityValidationTestHook hook = NULL;
-  gpointer hook_data = NULL;
-  G_LOCK (identity_validation_test_hook);
-  hook = identity_validation_test_hook;
-  hook_data = identity_validation_test_hook_data;
-  identity_validation_test_hook = NULL;
-  identity_validation_test_hook_data = NULL;
-  G_UNLOCK (identity_validation_test_hook);
-  if (hook != NULL)
-    hook (store->db, hook_data);
-
-  gint64 audit_tables = 0;
-  rc = query_single_count (store->conn,
-      "SELECT COUNT(*) FROM duckdb_tables() "
-      "WHERE database_name=current_database() AND schema_name='main' "
-      "AND table_name='audit_events' AND NOT internal;", &audit_tables);
-  if (rc != WYRELOG_E_OK) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    return rc;
-  }
-  if (audit_tables != 0) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY;
-    return WYRELOG_E_POLICY;
-  }
-  return validate_identity_values (store, identity, out_result);
-}
-
-static wyrelog_error_t
-validate_identity_snapshot (wyl_fact_store_t *store,
-    const WylFactStoreIdentity *identity, gboolean *out_missing,
-    WylFactStoreIdentityResult *out_result)
-{
-  wyrelog_error_t rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
-  if (rc != WYRELOG_E_OK) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    return rc;
-  }
-
-  rc = validate_identity_unlocked (store, identity, out_missing, out_result);
-  const gchar *cleanup_sql =
-      rc == WYRELOG_E_OK || rc == WYRELOG_E_POLICY ? "COMMIT;" : "ROLLBACK;";
-  if (exec_sql (store->conn, cleanup_sql) != WYRELOG_E_OK) {
-    if (cleanup_sql[0] == 'C')
-      (void) exec_sql (store->conn, "ROLLBACK;");
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
-    return WYRELOG_E_INTERNAL;
-  }
-  return rc;
-}
-
-static gboolean
-identity_fault (WylFactStoreIdentityTestFault fault)
-{
-  return g_atomic_int_compare_and_exchange (&identity_test_fault, fault,
-      WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE);
-}
-
-void
-wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault fault)
-{
-  if (fault >= WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE
-      && fault <= WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT)
-    g_atomic_int_set (&identity_test_fault, fault);
-}
 
 void wyl_fact_store_identity_set_validation_test_hook
     (WylFactStoreIdentityValidationTestHook hook, gpointer user_data)
@@ -839,109 +428,120 @@ void wyl_fact_store_identity_set_validation_test_hook
   G_UNLOCK (identity_validation_test_hook);
 }
 
-static wyrelog_error_t
-insert_identity_value (wyl_fact_store_t *store, const gchar *key,
-    const gchar *value)
+static gboolean
+fact_identity_bind_param (duckdb_prepared_statement statement, idx_t index,
+    const WylFactStoreIdentityCell *cell)
 {
-  duckdb_prepared_statement stmt = NULL;
-  if (duckdb_prepare (store->conn,
-          "INSERT INTO main.fact_store_metadata(key,value) VALUES (?,?);",
-          &stmt) != DuckDBSuccess)
-    return WYRELOG_E_IO;
-  duckdb_state state = duckdb_bind_varchar_length (stmt, 1, key, strlen (key));
-  if (state == DuckDBSuccess)
-    state = duckdb_bind_varchar_length (stmt, 2, value, strlen (value));
-  if (state == DuckDBSuccess)
-    state = duckdb_execute_prepared (stmt, NULL);
-  duckdb_destroy_prepare (&stmt);
-  return state == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+  switch (cell->type) {
+    case WYL_FACT_STORE_IDENTITY_CELL_NULL:
+      return duckdb_bind_null (statement, index) == DuckDBSuccess;
+    case WYL_FACT_STORE_IDENTITY_CELL_INT64:
+      return duckdb_bind_int64 (statement, index, cell->as.int64_value)
+          == DuckDBSuccess;
+    case WYL_FACT_STORE_IDENTITY_CELL_BYTES:
+      return cell->as.bytes.data != NULL
+          && duckdb_bind_varchar_length (statement, index,
+          (const gchar *) cell->as.bytes.data, cell->as.bytes.length)
+          == DuckDBSuccess;
+  }
+  return FALSE;
 }
 
 static wyrelog_error_t
-initialize_identity_unlocked (wyl_fact_store_t *store,
-    const WylFactStoreIdentity *identity,
-    WylFactStoreIdentityResult *out_result)
+fact_identity_execute (gpointer context, const gchar *sql,
+    const WylFactStoreIdentityCell *params, gsize n_params,
+    WylFactStoreIdentityRowFunc row_func, gpointer row_data, guint64 *out_rows)
 {
-  gboolean in_transaction = FALSE;
-  gboolean empty = FALSE;
-  wyrelog_error_t rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
-  if (rc != WYRELOG_E_OK) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    return rc;
+  wyl_fact_store_t *store = context;
+  duckdb_prepared_statement statement = NULL;
+  duckdb_result result = { 0 };
+  if (out_rows != NULL)
+    *out_rows = 0;
+  if (store == NULL || sql == NULL || out_rows == NULL
+      || (n_params != 0 && params == NULL)
+      || duckdb_prepare (store->conn, sql, &statement) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  for (gsize i = 0; i < n_params; i++)
+    if (!fact_identity_bind_param (statement, i + 1, &params[i])) {
+      duckdb_destroy_prepare (&statement);
+      return WYRELOG_E_IO;
+    }
+  if (duckdb_execute_prepared (statement, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&statement);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
   }
-  in_transaction = TRUE;
-  rc = identity_catalog_is_empty (store, &empty);
-  if (rc != WYRELOG_E_OK || !empty) {
-    *out_result = rc == WYRELOG_E_OK ? WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA :
-        WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    rc = rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
-    goto rollback;
-  }
-  rc = exec_sql (store->conn,
-      "CREATE TABLE main.fact_store_metadata("
-      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);");
-  if (rc != WYRELOG_E_OK)
-    goto internal_or_open;
-  if (identity_fault (WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_CREATE))
-    goto injected;
+  duckdb_destroy_prepare (&statement);
 
-  gchar format[32];
-  gchar path_encoding[32];
-  g_snprintf (format, sizeof format, "%" G_GUINT64_FORMAT,
-      identity->format_version);
-  g_snprintf (path_encoding, sizeof path_encoding, "%" G_GUINT64_FORMAT,
-      identity->path_encoding_version);
-  static const gchar *keys[] = {
-    "store_kind", "format_version", "store_uuid", "path_encoding_version",
-    "tenant_id", "graph_id"
-  };
-  const gchar *values[] = {
-    WYL_FACT_STORE_KIND, format, identity->store_uuid, path_encoding,
-    identity->tenant_id, identity->graph_id
-  };
-  const WylFactStoreIdentityTestFault faults[] = {
-    WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_KIND,
-    WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_FORMAT_VERSION,
-    WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_UUID,
-    WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_PATH_ENCODING_VERSION,
-    WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_TENANT_ID,
-    WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_GRAPH_ID,
-  };
-  for (gsize i = 0; i < G_N_ELEMENTS (keys); i++) {
-    rc = insert_identity_value (store, keys[i], values[i]);
-    if (rc != WYRELOG_E_OK)
-      goto internal_or_open;
-    if (identity_fault (faults[i]))
-      goto injected;
+  idx_t n_rows = duckdb_row_count (&result);
+  idx_t n_columns = duckdb_column_count (&result);
+  *out_rows = n_rows;
+  idx_t chunk_count = duckdb_result_chunk_count (result);
+  gboolean keep_going = TRUE;
+  for (idx_t chunk_index = 0;
+      chunk_index < chunk_count && row_func != NULL && keep_going;
+      chunk_index++) {
+    duckdb_data_chunk chunk = duckdb_result_get_chunk (result, chunk_index);
+    if (chunk == NULL) {
+      duckdb_destroy_result (&result);
+      return WYRELOG_E_IO;
+    }
+    idx_t chunk_size = duckdb_data_chunk_get_size (chunk);
+    for (idx_t row = 0; row < chunk_size && keep_going; row++) {
+      WylFactStoreIdentityCell *cells =
+          g_try_new0 (WylFactStoreIdentityCell, n_columns);
+      if (n_columns != 0 && cells == NULL) {
+        duckdb_destroy_data_chunk (&chunk);
+        duckdb_destroy_result (&result);
+        return WYRELOG_E_NOMEM;
+      }
+      gboolean valid = TRUE;
+      for (idx_t column = 0; column < n_columns; column++) {
+        duckdb_vector vector = duckdb_data_chunk_get_vector (chunk, column);
+        uint64_t *validity = duckdb_vector_get_validity (vector);
+        if (validity != NULL && !duckdb_validity_row_is_valid (validity, row)) {
+          cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_NULL;
+          continue;
+        }
+        duckdb_type type = duckdb_column_type (&result, column);
+        if (type == DUCKDB_TYPE_BIGINT) {
+          const gint64 *values = duckdb_vector_get_data (vector);
+          cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_INT64;
+          cells[column].as.int64_value = values[row];
+        } else if (type == DUCKDB_TYPE_VARCHAR || type == DUCKDB_TYPE_BLOB) {
+          duckdb_string_t *values = duckdb_vector_get_data (vector);
+          cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_BYTES;
+          cells[column].as.bytes.data = (const guint8 *)
+              duckdb_string_t_data (&values[row]);
+          cells[column].as.bytes.length = duckdb_string_t_length (values[row]);
+        } else {
+          valid = FALSE;
+          break;
+        }
+      }
+      keep_going = valid && row_func (cells, n_columns, row_data);
+      g_free (cells);
+    }
+    duckdb_destroy_data_chunk (&chunk);
   }
-
-  gboolean missing = FALSE;
-  rc = validate_identity_unlocked (store, identity, &missing, out_result);
-  if (rc != WYRELOG_E_OK || missing)
-    goto rollback;
-  if (identity_fault (WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT))
-    goto injected;
-  rc = exec_sql (store->conn, "COMMIT;");
-  if (rc != WYRELOG_E_OK) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-    goto rollback;
-  }
+  duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
+}
 
-injected:
-  rc = WYRELOG_E_INTERNAL;
-  *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
-  goto rollback;
-
-internal_or_open:
-  *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
-
-rollback:
-  if (in_transaction && exec_sql (store->conn, "ROLLBACK;") != WYRELOG_E_OK) {
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
-    return WYRELOG_E_INTERNAL;
-  }
-  return rc;
+static void
+fact_identity_validation_barrier (gpointer context)
+{
+  wyl_fact_store_t *store = context;
+  WylFactStoreIdentityValidationTestHook hook = NULL;
+  gpointer hook_data = NULL;
+  G_LOCK (identity_validation_test_hook);
+  hook = identity_validation_test_hook;
+  hook_data = identity_validation_test_hook_data;
+  identity_validation_test_hook = NULL;
+  identity_validation_test_hook_data = NULL;
+  G_UNLOCK (identity_validation_test_hook);
+  if (hook != NULL)
+    hook (store->db, hook_data);
 }
 
 wyrelog_error_t
@@ -954,53 +554,36 @@ wyl_fact_store_open_identified (const gchar *path,
   if (out_result != NULL)
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
   if (path == NULL || path[0] == '\0' || out_store == NULL
-      || out_result == NULL || !identity_input_is_valid (identity)
-      || (mode != WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY
-          && mode != WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY))
+      || out_result == NULL
+      || !wyl_fact_store_identity_input_is_valid (identity)
+      || !wyl_fact_store_identity_mode_is_valid (mode))
     return WYRELOG_E_INVALID;
 
-  /*
-   * DuckDB does not serialize two independently opened database objects that
-   * race to create the same new catalog.  Keep identity discovery and the
-   * initialization commit in one process-wide critical section.  The
-   * cross-process writer lease belongs to the later engine-ownership work.
-   */
-  G_LOCK (identity_open);
+  wyl_fact_store_identity_process_guard_lock ();
   wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
   wyrelog_error_t rc = open_duckdb_identified (path,
       mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &self->db);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     g_free (self);
-    G_UNLOCK (identity_open);
+    wyl_fact_store_identity_process_guard_unlock ();
     return rc;
   }
   if (duckdb_connect (self->db, &self->conn) != DuckDBSuccess) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     duckdb_close (&self->db);
     g_free (self);
-    G_UNLOCK (identity_open);
+    wyl_fact_store_identity_process_guard_unlock ();
     return WYRELOG_E_IO;
   }
   g_mutex_init (&self->lock);
-
-  gboolean missing = FALSE;
-  rc = validate_identity_snapshot (self, identity, &missing, out_result);
-  if (rc != WYRELOG_E_OK && missing
-      && mode == WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY) {
-    if (identity->path_encoding_version != WYL_FACT_STORE_PATH_ENCODING_VERSION) {
-      *out_result = WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING;
-      rc = WYRELOG_E_POLICY;
-    } else if (identity->format_version != WYL_FACT_STORE_FORMAT_VERSION) {
-      *out_result = WYL_FACT_STORE_IDENTITY_RESULT_FORMAT;
-      rc = WYRELOG_E_POLICY;
-    } else {
-      rc = initialize_identity_unlocked (self, identity, out_result);
-    }
-  }
+  WylFactStoreIdentityExecutor executor = {
+    self, fact_identity_execute, fact_identity_validation_barrier
+  };
+  rc = wyl_fact_store_identity_execute (&executor, identity, mode, out_result);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_store_close (self);
-    G_UNLOCK (identity_open);
+    wyl_fact_store_identity_process_guard_unlock ();
     return rc;
   }
 
@@ -1010,7 +593,7 @@ wyl_fact_store_open_identified (const gchar *path,
   self->identity_format_version = identity->format_version;
   self->identity_path_encoding_version = identity->path_encoding_version;
   *out_store = self;
-  G_UNLOCK (identity_open);
+  wyl_fact_store_identity_process_guard_unlock ();
   return WYRELOG_E_OK;
 }
 

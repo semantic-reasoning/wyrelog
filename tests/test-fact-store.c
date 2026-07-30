@@ -1584,6 +1584,7 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
       g_build_filename (dir, "extra-column.db", NULL);
   g_autofree gchar *defaulted = g_build_filename (dir, "defaulted.db", NULL);
   g_autofree gchar *collated = g_build_filename (dir, "collated.db", NULL);
+  g_autofree gchar *composite = g_build_filename (dir, "composite.db", NULL);
   g_autofree gchar *embedded_nul =
       g_build_filename (dir, "embedded-nul.db", NULL);
   g_autofree gchar *policy = g_build_filename (dir, "policy.sqlite", NULL);
@@ -1677,6 +1678,15 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
           WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2312;
 
+  if (!create_duckdb_with_sql (composite,
+          "CREATE TABLE fact_store_metadata("
+          "key VARCHAR NOT NULL,value VARCHAR NOT NULL,"
+          "PRIMARY KEY(key,value));" TEST_IDENTITY_ROWS)
+      || !identified_open_is (composite, &test_identity,
+          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+    return 2313;
+
   if (create_duckdb_with_sql (embedded_nul,
           "CREATE TABLE fact_store_metadata("
           "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
@@ -1685,7 +1695,7 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
           "WHERE key='tenant_id';")
       && !identified_open_is (embedded_nul, &test_identity,
           WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2309;
 
   g_autoptr (wyl_policy_store_t) policy_store = NULL;
@@ -1707,6 +1717,7 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
   g_remove (extra_column);
   g_remove (defaulted);
   g_remove (collated);
+  g_remove (composite);
   g_remove (embedded_nul);
   g_remove (policy);
   g_rmdir (dir);

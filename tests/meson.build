@@ -852,6 +852,14 @@ test_fact_schema = executable('test-fact-schema',
 test('fact-schema', test_fact_schema)
 
 if get_option('enable_fact_store').allowed()
+  test_fact_store_identity_core = executable('test-fact-store-identity-core',
+    'test-fact-store-identity-core.c',
+    '../wyrelog/fact/store-identity-private.c',
+    include_directories : include_directories('..', '../wyrelog'),
+    dependencies : [glib_dep, duckdb_dep],
+  )
+  test('fact-store-identity-core', test_fact_store_identity_core)
+
   test_fact_reconcile = executable('test-fact-reconcile',
     'test-fact-reconcile.c',
     include_directories : include_directories('../wyrelog'),
