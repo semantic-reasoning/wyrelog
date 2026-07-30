@@ -33,6 +33,12 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
   return out == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_secure_duckdb_bridge_finalize (WylSecureDuckdbBridge *self)
+{
+  return self == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
 void
 wyl_secure_duckdb_bridge_free (WylSecureDuckdbBridge *self)
 {

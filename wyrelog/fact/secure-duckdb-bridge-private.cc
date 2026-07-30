@@ -16,7 +16,9 @@ struct WylSecureDuckdbBridge
 {
   std::unique_ptr < duckdb::DuckDB > database;
   std::unique_ptr < duckdb::Connection > connection;
+  std::shared_ptr < WylSecureDuckdbHealth > health;
   WylSecureDuckdbMode mode = WYL_SECURE_DUCKDB_INIT_EMPTY;
+  bool finalized = false;
 };
 
 static wyrelog_error_t
@@ -24,19 +26,35 @@ bridge_query_health (WylSecureDuckdbBridge *self)
 {
   if (self == nullptr)
     return WYRELOG_E_POLICY;
+  if (self->health != nullptr) {
+    const auto health = self->health->Status ();
+    if (health != WYRELOG_E_OK)
+      return health;
+  }
+  if (self->finalized)
+    return WYRELOG_E_OK;
   if (self->connection == nullptr
       || std::strcmp (duckdb_library_version (), "v1.5.5") != 0)
     return WYRELOG_E_POLICY;
   try {
     auto result = self->connection->Query ("SELECT 1");
+    if (self->health != nullptr
+        && self->health->Status () != WYRELOG_E_OK)
+      return self->health->Status ();
     return result == nullptr || result->HasError ()? WYRELOG_E_IO
         : WYRELOG_E_OK;
   }
   catch (const std::exception &)
   {
+    if (self->health != nullptr
+        && self->health->Status () != WYRELOG_E_OK)
+      return self->health->Status ();
     return WYRELOG_E_IO;
   }
   catch ( ...) {
+    if (self->health != nullptr
+        && self->health->Status () != WYRELOG_E_OK)
+      return self->health->Status ();
     return WYRELOG_E_INTERNAL;
   }
 }
@@ -86,7 +104,7 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
     *out = nullptr;
   if (out == nullptr || namespace_ == nullptr
       || (mode != WYL_SECURE_DUCKDB_INIT_EMPTY
-          && mode != WYL_SECURE_DUCKDB_VALIDATE_ONLY))
+      && mode != WYL_SECURE_DUCKDB_VALIDATE_ONLY))
     return WYRELOG_E_INVALID;
   if (wyl_fact_artifact_namespace_revalidate (namespace_) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
@@ -95,7 +113,8 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
     bridge->mode = mode;
     duckdb::DBConfig config;
     auto filesystem = wyl_secure_duckdb_filesystem_new (namespace_,
-        mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY);
+            mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY);
+    bridge->health = filesystem->SharedHealth ();
     config.options.access_mode = mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY
         ? duckdb::AccessMode::READ_ONLY : duckdb::AccessMode::READ_WRITE;
     config.options.load_extensions = false;
@@ -118,11 +137,15 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
       auto emptiness =
           bridge->
           connection->Query
-          ("SELECT count(*) FROM duckdb_tables() WHERE NOT internal");
+            ("SELECT count(*) FROM duckdb_tables() WHERE NOT internal");
       if (emptiness == nullptr || emptiness->HasError ()
           || emptiness->RowCount () != 1
-          || emptiness->GetValue (0, 0).ToString () != "0")
+          || emptiness->GetValue (0, 0).ToString () != "0") {
+        const auto storage_health = bridge->health->Status ();
+        if (storage_health != WYRELOG_E_OK)
+          return storage_health;
         return WYRELOG_E_POLICY;
+      }
     }
     const auto health = bridge_query_health (bridge.get ());
     if (health != WYRELOG_E_OK)
@@ -155,8 +178,23 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
   }
 }
 
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_finalize (WylSecureDuckdbBridge *self)
+{
+  if (self == nullptr)
+    return WYRELOG_E_INVALID;
+  if (!self->finalized) {
+    self->connection.reset ();
+    self->database.reset ();
+    self->finalized = true;
+  }
+  return self->health == nullptr ? WYRELOG_E_OK : self->health->Status ();
+}
+
 extern "C" void
 wyl_secure_duckdb_bridge_free (WylSecureDuckdbBridge *self)
 {
+  if (self != nullptr)
+    (void) wyl_secure_duckdb_bridge_finalize (self);
   delete self;
 }
