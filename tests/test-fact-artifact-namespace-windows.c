@@ -34,6 +34,47 @@ identity_matches (const WylFactGraphWinIdentity *a,
       && memcmp (a->file_id, b->file_id, sizeof a->file_id) == 0;
 }
 
+static void
+await_deleted_artifact_name (const gchar *stage, const gchar *path,
+    const wchar_t *wide)
+{
+  const gint64 timeout_us = 5 * G_USEC_PER_SEC;
+  const gint64 deadline = g_get_monotonic_time () + timeout_us;
+  DWORD last_attrs = INVALID_FILE_ATTRIBUTES;
+  DWORD last_error = ERROR_SUCCESS;
+
+  while (TRUE) {
+    gint64 remaining;
+
+    last_attrs = GetFileAttributesW (wide);
+    last_error = last_attrs == INVALID_FILE_ATTRIBUTES
+        ? GetLastError () : ERROR_SUCCESS;
+    if (last_attrs == INVALID_FILE_ATTRIBUTES
+        && last_error == ERROR_FILE_NOT_FOUND)
+      return;
+
+    if (last_attrs == INVALID_FILE_ATTRIBUTES
+        && last_error != ERROR_ACCESS_DENIED
+        && last_error != ERROR_SHARING_VIOLATION
+        && last_error != ERROR_DELETE_PENDING)
+      g_error ("artifact name retirement failed: stage=%s path=%s "
+          "timeout-ms=5000 last-attrs=0x%08lx "
+          "last-observation-error=%lu",
+          stage, path, (unsigned long) last_attrs,
+          (unsigned long) last_error);
+
+    remaining = deadline - g_get_monotonic_time ();
+    if (remaining <= 1)
+      break;
+    g_usleep ((gulong) MIN (remaining - 1,
+            10 * G_TIME_SPAN_MILLISECOND));
+  }
+
+  g_error ("artifact name retirement timed out: stage=%s path=%s "
+      "timeout-ms=5000 last-attrs=0x%08lx last-observation-error=%lu",
+      stage, path, (unsigned long) last_attrs, (unsigned long) last_error);
+}
+
 /* Resolves a name to whatever object it currently addresses.  Observations
  * about the namespace must come from a fresh open, never from a HANDLE the
  * test already holds: a replaced name and a superseded object are exactly
@@ -376,7 +417,19 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
   main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
   wal_wide = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
   g_assert_true (DeleteFileW (wal_wide));
-  g_assert_true (CreateHardLinkW (wal_wide, main_wide, NULL));
+  await_deleted_artifact_name ("hard-link", wal_path, wal_wide);
+  if (!CreateHardLinkW (wal_wide, main_wide, NULL)) {
+    DWORD create_error = GetLastError ();
+    DWORD probe_attrs = GetFileAttributesW (wal_wide);
+    DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
+        ? GetLastError () : ERROR_SUCCESS;
+
+    g_error ("artifact substitution failed: operation=CreateHardLinkW "
+        "stage=hard-link path=%s create-error=%lu "
+        "probe-attrs=0x%08lx probe-error=%lu",
+        wal_path, (unsigned long) create_error, (unsigned long) probe_attrs,
+        (unsigned long) probe_error);
+  }
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
       (sidecar, &session), ==, WYRELOG_E_POLICY);
   wyl_fact_artifact_win_sidecar_binding_free (sidecar);
@@ -395,8 +448,20 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
   /* GitHub Windows runners permit unprivileged symlink creation.  A failure
    * is still a hard test failure: silently skipping would leave the reparse
    * substitution acceptance requirement unproven. */
-  g_assert_true (CreateSymbolicLinkW (wal_wide, main_wide,
-          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE));
+  await_deleted_artifact_name ("reparse", wal_path, wal_wide);
+  if (!CreateSymbolicLinkW (wal_wide, main_wide,
+          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    DWORD create_error = GetLastError ();
+    DWORD probe_attrs = GetFileAttributesW (wal_wide);
+    DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
+        ? GetLastError () : ERROR_SUCCESS;
+
+    g_error ("artifact substitution failed: operation=CreateSymbolicLinkW "
+        "stage=reparse path=%s create-error=%lu "
+        "probe-attrs=0x%08lx probe-error=%lu",
+        wal_path, (unsigned long) create_error, (unsigned long) probe_attrs,
+        (unsigned long) probe_error);
+  }
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_WAL, FALSE, &sidecar), ==, WYRELOG_E_POLICY);
   g_assert_null (sidecar);
