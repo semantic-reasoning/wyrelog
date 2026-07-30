@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #define _POSIX_C_SOURCE 200809L
+/* Apple SDKs hide O_NOFOLLOW under strict POSIX modes unless Darwin
+ * extensions are requested before system headers. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include <duckdb.hpp>
 #include <glib.h>
