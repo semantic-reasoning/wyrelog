@@ -5,7 +5,7 @@ source_filename = libduckdb-src-v1.5.5.zip
 source_hash = 102813201cf8072b8a56b6013978963f3c89202a148fd152d06909477e36fbf8
 lead_directory_missing = true
 patch_directory = duckdb-amalgamated
-diff_files = duckdb-amalgamated/0001-vfs-dynamic-cast.patch, duckdb-amalgamated/0002-windows-amalgamation-compat.patch
+diff_files = duckdb-amalgamated/0001-vfs-dynamic-cast.patch, duckdb-amalgamated/0002-windows-amalgamation-compat.patch, duckdb-amalgamated/0003-test-after-walstart-rendezvous.patch
 
 [provide]
 duckdb-amalgamated = duckdb_dep
