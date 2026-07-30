@@ -9414,6 +9414,7 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
   return 0;
 }
 
+#ifdef WYL_HAS_AUDIT
 /*
  * Unit 2 (#374 gap 1a): a valid service bearer -- the credential's own
  * access token -- is not an active human session, so every management
@@ -9526,6 +9527,7 @@ out:
   service_denial_env_clear (&env);
   return rc;
 }
+#endif
 
 /*
  * Unit 3 (#374 gap 1b): a resolvable human session whose in-memory state is
@@ -10235,11 +10237,13 @@ main (void)
     result = profile_denied_rc;
     goto cleanup;
   }
+#ifdef WYL_HAS_AUDIT
   gint bearer_denied_rc = check_service_management_bearer_denied ();
   if (bearer_denied_rc != 0) {
     result = bearer_denied_rc;
     goto cleanup;
   }
+#endif
   gint inactive_denied_rc = check_service_management_inactive_session_denied ();
   if (inactive_denied_rc != 0) {
     result = inactive_denied_rc;
