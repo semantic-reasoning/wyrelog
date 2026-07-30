@@ -27,11 +27,13 @@ Commit messages should be professional and emoji-free.
 - Before committing:
   1. Verify `git diff` shows only logical changes (no formatting-only changes)
   2. Run full test suite: `meson test -C builddir`
-  3. Run `./tools/gst-indent` on changed C files
+  3. Run `uncrustify -c tools/uncrustify.cfg -l C --replace` on changed C files,
+     then stage only the intended formatting hunks (for example, with `git add -p`)
 
 **Code Style:**
-- GStreamer gst-indent style enforced via pre-commit hook
-- Run `./tools/gst-indent <file>` to format
+- Project uncrustify style enforced via pre-commit hook
+- Run `uncrustify -c tools/uncrustify.cfg -l C --replace <file>` to format, then
+  stage only the intended formatting hunks (for example, with `git add -p`)
 - 2-space indentation, no tabs, 80-char line limit
 - Hook installed automatically by `meson setup`
 
