@@ -2,24 +2,295 @@
 #include "fact/secure-duckdb-bridge-private.h"
 #include "fact/secure-duckdb-filesystem-contract-private.h"
 #include "fact/secure-duckdb-filesystem-private.hpp"
+#include "fact/store-identity-private.h"
 
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <duckdb.hpp>
 
 static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5",
     "secure DuckDB bridge requires DuckDB v1.5.5 headers");
 
+struct LeaseDeleter
+{
+  void
+  operator() (WylFactArtifactMutationLease *lease) const
+  {
+    wyl_fact_artifact_mutation_lease_free (lease);
+  }
+};
+
 struct WylSecureDuckdbBridge
 {
+  std::unique_ptr<WylFactArtifactMutationLease, LeaseDeleter> authority_lease;
   std::unique_ptr < duckdb::DuckDB > database;
   std::unique_ptr < duckdb::Connection > connection;
   std::shared_ptr < WylSecureDuckdbHealth > health;
   WylSecureDuckdbMode mode = WYL_SECURE_DUCKDB_INIT_EMPTY;
   bool finalized = false;
 };
+
+namespace {
+
+  std::mutex pinned_test_hook_mutex;
+  WylFactStorePinnedTestHook pinned_test_hook = nullptr;
+  gpointer pinned_test_hook_data = nullptr;
+  wyrelog_error_t pinned_test_authority_error = WYRELOG_E_OK;
+  wyrelog_error_t pinned_test_finalize_error = WYRELOG_E_OK;
+  wyrelog_error_t pinned_test_r5_error = WYRELOG_E_OK;
+
+  struct PinnedTestControl
+  {
+    WylFactStorePinnedTestHook hook;
+    gpointer data;
+    wyrelog_error_t authority_error;
+    wyrelog_error_t finalize_error;
+    wyrelog_error_t r5_error;
+
+    void
+    Fire (WylFactStorePinnedRendezvous rendezvous) const
+    {
+      if (hook != nullptr)
+        hook (rendezvous, data);
+    }
+  };
+
+  PinnedTestControl
+  take_pinned_test_control ()
+  {
+    std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+    PinnedTestControl result {
+      pinned_test_hook,
+      pinned_test_hook_data,
+      pinned_test_authority_error,
+      pinned_test_finalize_error,
+      pinned_test_r5_error,
+    };
+    pinned_test_hook = nullptr;
+    pinned_test_hook_data = nullptr;
+    pinned_test_authority_error = WYRELOG_E_OK;
+    pinned_test_finalize_error = WYRELOG_E_OK;
+    pinned_test_r5_error = WYRELOG_E_OK;
+    return result;
+  }
+
+  void
+  bridge_populate_bounded (WylSecureDuckdbBridge *bridge,
+      WylFactArtifactNamespace *namespace_, bool read_only,
+      bool allow_temporary_storage)
+  {
+    bridge->mode = read_only ? WYL_SECURE_DUCKDB_VALIDATE_ONLY
+        : WYL_SECURE_DUCKDB_INIT_EMPTY;
+    duckdb::DBConfig config;
+    auto filesystem =
+        wyl_secure_duckdb_filesystem_new (namespace_, read_only,
+        allow_temporary_storage);
+    bridge->health = filesystem->SharedHealth ();
+    bridge->authority_lease.reset (filesystem->DetachLeaseOwnership ());
+    config.options.access_mode = read_only ? duckdb::AccessMode::READ_ONLY
+        : duckdb::AccessMode::READ_WRITE;
+    config.options.load_extensions = false;
+    config.options.use_temporary_directory =
+        !read_only && allow_temporary_storage;
+    if (config.options.use_temporary_directory)
+      config.options.temporary_directory = filesystem->TemporaryDirectory ();
+    config.SetOptionByName ("enable_external_access", duckdb::Value (false));
+    config.SetOptionByName ("allow_community_extensions",
+        duckdb::Value (false));
+    config.SetOptionByName ("autoinstall_known_extensions",
+        duckdb::Value (false));
+    config.SetOptionByName ("autoload_known_extensions",
+        duckdb::Value (false));
+    config.file_system = std::move (filesystem);
+    bridge->database =
+        std::make_unique<duckdb::DuckDB> ("facts.duckdb", &config);
+    bridge->connection =
+        std::make_unique<duckdb::Connection> (*bridge->database);
+  }
+
+  std::unique_ptr<WylSecureDuckdbBridge>
+  bridge_new_bounded (WylFactArtifactNamespace *namespace_, bool read_only)
+  {
+    auto bridge = std::make_unique<WylSecureDuckdbBridge> ();
+    bridge_populate_bounded (bridge.get (), namespace_, read_only, true);
+    return bridge;
+  }
+
+  wyrelog_error_t
+  cpp_identity_execute (gpointer context, const gchar *sql,
+      const WylFactStoreIdentityCell *params, gsize n_params,
+      WylFactStoreIdentityRowFunc row_func, gpointer row_data,
+      guint64 *out_rows)
+  {
+    auto *connection = static_cast<duckdb::Connection *>(context);
+    if (out_rows != nullptr)
+      *out_rows = 0;
+    if (connection == nullptr || sql == nullptr || out_rows == nullptr
+        || (n_params != 0 && params == nullptr))
+      return WYRELOG_E_IO;
+    try {
+      auto statement = connection->Prepare (sql);
+      if (statement == nullptr || statement->HasError ())
+        return WYRELOG_E_IO;
+      duckdb::vector<duckdb::Value> values;
+      values.reserve (n_params);
+      for (gsize i = 0; i < n_params; i++) {
+        switch (params[i].type) {
+          case WYL_FACT_STORE_IDENTITY_CELL_NULL:
+            values.emplace_back (nullptr);
+            break;
+          case WYL_FACT_STORE_IDENTITY_CELL_INT64:
+            values.emplace_back (params[i].as.int64_value);
+            break;
+          case WYL_FACT_STORE_IDENTITY_CELL_BYTES:
+            if (params[i].as.bytes.data == nullptr)
+              return WYRELOG_E_IO;
+            values.emplace_back (duckdb::string (
+                    reinterpret_cast<const char *>(params[i].as.bytes.data),
+                    params[i].as.bytes.length));
+            break;
+          default:
+            return WYRELOG_E_IO;
+        }
+      }
+      auto query = statement->Execute (values, false);
+      if (query == nullptr || query->HasError ()
+          || query->type != duckdb::QueryResultType::MATERIALIZED_RESULT)
+        return WYRELOG_E_IO;
+      auto &result = query->Cast<duckdb::MaterializedQueryResult> ();
+      *out_rows = result.RowCount ();
+      for (duckdb::idx_t row = 0;
+          row < result.RowCount () && row_func != nullptr; row++) {
+        std::vector<WylFactStoreIdentityCell> cells (query->ColumnCount ());
+        std::vector<duckdb::string> bytes (query->ColumnCount ());
+        bool valid = true;
+        for (duckdb::idx_t column = 0; column < query->ColumnCount ();
+            column++) {
+          auto value = result.GetValue (column, row);
+          if (value.IsNull ()) {
+            cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_NULL;
+          } else if (value.type ().id () == duckdb::LogicalTypeId::BIGINT) {
+            cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_INT64;
+            cells[column].as.int64_value = value.GetValue<int64_t> ();
+          } else if (value.type ().id () == duckdb::LogicalTypeId::VARCHAR
+              || value.type ().id () == duckdb::LogicalTypeId::BLOB) {
+            bytes[column] = value.GetValue<duckdb::string> ();
+            cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_BYTES;
+            cells[column].as.bytes.data =
+                reinterpret_cast<const guint8 *>(bytes[column].data ());
+            cells[column].as.bytes.length = bytes[column].size ();
+          } else {
+            valid = false;
+            break;
+          }
+        }
+        if (!valid || !row_func (cells.data (), cells.size (), row_data))
+          break;
+      }
+      return WYRELOG_E_OK;
+    } catch (const std::bad_alloc &)
+    {
+      return WYRELOG_E_NOMEM;
+    } catch (const WylSecureDuckdbAuthorityException &exception)
+    {
+      return exception.error;
+    } catch (const duckdb::PermissionException &)
+    {
+      return WYRELOG_E_POLICY;
+    } catch (const std::exception &)
+    {
+      return WYRELOG_E_IO;
+    } catch (...)
+    {
+      return WYRELOG_E_INTERNAL;
+    }
+  }
+
+  wyrelog_error_t
+  bridge_finalize_storage (WylSecureDuckdbBridge *bridge,
+      bool release_authority)
+  {
+    if (!bridge->finalized) {
+      bridge->connection.reset ();
+      bridge->database.reset ();
+      bridge->finalized = true;
+    }
+    const auto result = bridge->health == nullptr ? WYRELOG_E_OK
+        : bridge->health->Status ();
+    if (release_authority)
+      bridge->authority_lease.reset ();
+    return result;
+  }
+
+  wyrelog_error_t
+  current_exception_error ()
+  {
+    try {
+      throw;
+    } catch (const std::bad_alloc &)
+    {
+      return WYRELOG_E_NOMEM;
+    } catch (const WylSecureDuckdbAuthorityException &exception)
+    {
+      return exception.error;
+    } catch (const duckdb::PermissionException &)
+    {
+      return WYRELOG_E_POLICY;
+    } catch (const duckdb::IOException &)
+    {
+      return WYRELOG_E_IO;
+    } catch (const std::exception &)
+    {
+      return WYRELOG_E_IO;
+    } catch (...)
+    {
+      return WYRELOG_E_INTERNAL;
+    }
+  }
+
+  wyrelog_error_t
+  pinned_authority_revalidate (WylSecureDuckdbBridge *bridge,
+      WylFactArtifactNamespace *namespace_)
+  {
+    if (bridge == nullptr || bridge->authority_lease == nullptr)
+      return WYRELOG_E_INTERNAL;
+    const auto lease_result =
+        wyl_fact_artifact_mutation_lease_revalidate
+          (bridge->authority_lease.get ());
+    if (lease_result != WYRELOG_E_OK)
+      return lease_result;
+    return wyl_fact_artifact_namespace_revalidate (namespace_);
+  }
+
+  struct PinnedLifecycleResults
+  {
+    wyrelog_error_t body = WYRELOG_E_OK;
+    wyrelog_error_t authority = WYRELOG_E_OK;
+    wyrelog_error_t finalize = WYRELOG_E_OK;
+    wyrelog_error_t r5 = WYRELOG_E_OK;
+  };
+
+  wyrelog_error_t
+  reduce_pinned_lifecycle (const PinnedLifecycleResults &results,
+      bool *cleanup_uncertain)
+  {
+    *cleanup_uncertain = true;
+    if (results.finalize != WYRELOG_E_OK)
+      return results.finalize;
+    if (results.r5 != WYRELOG_E_OK)
+      return results.r5;
+    if (results.authority != WYRELOG_E_OK)
+      return results.authority;
+    *cleanup_uncertain = false;
+    return results.body;
+  }
+
+}                               // namespace
 
 static wyrelog_error_t
 bridge_query_health (WylSecureDuckdbBridge *self)
@@ -109,30 +380,8 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
   if (wyl_fact_artifact_namespace_revalidate (namespace_) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
   try {
-    auto bridge = std::make_unique < WylSecureDuckdbBridge > ();
-    bridge->mode = mode;
-    duckdb::DBConfig config;
-    auto filesystem = wyl_secure_duckdb_filesystem_new (namespace_,
-            mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY);
-    bridge->health = filesystem->SharedHealth ();
-    config.options.access_mode = mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY
-        ? duckdb::AccessMode::READ_ONLY : duckdb::AccessMode::READ_WRITE;
-    config.options.load_extensions = false;
-    config.options.use_temporary_directory =
-        mode != WYL_SECURE_DUCKDB_VALIDATE_ONLY;
-    if (config.options.use_temporary_directory)
-      config.options.temporary_directory = filesystem->TemporaryDirectory ();
-    config.SetOptionByName ("enable_external_access", duckdb::Value (false));
-    config.SetOptionByName ("allow_community_extensions",
-        duckdb::Value (false));
-    config.SetOptionByName ("autoinstall_known_extensions",
-        duckdb::Value (false));
-    config.SetOptionByName ("autoload_known_extensions", duckdb::Value (false));
-    config.file_system = std::move (filesystem);
-    bridge->database =
-        std::make_unique < duckdb::DuckDB > ("facts.duckdb", &config);
-    bridge->connection =
-        std::make_unique < duckdb::Connection > (*bridge->database);
+    auto bridge = bridge_new_bounded (namespace_,
+        mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY);
     if (mode == WYL_SECURE_DUCKDB_INIT_EMPTY) {
       auto emptiness =
           bridge->
@@ -140,7 +389,7 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
             ("SELECT count(*) FROM duckdb_tables() WHERE NOT internal");
       if (emptiness == nullptr || emptiness->HasError ()
           || emptiness->RowCount () != 1
-          || emptiness->GetValue (0, 0).ToString () != "0") {
+          || emptiness->GetValue (0, 0).GetValue<int64_t> () != 0) {
         const auto storage_health = bridge->health->Status ();
         if (storage_health != WYRELOG_E_OK)
           return storage_health;
@@ -183,12 +432,142 @@ wyl_secure_duckdb_bridge_finalize (WylSecureDuckdbBridge *self)
 {
   if (self == nullptr)
     return WYRELOG_E_INVALID;
-  if (!self->finalized) {
-    self->connection.reset ();
-    self->database.reset ();
-    self->finalized = true;
+  return bridge_finalize_storage (self, true);
+}
+
+extern "C" void
+wyl_fact_store_pinned_set_test_hook (WylFactStorePinnedTestHook hook,
+    gpointer user_data)
+{
+  std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+  pinned_test_hook = hook;
+  pinned_test_hook_data = user_data;
+}
+
+extern "C" void
+wyl_fact_store_pinned_set_test_stage_errors
+    (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+    wyrelog_error_t r5_error)
+{
+  std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+  pinned_test_authority_error = authority_error;
+  pinned_test_finalize_error = finalize_error;
+  pinned_test_r5_error = r5_error;
+}
+
+extern "C" wyrelog_error_t
+wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
+    const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
+    WylFactStoreIdentityResult *out_result)
+{
+  if (out_result != nullptr)
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  if (namespace_ == nullptr || out_result == nullptr
+      || !wyl_fact_store_identity_input_is_valid (identity)
+      || !wyl_fact_store_identity_mode_is_valid (mode))
+    return WYRELOG_E_INVALID;
+
+  *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
+  wyl_fact_store_identity_process_guard_lock ();
+  struct ProcessGuard
+  {
+    ~ProcessGuard ()
+    {
+      wyl_fact_store_identity_process_guard_unlock ();
+    }
+  } process_guard;
+
+  auto control = take_pinned_test_control ();
+  control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT);
+  const auto r0_result =
+      wyl_fact_artifact_namespace_revalidate (namespace_);
+  if (r0_result != WYRELOG_E_OK)
+    return r0_result;
+
+  std::unique_ptr<WylSecureDuckdbBridge> bridge;
+  try {
+    bridge = std::make_unique<WylSecureDuckdbBridge> ();
+  } catch (...)
+  {
+    return current_exception_error ();
   }
-  return self->health == nullptr ? WYRELOG_E_OK : self->health->Status ();
+
+  PinnedLifecycleResults results;
+  bool populated = false;
+  try {
+    bridge_populate_bounded (bridge.get (), namespace_,
+        mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, false);
+    populated = true;
+  } catch (...)
+  {
+    results.body = current_exception_error ();
+  }
+
+  if (populated) {
+    control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R1_POSTCONSTRUCT);
+    const auto r1_result =
+        pinned_authority_revalidate (bridge.get (), namespace_);
+    if (results.body == WYRELOG_E_OK && r1_result != WYRELOG_E_OK)
+      results.body = r1_result;
+
+    control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R2_PREIDENTITY);
+    const auto r2_result =
+        pinned_authority_revalidate (bridge.get (), namespace_);
+    if (results.body == WYRELOG_E_OK && r2_result != WYRELOG_E_OK)
+      results.body = r2_result;
+
+    if (results.body == WYRELOG_E_OK) {
+      WylFactStoreIdentityExecutor executor = {
+        bridge->connection.get (), cpp_identity_execute, nullptr
+      };
+      results.body =
+          wyl_fact_store_identity_execute (&executor, identity, mode,
+          out_result);
+    }
+  }
+
+  const bool storage_interacted = populated
+      || bridge->authority_lease != nullptr || bridge->health != nullptr;
+  if (!storage_interacted)
+    return results.body;
+
+  control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R3_POSTIDENTITY);
+  results.authority =
+      pinned_authority_revalidate (bridge.get (), namespace_);
+
+  control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R4_PREFINALIZE);
+  const auto r4_result =
+      pinned_authority_revalidate (bridge.get (), namespace_);
+  if (results.authority == WYRELOG_E_OK && r4_result != WYRELOG_E_OK)
+    results.authority = r4_result;
+  if (results.authority == WYRELOG_E_OK
+      && control.authority_error != WYRELOG_E_OK)
+    results.authority = control.authority_error;
+
+  try {
+    results.finalize = bridge_finalize_storage (bridge.get (), false);
+  } catch (...)
+  {
+    results.finalize = current_exception_error ();
+  }
+  if (results.finalize == WYRELOG_E_OK
+      && control.finalize_error != WYRELOG_E_OK)
+    results.finalize = control.finalize_error;
+
+  control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE);
+  results.r5 = pinned_authority_revalidate (bridge.get (), namespace_);
+  if (results.r5 == WYRELOG_E_OK && control.r5_error != WYRELOG_E_OK)
+    results.r5 = control.r5_error;
+
+  bridge->authority_lease.reset ();
+  bridge.reset ();
+
+  bool cleanup_uncertain = false;
+  const auto selected = reduce_pinned_lifecycle (results,
+      &cleanup_uncertain);
+  if (cleanup_uncertain)
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+  return selected;
 }
 
 extern "C" void

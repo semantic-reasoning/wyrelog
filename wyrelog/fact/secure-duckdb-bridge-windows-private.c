@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/secure-duckdb-bridge-private.h"
+#include "fact/store-identity-private.h"
 
 #ifdef G_OS_WIN32
 struct WylSecureDuckdbBridge
@@ -43,5 +44,37 @@ void
 wyl_secure_duckdb_bridge_free (WylSecureDuckdbBridge *self)
 {
   (void) self;
+}
+
+void
+wyl_fact_store_pinned_set_test_hook (WylFactStorePinnedTestHook hook,
+    gpointer user_data)
+{
+  (void) hook;
+  (void) user_data;
+}
+
+void wyl_fact_store_pinned_set_test_stage_errors
+    (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+    wyrelog_error_t r5_error)
+{
+  (void) authority_error;
+  (void) finalize_error;
+  (void) r5_error;
+}
+
+wyrelog_error_t
+wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
+    const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
+    WylFactStoreIdentityResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  if (namespace_ == NULL || out_result == NULL
+      || !wyl_fact_store_identity_input_is_valid (identity)
+      || !wyl_fact_store_identity_mode_is_valid (mode))
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
+  return WYRELOG_E_POLICY;
 }
 #endif

@@ -31,6 +31,16 @@ the retained filesystem health after handle and temporary-root cleanup.
 `wyl_secure_duckdb_bridge_free()` invokes the same cleanup only as a
 best-effort void fallback.
 
+`wyl_fact_store_open_identified_pinned()` is the one-shot identified-store
+consumer of this backend. It brackets bounded construction, typed identity
+SQL, checked finalization, and final namespace validation with the common
+in-process identity guard. Identity values are passed only as prepared
+parameters and returned as exact tagged null, signed-64-bit, or byte cells;
+the adapter never uses display conversion or SQL interpolation. No live
+DuckDB handle escapes. The pathname identity API remains available for legacy
+callers but is not a provisioning authority. #611 and #544 own the later
+retained-pair lifecycle and coordinator consumption.
+
 ## Version upgrade procedure
 
 An upgrade is a security-contract change, not a dependency-only update.

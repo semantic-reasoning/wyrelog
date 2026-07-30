@@ -117,9 +117,9 @@ its platform identity for the rest of that store lifetime: POSIX device/inode,
 or Windows volume serial and 128-bit file ID. Reusing the same configured string
 revalidates the pinned identity; supplying another root or replacing the named
 root fails before graph materialization, replay, or a subsequent resolver
-operation can enter the replacement tree. This does not close the already
-documented same-owner replacement window after a resolver operation hands a
-pathname to DuckDB; #544 still owns that residual on both platforms.
+operation can enter the replacement tree. Security-sensitive provisioning
+must additionally use the pinned fact-store opener described below rather
+than handing DuckDB a pathname.
 
 Tenant and graph directory descriptors remain operation-scoped in #539. Their
 exact identity and named containment are enforced throughout each resolver
@@ -141,18 +141,14 @@ publication to convergence.
 
 #539 and #540 deliberately do not reserve physical identity or provision the
 final DuckDB schema. Policy graph creation materializes only canonical private
-directories. On the first fact write, DuckDB creates `facts.duckdb` at the
-canonical derived path; the caller closes that first handle, hardens and
-revalidates the file through the resolver, and then reopens it. DuckDB currently
-accepts only a pathname, so there is still a
-same-owner replacement window between resolver verification and DuckDB's
-path-based open. Registry metadata cannot exploit that window, but an attacker
-with the service account's filesystem authority can. The identity reservation
-and descriptor-bound provisioning cutover in #544 owns removal of this
-residual risk; `/proc/self/fd` is not treated as a portable substitute. A
-lifetime root-writer lease excludes cooperating daemon writers before policy
-or graph mutation, but deliberately does not claim to close that same-owner
-pathname window.
+directories. The legacy identity-aware API still accepts a pathname and is
+unsuitable for security-sensitive provisioning. The private one-shot pinned
+opener instead accepts an already-imported artifact namespace, installs the
+bounded DuckDB filesystem, validates or initializes the identity, performs
+checked shutdown, and returns no engine or descriptor. It never treats
+`/proc/self/fd` as a portable substitute. #611 owns the retained artifact-pair
+lifecycle and #544 owns the coordinator cutover to that retained authority;
+neither is implemented by the one-shot #594 boundary.
 
 ## Physical graph-store identity
 
@@ -195,9 +191,12 @@ format, path encoding, schema, open, and internal failures. The returned handle
 owns a copy of the expected tuple and rejects fact operations for another
 tenant or graph. Within one process, discovery through initialization commit is
 serialized because separate DuckDB database objects do not provide a safe
-first-creator boundary for a new pathname. The durable cross-process writer
-lease is held for the complete writable-handle lifetime. Descriptor-bound
-long-lived engine ownership remains owned by #544.
+first-creator boundary for a new catalog. The pinned one-shot adapter shares
+that process guard with the pathname adapter and holds the namespace reader
+guard or mutation lease from bounded DuckDB construction through checked
+finalization and final namespace revalidation. It preserves the generic
+single-link (`nlink == 1`) artifact policy; retained two-link staging belongs
+to #611.
 
 The identity-aware API is private in #538. Existing raw fact-store opens and
 lazy legacy scope binding remain unchanged until the production cutover, so

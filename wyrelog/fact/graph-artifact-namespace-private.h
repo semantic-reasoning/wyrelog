@@ -111,6 +111,8 @@ typedef enum
 /* Private, process-local, one-shot fault injection for namespace tests. */
 void wyl_fact_artifact_namespace_set_test_fault
     (WylFactArtifactNamespaceTestFault fault);
+gboolean wyl_fact_artifact_namespace_test_fault_was_consumed
+    (WylFactArtifactNamespaceTestFault fault);
 
 /* Imports a CLOEXEC duplicate of the caller-held canonical facts.duckdb
  * identity.  The caller retains ownership of main_file; construction checks
