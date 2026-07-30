@@ -28,11 +28,14 @@ Three separate finite grammars are asserted:
 3. a `BEFORE_HEADER` abort leaves an incomplete checkpoint whose reopen merges
    both WALs and performs `.wal.recovery -> .wal`.
 
-Each grammar fixes every relevant handle's stable identity, artifact role,
-open flags, I/O, sync, close, and destruction. The `MoveFile()` snapshot fixes
-the complete relevant live-handle set. The old destination handle may remain
-live across replacement, but only its terminal close and destruction may
-follow the move; any post-move I/O fails the test.
+The successful, recovery, and reopen grammars fix every relevant handle's
+stable identity, artifact role, open flags, I/O, sync, close, and destruction.
+The abort-child grammar instead ends at the deliberate `_exit()` process-death
+boundary: the main and checkpoint handles must still be open, and their absent
+close/destruction events are part of the exact evidence. The `MoveFile()`
+snapshot fixes the complete relevant live-handle set. The old destination
+handle may remain live across replacement, but only its terminal close and
+destruction may follow the move; any post-move I/O fails the test.
 
 The abort strings, committed rows, intermediate sidecars, second reopen, and
 final main-only artifact set are also exact assertions. Linux and macOS run
