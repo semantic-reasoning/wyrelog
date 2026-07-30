@@ -33,14 +33,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # DuckDB source vs prebuilt is split deliberately: the amalgamation is
-          # one ~300k-line C++ translation unit pinned to optimization=2 (needed
-          # for the fact/audit runtime envelope, issue #386). Compiling it from
-          # source is heavy, and on the Linux runner it is not reliably cached,
-          # so it was recompiled every run and exhausted the runner mid-build
-          # (SIGTERM / "lost communication"). macOS keeps the from-source build
-          # as the amalgamation-compiles-clean canary; Linux uses the optimized
-          # prebuilt library (same one the Windows job already ships).
+          # The ordinary Linux job uses prebuilt DuckDB for runtime cost. The
+          # dedicated secure-backend step below still builds the pinned source
+          # and executes the real adapter on both supported POSIX runtimes.
           - os: ubuntu-latest
             tpm: enabled
             duckdb: prebuilt
@@ -116,15 +111,15 @@ jobs:
             -Denable_audit=enabled -Dduckdb_source=prebuilt
           meson compile -C build-fact wyrelogd
 
-      - name: Build secure DuckDB bridge from pinned source
-        if: matrix.duckdb == 'subproject'
+      - name: Build secure DuckDB backend from pinned source
         run: |
           meson setup build-secure-duckdb \
             -Denable_fact_store=enabled \
             -Dduckdb_source=subproject \
             -Denable_secure_duckdb_bridge=enabled
           meson test -C build-secure-duckdb secure-duckdb-bridge \
-            secure-duckdb-recording-filesystem --print-errorlogs
+            secure-duckdb-filesystem secure-duckdb-recording-filesystem \
+            --print-errorlogs
           if meson setup build-secure-duckdb-prebuilt \
               -Denable_fact_store=enabled \
               -Dduckdb_source=prebuilt \
