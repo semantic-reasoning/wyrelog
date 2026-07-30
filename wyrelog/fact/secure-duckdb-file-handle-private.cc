@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#ifndef G_OS_WIN32
+/* Darwin's strict POSIX feature set hides st_mtimespec, while its default
+ * extension set exposes the nanosecond stat ABI used below. */
+#if !defined(G_OS_WIN32) && !defined(__APPLE__)
 #define _POSIX_C_SOURCE 200809L
 #endif
 

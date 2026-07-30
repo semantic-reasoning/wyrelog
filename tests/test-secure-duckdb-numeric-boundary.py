@@ -19,6 +19,7 @@ runtime_test = (
 ).read_text(encoding="utf-8")
 
 required_proofs = (
+    "#if !defined(G_OS_WIN32) && !defined(__APPLE__)",
     "SSIZE_MAX",
     "DuckDB idx_t must remain an unsigned integer",
     "POSIX off_t must remain a signed integer",
@@ -29,6 +30,8 @@ required_proofs = (
     "checked_transfer (ssize_t amount, size_t remaining)",
     "checked_size (int64_t size)",
     "checked_stat_size (off_t size)",
+    "status.st_mtimespec.tv_sec",
+    "status.st_mtimespec.tv_nsec",
 )
 for token in required_proofs:
     if token not in handle:
