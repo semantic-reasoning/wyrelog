@@ -39,10 +39,39 @@ required_source = (
     'event->operation == "close" || event->operation == "destroy"',
     "move.live_handles.size (), ==, 2",
     "assert_fixed_wal_rows",
+    "drain_thread_until",
+    "checkpoint concurrency threads did not drain within ",
 )
 for token in required_source:
     if token not in source:
         raise SystemExit(f"fixed WAL lifecycle grammar drifted: {token}")
+
+helper_start = source.index("checkpoint_with_concurrent_commit (")
+helper_end = source.index(
+    "\nstatic void\ndump_handle_lifecycle_if_requested", helper_start
+)
+helper = source[helper_start:helper_end]
+timeout_start = helper.index("if (!commit_finished)")
+timeout_end = helper.index(
+    'g_error ("checkpoint-WAL commit did not finish within 5000 ms");',
+    timeout_start,
+)
+timeout_cleanup = helper[timeout_start:timeout_end]
+required_timeout_cleanup = (
+    "release_after_wal_start (latch);",
+    "commit_drained = drain_thread_until",
+    "checkpoint_drained = drain_thread_until",
+)
+for token in required_timeout_cleanup:
+    if token not in timeout_cleanup:
+        raise SystemExit(
+            f"commit timeout lost bounded thread cleanup: {token}"
+        )
+if timeout_cleanup.index("release_after_wal_start (latch);") > min(
+    timeout_cleanup.index("commit_drained = drain_thread_until"),
+    timeout_cleanup.index("checkpoint_drained = drain_thread_until"),
+):
+    raise SystemExit("commit timeout must release the latch before draining")
 
 named_tests = (
     "duckdb-fixed-wal-successful-checkpoint",
