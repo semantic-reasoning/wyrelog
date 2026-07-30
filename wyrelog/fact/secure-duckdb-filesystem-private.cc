@@ -5,6 +5,7 @@
 #include "fact/secure-duckdb-file-handle-private.hpp"
 #include "fact/secure-duckdb-filesystem-contract-private.h"
 
+#include <algorithm>
 #include <cstdint>
 
 namespace {
@@ -26,7 +27,7 @@ namespace {
   {
     LogicalKind kind;
     WylFactArtifactName artifact;
-      duckdb::string child;
+    duckdb::string child;
   };
 
   [[noreturn]] void io_reject (const duckdb::string & message)
@@ -37,15 +38,15 @@ namespace {
   [[noreturn]] void unsupported (const char *operation)
   {
     throw duckdb::NotImplementedException
-        ("bounded DuckDB filesystem does not support %s", operation);
+      ("bounded DuckDB filesystem does not support %s", operation);
   }
 
   void require_ok (wyrelog_error_t result, const char *operation)
   {
     if (result != WYRELOG_E_OK)
       throw WylSecureDuckdbAuthorityException (result,
-        duckdb::string (operation) + " failed with authority error "
-        + std::to_string (static_cast < int >(result)));
+          duckdb::string (operation) + " failed with authority error "
+          + std::to_string (static_cast < int >(result)));
   }
 
   bool is_missing (wyrelog_error_t result)
@@ -57,46 +58,46 @@ namespace {
   {
     const duckdb::string home (virtual_home);
     return path == home || (path.size () > home.size ()
-        && path.compare (0, home.size (), home) == 0
-        && path[home.size ()] == '/');
+           && path.compare (0, home.size (), home) == 0
+           && path[home.size ()] == '/');
   }
 
   LogicalPath
-      logical_path_for (const duckdb::string & path,
+  logical_path_for (const duckdb::string & path,
       const duckdb::string & temporary_directory)
   {
     if (path == "/proc/self/cgroup")
       return {
-      LogicalKind::HOST_PROBE, WYL_FACT_ARTIFACT_MAIN, {
-      }
+               LogicalKind::HOST_PROBE, WYL_FACT_ARTIFACT_MAIN, {
+               }
       };
     if (is_home_metadata (path))
       return {
-      LogicalKind::HOME_METADATA, WYL_FACT_ARTIFACT_MAIN, {
-      }
+               LogicalKind::HOME_METADATA, WYL_FACT_ARTIFACT_MAIN, {
+               }
       };
     WylFactArtifactName artifact;
     if (wyl_secure_duckdb_artifact_name (path, &artifact)) {
       if (artifact == WYL_FACT_ARTIFACT_MAIN)
         return {
-        LogicalKind::MAIN, artifact, {
-        }
+                 LogicalKind::MAIN, artifact, {
+                 }
         };
       if (artifact == WYL_FACT_ARTIFACT_LOCK)
         return {
-        LogicalKind::LOCK, artifact, {
-        }
+                 LogicalKind::LOCK, artifact, {
+                 }
         };
       return {
-        LogicalKind::SIDECAR, artifact, {
-        }
+               LogicalKind::SIDECAR, artifact, {
+               }
       };
     }
     if (!temporary_directory.empty ()) {
       if (path == temporary_directory)
         return {
-        LogicalKind::TEMP_ROOT, WYL_FACT_ARTIFACT_TEMP, {
-        }
+                 LogicalKind::TEMP_ROOT, WYL_FACT_ARTIFACT_TEMP, {
+                 }
         };
       const duckdb::string prefix = temporary_directory + "/";
       if (path.size () > prefix.size ()
@@ -105,7 +106,8 @@ namespace {
         if (child.find ('/') == duckdb::string::npos
             && child.find ('\\') == duckdb::string::npos)
           return {
-          LogicalKind::TEMP_CHILD, WYL_FACT_ARTIFACT_TEMP, child};
+                   LogicalKind::TEMP_CHILD, WYL_FACT_ARTIFACT_TEMP, child
+          };
       }
     }
     io_reject ("non-canonical logical path: " + path);
@@ -115,8 +117,8 @@ namespace {
       duckdb::FileLockType lock)
   {
     return flags.GetFlagsInternal () == value && flags.Lock () == lock
-        && flags.Compression () == duckdb::FileCompressionType::UNCOMPRESSED
-        && flags.GetCachingMode () == duckdb::CachingMode::NO_CACHING;
+           && flags.Compression () == duckdb::FileCompressionType::UNCOMPRESSED
+           && flags.GetCachingMode () == duckdb::CachingMode::NO_CACHING;
   }
 
   void validate_flags (const LogicalPath & logical, duckdb::FileOpenFlags flags,
@@ -129,11 +131,15 @@ namespace {
           && exact_flags (flags, 2433, duckdb::FileLockType::READ_LOCK))
           || (!read_only
           && (exact_flags (flags, 2307, duckdb::FileLockType::WRITE_LOCK)
-              || exact_flags (flags, 2315, duckdb::FileLockType::WRITE_LOCK)));
+          || exact_flags (flags, 2315, duckdb::FileLockType::WRITE_LOCK)));
     } else if (logical.kind == LogicalKind::SIDECAR) {
       accepted = exact_flags (flags, 129, duckdb::FileLockType::NO_LOCK)
+          || (logical.artifact == WYL_FACT_ARTIFACT_WAL
+          && exact_flags (flags, 1, duckdb::FileLockType::NO_LOCK))
           || (!read_only
-          && exact_flags (flags, 2090, duckdb::FileLockType::WRITE_LOCK));
+          && (exact_flags (flags, 2090, duckdb::FileLockType::WRITE_LOCK)
+          || (logical.artifact == WYL_FACT_ARTIFACT_RECOVERY
+          && exact_flags (flags, 18, duckdb::FileLockType::NO_LOCK))));
     } else if (logical.kind == LogicalKind::TEMP_CHILD) {
       accepted = !read_only
           && exact_flags (flags, 11, duckdb::FileLockType::NO_LOCK);
@@ -147,7 +153,7 @@ namespace {
   }
 
   gboolean
-      collect_temp_child (WylFactDuckdbTempChild *, const gchar * logical_name,
+  collect_temp_child (WylFactDuckdbTempChild *, const gchar * logical_name,
       gpointer user_data)
   {
     auto *names = static_cast < duckdb::vector < duckdb::string > *>(user_data);
@@ -159,10 +165,11 @@ namespace {
 
 WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
     *namespace_, bool read_only)
-    :
-lease_ (nullptr),
-temp_root_ (nullptr),
-read_only_ (read_only)
+  :
+  lease_ (nullptr),
+  temp_root_ (nullptr),
+  read_only_ (read_only),
+  health_ (std::make_shared<WylSecureDuckdbHealth> ())
 {
   if (namespace_ == nullptr
       || wyl_fact_artifact_namespace_revalidate (namespace_) != WYRELOG_E_OK)
@@ -170,13 +177,13 @@ read_only_ (read_only)
   const auto lease_result = read_only_
       ? wyl_fact_artifact_namespace_acquire_reader_guard (namespace_, &lease_)
       : wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,
-      &lease_);
+          &lease_);
   require_ok (lease_result, "acquire storage lease");
   if (!read_only_) {
     WylFactDuckdbTempOrphanEvidence *evidence = nullptr;
     const auto result =
         wyl_fact_duckdb_temp_root_create_with_orphan_evidence (lease_,
-        &temp_root_, &evidence);
+            &temp_root_, &evidence);
     if (evidence != nullptr)
       wyl_fact_duckdb_temp_orphan_evidence_free (evidence);
     if (result != WYRELOG_E_OK) {
@@ -186,50 +193,205 @@ read_only_ (read_only)
     }
     g_autofree gchar *logical =
         wyl_fact_duckdb_temp_root_dup_logical_name (temp_root_);
-    if (logical == nullptr) {
+    const auto cleanup_unpublished_temp_root = [this] () {
+      WylFactDuckdbTempRetireResult retired =
+          WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+      const auto result =
+          wyl_fact_duckdb_temp_root_retire (temp_root_, &retired);
       wyl_fact_duckdb_temp_root_free (temp_root_);
       temp_root_ = nullptr;
       wyl_fact_artifact_mutation_lease_free (lease_);
       lease_ = nullptr;
-      io_reject ("temporary root logical identity");
+      return result != WYRELOG_E_OK ? result
+          : retired == WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED
+          ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+    };
+    if (logical == nullptr) {
+      const auto cleanup = cleanup_unpublished_temp_root ();
+      throw WylSecureDuckdbAuthorityException (
+        cleanup == WYRELOG_E_OK ? WYRELOG_E_NOMEM : cleanup,
+        "temporary root logical identity");
     }
-    temporary_directory_ = logical;
+    try {
+      temporary_directory_ = logical;
+    } catch (...) {
+      const auto cleanup = cleanup_unpublished_temp_root ();
+      if (cleanup != WYRELOG_E_OK)
+        throw WylSecureDuckdbAuthorityException (cleanup,
+            "clean up unpublished temporary root");
+      throw;
+    }
   }
 }
 
 WylSecureDuckdbFileSystem::~WylSecureDuckdbFileSystem ()
 {
-for (auto & entry:temp_children_) {
+  FreeSidecarBindings ();
+  for (auto & entry:temp_children_) {
     WylFactDuckdbTempRetireResult retired =
         WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
-    (void) wyl_fact_duckdb_temp_child_retire (entry.second, &retired);
+    const auto result =
+        wyl_fact_duckdb_temp_child_retire (entry.second, &retired);
+    if (result != WYRELOG_E_OK
+        || retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED)
+      health_->Poison (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result);
     wyl_fact_duckdb_temp_child_free (entry.second);
   }
   temp_children_.clear ();
   if (temp_root_ != nullptr) {
     WylFactDuckdbTempRetireResult retired =
         WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
-    (void) wyl_fact_duckdb_temp_root_retire (temp_root_, &retired);
+    const auto result = wyl_fact_duckdb_temp_root_retire (temp_root_, &retired);
+    if (result != WYRELOG_E_OK
+        || retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED)
+      health_->Poison (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result);
     wyl_fact_duckdb_temp_root_free (temp_root_);
   }
   wyl_fact_artifact_mutation_lease_free (lease_);
 }
 
 void
+WylSecureDuckdbFileSystem::RequireHealthy (const char *operation) const
+{
+  const auto result = health_->Status ();
+  if (result != WYRELOG_E_OK)
+    throw WylSecureDuckdbAuthorityException (result,
+        duckdb::string (operation) + " rejected by poisoned filesystem");
+}
+
+void
+WylSecureDuckdbFileSystem::RequireOk (wyrelog_error_t result,
+    const char *operation) const
+{
+  if (result != WYRELOG_E_OK)
+    PoisonAndReject (result, operation);
+}
+
+[[noreturn]] void
+WylSecureDuckdbFileSystem::PoisonAndReject (wyrelog_error_t result,
+    const char *operation) const
+{
+  health_->Poison (result);
+  throw WylSecureDuckdbAuthorityException (
+    result == WYRELOG_E_OK ? WYRELOG_E_IO : result,
+    duckdb::string (operation) + " failed with authority error "
+    + std::to_string (static_cast<int> (
+      result == WYRELOG_E_OK ? WYRELOG_E_IO : result)));
+}
+
+void
 WylSecureDuckdbFileSystem::RequireLease (const char *operation) const
 {
-  require_ok (wyl_fact_artifact_mutation_lease_revalidate (lease_), operation);
+  RequireHealthy (operation);
+  RequireOk (wyl_fact_artifact_mutation_lease_revalidate (lease_), operation);
+}
+
+void
+WylSecureDuckdbFileSystem::RegisterSidecarHandle (
+  WylSecureDuckdbFileHandle *handle)
+{
+  std::lock_guard<std::mutex> lock (registry_mutex_);
+  live_sidecar_handles_.push_back (handle);
+}
+
+void
+WylSecureDuckdbFileSystem::UnregisterSidecarHandle (
+  WylSecureDuckdbFileHandle *handle)
+{
+  std::lock_guard<std::mutex> lock (registry_mutex_);
+  const auto found = std::find (live_sidecar_handles_.begin (),
+          live_sidecar_handles_.end (), handle);
+  if (found != live_sidecar_handles_.end ())
+    live_sidecar_handles_.erase (found);
+}
+
+void
+WylSecureDuckdbFileSystem::AdoptClosedSidecarBinding (
+  WylFactArtifactName artifact, WylFactArtifactSidecarBinding *binding)
+{
+  if (binding == nullptr)
+    return;
+  try {
+    std::lock_guard<std::mutex> lock (registry_mutex_);
+    sidecar_bindings_.push_back ({ artifact, binding });
+  } catch (...) {
+    wyl_fact_artifact_sidecar_binding_free (binding);
+    health_->Poison (WYRELOG_E_NOMEM);
+    throw;
+  }
+}
+
+WylFactArtifactSidecarBinding *
+WylSecureDuckdbFileSystem::TakeSidecarBinding (WylFactArtifactName artifact)
+{
+  std::lock_guard<std::mutex> lock (registry_mutex_);
+  std::unique_ptr<WylFactArtifactSidecarBinding,
+  decltype (&wyl_fact_artifact_sidecar_binding_free)> selected (
+    nullptr, wyl_fact_artifact_sidecar_binding_free);
+  for (auto *handle : live_sidecar_handles_) {
+    if (handle->sidecar_artifact_ != artifact)
+      continue;
+    auto *binding = handle->DetachSidecarBindingForMove ();
+    if (binding == nullptr)
+      continue;
+    if (selected == nullptr)
+      selected.reset (binding);
+    else
+      wyl_fact_artifact_sidecar_binding_free (binding);
+  }
+  for (auto it = sidecar_bindings_.rbegin ();
+      it != sidecar_bindings_.rend (); ++it) {
+    if (it->artifact != artifact || it->binding == nullptr)
+      continue;
+    if (selected == nullptr) {
+      selected.reset (it->binding);
+      it->binding = nullptr;
+    }
+  }
+  sidecar_bindings_.erase (std::remove_if (sidecar_bindings_.begin (),
+      sidecar_bindings_.end (), [] (const SidecarBindingRecord &record) {
+    return record.binding == nullptr;
+  }), sidecar_bindings_.end ());
+  return selected.release ();
+}
+
+WylFactArtifactSidecarBinding *
+WylSecureDuckdbFileSystem::BindAndCloseExistingSidecar (
+  WylFactArtifactName artifact)
+{
+  WylFactArtifactSidecarBinding *binding = nullptr;
+  int fd = -1;
+  RequireOk (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (
+        lease_, artifact, TRUE, &binding, &fd),
+      "reacquire fixed sidecar binding");
+  const auto close_result =
+      wyl_fact_artifact_sidecar_binding_close (binding, &fd);
+  if (close_result != WYRELOG_E_OK) {
+    wyl_fact_artifact_sidecar_binding_free (binding);
+    PoisonAndReject (close_result, "checked close reacquired sidecar");
+  }
+  return binding;
+}
+
+void
+WylSecureDuckdbFileSystem::FreeSidecarBindings ()
+{
+  std::lock_guard<std::mutex> lock (registry_mutex_);
+  for (auto &record : sidecar_bindings_)
+    wyl_fact_artifact_sidecar_binding_free (record.binding);
+  sidecar_bindings_.clear ();
 }
 
 WylFactDuckdbTempChild *
-WylSecureDuckdbFileSystem::FindTempChild (const duckdb::string & logical_name) const
+WylSecureDuckdbFileSystem::FindTempChild (
+  const duckdb::string & logical_name) const
 {
   const auto found = temp_children_.find (logical_name);
   return found == temp_children_.end ()? nullptr : found->second;
 }
 
 duckdb::unique_ptr < duckdb::FileHandle >
-    WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
+WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
     duckdb::FileOpenFlags flags,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
@@ -254,18 +416,18 @@ duckdb::unique_ptr < duckdb::FileHandle >
       io_reject ("main replacement");
     if (read_only_) {
       WylFactArtifactReaderMainBinding *binding = nullptr;
-      require_ok (wyl_fact_artifact_reader_guard_open_main_binding (lease_,
-              &binding, &fd), "open reader main");
+      RequireOk (wyl_fact_artifact_reader_guard_open_main_binding (lease_,
+          &binding, &fd), "open reader main");
       result =
-          duckdb::make_uniq < WylSecureDuckdbFileHandle > (*this, path, flags,
-          fd, binding);
+          duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_, path,
+          flags, fd, binding);
     } else {
       WylFactArtifactMainBinding *binding = nullptr;
-      require_ok (wyl_fact_artifact_mutation_lease_open_main_binding (lease_,
-              &binding, &fd), "open writer main");
+      RequireOk (wyl_fact_artifact_mutation_lease_open_main_binding (lease_,
+          &binding, &fd), "open writer main");
       result =
-          duckdb::make_uniq < WylSecureDuckdbFileHandle > (*this, path, flags,
-          fd, binding);
+          duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_, path,
+          flags, fd, binding);
     }
   } else if (logical.kind == LogicalKind::SIDECAR) {
     if (read_only_) {
@@ -274,13 +436,13 @@ duckdb::unique_ptr < duckdb::FileHandle >
       WylFactArtifactReaderWalBinding *binding = nullptr;
       const auto open_result =
           wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease_,
-          &binding, &fd);
+              &binding, &fd);
       if (is_missing (open_result) && flags.ReturnNullIfNotExists ())
         return nullptr;
-      require_ok (open_result, "open reader WAL");
+      RequireOk (open_result, "open reader WAL");
       result =
-          duckdb::make_uniq < WylSecureDuckdbFileHandle > (*this, path, flags,
-          fd, binding);
+          duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_, path,
+          flags, fd, binding);
     } else {
       WylFactArtifactSidecarBinding *binding = nullptr;
       wyrelog_error_t open_result = WYRELOG_E_NOT_FOUND;
@@ -290,15 +452,15 @@ duckdb::unique_ptr < duckdb::FileHandle >
         open_result = flags.OpenForWriting ()
             ?
             wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
-            (lease_, logical.artifact, TRUE, &binding, &fd)
+              (lease_, logical.artifact, TRUE, &binding, &fd)
             : wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease_,
-            logical.artifact, FALSE, FALSE, &binding, &fd);
+                logical.artifact, FALSE, FALSE, &binding, &fd);
       }
       if (is_missing (open_result)
           && (flags.CreateFileIfNotExists () || strict_create)) {
         open_result =
             wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease_,
-            logical.artifact, TRUE, flags.OpenForWriting (), &binding, &fd);
+                logical.artifact, TRUE, flags.OpenForWriting (), &binding, &fd);
       }
       if (open_result != WYRELOG_E_OK) {
         if (is_missing (open_result) && flags.ReturnNullIfNotExists ())
@@ -306,11 +468,11 @@ duckdb::unique_ptr < duckdb::FileHandle >
         if (open_result == WYRELOG_E_POLICY
             && flags.ReturnNullIfExists () && strict_create)
           return nullptr;
-        require_ok (open_result, "open writer sidecar");
+        RequireOk (open_result, "open writer sidecar");
       }
       result =
-          duckdb::make_uniq < WylSecureDuckdbFileHandle > (*this, path, flags,
-          fd, binding);
+          duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_, path,
+          flags, fd, logical.artifact, binding);
     }
   } else if (logical.kind == LogicalKind::TEMP_CHILD) {
     if (read_only_)
@@ -325,7 +487,7 @@ duckdb::unique_ptr < duckdb::FileHandle >
       WylFactDuckdbTempChild *created = nullptr;
       open_result =
           wyl_fact_duckdb_temp_root_create_child_binding (temp_root_,
-          logical.child.c_str (), &created, &binding, &fd, &evidence);
+              logical.child.c_str (), &created, &binding, &fd, &evidence);
       if (evidence != nullptr)
         wyl_fact_duckdb_temp_orphan_evidence_free (evidence);
       if (open_result == WYRELOG_E_OK) {
@@ -336,7 +498,7 @@ duckdb::unique_ptr < duckdb::FileHandle >
     } else if (child != nullptr && !strict_create) {
       open_result =
           wyl_fact_duckdb_temp_child_open_binding (child,
-          flags.OpenForWriting (), &binding, &fd);
+              flags.OpenForWriting (), &binding, &fd);
     } else {
       open_result = child == nullptr ? WYRELOG_E_NOT_FOUND : WYRELOG_E_POLICY;
     }
@@ -346,11 +508,11 @@ duckdb::unique_ptr < duckdb::FileHandle >
       if (open_result == WYRELOG_E_POLICY
           && flags.ReturnNullIfExists () && strict_create)
         return nullptr;
-      require_ok (open_result, "open temporary child");
+      RequireOk (open_result, "open temporary child");
     }
     result =
-        duckdb::make_uniq < WylSecureDuckdbFileHandle > (*this, path, flags, fd,
-        binding);
+        duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_, path,
+        flags, fd, binding);
   } else {
     io_reject ("unsupported open");
   }
@@ -376,23 +538,24 @@ WylSecureDuckdbFileSystem::Write (duckdb::FileHandle & handle, void *buffer,
 }
 
 int64_t
-    WylSecureDuckdbFileSystem::Read (duckdb::FileHandle & handle, void *buffer,
+WylSecureDuckdbFileSystem::Read (duckdb::FileHandle & handle, void *buffer,
     int64_t bytes)
 {
   return bounded_handle (handle).ReadSome (buffer, bytes);
 }
 
 int64_t
-    WylSecureDuckdbFileSystem::Write (duckdb::FileHandle & handle, void *buffer,
+WylSecureDuckdbFileSystem::Write (duckdb::FileHandle & handle, void *buffer,
     int64_t bytes)
 {
   return bounded_handle (handle).WriteSome (buffer, bytes);
 }
 
 bool
-WylSecureDuckdbFileSystem::Trim (duckdb::FileHandle &, duckdb::idx_t,
+WylSecureDuckdbFileSystem::Trim (duckdb::FileHandle &handle, duckdb::idx_t,
     duckdb::idx_t)
 {
+  bounded_handle (handle).Revalidate ();
   return false;
 }
 
@@ -403,26 +566,26 @@ WylSecureDuckdbFileSystem::GetFileSize (duckdb::FileHandle & handle)
 }
 
 duckdb::timestamp_t
-    WylSecureDuckdbFileSystem::GetLastModifiedTime (duckdb::FileHandle & handle)
+WylSecureDuckdbFileSystem::GetLastModifiedTime (duckdb::FileHandle & handle)
 {
   return bounded_handle (handle).LastModifiedTime ();
 }
 
 duckdb::string
-    WylSecureDuckdbFileSystem::GetVersionTag (duckdb::FileHandle & handle)
+WylSecureDuckdbFileSystem::GetVersionTag (duckdb::FileHandle & handle)
 {
   return bounded_handle (handle).VersionTag ();
 }
 
 duckdb::FileType
-    WylSecureDuckdbFileSystem::GetFileType (duckdb::FileHandle & handle)
+WylSecureDuckdbFileSystem::GetFileType (duckdb::FileHandle & handle)
 {
   bounded_handle (handle).Revalidate ();
   return duckdb::FileType::FILE_TYPE_REGULAR;
 }
 
 duckdb::FileMetadata
-    WylSecureDuckdbFileSystem::Stats (duckdb::FileHandle & handle)
+WylSecureDuckdbFileSystem::Stats (duckdb::FileHandle & handle)
 {
   duckdb::FileMetadata metadata;
   metadata.file_size = GetFileSize (handle);
@@ -442,11 +605,15 @@ WylSecureDuckdbFileSystem::DirectoryExists (const duckdb::string & path,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
   (void) opener;
+  std::lock_guard<std::mutex> lock (mutex_);
+  RequireHealthy ("directory existence");
   const auto logical = logical_path_for (path, temporary_directory_);
   if (logical.kind == LogicalKind::HOME_METADATA)
     return false;
-  if (logical.kind == LogicalKind::TEMP_ROOT)
+  if (logical.kind == LogicalKind::TEMP_ROOT) {
+    RequireLease ("temporary root existence");
     return temp_root_ != nullptr;
+  }
   io_reject ("directory existence outside temporary authority");
 }
 
@@ -455,9 +622,13 @@ WylSecureDuckdbFileSystem::CreateDirectory (const duckdb::string & path,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
   (void) opener;
+  std::lock_guard<std::mutex> lock (mutex_);
+  RequireHealthy ("directory creation");
   const auto logical = logical_path_for (path, temporary_directory_);
-  if (logical.kind == LogicalKind::TEMP_ROOT && temp_root_ != nullptr)
+  if (logical.kind == LogicalKind::TEMP_ROOT && temp_root_ != nullptr) {
+    RequireLease ("temporary root creation");
     return;
+  }
   io_reject ("directory creation outside temporary authority");
 }
 
@@ -475,16 +646,20 @@ WylSecureDuckdbFileSystem::RemoveDirectory (const duckdb::string & path,
 {
   (void) opener;
   std::lock_guard < std::mutex > lock (mutex_);
+  RequireLease ("pre-temp-root-retire lease revalidation");
   const auto logical = logical_path_for (path, temporary_directory_);
   if (logical.kind != LogicalKind::TEMP_ROOT || temp_root_ == nullptr
       || !temp_children_.empty ())
     io_reject ("temporary root retirement");
   WylFactDuckdbTempRetireResult retired =
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
-  require_ok (wyl_fact_duckdb_temp_root_retire (temp_root_, &retired),
-      "retire temporary root");
-  if (retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED)
-    io_reject ("temporary root retirement result");
+  const auto result = wyl_fact_duckdb_temp_root_retire (temp_root_, &retired);
+  if (result != WYRELOG_E_OK
+      || retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED)
+    PoisonAndReject (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result,
+        retired == WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED
+        ? "temporary root retirement requires reconciliation"
+        : "retire temporary root");
   wyl_fact_duckdb_temp_root_free (temp_root_);
   temp_root_ = nullptr;
 }
@@ -496,15 +671,16 @@ WylSecureDuckdbFileSystem::ListFiles (const duckdb::string & path,
 {
   (void) opener;
   std::lock_guard < std::mutex > lock (mutex_);
+  RequireLease ("pre-temp-list lease revalidation");
   const auto logical = logical_path_for (path, temporary_directory_);
   if (logical.kind == LogicalKind::HOME_METADATA)
     io_reject ("virtual-home listing");
   if (logical.kind != LogicalKind::TEMP_ROOT || temp_root_ == nullptr)
     io_reject ("directory listing outside temporary authority");
   duckdb::vector < duckdb::string > names;
-  require_ok (wyl_fact_duckdb_temp_root_foreach_child (temp_root_,
-          collect_temp_child, &names), "list temporary children");
-for (const auto & name:names)
+  RequireOk (wyl_fact_duckdb_temp_root_foreach_child (temp_root_,
+      collect_temp_child, &names), "list temporary children");
+  for (const auto & name:names)
     callback (name, false);
   return true;
 }
@@ -515,29 +691,64 @@ WylSecureDuckdbFileSystem::MoveFile (const duckdb::string & source,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
   (void) opener;
-  std::lock_guard < std::mutex > lock (mutex_);
+  std::lock_guard<std::mutex> lock (mutex_);
+  RequireLease ("pre-replace lease revalidation");
   if (read_only_)
     io_reject ("rename through validate-only bridge");
   const auto from = logical_path_for (source, temporary_directory_);
   const auto to = logical_path_for (target, temporary_directory_);
-  if (from.kind != LogicalKind::SIDECAR
-      || to.kind != LogicalKind::SIDECAR || from.artifact == to.artifact)
-    io_reject ("rename outside fixed-sidecar authority");
-  WylFactArtifactSidecarBinding *binding = nullptr;
-  int fd = -1;
-  require_ok (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
-      (lease_, from.artifact, TRUE, &binding, &fd), "bind rename source");
-  const auto close_result =
-      wyl_fact_artifact_sidecar_binding_close (binding, &fd);
-  if (close_result != WYRELOG_E_OK) {
-    wyl_fact_artifact_sidecar_binding_free (binding);
-    require_ok (close_result, "close rename source");
+  if (from.kind != LogicalKind::SIDECAR || to.kind != LogicalKind::SIDECAR
+      || (from.artifact != WYL_FACT_ARTIFACT_CHECKPOINT
+      && from.artifact != WYL_FACT_ARTIFACT_RECOVERY)
+      || to.artifact != WYL_FACT_ARTIFACT_WAL)
+    io_reject ("rename outside fixed WAL replacement authority");
+
+  std::unique_ptr<WylFactArtifactSidecarBinding,
+  decltype (&wyl_fact_artifact_sidecar_binding_free)> source_binding (
+    TakeSidecarBinding (from.artifact),
+    wyl_fact_artifact_sidecar_binding_free);
+  if (source_binding == nullptr)
+    source_binding.reset (BindAndCloseExistingSidecar (from.artifact));
+  std::unique_ptr<WylFactArtifactSidecarBinding,
+  decltype (&wyl_fact_artifact_sidecar_binding_free)> destination_binding (
+    TakeSidecarBinding (to.artifact),
+    wyl_fact_artifact_sidecar_binding_free);
+  if (destination_binding == nullptr)
+    destination_binding.reset (BindAndCloseExistingSidecar (to.artifact));
+
+  WylFactArtifactSidecarReplaceResult replacement =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  const auto replace_result =
+      wyl_fact_artifact_sidecar_binding_replace_existing_wal (
+    source_binding.get (), destination_binding.get (), &replacement);
+
+  {
+    std::lock_guard<std::mutex> registry_lock (registry_mutex_);
+    for (auto &record : sidecar_bindings_) {
+      if (record.artifact == from.artifact || record.artifact == to.artifact) {
+        wyl_fact_artifact_sidecar_binding_free (record.binding);
+        record.binding = nullptr;
+      }
+    }
+    sidecar_bindings_.erase (std::remove_if (sidecar_bindings_.begin (),
+        sidecar_bindings_.end (), [] (const SidecarBindingRecord &record) {
+      return record.binding == nullptr;
+    }), sidecar_bindings_.end ());
   }
-  const auto publish_result =
-      wyl_fact_artifact_sidecar_binding_publish_no_replace (binding,
-      to.artifact);
-  wyl_fact_artifact_sidecar_binding_free (binding);
-  require_ok (publish_result, "publish fixed sidecar");
+
+  if (replace_result == WYRELOG_E_OK
+      && replacement
+      == WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE) {
+    RequireLease ("post-replace lease revalidation");
+    return;
+  }
+  if (replacement
+      == WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED)
+    PoisonAndReject (replace_result == WYRELOG_E_OK
+        ? WYRELOG_E_POLICY : replace_result,
+        "fixed WAL replacement requires reconciliation");
+  PoisonAndReject (replace_result == WYRELOG_E_OK
+      ? WYRELOG_E_POLICY : replace_result, "replace fixed WAL sidecar");
 }
 
 bool
@@ -546,6 +757,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
 {
   (void) opener;
   std::lock_guard < std::mutex > lock (mutex_);
+  RequireHealthy ("artifact existence");
   const auto logical = logical_path_for (path, temporary_directory_);
   if (logical.kind == LogicalKind::HOST_PROBE
       || logical.kind == LogicalKind::HOME_METADATA)
@@ -555,8 +767,8 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     return temp_root_ != nullptr;
   if (logical.kind == LogicalKind::TEMP_CHILD) {
     gboolean exists = FALSE;
-    require_ok (wyl_fact_duckdb_temp_root_child_exists (temp_root_,
-            logical.child.c_str (), &exists), "temporary exists");
+    RequireOk (wyl_fact_duckdb_temp_root_child_exists (temp_root_,
+        logical.child.c_str (), &exists), "temporary exists");
     return exists;
   }
   if (logical.kind == LogicalKind::LOCK)
@@ -568,7 +780,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
       WylFactArtifactReaderMainBinding *binding = nullptr;
       result =
           wyl_fact_artifact_reader_guard_open_main_binding (lease_, &binding,
-          &fd);
+              &fd);
       if (result == WYRELOG_E_OK) {
         result = wyl_fact_artifact_reader_main_binding_close (binding, &fd);
         wyl_fact_artifact_reader_main_binding_free (binding);
@@ -577,7 +789,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
       WylFactArtifactMainBinding *binding = nullptr;
       result =
           wyl_fact_artifact_mutation_lease_open_main_binding (lease_, &binding,
-          &fd);
+              &fd);
       if (result == WYRELOG_E_OK) {
         result = wyl_fact_artifact_main_binding_close (binding, &fd);
         wyl_fact_artifact_main_binding_free (binding);
@@ -589,7 +801,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     WylFactArtifactReaderWalBinding *binding = nullptr;
     result =
         wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease_,
-        &binding, &fd);
+            &binding, &fd);
     if (result == WYRELOG_E_OK) {
       result = wyl_fact_artifact_reader_wal_binding_close (binding, &fd);
       wyl_fact_artifact_reader_wal_binding_free (binding);
@@ -598,7 +810,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     WylFactArtifactSidecarBinding *binding = nullptr;
     result =
         wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease_,
-        logical.artifact, FALSE, FALSE, &binding, &fd);
+            logical.artifact, FALSE, FALSE, &binding, &fd);
     if (result == WYRELOG_E_OK) {
       result = wyl_fact_artifact_sidecar_binding_close (binding, &fd);
       wyl_fact_artifact_sidecar_binding_free (binding);
@@ -612,7 +824,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     RequireLease ("post-exists lease revalidation");
     return false;
   }
-  require_ok (result, "artifact exists");
+  RequireOk (result, "artifact exists");
   return false;
 }
 
@@ -621,6 +833,7 @@ WylSecureDuckdbFileSystem::IsPipe (const duckdb::string & path,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
   (void) opener;
+  RequireHealthy ("pipe check");
   const auto logical = logical_path_for (path, temporary_directory_);
   if (logical.kind == LogicalKind::HOST_PROBE
       || logical.kind == LogicalKind::HOME_METADATA)
@@ -641,8 +854,10 @@ WylSecureDuckdbFileSystem::RetireTempChild (const duckdb::string & logical_name)
       wyl_fact_duckdb_temp_child_retire (found->second, &retired);
   if (result != WYRELOG_E_OK
       || retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED)
-    require_ok (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result,
-        "retire temporary child");
+    PoisonAndReject (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result,
+        retired == WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED
+        ? "temporary child retirement requires reconciliation"
+        : "retire temporary child");
   wyl_fact_duckdb_temp_child_free (found->second);
   temp_children_.erase (found);
 }
@@ -653,6 +868,7 @@ WylSecureDuckdbFileSystem::TryRemoveFile (const duckdb::string & path,
 {
   (void) opener;
   std::lock_guard < std::mutex > lock (mutex_);
+  RequireLease ("pre-remove lease revalidation");
   if (read_only_)
     io_reject ("remove through validate-only bridge");
   const auto logical = logical_path_for (path, temporary_directory_);
@@ -664,23 +880,49 @@ WylSecureDuckdbFileSystem::TryRemoveFile (const duckdb::string & path,
   }
   if (logical.kind != LogicalKind::SIDECAR)
     io_reject ("remove outside sidecar authority");
-  WylFactArtifactSidecarBinding *binding = nullptr;
-  int fd = -1;
-  const auto open_result =
-      wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease_,
-      logical.artifact, TRUE, &binding, &fd);
-  if (is_missing (open_result))
-    return false;
-  require_ok (open_result, "bind sidecar retirement");
-  auto result = wyl_fact_artifact_sidecar_binding_close (binding, &fd);
+  std::unique_ptr<WylFactArtifactSidecarBinding,
+  decltype (&wyl_fact_artifact_sidecar_binding_free)> binding (
+    TakeSidecarBinding (logical.artifact),
+    wyl_fact_artifact_sidecar_binding_free);
+  if (binding == nullptr) {
+    WylFactArtifactSidecarBinding *opened = nullptr;
+    int fd = -1;
+    const auto open_result =
+        wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease_,
+            logical.artifact, TRUE, &opened, &fd);
+    if (is_missing (open_result))
+      return false;
+    RequireOk (open_result, "bind sidecar retirement");
+    binding.reset (opened);
+    const auto close_result =
+        wyl_fact_artifact_sidecar_binding_close (binding.get (), &fd);
+    if (close_result != WYRELOG_E_OK)
+      PoisonAndReject (close_result, "checked close retired sidecar");
+  }
   WylFactArtifactSidecarRetireResult retired =
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
-  if (result == WYRELOG_E_OK)
-    result = wyl_fact_artifact_sidecar_binding_retire (binding, &retired);
-  wyl_fact_artifact_sidecar_binding_free (binding);
-  require_ok (result, "retire sidecar");
-  if (retired != WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED)
-    io_reject ("sidecar retirement result");
+  const auto result =
+      wyl_fact_artifact_sidecar_binding_retire (binding.get (), &retired);
+  {
+    std::lock_guard<std::mutex> registry_lock (registry_mutex_);
+    for (auto &record : sidecar_bindings_) {
+      if (record.artifact == logical.artifact) {
+        wyl_fact_artifact_sidecar_binding_free (record.binding);
+        record.binding = nullptr;
+      }
+    }
+    sidecar_bindings_.erase (std::remove_if (sidecar_bindings_.begin (),
+        sidecar_bindings_.end (), [] (const SidecarBindingRecord &record) {
+      return record.binding == nullptr;
+    }), sidecar_bindings_.end ());
+  }
+  if (result != WYRELOG_E_OK
+      || retired != WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED)
+    PoisonAndReject (result == WYRELOG_E_OK ? WYRELOG_E_POLICY : result,
+        retired
+        == WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED
+        ? "sidecar retirement requires reconciliation"
+        : "retire sidecar");
   return true;
 }
 
@@ -696,7 +938,7 @@ void
 WylSecureDuckdbFileSystem::RemoveFiles (const duckdb::vector < duckdb::string >
     &paths, duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
-for (const auto & path:paths)
+  for (const auto & path:paths)
     (void) TryRemoveFile (path, opener);
 }
 
@@ -708,19 +950,22 @@ WylSecureDuckdbFileSystem::FileSync (duckdb::FileHandle & handle)
 
 duckdb::string WylSecureDuckdbFileSystem::GetHomeDirectory ()
 {
+  RequireHealthy ("home directory");
   return virtual_home;
 }
 
 duckdb::string
-    WylSecureDuckdbFileSystem::ExpandPath (const duckdb::string & path)
+WylSecureDuckdbFileSystem::ExpandPath (const duckdb::string & path)
 {
+  RequireHealthy ("path expansion");
   (void) logical_path_for (path, temporary_directory_);
   return path;
 }
 
 duckdb::string
-    WylSecureDuckdbFileSystem::PathSeparator (const duckdb::string & path)
+WylSecureDuckdbFileSystem::PathSeparator (const duckdb::string & path)
 {
+  RequireHealthy ("path separator");
   (void) logical_path_for (path, temporary_directory_);
   return "/";
 }
@@ -728,11 +973,12 @@ duckdb::string
 bool
 WylSecureDuckdbFileSystem::IsPathAbsolute (const duckdb::string & path)
 {
+  RequireHealthy ("absolute path check");
   return is_home_metadata (path);
 }
 
 duckdb::vector < duckdb::OpenFileInfo >
-    WylSecureDuckdbFileSystem::Glob (const duckdb::string &,
+WylSecureDuckdbFileSystem::Glob (const duckdb::string &,
     duckdb::FileOpener *)
 {
   unsupported ("glob");
@@ -759,7 +1005,7 @@ WylSecureDuckdbFileSystem::UnregisterSubSystem (const duckdb::string &)
 }
 
 duckdb::unique_ptr < duckdb::FileSystem >
-    WylSecureDuckdbFileSystem::ExtractSubSystem (const duckdb::string &)
+WylSecureDuckdbFileSystem::ExtractSubSystem (const duckdb::string &)
 {
   unsupported ("subsystems");
 }
@@ -773,11 +1019,12 @@ duckdb::vector < duckdb::string > WylSecureDuckdbFileSystem::ListSubSystems ()
 bool
 WylSecureDuckdbFileSystem::CanHandleFile (const duckdb::string & path)
 {
+  RequireHealthy ("file handling check");
   try {
     const auto logical = logical_path_for (path, temporary_directory_);
     return logical.kind != LogicalKind::HOME_METADATA
-        && logical.kind != LogicalKind::HOST_PROBE
-        && logical.kind != LogicalKind::LOCK;
+           && logical.kind != LogicalKind::HOST_PROBE
+           && logical.kind != LogicalKind::LOCK;
   }
   catch (const duckdb::Exception &)
   {
@@ -799,7 +1046,7 @@ WylSecureDuckdbFileSystem::Reset (duckdb::FileHandle & handle)
 }
 
 duckdb::idx_t
-    WylSecureDuckdbFileSystem::SeekPosition (duckdb::FileHandle & handle)
+WylSecureDuckdbFileSystem::SeekPosition (duckdb::FileHandle & handle)
 {
   return bounded_handle (handle).SeekPosition ();
 }
@@ -824,7 +1071,7 @@ WylSecureDuckdbFileSystem::OnDiskFile (duckdb::FileHandle & handle)
 }
 
 duckdb::unique_ptr < duckdb::FileHandle >
-    WylSecureDuckdbFileSystem::OpenCompressedFile (duckdb::QueryContext,
+WylSecureDuckdbFileSystem::OpenCompressedFile (duckdb::QueryContext,
     duckdb::unique_ptr < duckdb::FileHandle >, bool)
 {
   unsupported ("compressed files");
@@ -864,16 +1111,17 @@ WylSecureDuckdbFileSystem::IsDisabledForPath (const duckdb::string & path)
 }
 
 duckdb::string
-    WylSecureDuckdbFileSystem::CanonicalizePath (const duckdb::string & path,
+WylSecureDuckdbFileSystem::CanonicalizePath (const duckdb::string & path,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
   (void) opener;
+  RequireHealthy ("canonical path");
   (void) logical_path_for (path, temporary_directory_);
   return path;
 }
 
 duckdb::unique_ptr < duckdb::FileHandle >
-    WylSecureDuckdbFileSystem::
+WylSecureDuckdbFileSystem::
 OpenFileExtended (const duckdb::OpenFileInfo & info,
     duckdb::FileOpenFlags flags,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
@@ -893,9 +1141,9 @@ WylSecureDuckdbFileSystem::ListFilesExtended (const duckdb::string & directory,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
 {
   return ListFiles (directory,[&callback] (const duckdb::string & path, bool) {
-        duckdb::OpenFileInfo info (path);
-        callback (info);
-      }, opener.get ());
+    duckdb::OpenFileInfo info (path);
+    callback (info);
+  }, opener.get ());
 }
 
 bool
@@ -905,7 +1153,7 @@ WylSecureDuckdbFileSystem::SupportsListFilesExtended () const
 }
 
 duckdb::unique_ptr < duckdb::MultiFileList >
-    WylSecureDuckdbFileSystem::GlobFilesExtended (const duckdb::string &,
+WylSecureDuckdbFileSystem::GlobFilesExtended (const duckdb::string &,
     const duckdb::FileGlobInput &, duckdb::optional_ptr < duckdb::FileOpener >)
 {
   unsupported ("extended glob");
@@ -922,5 +1170,5 @@ wyl_secure_duckdb_filesystem_new (WylFactArtifactNamespace *namespace_,
     bool read_only)
 {
   return duckdb::make_uniq < WylSecureDuckdbFileSystem > (namespace_,
-      read_only);
+         read_only);
 }

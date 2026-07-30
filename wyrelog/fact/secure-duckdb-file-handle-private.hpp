@@ -2,9 +2,23 @@
 #pragma once
 
 #include <duckdb.hpp>
+#include <memory>
 #include <mutex>
 
 #include "fact/graph-artifact-namespace-private.h"
+
+class WylSecureDuckdbFileSystem;
+
+class WylSecureDuckdbHealth final
+{
+public:
+  wyrelog_error_t Status () const;
+  void Poison (wyrelog_error_t);
+
+private:
+  mutable std::mutex mutex_;
+  wyrelog_error_t error_ = WYRELOG_E_OK;
+};
 
 enum class WylSecureDuckdbBindingKind
 {
@@ -19,21 +33,27 @@ enum class WylSecureDuckdbBindingKind
  * binding.  This class never closes a raw descriptor behind the provider:
  * every I/O boundary and the terminal close validate the actual descriptor
  * number through the authority that issued it. */
-class WylSecureDuckdbFileHandle final:public
-    duckdb::FileHandle
+class WylSecureDuckdbFileHandle final: public
+duckdb::FileHandle
 {
 public:
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
+      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
       duckdb::FileOpenFlags, int, WylFactArtifactMainBinding *);
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
+      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
       duckdb::FileOpenFlags, int, WylFactArtifactReaderMainBinding *);
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
-      duckdb::FileOpenFlags, int, WylFactArtifactSidecarBinding *);
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
+      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
+      duckdb::FileOpenFlags, int, WylFactArtifactName,
+      WylFactArtifactSidecarBinding *);
+  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
+      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
       duckdb::FileOpenFlags, int, WylFactArtifactReaderWalBinding *);
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
+      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
       duckdb::FileOpenFlags, int, WylFactDuckdbTempChildBinding *);
-   ~
+  ~
   WylSecureDuckdbFileHandle ()
   override;
   WylSecureDuckdbFileHandle (const WylSecureDuckdbFileHandle &) = delete;
@@ -69,7 +89,10 @@ public:
   override;
 
 private:
-  WylSecureDuckdbFileHandle (duckdb::FileSystem &, const duckdb::string &,
+  friend class WylSecureDuckdbFileSystem;
+
+  WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &,
+      const std::shared_ptr<WylSecureDuckdbHealth> &, const duckdb::string &,
       duckdb::FileOpenFlags, int, WylSecureDuckdbBindingKind);
   wyrelog_error_t
   RevalidateFd () const;
@@ -79,9 +102,21 @@ private:
   CheckedClose ();
   void
   FreeBinding ();
+  void
+  RequireHealthy () const;
+  [[noreturn]] void
+  PoisonAndReject (wyrelog_error_t, const char *) const;
+  WylFactArtifactSidecarBinding *
+  DetachSidecarBindingForMove ();
 
+  WylSecureDuckdbFileSystem *
+      owner_;
+  std::shared_ptr<WylSecureDuckdbHealth>
+  health_;
   WylSecureDuckdbBindingKind
       kind_;
+  WylFactArtifactName
+      sidecar_artifact_ = WYL_FACT_ARTIFACT_MAIN;
   int
       fd_;
   union
@@ -98,7 +133,7 @@ private:
         temp_child;
   } binding_;
   mutable
-      std::mutex
+  std::mutex
       mutex_;
   duckdb::idx_t
       offset_;

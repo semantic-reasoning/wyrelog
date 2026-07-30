@@ -4,6 +4,7 @@
 #endif
 
 #include "fact/secure-duckdb-file-handle-private.hpp"
+#include "fact/secure-duckdb-filesystem-private.hpp"
 
 #include <cerrno>
 #include <climits>
@@ -52,10 +53,11 @@ namespace {
     const auto offset = static_cast < uint64_t > (location);
     if (bytes
         > static_cast < uint64_t > (std::numeric_limits <
-            off_t >::max ()) - offset)
+        off_t >::max ()) - offset)
       io_reject ("numeric endpoint");
     return {
-    static_cast < size_t >(bytes), static_cast < off_t > (offset)};
+             static_cast < size_t >(bytes), static_cast < off_t > (offset)
+    };
   }
 
   off_t checked_size (int64_t size)
@@ -79,61 +81,108 @@ namespace {
     constexpr int64_t scale = 1000000;
     if (nanoseconds < 0 || nanoseconds >= 1000000000L
         || seconds > (std::numeric_limits < int64_t >::max ()
-            - nanoseconds / 1000) / scale
+        - nanoseconds / 1000) / scale
         || seconds < std::numeric_limits < int64_t >::min () / scale)
       io_reject ("timestamp conversion");
     return seconds * scale + nanoseconds / 1000;
   }
 
-  void require_ok (wyrelog_error_t result, const char *operation)
-  {
-    if (result != WYRELOG_E_OK)
-      io_reject (operation);
-  }
-
 }                               // namespace
 
-WylSecureDuckdbFileHandle::
-WylSecureDuckdbFileHandle (duckdb::FileSystem & filesystem,
-    const duckdb::string & path, duckdb::FileOpenFlags flags, int fd,
-    WylSecureDuckdbBindingKind kind)
-    :
-duckdb::FileHandle (filesystem, path, flags),
-kind_ (kind),
-fd_ (fd),
-    binding_
+wyrelog_error_t
+WylSecureDuckdbHealth::Status () const
 {
-}, offset_ (0)
+  std::lock_guard<std::mutex> lock (mutex_);
+  return error_;
+}
+
+void
+WylSecureDuckdbHealth::Poison (wyrelog_error_t error)
+{
+  std::lock_guard<std::mutex> lock (mutex_);
+  if (error_ == WYRELOG_E_OK)
+    error_ = error == WYRELOG_E_OK ? WYRELOG_E_IO : error;
+}
+
+WylSecureDuckdbFileHandle::
+WylSecureDuckdbFileHandle (WylSecureDuckdbFileSystem &filesystem,
+    const std::shared_ptr<WylSecureDuckdbHealth> &health,
+    const duckdb::string &path, duckdb::FileOpenFlags flags, int fd,
+    WylSecureDuckdbBindingKind kind)
+  :
+  duckdb::FileHandle (filesystem, path, flags),
+  owner_ (&filesystem),
+  health_ (health),
+  kind_ (kind),
+  fd_ (fd),
+  binding_
+  {
+  }, offset_ (0)
 {
 }
 
 #define WYL_HANDLE_CONSTRUCTOR(type, member, kind_value)                       \
-  WylSecureDuckdbFileHandle::WylSecureDuckdbFileHandle (                      \
-      duckdb::FileSystem &filesystem, const duckdb::string &path,              \
-      duckdb::FileOpenFlags flags, int fd, type *binding)                      \
-      : WylSecureDuckdbFileHandle (filesystem, path, flags, fd, kind_value)    \
-  {                                                                            \
-    binding_.member = binding;                                                  \
-    if (fd_ < 0 || binding == nullptr || RevalidateFd () != WYRELOG_E_OK) {     \
-      if (fd_ >= 0 && binding != nullptr)                                       \
-        (void) CheckedClose ();                                                 \
-      FreeBinding ();                                                           \
-      io_reject ("new binding");                                                \
-    }                                                                           \
-  }
+        WylSecureDuckdbFileHandle::WylSecureDuckdbFileHandle (                      \
+          WylSecureDuckdbFileSystem &filesystem,                                   \
+          const std::shared_ptr<WylSecureDuckdbHealth> &health,                    \
+          const duckdb::string &path, duckdb::FileOpenFlags flags, int fd,         \
+          type *binding)                                                           \
+          : WylSecureDuckdbFileHandle (filesystem, health, path, flags, fd,        \
+              kind_value)                                                          \
+        {                                                                            \
+          binding_.member = binding;                                                  \
+          const auto validation = fd_ < 0 || binding == nullptr                       \
+        ? WYRELOG_E_POLICY : RevalidateFd ();                                   \
+          if (validation != WYRELOG_E_OK) {                                           \
+            health_->Poison (validation);                                              \
+            if (fd_ >= 0 && binding != nullptr)                                       \
+            (void) CheckedClose ();                                                 \
+            FreeBinding ();                                                           \
+            io_reject ("new binding");                                                \
+          }                                                                           \
+        }
 
 WYL_HANDLE_CONSTRUCTOR (WylFactArtifactMainBinding, writer_main,
     WylSecureDuckdbBindingKind::WRITER_MAIN)
-    WYL_HANDLE_CONSTRUCTOR (WylFactArtifactReaderMainBinding, reader_main,
+WYL_HANDLE_CONSTRUCTOR (WylFactArtifactReaderMainBinding, reader_main,
     WylSecureDuckdbBindingKind::READER_MAIN)
-    WYL_HANDLE_CONSTRUCTOR (WylFactArtifactSidecarBinding, writer_sidecar,
-    WylSecureDuckdbBindingKind::WRITER_SIDECAR)
-    WYL_HANDLE_CONSTRUCTOR (WylFactArtifactReaderWalBinding, reader_wal,
+WYL_HANDLE_CONSTRUCTOR (WylFactArtifactReaderWalBinding, reader_wal,
     WylSecureDuckdbBindingKind::READER_WAL)
-    WYL_HANDLE_CONSTRUCTOR (WylFactDuckdbTempChildBinding, temp_child,
+WYL_HANDLE_CONSTRUCTOR (WylFactDuckdbTempChildBinding, temp_child,
     WylSecureDuckdbBindingKind::TEMP_CHILD)
 #undef WYL_HANDLE_CONSTRUCTOR
-    WylSecureDuckdbFileHandle::~WylSecureDuckdbFileHandle ()
+
+WylSecureDuckdbFileHandle::WylSecureDuckdbFileHandle (
+  WylSecureDuckdbFileSystem &filesystem,
+  const std::shared_ptr<WylSecureDuckdbHealth> &health,
+  const duckdb::string &path, duckdb::FileOpenFlags flags, int fd,
+  WylFactArtifactName artifact, WylFactArtifactSidecarBinding *binding)
+  : WylSecureDuckdbFileHandle (filesystem, health, path, flags, fd,
+      WylSecureDuckdbBindingKind::WRITER_SIDECAR)
+{
+  sidecar_artifact_ = artifact;
+  binding_.writer_sidecar = binding;
+  const auto validation = fd_ < 0 || binding == nullptr
+      ? WYRELOG_E_POLICY : RevalidateFd ();
+  if (validation != WYRELOG_E_OK) {
+    health_->Poison (validation);
+    if (fd_ >= 0 && binding != nullptr)
+      (void) CheckedClose ();
+    FreeBinding ();
+    io_reject ("new binding");
+  }
+  try {
+    owner_->RegisterSidecarHandle (this);
+  } catch (...) {
+    const auto close_result = CheckedClose ();
+    FreeBinding ();
+    health_->Poison (close_result == WYRELOG_E_OK
+        ? WYRELOG_E_NOMEM : close_result);
+    throw;
+  }
+}
+
+WylSecureDuckdbFileHandle::~WylSecureDuckdbFileHandle ()
 {
   try {
     Close ();
@@ -141,6 +190,8 @@ WYL_HANDLE_CONSTRUCTOR (WylFactArtifactMainBinding, writer_main,
     /* A provider that cannot prove descriptor identity deliberately leaves it
      * open; a destructor must not raw-close a possibly reused foreign fd. */
   }
+  if (kind_ == WylSecureDuckdbBindingKind::WRITER_SIDECAR)
+    owner_->UnregisterSidecarHandle (this);
   FreeBinding ();
 }
 
@@ -150,23 +201,23 @@ WylSecureDuckdbFileHandle::RevalidateFd () const
   switch (kind_) {
     case WylSecureDuckdbBindingKind::WRITER_MAIN:
       return wyl_fact_artifact_main_binding_revalidate_fd (binding_.writer_main,
-          fd_);
+                 fd_);
     case WylSecureDuckdbBindingKind::READER_MAIN:
       return
-          wyl_fact_artifact_reader_main_binding_revalidate_fd
+        wyl_fact_artifact_reader_main_binding_revalidate_fd
           (binding_.reader_main, fd_);
     case WylSecureDuckdbBindingKind::WRITER_SIDECAR:
       return
-          wyl_fact_artifact_sidecar_binding_revalidate_fd
+        wyl_fact_artifact_sidecar_binding_revalidate_fd
           (binding_.writer_sidecar, fd_);
     case WylSecureDuckdbBindingKind::READER_WAL:
       return
-          wyl_fact_artifact_reader_wal_binding_revalidate_fd
+        wyl_fact_artifact_reader_wal_binding_revalidate_fd
           (binding_.reader_wal, fd_);
     case WylSecureDuckdbBindingKind::TEMP_CHILD:
       return
-          wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding_.temp_child,
-          fd_);
+        wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding_.temp_child,
+            fd_);
   }
   return WYRELOG_E_POLICY;
 }
@@ -179,16 +230,16 @@ WylSecureDuckdbFileHandle::CheckedClose ()
       return wyl_fact_artifact_main_binding_close (binding_.writer_main, &fd_);
     case WylSecureDuckdbBindingKind::READER_MAIN:
       return wyl_fact_artifact_reader_main_binding_close (binding_.reader_main,
-          &fd_);
+                 &fd_);
     case WylSecureDuckdbBindingKind::WRITER_SIDECAR:
       return wyl_fact_artifact_sidecar_binding_close (binding_.writer_sidecar,
-          &fd_);
+                 &fd_);
     case WylSecureDuckdbBindingKind::READER_WAL:
       return wyl_fact_artifact_reader_wal_binding_close (binding_.reader_wal,
-          &fd_);
+                 &fd_);
     case WylSecureDuckdbBindingKind::TEMP_CHILD:
       return wyl_fact_duckdb_temp_child_binding_close (binding_.temp_child,
-          &fd_);
+                 &fd_);
   }
   return WYRELOG_E_POLICY;
 }
@@ -230,9 +281,12 @@ WylSecureDuckdbFileHandle::Revalidate () const
 void
 WylSecureDuckdbFileHandle::RevalidateUnlocked () const
 {
+  RequireHealthy ();
   if (fd_ < 0)
     io_reject ("closed handle");
-  require_ok (RevalidateFd (), "working descriptor identity");
+  const auto result = RevalidateFd ();
+  if (result != WYRELOG_E_OK)
+    PoisonAndReject (result, "working descriptor identity");
 }
 
 void
@@ -254,7 +308,7 @@ WylSecureDuckdbFileHandle::ReadAt (void *buffer, int64_t byte_count,
     const ssize_t amount =
         pread (fd_, cursor + done, range.bytes - done, offset);
     if (amount <= 0)
-      io_reject ("positioned read");
+      PoisonAndReject (WYRELOG_E_IO, "positioned read");
     done += static_cast < size_t >(amount);
   }
   RevalidateUnlocked ();
@@ -279,7 +333,7 @@ WylSecureDuckdbFileHandle::WriteAt (void *buffer, int64_t byte_count,
     const ssize_t amount =
         pwrite (fd_, cursor + done, range.bytes - done, offset);
     if (amount <= 0)
-      io_reject ("positioned write");
+      PoisonAndReject (WYRELOG_E_IO, "positioned write");
     done += static_cast < size_t >(amount);
   }
   RevalidateUnlocked ();
@@ -297,7 +351,7 @@ WylSecureDuckdbFileHandle::ReadSome (void *buffer, int64_t byte_count)
   RevalidateUnlocked ();
   const ssize_t amount = pread (fd_, buffer, range.bytes, range.offset);
   if (amount < 0)
-    io_reject ("read");
+    PoisonAndReject (WYRELOG_E_IO, "read");
   RevalidateUnlocked ();
   offset_ += static_cast < duckdb::idx_t > (amount);
   return static_cast < int64_t > (amount);
@@ -315,7 +369,7 @@ WylSecureDuckdbFileHandle::WriteSome (void *buffer, int64_t byte_count)
   RevalidateUnlocked ();
   const ssize_t amount = pwrite (fd_, buffer, range.bytes, range.offset);
   if (amount < 0)
-    io_reject ("write");
+    PoisonAndReject (WYRELOG_E_IO, "write");
   RevalidateUnlocked ();
   offset_ += static_cast < duckdb::idx_t > (amount);
   return static_cast < int64_t > (amount);
@@ -329,7 +383,7 @@ WylSecureDuckdbFileHandle::Sync ()
     io_reject ("sync without write flag");
   RevalidateUnlocked ();
   if (fsync (fd_) != 0)
-    io_reject ("sync");
+    PoisonAndReject (WYRELOG_E_IO, "sync");
   RevalidateUnlocked ();
 }
 
@@ -342,7 +396,7 @@ WylSecureDuckdbFileHandle::TruncateTo (int64_t size)
   const off_t checked = checked_size (size);
   RevalidateUnlocked ();
   if (ftruncate (fd_, checked) != 0)
-    io_reject ("truncate");
+    PoisonAndReject (WYRELOG_E_IO, "truncate");
   RevalidateUnlocked ();
 }
 
@@ -369,7 +423,7 @@ WylSecureDuckdbFileHandle::Size () const
   RevalidateUnlocked ();
   struct stat status;
   if (fstat (fd_, &status) != 0)
-    io_reject ("file size");
+    PoisonAndReject (WYRELOG_E_IO, "file size");
   RevalidateUnlocked ();
   return checked_stat_size (status.st_size);
 }
@@ -381,14 +435,14 @@ duckdb::timestamp_t WylSecureDuckdbFileHandle::LastModifiedTime ()const
   struct stat
       status;
   if (fstat (fd_, &status) != 0)
-    io_reject ("last modified time");
+    PoisonAndReject (WYRELOG_E_IO, "last modified time");
   RevalidateUnlocked ();
 #if defined(__APPLE__)
   return duckdb::timestamp_t (checked_timestamp (status.st_mtimespec.tv_sec,
-          status.st_mtimespec.tv_nsec));
+             status.st_mtimespec.tv_nsec));
 #else
   return duckdb::timestamp_t (checked_timestamp (status.st_mtim.tv_sec,
-          status.st_mtim.tv_nsec));
+             status.st_mtim.tv_nsec));
 #endif
 }
 
@@ -399,21 +453,64 @@ duckdb::string WylSecureDuckdbFileHandle::VersionTag ()const
   struct stat
       status;
   if (fstat (fd_, &status) != 0)
-    io_reject ("version tag");
+    PoisonAndReject (WYRELOG_E_IO, "version tag");
   RevalidateUnlocked ();
   const
-      auto
+  auto
       size = checked_stat_size (status.st_size);
   return std::to_string (static_cast < uint64_t > (status.st_dev)) + ":"
-      + std::to_string (static_cast < uint64_t > (status.st_ino)) + ":"
-      + std::to_string (size);
+         + std::to_string (static_cast < uint64_t > (status.st_ino)) + ":"
+         + std::to_string (size);
 }
 
 void
 WylSecureDuckdbFileHandle::Close ()
 {
-  std::lock_guard < std::mutex > lock (mutex_);
-  if (fd_ < 0)
-    return;
-  require_ok (CheckedClose (), "checked close");
+  WylFactArtifactSidecarBinding *closed_sidecar = nullptr;
+  {
+    std::lock_guard<std::mutex> lock (mutex_);
+    if (fd_ < 0)
+      return;
+    const auto result = CheckedClose ();
+    if (result != WYRELOG_E_OK)
+      PoisonAndReject (result, "checked close");
+    if (kind_ == WylSecureDuckdbBindingKind::WRITER_SIDECAR) {
+      closed_sidecar = binding_.writer_sidecar;
+      binding_.writer_sidecar = nullptr;
+    }
+  }
+  if (closed_sidecar != nullptr)
+    owner_->AdoptClosedSidecarBinding (sidecar_artifact_, closed_sidecar);
+}
+
+void
+WylSecureDuckdbFileHandle::RequireHealthy () const
+{
+  if (health_->Status () != WYRELOG_E_OK)
+    io_reject ("poisoned filesystem");
+}
+
+[[noreturn]] void
+WylSecureDuckdbFileHandle::PoisonAndReject (wyrelog_error_t error,
+    const char *operation) const
+{
+  health_->Poison (error);
+  io_reject (operation);
+}
+
+WylFactArtifactSidecarBinding *
+WylSecureDuckdbFileHandle::DetachSidecarBindingForMove ()
+{
+  std::lock_guard<std::mutex> lock (mutex_);
+  if (kind_ != WylSecureDuckdbBindingKind::WRITER_SIDECAR
+      || binding_.writer_sidecar == nullptr)
+    return nullptr;
+  if (fd_ >= 0) {
+    const auto result = CheckedClose ();
+    if (result != WYRELOG_E_OK)
+      PoisonAndReject (result, "checked close before fixed WAL replacement");
+  }
+  auto *binding = binding_.writer_sidecar;
+  binding_.writer_sidecar = nullptr;
+  return binding;
 }
