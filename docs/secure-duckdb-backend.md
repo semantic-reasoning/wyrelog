@@ -18,6 +18,19 @@ and is closed only through that provider. The fixed virtual home
 listing, creation, extension loading, secret access, and runtime redirection
 are denied. The adapter registers no LocalFileSystem fallback.
 
+DuckDB's fixed `checkpoint -> WAL` and `recovery -> WAL` moves use one exact
+held binding for each name. A live old-WAL descriptor is checked-closed and
+detached before the provider transfers the source identity to the WAL binding;
+DuckDB's later close is then a no-op. Ambiguous replacement, revalidation,
+checked-close, retirement, or terminal-cleanup failure poisons the shared
+filesystem state, so subsequent operations cannot retry with stale authority.
+
+Call `wyl_secure_duckdb_bridge_finalize()` when cleanup success is part of the
+caller-visible result. It destroys the connection and database, then returns
+the retained filesystem health after handle and temporary-root cleanup.
+`wyl_secure_duckdb_bridge_free()` invokes the same cleanup only as a
+best-effort void fallback.
+
 ## Version upgrade procedure
 
 An upgrade is a security-contract change, not a dependency-only update.
