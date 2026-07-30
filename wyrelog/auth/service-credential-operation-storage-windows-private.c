@@ -120,6 +120,7 @@ wyl_win_set_delete_disposition (HANDLE handle)
 }
 
 static volatile LONG wyl_win_next_directory_flush_error = ERROR_SUCCESS;
+G_LOCK_DEFINE_STATIC (wyl_win_test_hooks);
 static WylWinChildBeforeRenameHookForTest wyl_win_before_rename_hook;
 static gpointer wyl_win_before_rename_hook_data;
 static WylServiceCredentialOperationBeforeExactDeleteHookForTest
@@ -132,29 +133,73 @@ wyl_win_child_fail_next_directory_flush_for_test (DWORD error)
   InterlockedExchange (&wyl_win_next_directory_flush_error, (LONG) error);
 }
 
+DWORD
+wyl_win_child_take_next_directory_flush_error_for_test (void)
+{
+  return (DWORD) InterlockedExchange (&wyl_win_next_directory_flush_error,
+      ERROR_SUCCESS);
+}
+
 void wyl_win_child_set_before_rename_hook_for_test
     (WylWinChildBeforeRenameHookForTest hook, gpointer user_data)
 {
+  G_LOCK (wyl_win_test_hooks);
   wyl_win_before_rename_hook = hook;
   wyl_win_before_rename_hook_data = user_data;
+  G_UNLOCK (wyl_win_test_hooks);
+}
+
+void wyl_win_child_take_before_rename_hook_for_test
+  (WylWinChildBeforeRenameHookForTest *out_hook, gpointer *out_user_data)
+{
+  if (out_hook != NULL)
+    *out_hook = NULL;
+  if (out_user_data != NULL)
+    *out_user_data = NULL;
+  G_LOCK (wyl_win_test_hooks);
+  if (out_hook != NULL)
+    *out_hook = wyl_win_before_rename_hook;
+  if (out_user_data != NULL)
+    *out_user_data = wyl_win_before_rename_hook_data;
+  wyl_win_before_rename_hook = NULL;
+  wyl_win_before_rename_hook_data = NULL;
+  G_UNLOCK (wyl_win_test_hooks);
 }
 
 void wyl_win_child_set_before_exact_delete_hook_for_test
     (WylServiceCredentialOperationBeforeExactDeleteHookForTest hook,
     gpointer user_data)
 {
+  G_LOCK (wyl_win_test_hooks);
   wyl_win_before_exact_delete_hook = hook;
   wyl_win_before_exact_delete_hook_data = user_data;
+  G_UNLOCK (wyl_win_test_hooks);
+}
+
+void wyl_win_child_take_before_exact_delete_hook_for_test
+  (WylServiceCredentialOperationBeforeExactDeleteHookForTest *out_hook,
+    gpointer *out_user_data)
+{
+  if (out_hook != NULL)
+    *out_hook = NULL;
+  if (out_user_data != NULL)
+    *out_user_data = NULL;
+  G_LOCK (wyl_win_test_hooks);
+  if (out_hook != NULL)
+    *out_hook = wyl_win_before_exact_delete_hook;
+  if (out_user_data != NULL)
+    *out_user_data = wyl_win_before_exact_delete_hook_data;
+  wyl_win_before_exact_delete_hook = NULL;
+  wyl_win_before_exact_delete_hook_data = NULL;
+  G_UNLOCK (wyl_win_test_hooks);
 }
 
 static void
 wyl_win_child_run_before_exact_delete_hook_for_test (void)
 {
-  WylServiceCredentialOperationBeforeExactDeleteHookForTest hook =
-      wyl_win_before_exact_delete_hook;
-  gpointer user_data = wyl_win_before_exact_delete_hook_data;
-  wyl_win_before_exact_delete_hook = NULL;
-  wyl_win_before_exact_delete_hook_data = NULL;
+  WylServiceCredentialOperationBeforeExactDeleteHookForTest hook = NULL;
+  gpointer user_data = NULL;
+  wyl_win_child_take_before_exact_delete_hook_for_test (&hook, &user_data);
   if (hook != NULL)
     hook (user_data);
 }
@@ -162,10 +207,9 @@ wyl_win_child_run_before_exact_delete_hook_for_test (void)
 static void
 wyl_win_child_run_before_rename_hook_for_test (void)
 {
-  WylWinChildBeforeRenameHookForTest hook = wyl_win_before_rename_hook;
-  gpointer user_data = wyl_win_before_rename_hook_data;
-  wyl_win_before_rename_hook = NULL;
-  wyl_win_before_rename_hook_data = NULL;
+  WylWinChildBeforeRenameHookForTest hook = NULL;
+  gpointer user_data = NULL;
+  wyl_win_child_take_before_rename_hook_for_test (&hook, &user_data);
   if (hook != NULL)
     hook (user_data);
 }
@@ -190,12 +234,12 @@ wyl_win_directory_flush_error (DWORD error)
 static wyrelog_error_t
 wyl_win_flush_directory (HANDLE root)
 {
-  LONG forced = InterlockedExchange (&wyl_win_next_directory_flush_error,
-      ERROR_SUCCESS);
+  DWORD forced =
+      wyl_win_child_take_next_directory_flush_error_for_test ();
   if (root == NULL || root == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
   if (forced != ERROR_SUCCESS)
-    return wyl_win_directory_flush_error ((DWORD) forced);
+    return wyl_win_directory_flush_error (forced);
   return FlushFileBuffers (root) ? WYRELOG_E_OK
       : wyl_win_directory_flush_error (GetLastError ());
 }
