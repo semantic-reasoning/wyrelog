@@ -547,6 +547,64 @@ test_pending_binding_close_failure_poison_is_terminal (void)
 }
 
 static void
+test_file_exists_uses_checked_main_handle (void)
+{
+  {
+    Fixture fixture (false, true);
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    g_assert_false (filesystem.FileExists ("facts.duckdb", nullptr));
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+  }
+  {
+    Fixture fixture (false, true);
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    wyl_secure_duckdb_filesystem_set_test_faults (
+      WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION);
+    try {
+      (void) filesystem.FileExists ("facts.duckdb", nullptr);
+      g_assert_not_reached ();
+    } catch (const duckdb::IOException &)
+    {
+    }
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    Fixture fixture (false, true);
+    {
+      WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+      wyl_secure_duckdb_filesystem_set_test_faults (
+        WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION);
+      try {
+        (void) filesystem.FileExists ("facts.duckdb", nullptr);
+        g_assert_not_reached ();
+      } catch (const std::bad_alloc &)
+      {
+      }
+      g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+          WYRELOG_E_NOMEM);
+    }
+    WylSecureDuckdbFileSystem retry (fixture.namespace_, false);
+    g_assert_false (retry.FileExists ("facts.duckdb", nullptr));
+  }
+  {
+    Fixture fixture (false, true);
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    wyl_secure_duckdb_filesystem_set_test_faults (
+      WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION
+      | WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION);
+    try {
+      (void) filesystem.FileExists ("facts.duckdb", nullptr);
+      g_assert_not_reached ();
+    } catch (const std::bad_alloc &)
+    {
+    }
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+        WYRELOG_E_POLICY);
+  }
+}
+
+static void
 test_temp_registration_failure_rolls_back_durable_child (void)
 {
   Fixture fixture;
@@ -1792,6 +1850,8 @@ main (int argc, char **argv)
       test_pending_binding_allocation_failure_is_not_clean);
   g_test_add_func ("/secure-duckdb-filesystem/pending-close-poison",
       test_pending_binding_close_failure_poison_is_terminal);
+  g_test_add_func ("/secure-duckdb-filesystem/file-exists-checked-main",
+      test_file_exists_uses_checked_main_handle);
   g_test_add_func ("/secure-duckdb-filesystem/temp-registration-rollback",
       test_temp_registration_failure_rolls_back_durable_child);
   g_test_add_func ("/secure-duckdb-filesystem/bridge-construction-allocation",
