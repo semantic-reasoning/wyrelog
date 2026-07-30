@@ -119,6 +119,11 @@ typedef struct
   gchar *root_dir;
 } WindowsFixture;
 
+#ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
+static WyctlPublicationWindowsTestObservation return_test_observation
+  (gpointer data);
+#endif
+
 /* Stamp the token user as owner alongside the protected owner-only DACL. A
  * single call applies the owner before the DACL, so the WRITE_OWNER check
  * still runs against the inherited parent DACL; stamping the DACL first would
@@ -237,6 +242,20 @@ test_plan_prepare_commit_roundtrip (void)
       WYRELOG_E_OK);
   g_assert_nonnull (lease);
   g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
+  wyctl_publication_windows_backend_set_test_observation_hook
+    (&fixture.backend, return_test_observation,
+      GINT_TO_POINTER (WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_MISMATCH));
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_inspect
+        (&fixture.backend, lease, credential_id, &expected_secret, &result), ==,
+      WYRELOG_E_POLICY);
+  wyctl_publication_windows_backend_set_test_observation_hook
+    (&fixture.backend, return_test_observation,
+      GINT_TO_POINTER (WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_FAILURE));
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_inspect
+        (&fixture.backend, lease, credential_id, &expected_secret, &result), ==,
+      WYRELOG_E_IO);
+  wyctl_publication_windows_backend_set_test_observation_hook
+    (&fixture.backend, NULL, NULL);
   g_assert_cmpint (wyctl_publication_windows_receipt_target_inspect
         (&fixture.backend, lease, credential_id, &expected_secret, &result), ==,
       WYRELOG_E_OK);
@@ -867,6 +886,22 @@ test_root_observation_distinguishes_substitution_from_failure (void)
   wyctl_publication_windows_backend_set_test_observation_hook
     (&fixture.backend, return_test_observation,
       GINT_TO_POINTER (WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_FAILURE));
+  g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend, &request,
+      &planned), ==, WYRELOG_E_IO);
+  wyctl_publication_windows_backend_set_test_observation_hook
+    (&fixture.backend, return_test_observation,
+      GINT_TO_POINTER (WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_REPARSE));
+  g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend, &request,
+      &planned), ==, WYRELOG_E_POLICY);
+  wyctl_publication_windows_backend_set_test_observation_hook
+    (&fixture.backend, return_test_observation,
+      GINT_TO_POINTER (WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_NON_PRIVATE));
+  g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend, &request,
+      &planned), ==, WYRELOG_E_POLICY);
+  wyctl_publication_windows_backend_set_test_observation_hook
+    (&fixture.backend, return_test_observation,
+      GINT_TO_POINTER
+        (WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_SECURITY_FAILURE));
   g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend, &request,
       &planned), ==, WYRELOG_E_IO);
   wyctl_publication_plan_clear (&request);
