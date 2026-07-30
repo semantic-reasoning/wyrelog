@@ -324,6 +324,18 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
+    wyl_fact_artifact_sidecar_binding_replace_existing_wal
+    (WylFactArtifactSidecarBinding * source,
+    WylFactArtifactSidecarBinding * destination,
+    WylFactArtifactSidecarReplaceResult * out_result) {
+  (void) source;
+  (void) destination;
+  if (out_result)
+    *out_result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  return closed ();
+}
+
+wyrelog_error_t
 wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding *b,
     WylFactArtifactSidecarRetireResult *out_result)
 {
@@ -2996,6 +3008,18 @@ wyrelog_error_t
 done:
   g_mutex_unlock (&lease->mutex);
   return result;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_sidecar_binding_replace_existing_wal
+    (WylFactArtifactSidecarBinding * source,
+    WylFactArtifactSidecarBinding * destination,
+    WylFactArtifactSidecarReplaceResult * out_result) {
+  (void) source;
+  (void) destination;
+  if (out_result)
+    *out_result = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  return WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t

@@ -1735,6 +1735,16 @@ test_sidecar_retirement_result_contract (void)
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
   g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (NULL, NULL),
       ==, WYRELOG_E_POLICY);
+  WylFactArtifactSidecarReplaceResult replacement =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (NULL, NULL,
+          &replacement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (replacement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
+  g_assert_cmpint
+      (wyl_fact_artifact_sidecar_binding_replace_existing_wal (NULL, NULL,
+          NULL), ==, WYRELOG_E_POLICY);
 }
 
 #ifdef G_OS_WIN32
