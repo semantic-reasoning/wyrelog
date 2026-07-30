@@ -362,15 +362,6 @@ struct RecorderState {
   uint64_t active_move_sequence = 0;
   guint move_overlap_rejections = 0;
 
-  std::mutex replacement_gate_mutex;
-  std::condition_variable replacement_gate_cv;
-  bool replacement_gate_armed = false;
-  bool replacement_gate_sidecar_seen = false;
-  bool replacement_gate_reached = false;
-  bool replacement_gate_release = false;
-  std::string replacement_gate_main;
-  std::string replacement_gate_checkpoint;
-  std::string replacement_gate_operation;
 };
 
 static void write_trace_or_exit (const RecorderState &recorder, int error_code);
@@ -572,7 +563,6 @@ public:
       local_->Write (*recording.inner, buffer, bytes, location);
       complete (token, 1, {});
       record_handle ("write-at", recording);
-      PauseCheckpointMainOperation (recording, "write-at");
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
       record_handle ("write-at", recording, 0, "IOException");
@@ -618,7 +608,6 @@ public:
       const auto result = local_->Write (*recording.inner, buffer, bytes);
       complete (token, 1, {}, { (uint64_t) result });
       record_handle ("write", recording);
-      PauseCheckpointMainOperation (recording, "write");
       return result;
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
@@ -1073,7 +1062,6 @@ public:
       throw;
     }
     record ("try-remove", checked, {}, removed ? 1 : 0);
-    ObserveCheckpointSidecarRemoval (path_to_utf8 (checked));
     if (recorder_->checkpoint_fault_armed && recorder_->checkpoint_fault_stage == 1
         && path_to_utf8 (checked) == path_with_suffix (
             path_from_utf8 (recorder_->checkpoint_wal), ".checkpoint") && !removed)
@@ -1122,7 +1110,6 @@ public:
       local_->FileSync (*recording.inner);
       complete (token, 1, {});
       record_handle ("sync", recording);
-      PauseCheckpointMainOperation (recording, "sync");
     } catch (const duckdb::IOException &) {
       complete (token, 0, "IOException");
       record_handle ("sync", recording, 0, "IOException");
@@ -1445,34 +1432,6 @@ private:
     if (path == recorder_->fixed_main)
       return FixedHandleRole::MAIN;
     return FixedHandleRole::OTHER;
-  }
-
-  void ObserveCheckpointSidecarRemoval (const std::string &path)
-  {
-    std::lock_guard<std::mutex> lock (recorder_->replacement_gate_mutex);
-    if (recorder_->replacement_gate_armed
-        && path == recorder_->replacement_gate_checkpoint)
-      recorder_->replacement_gate_sidecar_seen = true;
-  }
-
-  void PauseCheckpointMainOperation (const RecordingFileHandle &handle,
-      const std::string &operation)
-  {
-    if (handle.role != FixedHandleRole::MAIN)
-      return;
-    std::unique_lock<std::mutex> lock (recorder_->replacement_gate_mutex);
-    if (!recorder_->replacement_gate_armed
-        || !recorder_->replacement_gate_sidecar_seen
-        || recorder_->replacement_gate_reached
-        || handle.GetPath () != recorder_->replacement_gate_main)
-      return;
-    recorder_->replacement_gate_reached = true;
-    recorder_->replacement_gate_operation = operation;
-    recorder_->replacement_gate_cv.notify_all ();
-    recorder_->replacement_gate_cv.wait (lock, [this] {
-      return recorder_->replacement_gate_release;
-    });
-    recorder_->replacement_gate_armed = false;
   }
 
   std::pair<uint64_t, FixedHandleRole> BeginOpenHandle (
@@ -1846,50 +1805,6 @@ RecordingFileSystem::DestroyHandle (RecordingFileHandle &handle)
 RecordingFileSystem::RejectClosedHandle (const RecordingFileHandle &handle)
 {
   reject ("double close", handle.GetPath (), handle.GetFlags ());
-}
-
-static void
-arm_replacement_gate (const std::shared_ptr<RecorderState> &recorder,
-    const fs::path &database)
-{
-  std::lock_guard<std::mutex> lock (recorder->replacement_gate_mutex);
-  g_assert_false (recorder->replacement_gate_armed);
-  recorder->replacement_gate_armed = true;
-  recorder->replacement_gate_sidecar_seen = false;
-  recorder->replacement_gate_reached = false;
-  recorder->replacement_gate_release = false;
-  recorder->replacement_gate_main = path_to_utf8 (database);
-  recorder->replacement_gate_checkpoint =
-      path_with_suffix (database, ".wal.checkpoint");
-  recorder->replacement_gate_operation.clear ();
-}
-
-static std::string
-wait_for_replacement_gate (const std::shared_ptr<RecorderState> &recorder)
-{
-  std::unique_lock<std::mutex> lock (recorder->replacement_gate_mutex);
-  const bool reached = recorder->replacement_gate_cv.wait_for (lock,
-      std::chrono::seconds (5), [&recorder] {
-        return recorder->replacement_gate_reached;
-      });
-  if (!reached) {
-    recorder->replacement_gate_release = true;
-    recorder->replacement_gate_cv.notify_all ();
-  }
-  const auto operation = recorder->replacement_gate_operation;
-  lock.unlock ();
-  g_assert_true (reached);
-  return operation;
-}
-
-static void
-release_replacement_gate (const std::shared_ptr<RecorderState> &recorder)
-{
-  std::lock_guard<std::mutex> lock (recorder->replacement_gate_mutex);
-  g_assert_true (recorder->replacement_gate_reached);
-  g_assert_false (recorder->replacement_gate_release);
-  recorder->replacement_gate_release = true;
-  recorder->replacement_gate_cv.notify_all ();
 }
 
 static void
@@ -2562,7 +2477,14 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
 /* The scenario streams below are complete source-pinned DuckDB 1.5.5
  * languages: every tuple is consumed once, including the two metadata-only
  * probes caused by the explicitly configured home directory. */
-enum class TracePathRole { HOME, HOME_METADATA, MAIN, WAL, CHECKPOINT };
+enum class TracePathRole {
+  HOME,
+  HOME_METADATA,
+  MAIN,
+  WAL,
+  CHECKPOINT,
+  RECOVERY,
+};
 
 struct ExactTraceToken {
   const char *operation;
@@ -2582,6 +2504,7 @@ assert_exact_trace (const gchar *scenario, const std::vector<Event> &events,
   const std::string main = path_to_utf8 (database);
   const std::string wal = path_with_suffix (database, ".wal");
   const std::string checkpoint = path_with_suffix (path_from_utf8 (wal), ".checkpoint");
+  const std::string recovery = path_with_suffix (path_from_utf8 (wal), ".recovery");
   g_assert_cmpuint (events.size (), ==, token_count);
   for (size_t i = 0; i < token_count; i++) {
     const auto &event = events[i];
@@ -2589,7 +2512,8 @@ assert_exact_trace (const gchar *scenario, const std::vector<Event> &events,
     const std::string &path = token.path == TracePathRole::HOME ? home :
         token.path == TracePathRole::HOME_METADATA ? home_metadata :
         token.path == TracePathRole::MAIN ? main :
-        token.path == TracePathRole::WAL ? wal : checkpoint;
+        token.path == TracePathRole::WAL ? wal :
+        token.path == TracePathRole::CHECKPOINT ? checkpoint : recovery;
     g_assert_cmpstr (event.operation.c_str (), ==, token.operation);
     g_assert_cmpstr (event.path.c_str (), ==, path.c_str ());
     g_assert_cmpuint (event.flags, ==, token.flags);
@@ -2611,6 +2535,8 @@ assert_exact_trace (const gchar *scenario, const std::vector<Event> &events,
   { operation, TracePathRole::WAL, flags, duckdb::FileLockType::lock, outcome, "" }
 #define C(operation, flags, lock, outcome) \
   { operation, TracePathRole::CHECKPOINT, flags, duckdb::FileLockType::lock, outcome, "" }
+#define R(operation, flags, lock, outcome) \
+  { operation, TracePathRole::RECOVERY, flags, duckdb::FileLockType::lock, outcome, "" }
 
 static void
 assert_writer_contender_exact_trace (const std::vector<Event> &events,
@@ -2923,6 +2849,7 @@ assert_interrupted_checkpoint_recovery_exact_trace (const std::vector<Event> &ev
       tokens, G_N_ELEMENTS (tokens));
 }
 
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
 static void
 assert_concurrent_checkpoint_event_exact_trace (
     const std::vector<Event> &events, const fs::path &database)
@@ -2947,13 +2874,14 @@ assert_concurrent_checkpoint_event_exact_trace (
     W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
     W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
-    M ("write-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1),
     C ("open", 2090, WRITE_LOCK, -1), C ("size", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), C ("size", 0, NO_LOCK, -1),
     C ("write", 0, NO_LOCK, -1), C ("sync", 0, NO_LOCK, -1),
-    C ("size", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
-    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    C ("size", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
+    M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
+    M ("sync", 0, NO_LOCK, -1),
     C ("close", 2090, WRITE_LOCK, -1), C ("move", 0, NO_LOCK, -1),
     W ("move-target", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
@@ -2962,6 +2890,148 @@ assert_concurrent_checkpoint_event_exact_trace (
   };
   assert_exact_trace ("concurrent-checkpoint-move", events, database, tokens,
       G_N_ELEMENTS (tokens));
+}
+
+static void
+assert_checkpoint_abort_event_exact_trace (const std::vector<Event> &events,
+    const fs::path &database, bool checkpoint_completed)
+{
+  std::vector<ExactTraceToken> tokens = {
+    H ("separator"), D ("separator"),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
+    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
+    M ("on-disk", 0, NO_LOCK, -1),
+    C ("open", 2090, WRITE_LOCK, -1), C ("size", 0, NO_LOCK, -1),
+    C ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    C ("size", 0, NO_LOCK, -1), C ("size", 0, NO_LOCK, -1),
+    C ("write", 0, NO_LOCK, -1), C ("sync", 0, NO_LOCK, -1),
+    C ("size", 0, NO_LOCK, -1),
+  };
+  if (checkpoint_completed) {
+    tokens.insert (tokens.end (), {
+        M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+        M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    });
+  }
+  assert_exact_trace (checkpoint_completed
+      ? "checkpoint-abort-before-wal-finish"
+      : "checkpoint-abort-before-header",
+      events, database, tokens.data (), tokens.size ());
+}
+
+static void
+assert_completed_checkpoint_recovery_event_exact_trace (
+    const std::vector<Event> &events, const fs::path &database)
+{
+  static const ExactTraceToken tokens[] = {
+    H ("separator"), D ("separator"),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
+    C ("close", 129, NO_LOCK, -1), C ("move", 0, NO_LOCK, -1),
+    W ("move-target", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("close", 2307, WRITE_LOCK, -1),
+  };
+  assert_exact_trace ("completed-checkpoint-recovery", events, database,
+      tokens, G_N_ELEMENTS (tokens));
+}
+
+static void
+assert_incomplete_checkpoint_recovery_event_exact_trace (
+    const std::vector<Event> &events, const fs::path &database)
+{
+  static const ExactTraceToken tokens[] = {
+    H ("separator"), D ("separator"),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
+    R ("open", 18, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), R ("write", 0, NO_LOCK, -1),
+    C ("size", 0, NO_LOCK, -1), C ("read", 0, NO_LOCK, -1),
+    R ("write", 0, NO_LOCK, -1), C ("close", 129, NO_LOCK, -1),
+    R ("sync", 0, NO_LOCK, -1), R ("close", 18, NO_LOCK, -1),
+    R ("move", 0, NO_LOCK, -1), W ("move-target", 0, NO_LOCK, -1),
+    C ("remove", 0, NO_LOCK, -1), W ("open", 1, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("close", 1, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("close", 2307, WRITE_LOCK, -1),
+  };
+  assert_exact_trace ("incomplete-checkpoint-recovery", events, database,
+      tokens, G_N_ELEMENTS (tokens));
+}
+
+static void
+assert_incomplete_recovery_reopen_event_exact_trace (
+    const std::vector<Event> &events, const fs::path &database)
+{
+  static const ExactTraceToken tokens[] = {
+    H ("separator"), D ("separator"),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
+    C ("try-remove", 0, NO_LOCK, 0), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    W ("try-remove", 0, NO_LOCK, 1), M ("close", 2307, WRITE_LOCK, -1),
+  };
+  assert_exact_trace ("incomplete-recovery-reopen", events, database,
+      tokens, G_N_ELEMENTS (tokens));
 }
 
 static void
@@ -2998,12 +3068,14 @@ assert_fixed_wal_reopen_event_exact_trace (
   assert_exact_trace ("fixed-wal-reopen", events, database, tokens,
       G_N_ELEMENTS (tokens));
 }
+#endif
 
 #undef H
 #undef D
 #undef M
 #undef W
 #undef C
+#undef R
 
 static gboolean
 is_expected_home_metadata_path (const std::string &path, const fs::path &database)
@@ -4945,7 +5017,7 @@ test_recording_filesystem_after_wal_start_no_wal (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4959,7 +5031,7 @@ test_recording_filesystem_after_wal_start_no_wal (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -4990,7 +5062,7 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
   {
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -5011,7 +5083,7 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
   size_t commit_end = 0;
   {
     duckdb::DBConfig config;
-    configure_test_database (&config, root, recorder, {
+    configure_test_database (&config, root, database, recorder, {
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
@@ -5096,6 +5168,7 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
 }
 #endif
 
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
 static void
 create_fixed_wal_fixture (const fs::path &root, const fs::path &database)
 {
@@ -5115,26 +5188,40 @@ create_fixed_wal_fixture (const fs::path &root, const fs::path &database)
 static std::string
 checkpoint_with_concurrent_commit (duckdb::Connection &checkpoint_connection,
     duckdb::Connection &writer_connection, const fs::path &database,
-    const std::shared_ptr<RecorderState> &recorder)
+    AfterWalStartLatch *latch)
 {
   auto prepare = writer_connection.Query (
       "BEGIN TRANSACTION; INSERT INTO facts VALUES (100)");
   g_assert_false (prepare->HasError ());
-  arm_replacement_gate (recorder, database);
   std::string checkpoint_error;
   std::thread checkpoint_thread ([&checkpoint_connection, &checkpoint_error] {
     auto result = checkpoint_connection.Query ("CHECKPOINT");
     if (result->HasError ())
       checkpoint_error = result->GetError ();
   });
-  const auto paused_operation = wait_for_replacement_gate (recorder);
-  g_assert_true (paused_operation == "write-at" || paused_operation == "sync");
-  auto commit = writer_connection.Query ("COMMIT");
-  g_assert_false (commit->HasError ());
-  g_assert_true (fs::exists (path_from_utf8 (
-      path_with_suffix (database, ".wal.checkpoint"))));
-  release_replacement_gate (recorder);
+  const gboolean entered = wait_for_after_wal_start (latch);
+  if (entered) {
+    std::promise<gboolean> commit_promise;
+    auto commit_future = commit_promise.get_future ();
+    std::thread commit_thread ([&writer_connection, &commit_promise] {
+      auto commit = writer_connection.Query ("COMMIT");
+      commit_promise.set_value (!commit->HasError ());
+    });
+    if (commit_future.wait_for (std::chrono::seconds (5))
+        != std::future_status::ready)
+      g_error ("checkpoint-WAL commit did not finish within 5000 ms");
+    const gboolean commit_succeeded = commit_future.get ();
+    commit_thread.join ();
+    g_assert_true (commit_succeeded);
+    g_assert_true (fs::exists (path_from_utf8 (
+        path_with_suffix (database, ".wal.checkpoint"))));
+    release_after_wal_start (latch);
+  }
   checkpoint_thread.join ();
+  g_assert_true (entered);
+  g_assert_false (latch->callback_timed_out);
+  g_assert_cmpuint (latch->callback_count, ==, 1);
+  g_assert_cmpstr (latch->phase.c_str (), ==, "AFTER_WAL_START");
   return checkpoint_error;
 }
 
@@ -5263,6 +5350,50 @@ assert_fixed_wal_reopen_exact_grammar (
 }
 
 static void
+assert_incomplete_recovery_reopen_exact_grammar (
+    const std::shared_ptr<RecorderState> &recorder,
+    const fs::path &database)
+{
+  const std::string main = path_to_utf8 (database);
+  const std::string wal = path_with_suffix (database, ".wal");
+  std::vector<HandleLifecycleEvent> lifecycle;
+  {
+    std::lock_guard<std::mutex> lock (recorder->observation_mutex);
+    lifecycle = recorder->handle_lifecycle;
+  }
+  assert_incomplete_recovery_reopen_event_exact_trace (
+      recorder->events, database);
+  g_assert_cmpuint (lifecycle.size (), ==, 45);
+  const auto main_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::MAIN, main);
+  const auto wal_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::WAL, wal);
+  g_assert_cmpuint (main_ids.size (), ==, 3);
+  g_assert_cmpuint (wal_ids.size (), ==, 2);
+  assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
+      main, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "read", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
+      main, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "read", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
+      main, 2307, duckdb::FileLockType::WRITE_LOCK,
+      { "open", "size", "read-at", "read-at", "read-at", "read-at",
+        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
+        "on-disk", "on-disk", "write-at", "write-at", "sync", "write-at",
+        "sync", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
+      wal, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "size", "read", "reset", "read", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, wal_ids[1], FixedHandleRole::WAL,
+      wal, 2090, duckdb::FileLockType::WRITE_LOCK,
+      { "open", "size", "size", "size", "write", "sync", "size", "close",
+        "destroy" });
+  g_assert_true (recorder->move_snapshots.empty ());
+  g_assert_cmpuint (recorder->move_overlap_rejections, ==, 0);
+}
+
+static void
 assert_concurrent_checkpoint_exact_grammar (
     const std::shared_ptr<RecorderState> &recorder,
     const fs::path &database)
@@ -5304,8 +5435,8 @@ assert_concurrent_checkpoint_exact_grammar (
   assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
       main, 2307, duckdb::FileLockType::WRITE_LOCK,
       { "open", "size", "read-at", "read-at", "read-at", "read-at",
-        "read-at", "on-disk", "on-disk", "on-disk", "write-at", "on-disk",
-        "on-disk", "sync", "write-at", "sync", "on-disk", "on-disk",
+        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
+        "write-at", "sync", "write-at", "sync", "on-disk", "on-disk",
         "on-disk", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
       wal, 2090, duckdb::FileLockType::WRITE_LOCK,
@@ -5369,12 +5500,425 @@ assert_concurrent_checkpoint_exact_grammar (
 }
 
 static void
+assert_live_handle_snapshot (const LiveHandleSnapshot &live,
+    uint64_t handle_id, FixedHandleRole role, const std::string &path,
+    duckdb::idx_t flags, duckdb::FileLockType lock)
+{
+  g_assert_cmpuint (live.handle_id, ==, handle_id);
+  g_assert_true (live.role == role);
+  g_assert_cmpstr (live.path.c_str (), ==, path.c_str ());
+  g_assert_cmpuint (live.flags, ==, flags);
+  g_assert_true (live.lock == lock);
+  g_assert_true (
+      live.compression == duckdb::FileCompressionType::UNCOMPRESSED);
+  g_assert_true (live.caching == duckdb::CachingMode::NO_CACHING);
+  g_assert_true (live.state == RecordedHandleState::OPEN);
+  g_assert_true (live.active_operation.empty ());
+}
+
+static void
+assert_checkpoint_abort_child_exact_grammar (
+    const std::shared_ptr<RecorderState> &recorder,
+    const fs::path &database, bool checkpoint_completed)
+{
+  const std::string main = path_to_utf8 (database);
+  const std::string wal = path_with_suffix (database, ".wal");
+  const std::string checkpoint =
+      path_with_suffix (database, ".wal.checkpoint");
+  std::vector<HandleLifecycleEvent> lifecycle;
+  std::vector<MoveHandleSnapshot> moves;
+  std::vector<Event> events;
+  {
+    std::lock_guard<std::mutex> lock (recorder->observation_mutex);
+    lifecycle = recorder->handle_lifecycle;
+    moves = recorder->move_snapshots;
+    events = recorder->events;
+  }
+  assert_checkpoint_abort_event_exact_trace (
+      events, database, checkpoint_completed);
+  g_assert_cmpuint (lifecycle.size (), ==,
+      checkpoint_completed ? 48 : 44);
+  g_assert_true (moves.empty ());
+  g_assert_cmpuint (recorder->move_overlap_rejections, ==, 0);
+
+  const auto main_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::MAIN, main);
+  const auto wal_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::WAL, wal);
+  const auto checkpoint_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::CHECKPOINT, checkpoint);
+  g_assert_cmpuint (main_ids.size (), ==, 3);
+  g_assert_cmpuint (wal_ids.size (), ==, 1);
+  g_assert_cmpuint (checkpoint_ids.size (), ==, 1);
+  assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
+      main, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "read", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
+      main, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "read", "close", "destroy" });
+  if (checkpoint_completed) {
+    assert_exact_handle_grammar (lifecycle, main_ids[2],
+        FixedHandleRole::MAIN, main, 2307,
+        duckdb::FileLockType::WRITE_LOCK,
+        { "open", "size", "read-at", "read-at", "read-at", "read-at",
+          "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+          "on-disk", "write-at", "sync", "write-at", "sync" });
+  } else {
+    assert_exact_handle_grammar (lifecycle, main_ids[2],
+        FixedHandleRole::MAIN, main, 2307,
+        duckdb::FileLockType::WRITE_LOCK,
+        { "open", "size", "read-at", "read-at", "read-at", "read-at",
+          "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+          "on-disk" });
+  }
+  assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
+      wal, 2090, duckdb::FileLockType::WRITE_LOCK,
+      { "open", "size", "size", "size", "size", "write", "sync", "size",
+        "size", "size", "write", "sync", "size", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, checkpoint_ids[0],
+      FixedHandleRole::CHECKPOINT, checkpoint, 2090,
+      duckdb::FileLockType::WRITE_LOCK,
+      { "open", "size", "size", "size", "size", "write", "sync", "size" });
+
+  const HandleLifecycleEvent *failed_wal_open = nullptr;
+  for (const auto &event : lifecycle) {
+    if (event.operation == "open" && event.role == FixedHandleRole::WAL
+        && event.path == wal && event.flags == 129
+        && event.lock == duckdb::FileLockType::NO_LOCK
+        && event.outcome == 0) {
+      g_assert_null (failed_wal_open);
+      failed_wal_open = &event;
+    }
+  }
+  g_assert_nonnull (failed_wal_open);
+  g_assert_true (
+      failed_wal_open->compression == duckdb::FileCompressionType::UNCOMPRESSED);
+  g_assert_true (failed_wal_open->caching == duckdb::CachingMode::NO_CACHING);
+  g_assert_cmpuint (
+      events_for_handle (lifecycle, failed_wal_open->handle_id).size (), ==, 1);
+
+  std::lock_guard<std::mutex> lock (recorder->observation_mutex);
+  g_assert_cmpuint (recorder->live_handles.size (), ==, 2);
+  const auto live_main = recorder->live_handles.find (main_ids[2]);
+  const auto live_checkpoint =
+      recorder->live_handles.find (checkpoint_ids[0]);
+  g_assert_true (live_main != recorder->live_handles.end ());
+  g_assert_true (live_checkpoint != recorder->live_handles.end ());
+  g_assert_true (live_main->second.role == FixedHandleRole::MAIN);
+  g_assert_cmpstr (live_main->second.path.c_str (), ==, main.c_str ());
+  g_assert_cmpuint (live_main->second.flags, ==, 2307);
+  g_assert_true (
+      live_main->second.lock == duckdb::FileLockType::WRITE_LOCK);
+  g_assert_true (live_main->second.state == RecordedHandleState::OPEN);
+  g_assert_true (live_main->second.active_operation.empty ());
+  g_assert_true (
+      live_checkpoint->second.role == FixedHandleRole::CHECKPOINT);
+  g_assert_cmpstr (
+      live_checkpoint->second.path.c_str (), ==, checkpoint.c_str ());
+  g_assert_cmpuint (live_checkpoint->second.flags, ==, 2090);
+  g_assert_true (
+      live_checkpoint->second.lock == duckdb::FileLockType::WRITE_LOCK);
+  g_assert_true (
+      live_checkpoint->second.state == RecordedHandleState::OPEN);
+  g_assert_true (live_checkpoint->second.active_operation.empty ());
+}
+
+static void
+assert_recovery_replacement_exact_grammar (
+    const std::shared_ptr<RecorderState> &recorder,
+    const fs::path &database, bool checkpoint_completed)
+{
+  const std::string main = path_to_utf8 (database);
+  const std::string wal = path_with_suffix (database, ".wal");
+  const std::string checkpoint =
+      path_with_suffix (database, ".wal.checkpoint");
+  const std::string recovery =
+      path_with_suffix (database, ".wal.recovery");
+  std::vector<HandleLifecycleEvent> lifecycle;
+  std::vector<MoveHandleSnapshot> moves;
+  std::vector<Event> events;
+  guint overlaps;
+  {
+    std::lock_guard<std::mutex> lock (recorder->observation_mutex);
+    lifecycle = recorder->handle_lifecycle;
+    moves = recorder->move_snapshots;
+    events = recorder->events;
+    overlaps = recorder->move_overlap_rejections;
+  }
+  if (checkpoint_completed)
+    assert_completed_checkpoint_recovery_event_exact_trace (events, database);
+  else
+    assert_incomplete_checkpoint_recovery_event_exact_trace (events, database);
+  g_assert_cmpuint (lifecycle.size (), ==,
+      checkpoint_completed ? 37 : 47);
+  g_assert_cmpuint (moves.size (), ==, 1);
+  g_assert_cmpuint (overlaps, ==, 0);
+
+  const auto main_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::MAIN, main);
+  const auto wal_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::WAL, wal);
+  const auto checkpoint_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::CHECKPOINT, checkpoint);
+  const auto recovery_ids = successful_open_ids (
+      lifecycle, FixedHandleRole::RECOVERY, recovery);
+  g_assert_cmpuint (main_ids.size (), ==, 3);
+  g_assert_cmpuint (wal_ids.size (), ==, 2);
+  g_assert_cmpuint (checkpoint_ids.size (), ==, 1);
+  g_assert_cmpuint (recovery_ids.size (), ==,
+      checkpoint_completed ? 0 : 1);
+  assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
+      main, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "read", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
+      main, 129, duckdb::FileLockType::NO_LOCK,
+      { "open", "read", "close", "destroy" });
+  assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
+      main, 2307, duckdb::FileLockType::WRITE_LOCK,
+      { "open", "size", "read-at", "read-at", "read-at", "read-at",
+        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
+        "close", "destroy" });
+  if (checkpoint_completed) {
+    assert_exact_handle_grammar (lifecycle, wal_ids[0],
+        FixedHandleRole::WAL, wal, 129, duckdb::FileLockType::NO_LOCK,
+        { "open", "size", "read", "close", "destroy" });
+    assert_exact_handle_grammar (lifecycle, wal_ids[1],
+        FixedHandleRole::WAL, wal, 129, duckdb::FileLockType::NO_LOCK,
+        { "open", "size", "read", "reset", "read", "close", "destroy" });
+    assert_exact_handle_grammar (lifecycle, checkpoint_ids[0],
+        FixedHandleRole::CHECKPOINT, checkpoint, 129,
+        duckdb::FileLockType::NO_LOCK,
+        { "open", "close", "destroy" });
+  } else {
+    assert_exact_handle_grammar (lifecycle, wal_ids[0],
+        FixedHandleRole::WAL, wal, 129, duckdb::FileLockType::NO_LOCK,
+        { "open", "size", "read", "reset", "read", "close", "destroy" });
+    assert_exact_handle_grammar (lifecycle, wal_ids[1],
+        FixedHandleRole::WAL, wal, 1, duckdb::FileLockType::NO_LOCK,
+        { "open", "size", "read", "reset", "read", "close", "destroy" });
+    assert_exact_handle_grammar (lifecycle, checkpoint_ids[0],
+        FixedHandleRole::CHECKPOINT, checkpoint, 129,
+        duckdb::FileLockType::NO_LOCK,
+        { "open", "size", "read", "close", "destroy" });
+    assert_exact_handle_grammar (lifecycle, recovery_ids[0],
+        FixedHandleRole::RECOVERY, recovery, 18,
+        duckdb::FileLockType::NO_LOCK,
+        { "open", "write", "write", "sync", "close", "destroy" });
+  }
+
+  const auto &move = moves.front ();
+  const std::string &source =
+      checkpoint_completed ? checkpoint : recovery;
+  g_assert_cmpstr (move.source.c_str (), ==, source.c_str ());
+  g_assert_cmpstr (move.destination.c_str (), ==, wal.c_str ());
+  g_assert_cmpuint (move.live_handles.size (), ==, 2);
+  assert_live_handle_snapshot (move.live_handles[0], main_ids[2],
+      FixedHandleRole::MAIN, main, 2307,
+      duckdb::FileLockType::WRITE_LOCK);
+  assert_live_handle_snapshot (move.live_handles[1], wal_ids[0],
+      FixedHandleRole::WAL, wal, 129, duckdb::FileLockType::NO_LOCK);
+
+  const auto source_id = checkpoint_completed
+      ? checkpoint_ids[0] : recovery_ids[0];
+  const auto source_events = events_for_handle (lifecycle, source_id);
+  g_assert_cmpstr (
+      source_events[source_events.size () - 2]->operation.c_str (),
+      ==, "close");
+  g_assert_cmpstr (source_events.back ()->operation.c_str (), ==, "destroy");
+  g_assert_cmpuint (source_events.back ()->sequence, <, move.sequence);
+  const auto checkpoint_events =
+      events_for_handle (lifecycle, checkpoint_ids[0]);
+  g_assert_cmpstr (
+      checkpoint_events[checkpoint_events.size () - 2]->operation.c_str (),
+      ==, "close");
+  g_assert_cmpstr (
+      checkpoint_events.back ()->operation.c_str (), ==, "destroy");
+  g_assert_cmpuint (checkpoint_events.back ()->sequence, <, move.sequence);
+
+  const auto old_wal_events = events_for_handle (lifecycle, wal_ids[0]);
+  bool crossed_move = false;
+  for (const auto *event : old_wal_events) {
+    if (event->sequence <= move.sequence)
+      continue;
+    crossed_move = true;
+    g_assert_true (
+        event->operation == "close" || event->operation == "destroy");
+  }
+  g_assert_true (crossed_move);
+  g_assert_cmpstr (
+      old_wal_events[old_wal_events.size () - 2]->operation.c_str (),
+      ==, "close");
+  g_assert_cmpstr (old_wal_events.back ()->operation.c_str (), ==, "destroy");
+  g_assert_cmpuint (old_wal_events.back ()->sequence, >, move.sequence);
+  const auto new_wal_events = events_for_handle (lifecycle, wal_ids[1]);
+  g_assert_cmpuint (new_wal_events.front ()->sequence, >, move.sequence);
+}
+
+static int
+fixed_wal_checkpoint_abort_child (const gchar *sandbox,
+    const char *abort_setting)
+{
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+  auto recorder = std::make_shared<RecorderState> ();
+  duckdb::DBConfig config;
+  configure_test_database (&config, root, database, recorder, {
+      source_155_open_flags (129),
+      source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+      source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+  config.options.checkpoint_on_shutdown = false;
+  config.SetOptionByName ("debug_checkpoint_abort",
+      duckdb::Value (abort_setting));
+  AfterWalStartLatch latch;
+  latch.recorder = recorder;
+  config.options.test_after_wal_start = after_wal_start_latch_callback;
+  config.options.test_after_wal_start_context = &latch;
+  duckdb::DuckDB db (path_to_utf8 (database), &config);
+  duckdb::Connection checkpoint_connection (db);
+  duckdb::Connection writer_connection (db);
+  auto insert = writer_connection.Query ("INSERT INTO facts VALUES (99)");
+  if (insert->HasError ())
+    _exit (120);
+  const auto checkpoint_error = checkpoint_with_concurrent_commit (
+      checkpoint_connection, writer_connection, database, &latch);
+  const char *expected_error =
+      g_strcmp0 (abort_setting, "BEFORE_HEADER") == 0
+      ? "FATAL Error: Failed to create checkpoint because of error: "
+        "Checkpoint aborted before header write because of PRAGMA "
+        "checkpoint_abort flag"
+      : "FATAL Error: Failed to create checkpoint because of error: "
+        "Checkpoint aborted before truncate because of PRAGMA "
+        "checkpoint_abort flag";
+  if (checkpoint_error != expected_error)
+    _exit (121);
+  const fs::path wal =
+      path_from_utf8 (path_with_suffix (database, ".wal"));
+  const fs::path checkpoint =
+      path_from_utf8 (path_with_suffix (database, ".wal.checkpoint"));
+  const fs::path recovery =
+      path_from_utf8 (path_with_suffix (database, ".wal.recovery"));
+  if (!fs::exists (wal) || !fs::exists (checkpoint)
+      || fs::exists (recovery))
+    _exit (122);
+  assert_checkpoint_abort_child_exact_grammar (recorder, database,
+      g_strcmp0 (abort_setting, "BEFORE_WAL_FINISH") == 0);
+  dump_handle_lifecycle_if_requested (recorder);
+  _exit (0);
+}
+
+static void
+run_fixed_wal_abort_child (const fs::path &root, const char *mode)
+{
+  const std::string root_utf8 = path_to_utf8 (root);
+  const gchar *argv[] = { self_path, mode, root_utf8.c_str (), NULL };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSubprocess) child = g_subprocess_newv (argv,
+      G_SUBPROCESS_FLAGS_STDOUT_PIPE, &error);
+  g_assert_no_error (error);
+  g_autofree gchar *output = communicate_utf8_with_timeout (child, 15000);
+  g_assert_nonnull (output);
+  g_assert_cmpstr (output, ==, "");
+  g_assert_cmpint (g_subprocess_get_exit_status (child), ==, 0);
+}
+
+static void
+assert_fixed_wal_rows (duckdb::Connection &connection)
+{
+  auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
+  g_assert_false (rows->HasError ());
+  g_assert_cmpuint (rows->RowCount (), ==, 3);
+  assert_value_text (rows->GetValue (0, 0), "42");
+  assert_value_text (rows->GetValue (0, 1), "99");
+  assert_value_text (rows->GetValue (0, 2), "100");
+}
+
+static void
+exercise_interrupted_checkpoint_replacement (const char *child_mode,
+    const char *expected_source_suffix)
+{
+  assert_duckdb_155 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox =
+      g_dir_make_tmp ("wyl-duckdb-fixed-recovery-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+  const fs::path wal =
+      path_from_utf8 (path_with_suffix (database, ".wal"));
+  const fs::path checkpoint =
+      path_from_utf8 (path_with_suffix (database, ".wal.checkpoint"));
+  const fs::path recovery =
+      path_from_utf8 (path_with_suffix (database, ".wal.recovery"));
+  create_fixed_wal_fixture (root, database);
+  run_fixed_wal_abort_child (root, child_mode);
+  g_assert_true (fs::exists (wal));
+  g_assert_true (fs::exists (checkpoint));
+  g_assert_false (fs::exists (recovery));
+
+  auto recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, database, recorder, {
+        source_155_open_flags (1),
+        source_155_open_flags (18),
+        source_155_open_flags (129),
+        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    config.options.checkpoint_on_shutdown = false;
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    assert_fixed_wal_rows (connection);
+  }
+  dump_handle_lifecycle_if_requested (recorder);
+  const bool checkpoint_completed =
+      g_strcmp0 (child_mode, "--fixed-wal-abort-before-wal-finish") == 0;
+  g_assert_cmpstr (expected_source_suffix, ==,
+      checkpoint_completed ? ".wal.checkpoint" : ".wal.recovery");
+  assert_recovery_replacement_exact_grammar (
+      recorder, database, checkpoint_completed);
+  g_assert_false (fs::exists (checkpoint));
+  g_assert_false (fs::exists (recovery));
+
+  auto reopen_recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, database, reopen_recorder, {
+        source_155_open_flags (129),
+        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    assert_fixed_wal_rows (connection);
+  }
+  dump_handle_lifecycle_if_requested (reopen_recorder);
+  if (checkpoint_completed)
+    assert_fixed_wal_reopen_exact_grammar (reopen_recorder, database);
+  else
+    assert_incomplete_recovery_reopen_exact_grammar (
+        reopen_recorder, database);
+  const ArtifactSet reopened = snapshot_artifacts (root);
+  g_assert_cmpuint (reopened.files.size (), ==, 1);
+  g_assert_cmpstr (reopened.files[0].first.c_str (), ==, "facts.duckdb");
+  remove_tree (sandbox);
+}
+
+static void
+test_recording_filesystem_completed_checkpoint_recovery_move (void)
+{
+  exercise_interrupted_checkpoint_replacement (
+      "--fixed-wal-abort-before-wal-finish", ".wal.checkpoint");
+}
+
+static void
+test_recording_filesystem_incomplete_checkpoint_recovery_move (void)
+{
+  exercise_interrupted_checkpoint_replacement (
+      "--fixed-wal-abort-before-header", ".wal.recovery");
+}
+
+static void
 test_recording_filesystem_concurrent_checkpoint_move (void)
 {
-#ifdef G_OS_WIN32
-  g_test_skip ("fixed WAL replacement evidence is Linux/macOS source-pinned");
-  return;
-#endif
   assert_duckdb_155 ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox =
@@ -5395,13 +5939,17 @@ test_recording_filesystem_concurrent_checkpoint_move (void)
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.checkpoint_on_shutdown = false;
+    AfterWalStartLatch latch;
+    latch.recorder = recorder;
+    config.options.test_after_wal_start = after_wal_start_latch_callback;
+    config.options.test_after_wal_start_context = &latch;
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection checkpoint_connection (db);
     duckdb::Connection writer_connection (db);
     auto insert = writer_connection.Query ("INSERT INTO facts VALUES (99)");
     g_assert_false (insert->HasError ());
     const auto checkpoint_error = checkpoint_with_concurrent_commit (
-        checkpoint_connection, writer_connection, database, recorder);
+        checkpoint_connection, writer_connection, database, &latch);
     g_assert_true (checkpoint_error.empty ());
     auto rows = writer_connection.Query (
         "SELECT value FROM facts ORDER BY value");
@@ -5439,6 +5987,7 @@ test_recording_filesystem_concurrent_checkpoint_move (void)
       path_from_utf8 (path_with_suffix (wal, ".recovery"))));
   remove_tree (sandbox);
 }
+#endif
 
 static void
 test_recording_filesystem_explicit_checkpoint_discovery (void)
@@ -5658,6 +6207,14 @@ main (int argc, char **argv)
     return contend_writer_child (argv[2]);
   if (argc == 3 && g_strcmp0 (argv[1], "--checkpoint-crash") == 0)
     return checkpoint_crash_child (argv[2]);
+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
+  if (argc == 3
+      && g_strcmp0 (argv[1], "--fixed-wal-abort-before-wal-finish") == 0)
+    return fixed_wal_checkpoint_abort_child (argv[2], "BEFORE_WAL_FINISH");
+  if (argc == 3
+      && g_strcmp0 (argv[1], "--fixed-wal-abort-before-header") == 0)
+    return fixed_wal_checkpoint_abort_child (argv[2], "BEFORE_HEADER");
+#endif
 #ifdef G_OS_WIN32
   /* self_path re-spawns the trace-writer children, so it must be an absolute
    * path that resolves regardless of how meson invoked this process. The
@@ -5698,11 +6255,15 @@ main (int argc, char **argv)
       test_recording_filesystem_rw_writer_contention);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/explicit-checkpoint-discovery",
       test_recording_filesystem_explicit_checkpoint_discovery);
-  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/concurrent-checkpoint-move",
-      test_recording_filesystem_concurrent_checkpoint_move);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/checkpoint-crash-phase-a",
       test_recording_filesystem_checkpoint_crash_phase_a);
 #ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/concurrent-checkpoint-move",
+      test_recording_filesystem_concurrent_checkpoint_move);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/completed-checkpoint-recovery-move",
+      test_recording_filesystem_completed_checkpoint_recovery_move);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/incomplete-checkpoint-recovery-move",
+      test_recording_filesystem_incomplete_checkpoint_recovery_move);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-no-wal",
       test_recording_filesystem_after_wal_start_no_wal);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-rendezvous",

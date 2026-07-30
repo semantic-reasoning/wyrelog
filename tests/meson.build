@@ -942,6 +942,30 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       ],
       timeout : 30,
     )
+    test('duckdb-fixed-wal-successful-checkpoint',
+      test_duckdb_after_walstart,
+      args : [
+        '-p',
+        '/secure-duckdb-bridge/recording-filesystem/concurrent-checkpoint-move',
+      ],
+      timeout : 30,
+    )
+    test('duckdb-fixed-wal-pre-move-abort-reopen',
+      test_duckdb_after_walstart,
+      args : [
+        '-p',
+        '/secure-duckdb-bridge/recording-filesystem/completed-checkpoint-recovery-move',
+      ],
+      timeout : 30,
+    )
+    test('duckdb-fixed-wal-interrupted-recovery',
+      test_duckdb_after_walstart,
+      args : [
+        '-p',
+        '/secure-duckdb-bridge/recording-filesystem/incomplete-checkpoint-recovery-move',
+      ],
+      timeout : 30,
+    )
   endif
 endif
 
