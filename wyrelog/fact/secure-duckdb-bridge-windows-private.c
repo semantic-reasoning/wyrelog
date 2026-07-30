@@ -22,6 +22,17 @@ wyl_secure_duckdb_bridge_health (WylSecureDuckdbBridge *self)
   return WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
+    *namespace_, WylSecureDuckdbMode mode, WylSecureDuckdbBridge **out)
+{
+  (void) namespace_;
+  (void) mode;
+  if (out != NULL)
+    *out = NULL;
+  return out == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
 void
 wyl_secure_duckdb_bridge_free (WylSecureDuckdbBridge *self)
 {
