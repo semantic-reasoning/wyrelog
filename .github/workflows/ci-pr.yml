@@ -245,9 +245,25 @@ jobs:
           meson test -C build-duckdb-seam --no-rebuild \
             duckdb-after-walstart-no-wal \
             duckdb-after-walstart-rendezvous \
+            duckdb-fixed-wal-successful-checkpoint \
+            duckdb-fixed-wal-pre-move-abort-reopen \
+            duckdb-fixed-wal-interrupted-recovery \
             duckdb-after-walstart-boundary \
             duckdb-test-seam-wiring \
+            duckdb-fixed-wal-lifecycle-boundary \
             --print-errorlogs
+
+      - name: Repeat fixed WAL lifecycle evidence
+        run: |
+          set -euo pipefail
+          for iteration in 1 2 3 4 5; do
+            echo "fixed WAL lifecycle iteration ${iteration}/5"
+            meson test -C build-duckdb-seam --no-rebuild \
+              duckdb-fixed-wal-successful-checkpoint \
+              duckdb-fixed-wal-pre-move-abort-reopen \
+              duckdb-fixed-wal-interrupted-recovery \
+              --print-errorlogs
+          done
 
       - name: Remove bounded Linux compile swap
         if: always() && runner.os == 'Linux'
