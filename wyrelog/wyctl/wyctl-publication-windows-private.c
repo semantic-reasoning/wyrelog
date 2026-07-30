@@ -223,6 +223,8 @@ static gboolean info_is_reparse_point (const BY_HANDLE_FILE_INFORMATION * info);
 static gboolean handle_is_owner_only_directory (HANDLE handle,
     const BY_HANDLE_FILE_INFORMATION * info);
 static gchar *identity_from_info (const BY_HANDLE_FILE_INFORMATION * info);
+static wyrelog_error_t observe_owner_only_directory (HANDLE handle,
+    const BY_HANDLE_FILE_INFORMATION * info, gboolean * out_owner_only);
 
 static wyrelog_error_t
 observe_root_path (const WyctlPublicationWindowsBackend *backend)
@@ -231,14 +233,19 @@ observe_root_path (const WyctlPublicationWindowsBackend *backend)
   HANDLE handle = INVALID_HANDLE_VALUE;
   BY_HANDLE_FILE_INFORMATION info = { 0 };
   g_autofree gchar *identity = NULL;
+  gboolean owner_only = FALSE;
+  wyrelog_error_t rc;
 
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
   if (backend->root_observation_hook != NULL) {
     switch (backend->root_observation_hook
           (backend->root_observation_hook_data)) {
       case WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_MISMATCH:
+      case WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_REPARSE:
+      case WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_NON_PRIVATE:
         return WYRELOG_E_POLICY;
       case WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_FAILURE:
+      case WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_SECURITY_FAILURE:
         return WYRELOG_E_IO;
       case WYCTL_PUBLICATION_WINDOWS_TEST_OBSERVE_DEFAULT:
         break;
@@ -259,6 +266,20 @@ observe_root_path (const WyctlPublicationWindowsBackend *backend)
   if (!GetFileInformationByHandle (handle, &info)) {
     CloseHandle (handle);
     return WYRELOG_E_IO;
+  }
+  if (info_is_reparse_point (&info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
+  rc = observe_owner_only_directory (handle, &info, &owner_only);
+  if (rc != WYRELOG_E_OK) {
+    CloseHandle (handle);
+    return rc;
+  }
+  if (!owner_only) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
   }
   identity = identity_from_info (&info);
   CloseHandle (handle);
@@ -512,6 +533,35 @@ handle_is_owner_only_directory (HANDLE handle,
           &sec_len) && security_descriptor_is_owner_only (sec);
   g_free (sec);
   return valid;
+}
+
+static wyrelog_error_t
+observe_owner_only_directory (HANDLE handle,
+    const BY_HANDLE_FILE_INFORMATION *info, gboolean *out_owner_only)
+{
+  DWORD sec_len = 0;
+  PSECURITY_DESCRIPTOR sec = NULL;
+
+  if (handle == INVALID_HANDLE_VALUE || handle == NULL || info == NULL
+      || out_owner_only == NULL)
+    return WYRELOG_E_INVALID;
+  *out_owner_only = FALSE;
+  if (!GetKernelObjectSecurity (handle,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0,
+      &sec_len) && GetLastError () != ERROR_INSUFFICIENT_BUFFER)
+    return WYRELOG_E_IO;
+  sec = g_malloc0 (sec_len);
+  if (sec == NULL)
+    return WYRELOG_E_NOMEM;
+  if (!GetKernelObjectSecurity (handle,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, sec,
+      sec_len, &sec_len)) {
+    g_free (sec);
+    return WYRELOG_E_IO;
+  }
+  *out_owner_only = security_descriptor_is_owner_only (sec);
+  g_free (sec);
+  return WYRELOG_E_OK;
 }
 
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
@@ -1682,37 +1732,53 @@ wyctl_publication_windows_commit
              credential_secret, out_result);
 }
 
-static gboolean
+static wyrelog_error_t
 windows_receipt_target_name_matches (const
     WyctlPublicationWindowsBackend *backend,
-    const WyctlPublicationReceiptTargetLease *lease)
+    const WyctlPublicationReceiptTargetLease *lease, gboolean *out_matches)
 {
   g_autofree wchar_t *path = NULL;
   HANDLE handle = INVALID_HANDLE_VALUE;
   BY_HANDLE_FILE_INFORMATION root_info = { 0 };
   BY_HANDLE_FILE_INFORMATION info = { 0 };
-  gboolean matches = FALSE;
+  DWORD error;
+  wyrelog_error_t rc;
 
+  if (out_matches == NULL)
+    return WYRELOG_E_INVALID;
+  *out_matches = FALSE;
   if (!backend_is_valid (backend) || lease == NULL || lease->owner != backend
-      || !GetFileInformationByHandle (lease->root_handle, &root_info)
-      || !identity_matches_info (lease->parent_identity, &root_info))
-    return FALSE;
+      || lease->root_handle == INVALID_HANDLE_VALUE
+      || lease->root_handle == NULL)
+    return WYRELOG_E_INVALID;
+  rc = observe_root_path (backend);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!GetFileInformationByHandle (lease->root_handle, &root_info))
+    return WYRELOG_E_IO;
+  if (!identity_matches_info (lease->parent_identity, &root_info))
+    return WYRELOG_E_POLICY;
   path = wide_child_path (lease->canonical_root, lease->basename);
   if (path == NULL)
-    return FALSE;
+    return WYRELOG_E_NOMEM;
   handle = CreateFileW (path, 0,
           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
           NULL);
-  if (handle != INVALID_HANDLE_VALUE
-      && GetFileInformationByHandle (handle, &info))
-    matches = identity_matches_info (lease->identity, &info)
-        && !info_is_reparse_point (&info)
-        && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
-
-  if (handle != INVALID_HANDLE_VALUE)
+  if (handle == INVALID_HANDLE_VALUE) {
+    error = GetLastError ();
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ?
+           WYRELOG_E_OK : WYRELOG_E_IO;
+  }
+  if (!GetFileInformationByHandle (handle, &info)) {
     CloseHandle (handle);
-  return matches;
+    return WYRELOG_E_IO;
+  }
+  *out_matches = identity_matches_info (lease->identity, &info)
+      && !info_is_reparse_point (&info)
+      && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+  CloseHandle (handle);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -1854,6 +1920,7 @@ wyctl_publication_windows_receipt_target_inspect
   gboolean directory_synced = TRUE;
   gboolean empty = FALSE;
   gboolean matches = FALSE;
+  gboolean name_matches = FALSE;
   gboolean target_synced;
   wyrelog_error_t rc;
 
@@ -1868,21 +1935,32 @@ wyctl_publication_windows_receipt_target_inspect
     return WYRELOG_E_INVALID;
   if (!GetFileInformationByHandle (lease->target_handle, &info)
       || !identity_matches_info (lease->identity, &info)
-      || !handle_is_owner_only_regular (lease->target_handle, &info, FALSE)
-      || !windows_receipt_target_name_matches (backend, lease))
+      || !handle_is_owner_only_regular (lease->target_handle, &info, FALSE))
+    goto foreign;
+  rc = windows_receipt_target_name_matches (backend, lease, &name_matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!name_matches)
     goto foreign;
   rc = credential_document_matches_handle (lease->target_handle,
           expected_credential_id, expected_credential_secret, &empty, &matches);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (empty || !matches
-      || !windows_receipt_target_name_matches (backend, lease))
+  if (empty || !matches)
+    goto foreign;
+  rc = windows_receipt_target_name_matches (backend, lease, &name_matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!name_matches)
     goto foreign;
   lease->inspected_exact = TRUE;
   target_synced = FlushFileBuffers (lease->target_handle);
   if (lease->destination_target)
     directory_synced = directory_flush (lease->root_handle) == WYRELOG_E_OK;
-  if (!windows_receipt_target_name_matches (backend, lease))
+  rc = windows_receipt_target_name_matches (backend, lease, &name_matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!name_matches)
     goto foreign;
   if (!target_synced || !directory_synced)
     return windows_result_fill (out_result,
@@ -1911,6 +1989,7 @@ wyctl_publication_windows_receipt_target_commit
   gboolean directory_synced;
   gboolean empty = FALSE;
   gboolean matches = FALSE;
+  gboolean name_matches = FALSE;
   gboolean target_synced;
   wyrelog_error_t rc;
 
@@ -1928,8 +2007,13 @@ wyctl_publication_windows_receipt_target_commit
           expected_credential_id, expected_credential_secret, &empty, &matches);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (empty || !matches || !windows_receipt_target_name_matches (backend,
-      lease))
+  if (empty || !matches)
+    return windows_result_fill (out_result,
+               WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+  rc = windows_receipt_target_name_matches (backend, lease, &name_matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!name_matches)
     return windows_result_fill (out_result,
                WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
   next_basename = g_strdup (lease->destination);
@@ -1942,12 +2026,18 @@ wyctl_publication_windows_receipt_target_commit
   g_free (lease->basename);
   lease->basename = g_steal_pointer (&next_basename);
   lease->destination_target = TRUE;
-  if (!windows_receipt_target_name_matches (backend, lease))
+  rc = windows_receipt_target_name_matches (backend, lease, &name_matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!name_matches)
     return windows_result_fill (out_result,
                WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
   target_synced = FlushFileBuffers (lease->target_handle);
   directory_synced = directory_flush (lease->root_handle) == WYRELOG_E_OK;
-  if (!windows_receipt_target_name_matches (backend, lease))
+  rc = windows_receipt_target_name_matches (backend, lease, &name_matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!name_matches)
     return windows_result_fill (out_result,
                WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
   return windows_result_fill (out_result,
