@@ -1449,6 +1449,14 @@ test('service-credential-operation-coordinator-handoff',
   timeout : service_credential_operation_coordinator_execute_timeout,
 )
 
+# The real-publication case stamps the fixture's publication root with a
+# protected owner-only DACL on Windows, which needs the advapi32 security APIs.
+test_daemon_service_credential_handoff_deps = (
+  test_service_credential_operation_coordinator_execute_deps
+  + [publication_private_dep])
+if host_machine.system() == 'windows'
+  test_daemon_service_credential_handoff_deps += advapi32_dep
+endif
 test_daemon_service_credential_handoff = executable('test-daemon-service-credential-handoff',
   [
     'test-daemon-service-credential-handoff.c',
@@ -1456,8 +1464,7 @@ test_daemon_service_credential_handoff = executable('test-daemon-service-credent
   ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog'),
     include_directories('../wyrelog/wyctl')],
-  dependencies : test_service_credential_operation_coordinator_execute_deps
-    + [publication_private_dep],
+  dependencies : test_daemon_service_credential_handoff_deps,
   c_args : test_service_credential_operation_coordinator_execute_c_args
     + ['-DWYL_TEST_DAEMON_HTTP'],
 )

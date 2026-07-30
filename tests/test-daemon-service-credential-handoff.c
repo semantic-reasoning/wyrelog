@@ -15,6 +15,7 @@
 #include "wyl-request-id-private.h"
 #include "../wyrelog/wyctl/wyctl-publication-private.h"
 #include "test-service-credential-operation-root.h"
+#include "test-publication-root.h"
 
 typedef struct
 {
@@ -637,25 +638,27 @@ test_daemon_handoff_unconfigured (void)
   g_assert_cmpuint (publication.plan_calls, ==, 0);
 }
 
-/* Drives the module against the REAL POSIX publication backend with no override:
- * the module opens the backend on the fixture's 0700 publication_root and
- * derives parent_identity through the real accessor. A green delivered receipt
- * proves the derived parent_identity equals what plan() stamps -- any divergence
- * would trip the executor's plan/record parent_identity assertion and fail
- * closed with POLICY. This is the sole regression guard for the crux; the mock
- * path cannot catch an accessor != plan divergence. (Windows accessor==plan
- * equality rests on code review; there is no real-Windows daemon test here.)
+/* Drives the module against the REAL publication backend with no override on
+ * both platforms: the module opens the backend on the fixture's owner-private
+ * publication_root -- 0700 on POSIX, a protected owner-only DACL on Windows --
+ * and derives parent_identity through the real accessor. A green delivered
+ * receipt proves the derived parent_identity equals what plan() stamps; any
+ * divergence trips the executor's plan/record parent_identity assertion and
+ * fails closed with POLICY. This is the sole regression guard for the crux on
+ * either platform: the mock path cannot catch an accessor != plan divergence,
+ * and root_identity has no other runtime coverage anywhere in the suite.
  *
- * POSIX-only: the fixture's 0700 publication root uses POSIX ownership/mode
- * semantics, and this exercises the POSIX stat-identity crux specifically. The
- * real-Windows escrow-publish path is not yet validated end-to-end (tracked
- * separately) and needs a Windows owner-only-ACL fixture. */
-#ifndef G_OS_WIN32
+ * A POLICY failure here is not automatically a divergence. The Windows backend
+ * re-derives parent_identity from independent root-anchor opens and refuses
+ * when two observations disagree; that was seen once in 74 runs (issue #661).
+ * A real divergence fails every run, a #661 flake does not -- re-run before
+ * bisecting. */
 static void
 test_daemon_handoff_issue_real_publication (void)
 {
   g_auto (Fixture) fixture = { 0 };
   fixture_init (&fixture);
+  publication_root_stamp_owner_only (fixture.publication_root);
   prepare_authority (fixture.handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
       "tenant-a");
@@ -671,15 +674,20 @@ test_daemon_handoff_issue_real_publication (void)
       issue_inputs_for (request_id);
 
   g_autofree gchar *json = NULL;
-  g_assert_cmpint (wyl_daemon_service_credential_handoff (&ctx, &inputs, &json),
-      ==, WYRELOG_E_OK);
+  wyrelog_error_t rc = wyl_daemon_service_credential_handoff (&ctx, &inputs,
+      &json);
+  if (rc == WYRELOG_E_POLICY)
+    g_test_message ("POLICY here is usually an accessor/plan parent_identity "
+        "divergence (fails every run) or the known Windows root-anchor "
+        "re-derivation race, issue #661 (seen once in 74). Re-run before "
+        "bisecting.");
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
   g_assert_nonnull (json);
   g_assert_nonnull (strstr (json, "\"state\":\"terminal\""));
   g_assert_nonnull (strstr (json, "\"delivered\":true"));
   g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
   g_assert_cmpint (count_delivered (db_of (fixture.handle), request_id), ==, 1);
 }
-#endif /* !G_OS_WIN32 */
 
 int
 main (int argc, char *argv[])
@@ -695,9 +703,7 @@ main (int argc, char *argv[])
       test_daemon_handoff_malformed);
   g_test_add_func ("/daemon-service-credential-handoff/unconfigured",
       test_daemon_handoff_unconfigured);
-#ifndef G_OS_WIN32
   g_test_add_func ("/daemon-service-credential-handoff/issue-real-publication",
       test_daemon_handoff_issue_real_publication);
-#endif
   return g_test_run ();
 }
