@@ -1762,26 +1762,6 @@ temp_binding_revoke (WylFactArtifactWinTempChildBinding *binding)
   binding->child->io_terminal = TRUE;
 }
 
-static wyrelog_error_t
-temp_binding_check (WylFactArtifactWinTempChildBinding *binding,
-    gboolean require_handle, HANDLE supplied)
-{
-  wyrelog_error_t rc;
-  if (binding == NULL || !binding->active)
-    return WYRELOG_E_POLICY;
-  g_mutex_lock (&binding->child->mutex);
-  rc = temp_child_check (binding->child);
-  if (rc == WYRELOG_E_OK && require_handle) {
-    rc = !binding->io_open ? WYRELOG_E_POLICY
-        : wyl_fact_artifact_win_working_handle_revalidate (binding->working);
-    (void) supplied;
-  }
-  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_BUSY)
-    temp_binding_revoke (binding);
-  g_mutex_unlock (&binding->child->mutex);
-  return rc;
-}
-
 wyrelog_error_t
 wyl_fact_artifact_win_lease_create_temp_root (WylFactArtifactWinLease *lease,
     WylFactArtifactWinTempRoot **out_root)
