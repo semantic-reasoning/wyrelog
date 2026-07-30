@@ -26,6 +26,10 @@ struct WylFactArtifactMainBinding
 {
   gint unused;
 };
+struct WylFactArtifactReaderMainBinding
+{
+  gint unused;
+};
 struct WylFactDuckdbTempChildBinding
 {
   gint unused;
@@ -97,6 +101,48 @@ void
 wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *l)
 {
   (void) l;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_guard_open_main_binding (WylFactArtifactMutationLease
+    *l, WylFactArtifactReaderMainBinding **b, gint *fd)
+{
+  (void) l;
+  if (b)
+    *b = NULL;
+  if (fd)
+    *fd = -1;
+  return closed ();
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_reader_main_binding_revalidate
+    (WylFactArtifactReaderMainBinding * b) {
+  (void) b;
+  return closed ();
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_reader_main_binding_revalidate_fd
+    (WylFactArtifactReaderMainBinding * b, gint fd) {
+  (void) b;
+  (void) fd;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_main_binding_close (WylFactArtifactReaderMainBinding
+    *b, gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return closed ();
+}
+
+void
+wyl_fact_artifact_reader_main_binding_free (WylFactArtifactReaderMainBinding *b)
+{
+  (void) b;
 }
 
 wyrelog_error_t
@@ -723,6 +769,13 @@ struct WylFactArtifactMainBinding
   guint64 device, inode;
   gboolean active;
 };
+struct WylFactArtifactReaderMainBinding
+{
+  WylFactArtifactMutationLease *lease;
+  gint pin_fd;
+  guint64 device, inode;
+  gboolean active;
+};
 struct WylFactArtifactTempRecoveryEvidence
 {
   gchar *token;
@@ -786,6 +839,8 @@ static wyrelog_error_t duckdb_temp_set_orphan_evidence (const gchar *,
 static void release_lock_domain (WylFactArtifactNamespace *);
 static wyrelog_error_t namespace_test_substitute_regular
     (WylFactArtifactNamespace *, const gchar *, gboolean);
+static wyrelog_error_t namespace_test_substitute_fifo
+    (WylFactArtifactNamespace *, const gchar *);
 
 static gboolean
 namespace_fault_take (WylFactArtifactNamespaceTestFault fault)
@@ -1728,6 +1783,172 @@ wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *binding)
   g_free (binding);
 }
 
+static wyrelog_error_t
+reader_main_binding_matches_unlocked (WylFactArtifactReaderMainBinding *binding)
+{
+  WylFactArtifactMutationLease *lease = binding->lease;
+  WylFactArtifactNamespace *namespace_ = lease->namespace_;
+  struct stat pinned;
+  if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
+      || !S_ISREG (pinned.st_mode) || pinned.st_nlink != 1
+      || (pinned.st_mode & 07777) != 0600
+      || (guint64) pinned.st_uid != namespace_->owner
+      || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || binding->device != namespace_->main_device
+      || binding->inode != namespace_->main_inode
+      || check (namespace_) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+reader_main_binding_revalidate_unlocked (WylFactArtifactReaderMainBinding
+    *binding)
+{
+  if (!binding || !binding->lease || binding->lease->exclusive)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t result = lease_revalidate_unlocked (binding->lease);
+  if (result == WYRELOG_E_OK)
+    result = reader_main_binding_matches_unlocked (binding);
+  if (result != WYRELOG_E_OK)
+    binding->active = FALSE;
+  return result;
+}
+
+static wyrelog_error_t
+    reader_main_binding_revalidate_fd_unlocked
+    (WylFactArtifactReaderMainBinding * binding, gint working_fd)
+{
+  wyrelog_error_t result = reader_main_binding_revalidate_unlocked (binding);
+  struct stat working;
+  if (result == WYRELOG_E_OK
+      && (working_fd < 0 || fstat (working_fd, &working) != 0
+          || !S_ISREG (working.st_mode) || working.st_nlink != 1
+          || (working.st_mode & 07777) != 0600
+          || (guint64) working.st_uid != binding->lease->namespace_->owner
+          || (guint64) working.st_dev != binding->device
+          || (guint64) working.st_ino != binding->inode))
+    result = WYRELOG_E_POLICY;
+  if (result != WYRELOG_E_OK)
+    binding->active = FALSE;
+  return result;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_reader_guard_open_main_binding
+    (WylFactArtifactMutationLease * lease,
+    WylFactArtifactReaderMainBinding ** out_binding, gint * out_fd) {
+  if (out_binding)
+    *out_binding = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (!lease || !out_binding || !out_fd || lease->exclusive)
+    return WYRELOG_E_POLICY;
+
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = lease_revalidate_unlocked (lease);
+  if (result != WYRELOG_E_OK || check (lease->namespace_) != WYRELOG_E_OK) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO))
+  {
+    result = namespace_test_substitute_fifo (lease->namespace_,
+        name_for (WYL_FACT_ARTIFACT_MAIN));
+    if (result != WYRELOG_E_OK)
+      goto done;
+  }
+  gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
+      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
+        : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
+        || errno == EACCES ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+    goto done;
+  }
+  gint pin_fd = duplicate_cloexec (fd);
+  struct stat pinned;
+  if (pin_fd < 0 || fstat (pin_fd, &pinned) != 0) {
+    if (pin_fd >= 0)
+      close (pin_fd);
+    close (fd);
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  WylFactArtifactReaderMainBinding *binding = g_new0
+      (WylFactArtifactReaderMainBinding, 1);
+  binding->lease = mutation_lease_ref (lease);
+  binding->pin_fd = pin_fd;
+  binding->device = pinned.st_dev;
+  binding->inode = pinned.st_ino;
+  binding->active = TRUE;
+  result = reader_main_binding_revalidate_unlocked (binding);
+  if (result != WYRELOG_E_OK) {
+    wyl_fact_artifact_reader_main_binding_free (binding);
+    close (fd);
+    goto done;
+  }
+  *out_binding = binding;
+  *out_fd = fd;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_reader_main_binding_revalidate
+    (WylFactArtifactReaderMainBinding * binding) {
+  if (!binding || !binding->lease)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = reader_main_binding_revalidate_unlocked (binding);
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_reader_main_binding_revalidate_fd
+    (WylFactArtifactReaderMainBinding * binding, gint working_fd) {
+  if (!binding || !binding->lease)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = reader_main_binding_revalidate_fd_unlocked (binding,
+      working_fd);
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_reader_main_binding_close
+    (WylFactArtifactReaderMainBinding * binding, gint * working_fd) {
+  if (!binding || !binding->lease || !working_fd)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = reader_main_binding_revalidate_fd_unlocked (binding,
+      *working_fd);
+  if (result == WYRELOG_E_OK) {
+    const gint fd = *working_fd;
+    *working_fd = -1;
+    binding->active = FALSE;
+    result = close (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  }
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+void wyl_fact_artifact_reader_main_binding_free
+    (WylFactArtifactReaderMainBinding * binding)
+{
+  if (!binding)
+    return;
+  if (binding->pin_fd >= 0)
+    close (binding->pin_fd);
+  wyl_fact_artifact_mutation_lease_free (binding->lease);
+  g_free (binding);
+}
+
 wyrelog_error_t
 open_file_unchecked (WylFactArtifactNamespace *n,
     WylFactArtifactName a, gboolean create, gboolean writable, gint *o)
@@ -2178,6 +2399,16 @@ namespace_test_substitute_regular (WylFactArtifactNamespace *namespace_,
     return errno == EEXIST ? WYRELOG_E_POLICY : WYRELOG_E_IO;
   close (fd);
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+namespace_test_substitute_fifo (WylFactArtifactNamespace *namespace_,
+    const gchar *name)
+{
+  if (unlinkat (namespace_->fd, name, 0) != 0)
+    return WYRELOG_E_IO;
+  return mkfifoat (namespace_->fd, name, 0600) == 0 ? WYRELOG_E_OK :
+      WYRELOG_E_IO;
 }
 
 static wyrelog_error_t

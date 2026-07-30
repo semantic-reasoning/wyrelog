@@ -10,6 +10,8 @@ typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
 typedef struct WylFactArtifactSidecarBinding WylFactArtifactSidecarBinding;
 typedef struct WylFactArtifactMainBinding WylFactArtifactMainBinding;
+typedef struct WylFactArtifactReaderMainBinding
+    WylFactArtifactReaderMainBinding;
 typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
@@ -67,6 +69,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE,
@@ -119,6 +122,27 @@ wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
 wyrelog_error_t wyl_fact_artifact_mutation_lease_revalidate
     (WylFactArtifactMutationLease *);
 void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
+/* Binds the already-imported canonical facts.duckdb for validate-only I/O.
+ * This is a reader-guard-only capability: it opens the existing fixed name
+ * O_RDONLY/CLOEXEC/NOFOLLOW, grants no creation or mutation authority, and
+ * retains the shared reader guard plus a separate identity pin.  #596 must
+ * revalidate the actual working descriptor immediately before and after raw
+ * reads, seeks, and close.  Validation failure terminally revokes the binding
+ * without closing a possibly reused foreign descriptor. */
+wyrelog_error_t wyl_fact_artifact_reader_guard_open_main_binding
+    (WylFactArtifactMutationLease *,
+    WylFactArtifactReaderMainBinding ** out_binding, gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_reader_main_binding_revalidate
+    (WylFactArtifactReaderMainBinding *);
+wyrelog_error_t wyl_fact_artifact_reader_main_binding_revalidate_fd
+    (WylFactArtifactReaderMainBinding *, gint working_fd);
+/* On success, closes and sets *working_fd to -1, consuming the binding.  On
+ * validation failure it leaves *working_fd untouched because it may already
+ * name a foreign descriptor. */
+wyrelog_error_t wyl_fact_artifact_reader_main_binding_close
+    (WylFactArtifactReaderMainBinding *, gint * working_fd);
+void wyl_fact_artifact_reader_main_binding_free
+    (WylFactArtifactReaderMainBinding *);
 /* Binds the already-imported canonical facts.duckdb for in-place DuckDB I/O.
  * This is deliberately not a pathname capability: it requires an exclusive
  * lease, opens only the existing fixed name with O_RDWR/CLOEXEC/NOFOLLOW, and
