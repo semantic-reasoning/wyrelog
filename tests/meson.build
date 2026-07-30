@@ -2177,6 +2177,10 @@ test('duckdb-test-seam-wiring', python3,
   args : [files('test-duckdb-test-seam-wiring.py'),
     meson.project_source_root()])
 
+test('duckdb-fixed-wal-lifecycle-boundary', python3,
+  args : [files('test-duckdb-fixed-wal-lifecycle-boundary.py'),
+    meson.project_source_root()])
+
 if host_machine.system() != 'windows'
   valgrind_gate = find_program(
     '../tools/run-valgrind-gate.sh',
