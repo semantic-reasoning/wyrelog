@@ -26,6 +26,7 @@ enable_audit_opt = get_option('enable_audit')
 enable_fact_store_opt = get_option('enable_fact_store')
 enable_break_glass_opt = get_option('enable_break_glass')
 enable_secure_duckdb_bridge_opt = get_option('enable_secure_duckdb_bridge')
+duckdb_test_seam_dep = disabler()
 if enable_secure_duckdb_bridge_opt.enabled()
   if not enable_fact_store_opt.enabled()
     error('enable_secure_duckdb_bridge requires enable_fact_store=enabled')
@@ -77,6 +78,10 @@ if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
       # subproject (currently v1.5.5), never a system lookalike.
       duckdb_subproject = subproject('duckdb-amalgamated', required : true)
       duckdb_dep = duckdb_subproject.get_variable('duckdb_dep')
+      if host_machine.system() != 'windows'
+        duckdb_test_seam_dep = duckdb_subproject.get_variable(
+          'duckdb_test_seam_dep')
+      endif
       # Meson 1.1 lacks SubprojectHolder.project_version(); the declared
       # subproject dependency carries that same project version.
       if duckdb_dep.version() != '1.5.5'

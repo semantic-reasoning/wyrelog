@@ -80,4 +80,35 @@ duckdb_dep = declare_dependency(
   link_args : host_machine.system() == 'windows' and cpp.get_id() == 'gcc' ? ['-Wl,--whole-archive', duckdb_lib.full_path(), '-Wl,--no-whole-archive', '-lstdc++'] : [],
 )
 
+duckdb_test_seam_dep = disabler()
+if host_machine.system() != 'windows'
+  # Compile the pinned rendezvous as a separate, test-only DuckDB variant.
+  # duckdb_lib above deliberately receives neither this macro nor this
+  # dependency, so the installed/production library keeps its original ABI,
+  # symbol surface, and checkpoint path.
+  duckdb_test_seam_compile_args = duckdb_compile_args + [
+    '-DWYL_DUCKDB_TEST_AFTER_WAL_START=1',
+  ]
+  duckdb_test_seam_lib = static_library('duckdb-test-after-wal-start',
+    'duckdb.cpp',
+    override_options : [
+      'optimization=2',
+      'debug=false',
+      'b_lto=false',
+      'cpp_std=gnu++17',
+    ],
+    dependencies : duckdb_deps,
+    cpp_args : duckdb_test_seam_compile_args,
+    include_directories : include_directories('.'),
+    install : false,
+    build_by_default : false,
+  )
+  duckdb_test_seam_dep = declare_dependency(
+    link_with : duckdb_test_seam_lib,
+    dependencies : duckdb_deps,
+    include_directories : include_directories('.'),
+    compile_args : duckdb_test_seam_compile_args,
+  )
+endif
+
 install_headers('duckdb.h')
