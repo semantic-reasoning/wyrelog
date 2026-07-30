@@ -61,8 +61,15 @@ struct Fixture
 
   explicit Fixture (bool populated = true) {
     g_autoptr (GError) error = nullptr;
-    root = g_dir_make_tmp ("wyl-secure-filesystem-XXXXXX", &error);
+    g_autofree gchar *
+        created_root = g_dir_make_tmp ("wyl-secure-filesystem-XXXXXX", &error);
     g_assert_no_error (error);
+    g_assert_nonnull (created_root);
+    /* macOS may spell TMPDIR through /var, which is a symlink to /private/var.
+     * Resolve the owned fixture root before the resolver's no-symlink walk. */
+    auto
+        canonical_root = fs::canonical (created_root);
+    root = g_strdup (canonical_root.c_str ());
     g_assert_nonnull (root);
     g_assert_cmpint (g_chmod (root, 0700), ==, 0);
     g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
