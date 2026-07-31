@@ -95,6 +95,14 @@ typedef struct
   gpointer checkpoint_data;
 } WylFactGraphDirectory;
 
+#ifndef G_OS_WIN32
+/* Opaque authority for one exact retained POSIX provisioning pair.  It owns
+ * independent root/tenant/graph and final-file handles and pins the identity
+ * verified by the #595 exact opener; callers cannot retarget it by changing
+ * either retained name. */
+typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
+#endif
+
 typedef struct
 {
   gint fd;
@@ -217,6 +225,16 @@ wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_exact
     (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphRegularFile * out_final);
+#ifndef G_OS_WIN32
+wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphProvisionedPair ** out_pair);
+WylFactGraphProvisionedPair *wyl_fact_graph_provisioned_pair_ref
+    (WylFactGraphProvisionedPair * pair);
+void wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair);
+wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate
+    (WylFactGraphProvisionedPair * pair);
+#endif
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *
     directory, WylFactGraphStage * stage);
