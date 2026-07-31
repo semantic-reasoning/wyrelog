@@ -312,7 +312,7 @@ jobs:
   daemon-http-shared-fact:
     name: daemon-http-shared-fact-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -370,6 +370,7 @@ jobs:
             daemon-http-decide-refresh \
             daemon-http-decide-service \
             daemon-http-decide-audit \
+            daemon-http-decide-private-symbols \
             --print-errorlogs
 
       - name: Upload daemon HTTP meson logs on failure
