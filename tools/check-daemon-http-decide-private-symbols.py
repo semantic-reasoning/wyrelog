@@ -62,12 +62,10 @@ def normalize_symbol(name: str, macho: bool) -> str:
 def wyl_symbols(output: str, macho: bool) -> set[str]:
     symbols = set()
     for line in output.splitlines():
-        fields = line.split()
-        if not fields:
-            continue
-        candidate = normalize_symbol(fields[-1], macho)
-        if re.fullmatch(r"wyl_[A-Za-z0-9_]+", candidate):
-            symbols.add(candidate)
+        for field in line.split():
+            candidate = normalize_symbol(field, macho)
+            if re.fullmatch(r"wyl_[A-Za-z0-9_]+", candidate):
+                symbols.add(candidate)
     return symbols
 
 
@@ -119,8 +117,12 @@ def exported_command(tool: str, artifact: Path, macho: bool) -> list[str]:
     )
 
 
-def undefined_command(tool: str, artifact: Path) -> list[str]:
-    return [tool, "-u", str(artifact)]
+def undefined_command(tool: str, artifact: Path, macho: bool) -> list[str]:
+    return (
+        [tool, "-m", "-u", str(artifact)]
+        if macho
+        else [tool, "-u", str(artifact)]
+    )
 
 
 def defined_symbols(artifact: Path, macho: bool) -> set[str]:
@@ -146,7 +148,11 @@ def dynamic_external_exports(artifact: Path, macho: bool) -> set[str]:
 
 def undefined_symbols(artifact: Path, macho: bool) -> set[str]:
     return wyl_symbols(
-        run(undefined_command(find_tool("nm", "llvm-nm"), artifact)),
+        run(undefined_command(
+            find_tool("nm", "llvm-nm"),
+            artifact,
+            macho,
+        )),
         macho,
     )
 
@@ -186,11 +192,15 @@ def self_test() -> int:
     }:
         return 1
     macho = """
-00000001 T _wyl_test_daemon_http_seed_prepared_operation
-                 U _wyl_service_credential_operation_coordinator_load
-00000003 T __wyl_not_normalized
+         (undefined) external _wyl_test_daemon_http_seed_prepared_operation (from libtest-daemon-http-decide-seed-helper)
+         (undefined) external _wyl_service_credential_operation_storage_open (from libwyrelog.0)
+         (undefined) external _wyl_service_credential_operation_coordinator_load (from libwyrelog.0)
+         (undefined) external _wyl_service_credential_operation_coordinator_lock_acquire (from libwyrelog.0)
+         (undefined) external _wyl_service_credential_operation_coordinator_lock_release (from libwyrelog.0)
+         (undefined) external __wyl_not_normalized (from libunintended)
+         (undefined) external prefix_wyl_not_a_symbol (from libunintended)
 """
-    if wyl_symbols(macho, True) != {SEED_SYMBOL, LOAD_SYMBOL}:
+    if wyl_symbols(macho, True) != EXECUTABLE_IMPORTS:
         return 1
     adversarial_helper_exports = """
 00000001 T wyl_test_daemon_http_seed_prepared_operation
@@ -240,7 +250,11 @@ def self_test() -> int:
     if exported_command("nm", artifact, True) != [
             "nm", "-gU", str(artifact)]:
         return 1
-    if undefined_command("nm", artifact) != ["nm", "-u", str(artifact)]:
+    if undefined_command("nm", artifact, False) != [
+            "nm", "-u", str(artifact)]:
+        return 1
+    if undefined_command("nm", artifact, True) != [
+            "nm", "-m", "-u", str(artifact)]:
         return 1
     helper = Path("/tmp/libtest-daemon-http-decide-seed-helper.so")
     if not provider_is_needed(
