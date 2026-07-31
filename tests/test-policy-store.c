@@ -2351,6 +2351,209 @@ check_store_validates_service_permission_closure (void)
   return 0;
 }
 
+/* Analyze the service permission closure into an ordered removal list and a
+ * deterministic store snapshot. Mirrors the validator seeding above, but
+ * asserts the concrete REVOKE_DIRECT / REMOVE_MEMBERSHIP removals, the
+ * unsafe/dangling tallies, and that the snapshot digest is stable on an
+ * unchanged store yet changes after a mutation. */
+static gint
+check_store_analyzes_service_permission_closure (void)
+{
+  g_autoptr (wyl_policy_store_t) clean = NULL;
+  g_autoptr (wyl_policy_store_t) bad_direct = NULL;
+  g_autoptr (wyl_policy_store_t) bad_role = NULL;
+  g_autoptr (wyl_policy_store_t) bad_inherit = NULL;
+  wyl_policy_service_principal_info_t principal = { 0 };
+  WylPolicyPermissionClosureAnalysis analysis = { 0 };
+  WylPolicyPermissionClosureRemoval *removal = NULL;
+
+  /* Clean closure: allowlisted direct data-plane permission only. Empty
+   * removal list, zero counts, and a well-formed non-zero generation. */
+  if (wyl_policy_store_open (NULL, &clean) != WYRELOG_E_OK)
+    return 700;
+  if (wyl_policy_store_create_schema (clean) != WYRELOG_E_OK)
+    return 701;
+  if (wyl_policy_store_create_service_principal (clean,
+          "svc:closure:clean", "clean", "admin-user",
+          "req-closure-clean", &principal) != WYRELOG_E_OK)
+    return 702;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (clean),
+          "INSERT INTO direct_permissions "
+          "(subject_id, perm_id, scope, granted_at) VALUES "
+          "('svc:closure:clean', 'wr.stream.read', 'svc-scope', 0);",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 703;
+  if (wyl_policy_store_analyze_service_permission_closure (clean, &analysis)
+      != WYRELOG_E_OK)
+    return 704;
+  if (analysis.removals == NULL || analysis.removals->len != 0)
+    return 705;
+  if (analysis.unsafe_permission_count != 0
+      || analysis.dangling_subject_count != 0
+      || analysis.dangling_role_count != 0)
+    return 706;
+  if (analysis.generation == 0)
+    return 707;
+
+  /* Snapshot determinism: two reads of the unchanged store agree; a mutation
+   * changes the digest. */
+  guint8 digest_a[32] = { 0 };
+  guint8 digest_b[32] = { 0 };
+  guint64 gen_a = 0;
+  guint64 gen_b = 0;
+  if (wyl_policy_store_service_permission_authority_snapshot (clean,
+          &gen_a, digest_a) != WYRELOG_E_OK)
+    return 708;
+  if (wyl_policy_store_service_permission_authority_snapshot (clean,
+          &gen_b, digest_b) != WYRELOG_E_OK)
+    return 709;
+  if (memcmp (digest_a, digest_b, 32) != 0 || gen_a != gen_b)
+    return 710;
+  if (memcmp (analysis.digest, digest_a, 32) != 0)
+    return 711;
+  if (sqlite3_exec (wyl_policy_store_get_db (clean),
+          "INSERT INTO direct_permissions "
+          "(subject_id, perm_id, scope, granted_at) VALUES "
+          "('svc:closure:clean', 'wr.stream.list', 'svc-scope', 0);",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 712;
+  if (wyl_policy_store_service_permission_authority_snapshot (clean,
+          &gen_b, digest_b) != WYRELOG_E_OK)
+    return 713;
+  if (memcmp (digest_a, digest_b, 32) == 0)
+    return 714;
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+
+  /* Unsafe direct control-plane permission: one REVOKE_DIRECT removal with the
+   * exact subject/right/scope and an UNSAFE_PERMISSION reason. */
+  if (wyl_policy_store_open (NULL, &bad_direct) != WYRELOG_E_OK)
+    return 715;
+  if (wyl_policy_store_create_schema (bad_direct) != WYRELOG_E_OK)
+    return 716;
+  if (wyl_policy_store_create_service_principal (bad_direct,
+          "svc:closure:baddirect", "bad direct", "admin-user",
+          "req-closure-bad-direct", &principal) != WYRELOG_E_OK)
+    return 717;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (bad_direct),
+          "INSERT INTO direct_permissions "
+          "(subject_id, perm_id, scope, granted_at) VALUES "
+          "('svc:closure:baddirect', 'wr.service_credential.manage', "
+          "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
+    return 718;
+  if (wyl_policy_store_analyze_service_permission_closure (bad_direct,
+          &analysis) != WYRELOG_E_OK)
+    return 719;
+  if (analysis.removals->len != 1)
+    return 720;
+  if (analysis.unsafe_permission_count != 1
+      || analysis.dangling_subject_count != 0
+      || analysis.dangling_role_count != 0)
+    return 721;
+  removal = g_ptr_array_index (analysis.removals, 0);
+  if (removal->action != WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT)
+    return 722;
+  if (removal->reason != WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION)
+    return 723;
+  if (g_strcmp0 (removal->subject_id, "svc:closure:baddirect") != 0)
+    return 724;
+  if (g_strcmp0 (removal->right_id, "wr.service_credential.manage") != 0)
+    return 725;
+  if (g_strcmp0 (removal->scope, "svc-scope") != 0)
+    return 726;
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+
+  /* Unsafe control-plane permission via a direct role membership: one
+   * REMOVE_MEMBERSHIP removal keyed by the offending role membership. */
+  if (wyl_policy_store_open (NULL, &bad_role) != WYRELOG_E_OK)
+    return 727;
+  if (wyl_policy_store_create_schema (bad_role) != WYRELOG_E_OK)
+    return 728;
+  if (wyl_policy_store_create_service_principal (bad_role,
+          "svc:closure:badrole", "bad role", "admin-user",
+          "req-closure-bad-role", &principal) != WYRELOG_E_OK)
+    return 729;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (bad_role),
+          "INSERT INTO roles (role_id, role_name) VALUES "
+          "  ('closure.bad-role', 'closure bad role');"
+          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+          "  ('closure.bad-role', 'wr.service_credential.manage');"
+          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+          "  ('svc:closure:badrole', 'closure.bad-role', 'svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 730;
+  if (wyl_policy_store_analyze_service_permission_closure (bad_role,
+          &analysis) != WYRELOG_E_OK)
+    return 731;
+  if (analysis.removals->len != 1)
+    return 732;
+  if (analysis.unsafe_permission_count != 1
+      || analysis.dangling_subject_count != 0
+      || analysis.dangling_role_count != 0)
+    return 733;
+  removal = g_ptr_array_index (analysis.removals, 0);
+  if (removal->action != WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP)
+    return 734;
+  if (removal->reason != WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION)
+    return 735;
+  if (g_strcmp0 (removal->subject_id, "svc:closure:badrole") != 0)
+    return 736;
+  if (g_strcmp0 (removal->right_id, "closure.bad-role") != 0)
+    return 737;
+  if (g_strcmp0 (removal->scope, "svc-scope") != 0)
+    return 738;
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+
+  /* Unsafe control-plane permission reached only through multi-hop role
+   * inheritance: one REMOVE_MEMBERSHIP removal for the child membership. */
+  if (wyl_policy_store_open (NULL, &bad_inherit) != WYRELOG_E_OK)
+    return 739;
+  if (wyl_policy_store_create_schema (bad_inherit) != WYRELOG_E_OK)
+    return 740;
+  if (wyl_policy_store_create_service_principal (bad_inherit,
+          "svc:closure:badinherit", "bad inherit", "admin-user",
+          "req-closure-bad-inherit", &principal) != WYRELOG_E_OK)
+    return 741;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (bad_inherit),
+          "INSERT INTO roles (role_id, role_name) VALUES "
+          "  ('closure.child', 'closure child'),"
+          "  ('closure.parent', 'closure parent'),"
+          "  ('closure.grand', 'closure grand');"
+          "INSERT INTO role_inheritances (child_role_id, parent_role_id) "
+          "VALUES ('closure.child', 'closure.parent'),"
+          "  ('closure.parent', 'closure.grand');"
+          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+          "  ('closure.grand', 'wr.service_credential.manage');"
+          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+          "  ('svc:closure:badinherit', 'closure.child', 'svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 742;
+  if (wyl_policy_store_analyze_service_permission_closure (bad_inherit,
+          &analysis) != WYRELOG_E_OK)
+    return 743;
+  if (analysis.removals->len != 1)
+    return 744;
+  if (analysis.unsafe_permission_count != 1
+      || analysis.dangling_subject_count != 0
+      || analysis.dangling_role_count != 0)
+    return 745;
+  removal = g_ptr_array_index (analysis.removals, 0);
+  if (removal->action != WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP)
+    return 746;
+  if (g_strcmp0 (removal->subject_id, "svc:closure:badinherit") != 0)
+    return 747;
+  if (g_strcmp0 (removal->right_id, "closure.child") != 0)
+    return 748;
+  if (g_strcmp0 (removal->scope, "svc-scope") != 0)
+    return 749;
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+
+  return 0;
+}
+
 static gint
 check_store_checks_effective_subject_permission (void)
 {
@@ -4995,6 +5198,8 @@ main (void)
   if ((rc = check_store_enforces_service_permission_planes ()) != 0)
     return rc;
   if ((rc = check_store_validates_service_permission_closure ()) != 0)
+    return rc;
+  if ((rc = check_store_analyzes_service_permission_closure ()) != 0)
     return rc;
   if ((rc = check_store_checks_effective_subject_permission ()) != 0)
     return rc;

@@ -23,6 +23,43 @@ typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
 
 typedef enum
 {
+  WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT,
+  WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP,
+} WylPolicyPermissionClosureRemovalAction;
+
+typedef enum
+{
+  WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION,
+  WYL_POLICY_PERMISSION_CLOSURE_DANGLING_SUBJECT,
+  WYL_POLICY_PERMISSION_CLOSURE_DANGLING_ROLE,
+} WylPolicyPermissionClosureReason;
+
+typedef struct
+{
+  WylPolicyPermissionClosureRemovalAction action;
+  WylPolicyPermissionClosureReason reason;
+  gchar *subject_id;
+  gchar *right_id;
+  gchar *scope;
+} WylPolicyPermissionClosureRemoval;
+
+typedef struct
+{
+  guint64 generation;
+  guint8 digest[32];
+  guint unsafe_permission_count;
+  guint dangling_subject_count;
+  guint dangling_role_count;
+  GPtrArray *removals;
+} WylPolicyPermissionClosureAnalysis;
+
+void wyl_policy_permission_closure_removal_free
+    (WylPolicyPermissionClosureRemoval * removal);
+void wyl_policy_permission_closure_analysis_clear
+    (WylPolicyPermissionClosureAnalysis * analysis);
+
+typedef enum
+{
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS,
@@ -1865,6 +1902,12 @@ wyrelog_error_t wyl_policy_store_role_is_service_eligible
     gboolean * out_eligible);
 wyrelog_error_t wyl_policy_store_validate_service_permission_closure
     (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_analyze_service_permission_closure
+    (wyl_policy_store_t * store,
+    WylPolicyPermissionClosureAnalysis * out_analysis);
+wyrelog_error_t wyl_policy_store_service_permission_authority_snapshot
+    (wyl_policy_store_t * store, guint64 * out_generation,
+    guint8 out_digest[32]);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *
