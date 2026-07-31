@@ -81,14 +81,30 @@ if guard is None:
         "daemon HTTP seed helper must require POSIX, fact-store, and a shared "
         "libwyrelog selection"
     )
-for selection in (
-    "get_option('default_library') == 'shared'",
-    "get_option('default_library') == 'both'",
-    "get_option('default_both_libraries') == 'shared'",
-    "libwyrelog.get_shared_lib()",
-):
-    if selection not in source:
-        fail(f"daemon HTTP shared libwyrelog selection missing: {selection}")
+selection_contract = re.search(
+    r"test_daemon_http_decide_uses_shared_wyrelog\s*=\s*\(\s*"
+    r"get_option\('default_library'\) == 'shared'\s*\)\s*"
+    r"if get_option\('default_library'\) == 'both'\s*"
+    r"(?:#[^\n]*\n\s*)*"
+    r"test_daemon_http_decide_uses_shared_wyrelog\s*=\s*true\s*"
+    r"if meson\.version\(\)\.version_compare\('>=1\.6\.0'\)\s*"
+    r"test_daemon_http_decide_uses_shared_wyrelog\s*=\s*\(\s*"
+    r"get_option\('default_both_libraries'\) != 'static'\s*\)\s*"
+    r"endif\s*endif",
+    source,
+)
+if selection_contract is None:
+    fail(
+        "daemon HTTP shared selection must treat Meson 1.1-1.5 both as "
+        "shared and Meson 1.6+ both auto/shared as shared"
+    )
+if source.count("get_option('default_both_libraries')") != 1:
+    fail(
+        "default_both_libraries must be evaluated exactly once inside its "
+        "Meson 1.6+ guard"
+    )
+if "libwyrelog.get_shared_lib()" not in source:
+    fail("daemon HTTP both selection must link libwyrelog's shared target")
 
 link_list = source.find("test_daemon_http_decide_link_with = []")
 guard_start = source.find(

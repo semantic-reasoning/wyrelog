@@ -167,10 +167,19 @@ endif
 
 if build_client
   test_daemon_http_decide_uses_shared_wyrelog = (
-    get_option('default_library') == 'shared' or
-    (get_option('default_library') == 'both' and
-     get_option('default_both_libraries') == 'shared')
+    get_option('default_library') == 'shared'
   )
+  if get_option('default_library') == 'both'
+    # Meson 1.1-1.5 always selects the shared library from a both_library().
+    # Since 1.6, only an explicit static selection changes that default; auto
+    # and shared continue to select the shared library.
+    test_daemon_http_decide_uses_shared_wyrelog = true
+    if meson.version().version_compare('>=1.6.0')
+      test_daemon_http_decide_uses_shared_wyrelog = (
+        get_option('default_both_libraries') != 'static'
+      )
+    endif
+  endif
   test_daemon_http_decide_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
