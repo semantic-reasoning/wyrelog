@@ -59,15 +59,31 @@ for required in (
         fail(f"daemon HTTP private companion missing: {required}")
 
 guard = re.search(
-    r"if host_machine\.system\(\) != 'windows'\s+"
+    r"if \(host_machine\.system\(\) != 'windows' and\s+"
+    r"get_option\('enable_fact_store'\)\.allowed\(\)\)\s+"
     r"test_daemon_http_decide_private_companion\s*=\s*static_library\(",
     source,
 )
 if guard is None:
-    fail("daemon HTTP private companion must have an explicit POSIX guard")
+    fail(
+        "daemon HTTP private companion must have explicit POSIX and "
+        "fact-store guards"
+    )
 
-if source.count("test_daemon_http_decide_link_with = []") != 1:
+link_list = source.find("test_daemon_http_decide_link_with = []")
+guard_start = source.find(
+    "if (host_machine.system() != 'windows' and",
+    link_list,
+)
+first_consumer = source.find(
+    "test_daemon_http_decide = executable(",
+    guard_start,
+)
+if link_list == -1 or source.count(
+        "test_daemon_http_decide_link_with = []") != 1:
     fail("daemon HTTP variants must have one common link list")
+if not link_list < guard_start < first_consumer:
+    fail("daemon HTTP common link list must exist outside the feature guard")
 if source.count(
         "test_daemon_http_decide_link_with += [\n"
         "      test_daemon_http_decide_private_companion,\n"
@@ -96,6 +112,21 @@ if re.search(
         re.DOTALL,
 ):
     fail("daemon HTTP variants must not use link_whole")
+
+symbol_test_guard = re.search(
+    r"if host_machine\.system\(\) != 'windows'\s+"
+    r"check_daemon_http_decide_private_symbols\s*=\s*find_program\(.*?"
+    r"test\('daemon-http-decide-private-symbols-self-test'.*?"
+    r"if get_option\('enable_fact_store'\)\.allowed\(\)\s+.*?"
+    r"test\('daemon-http-decide-private-symbols',",
+    source,
+    re.DOTALL,
+)
+if symbol_test_guard is None:
+    fail(
+        "artifact symbol test must require POSIX and fact-store while its "
+        "self-test remains POSIX-only"
+    )
 
 
 def job_body(workflow: str, name: str) -> str:
