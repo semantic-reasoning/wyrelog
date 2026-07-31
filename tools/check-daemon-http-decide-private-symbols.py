@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Verify the POSIX daemon HTTP companion stays linked but unexported."""
+"""Prove the daemon HTTP seed helper is an isolated runtime DSO boundary."""
 
+import json
 from pathlib import Path
 import re
 import shutil
@@ -8,9 +9,30 @@ import subprocess
 import sys
 
 
+SEED_SYMBOL = "wyl_test_daemon_http_seed_prepared_operation"
 BEGIN_SYMBOL = (
     "wyl_service_credential_operation_coordinator_begin_or_replay_locked"
 )
+STORAGE_OPEN_SYMBOL = "wyl_service_credential_operation_storage_open"
+LOAD_SYMBOL = "wyl_service_credential_operation_coordinator_load"
+LOCK_ACQUIRE_SYMBOL = (
+    "wyl_service_credential_operation_coordinator_lock_acquire"
+)
+LOCK_RELEASE_SYMBOL = (
+    "wyl_service_credential_operation_coordinator_lock_release"
+)
+HELPER_CLOSURE = {
+    BEGIN_SYMBOL,
+    STORAGE_OPEN_SYMBOL,
+    LOAD_SYMBOL,
+    LOCK_ACQUIRE_SYMBOL,
+    LOCK_RELEASE_SYMBOL,
+}
+EXECUTABLE_IMPORTS = {
+    SEED_SYMBOL,
+    STORAGE_OPEN_SYMBOL,
+    LOAD_SYMBOL,
+}
 
 
 def run(command: list[str]) -> str:
@@ -23,7 +45,7 @@ def run(command: list[str]) -> str:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"symbol inspection failed: {' '.join(command)}\n{result.stdout}"
+            f"artifact inspection failed: {' '.join(command)}\n{result.stdout}"
         )
     return result.stdout
 
@@ -47,11 +69,12 @@ def wyl_symbols(output: str, macho: bool) -> set[str]:
     return symbols
 
 
-def nm_path() -> str:
-    tool = shutil.which("nm") or shutil.which("llvm-nm")
-    if tool is None:
-        raise RuntimeError("nm or llvm-nm is required")
-    return tool
+def find_tool(*names: str) -> str:
+    for name in names:
+        tool = shutil.which(name)
+        if tool is not None:
+            return tool
+    raise RuntimeError(f"required artifact inspector missing: {' or '.join(names)}")
 
 
 def defined_command(tool: str, artifact: Path, macho: bool) -> list[str]:
@@ -62,10 +85,7 @@ def defined_command(tool: str, artifact: Path, macho: bool) -> list[str]:
     )
 
 
-def exported_command(tool: str, artifact: Path,
-                     macho: bool) -> list[str] | None:
-    if artifact.suffix == ".a":
-        return None
+def exported_command(tool: str, artifact: Path, macho: bool) -> list[str]:
     return (
         [tool, "-gU", str(artifact)]
         if macho
@@ -73,42 +93,71 @@ def exported_command(tool: str, artifact: Path,
     )
 
 
+def undefined_command(tool: str, artifact: Path) -> list[str]:
+    return [tool, "-u", str(artifact)]
+
+
 def defined_symbols(artifact: Path, macho: bool) -> set[str]:
-    command = defined_command(nm_path(), artifact, macho)
-    return wyl_symbols(run(command), macho)
+    return wyl_symbols(
+        run(defined_command(find_tool("nm", "llvm-nm"), artifact, macho)),
+        macho,
+    )
 
 
 def exported_symbols(artifact: Path, macho: bool) -> set[str]:
-    command = exported_command(nm_path(), artifact, macho)
-    if command is None:
-        # An archive contributes link inputs, not runtime exports.  The
-        # executable checks below still prove that its selected definitions
-        # remain hidden in static-library configurations.
-        return set()
-    return wyl_symbols(run(command), macho)
+    return wyl_symbols(
+        run(exported_command(find_tool("nm", "llvm-nm"), artifact, macho)),
+        macho,
+    )
+
+
+def undefined_symbols(artifact: Path, macho: bool) -> set[str]:
+    return wyl_symbols(
+        run(undefined_command(find_tool("nm", "llvm-nm"), artifact)),
+        macho,
+    )
+
+
+def provider_output(artifact: Path, macho: bool) -> str:
+    if macho:
+        return run([find_tool("otool"), "-L", str(artifact)])
+    return run([
+        find_tool("readelf", "llvm-readelf"),
+        "-d",
+        str(artifact),
+    ])
+
+
+def provider_is_needed(output: str, helper: Path) -> bool:
+    return helper.name in output
+
+
+def install_manifest_is_clean(manifest: Path, helper: Path,
+                              header: Path) -> bool:
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    encoded = json.dumps(data, sort_keys=True)
+    return helper.name not in encoded and header.name not in encoded
 
 
 def self_test() -> int:
     elf = """
 00000001 T wyl_public
-00000002 T wyl_service_credential_operation_coordinator_begin_or_replay_locked
-00000003 T wyl_versioned@@WYRELOG_1
+00000002 t wyl_service_credential_operation_coordinator_begin_or_replay_locked
+                 U wyl_service_credential_operation_storage_open@@WYRELOG_1
 00000004 T prefix_wyl_not_a_symbol
 """
     if wyl_symbols(elf, False) != {
         "wyl_public",
         BEGIN_SYMBOL,
-        "wyl_versioned",
+        STORAGE_OPEN_SYMBOL,
     }:
         return 1
     macho = """
-00000001 T _wyl_public
-00000002 T _wyl_service_credential_operation_coordinator_begin_or_replay_locked
+00000001 T _wyl_test_daemon_http_seed_prepared_operation
+                 U _wyl_service_credential_operation_coordinator_load
 00000003 T __wyl_not_normalized
 """
-    if wyl_symbols(macho, True) != {"wyl_public", BEGIN_SYMBOL}:
-        return 1
-    if normalize_symbol("__wyl_private", True) != "__wyl_private":
+    if wyl_symbols(macho, True) != {SEED_SYMBOL, LOAD_SYMBOL}:
         return 1
     artifact = Path("/tmp/test-daemon-http-decide")
     if defined_command("nm", artifact, False) != [
@@ -123,7 +172,15 @@ def self_test() -> int:
     if exported_command("nm", artifact, True) != [
             "nm", "-gU", str(artifact)]:
         return 1
-    if exported_command("nm", Path("/tmp/libwyrelog.a"), False) is not None:
+    if undefined_command("nm", artifact) != ["nm", "-u", str(artifact)]:
+        return 1
+    helper = Path("/tmp/libtest-daemon-http-decide-seed-helper.so")
+    if not provider_is_needed(
+            " 0x0000000000000001 (NEEDED) Shared library: "
+            "[libtest-daemon-http-decide-seed-helper.so]",
+            helper):
+        return 1
+    if provider_is_needed("libwyrelog.so.0", helper):
         return 1
     return 0
 
@@ -131,59 +188,133 @@ def self_test() -> int:
 def main() -> int:
     if sys.argv[1:] == ["--self-test"]:
         return self_test()
-    if len(sys.argv) < 4:
+    if len(sys.argv) < 6:
         print(
             "usage: check-daemon-http-decide-private-symbols.py "
-            "COMPANION LIBWYRELOG EXECUTABLE...",
+            "INSTALL_MANIFEST HELPER HEADER LIBWYRELOG EXECUTABLE...",
             file=sys.stderr,
         )
         return 2
 
-    artifacts = [Path(argument) for argument in sys.argv[1:]]
+    manifest = Path(sys.argv[1])
+    helper = Path(sys.argv[2])
+    header = Path(sys.argv[3])
+    library = Path(sys.argv[4])
+    executables = [Path(argument) for argument in sys.argv[5:]]
+    artifacts = [manifest, helper, header, library, *executables]
     missing = [artifact for artifact in artifacts if not artifact.is_file()]
     if missing:
         print("artifact missing:", *missing, sep="\n  ", file=sys.stderr)
         return 1
 
-    companion, library, *executables = artifacts
     macho = sys.platform == "darwin"
     try:
-        companion_symbols = defined_symbols(companion, macho)
+        helper_exports = exported_symbols(helper, macho)
+        helper_definitions = defined_symbols(helper, macho)
         library_exports = exported_symbols(library, macho)
-        executable_symbols = [
+        library_definitions = defined_symbols(library, macho)
+        executable_definitions = [
             defined_symbols(executable, macho) for executable in executables
         ]
-        executable_exports = [
-            exported_symbols(executable, macho) for executable in executables
+        executable_imports = [
+            undefined_symbols(executable, macho) for executable in executables
         ]
-    except RuntimeError as error:
+        providers = [
+            provider_output(executable, macho) for executable in executables
+        ]
+        manifest_clean = install_manifest_is_clean(manifest, helper, header)
+    except (json.JSONDecodeError, OSError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 1
 
-    if BEGIN_SYMBOL not in companion_symbols:
+    if helper_exports != {SEED_SYMBOL}:
         print(
-            f"private companion does not define {BEGIN_SYMBOL}",
+            "seed helper exported Wyl symbols mismatch:",
+            *sorted(helper_exports),
+            sep="\n  ",
             file=sys.stderr,
         )
         return 1
-    if BEGIN_SYMBOL in library_exports:
-        print(f"libwyrelog exports {BEGIN_SYMBOL}", file=sys.stderr)
+    missing_closure = HELPER_CLOSURE - helper_definitions
+    if missing_closure:
+        print(
+            "seed helper hidden closure missing:",
+            *sorted(missing_closure),
+            sep="\n  ",
+            file=sys.stderr,
+        )
+        return 1
+    if HELPER_CLOSURE & helper_exports:
+        print("seed helper closure is dynamically exported", file=sys.stderr)
+        return 1
+    forbidden_library_exports = {BEGIN_SYMBOL, SEED_SYMBOL} & library_exports
+    if forbidden_library_exports:
+        print(
+            "libwyrelog exports test/private symbols:",
+            *sorted(forbidden_library_exports),
+            sep="\n  ",
+            file=sys.stderr,
+        )
+        return 1
+    missing_library_definitions = {
+        STORAGE_OPEN_SYMBOL,
+        LOAD_SYMBOL,
+    } - library_definitions
+    if missing_library_definitions:
+        print(
+            "libwyrelog ordinary provider definitions missing:",
+            *sorted(missing_library_definitions),
+            sep="\n  ",
+            file=sys.stderr,
+        )
+        return 1
+    missing_library_exports = {
+        STORAGE_OPEN_SYMBOL,
+        LOAD_SYMBOL,
+    } - library_exports
+    if missing_library_exports:
+        print(
+            "libwyrelog dynamic provider exports missing:",
+            *sorted(missing_library_exports),
+            sep="\n  ",
+            file=sys.stderr,
+        )
+        return 1
+    if not manifest_clean:
+        print("seed helper or header appears in the install manifest",
+              file=sys.stderr)
         return 1
 
-    for executable, symbols, exports in zip(
-            executables, executable_symbols, executable_exports):
-        if BEGIN_SYMBOL not in symbols:
+    helper_private_definitions = helper_definitions - {SEED_SYMBOL}
+    for executable, definitions, imports, provider in zip(
+            executables, executable_definitions, executable_imports, providers):
+        copied = helper_private_definitions & definitions
+        if copied or {SEED_SYMBOL, BEGIN_SYMBOL} & definitions:
             print(
-                f"{executable} does not contain linked {BEGIN_SYMBOL}",
+                f"{executable} contains copied seed-helper definitions:",
+                *sorted(copied | ({SEED_SYMBOL, BEGIN_SYMBOL} & definitions)),
+                sep="\n  ",
                 file=sys.stderr,
             )
             return 1
-        leaked = companion_symbols & exports
-        if leaked:
+        missing_imports = EXECUTABLE_IMPORTS - imports
+        if missing_imports:
             print(
-                f"{executable} exports private companion symbols:",
-                *sorted(leaked),
+                f"{executable} seed/provider imports missing:",
+                *sorted(missing_imports),
                 sep="\n  ",
+                file=sys.stderr,
+            )
+            return 1
+        if not provider_is_needed(provider, helper):
+            print(
+                f"{executable} has no runtime dependency on {helper.name}",
+                file=sys.stderr,
+            )
+            return 1
+        if not provider_is_needed(provider, library):
+            print(
+                f"{executable} has no runtime dependency on {library.name}",
                 file=sys.stderr,
             )
             return 1

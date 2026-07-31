@@ -30,6 +30,9 @@
 #include "wyrelog/auth/service-credential-operation-coordinator-storage-private.h"
 #include "wyrelog/auth/service-credential-operation-storage-private.h"
 #endif
+#ifdef WYL_TEST_DAEMON_HTTP_SEED_HELPER_DSO
+#include "test-daemon-http-decide-seed-helper.h"
+#endif
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -8120,15 +8123,102 @@ sp_body_leaks_root (const gchar *body, const gchar *r1, const gchar *r2,
 static const gchar *const STATUS_ROTATE_OLD_CREDENTIAL_ID =
     "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
 
-/* Seed one PREPARED durable operation straight into |operation_root| via the
- * coordinator test friend.  This is deterministic and lets the status/recover
- * HTTP contract assert tenant scoping (via subject_id) and recover
- * classification without racing a live handoff.  Returns 0 on success. */
+/* Immediately after the seed helper returns, load through libwyrelog and
+ * acquire/release the production lifecycle lock.  Besides validating the
+ * durable tuple, this proves the executable consumes the library's storage,
+ * load, and lock providers rather than definitions copied out of the helper
+ * DSO. */
+static gint
+verify_seeded_prepared_operation (const gchar *operation_root,
+    const gchar *request_id,
+    WylServiceCredentialOperationKind kind, const gchar *subject_id,
+    const gchar *tenant_id, const gchar *old_credential_id)
+{
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationCoordinatorLock lifecycle_lock =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationRecord loaded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean lock_acquired = FALSE;
+  gint rc_out = 0;
+
+  if (wyl_service_credential_operation_storage_open (operation_root, &storage)
+      != WYRELOG_E_OK) {
+    rc_out = 2105;
+    goto out;
+  }
+  if (wyl_service_credential_operation_storage_capture_anchor (&storage,
+          &anchor) != WYRELOG_E_OK) {
+    rc_out = 2106;
+    goto out;
+  }
+  if (wyl_service_credential_operation_coordinator_load (&storage, &anchor,
+          request_id, &loaded) != WYRELOG_E_OK) {
+    rc_out = 2107;
+    goto out;
+  }
+  if (loaded.state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
+      || loaded.kind != kind) {
+    rc_out = 2170;
+    goto out;
+  }
+  if (g_strcmp0 (loaded.request_id, request_id) != 0
+      || g_strcmp0 (loaded.operation_id, request_id) != 0) {
+    rc_out = 2171;
+    goto out;
+  }
+  if (g_strcmp0 (loaded.subject_id, subject_id) != 0) {
+    rc_out = 2172;
+    goto out;
+  }
+  if ((tenant_id == NULL
+          && loaded.tenant_id != NULL && loaded.tenant_id[0] != '\0')
+      || (tenant_id != NULL && g_strcmp0 (loaded.tenant_id, tenant_id) != 0)) {
+    rc_out = 2173;
+    goto out;
+  }
+  if ((old_credential_id == NULL
+          && loaded.old_credential_id != NULL
+          && loaded.old_credential_id[0] != '\0')
+      || (old_credential_id != NULL
+          && g_strcmp0 (loaded.old_credential_id, old_credential_id) != 0)) {
+    rc_out = 2174;
+    goto out;
+  }
+  if (wyl_service_credential_operation_coordinator_lock_acquire (&storage,
+          &anchor, request_id, &lifecycle_lock) != WYRELOG_E_OK) {
+    rc_out = 2108;
+    goto out;
+  }
+  lock_acquired = TRUE;
+
+out:
+  if (lock_acquired)
+    wyl_service_credential_operation_coordinator_lock_release (&storage,
+        &anchor, &lifecycle_lock);
+  wyl_service_credential_operation_record_clear (&loaded);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  return rc_out;
+}
+
+/* Seed one PREPARED durable operation straight into |operation_root|.  Shared
+ * POSIX builds cross the scalar-only helper DSO API.  Windows and explicitly
+ * static selections retain the existing in-executable friend path. */
 static gint
 seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
     WylServiceCredentialOperationKind kind, const gchar *subject_id,
     const gchar *tenant_id, const gchar *old_credential_id)
 {
+  gint rc_out;
+
+#ifdef WYL_TEST_DAEMON_HTTP_SEED_HELPER_DSO
+  rc_out = wyl_test_daemon_http_seed_prepared_operation (operation_root,
+      request_id, (guint32) kind, subject_id, tenant_id, old_credential_id);
+#else
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -8137,14 +8227,17 @@ seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationCoordinatorRequest request =
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
-  gint rc_out = 0;
+
+  rc_out = 0;
   if (wyl_service_credential_operation_storage_open (operation_root, &storage)
-      != WYRELOG_E_OK)
-    return 2101;
+      != WYRELOG_E_OK) {
+    rc_out = 2101;
+    goto direct_out;
+  }
   if (wyl_service_credential_operation_storage_capture_anchor (&storage,
           &anchor) != WYRELOG_E_OK) {
     rc_out = 2102;
-    goto out;
+    goto direct_out;
   }
   request.kind = kind;
   request.request_id = (gchar *) request_id;
@@ -8164,10 +8257,15 @@ seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
       (&storage, &anchor, &request, 1, NULL, &begun) != WYRELOG_E_OK
       || begun.state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     rc_out = 2103;
-out:
+direct_out:
   wyl_service_credential_operation_record_clear (&begun);
-  wyl_service_credential_operation_storage_clear (&storage);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+#endif
+
+  if (rc_out == 0)
+    rc_out = verify_seeded_prepared_operation (operation_root, request_id,
+        kind, subject_id, tenant_id, old_credential_id);
   return rc_out;
 }
 
