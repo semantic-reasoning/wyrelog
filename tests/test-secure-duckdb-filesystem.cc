@@ -204,6 +204,17 @@ snapshot_directory_names (const gchar *path)
   return names;
 }
 
+static void
+assert_file_bytes (const gchar *path, const gchar *expected,
+    gsize expected_size)
+{
+  g_autofree gchar *actual = nullptr;
+  gsize actual_size = 0;
+  g_assert_true (g_file_get_contents (path, &actual, &actual_size, nullptr));
+  g_assert_cmpuint (actual_size, ==, expected_size);
+  g_assert_cmpmem (actual, actual_size, expected, expected_size);
+}
+
 struct SecureDatabase
 {
   WylSecureDuckdbFileSystem *
@@ -1145,51 +1156,54 @@ test_provisioned_pair_pinned_modes (void)
   g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
 }
 
-struct PairRendezvousMarker
+struct PairPreflightAction
 {
-  WylFactStorePinnedRendezvous target;
-  gboolean fired;
+  const gchar *stage_path;
+  gboolean remove_stage;
+  guint calls;
 };
 
 static void
-mark_pair_rendezvous (WylFactStorePinnedRendezvous rendezvous,
+pair_preflight_action (WylFactStorePairPreflightForTest seam,
     gpointer user_data)
 {
-  auto *marker = static_cast<PairRendezvousMarker *> (user_data);
-  if (!marker->fired && rendezvous == marker->target)
-    marker->fired = TRUE;
+  auto *action = static_cast<PairPreflightAction *> (user_data);
+  g_assert_cmpint (seam, ==, WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY);
+  action->calls++;
+  if (action->remove_stage)
+    g_assert_cmpint (g_remove (action->stage_path), ==, 0);
 }
 
 static void
-test_provisioned_pair_pinned_rendezvous (void)
+test_provisioned_pair_pinned_preflight_no_mutation (void)
 {
-  for (int value = WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
-      value <= WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE; value++) {
+  {
     ProvisionedPairFixture fixture;
-    WylFactStoreIdentityResult result =
-        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     struct stat stage_before, final_before;
     g_assert_cmpint (g_stat (fixture.stage_path, &stage_before), ==, 0);
     g_assert_cmpint (g_stat (fixture.final_path, &final_before), ==, 0);
+    g_assert_cmpuint (stage_before.st_dev, ==, final_before.st_dev);
+    g_assert_cmpuint (stage_before.st_ino, ==, final_before.st_ino);
     g_assert_cmpuint (stage_before.st_size, ==, 0);
     g_assert_cmpuint (final_before.st_size, ==, 0);
     const auto names_before = snapshot_directory_names (fixture.graph_path);
     g_autofree gchar *lock_path =
         g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
-    g_assert_false (g_file_test (lock_path, G_FILE_TEST_EXISTS));
-    PairRendezvousMarker marker = {
-      static_cast<WylFactStorePinnedRendezvous> (value),
-      FALSE,
-    };
-    wyl_fact_store_pinned_set_pair_test_hook_for_test (mark_pair_rendezvous,
-        &marker);
-    wyl_fact_store_pinned_set_pair_rendezvous_error_for_test (marker.target,
-        WYRELOG_E_POLICY);
+    g_autofree gchar *wal_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
+    PairPreflightAction action = { fixture.stage_path, FALSE, 0 };
+    wyl_fact_store_pinned_set_pair_preflight_hook_for_test
+        (pair_preflight_action, &action);
+    wyl_fact_store_pinned_set_pair_preflight_error_for_test
+        (WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY, WYRELOG_E_POLICY);
+
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
         (fixture.pair, &pinned_identity,
             WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_POLICY);
-    g_assert_true (marker.fired);
+    g_assert_cmpuint (action.calls, ==, 1);
     struct stat stage_after, final_after;
     g_assert_cmpint (g_stat (fixture.stage_path, &stage_after), ==, 0);
     g_assert_cmpint (g_stat (fixture.final_path, &final_after), ==, 0);
@@ -1204,11 +1218,201 @@ test_provisioned_pair_pinned_rendezvous (void)
     g_assert_true (snapshot_directory_names (fixture.graph_path)
         == names_before);
     g_assert_false (g_file_test (lock_path, G_FILE_TEST_EXISTS));
-    g_autofree gchar *wal =
-        g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
-    g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
+    g_assert_false (g_file_test (wal_path, G_FILE_TEST_EXISTS));
     g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
         ==, WYRELOG_E_OK);
+  }
+
+  {
+    ProvisionedPairFixture fixture;
+    struct stat stage_before, final_before;
+    g_assert_cmpint (g_stat (fixture.stage_path, &stage_before), ==, 0);
+    g_assert_cmpint (g_stat (fixture.final_path, &final_before), ==, 0);
+    g_assert_cmpuint (stage_before.st_dev, ==, final_before.st_dev);
+    g_assert_cmpuint (stage_before.st_ino, ==, final_before.st_ino);
+    g_assert_cmpuint (stage_before.st_size, ==, 0);
+    g_assert_cmpuint (final_before.st_size, ==, 0);
+    const auto names_before = snapshot_directory_names (fixture.graph_path);
+    auto expected_names = names_before;
+    g_autofree gchar *stage_name = g_path_get_basename (fixture.stage_path);
+    expected_names.erase (std::remove (expected_names.begin (),
+            expected_names.end (), std::string (stage_name)),
+        expected_names.end ());
+    g_autofree gchar *lock_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
+    g_autofree gchar *wal_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
+    PairPreflightAction action = { fixture.stage_path, TRUE, 0 };
+    wyl_fact_store_pinned_set_pair_preflight_hook_for_test
+        (pair_preflight_action, &action);
+
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpuint (action.calls, ==, 1);
+    g_assert_false (g_file_test (fixture.stage_path, G_FILE_TEST_EXISTS));
+    struct stat final_after;
+    g_assert_cmpint (g_stat (fixture.final_path, &final_after), ==, 0);
+    g_assert_cmpuint (final_after.st_dev, ==, final_before.st_dev);
+    g_assert_cmpuint (final_after.st_ino, ==, final_before.st_ino);
+    g_assert_cmpuint (final_after.st_nlink + 1, ==, final_before.st_nlink);
+    g_assert_cmpuint (final_after.st_size, ==, final_before.st_size);
+    g_assert_true (snapshot_directory_names (fixture.graph_path)
+        == expected_names);
+    g_assert_false (g_file_test (lock_path, G_FILE_TEST_EXISTS));
+    g_assert_false (g_file_test (wal_path, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
+        ==, WYRELOG_E_POLICY);
+  }
+}
+
+enum class PairLifecycleAttack
+{
+  STAGE_REMOVAL,
+  FINAL_SUBSTITUTION,
+  GRAPH_REPLACEMENT,
+};
+
+struct PairLifecycleAttackContext
+{
+  WylFactStorePinnedRendezvous target;
+  PairLifecycleAttack attack;
+  ProvisionedPairFixture *fixture;
+  const gchar *saved_path;
+  guint calls;
+  gboolean fired;
+};
+
+static void
+attack_pair_lifecycle (WylFactStorePinnedRendezvous rendezvous,
+    gpointer user_data)
+{
+  auto *context = static_cast<PairLifecycleAttackContext *> (user_data);
+  context->calls++;
+  if (context->fired || rendezvous != context->target)
+    return;
+  context->fired = TRUE;
+  switch (context->attack) {
+    case PairLifecycleAttack::STAGE_REMOVAL:
+      g_assert_cmpint (g_remove (context->fixture->stage_path), ==, 0);
+      break;
+    case PairLifecycleAttack::FINAL_SUBSTITUTION:
+      g_assert_cmpint (g_rename (context->fixture->final_path,
+              context->saved_path), ==, 0);
+      g_assert_true (g_file_set_contents (context->fixture->final_path,
+          "attacker", -1, nullptr));
+      g_assert_cmpint (g_chmod (context->fixture->final_path, 0600), ==, 0);
+      break;
+    case PairLifecycleAttack::GRAPH_REPLACEMENT:
+      g_assert_cmpint (g_rename (context->fixture->graph_path,
+              context->saved_path), ==, 0);
+      g_assert_cmpint (g_mkdir (context->fixture->graph_path, 0700), ==, 0);
+      break;
+  }
+}
+
+static void
+test_provisioned_pair_pinned_actual_rendezvous (void)
+{
+  for (int value = WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
+      value <= WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE; value++) {
+    ProvisionedPairFixture fixture;
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *database_bytes = nullptr;
+    gsize database_size = 0;
+    g_assert_true (g_file_get_contents (fixture.stage_path, &database_bytes,
+        &database_size, nullptr));
+    const auto names_before = snapshot_directory_names (fixture.graph_path);
+    g_autofree gchar *lock_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
+    struct stat lock_before;
+    g_assert_cmpint (g_stat (lock_path, &lock_before), ==, 0);
+    g_autofree gchar *wal_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
+    g_assert_false (g_file_test (wal_path, G_FILE_TEST_EXISTS));
+
+    const auto attack = static_cast<PairLifecycleAttack> (value % 3);
+    g_autofree gchar *saved_path =
+        attack == PairLifecycleAttack::GRAPH_REPLACEMENT
+        ? g_strdup_printf ("%s.saved", fixture.graph_path)
+        : g_build_filename (fixture.graph_path, "facts.duckdb.saved", nullptr);
+    PairLifecycleAttackContext context = {
+      static_cast<WylFactStorePinnedRendezvous> (value),
+      attack,
+      &fixture,
+      saved_path,
+      0,
+      FALSE,
+    };
+    wyl_fact_store_pinned_set_pair_test_hook_for_test (attack_pair_lifecycle,
+        &context);
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+            &result), ==, WYRELOG_E_POLICY);
+    g_assert_true (context.fired);
+
+    gchar *authority_path = fixture.graph_path;
+    if (attack == PairLifecycleAttack::GRAPH_REPLACEMENT) {
+      authority_path = saved_path;
+      g_assert_true (snapshot_directory_names (authority_path)
+          == names_before);
+      g_assert_true (snapshot_directory_names (fixture.graph_path).empty ());
+    }
+    g_autofree gchar *authority_lock =
+        g_build_filename (authority_path, "facts.duckdb.lock", nullptr);
+    struct stat lock_after;
+    g_assert_cmpint (g_stat (authority_lock, &lock_after), ==, 0);
+    g_assert_cmpuint (lock_after.st_dev, ==, lock_before.st_dev);
+    g_assert_cmpuint (lock_after.st_ino, ==, lock_before.st_ino);
+    g_autofree gchar *authority_wal =
+        g_build_filename (authority_path, "facts.duckdb.wal", nullptr);
+    g_assert_false (g_file_test (authority_wal, G_FILE_TEST_EXISTS));
+
+    if (attack == PairLifecycleAttack::STAGE_REMOVAL) {
+      assert_file_bytes (fixture.final_path, database_bytes, database_size);
+      auto expected_names = names_before;
+      g_autofree gchar *stage_name =
+          g_path_get_basename (fixture.stage_path);
+      expected_names.erase (std::remove (expected_names.begin (),
+              expected_names.end (), std::string (stage_name)),
+          expected_names.end ());
+      g_assert_true (snapshot_directory_names (fixture.graph_path)
+          == expected_names);
+      g_assert_cmpint (link (fixture.final_path, fixture.stage_path), ==, 0);
+    } else if (attack == PairLifecycleAttack::FINAL_SUBSTITUTION) {
+      assert_file_bytes (fixture.stage_path, database_bytes, database_size);
+      assert_file_contents (fixture.final_path, "attacker");
+      auto expected_names = names_before;
+      expected_names.emplace_back ("facts.duckdb.saved");
+      std::sort (expected_names.begin (), expected_names.end ());
+      g_assert_true (snapshot_directory_names (fixture.graph_path)
+          == expected_names);
+      g_assert_cmpint (g_remove (fixture.final_path), ==, 0);
+      g_assert_cmpint (g_rename (saved_path, fixture.final_path), ==, 0);
+    } else {
+      g_autofree gchar *authority_stage =
+          g_build_filename (authority_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
+      assert_file_bytes (authority_stage, database_bytes, database_size);
+      g_assert_cmpint (g_rmdir (fixture.graph_path), ==, 0);
+      g_assert_cmpint (g_rename (saved_path, fixture.graph_path), ==, 0);
+    }
+
+    const guint calls_after_attack = context.calls;
+    g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+            &result), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (context.calls, ==, calls_after_attack);
   }
 }
 
@@ -1233,11 +1437,13 @@ test_provisioned_pair_pinned_control_isolation (void)
   {
     Fixture generic_fixture (false);
     ProvisionedPairFixture pair_fixture;
-    PinnedControlTrace pair_trace = { 0, 0 };
-    wyl_fact_store_pinned_set_pair_test_hook_for_test (trace_pinned_control,
-        &pair_trace);
-    wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
-        (WYL_FACT_STORE_PINNED_RENDEZVOUS_R2_PREIDENTITY, WYRELOG_E_POLICY);
+    PairPreflightAction pair_trace = {
+      pair_fixture.stage_path, FALSE, 0
+    };
+    wyl_fact_store_pinned_set_pair_preflight_hook_for_test
+        (pair_preflight_action, &pair_trace);
+    wyl_fact_store_pinned_set_pair_preflight_error_for_test
+        (WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY, WYRELOG_E_POLICY);
 
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
@@ -1251,14 +1457,13 @@ test_provisioned_pair_pinned_control_isolation (void)
         (pair_fixture.pair, &pinned_identity,
             WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_POLICY);
-    g_assert_cmpuint (pair_trace.calls, ==, 3);
-    g_assert_cmpuint (pair_trace.fired, ==, (1U << 3) - 1);
+    g_assert_cmpuint (pair_trace.calls, ==, 1);
 
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
         (pair_fixture.pair, &pinned_identity,
             WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_OK);
-    g_assert_cmpuint (pair_trace.calls, ==, 3);
+    g_assert_cmpuint (pair_trace.calls, ==, 1);
   }
 
   {
@@ -2138,8 +2343,12 @@ main (int argc, char **argv)
       test_pinned_identified_modes_and_identity);
   g_test_add_func ("/secure-duckdb-filesystem/provisioned-pair/modes",
       test_provisioned_pair_pinned_modes);
-  g_test_add_func ("/secure-duckdb-filesystem/provisioned-pair/rendezvous",
-      test_provisioned_pair_pinned_rendezvous);
+  g_test_add_func (
+    "/secure-duckdb-filesystem/provisioned-pair/preflight-no-mutation",
+    test_provisioned_pair_pinned_preflight_no_mutation);
+  g_test_add_func (
+    "/secure-duckdb-filesystem/provisioned-pair/actual-rendezvous",
+    test_provisioned_pair_pinned_actual_rendezvous);
   g_test_add_func (
     "/secure-duckdb-filesystem/provisioned-pair/control-isolation",
     test_provisioned_pair_pinned_control_isolation);

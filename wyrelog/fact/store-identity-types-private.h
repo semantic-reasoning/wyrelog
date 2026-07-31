@@ -65,6 +65,14 @@ typedef enum
 
 typedef void (*WylFactStorePinnedTestHook) (WylFactStorePinnedRendezvous,
     gpointer user_data);
+#ifndef G_OS_WIN32
+typedef enum
+{
+  WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY = 0,
+} WylFactStorePairPreflightForTest;
+typedef void (*WylFactStorePairPreflightTestHook)
+  (WylFactStorePairPreflightForTest seam, gpointer user_data);
+#endif
 
 /* The one-shot pinned API consumes only a caller-held artifact namespace,
  * returns no live DuckDB handle, and is the storage handoff intended for
@@ -83,8 +91,10 @@ wyrelog_error_t wyl_fact_store_open_identified_provisioned_pair_pinned
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
 void wyl_fact_store_pinned_set_pair_test_hook_for_test
     (WylFactStorePinnedTestHook hook, gpointer user_data);
-void wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
-    (WylFactStorePinnedRendezvous rendezvous, wyrelog_error_t error);
+void wyl_fact_store_pinned_set_pair_preflight_hook_for_test
+    (WylFactStorePairPreflightTestHook hook, gpointer user_data);
+void wyl_fact_store_pinned_set_pair_preflight_error_for_test
+    (WylFactStorePairPreflightForTest seam, wyrelog_error_t error);
 #endif
 void wyl_fact_store_pinned_set_test_hook
     (WylFactStorePinnedTestHook hook, gpointer user_data);

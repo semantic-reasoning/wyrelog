@@ -50,9 +50,11 @@ namespace {
   std::mutex pinned_pair_test_control_mutex;
   WylFactStorePinnedTestHook pinned_pair_test_hook = nullptr;
   gpointer pinned_pair_test_hook_data = nullptr;
-  WylFactStorePinnedRendezvous pinned_pair_test_error_rendezvous =
-      WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
-  wyrelog_error_t pinned_pair_test_error = WYRELOG_E_OK;
+  WylFactStorePairPreflightTestHook pinned_pair_preflight_test_hook = nullptr;
+  gpointer pinned_pair_preflight_test_hook_data = nullptr;
+  WylFactStorePairPreflightForTest pinned_pair_preflight_test_error_seam =
+      WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
+  wyrelog_error_t pinned_pair_preflight_test_error = WYRELOG_E_OK;
 
   struct PinnedTestControl
   {
@@ -72,17 +74,25 @@ namespace {
 
   struct PinnedPairTestControl
   {
-    WylFactStorePinnedTestHook hook = nullptr;
-    gpointer data = nullptr;
-    WylFactStorePinnedRendezvous error_rendezvous =
-        WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
-    wyrelog_error_t error = WYRELOG_E_OK;
+    WylFactStorePinnedTestHook lifecycle_hook = nullptr;
+    gpointer lifecycle_data = nullptr;
+    WylFactStorePairPreflightTestHook preflight_hook = nullptr;
+    gpointer preflight_data = nullptr;
+    WylFactStorePairPreflightForTest preflight_error_seam =
+        WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
+    wyrelog_error_t preflight_error = WYRELOG_E_OK;
 
     void
-    Fire (WylFactStorePinnedRendezvous rendezvous) const
+    FirePreflight (WylFactStorePairPreflightForTest seam) const
     {
-      if (hook != nullptr)
-        hook (rendezvous, data);
+      if (preflight_hook != nullptr)
+        preflight_hook (seam, preflight_data);
+    }
+
+    PinnedTestControl
+    Lifecycle () const
+    {
+      return { lifecycle_hook, lifecycle_data };
     }
   };
 
@@ -112,14 +122,18 @@ namespace {
     PinnedPairTestControl result {
       pinned_pair_test_hook,
       pinned_pair_test_hook_data,
-      pinned_pair_test_error_rendezvous,
-      pinned_pair_test_error,
+      pinned_pair_preflight_test_hook,
+      pinned_pair_preflight_test_hook_data,
+      pinned_pair_preflight_test_error_seam,
+      pinned_pair_preflight_test_error,
     };
     pinned_pair_test_hook = nullptr;
     pinned_pair_test_hook_data = nullptr;
-    pinned_pair_test_error_rendezvous =
-        WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
-    pinned_pair_test_error = WYRELOG_E_OK;
+    pinned_pair_preflight_test_hook = nullptr;
+    pinned_pair_preflight_test_hook_data = nullptr;
+    pinned_pair_preflight_test_error_seam =
+        WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
+    pinned_pair_preflight_test_error = WYRELOG_E_OK;
     return result;
   }
 
@@ -509,12 +523,21 @@ wyl_fact_store_pinned_set_pair_test_hook_for_test
 }
 
 extern "C" void
-wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
-    (WylFactStorePinnedRendezvous rendezvous, wyrelog_error_t error)
+wyl_fact_store_pinned_set_pair_preflight_hook_for_test
+    (WylFactStorePairPreflightTestHook hook, gpointer user_data)
 {
   std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
-  pinned_pair_test_error_rendezvous = rendezvous;
-  pinned_pair_test_error = error;
+  pinned_pair_preflight_test_hook = hook;
+  pinned_pair_preflight_test_hook_data = user_data;
+}
+
+extern "C" void
+wyl_fact_store_pinned_set_pair_preflight_error_for_test
+    (WylFactStorePairPreflightForTest seam, wyrelog_error_t error)
+{
+  std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
+  pinned_pair_preflight_test_error_seam = seam;
+  pinned_pair_preflight_test_error = error;
 }
 
 static wyrelog_error_t
@@ -655,27 +678,21 @@ wyl_fact_store_open_identified_provisioned_pair_pinned
     return WYRELOG_E_INVALID;
   *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
 
-  /* A fresh INITIALIZE_IF_EMPTY open can mutate the database during DuckDB
-   * construction, before the generic R1 rendezvous.  Operation-bound hooks
-   * therefore form a complete authority-only preflight: every injected seam
-   * runs before lock creation or any storage access.  The generic lifecycle
-   * below receives an explicit empty generic control, so pair and generic
-   * callers cannot consume each other's independently synchronized test
-   * state. */
+  /* The operation-bound preflight is separate from the actual R0-R5
+   * lifecycle.  It runs before the hidden factory can create the lock or
+   * DuckDB can inspect an empty database.  The pair-owned lifecycle hook is
+   * then passed explicitly into the core; the generic global control remains
+   * independently synchronized and untouched. */
   const auto control = take_pinned_pair_test_control ();
-  for (int value = WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
-      value <= WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE; value++) {
-    const auto rendezvous =
-        static_cast<WylFactStorePinnedRendezvous> (value);
-    control.Fire (rendezvous);
-    if (control.error != WYRELOG_E_OK
-        && control.error_rendezvous == rendezvous)
-      return control.error;
-    const auto authority_result =
-        wyl_fact_graph_provisioned_pair_revalidate (pair);
-    if (authority_result != WYRELOG_E_OK)
-      return authority_result;
-  }
+  constexpr auto preflight = WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
+  control.FirePreflight (preflight);
+  if (control.preflight_error != WYRELOG_E_OK
+      && control.preflight_error_seam == preflight)
+    return control.preflight_error;
+  const auto authority_result =
+      wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (authority_result != WYRELOG_E_OK)
+    return authority_result;
 
   WylFactArtifactNamespace *namespace_ = nullptr;
   const auto result =
@@ -683,10 +700,10 @@ wyl_fact_store_open_identified_provisioned_pair_pinned
       &namespace_);
   if (result != WYRELOG_E_OK)
     return result;
-  const PinnedTestControl empty_control;
+  const auto lifecycle_control = control.Lifecycle ();
   const auto open_result =
       open_identified_pinned_core (namespace_, identity, mode, out_result,
-      empty_control);
+      lifecycle_control);
   wyl_fact_artifact_namespace_free (namespace_);
   return open_result;
 }
