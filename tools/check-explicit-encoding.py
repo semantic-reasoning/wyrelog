@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field, replace
+from enum import Enum, auto
 from pathlib import Path
 import re
 import sys
@@ -86,6 +87,12 @@ class PossibleValue:
     alternatives: frozenset[object]
 
 
+@dataclass(frozen=True)
+class MappingValue:
+    key: object
+    value: object
+
+
 def alternatives(value: object) -> frozenset[object]:
     if isinstance(value, PossibleValue):
         return value.alternatives
@@ -109,6 +116,18 @@ def callable_values(value: object) -> tuple[CallableValue, ...]:
         for item in alternatives(value)
         if isinstance(item, CallableValue)
     )
+
+
+def path_element(value: object) -> object:
+    if has_value(value, PATH_ITERABLE):
+        return PATH_VALUE
+    for candidate in alternatives(value):
+        if isinstance(candidate, MappingValue) and has_value(
+            candidate.key,
+            PATH_VALUE,
+        ):
+            return PATH_VALUE
+    return UNKNOWN
 
 
 @dataclass
@@ -218,11 +237,19 @@ class LocalBindingCollector(ast.NodeVisitor):
         self.nonlocal_names.update(node.names)
 
 
+@dataclass(frozen=True)
+class FutureBinding:
+    names: tuple[str, ...]
+    expression: ast.AST | None = None
+    static_value: object = UNKNOWN
+    is_static: bool = False
+
+
 class FutureAssignmentCollector(ast.NodeVisitor):
     """Collect same-scope assignments without entering deferred scopes."""
 
     def __init__(self) -> None:
-        self.assignments: list[tuple[list[str], ast.AST | None]] = []
+        self.bindings: list[FutureBinding] = []
 
     @staticmethod
     def names(target: ast.AST) -> list[str]:
@@ -245,21 +272,51 @@ class FutureAssignmentCollector(ast.NodeVisitor):
             for name in self.names(target)
         ]
         if names:
-            self.assignments.append((names, node.value))
+            self.bindings.append(FutureBinding(tuple(names), node.value))
         self.visit(node.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         names = self.names(node.target)
         if names:
-            self.assignments.append((names, node.value))
+            self.bindings.append(FutureBinding(tuple(names), node.value))
         if node.value is not None:
             self.visit(node.value)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         names = self.names(node.target)
         if names:
-            self.assignments.append((names, node.value))
+            self.bindings.append(FutureBinding(tuple(names), node.value))
         self.visit(node.value)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            name = item.asname or item.name.split(".", 1)[0]
+            value = {
+                "builtins": BUILTINS_MODULE,
+                "io": IO_MODULE,
+                "pathlib": PATHLIB_MODULE,
+            }.get(item.name, UNKNOWN)
+            self.bindings.append(
+                FutureBinding((name,), static_value=value, is_static=True)
+            )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for item in node.names:
+            if item.name == "*":
+                continue
+            name = item.asname or item.name
+            value = UNKNOWN
+            if node.module in {"builtins", "io"} and item.name == "open":
+                value = BUILTIN_OPEN
+            elif node.module == "builtins" and item.name == "next":
+                value = NEXT_BUILTIN
+            elif node.module == "builtins" and item.name == "iter":
+                value = ITER_BUILTIN
+            elif node.module == "pathlib" and item.name == "Path":
+                value = PATH_CLASS
+            self.bindings.append(
+                FutureBinding((name,), static_value=value, is_static=True)
+            )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
@@ -423,16 +480,20 @@ class PythonScanner(ast.NodeVisitor):
         collector = FutureAssignmentCollector()
         for statement in statements:
             collector.visit(statement)
-        if not collector.assignments:
+        if not collector.bindings:
             return
 
         saved = self.capture_state()
         targets: set[tuple[int, str]] = set()
         for _iteration in range(64):
             changed = False
-            for names, expression in collector.assignments:
-                assigned = self.value(expression)
-                for name in names:
+            for binding in collector.bindings:
+                assigned = (
+                    binding.static_value
+                    if binding.is_static
+                    else self.value(binding.expression)
+                )
+                for name in binding.names:
                     index = self.binding_scope(name)
                     targets.add((index, name))
                     current = self.scopes[index].values.get(name, UNKNOWN)
@@ -525,14 +586,14 @@ class PythonScanner(ast.NodeVisitor):
                     iterable = self.value(node.args[0])
                     results.append(
                         PATH_VALUE
-                        if has_value(iterable, PATH_ITERABLE)
+                        if path_element(iterable) is PATH_VALUE
                         else UNKNOWN
                     )
                 elif candidate is ITER_BUILTIN and node.args:
                     iterable = self.value(node.args[0])
                     results.append(
                         PATH_ITERABLE
-                        if has_value(iterable, PATH_ITERABLE)
+                        if path_element(iterable) is PATH_VALUE
                         else UNKNOWN
                     )
             if isinstance(node.func, ast.Attribute):
@@ -547,6 +608,15 @@ class PythonScanner(ast.NodeVisitor):
                     and node.func.attr in self.PATH_CLASS_METHODS
                 ):
                     results.append(PATH_VALUE)
+                for candidate in alternatives(owner):
+                    if not isinstance(candidate, MappingValue):
+                        continue
+                    selected = {
+                        "keys": candidate.key,
+                        "values": candidate.value,
+                    }.get(node.func.attr, UNKNOWN)
+                    if has_value(selected, PATH_VALUE):
+                        results.append(PATH_ITERABLE)
             return merge_values(*(results or [UNKNOWN]))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             if has_value(self.value(node.left), PATH_VALUE):
@@ -558,6 +628,17 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
             if any(has_value(self.value(item), PATH_VALUE) for item in node.elts):
                 return PATH_ITERABLE
+        if isinstance(node, ast.Dict):
+            keys = [
+                self.value(item)
+                for item in node.keys
+                if item is not None
+            ]
+            values = [self.value(item) for item in node.values]
+            return MappingValue(
+                merge_values(*(keys or [UNKNOWN])),
+                merge_values(*(values or [UNKNOWN])),
+            )
         if isinstance(
             node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)
         ):
@@ -584,7 +665,13 @@ class PythonScanner(ast.NodeVisitor):
                 r"\[(?:pathlib\.)?Path,",
                 compact,
             ):
-                return PATH_ITERABLE
+                return MappingValue(PATH_VALUE, UNKNOWN)
+            if re.search(
+                r"(?:dict|Mapping|MutableMapping)"
+                r"\[[^,]+,(?:pathlib\.)?Path\]",
+                compact,
+            ):
+                return MappingValue(UNKNOWN, PATH_VALUE)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
             return merge_values(
                 self.annotation_value(node.left),
@@ -593,12 +680,15 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(node, ast.Subscript):
             container = self.annotation_name(node.value)
             if container in {"dict", "Mapping", "MutableMapping"}:
-                if isinstance(node.slice, ast.Tuple) and node.slice.elts:
+                if (
+                    isinstance(node.slice, ast.Tuple)
+                    and len(node.slice.elts) >= 2
+                ):
                     key = self.annotation_value(node.slice.elts[0])
-                    return (
-                        PATH_ITERABLE
-                        if has_value(key, PATH_VALUE)
-                        else UNKNOWN
+                    value = self.annotation_value(node.slice.elts[1])
+                    return MappingValue(
+                        key,
+                        value,
                     )
                 return UNKNOWN
             element = self.annotation_value(node.slice)
@@ -968,9 +1058,7 @@ class PythonScanner(ast.NodeVisitor):
         self.scan_expression(node.iter)
         before = self.capture_state()
         element = (
-            PATH_VALUE
-            if has_value(self.value(node.iter), PATH_ITERABLE)
-            else UNKNOWN
+            path_element(self.value(node.iter))
         )
         head = before
         for _iteration in range(64):
@@ -1059,9 +1147,7 @@ class PythonScanner(ast.NodeVisitor):
         for generator in node.generators:
             self.scan_expression(generator.iter)
             element = (
-                PATH_VALUE
-                if has_value(self.value(generator.iter), PATH_ITERABLE)
-                else UNKNOWN
+                path_element(self.value(generator.iter))
             )
             self.bind_target(generator.target, element)
             for condition in generator.ifs:
@@ -1086,9 +1172,7 @@ class PythonScanner(ast.NodeVisitor):
         )
         for generator in node.generators:
             element = (
-                PATH_VALUE
-                if has_value(self.value(generator.iter), PATH_ITERABLE)
-                else UNKNOWN
+                path_element(self.value(generator.iter))
             )
             self.bind_target(generator.target, element)
         element_value = self.value(node.elt)
@@ -1126,6 +1210,37 @@ class ShellSegment:
     pipeline: int
     words: list[ShellWord] = field(default_factory=list)
     stdin_events: list[tuple[str, int]] = field(default_factory=list)
+    stdout_redirected: bool = False
+
+
+class PipelineSourceKind(Enum):
+    PASSTHROUGH = auto()
+    BLOCKED = auto()
+    UNSUPPORTED = auto()
+
+
+@dataclass(frozen=True)
+class TrailingPipeline:
+    heredoc_index: int
+    source_kind: PipelineSourceKind
+    position: int
+
+
+@dataclass
+class ShellLexResult:
+    heredocs: list[HereDoc]
+    errors: list[tuple[int, str]]
+    has_command: bool
+    accepts_incoming_pipeline: bool
+    trailing_pipeline: TrailingPipeline | None
+
+
+@dataclass(frozen=True)
+class PendingPipelineBody:
+    source_kind: PipelineSourceKind
+    source: str
+    line_map: list[tuple[int, int]]
+    location: Location
 
 
 def shell_word(command: str, start: int) -> tuple[str, int, bool]:
@@ -1180,29 +1295,43 @@ def command_words(segment: ShellSegment) -> tuple[str, list[str]] | None:
     while words and Path(words[0]).name in {"command", "exec", "env"}:
         wrapper = Path(words.pop(0)).name
         if wrapper == "command":
-            while words and words[0] == "-p":
-                words.pop(0)
+            while words and words[0] in {"-p", "--"}:
+                option = words.pop(0)
+                if option == "--":
+                    break
             if words and words[0] in {"-v", "-V"}:
                 return None
+            if words and words[0].startswith("-"):
+                raise ValueError("unsupported command wrapper option")
             continue
         if wrapper == "exec":
             while words and words[0].startswith("-"):
                 option = words.pop(0)
                 if option in {"-a", "--argv0"}:
                     if not words:
-                        return None
+                        raise ValueError("missing exec argv0 value")
                     words.pop(0)
+                elif option == "--":
+                    break
+                elif option not in {"-c", "-l"}:
+                    raise ValueError("unsupported exec wrapper option")
             continue
         while words:
             word = words[0]
             if word in {"-u", "--unset", "-C", "--chdir"}:
                 if len(words) < 2:
-                    return None
+                    raise ValueError("missing env wrapper option value")
                 del words[:2]
             elif word.startswith(("--unset=", "--chdir=")):
                 words.pop(0)
-            elif word.startswith("-"):
+            elif word in {"-i", "--ignore-environment", "--"}:
                 words.pop(0)
+                if word == "--":
+                    break
+            elif word.startswith("-u") and len(word) > 2:
+                words.pop(0)
+            elif word.startswith("-"):
+                raise ValueError("unsupported env wrapper option")
             elif "=" in word and not word.startswith("="):
                 words.pop(0)
             else:
@@ -1224,10 +1353,36 @@ def is_python_stdin(segment: ShellSegment) -> bool:
         return False
 
     index = 0
+    no_input_options = {
+        "-h",
+        "--help",
+        "-V",
+        "-VV",
+        "--version",
+    }
+    flag_options = {
+        "-b",
+        "-B",
+        "-d",
+        "-E",
+        "-i",
+        "-I",
+        "-O",
+        "-OO",
+        "-P",
+        "-q",
+        "-s",
+        "-S",
+        "-u",
+        "-v",
+        "-x",
+    }
     while index < len(arguments):
         argument = arguments[index]
         if argument == "-":
             return True
+        if argument in no_input_options:
+            return False
         if argument in {"-c", "-m"} or argument.startswith(("-c", "-m")):
             return False
         if argument in {"-W", "-X"}:
@@ -1237,17 +1392,39 @@ def is_python_stdin(segment: ShellSegment) -> bool:
             if index + 1 == len(arguments):
                 return True
             return arguments[index + 1] == "-"
-        if argument.startswith("-"):
+        if argument in flag_options:
             index += 1
             continue
+        if argument.startswith("-"):
+            raise ValueError(
+                f"unsupported Python interpreter option {argument!r}"
+            )
         return False
     return True
+
+
+def pipeline_source_kind(segment: ShellSegment) -> PipelineSourceKind:
+    try:
+        command = command_words(segment)
+    except ValueError:
+        return PipelineSourceKind.UNSUPPORTED
+    if command is None:
+        return PipelineSourceKind.UNSUPPORTED
+    executable, arguments = command
+    name = Path(executable).name
+    if name == "cat":
+        if not arguments and not segment.stdout_redirected:
+            return PipelineSourceKind.PASSTHROUGH
+        return PipelineSourceKind.BLOCKED
+    if name in {"true", "false"}:
+        return PipelineSourceKind.BLOCKED
+    return PipelineSourceKind.UNSUPPORTED
 
 
 def lex_shell_command(
     command: str,
     positions: list[tuple[int, int]],
-) -> tuple[list[HereDoc], list[tuple[int, str]]]:
+) -> ShellLexResult:
     segments = [ShellSegment(0)]
     heredocs: list[HereDoc] = []
     errors: list[tuple[int, str]] = []
@@ -1345,11 +1522,14 @@ def lex_shell_command(
             continue
         if char == ">":
             operator = index
+            descriptor = 1
             if segments[-1].words and (
                 segments[-1].words[-1].end == operator
                 and segments[-1].words[-1].value.isdigit()
             ):
-                segments[-1].words.pop()
+                descriptor = int(segments[-1].words.pop().value)
+            if descriptor == 1:
+                segments[-1].stdout_redirected = True
             index += 2 if command.startswith((">>", ">&"), index) else 1
             while index < len(command) and command[index] in " \t":
                 index += 1
@@ -1369,12 +1549,21 @@ def lex_shell_command(
         segments[-1].words.append(ShellWord(value, index, end))
         index = end
 
+    python_inputs: dict[int, bool] = {}
+    for segment in segments:
+        try:
+            python_inputs[id(segment)] = is_python_stdin(segment)
+        except ValueError as exc:
+            position = segment.words[0].start if segment.words else 0
+            errors.append((position, str(exc)))
+            python_inputs[id(segment)] = False
+
     for pipeline_id in {segment.pipeline for segment in segments}:
         group = [
             segment for segment in segments if segment.pipeline == pipeline_id
         ]
         for target_index, segment in enumerate(group):
-            if not is_python_stdin(segment):
+            if not python_inputs[id(segment)]:
                 continue
             if segment.stdin_events:
                 kind, heredoc_index = segment.stdin_events[-1]
@@ -1384,17 +1573,105 @@ def lex_shell_command(
                         selected=True,
                     )
                 continue
-            for producer in reversed(group[:target_index]):
-                if not producer.stdin_events:
-                    continue
+            if target_index == 0:
+                continue
+            producer = group[target_index - 1]
+            if producer.stdin_events:
                 kind, heredoc_index = producer.stdin_events[-1]
-                if kind == "heredoc":
+                source_kind = pipeline_source_kind(producer)
+                if (
+                    kind == "heredoc"
+                    and source_kind is PipelineSourceKind.PASSTHROUGH
+                ):
                     heredocs[heredoc_index] = replace(
                         heredocs[heredoc_index],
                         selected=True,
                     )
-                break
-    return heredocs, errors
+                elif (
+                    kind == "heredoc"
+                    and source_kind is PipelineSourceKind.UNSUPPORTED
+                ):
+                    position = (
+                        producer.words[0].start if producer.words else 0
+                    )
+                    errors.append(
+                        (
+                            position,
+                            "unsupported heredoc pipeline source",
+                        )
+                    )
+                continue
+            earlier = [
+                item
+                for item in group[: target_index - 1]
+                if item.stdin_events
+            ]
+            if earlier:
+                position = (
+                    earlier[-1].words[0].start
+                    if earlier[-1].words
+                    else 0
+                )
+                errors.append(
+                    (
+                        position,
+                        "unsupported multi-stage heredoc pipeline",
+                    )
+                )
+
+    nonempty = [
+        segment
+        for segment in segments
+        if segment.words or segment.stdin_events
+    ]
+    accepts_incoming = bool(
+        nonempty
+        and python_inputs[id(nonempty[0])]
+        and not nonempty[0].stdin_events
+    )
+
+    trailing: TrailingPipeline | None = None
+    if (
+        len(segments) >= 2
+        and not segments[-1].words
+        and not segments[-1].stdin_events
+        and segments[-1].pipeline == segments[-2].pipeline
+    ):
+        producer = segments[-2]
+        if producer.stdin_events:
+            kind, heredoc_index = producer.stdin_events[-1]
+            if kind == "heredoc":
+                position = producer.words[0].start if producer.words else 0
+                trailing = TrailingPipeline(
+                    heredoc_index,
+                    pipeline_source_kind(producer),
+                    position,
+                )
+        else:
+            earlier = [
+                segment
+                for segment in segments[:-2]
+                if segment.pipeline == producer.pipeline
+                and segment.stdin_events
+            ]
+            if earlier:
+                source = earlier[-1]
+                kind, heredoc_index = source.stdin_events[-1]
+                if kind == "heredoc":
+                    position = source.words[0].start if source.words else 0
+                    trailing = TrailingPipeline(
+                        heredoc_index,
+                        PipelineSourceKind.UNSUPPORTED,
+                        position,
+                    )
+
+    return ShellLexResult(
+        heredocs,
+        errors,
+        bool(nonempty),
+        accepts_incoming,
+        trailing,
+    )
 
 
 def continued_shell_command(
@@ -1485,13 +1762,14 @@ def scan_shell(
     lines = source.splitlines()
     findings: list[Finding] = []
     errors: list[Finding] = []
+    pending: PendingPipelineBody | None = None
     line_index = 0
     while line_index < len(lines):
         command, positions, next_line = continued_shell_command(
             lines, line_index
         )
-        heredocs, command_errors = lex_shell_command(command, positions)
-        for position, message in command_errors:
+        analysis = lex_shell_command(command, positions)
+        for position, message in analysis.errors:
             original_line, original_column = positions[
                 min(position, len(positions) - 1)
             ]
@@ -1501,8 +1779,26 @@ def scan_shell(
                     message,
                 )
             )
+        if pending is not None and analysis.has_command:
+            if analysis.accepts_incoming_pipeline:
+                if pending.source_kind is PipelineSourceKind.PASSTHROUGH:
+                    found, broken = scan_python(
+                        pending.source,
+                        path,
+                        pending.line_map,
+                    )
+                    findings.extend(found)
+                    errors.extend(broken)
+                elif pending.source_kind is PipelineSourceKind.UNSUPPORTED:
+                    errors.append(
+                        Finding(
+                            pending.location,
+                            "unsupported heredoc pipeline source",
+                        )
+                    )
+            pending = None
         line_index = next_line
-        for heredoc in heredocs:
+        for heredoc_index, heredoc in enumerate(analysis.heredocs):
             body: list[str] = []
             line_map: list[tuple[int, int]] = []
             found_terminator = False
@@ -1533,11 +1829,32 @@ def scan_shell(
                     )
                 )
                 return findings, errors
-            if heredoc.selected:
-                selected = "\n".join(body) + ("\n" if body else "")
+            selected = "\n".join(body) + ("\n" if body else "")
+            trailing = analysis.trailing_pipeline
+            if (
+                trailing is not None
+                and trailing.heredoc_index == heredoc_index
+            ):
+                original_line, original_column = positions[
+                    min(trailing.position, len(positions) - 1)
+                ]
+                pending = PendingPipelineBody(
+                    trailing.source_kind,
+                    selected,
+                    line_map,
+                    Location(path, original_line, original_column),
+                )
+            elif heredoc.selected:
                 found, broken = scan_python(selected, path, line_map)
                 findings.extend(found)
                 errors.extend(broken)
+    if pending is not None:
+        errors.append(
+            Finding(
+                pending.location,
+                "pipeline is missing a downstream command",
+            )
+        )
     return findings, errors
 
 
@@ -2186,6 +2503,50 @@ function()
                     0,
                 ),
                 (
+                    "future global import is visible to deferred body",
+                    """def function():
+    global op
+    op("x")
+from builtins import open as op
+function()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "future import is visible to nested closure",
+                    """def outer():
+    def inner():
+        op("x")
+    from builtins import open as op
+    inner()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "future Path import and value reach deferred body",
+                    """def function():
+    path.read_text()
+from pathlib import Path
+path = Path("x")
+function()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "future module imports feed alias fixed point",
+                    """def function():
+    path.read_text()
+import pathlib as paths
+path = paths.Path("x")
+function()
+""",
+                    1,
+                    0,
+                ),
+                (
                     "IfExp identical callable aliases deduplicate",
                     """op = open if condition else open
 op("x")
@@ -2274,6 +2635,46 @@ for path in mapping:
     path.read_text()
 """,
                     1,
+                    0,
+                ),
+                (
+                    "dict Path values propagate through values",
+                    """from pathlib import Path
+mapping: dict[str, Path]
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict Path keys propagate through keys",
+                    """from pathlib import Path
+mapping: dict[Path, str]
+for path in mapping.keys():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict literal Path keys propagate through iteration",
+                    """from pathlib import Path
+mapping = {Path("x"): "value"}
+for path in mapping:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict non-Path values stay clean",
+                    """from pathlib import Path
+mapping: dict[Path, str]
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
                     0,
                 ),
                 (
@@ -2416,6 +2817,15 @@ PY
                     0,
                 ),
                 (
+                    "command option terminator preserves executable",
+                    """command -- python3 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
                     "env chdir wrapper preserves executable",
                     """env -C /tmp python3 - <<PY
 open("x")
@@ -2434,6 +2844,33 @@ PY
                     0,
                 ),
                 (
+                    "Python help does not consume stdin",
+                    """python3 --help <<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "Python version does not consume stdin",
+                    """python3 -V <<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "unknown Python option fails closed",
+                    """python3 -Z <<PY
+open("x")
+PY
+""",
+                    0,
+                    1,
+                ),
+                (
                     "pipeline producer feeds Python stdin",
                     """cat <<PY | python3 -
 open("x")
@@ -2441,6 +2878,52 @@ PY
 """,
                     1,
                     0,
+                ),
+                (
+                    "non-passthrough pipeline producer is ignored",
+                    """true <<PY | python3 -
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "redirected cat does not feed pipeline",
+                    """cat <<PY >/dev/null | python3 -
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "physical downstream command receives cat heredoc",
+                    """cat <<PY |
+open("x")
+PY
+python3 -
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "unsupported pipeline source fails closed",
+                    """sed <<PY | python3 -
+open("x")
+PY
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "unsupported multi-stage pipeline fails closed",
+                    """cat <<PY | tee | python3 -
+open("x")
+PY
+""",
+                    0,
+                    1,
                 ),
                 (
                     "non-stdin descriptor heredoc is ignored",
