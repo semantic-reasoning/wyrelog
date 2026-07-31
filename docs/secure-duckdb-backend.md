@@ -58,6 +58,9 @@ bounded construction, typed identity SQL, checked finalization, and final
 validation under the common in-process identity guard. Identity values use
 prepared parameters and exact tagged cells; no display conversion, SQL
 interpolation, live DuckDB handle, pathname, or descriptor escapes.
+Test-only control follows the same ownership boundary: the generic and pair
+entries consume independently synchronized one-shot controls, and the pair's
+inner generic core always receives an explicit empty control.
 
 #611 completes this private storage handoff. #544 remains responsible for
 persisting and selecting the canonical operation UUID, calling the sole pair

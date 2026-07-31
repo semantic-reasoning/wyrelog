@@ -41,25 +41,42 @@ struct WylSecureDuckdbBridge
 
 namespace {
 
-  std::mutex pinned_test_hook_mutex;
+  std::mutex pinned_test_control_mutex;
   WylFactStorePinnedTestHook pinned_test_hook = nullptr;
   gpointer pinned_test_hook_data = nullptr;
   wyrelog_error_t pinned_test_authority_error = WYRELOG_E_OK;
   wyrelog_error_t pinned_test_finalize_error = WYRELOG_E_OK;
   wyrelog_error_t pinned_test_r5_error = WYRELOG_E_OK;
+  std::mutex pinned_pair_test_control_mutex;
+  WylFactStorePinnedTestHook pinned_pair_test_hook = nullptr;
+  gpointer pinned_pair_test_hook_data = nullptr;
   WylFactStorePinnedRendezvous pinned_pair_test_error_rendezvous =
       WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
   wyrelog_error_t pinned_pair_test_error = WYRELOG_E_OK;
 
   struct PinnedTestControl
   {
-    WylFactStorePinnedTestHook hook;
-    gpointer data;
-    wyrelog_error_t authority_error;
-    wyrelog_error_t finalize_error;
-    wyrelog_error_t r5_error;
-    WylFactStorePinnedRendezvous pair_error_rendezvous;
-    wyrelog_error_t pair_error;
+    WylFactStorePinnedTestHook hook = nullptr;
+    gpointer data = nullptr;
+    wyrelog_error_t authority_error = WYRELOG_E_OK;
+    wyrelog_error_t finalize_error = WYRELOG_E_OK;
+    wyrelog_error_t r5_error = WYRELOG_E_OK;
+
+    void
+    Fire (WylFactStorePinnedRendezvous rendezvous) const
+    {
+      if (hook != nullptr)
+        hook (rendezvous, data);
+    }
+  };
+
+  struct PinnedPairTestControl
+  {
+    WylFactStorePinnedTestHook hook = nullptr;
+    gpointer data = nullptr;
+    WylFactStorePinnedRendezvous error_rendezvous =
+        WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
+    wyrelog_error_t error = WYRELOG_E_OK;
 
     void
     Fire (WylFactStorePinnedRendezvous rendezvous) const
@@ -72,21 +89,34 @@ namespace {
   PinnedTestControl
   take_pinned_test_control ()
   {
-    std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+    std::lock_guard<std::mutex> lock (pinned_test_control_mutex);
     PinnedTestControl result {
       pinned_test_hook,
       pinned_test_hook_data,
       pinned_test_authority_error,
       pinned_test_finalize_error,
       pinned_test_r5_error,
-      pinned_pair_test_error_rendezvous,
-      pinned_pair_test_error,
     };
     pinned_test_hook = nullptr;
     pinned_test_hook_data = nullptr;
     pinned_test_authority_error = WYRELOG_E_OK;
     pinned_test_finalize_error = WYRELOG_E_OK;
     pinned_test_r5_error = WYRELOG_E_OK;
+    return result;
+  }
+
+  PinnedPairTestControl
+  take_pinned_pair_test_control ()
+  {
+    std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
+    PinnedPairTestControl result {
+      pinned_pair_test_hook,
+      pinned_pair_test_hook_data,
+      pinned_pair_test_error_rendezvous,
+      pinned_pair_test_error,
+    };
+    pinned_pair_test_hook = nullptr;
+    pinned_pair_test_hook_data = nullptr;
     pinned_pair_test_error_rendezvous =
         WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
     pinned_pair_test_error = WYRELOG_E_OK;
@@ -453,7 +483,7 @@ extern "C" void
 wyl_fact_store_pinned_set_test_hook (WylFactStorePinnedTestHook hook,
     gpointer user_data)
 {
-  std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+  std::lock_guard<std::mutex> lock (pinned_test_control_mutex);
   pinned_test_hook = hook;
   pinned_test_hook_data = user_data;
 }
@@ -463,33 +493,36 @@ wyl_fact_store_pinned_set_test_stage_errors
     (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
     wyrelog_error_t r5_error)
 {
-  std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+  std::lock_guard<std::mutex> lock (pinned_test_control_mutex);
   pinned_test_authority_error = authority_error;
   pinned_test_finalize_error = finalize_error;
   pinned_test_r5_error = r5_error;
 }
 
 extern "C" void
+wyl_fact_store_pinned_set_pair_test_hook_for_test
+    (WylFactStorePinnedTestHook hook, gpointer user_data)
+{
+  std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
+  pinned_pair_test_hook = hook;
+  pinned_pair_test_hook_data = user_data;
+}
+
+extern "C" void
 wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
     (WylFactStorePinnedRendezvous rendezvous, wyrelog_error_t error)
 {
-  std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+  std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
   pinned_pair_test_error_rendezvous = rendezvous;
   pinned_pair_test_error = error;
 }
 
-extern "C" wyrelog_error_t
-wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
+static wyrelog_error_t
+open_identified_pinned_core (WylFactArtifactNamespace *namespace_,
     const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
-    WylFactStoreIdentityResult *out_result)
+    WylFactStoreIdentityResult *out_result,
+    const PinnedTestControl &control)
 {
-  if (out_result != nullptr)
-    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
-  if (namespace_ == nullptr || out_result == nullptr
-      || !wyl_fact_store_identity_input_is_valid (identity)
-      || !wyl_fact_store_identity_mode_is_valid (mode))
-    return WYRELOG_E_INVALID;
-
   *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
   wyl_fact_store_identity_process_guard_lock ();
   struct ProcessGuard
@@ -500,7 +533,6 @@ wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
     }
   } process_guard;
 
-  auto control = take_pinned_test_control ();
   control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT);
   const auto r0_result =
       wyl_fact_artifact_namespace_revalidate (namespace_);
@@ -594,6 +626,22 @@ wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
 }
 
 extern "C" wyrelog_error_t
+wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
+    const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
+    WylFactStoreIdentityResult *out_result)
+{
+  if (out_result != nullptr)
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  if (namespace_ == nullptr || out_result == nullptr
+      || !wyl_fact_store_identity_input_is_valid (identity)
+      || !wyl_fact_store_identity_mode_is_valid (mode))
+    return WYRELOG_E_INVALID;
+  const auto control = take_pinned_test_control ();
+  return open_identified_pinned_core (namespace_, identity, mode, out_result,
+      control);
+}
+
+extern "C" wyrelog_error_t
 wyl_fact_store_open_identified_provisioned_pair_pinned
     (WylFactGraphProvisionedPair *pair,
     const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
@@ -611,17 +659,18 @@ wyl_fact_store_open_identified_provisioned_pair_pinned
    * construction, before the generic R1 rendezvous.  Operation-bound hooks
    * therefore form a complete authority-only preflight: every injected seam
    * runs before lock creation or any storage access.  The generic lifecycle
-   * below consumes an empty test control and retains its existing semantics
-   * for callers that already hold a generic namespace. */
-  const auto control = take_pinned_test_control ();
+   * below receives an explicit empty generic control, so pair and generic
+   * callers cannot consume each other's independently synchronized test
+   * state. */
+  const auto control = take_pinned_pair_test_control ();
   for (int value = WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
       value <= WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE; value++) {
     const auto rendezvous =
         static_cast<WylFactStorePinnedRendezvous> (value);
     control.Fire (rendezvous);
-    if (control.pair_error != WYRELOG_E_OK
-        && control.pair_error_rendezvous == rendezvous)
-      return control.pair_error;
+    if (control.error != WYRELOG_E_OK
+        && control.error_rendezvous == rendezvous)
+      return control.error;
     const auto authority_result =
         wyl_fact_graph_provisioned_pair_revalidate (pair);
     if (authority_result != WYRELOG_E_OK)
@@ -634,9 +683,10 @@ wyl_fact_store_open_identified_provisioned_pair_pinned
       &namespace_);
   if (result != WYRELOG_E_OK)
     return result;
+  const PinnedTestControl empty_control;
   const auto open_result =
-      wyl_fact_store_open_identified_pinned (namespace_, identity, mode,
-      out_result);
+      open_identified_pinned_core (namespace_, identity, mode, out_result,
+      empty_control);
   wyl_fact_artifact_namespace_free (namespace_);
   return open_result;
 }
