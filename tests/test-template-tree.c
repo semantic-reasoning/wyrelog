@@ -113,6 +113,9 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
     "approved_data_plane_permission(\"wr.stream.read\").",
     "approved_data_plane_permission(\"wr.stream.list\").",
     "approved_data_plane_permission(\"wr.svc.read_decision\").",
+    "permission_plane(P, \"data\") :- approved_data_plane_permission(P).",
+    "permission_plane(P, \"control\") :-",
+    "!approved_data_plane_permission(P).",
     "role_permission(\"wr.system_admin\", \"wr.policy.write\").",
     "role_permission(\"wr.system_admin\", \"wr.tenant.manage\").",
     "role_permission(\"wr.service_admin\", \"wr.policy.write\").",
@@ -163,6 +166,8 @@ check_bootstrap_seed_consistency (void)
       g_str_equal, g_free, NULL);
   g_autoptr (GHashTable) permissions = g_hash_table_new_full (g_str_hash,
       g_str_equal, g_free, NULL);
+  g_autoptr (GHashTable) approved_data_permissions =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
   rc = collect_template_facts (contents, "role(\"", roles);
   if (rc != 0)
@@ -170,6 +175,10 @@ check_bootstrap_seed_consistency (void)
   rc = collect_template_facts (contents, "permission(\"", permissions);
   if (rc != 0)
     return 32;
+  rc = collect_template_facts (contents, "approved_data_plane_permission(\"",
+      approved_data_permissions);
+  if (rc != 0)
+    return 34;
 
   rc = check_seed_list (roles, wyl_policy_store_builtin_role_count (),
       wyl_policy_store_builtin_role_id);
@@ -180,6 +189,11 @@ check_bootstrap_seed_consistency (void)
       wyl_policy_store_builtin_permission_id);
   if (rc != 0)
     return 60 + rc;
+  rc = check_seed_list (approved_data_permissions,
+      wyl_policy_store_approved_data_plane_permission_count (),
+      wyl_policy_store_approved_data_plane_permission_id);
+  if (rc != 0)
+    return 120 + rc;
 
   return 0;
 }
