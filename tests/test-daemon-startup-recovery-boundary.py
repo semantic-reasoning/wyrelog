@@ -7,11 +7,13 @@ import sys
 
 
 root = Path(sys.argv[1])
-runtime = (root / "wyrelog/daemon/runtime.c").read_text()
-helper = (root / "wyrelog/daemon/startup-recovery-private.c").read_text()
-http = (root / "wyrelog/daemon/http.c").read_text()
-core_meson = (root / "wyrelog/meson.build").read_text()
-test_meson = (root / "tests/meson.build").read_text()
+runtime = (root / "wyrelog/daemon/runtime.c").read_text(encoding="utf-8")
+helper = (root / "wyrelog/daemon/startup-recovery-private.c").read_text(
+    encoding="utf-8"
+)
+http = (root / "wyrelog/daemon/http.c").read_text(encoding="utf-8")
+core_meson = (root / "wyrelog/meson.build").read_text(encoding="utf-8")
+test_meson = (root / "tests/meson.build").read_text(encoding="utf-8")
 
 
 def body(source: str, name: str) -> str:
@@ -107,8 +109,8 @@ assert session_boundary_self_test.count("is_parallel : false") == 1
 assert "timeout_multiplier" not in test_meson
 
 for public_header in (root / "wyrelog").glob("*.h"):
-    assert consumer not in public_header.read_text()
-    assert recovery not in public_header.read_text()
+    assert consumer not in public_header.read_text(encoding="utf-8")
+    assert recovery not in public_header.read_text(encoding="utf-8")
 
 # The operator-visible failure is fixed and must not interpolate identities,
 # paths, records, payloads, or credentials.

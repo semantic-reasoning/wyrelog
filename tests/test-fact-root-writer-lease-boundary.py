@@ -7,13 +7,19 @@ import sys
 
 
 root = Path(sys.argv[1])
-runtime = (root / "wyrelog/daemon/runtime.c").read_text()
-handle = (root / "wyrelog/wyl-handle.c").read_text()
-handle_private = (root / "wyrelog/wyl-handle-private.h").read_text()
-fact_replay = (root / "wyrelog/fact/replay.c").read_text()
-policy_store = (root / "wyrelog/policy/store.c").read_text()
-posix = (root / "wyrelog/fact/root-writer-lease-private.c").read_text()
-windows = (root / "wyrelog/fact/graph-locator-windows-private.c").read_text()
+runtime = (root / "wyrelog/daemon/runtime.c").read_text(encoding="utf-8")
+handle = (root / "wyrelog/wyl-handle.c").read_text(encoding="utf-8")
+handle_private = (root / "wyrelog/wyl-handle-private.h").read_text(
+    encoding="utf-8"
+)
+fact_replay = (root / "wyrelog/fact/replay.c").read_text(encoding="utf-8")
+policy_store = (root / "wyrelog/policy/store.c").read_text(encoding="utf-8")
+posix = (root / "wyrelog/fact/root-writer-lease-private.c").read_text(
+    encoding="utf-8"
+)
+windows = (root / "wyrelog/fact/graph-locator-windows-private.c").read_text(
+    encoding="utf-8"
+)
 
 
 def body(source: str, name: str) -> str:
@@ -111,6 +117,8 @@ assert "DeleteFile" not in windows_release
 assert "set_delete_disposition" not in windows_release
 
 for public_header in (root / "wyrelog").glob("*.h"):
-    assert "WylFactRootWriterLease" not in public_header.read_text()
+    assert "WylFactRootWriterLease" not in public_header.read_text(
+        encoding="utf-8"
+    )
 
 print("fact root writer lease boundary: OK")

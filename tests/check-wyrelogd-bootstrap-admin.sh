@@ -301,7 +301,7 @@ proc = subprocess.Popen(
     [wyctl, "--daemon-url", daemon_url, "mfa", "enroll",
      "--subject", subject, "--access-token-file", token_file],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    text=True,
+    text=True, encoding="utf-8",
 )
 uri_line = proc.stdout.readline().strip()
 secret_line = proc.stdout.readline().strip()
@@ -463,7 +463,7 @@ import base64, hashlib, hmac, os, struct, subprocess, sys, time
 wyctl, daemon_url, token_file, secret_path, subject = sys.argv[1:]
 proc = subprocess.Popen([wyctl, "--daemon-url", daemon_url, "mfa", "enroll",
     "--subject", subject, "--access-token-file", token_file], stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
 uri = proc.stdout.readline().strip()
 secret_line = proc.stdout.readline().strip()
 if not uri.startswith("otpauth_uri=") or not secret_line.startswith("secret_base32="):
@@ -478,7 +478,7 @@ proc.stdin.write(f"{code:06d}\n"); proc.stdin.flush()
 _, err = proc.communicate(timeout=10)
 if proc.returncode != 0:
     sys.stderr.write(err); raise SystemExit(proc.returncode)
-with open(secret_path, "w") as f: f.write(secret)
+with open(secret_path, "w", encoding="ascii") as f: f.write(secret)
 os.chmod(secret_path, 0o600)
 PY
 
@@ -510,7 +510,7 @@ done
 "$PYTHON" - "http://127.0.0.1:$PORT" "$TOKEN_FILE" <<'PY'
 import json, sys, urllib.error, urllib.request
 base, token_path = sys.argv[1:]
-with open(token_path) as f: token = f.read().strip()
+with open(token_path, encoding="utf-8") as f: token = f.read().strip()
 req = urllib.request.Request(
     base + "/auth/mfa/enroll/start?tenant=__wr_default&guard_timestamp=123&guard_loc_class=public&guard_risk=0",
     data=b'{"subject":"admin4"}', method="POST",
@@ -598,7 +598,7 @@ RESTART_TOKEN="$TMPDIR/admin2-restart.token"
 "$PYTHON" - "http://127.0.0.1:$PORT" "$ADMIN2_SECRET" "$RESTART_TOKEN" <<'PY'
 import base64, hashlib, hmac, json, os, struct, sys, time, urllib.request
 base, secret_path, token_path = sys.argv[1:]
-with open(secret_path) as f: seed = base64.b32decode(f.read().strip())
+with open(secret_path, encoding="ascii") as f: seed = base64.b32decode(f.read().strip())
 time.sleep(30 - (time.time() % 30) + 0.25)
 login = urllib.request.Request(base + "/auth/login?username=admin2", method="POST")
 with urllib.request.urlopen(login, timeout=3) as response:
@@ -611,7 +611,7 @@ verify = urllib.request.Request(
     f"{base}/auth/mfa/verify?session_token={session}&code={code:06d}", method="POST")
 with urllib.request.urlopen(verify, timeout=3) as response:
     token = json.load(response)["access_token"]
-with open(token_path, "w") as f: f.write(token + "\n")
+with open(token_path, "w", encoding="utf-8") as f: f.write(token + "\n")
 os.chmod(token_path, 0o600)
 PY
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy permission-grant \
