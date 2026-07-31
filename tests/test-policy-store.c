@@ -2218,6 +2218,139 @@ check_store_enforces_service_permission_planes (void)
   return 0;
 }
 
+/* Seed a registered service principal, bypassing the mutation-path guards so
+ * we can construct both safe and unsafe effective closures directly, then
+ * assert wyl_policy_store_validate_service_permission_closure verdicts. */
+static gint
+check_store_validates_service_permission_closure (void)
+{
+  g_autoptr (wyl_policy_store_t) safe_direct = NULL;
+  g_autoptr (wyl_policy_store_t) safe_role = NULL;
+  g_autoptr (wyl_policy_store_t) bad_direct = NULL;
+  g_autoptr (wyl_policy_store_t) bad_role = NULL;
+  g_autoptr (wyl_policy_store_t) bad_inherit = NULL;
+  wyl_policy_service_principal_info_t principal = { 0 };
+
+  /* Safe: registered service principal holding only an allowlisted direct
+   * data-plane permission. */
+  if (wyl_policy_store_open (NULL, &safe_direct) != WYRELOG_E_OK)
+    return 300;
+  if (wyl_policy_store_create_schema (safe_direct) != WYRELOG_E_OK)
+    return 301;
+  if (wyl_policy_store_create_service_principal (safe_direct,
+          "svc:closure:safedirect", "safe direct", "admin-user",
+          "req-closure-safe-direct", &principal) != WYRELOG_E_OK)
+    return 302;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (safe_direct),
+          "INSERT INTO direct_permissions "
+          "(subject_id, perm_id, scope, granted_at) VALUES "
+          "('svc:closure:safedirect', 'wr.stream.read', 'svc-scope', 0);",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 303;
+  if (wyl_policy_store_validate_service_permission_closure (safe_direct)
+      != WYRELOG_E_OK)
+    return 304;
+
+  /* Safe: allowlisted permission reached through a role membership. */
+  if (wyl_policy_store_open (NULL, &safe_role) != WYRELOG_E_OK)
+    return 305;
+  if (wyl_policy_store_create_schema (safe_role) != WYRELOG_E_OK)
+    return 306;
+  if (wyl_policy_store_create_service_principal (safe_role,
+          "svc:closure:saferole", "safe role", "admin-user",
+          "req-closure-safe-role", &principal) != WYRELOG_E_OK)
+    return 307;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (safe_role),
+          "INSERT INTO roles (role_id, role_name) VALUES "
+          "  ('closure.safe-role', 'closure safe role');"
+          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+          "  ('closure.safe-role', 'wr.stream.list');"
+          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+          "  ('svc:closure:saferole', 'closure.safe-role', 'svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 308;
+  if (wyl_policy_store_validate_service_permission_closure (safe_role)
+      != WYRELOG_E_OK)
+    return 309;
+
+  /* Unsafe: direct non-allowlisted (control-plane) permission. */
+  if (wyl_policy_store_open (NULL, &bad_direct) != WYRELOG_E_OK)
+    return 310;
+  if (wyl_policy_store_create_schema (bad_direct) != WYRELOG_E_OK)
+    return 311;
+  if (wyl_policy_store_create_service_principal (bad_direct,
+          "svc:closure:baddirect", "bad direct", "admin-user",
+          "req-closure-bad-direct", &principal) != WYRELOG_E_OK)
+    return 312;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (bad_direct),
+          "INSERT INTO direct_permissions "
+          "(subject_id, perm_id, scope, granted_at) VALUES "
+          "('svc:closure:baddirect', 'wr.service_credential.manage', "
+          "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
+    return 313;
+  if (wyl_policy_store_validate_service_permission_closure (bad_direct)
+      != WYRELOG_E_POLICY)
+    return 314;
+
+  /* Unsafe: control-plane permission via a role the service principal is a
+   * direct member of. */
+  if (wyl_policy_store_open (NULL, &bad_role) != WYRELOG_E_OK)
+    return 315;
+  if (wyl_policy_store_create_schema (bad_role) != WYRELOG_E_OK)
+    return 316;
+  if (wyl_policy_store_create_service_principal (bad_role,
+          "svc:closure:badrole", "bad role", "admin-user",
+          "req-closure-bad-role", &principal) != WYRELOG_E_OK)
+    return 317;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (bad_role),
+          "INSERT INTO roles (role_id, role_name) VALUES "
+          "  ('closure.bad-role', 'closure bad role');"
+          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+          "  ('closure.bad-role', 'wr.service_credential.manage');"
+          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+          "  ('svc:closure:badrole', 'closure.bad-role', 'svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 318;
+  if (wyl_policy_store_validate_service_permission_closure (bad_role)
+      != WYRELOG_E_POLICY)
+    return 319;
+
+  /* Unsafe: control-plane permission reached only through multi-hop role
+   * inheritance (member of child, child -> parent -> grandparent). */
+  if (wyl_policy_store_open (NULL, &bad_inherit) != WYRELOG_E_OK)
+    return 320;
+  if (wyl_policy_store_create_schema (bad_inherit) != WYRELOG_E_OK)
+    return 321;
+  if (wyl_policy_store_create_service_principal (bad_inherit,
+          "svc:closure:badinherit", "bad inherit", "admin-user",
+          "req-closure-bad-inherit", &principal) != WYRELOG_E_OK)
+    return 322;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (bad_inherit),
+          "INSERT INTO roles (role_id, role_name) VALUES "
+          "  ('closure.child', 'closure child'),"
+          "  ('closure.parent', 'closure parent'),"
+          "  ('closure.grand', 'closure grand');"
+          "INSERT INTO role_inheritances (child_role_id, parent_role_id) "
+          "VALUES ('closure.child', 'closure.parent'),"
+          "  ('closure.parent', 'closure.grand');"
+          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+          "  ('closure.grand', 'wr.service_credential.manage');"
+          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+          "  ('svc:closure:badinherit', 'closure.child', 'svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 323;
+  if (wyl_policy_store_validate_service_permission_closure (bad_inherit)
+      != WYRELOG_E_POLICY)
+    return 324;
+
+  return 0;
+}
+
 static gint
 check_store_checks_effective_subject_permission (void)
 {
@@ -4860,6 +4993,8 @@ main (void)
   if ((rc = check_store_reports_permission_planes ()) != 0)
     return rc;
   if ((rc = check_store_enforces_service_permission_planes ()) != 0)
+    return rc;
+  if ((rc = check_store_validates_service_permission_closure ()) != 0)
     return rc;
   if ((rc = check_store_checks_effective_subject_permission ()) != 0)
     return rc;

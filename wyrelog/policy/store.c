@@ -2007,6 +2007,96 @@ wyl_policy_store_role_is_service_eligible (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
+/* Pass/fail validator over the entire service permission closure. It runs the
+ * single service-closure classifier: every service principal's effective
+ * grants -- direct permissions, role permissions, transitive role inheritance,
+ * and role memberships -- are projected, and any subject holding an effective
+ * non-allowlisted (control-plane) permission, a dangling subject, or a
+ * dangling role yields a row. If the projection is empty the whole service
+ * closure is data-plane safe. The recursive-CTE detection query is the exact
+ * classifier used by the closure analysis in the #614 design; here it is
+ * wrapped as an existence check rather than a removal-list builder. */
+wyrelog_error_t
+wyl_policy_store_validate_service_permission_closure (wyl_policy_store_t *store)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "WITH RECURSIVE service_subject(subject_id) AS ("
+      "  SELECT subject_id FROM service_principals"
+      "  UNION SELECT subject_id FROM direct_permissions"
+      "    WHERE substr(subject_id, 1, 4) = 'svc:'"
+      "  UNION SELECT subject_id FROM role_memberships"
+      "    WHERE substr(subject_id, 1, 4) = 'svc:'"
+      "), service_roles(subject_id, root_role_id, role_id) AS ("
+      "  SELECT ss.subject_id, rm.role_id, rm.role_id"
+      "  FROM service_subject ss"
+      "  JOIN role_memberships rm ON rm.subject_id = ss.subject_id"
+      "  UNION"
+      "  SELECT sr.subject_id, sr.root_role_id, ri.parent_role_id"
+      "  FROM service_roles sr"
+      "  JOIN role_inheritances ri ON ri.child_role_id = sr.role_id"
+      "), direct_candidate(action,subject_id,right_id,scope,reason) AS ("
+      "  SELECT 0,ss.subject_id,dp.perm_id,dp.scope,"
+      "    CASE WHEN sp.subject_id IS NULL THEN 1 ELSE 0 END"
+      "  FROM service_subject ss"
+      "  JOIN direct_permissions dp ON dp.subject_id=ss.subject_id"
+      "  LEFT JOIN service_principals sp ON sp.subject_id=ss.subject_id"
+      "  LEFT JOIN permissions p ON p.perm_id=dp.perm_id"
+      "  WHERE sp.subject_id IS NULL OR NOT ("
+      "    (p.perm_id='wr.stream.read' AND p.perm_name='stream read'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.stream.list' AND p.perm_name='stream list'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.svc.read_decision'"
+      "      AND p.perm_name='service decision read' AND p.class='basic')"
+      "  ) OR p.perm_id IS NULL"
+      "), role_issue(subject_id,root_role_id,reason) AS ("
+      "  SELECT sr.subject_id,sr.root_role_id,"
+      "    MAX(CASE WHEN r.role_id IS NULL THEN 2 ELSE 0 END)"
+      "  FROM service_roles sr"
+      "  LEFT JOIN roles r ON r.role_id=sr.role_id"
+      "  LEFT JOIN role_permissions rp ON rp.role_id=sr.role_id"
+      "  LEFT JOIN permissions p ON p.perm_id=rp.perm_id"
+      "  WHERE r.role_id IS NULL OR (rp.perm_id IS NOT NULL AND (NOT ("
+      "    (p.perm_id='wr.stream.read' AND p.perm_name='stream read'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.stream.list' AND p.perm_name='stream list'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.svc.read_decision'"
+      "      AND p.perm_name='service decision read' AND p.class='basic')"
+      "  ) OR p.perm_id IS NULL))"
+      "  GROUP BY sr.subject_id,sr.root_role_id"
+      "), membership_candidate(action,subject_id,right_id,scope,reason) AS ("
+      "  SELECT 1,ss.subject_id,rm.role_id,rm.scope,"
+      "    CASE WHEN sp.subject_id IS NULL THEN 1 ELSE ri.reason END"
+      "  FROM service_subject ss"
+      "  JOIN role_memberships rm ON rm.subject_id=ss.subject_id"
+      "  LEFT JOIN service_principals sp ON sp.subject_id=ss.subject_id"
+      "  LEFT JOIN role_issue ri ON ri.subject_id=ss.subject_id"
+      "    AND ri.root_role_id=rm.role_id"
+      "  WHERE sp.subject_id IS NULL OR ri.root_role_id IS NOT NULL"
+      ")"
+      "SELECT action,subject_id,right_id,scope,reason FROM ("
+      "  SELECT * FROM direct_candidate"
+      "  UNION SELECT * FROM membership_candidate"
+      ") ORDER BY action,subject_id,right_id,scope;";
+
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc == SQLITE_ROW)
+    return WYRELOG_E_POLICY;
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 is_reserved_catalog_id (const gchar *id)
 {
