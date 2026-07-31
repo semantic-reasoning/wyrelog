@@ -93,6 +93,17 @@ class MappingValue:
     value: object
 
 
+@dataclass(frozen=True)
+class PairValue:
+    first: object
+    second: object
+
+
+@dataclass(frozen=True)
+class IterableValue:
+    element: object
+
+
 def alternatives(value: object) -> frozenset[object]:
     if isinstance(value, PossibleValue):
         return value.alternatives
@@ -118,16 +129,31 @@ def callable_values(value: object) -> tuple[CallableValue, ...]:
     )
 
 
-def path_element(value: object) -> object:
+def iterable_element(value: object) -> object:
     if has_value(value, PATH_ITERABLE):
         return PATH_VALUE
     for candidate in alternatives(value):
-        if isinstance(candidate, MappingValue) and has_value(
-            candidate.key,
-            PATH_VALUE,
-        ):
-            return PATH_VALUE
+        if isinstance(candidate, MappingValue):
+            return candidate.key
+        if isinstance(candidate, IterableValue):
+            return candidate.element
     return UNKNOWN
+
+
+def pair_components(value: object) -> tuple[object, object] | None:
+    candidates = alternatives(value)
+    if not any(isinstance(item, PairValue) for item in candidates):
+        return None
+    first: list[object] = []
+    second: list[object] = []
+    for candidate in candidates:
+        if isinstance(candidate, PairValue):
+            first.append(candidate.first)
+            second.append(candidate.second)
+        else:
+            first.append(UNKNOWN)
+            second.append(UNKNOWN)
+    return merge_values(*first), merge_values(*second)
 
 
 @dataclass
@@ -241,6 +267,7 @@ class LocalBindingCollector(ast.NodeVisitor):
 class FutureBinding:
     names: tuple[str, ...]
     expression: ast.AST | None = None
+    annotation: ast.AST | None = None
     static_value: object = UNKNOWN
     is_static: bool = False
 
@@ -278,7 +305,13 @@ class FutureAssignmentCollector(ast.NodeVisitor):
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         names = self.names(node.target)
         if names:
-            self.bindings.append(FutureBinding(tuple(names), node.value))
+            self.bindings.append(
+                FutureBinding(
+                    tuple(names),
+                    node.value,
+                    node.annotation,
+                )
+            )
         if node.value is not None:
             self.visit(node.value)
 
@@ -493,6 +526,9 @@ class PythonScanner(ast.NodeVisitor):
                     if binding.is_static
                     else self.value(binding.expression)
                 )
+                annotated = self.annotation_value(binding.annotation)
+                if annotated is not UNKNOWN:
+                    assigned = annotated
                 for name in binding.names:
                     index = self.binding_scope(name)
                     targets.add((index, name))
@@ -529,6 +565,11 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(target, (ast.Tuple, ast.List)):
             if callable_values(value):
                 return False
+            pair = pair_components(value)
+            if pair is not None and len(target.elts) == 2:
+                self.bind_target(target.elts[0], pair[0])
+                self.bind_target(target.elts[1], pair[1])
+                return True
             for item in target.elts:
                 self.bind_target(item, UNKNOWN)
             return True
@@ -537,6 +578,37 @@ class PythonScanner(ast.NodeVisitor):
                 return False
             return self.bind_target(target.value, UNKNOWN)
         return not callable_values(value)
+
+    def update_mapping_target(
+        self,
+        target: ast.AST,
+        assigned: object,
+    ) -> bool:
+        if not isinstance(target, ast.Subscript) or not isinstance(
+            target.value,
+            ast.Name,
+        ):
+            return False
+        current = self.value(target.value)
+        if not any(
+            isinstance(candidate, MappingValue)
+            for candidate in alternatives(current)
+        ):
+            return False
+        key = self.value(target.slice)
+        updated: list[object] = []
+        for candidate in alternatives(current):
+            if isinstance(candidate, MappingValue):
+                updated.append(
+                    MappingValue(
+                        merge_values(candidate.key, key),
+                        merge_values(candidate.value, assigned),
+                    )
+                )
+            else:
+                updated.append(candidate)
+        self.bind(target.value.id, merge_values(*updated))
+        return True
 
     def value(self, node: ast.AST | None) -> object:
         if node is None:
@@ -584,16 +656,13 @@ class PythonScanner(ast.NodeVisitor):
                     results.append(PATH_VALUE)
                 elif candidate is NEXT_BUILTIN and node.args:
                     iterable = self.value(node.args[0])
-                    results.append(
-                        PATH_VALUE
-                        if path_element(iterable) is PATH_VALUE
-                        else UNKNOWN
-                    )
+                    results.append(iterable_element(iterable))
                 elif candidate is ITER_BUILTIN and node.args:
                     iterable = self.value(node.args[0])
+                    element = iterable_element(iterable)
                     results.append(
-                        PATH_ITERABLE
-                        if path_element(iterable) is PATH_VALUE
+                        IterableValue(element)
+                        if element is not UNKNOWN
                         else UNKNOWN
                     )
             if isinstance(node.func, ast.Attribute):
@@ -611,12 +680,16 @@ class PythonScanner(ast.NodeVisitor):
                 for candidate in alternatives(owner):
                     if not isinstance(candidate, MappingValue):
                         continue
-                    selected = {
-                        "keys": candidate.key,
-                        "values": candidate.value,
-                    }.get(node.func.attr, UNKNOWN)
-                    if has_value(selected, PATH_VALUE):
-                        results.append(PATH_ITERABLE)
+                    if node.func.attr == "items":
+                        results.append(
+                            IterableValue(
+                                PairValue(candidate.key, candidate.value)
+                            )
+                        )
+                    elif node.func.attr == "keys":
+                        results.append(IterableValue(candidate.key))
+                    elif node.func.attr == "values":
+                        results.append(IterableValue(candidate.value))
             return merge_values(*(results or [UNKNOWN]))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             if has_value(self.value(node.left), PATH_VALUE):
@@ -643,6 +716,8 @@ class PythonScanner(ast.NodeVisitor):
             node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)
         ):
             return self.comprehension_value(node)
+        if isinstance(node, ast.DictComp):
+            return self.dict_comprehension_value(node)
         return UNKNOWN
 
     def annotation_value(self, node: ast.AST | None) -> object:
@@ -849,6 +924,10 @@ class PythonScanner(ast.NodeVisitor):
         allow = bool(callable_values(assigned))
         self.scan_expression(node.value, allow_top_callable=allow)
         for target in node.targets:
+            if not isinstance(target, ast.Name):
+                self.scan_expression(target)
+            if self.update_mapping_target(target, assigned):
+                continue
             if not self.bind_target(target, assigned):
                 names = ", ".join(
                     sorted({item.name for item in callable_values(assigned)})
@@ -866,6 +945,10 @@ class PythonScanner(ast.NodeVisitor):
             assigned = annotated
         allow = bool(callable_values(assigned))
         self.scan_expression(node.value, allow_top_callable=allow)
+        if not isinstance(node.target, ast.Name):
+            self.scan_expression(node.target)
+        if self.update_mapping_target(node.target, assigned):
+            return
         if not self.bind_target(node.target, assigned):
             names = ", ".join(
                 sorted({item.name for item in callable_values(assigned)})
@@ -1058,7 +1141,7 @@ class PythonScanner(ast.NodeVisitor):
         self.scan_expression(node.iter)
         before = self.capture_state()
         element = (
-            path_element(self.value(node.iter))
+            iterable_element(self.value(node.iter))
         )
         head = before
         for _iteration in range(64):
@@ -1147,7 +1230,7 @@ class PythonScanner(ast.NodeVisitor):
         for generator in node.generators:
             self.scan_expression(generator.iter)
             element = (
-                path_element(self.value(generator.iter))
+                iterable_element(self.value(generator.iter))
             )
             self.bind_target(generator.target, element)
             for condition in generator.ifs:
@@ -1172,7 +1255,7 @@ class PythonScanner(ast.NodeVisitor):
         )
         for generator in node.generators:
             element = (
-                path_element(self.value(generator.iter))
+                iterable_element(self.value(generator.iter))
             )
             self.bind_target(generator.target, element)
         element_value = self.value(node.elt)
@@ -1182,6 +1265,25 @@ class PythonScanner(ast.NodeVisitor):
             if has_value(element_value, PATH_VALUE)
             else UNKNOWN
         )
+
+    def dict_comprehension_value(self, node: ast.DictComp) -> object:
+        self.scopes.append(
+            Scope(
+                {},
+                set(),
+                "comprehension",
+                self.lexical_parent(skip_class=True),
+            )
+        )
+        for generator in node.generators:
+            self.bind_target(
+                generator.target,
+                iterable_element(self.value(generator.iter)),
+            )
+        key = self.value(node.key)
+        value = self.value(node.value)
+        self.scopes.pop()
+        return MappingValue(key, value)
 
     visit_ListComp = visit_comprehension_expression
     visit_SetComp = visit_comprehension_expression
@@ -1232,6 +1334,7 @@ class ShellLexResult:
     errors: list[tuple[int, str]]
     has_command: bool
     accepts_incoming_pipeline: bool
+    has_trailing_pipe: bool
     trailing_pipeline: TrailingPipeline | None
 
 
@@ -1365,7 +1468,6 @@ def is_python_stdin(segment: ShellSegment) -> bool:
         "-B",
         "-d",
         "-E",
-        "-i",
         "-I",
         "-O",
         "-OO",
@@ -1377,29 +1479,59 @@ def is_python_stdin(segment: ShellSegment) -> bool:
         "-v",
         "-x",
     }
+    combined_flags = frozenset("bBdEiIOPqSsuvx")
+    interactive = False
     while index < len(arguments):
         argument = arguments[index]
         if argument == "-":
             return True
         if argument in no_input_options:
             return False
+        if argument == "-i":
+            interactive = True
+            index += 1
+            continue
+        if argument.startswith("-i") and len(argument) > 2:
+            remainder = argument[2:]
+            interactive = True
+            if remainder.startswith(("c", "m")):
+                return True
+            if not set(remainder) <= combined_flags:
+                raise ValueError(
+                    f"unsupported combined Python option {argument!r}"
+                )
+            index += 1
+            continue
         if argument in {"-c", "-m"} or argument.startswith(("-c", "-m")):
-            return False
+            return interactive
         if argument in {"-W", "-X"}:
             index += 2
+            continue
+        if argument.startswith(("-W", "-X")):
+            index += 1
             continue
         if argument == "--":
             if index + 1 == len(arguments):
                 return True
-            return arguments[index + 1] == "-"
+            if arguments[index + 1] == "-":
+                return True
+            return interactive
         if argument in flag_options:
+            index += 1
+            continue
+        if (
+            argument.startswith("-")
+            and len(argument) > 2
+            and set(argument[1:]) <= combined_flags
+        ):
+            interactive = interactive or "i" in argument[1:]
             index += 1
             continue
         if argument.startswith("-"):
             raise ValueError(
                 f"unsupported Python interpreter option {argument!r}"
             )
-        return False
+        return interactive
     return True
 
 
@@ -1413,7 +1545,10 @@ def pipeline_source_kind(segment: ShellSegment) -> PipelineSourceKind:
     executable, arguments = command
     name = Path(executable).name
     if name == "cat":
-        if not arguments and not segment.stdout_redirected:
+        if (
+            (not arguments or arguments == ["-"])
+            and not segment.stdout_redirected
+        ):
             return PipelineSourceKind.PASSTHROUGH
         return PipelineSourceKind.BLOCKED
     if name in {"true", "false"}:
@@ -1440,6 +1575,12 @@ def lex_shell_command(
                 index += 1
             continue
         if command.startswith("&&", index) or command.startswith("||", index):
+            pipeline += 1
+            segments.append(ShellSegment(pipeline))
+            index += 2
+            continue
+        if command.startswith("|&", index):
+            errors.append((index, "unsupported pipeline operator '|&'"))
             pipeline += 1
             segments.append(ShellSegment(pipeline))
             index += 2
@@ -1631,12 +1772,13 @@ def lex_shell_command(
     )
 
     trailing: TrailingPipeline | None = None
-    if (
+    has_trailing_pipe = (
         len(segments) >= 2
         and not segments[-1].words
         and not segments[-1].stdin_events
         and segments[-1].pipeline == segments[-2].pipeline
-    ):
+    )
+    if has_trailing_pipe:
         producer = segments[-2]
         if producer.stdin_events:
             kind, heredoc_index = producer.stdin_events[-1]
@@ -1670,6 +1812,7 @@ def lex_shell_command(
         errors,
         bool(nonempty),
         accepts_incoming,
+        has_trailing_pipe,
         trailing,
     )
 
@@ -1796,7 +1939,15 @@ def scan_shell(
                             "unsupported heredoc pipeline source",
                         )
                     )
-            pending = None
+                pending = None
+            elif analysis.has_trailing_pipe:
+                if pending.source_kind is PipelineSourceKind.PASSTHROUGH:
+                    pending = replace(
+                        pending,
+                        source_kind=PipelineSourceKind.UNSUPPORTED,
+                    )
+            else:
+                pending = None
         line_index = next_line
         for heredoc_index, heredoc in enumerate(analysis.heredocs):
             body: list[str] = []
@@ -2547,6 +2698,39 @@ function()
                     0,
                 ),
                 (
+                    "future Path annotation reaches deferred body",
+                    """def function():
+    path.read_text()
+path: Path = make_path()
+from pathlib import Path
+function()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "future mapping annotation reaches deferred body",
+                    """def function():
+    for path in mapping.values():
+        path.read_text()
+mapping: dict[str, Path] = make_mapping()
+from pathlib import Path
+function()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "future non-Path annotation stays clean",
+                    """def function():
+    value.read_text()
+value: str = make_value()
+function()
+""",
+                    0,
+                    0,
+                ),
+                (
                     "IfExp identical callable aliases deduplicate",
                     """op = open if condition else open
 op("x")
@@ -2678,6 +2862,87 @@ for value in mapping.values():
                     0,
                 ),
                 (
+                    "dict items propagate Path values",
+                    """from pathlib import Path
+mapping: dict[str, Path]
+for key, path in mapping.items():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict items propagate Path keys",
+                    """from pathlib import Path
+mapping: dict[Path, str]
+for path, value in mapping.items():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict items keep non-Path values clean",
+                    """from pathlib import Path
+mapping: dict[Path, str]
+for path, value in mapping.items():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "dict subscript mutation propagates Path values",
+                    """from pathlib import Path
+mapping = {}
+mapping["x"] = Path("x")
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict subscript mutation keeps string values clean",
+                    """from pathlib import Path
+mapping = {}
+mapping[Path("x")] = "value"
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "dict comprehension propagates Path values",
+                    """from pathlib import Path
+mapping = {name: Path(name) for name in names}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict comprehension propagates Path keys",
+                    """from pathlib import Path
+mapping = {Path(name): name for name in names}
+for path in mapping:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict comprehension keeps string keys clean",
+                    """mapping = {name: "value" for name in names}
+for name in mapping:
+    name.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
                     "comprehension target is a Path",
                     """from pathlib import Path
 root = Path("x")
@@ -2774,6 +3039,51 @@ PY
                 (
                     "command source ignores heredoc",
                     """python3 -c pass <<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "interactive command continues with stdin",
+                    """python3 -i -c pass <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "interactive module continues with stdin",
+                    """python3 -i -m module <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "interactive script continues with stdin",
+                    """python3 -i script.py <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "attached interactive command continues with stdin",
+                    """python3 -icpass <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "module source ignores heredoc",
+                    """python3 -m module <<PY
 open("x")
 PY
 """,
@@ -2880,6 +3190,24 @@ PY
                     0,
                 ),
                 (
+                    "explicit cat stdin feeds Python stdin",
+                    """cat - <<PY | python3 -
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "stderr pipeline operator fails closed",
+                    """cat <<PY |& python3 -
+open("x")
+PY
+""",
+                    0,
+                    1,
+                ),
+                (
                     "non-passthrough pipeline producer is ignored",
                     """true <<PY | python3 -
 open("x")
@@ -2906,6 +3234,17 @@ python3 -
 """,
                     1,
                     0,
+                ),
+                (
+                    "physical multi-stage pipeline fails closed",
+                    """cat <<PY |
+open("x")
+PY
+tee |
+python3 -
+""",
+                    0,
+                    1,
                 ),
                 (
                     "unsupported pipeline source fails closed",
