@@ -81,6 +81,8 @@ wyrelog_error_t wyl_fact_store_open_identified_provisioned_pair_pinned
     (WylFactGraphProvisionedPair * pair,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
+void wyl_fact_store_pinned_set_pair_test_hook_for_test
+    (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
     (WylFactStorePinnedRendezvous rendezvous, wyrelog_error_t error);
 #endif

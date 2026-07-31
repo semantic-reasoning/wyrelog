@@ -1181,7 +1181,8 @@ test_provisioned_pair_pinned_rendezvous (void)
       static_cast<WylFactStorePinnedRendezvous> (value),
       FALSE,
     };
-    wyl_fact_store_pinned_set_test_hook (mark_pair_rendezvous, &marker);
+    wyl_fact_store_pinned_set_pair_test_hook_for_test (mark_pair_rendezvous,
+        &marker);
     wyl_fact_store_pinned_set_pair_rendezvous_error_for_test (marker.target,
         WYRELOG_E_POLICY);
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
@@ -1208,6 +1209,87 @@ test_provisioned_pair_pinned_rendezvous (void)
     g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
     g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
         ==, WYRELOG_E_OK);
+  }
+}
+
+struct PinnedControlTrace
+{
+  guint calls;
+  guint fired;
+};
+
+static void
+trace_pinned_control (WylFactStorePinnedRendezvous rendezvous,
+    gpointer user_data)
+{
+  auto *trace = static_cast<PinnedControlTrace *> (user_data);
+  trace->calls++;
+  trace->fired |= 1U << static_cast<guint> (rendezvous);
+}
+
+static void
+test_provisioned_pair_pinned_control_isolation (void)
+{
+  {
+    Fixture generic_fixture (false);
+    ProvisionedPairFixture pair_fixture;
+    PinnedControlTrace pair_trace = { 0, 0 };
+    wyl_fact_store_pinned_set_pair_test_hook_for_test (trace_pinned_control,
+        &pair_trace);
+    wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
+        (WYL_FACT_STORE_PINNED_RENDEZVOUS_R2_PREIDENTITY, WYRELOG_E_POLICY);
+
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_pinned
+        (generic_fixture.namespace_, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (pair_trace.calls, ==, 0);
+
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (pair_fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpuint (pair_trace.calls, ==, 3);
+    g_assert_cmpuint (pair_trace.fired, ==, (1U << 3) - 1);
+
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (pair_fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (pair_trace.calls, ==, 3);
+  }
+
+  {
+    Fixture generic_fixture (false);
+    ProvisionedPairFixture pair_fixture;
+    PinnedControlTrace generic_trace = { 0, 0 };
+    wyl_fact_store_pinned_set_test_hook (trace_pinned_control,
+        &generic_trace);
+    wyl_fact_store_pinned_set_test_stage_errors (WYRELOG_E_OK,
+        WYRELOG_E_OK, WYRELOG_E_POLICY);
+
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (pair_fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (generic_trace.calls, ==, 0);
+
+    g_assert_cmpint (wyl_fact_store_open_identified_pinned
+        (generic_fixture.namespace_, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpuint (generic_trace.calls, ==, 6);
+    g_assert_cmpuint (generic_trace.fired, ==, (1U << 6) - 1);
+
+    g_assert_cmpint (wyl_fact_store_open_identified_pinned
+        (generic_fixture.namespace_, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (generic_trace.calls, ==, 6);
   }
 }
 
@@ -2058,6 +2140,9 @@ main (int argc, char **argv)
       test_provisioned_pair_pinned_modes);
   g_test_add_func ("/secure-duckdb-filesystem/provisioned-pair/rendezvous",
       test_provisioned_pair_pinned_rendezvous);
+  g_test_add_func (
+    "/secure-duckdb-filesystem/provisioned-pair/control-isolation",
+    test_provisioned_pair_pinned_control_isolation);
   g_test_add_func (
     "/secure-duckdb-filesystem/pinned-identified/validate-no-write",
     test_pinned_validate_only_does_not_initialize);
