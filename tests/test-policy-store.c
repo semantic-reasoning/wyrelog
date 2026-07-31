@@ -2082,6 +2082,12 @@ check_store_reports_permission_planes (void)
   if (plane != WYL_PERMISSION_PLANE_DATA)
     return 89;
 
+  if (wyl_policy_store_permission_plane (store, "wr.stream.list", &plane)
+      != WYRELOG_E_OK)
+    return 108;
+  if (plane != WYL_PERMISSION_PLANE_DATA)
+    return 109;
+
   if (wyl_policy_store_permission_plane (store,
           "wr.service_principal.manage", &plane) != WYRELOG_E_OK)
     return 90;
@@ -2099,6 +2105,29 @@ check_store_reports_permission_planes (void)
     return 94;
   if (plane != WYL_PERMISSION_PLANE_CONTROL)
     return 95;
+
+  /* A custom permission persisted with class 'basic' must remain control:
+   * the mutable class no longer grants data-plane authority (#614). */
+  if (wyl_policy_store_upsert_permission (store, "site.custom.basic",
+          "custom basic", "basic") != WYRELOG_E_OK)
+    return 97;
+  if (wyl_policy_store_permission_plane (store, "site.custom.basic", &plane)
+      != WYRELOG_E_OK)
+    return 98;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 99;
+
+  /* An allowlisted permission whose persisted class has been tampered must
+   * fall back to control: DATA requires the canonical name and class. */
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE permissions SET class = 'critical' "
+          "WHERE perm_id = 'wr.stream.read';", NULL, NULL, NULL) != SQLITE_OK)
+    return 100;
+  if (wyl_policy_store_permission_plane (store, "wr.stream.read", &plane)
+      != WYRELOG_E_OK)
+    return 101;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 102;
 
   if (wyl_permission_plane_name (WYL_PERMISSION_PLANE_LAST_) != NULL)
     return 96;

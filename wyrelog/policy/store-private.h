@@ -1853,6 +1853,8 @@ typedef enum
 const gchar *wyl_permission_plane_name (wyl_permission_plane_t plane);
 wyrelog_error_t wyl_policy_store_permission_plane (wyl_policy_store_t * store,
     const gchar * perm_id, wyl_permission_plane_t * out_plane);
+gsize wyl_policy_store_approved_data_plane_permission_count (void);
+const gchar *wyl_policy_store_approved_data_plane_permission_id (gsize idx);
 wyrelog_error_t wyl_policy_store_role_is_service_eligible
     (wyl_policy_store_t * store, const gchar * role_id,
     gboolean * out_eligible);
