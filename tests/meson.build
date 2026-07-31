@@ -145,12 +145,14 @@ if build_client
 endif
 
 if build_client
+  test_daemon_http_decide_uses_shared_wyrelog = (
+    get_option('default_library') == 'shared' or
+    (get_option('default_library') == 'both' and
+     get_option('default_both_libraries') == 'shared')
+  )
   test_daemon_http_decide_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
-    # Seed durable PREPARED operations directly through the coordinator test
-    # friend so the status/recover HTTP contract has records to enumerate.
-    '-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     # The four daemon-http-decide variants share one source file with one
     # main() per variant; helpers irrelevant to the active variant remain
@@ -167,6 +169,18 @@ if build_client
   if get_option('enable_fact_store').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_FACT_STORE'
     test_daemon_http_decide_deps += duckdb_dep
+    if (host_machine.system() == 'windows' or
+        not test_daemon_http_decide_uses_shared_wyrelog)
+      # Windows and static selections keep the existing in-executable test
+      # friend.  A shared POSIX selection uses the isolated seed helper DSO.
+      test_daemon_http_decide_c_args += [
+        '-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS',
+      ]
+    else
+      test_daemon_http_decide_c_args += [
+        '-DWYL_TEST_DAEMON_HTTP_SEED_HELPER_DSO',
+      ]
+    endif
   endif
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
@@ -177,21 +191,30 @@ if build_client
   test_daemon_http_decide_link_with = []
   test_daemon_http_decide_targets = []
   if (host_machine.system() != 'windows' and
-      get_option('enable_fact_store').allowed())
-    test_daemon_http_decide_private_companion = static_library(
-      'test-daemon-http-decide-private-companion',
+      get_option('enable_fact_store').allowed() and
+      test_daemon_http_decide_uses_shared_wyrelog)
+    test_daemon_http_decide_seed_wyrelog = libwyrelog
+    if get_option('default_library') == 'both'
+      test_daemon_http_decide_seed_wyrelog = libwyrelog.get_shared_lib()
+    endif
+    test_daemon_http_decide_seed_helper = shared_library(
+      'test-daemon-http-decide-seed-helper',
+      'test-daemon-http-decide-seed-helper.c',
       '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
       '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
       '../wyrelog/auth/service-credential-operation-storage-private.c',
       include_directories : [wyrelog_inc, include_directories('../wyrelog')],
       dependencies : wyrelog_deps,
-      c_args : wyrelog_c_args,
+      link_with : test_daemon_http_decide_seed_wyrelog,
+      c_args : wyrelog_c_args + [
+        '-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS',
+      ],
       gnu_symbol_visibility : 'hidden',
       build_by_default : false,
       install : false,
     )
     test_daemon_http_decide_link_with += [
-      test_daemon_http_decide_private_companion,
+      test_daemon_http_decide_seed_helper,
     ]
   endif
   test_daemon_http_decide = executable('test-daemon-http-decide',
@@ -270,6 +293,9 @@ if build_client
     args : [
       meson.current_source_dir() / 'test-daemon-http-decide-private-companion-boundary.py',
       meson.current_source_dir() / 'meson.build',
+      meson.current_source_dir() / 'test-daemon-http-decide-seed-helper.c',
+      meson.current_source_dir() / 'test-daemon-http-decide-seed-helper.h',
+      meson.current_source_dir() / 'test-daemon-http-decide.c',
       meson.project_source_root() / '.github' / 'workflows' / 'ci-pr.yml',
       meson.project_source_root() / '.github' / 'workflows' / 'ci-main.yml',
     ],
@@ -283,7 +309,8 @@ if build_client
       check_daemon_http_decide_private_symbols,
       args : ['--self-test'],
     )
-    if get_option('enable_fact_store').allowed()
+    if (get_option('enable_fact_store').allowed() and
+        test_daemon_http_decide_uses_shared_wyrelog)
       test_daemon_http_decide_target_paths = []
       foreach target : test_daemon_http_decide_targets
         test_daemon_http_decide_target_paths += [target.full_path()]
@@ -291,11 +318,13 @@ if build_client
       test('daemon-http-decide-private-symbols',
         check_daemon_http_decide_private_symbols,
         args : [
-          test_daemon_http_decide_private_companion.full_path(),
+          meson.project_build_root() / 'meson-info' / 'intro-installed.json',
+          test_daemon_http_decide_seed_helper.full_path(),
+          meson.current_source_dir() / 'test-daemon-http-decide-seed-helper.h',
           libwyrelog.full_path(),
         ] + test_daemon_http_decide_target_paths,
         depends : [
-          test_daemon_http_decide_private_companion,
+          test_daemon_http_decide_seed_helper,
           libwyrelog,
         ] + test_daemon_http_decide_targets,
       )

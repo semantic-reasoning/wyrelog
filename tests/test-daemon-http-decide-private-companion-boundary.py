@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Keep the daemon HTTP test-only coordinator companion narrowly bounded."""
+"""Keep the daemon HTTP test-only seed helper DSO narrowly bounded."""
 
 from pathlib import Path
 import re
 import sys
 
 
-EXPECTED_SOURCES = {
+EXPECTED_PRODUCTION_SOURCES = {
     "../wyrelog/auth/service-credential-operation-coordinator-journal-private.c",
     "../wyrelog/auth/service-credential-operation-coordinator-storage-private.c",
     "../wyrelog/auth/service-credential-operation-storage-private.c",
 }
+EXPECTED_WRAPPER = "test-daemon-http-decide-seed-helper.c"
+SEED_SYMBOL = "wyl_test_daemon_http_seed_prepared_operation"
 EXPECTED_TARGETS = {
     "test_daemon_http_decide",
     "test_daemon_http_decide_refresh",
@@ -23,52 +25,70 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-if len(sys.argv) != 4:
+if len(sys.argv) != 7:
     fail(
         "usage: test-daemon-http-decide-private-companion-boundary.py "
-        "MESON CI_PR CI_MAIN"
+        "MESON WRAPPER_C WRAPPER_H TEST_C CI_PR CI_MAIN"
     )
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
+wrapper_source = Path(sys.argv[2]).read_text(encoding="utf-8")
+wrapper_header = Path(sys.argv[3]).read_text(encoding="utf-8")
+test_source = Path(sys.argv[4]).read_text(encoding="utf-8")
 
 matches = re.findall(
-    r"test_daemon_http_decide_private_companion\s*=\s*static_library\((.*?)\n"
+    r"test_daemon_http_decide_seed_helper\s*=\s*shared_library\((.*?)\n"
     r"\s*\)",
     source,
     re.DOTALL,
 )
 if len(matches) != 1:
-    fail("daemon HTTP private companion must be declared exactly once")
+    fail("daemon HTTP seed helper must be one shared_library")
 
-companion = matches[0]
-actual_sources = set(re.findall(
+helper = matches[0]
+actual_production_sources = set(re.findall(
     r"'(\.\./wyrelog/auth/[^']+\.c)'",
-    companion,
+    helper,
 ))
-if actual_sources != EXPECTED_SOURCES:
+if actual_production_sources != EXPECTED_PRODUCTION_SOURCES:
     fail(
-        "daemon HTTP private companion source set mismatch: "
-        f"expected {sorted(EXPECTED_SOURCES)}, got {sorted(actual_sources)}"
+        "daemon HTTP seed helper production source set mismatch: "
+        f"expected {sorted(EXPECTED_PRODUCTION_SOURCES)}, "
+        f"got {sorted(actual_production_sources)}"
     )
+local_sources = set(re.findall(r"'([^'/]+\.c)'", helper))
+if local_sources != {EXPECTED_WRAPPER}:
+    fail(f"daemon HTTP seed helper wrapper mismatch: {sorted(local_sources)}")
 for required in (
     "gnu_symbol_visibility : 'hidden'",
     "build_by_default : false",
     "install : false",
+    "'-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS'",
 ):
-    if required not in companion:
-        fail(f"daemon HTTP private companion missing: {required}")
+    if required not in helper:
+        fail(f"daemon HTTP seed helper missing: {required}")
 
 guard = re.search(
     r"if \(host_machine\.system\(\) != 'windows' and\s+"
-    r"get_option\('enable_fact_store'\)\.allowed\(\)\)\s+"
-    r"test_daemon_http_decide_private_companion\s*=\s*static_library\(",
+    r"get_option\('enable_fact_store'\)\.allowed\(\) and\s+"
+    r"test_daemon_http_decide_uses_shared_wyrelog\)\s+"
+    r"(?:.*?\s+)?test_daemon_http_decide_seed_helper\s*=\s*shared_library\(",
     source,
+    re.DOTALL,
 )
 if guard is None:
     fail(
-        "daemon HTTP private companion must have explicit POSIX and "
-        "fact-store guards"
+        "daemon HTTP seed helper must require POSIX, fact-store, and a shared "
+        "libwyrelog selection"
     )
+for selection in (
+    "get_option('default_library') == 'shared'",
+    "get_option('default_library') == 'both'",
+    "get_option('default_both_libraries') == 'shared'",
+    "libwyrelog.get_shared_lib()",
+):
+    if selection not in source:
+        fail(f"daemon HTTP shared libwyrelog selection missing: {selection}")
 
 link_list = source.find("test_daemon_http_decide_link_with = []")
 guard_start = source.find(
@@ -86,11 +106,11 @@ if not link_list < guard_start < first_consumer:
     fail("daemon HTTP common link list must exist outside the feature guard")
 if source.count(
         "test_daemon_http_decide_link_with += [\n"
-        "      test_daemon_http_decide_private_companion,\n"
+        "      test_daemon_http_decide_seed_helper,\n"
         "    ]") != 1:
-    fail("daemon HTTP private companion must enter the common link list once")
-if "link_whole" in companion:
-    fail("daemon HTTP private companion must not use link_whole")
+    fail("daemon HTTP seed helper must enter the common link list once")
+if "link_whole" in helper:
+    fail("daemon HTTP seed helper must not use link_whole")
 
 actual_consumers = set(re.findall(
     r"(test_daemon_http_decide(?:_refresh|_service|_audit)?)\s*="
@@ -117,7 +137,8 @@ symbol_test_guard = re.search(
     r"if host_machine\.system\(\) != 'windows'\s+"
     r"check_daemon_http_decide_private_symbols\s*=\s*find_program\(.*?"
     r"test\('daemon-http-decide-private-symbols-self-test'.*?"
-    r"if get_option\('enable_fact_store'\)\.allowed\(\)\s+.*?"
+    r"if \(get_option\('enable_fact_store'\)\.allowed\(\) and\s+"
+    r"test_daemon_http_decide_uses_shared_wyrelog\)\s+.*?"
     r"test\('daemon-http-decide-private-symbols',",
     source,
     re.DOTALL,
@@ -127,6 +148,41 @@ if symbol_test_guard is None:
         "artifact symbol test must require POSIX and fact-store while its "
         "self-test remains POSIX-only"
     )
+
+if wrapper_source.count("G_MODULE_EXPORT") != 1:
+    fail("seed helper wrapper must mark exactly one definition default-visible")
+if wrapper_header.count("G_MODULE_EXPORT") != 1:
+    fail("seed helper header must declare exactly one default-visible API")
+if wrapper_source.count(SEED_SYMBOL) != 1 or wrapper_header.count(
+        SEED_SYMBOL) != 1:
+    fail("seed helper must define and declare exactly one seed API")
+for forbidden in (
+    "WylServiceCredentialOperationStorage *",
+    "WylServiceCredentialOperationRootAnchor *",
+    "WylServiceCredentialOperationCoordinatorLock *",
+    "WylServiceCredentialOperationRecord *",
+):
+    if forbidden in wrapper_header:
+        fail(f"seed helper header leaks a private object: {forbidden}")
+for cleanup in (
+    "wyl_service_credential_operation_coordinator_lock_release",
+    "wyl_service_credential_operation_record_clear",
+    "wyl_service_credential_operation_root_anchor_clear",
+    "wyl_service_credential_operation_storage_clear",
+    "wyl_service_credential_operation_coordinator_request_clear",
+):
+    if cleanup not in wrapper_source:
+        fail(f"seed helper cleanup closure missing: {cleanup}")
+if test_source.count(SEED_SYMBOL) != 1:
+    fail("daemon HTTP test must call only the scalar seed helper API")
+if re.search(
+        r"\bwyl_service_credential_operation_coordinator_"
+        r"begin_or_replay_locked\b",
+        test_source,
+):
+    fail("daemon HTTP executable must not call the hidden begin symbol")
+if source.count("-DWYL_TEST_DAEMON_HTTP_SEED_HELPER_DSO") != 1:
+    fail("daemon HTTP helper DSO selector must be defined exactly once")
 
 
 def job_body(workflow: str, name: str) -> str:
@@ -171,7 +227,7 @@ meson test -C build-daemon-http-shared --no-rebuild \\
   --print-errorlogs"""
 
 ci_jobs = []
-for workflow_path in map(Path, sys.argv[2:]):
+for workflow_path in map(Path, sys.argv[5:]):
     workflow = workflow_path.read_text(encoding="utf-8")
     if workflow.count("\n  daemon-http-shared-fact:\n") != 1:
         fail(f"{workflow_path} must define one daemon HTTP shared fact job")
