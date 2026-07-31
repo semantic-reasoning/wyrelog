@@ -158,7 +158,8 @@ pin_store_file (wyl_policy_store_lease_t *lease)
   if (wstore == NULL)
     return WYRELOG_E_INVALID;
   HANDLE handle = CreateFileW (wstore, READ_CONTROL | FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   DWORD last_error = handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
   g_free (wstore);
@@ -320,7 +321,8 @@ wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
   if (wstore == NULL)
     return WYRELOG_E_INVALID;
   HANDLE handle = CreateFileW (wstore, READ_CONTROL | FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   g_free (wstore);
   if (handle == INVALID_HANDLE_VALUE)

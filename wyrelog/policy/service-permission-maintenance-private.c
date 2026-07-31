@@ -10,6 +10,11 @@
 #define _XOPEN_SOURCE 700
 #endif
 #endif
+/* Apple SDKs gate POSIX-only BSD features (O_NOFOLLOW, openat) behind
+ * _DARWIN_C_SOURCE, which a strict _XOPEN_SOURCE otherwise suppresses. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include "service-permission-maintenance-private.h"
 
