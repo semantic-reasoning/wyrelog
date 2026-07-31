@@ -58,6 +58,27 @@ void wyl_policy_permission_closure_removal_free
 void wyl_policy_permission_closure_analysis_clear
     (WylPolicyPermissionClosureAnalysis * analysis);
 
+/* One durable, immutable #618 remediation-apply receipt. Maps 1:1 onto a row of
+ * service_permission_remediation_receipts. Heap-owned strings are populated by
+ * the lookup helper and released by wyl_policy_service_permission_receipt_clear;
+ * the insert helper reads the caller-owned fields without taking ownership. */
+typedef struct
+{
+  gchar *request_id;
+  gchar *actor_identity;
+  gchar *audit_id;              /* Nullable. */
+  gchar *manifest_fingerprint;
+  guint64 operation_count;
+  gint64 applied_at_us;
+  guint64 pre_generation;
+  gchar *pre_digest;
+  guint64 post_generation;
+  gchar *post_digest;
+} wyl_policy_service_permission_receipt_t;
+
+void wyl_policy_service_permission_receipt_clear
+    (wyl_policy_service_permission_receipt_t * receipt);
+
 typedef enum
 {
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE,
@@ -1908,6 +1929,15 @@ wyrelog_error_t wyl_policy_store_analyze_service_permission_closure
 wyrelog_error_t wyl_policy_store_service_permission_authority_snapshot
     (wyl_policy_store_t * store, guint64 * out_generation,
     guint8 out_digest[32]);
+wyrelog_error_t wyl_policy_store_service_permission_remediation_generation
+    (wyl_policy_store_t * store, guint64 * out_generation);
+wyrelog_error_t wyl_policy_store_service_permission_receipt_lookup
+    (wyl_policy_store_t * store, const gchar * request_id,
+    gboolean * out_found,
+    wyl_policy_service_permission_receipt_t * out_receipt);
+wyrelog_error_t wyl_policy_store_service_permission_receipt_insert
+    (wyl_policy_store_t * store,
+    const wyl_policy_service_permission_receipt_t * receipt);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *

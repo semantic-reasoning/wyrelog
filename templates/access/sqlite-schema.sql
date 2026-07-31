@@ -1570,6 +1570,40 @@ BEGIN
 END;
 
 -- ---------------------------------------------------------------------------
+-- Table: service_permission_remediation_receipts
+-- Durable, immutable receipt for each applied #618 service-permission
+-- remediation. Written once inside the apply transaction and never mutated;
+-- UPDATE/DELETE are blocked by triggers so the pre/post authority snapshot
+-- around each apply is a permanent, tamper-evident record for idempotent
+-- replay.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS service_permission_remediation_receipts (
+    request_id           TEXT PRIMARY KEY CHECK (length(request_id) BETWEEN 1 AND 64
+                             AND instr(request_id, char(0)) = 0),
+    actor_identity       TEXT NOT NULL CHECK (length(actor_identity) BETWEEN 1 AND 256),
+    audit_id             TEXT,
+    manifest_fingerprint TEXT NOT NULL CHECK (length(manifest_fingerprint) = 64),
+    operation_count      INTEGER NOT NULL CHECK (operation_count >= 0),
+    applied_at_us        INTEGER NOT NULL CHECK (applied_at_us > 0),
+    pre_generation       INTEGER NOT NULL,
+    pre_digest           TEXT NOT NULL CHECK (length(pre_digest) = 64),
+    post_generation      INTEGER NOT NULL,
+    post_digest          TEXT NOT NULL CHECK (length(post_digest) = 64)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_service_permission_receipt_no_update
+BEFORE UPDATE ON service_permission_remediation_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service_permission_remediation_receipts is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_permission_receipt_no_delete
+BEFORE DELETE ON service_permission_remediation_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service_permission_remediation_receipts is immutable');
+END;
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically

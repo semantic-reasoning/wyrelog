@@ -710,6 +710,7 @@ static const gchar *const required_tables[] = {
   "service_credential_handoff_cancellation_claims",
   "service_credential_handoff_remediation_actions",
   "service_credential_handoff_retirement_receipts",
+  "service_permission_remediation_receipts",
 };
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
@@ -1409,7 +1410,28 @@ static const gchar service_schema_ddl[] =
     " BEGIN SELECT RAISE(ABORT, 'service domain requests are append-only'); END;"
     "CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_delete"
     " BEFORE DELETE ON service_domain_requests"
-    " BEGIN SELECT RAISE(ABORT, 'service domain requests are append-only'); END;";
+    " BEGIN SELECT RAISE(ABORT, 'service domain requests are append-only'); END;"
+    "CREATE TABLE IF NOT EXISTS service_permission_remediation_receipts ("
+    " request_id TEXT PRIMARY KEY CHECK (length(request_id) BETWEEN 1 AND 64"
+    "   AND instr(request_id, char(0)) = 0),"
+    " actor_identity TEXT NOT NULL CHECK (length(actor_identity) BETWEEN 1 AND 256),"
+    " audit_id TEXT,"
+    " manifest_fingerprint TEXT NOT NULL CHECK (length(manifest_fingerprint) = 64),"
+    " operation_count INTEGER NOT NULL CHECK (operation_count >= 0),"
+    " applied_at_us INTEGER NOT NULL CHECK (applied_at_us > 0),"
+    " pre_generation INTEGER NOT NULL,"
+    " pre_digest TEXT NOT NULL CHECK (length(pre_digest) = 64),"
+    " post_generation INTEGER NOT NULL,"
+    " post_digest TEXT NOT NULL CHECK (length(post_digest) = 64)"
+    ");"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_permission_receipt_no_update"
+    " BEFORE UPDATE ON service_permission_remediation_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service_permission_remediation_receipts is immutable'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_permission_receipt_no_delete"
+    " BEFORE DELETE ON service_permission_remediation_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service_permission_remediation_receipts is immutable'); END;";
 
 typedef struct
 {
@@ -1669,6 +1691,17 @@ static const gchar *const service_exchange_audit_needles[] = {
   NULL,
 };
 
+static const gchar *const service_permission_receipt_needles[] = {
+  "check(length(request_id)between1and64andinstr(request_id,char(0))=0)",
+  "check(length(actor_identity)between1and256)",
+  "check(length(manifest_fingerprint)=64)",
+  "check(operation_count>=0)",
+  "check(applied_at_us>0)",
+  "check(length(pre_digest)=64)",
+  "check(length(post_digest)=64)",
+  NULL,
+};
+
 static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_principals",
         "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
@@ -1729,6 +1762,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         "original_request_id:TEXT:1::1,terminal_kind:TEXT:1::0,raw_journal_snapshot_digest:BLOB:1::0,delivery_disposition_id:TEXT:0::0,delivery_audit_id:TEXT:0::0,delivery_proof_digest:BLOB:1::0,revoke_remediation_request_id:TEXT:0::0,revoke_audit_id:TEXT:0::0,revoke_event_id:INTEGER:0::0,resume_remediation_request_id:TEXT:0::0,resume_audit_id:TEXT:0::0,remediation_source_snapshot_digest:BLOB:0::0,remediation_request_fingerprint:BLOB:0::0,retention_basis_at_us:INTEGER:1::0,retired_at_us:INTEGER:1::0",
         service_handoff_retirement_needles, 16, "",
       "idx_service_handoff_retirement_delivery:1:c:1:0:3:delivery_disposition_id:0:BINARY:1,1:-1::0:BINARY:0;idx_service_handoff_retirement_raw:1:c:0:0:2:raw_journal_snapshot_digest:0:BINARY:1,1:-1::0:BINARY:0;idx_service_handoff_retirement_resume:1:c:1:0:9:resume_remediation_request_id:0:BINARY:1,1:-1::0:BINARY:0;idx_service_handoff_retirement_revoke:1:c:1:0:6:revoke_remediation_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_retirement_receipts_1:1:pk:0:0:0:original_request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_permission_remediation_receipts",
+        "request_id:TEXT:0::1,actor_identity:TEXT:1::0,audit_id:TEXT:0::0,manifest_fingerprint:TEXT:1::0,operation_count:INTEGER:1::0,applied_at_us:INTEGER:1::0,pre_generation:INTEGER:1::0,pre_digest:TEXT:1::0,post_generation:INTEGER:1::0,post_digest:TEXT:1::0",
+        service_permission_receipt_needles, 7, "",
+      "sqlite_autoindex_service_permission_remediation_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
 };
 
 static const ServiceIndexDescriptor service_index_descriptors[] = {
@@ -1829,6 +1866,12 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
   {"trg_service_domain_requests_no_cancellation_collision",
         "service_domain_requests",
       "createtriggertrg_service_domain_requests_no_cancellation_collisionbeforeinsertonservice_domain_requestswhenexists(select1fromservice_credential_handoff_cancellation_claimswherecancellation_request_id=new.request_id)beginselectraise(abort,'servicedomainrequestcollideswithservicehandoffcancellationrequest');end"},
+  {"trg_service_permission_receipt_no_update",
+        "service_permission_remediation_receipts",
+      "createtriggertrg_service_permission_receipt_no_updatebeforeupdateonservice_permission_remediation_receiptsbeginselectraise(abort,'service_permission_remediation_receiptsisimmutable');end"},
+  {"trg_service_permission_receipt_no_delete",
+        "service_permission_remediation_receipts",
+      "createtriggertrg_service_permission_receipt_no_deletebeforedeleteonservice_permission_remediation_receiptsbeginselectraise(abort,'service_permission_remediation_receiptsisimmutable');end"},
 };
 
 static const BuiltinRole *
@@ -2378,6 +2421,194 @@ bind_nullable_text (sqlite3_stmt *stmt, int index, const gchar *value)
     return WYRELOG_E_OK;
   }
   return bind_text (stmt, index, value);
+}
+
+void wyl_policy_service_permission_receipt_clear
+    (wyl_policy_service_permission_receipt_t * receipt)
+{
+  if (receipt == NULL)
+    return;
+  g_clear_pointer (&receipt->request_id, g_free);
+  g_clear_pointer (&receipt->actor_identity, g_free);
+  g_clear_pointer (&receipt->audit_id, g_free);
+  g_clear_pointer (&receipt->manifest_fingerprint, g_free);
+  g_clear_pointer (&receipt->pre_digest, g_free);
+  g_clear_pointer (&receipt->post_digest, g_free);
+  memset (receipt, 0, sizeof *receipt);
+}
+
+/* Persisted, monotonically advancing count of applied #618 remediations. The
+ * counter lives in the wyrelog_config meta table under a dedicated key and is
+ * incremented by wyl_policy_store_service_permission_receipt_insert. Absent key
+ * reads as generation 0. */
+wyrelog_error_t
+    wyl_policy_store_service_permission_remediation_generation
+    (wyl_policy_store_t * store, guint64 * out_generation) {
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || out_generation == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_generation = 0;
+  static const gchar *sql =
+      "SELECT config_value FROM wyrelog_config "
+      "WHERE config_key = 'service_permission_remediation_generation';";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *value = (const gchar *) sqlite3_column_text (stmt, 0);
+    if (value == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    gchar *endptr = NULL;
+    guint64 parsed = g_ascii_strtoull (value, &endptr, 10);
+    if (endptr == value || *endptr != '\0') {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    *out_generation = parsed;
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+/* Look up a stored remediation receipt by request id for idempotent replay. On
+ * a hit *out_found is TRUE and out_receipt owns freshly duplicated strings the
+ * caller releases with wyl_policy_service_permission_receipt_clear; on a miss
+ * out_receipt is left zeroed. */
+wyrelog_error_t
+    wyl_policy_store_service_permission_receipt_lookup
+    (wyl_policy_store_t * store, const gchar * request_id, gboolean * out_found,
+    wyl_policy_service_permission_receipt_t * out_receipt)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || request_id == NULL
+      || out_found == NULL || out_receipt == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_found = FALSE;
+  memset (out_receipt, 0, sizeof *out_receipt);
+  static const gchar *sql =
+      "SELECT request_id, actor_identity, audit_id, manifest_fingerprint,"
+      " operation_count, applied_at_us, pre_generation, pre_digest,"
+      " post_generation, post_digest"
+      " FROM service_permission_remediation_receipts WHERE request_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, request_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_OK;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  out_receipt->request_id =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  out_receipt->actor_identity =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 1));
+  if (sqlite3_column_type (stmt, 2) != SQLITE_NULL)
+    out_receipt->audit_id =
+        g_strdup ((const gchar *) sqlite3_column_text (stmt, 2));
+  out_receipt->manifest_fingerprint =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 3));
+  out_receipt->operation_count = (guint64) sqlite3_column_int64 (stmt, 4);
+  out_receipt->applied_at_us = (gint64) sqlite3_column_int64 (stmt, 5);
+  out_receipt->pre_generation = (guint64) sqlite3_column_int64 (stmt, 6);
+  out_receipt->pre_digest =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 7));
+  out_receipt->post_generation = (guint64) sqlite3_column_int64 (stmt, 8);
+  out_receipt->post_digest =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 9));
+  sqlite3_finalize (stmt);
+
+  if (out_receipt->request_id == NULL || out_receipt->actor_identity == NULL
+      || out_receipt->manifest_fingerprint == NULL
+      || out_receipt->pre_digest == NULL || out_receipt->post_digest == NULL) {
+    wyl_policy_service_permission_receipt_clear (out_receipt);
+    return WYRELOG_E_NOMEM;
+  }
+  *out_found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+/* Insert one immutable remediation receipt and advance the persisted apply
+ * generation counter. Intended to run inside the unit 5 apply transaction; a
+ * primary-key collision surfaces as WYRELOG_E_POLICY so a duplicate apply cannot
+ * silently overwrite the frozen record. */
+wyrelog_error_t
+    wyl_policy_store_service_permission_receipt_insert
+    (wyl_policy_store_t * store,
+    const wyl_policy_service_permission_receipt_t * receipt)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || receipt == NULL
+      || receipt->request_id == NULL || receipt->actor_identity == NULL
+      || receipt->manifest_fingerprint == NULL || receipt->pre_digest == NULL
+      || receipt->post_digest == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO service_permission_remediation_receipts ("
+      " request_id, actor_identity, audit_id, manifest_fingerprint,"
+      " operation_count, applied_at_us, pre_generation, pre_digest,"
+      " post_generation, post_digest) VALUES (?,?,?,?,?,?,?,?,?,?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if ((rc = bind_text (stmt, 1, receipt->request_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, receipt->actor_identity)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 3, receipt->audit_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, receipt->manifest_fingerprint))
+      != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 8, receipt->pre_digest)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 10, receipt->post_digest)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  if (sqlite3_bind_int64 (stmt, 5,
+          (sqlite3_int64) receipt->operation_count) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 6,
+          (sqlite3_int64) receipt->applied_at_us) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 7,
+          (sqlite3_int64) receipt->pre_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 9,
+          (sqlite3_int64) receipt->post_generation) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return (step_rc & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_POLICY :
+        WYRELOG_E_IO;
+
+  static const gchar *bump =
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at)"
+      " VALUES ('service_permission_remediation_generation', '1', unixepoch())"
+      " ON CONFLICT(config_key) DO UPDATE SET"
+      "   config_value = CAST(CAST(config_value AS INTEGER) + 1 AS TEXT),"
+      "   updated_at = excluded.updated_at;";
+  return exec_sql (store->db, bump);
 }
 
 static gboolean
@@ -13391,6 +13622,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts',"
       "'service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
@@ -13418,7 +13650,9 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_domain_requests_no_remediation_collision',"
       "'trg_service_domain_requests_no_cancellation_collision',"
       "'trg_service_exchange_audit_no_update',"
-      "'trg_service_exchange_audit_no_delete') LIMIT 1;", &found);
+      "'trg_service_exchange_audit_no_delete',"
+      "'trg_service_permission_receipt_no_update',"
+      "'trg_service_permission_receipt_no_delete') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -13435,6 +13669,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
@@ -13446,6 +13681,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate')) LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
@@ -13482,7 +13718,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
-      "'service_credential_handoff_retirement_receipts') LIMIT 1;", &found);
+      "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
