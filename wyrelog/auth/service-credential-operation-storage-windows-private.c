@@ -150,7 +150,7 @@ void wyl_win_child_set_before_rename_hook_for_test
 }
 
 void wyl_win_child_take_before_rename_hook_for_test
-  (WylWinChildBeforeRenameHookForTest *out_hook, gpointer *out_user_data)
+    (WylWinChildBeforeRenameHookForTest * out_hook, gpointer * out_user_data)
 {
   if (out_hook != NULL)
     *out_hook = NULL;
@@ -177,8 +177,8 @@ void wyl_win_child_set_before_exact_delete_hook_for_test
 }
 
 void wyl_win_child_take_before_exact_delete_hook_for_test
-  (WylServiceCredentialOperationBeforeExactDeleteHookForTest *out_hook,
-    gpointer *out_user_data)
+    (WylServiceCredentialOperationBeforeExactDeleteHookForTest * out_hook,
+    gpointer * out_user_data)
 {
   if (out_hook != NULL)
     *out_hook = NULL;
@@ -234,8 +234,7 @@ wyl_win_directory_flush_error (DWORD error)
 static wyrelog_error_t
 wyl_win_flush_directory (HANDLE root)
 {
-  DWORD forced =
-      wyl_win_child_take_next_directory_flush_error_for_test ();
+  DWORD forced = wyl_win_child_take_next_directory_flush_error_for_test ();
   if (root == NULL || root == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
   if (forced != ERROR_SUCCESS)

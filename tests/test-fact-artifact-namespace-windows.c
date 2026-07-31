@@ -60,14 +60,12 @@ await_deleted_artifact_name (const gchar *stage, const gchar *path,
       g_error ("artifact name retirement failed: stage=%s path=%s "
           "timeout-ms=5000 last-attrs=0x%08lx "
           "last-observation-error=%lu",
-          stage, path, (unsigned long) last_attrs,
-          (unsigned long) last_error);
+          stage, path, (unsigned long) last_attrs, (unsigned long) last_error);
 
     remaining = deadline - g_get_monotonic_time ();
     if (remaining <= 1)
       break;
-    g_usleep ((gulong) MIN (remaining - 1,
-            10 * G_TIME_SPAN_MILLISECOND));
+    g_usleep ((gulong) MIN (remaining - 1, 10 * G_TIME_SPAN_MILLISECOND));
   }
 
   g_error ("artifact name retirement timed out: stage=%s path=%s "
@@ -1831,8 +1829,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
         "facts.duckdb.wal", NULL);
     gchar rejected_readback[4] = { 0 };
 
-    g_assert_true (GetFileAttributesW (staged_wide) !=
-        INVALID_FILE_ATTRIBUTES);
+    g_assert_true (GetFileAttributesW (staged_wide) != INVALID_FILE_ATTRIBUTES);
     read_named_file_prefix (published_path, rejected_readback, 3);
     g_assert_cmpstr (rejected_readback, ==, "old");
   }

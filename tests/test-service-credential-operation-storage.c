@@ -203,7 +203,7 @@ static void
 rearm_exact_delete_hook_for_test (gpointer user_data)
 {
   wyl_win_child_set_before_exact_delete_hook_for_test
-    (rearm_exact_delete_hook_for_test, user_data);
+      (rearm_exact_delete_hook_for_test, user_data);
 }
 
 static void
@@ -1322,7 +1322,7 @@ test_windows_final_reparse_is_policy (void)
   race->decoy = g_strdup (decoy);
   race->junction_result = WYL_TEST_JUNCTION_FAILED;
   wyl_win_child_set_before_rename_hook_for_test
-    (replace_destination_with_junction_for_test, race);
+      (replace_destination_with_junction_for_test, race);
   wyrelog_error_t replace_rc = wyl_win_child_replace (&storage, &anchor,
       &name, replacement);
   assert_rename_hook_consumed ();
@@ -1464,7 +1464,7 @@ test_windows_child_exact_delete_fixture (void)
   WylTestExactDeleteRace *mutation = g_new0 (WylTestExactDeleteRace, 1);
   mutation->record = g_strdup (record);
   wyl_win_child_set_before_exact_delete_hook_for_test
-    (mutate_exact_delete_child_for_test, mutation);
+      (mutate_exact_delete_child_for_test, mutation);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
       ==, WYRELOG_E_OK);
   assert_exact_delete_hook_consumed ();
@@ -1483,7 +1483,7 @@ test_windows_child_exact_delete_fixture (void)
   rebind->record = g_strdup (record);
   rebind->aside = g_strdup (aside);
   wyl_win_child_set_before_exact_delete_hook_for_test
-    (rebind_exact_delete_child_for_test, rebind);
+      (rebind_exact_delete_child_for_test, rebind);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
       ==, WYRELOG_E_OK);
   assert_exact_delete_hook_consumed ();
@@ -1500,7 +1500,7 @@ test_windows_child_exact_delete_fixture (void)
       WYRELOG_E_OK);
 
   wyl_win_child_set_before_exact_delete_hook_for_test
-    (rearm_exact_delete_hook_for_test, &leaked_hook_data);
+      (rearm_exact_delete_hook_for_test, &leaked_hook_data);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
       ==, WYRELOG_E_OK);
   {
@@ -1653,7 +1653,7 @@ typedef struct
   DWORD expected_flush_error;
   WylWinChildBeforeRenameHookForTest expected_rename_hook;
   gpointer expected_rename_data;
-  WylServiceCredentialOperationBeforeExactDeleteHookForTest
+    WylServiceCredentialOperationBeforeExactDeleteHookForTest
       expected_exact_delete_hook;
   gpointer expected_exact_delete_data;
 } WinGuardedOperationStorageCase;
@@ -1677,7 +1677,7 @@ test_windows_deliberately_leaked_operation_hooks (void)
   wyl_win_child_set_before_rename_hook_for_test (leaked_rename_hook_for_test,
       &leaked_hook_data);
   wyl_win_child_set_before_exact_delete_hook_for_test
-    (leaked_exact_delete_hook_for_test, &leaked_hook_data);
+      (leaked_exact_delete_hook_for_test, &leaked_hook_data);
 }
 
 static void
@@ -1687,8 +1687,7 @@ take_windows_operation_test_state (DWORD *flush_error,
     WylServiceCredentialOperationBeforeExactDeleteHookForTest
     *exact_delete_hook, gpointer *exact_delete_data)
 {
-  *flush_error =
-      wyl_win_child_take_next_directory_flush_error_for_test ();
+  *flush_error = wyl_win_child_take_next_directory_flush_error_for_test ();
   wyl_win_child_take_before_rename_hook_for_test (rename_hook, rename_data);
   wyl_win_child_take_before_exact_delete_hook_for_test (exact_delete_hook,
       exact_delete_data);
@@ -1783,39 +1782,39 @@ static const WinGuardedOperationStorageCase win_guarded_cases[] = {
   {"/operation-storage/file-root", test_rejects_file_root},
   {"/operation-storage/child-contract", test_child_name_and_anchor_contract},
   {"/operation-storage/windows/child-read-validation",
-   test_windows_child_read_validation},
+      test_windows_child_read_validation},
   {"/operation-storage/windows/reparse-status-mapping",
-   test_windows_reparse_status_mapping},
+      test_windows_reparse_status_mapping},
   {"/operation-storage/windows/live-root-validation",
-   test_windows_live_root_validation},
+      test_windows_live_root_validation},
   {"/operation-storage/windows/child-read-fixture",
-   test_windows_child_read_fixture},
+      test_windows_child_read_fixture},
   {"/operation-storage/windows/child-create-fixture",
-   test_windows_child_create_fixture},
+      test_windows_child_create_fixture},
   {"/operation-storage/windows/directory-flush-failures",
-   test_windows_directory_flush_failures},
+      test_windows_directory_flush_failures},
   {"/operation-storage/windows/child-replace-fixture",
-   test_windows_child_replace_fixture},
+      test_windows_child_replace_fixture},
   {"/operation-storage/windows/replace-stale-temp-reopen",
-   test_windows_replace_ignores_stale_temp_after_reopen},
+      test_windows_replace_ignores_stale_temp_after_reopen},
   {"/operation-storage/windows/replace-root-substitution",
-   test_windows_replace_survives_root_substitution},
+      test_windows_replace_survives_root_substitution},
   {"/operation-storage/windows/replace-ancestor-junction-substitution",
-   test_windows_replace_survives_ancestor_junction_substitution},
+      test_windows_replace_survives_ancestor_junction_substitution},
   {"/operation-storage/windows/final-reparse-policy",
-   test_windows_final_reparse_is_policy},
+      test_windows_final_reparse_is_policy},
   {"/operation-storage/windows/child-delete-fixture",
-   test_windows_child_delete_fixture},
+      test_windows_child_delete_fixture},
   {"/operation-storage/windows/child-exact-delete-fixture",
-   test_windows_child_exact_delete_fixture},
+      test_windows_child_exact_delete_fixture},
   {"/operation-storage/windows/child-lock-fixture",
-   test_windows_child_lock_fixture},
+      test_windows_child_lock_fixture},
   {"/operation-storage/windows/relative-override",
-   test_rejects_relative_override},
+      test_rejects_relative_override},
   {"/operation-storage/windows/deliberately-leaked-hooks",
-   test_windows_deliberately_leaked_operation_hooks, ERROR_WRITE_FAULT,
-   leaked_rename_hook_for_test, &leaked_hook_data,
-   leaked_exact_delete_hook_for_test, &leaked_hook_data},
+        test_windows_deliberately_leaked_operation_hooks, ERROR_WRITE_FAULT,
+        leaked_rename_hook_for_test, &leaked_hook_data,
+      leaked_exact_delete_hook_for_test, &leaked_hook_data},
 };
 #endif
 
