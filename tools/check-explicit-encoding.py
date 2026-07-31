@@ -7,10 +7,11 @@ heredocs is parsed with the same AST scanner as standalone Python, with
 diagnostics mapped back to the original shell line and column.
 
 The analysis intentionally follows direct imports, simple name aliases and
-statically-proven ``pathlib.Path`` values.  Dynamic reflection such as
+statically-proven ``pathlib.Path`` values for ``Path.open``.  Attribute names
+``read_text`` and ``write_text`` are protected independently of receiver
+provenance so whole-tree analysis fails closed.  Dynamic reflection such as
 ``getattr(value, name)`` is outside the contract: it cannot be classified
-without executing repository code.  Conversely, once a protected callable
-(``open``, ``Path.open``, ``read_text`` or ``write_text``) is identified,
+without executing repository code.  Once a protected callable is identified,
 passing, returning, storing or otherwise escaping it is a structural error
 rather than a silent blind spot.
 """
@@ -1006,7 +1007,20 @@ class PythonScanner(ast.NodeVisitor):
             results: list[object] = []
             for candidate in alternatives(owner):
                 result = UNKNOWN
-                if (
+                if candidate is PATH_CLASS and node.attr in {
+                    "read_text",
+                    "write_text",
+                }:
+                    result = {
+                        "read_text": UNBOUND_READ_TEXT,
+                        "write_text": UNBOUND_WRITE_TEXT,
+                    }[node.attr]
+                elif node.attr in {"read_text", "write_text"}:
+                    result = {
+                        "read_text": BOUND_READ_TEXT,
+                        "write_text": BOUND_WRITE_TEXT,
+                    }[node.attr]
+                elif (
                     candidate in {BUILTINS_MODULE, IO_MODULE}
                     and node.attr == "open"
                 ):
@@ -3373,7 +3387,7 @@ function()
                 (
                     "future non-Path annotation stays clean",
                     """def function():
-    value.read_text()
+    value.open()
 value: str = make_value()
 function()
 """,
@@ -3415,10 +3429,75 @@ path.read_text(encoding=choose(open))
                     1,
                 ),
                 (
+                    "untyped direct read_text needs encoding",
+                    """value = make_value()
+value.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "untyped direct write_text needs encoding",
+                    """value = make_value()
+value.write_text("text")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "untyped read_text alias needs encoding",
+                    """value = make_value()
+reader = value.read_text
+reader()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "untyped write_text alias needs encoding",
+                    """value = make_value()
+writer = value.write_text
+writer("text")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "untyped direct text methods accept encoding",
+                    """value = make_value()
+value.read_text(encoding="utf-8")
+value.write_text("text", encoding="utf-8")
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "untyped text method aliases accept encoding",
+                    """value = make_value()
+reader = value.read_text
+writer = value.write_text
+reader(encoding="utf-8")
+writer("text", encoding="utf-8")
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "custom same-name method fails closed",
+                    """class Custom:
+    def read_text(self):
+        return "text"
+custom = Custom()
+custom.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
                     "Path collection is not a Path value",
                     """from pathlib import Path
 paths: list[Path]
-paths.read_text()
+paths.open()
 """,
                     0,
                     0,
@@ -3456,7 +3535,7 @@ next(paths).read_text()
                     "dict Path values are not Path keys",
                     """from pathlib import Path
 mapping: dict[str, Path]
-mapping.read_text()
+mapping.open()
 """,
                     0,
                     0,
@@ -3506,7 +3585,7 @@ for path in mapping:
                     """from pathlib import Path
 mapping: dict[Path, str]
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3536,7 +3615,7 @@ for path, value in mapping.items():
                     """from pathlib import Path
 mapping: dict[Path, str]
 for path, value in mapping.items():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3558,7 +3637,7 @@ for path in mapping.values():
 mapping = {}
 mapping[Path("x")] = "value"
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3587,7 +3666,7 @@ for path in mapping:
                     "dict comprehension keeps string keys clean",
                     """mapping = {name: "value" for name in names}
 for name in mapping:
-    name.read_text()
+    name.open()
 """,
                     0,
                     0,
@@ -3618,8 +3697,8 @@ for key, (left, right) in mapping.items():
                     "nested dict item tuple keeps strings clean",
                     """mapping: dict[str, tuple[str, str]]
 for key, (left, right) in mapping.items():
-    left.read_text()
-    right.read_text()
+    left.open()
+    right.open()
 """,
                     0,
                     0,
@@ -3651,9 +3730,9 @@ right.read_text()
                     "fixed three-tuple strings stay clean",
                     """values: tuple[str, str, str]
 first, second, third = values
-first.read_text()
-second.read_text()
-third.read_text()
+first.open()
+second.open()
+third.open()
 """,
                     0,
                     0,
@@ -3697,7 +3776,7 @@ for path in paths:
                     """values: tuple[str, str, str, str]
 head, *middle, tail = values
 for value in middle:
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3744,9 +3823,9 @@ for pair in rest:
                     "starred list string neighbor stays clean",
                     """values: list[str]
 head, *rest = values
-head.read_text()
+head.open()
 for value in rest:
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3784,7 +3863,7 @@ item[-2].read_text()
                     "negative tuple index keeps exact string clean",
                     """from pathlib import Path
 item: tuple[str, Path, str]
-item[-3].read_text()
+item[-3].open()
 """,
                     0,
                     0,
@@ -3793,7 +3872,7 @@ item[-3].read_text()
                     "out of range tuple index stays unknown",
                     """from pathlib import Path
 item: tuple[str, Path]
-item[-3].read_text()
+item[-3].open()
 """,
                     0,
                     0,
@@ -3820,7 +3899,7 @@ item[True].read_text()
                     "false tuple index selects first component",
                     """from pathlib import Path
 item: tuple[str, Path]
-item[False].read_text()
+item[False].open()
 """,
                     0,
                     0,
@@ -3829,7 +3908,7 @@ item[False].read_text()
                     "exact tuple slice preserves Tuple receiver",
                     """from pathlib import Path
 item: tuple[Path, Path]
-item[:].read_text()
+item[:].open()
 """,
                     0,
                     0,
@@ -3840,7 +3919,7 @@ item[:].read_text()
 item: tuple[str, Path]
 first, second = item[::-1]
 first.read_text()
-second.read_text()
+second.open()
 """,
                     1,
                     0,
@@ -3859,7 +3938,7 @@ for path in item[1:]:
                     "dynamic tuple slice receiver stays clean",
                     """from pathlib import Path
 item: tuple[Path, Path]
-item[start:].read_text()
+item[start:].open()
 """,
                     0,
                     0,
@@ -3899,7 +3978,7 @@ for path in item[::step]:
                     """from pathlib import Path
 mapping: dict[str, Path]
 for item in mapping.items():
-    item[0].read_text()
+    item[0].open()
 """,
                     0,
                     0,
@@ -3934,7 +4013,7 @@ for path in alias.values():
 mapping = {"x": Path("x")}
 mapping["x"] = "value"
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3946,7 +4025,7 @@ mapping = {"x": Path("x")}
 alias = mapping
 alias["x"] = "value"
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -3979,7 +4058,7 @@ for path in mapping.values():
 base = {"x": Path("x")}
 mapping = {**base, "x": "value"}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4002,7 +4081,7 @@ first = {"x": Path("x")}
 second = {"x": "value"}
 mapping = {**first, **second}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4024,7 +4103,7 @@ for path in mapping.values():
                     """base = {"x": "value"}
 mapping = {**base}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4067,7 +4146,7 @@ for path in mapping.values():
 known = {"x": "value"}
 mapping = {**unknown, **known}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     1,
@@ -4089,7 +4168,7 @@ for path in mapping.values():
 base = {"x": Path("x")}
 mapping = base | {"x": "value"}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4110,7 +4189,7 @@ for path in mapping.values():
                     """base = {"x": "value"}
 mapping = {} | base
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4146,7 +4225,7 @@ for path in alias.values():
 mapping = {"x": Path("x")}
 mapping |= {"x": "value"}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4158,9 +4237,9 @@ mapping = {"x": Path("x")}
 alias = mapping
 alias |= {"x": "value"}
 for value in mapping.values():
-    value.read_text()
+    value.open()
 for value in alias.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4183,7 +4262,7 @@ mapping |= {"x": "replacement"}
 for value in a.values():
     value.read_text()
 for value in b.values():
-    value.read_text()
+    value.open()
 """,
                     1,
                     1,
@@ -4195,9 +4274,9 @@ b = {"x": "second"}
 mapping = a if condition else b
 mapping |= {"x": "replacement"}
 for value in a.values():
-    value.read_text()
+    value.open()
 for value in b.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     0,
@@ -4210,9 +4289,9 @@ b = {"x": "second"}
 mapping = a if condition else b
 mapping |= {"x": Path("x")}
 for value in a.values():
-    value.read_text()
+    value.open()
 for value in b.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     1,
@@ -4224,9 +4303,9 @@ b = {"x": "second"}
 mapping = a if condition else b
 mapping |= make_mapping()
 for value in a.values():
-    value.read_text()
+    value.open()
 for value in b.values():
-    value.read_text()
+    value.open()
 """,
                     0,
                     1,
