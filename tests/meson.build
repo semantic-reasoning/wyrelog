@@ -2480,7 +2480,7 @@ if get_option('enable_audit').allowed()
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : [wyrelog_dep, duckdb_dep],
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
   )
 
   test('daemon-checks', test_daemon_checks, env : audit_conn_test_env)
