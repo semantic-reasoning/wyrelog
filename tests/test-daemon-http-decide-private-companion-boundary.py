@@ -23,8 +23,11 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-if len(sys.argv) != 2:
-    fail("usage: test-daemon-http-decide-private-companion-boundary.py MESON")
+if len(sys.argv) != 4:
+    fail(
+        "usage: test-daemon-http-decide-private-companion-boundary.py "
+        "MESON CI_PR CI_MAIN"
+    )
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 
@@ -93,3 +96,91 @@ if re.search(
         re.DOTALL,
 ):
     fail("daemon HTTP variants must not use link_whole")
+
+
+def job_body(workflow: str, name: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        fail(f"workflow is missing the {name} job")
+    return match.group(1)
+
+
+def step_run(job: str, name: str) -> str:
+    match = re.search(
+        rf"^      - name: {re.escape(name)}\n.*?^        run: \|\n"
+        r"(.*?)(?=^      - name: |\Z)",
+        job,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        fail(f"daemon HTTP shared fact job is missing step: {name}")
+    return "\n".join(
+        line.removeprefix("          ") for line in
+        match.group(1).rstrip().splitlines()
+    )
+
+
+expected_compile = """\
+meson compile -C build-daemon-http-shared \\
+  test-daemon-http-decide \\
+  test-daemon-http-decide-refresh \\
+  test-daemon-http-decide-service \\
+  test-daemon-http-decide-audit"""
+expected_test = """\
+meson test -C build-daemon-http-shared --no-rebuild \\
+  daemon-http-decide \\
+  daemon-http-decide-refresh \\
+  daemon-http-decide-service \\
+  daemon-http-decide-audit \\
+  --print-errorlogs"""
+
+ci_jobs = []
+for workflow_path in map(Path, sys.argv[2:]):
+    workflow = workflow_path.read_text(encoding="utf-8")
+    if workflow.count("\n  daemon-http-shared-fact:\n") != 1:
+        fail(f"{workflow_path} must define one daemon HTTP shared fact job")
+    job = job_body(workflow, "daemon-http-shared-fact")
+    ci_jobs.append(job)
+    for required in (
+        "os: [ubuntu-latest, macos-latest]",
+        "meson setup build-daemon-http-shared",
+        "-Ddefault_library=shared",
+        "-Denable_client=enabled",
+        "-Denable_fact_store=enabled",
+        "-Denable_audit=enabled",
+        "-Dduckdb_source=prebuilt",
+        "meson compile -C build-daemon-http-shared",
+        "meson test -C build-daemon-http-shared --no-rebuild",
+        "build-daemon-http-shared/meson-logs/",
+    ):
+        if required not in job:
+            fail(f"{workflow_path} daemon HTTP job missing: {required}")
+    if "windows" in job.lower():
+        fail(f"{workflow_path} daemon HTTP job must stay POSIX-only")
+    if step_run(job, "Compile daemon HTTP variants") != expected_compile:
+        fail(f"{workflow_path} must compile exactly four daemon HTTP variants")
+    if step_run(job, "Test daemon HTTP variants") != expected_test:
+        fail(f"{workflow_path} must test exactly four daemon HTTP variants")
+    for target in (
+        "daemon-http-decide",
+        "daemon-http-decide-refresh",
+        "daemon-http-decide-service",
+        "daemon-http-decide-audit",
+    ):
+        occurrences = re.findall(
+            rf"(?<![A-Za-z0-9_-])(?:test-)?{re.escape(target)}"
+            r"(?![A-Za-z0-9_-])",
+            job,
+        )
+        if len(occurrences) != 2:
+            fail(
+                f"{workflow_path} must name {target} exactly in the compile "
+                "and test steps"
+            )
+
+if ci_jobs[0] != ci_jobs[1]:
+    fail("PR and main daemon HTTP shared fact jobs must remain identical")

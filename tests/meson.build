@@ -290,6 +290,8 @@ if build_client
     args : [
       meson.current_source_dir() / 'test-daemon-http-decide-private-companion-boundary.py',
       meson.current_source_dir() / 'meson.build',
+      meson.project_source_root() / '.github' / 'workflows' / 'ci-pr.yml',
+      meson.project_source_root() / '.github' / 'workflows' / 'ci-main.yml',
     ],
   )
 
