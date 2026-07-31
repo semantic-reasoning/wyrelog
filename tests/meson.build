@@ -19,6 +19,25 @@ python3 = find_program('python3')
 python_strict_encoding_env = environment()
 python_strict_encoding_env.set('PYTHONWARNDEFAULTENCODING', '1')
 python_strict_encoding_env.set('PYTHONWARNINGS', 'error::EncodingWarning')
+
+explicit_encoding_checker = files(
+  '../tools/check-explicit-encoding.py',
+)
+test('check-explicit-encoding', python3,
+  args : [
+    explicit_encoding_checker,
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+)
+test('check-explicit-encoding-self-test', python3,
+  args : [
+    explicit_encoding_checker,
+    '--self-test',
+  ],
+  env : python_strict_encoding_env,
+)
+
 if host_machine.system() == 'windows'
   advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
     required : true)
