@@ -167,6 +167,7 @@ meson test -C build-daemon-http-shared --no-rebuild \\
   daemon-http-decide-refresh \\
   daemon-http-decide-service \\
   daemon-http-decide-audit \\
+  daemon-http-decide-private-symbols \\
   --print-errorlogs"""
 
 ci_jobs = []
@@ -178,6 +179,7 @@ for workflow_path in map(Path, sys.argv[2:]):
     ci_jobs.append(job)
     for required in (
         "os: [ubuntu-latest, macos-latest]",
+        "timeout-minutes: 30",
         "meson setup build-daemon-http-shared",
         "-Ddefault_library=shared",
         "-Denable_client=enabled",
@@ -195,7 +197,10 @@ for workflow_path in map(Path, sys.argv[2:]):
     if step_run(job, "Compile daemon HTTP variants") != expected_compile:
         fail(f"{workflow_path} must compile exactly four daemon HTTP variants")
     if step_run(job, "Test daemon HTTP variants") != expected_test:
-        fail(f"{workflow_path} must test exactly four daemon HTTP variants")
+        fail(
+            f"{workflow_path} must test exactly four daemon HTTP variants "
+            "and their artifact symbols"
+        )
     for target in (
         "daemon-http-decide",
         "daemon-http-decide-refresh",
