@@ -8,6 +8,9 @@
 G_BEGIN_DECLS;
 
 typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
+#ifndef G_OS_WIN32
+typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
+#endif
 
 typedef struct
 {
@@ -70,6 +73,14 @@ wyrelog_error_t wyl_fact_store_open_identified_pinned
     (WylFactArtifactNamespace * namespace_,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
+#ifndef G_OS_WIN32
+/* One-shot handoff from the exact retained provisioning pair into the bounded
+ * DuckDB filesystem.  It accepts no artifact pathname or descriptor. */
+wyrelog_error_t wyl_fact_store_open_identified_provisioned_pair_pinned
+    (WylFactGraphProvisionedPair * pair,
+    const WylFactStoreIdentity * identity,
+    WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
+#endif
 void wyl_fact_store_pinned_set_test_hook
     (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_test_stage_errors

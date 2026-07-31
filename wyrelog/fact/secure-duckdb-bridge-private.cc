@@ -570,6 +570,31 @@ wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
   return selected;
 }
 
+extern "C" wyrelog_error_t
+wyl_fact_store_open_identified_provisioned_pair_pinned
+    (WylFactGraphProvisionedPair *pair,
+    const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
+    WylFactStoreIdentityResult *out_result)
+{
+  if (out_result != nullptr)
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  if (pair == nullptr || out_result == nullptr
+      || !wyl_fact_store_identity_input_is_valid (identity)
+      || !wyl_fact_store_identity_mode_is_valid (mode))
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
+  WylFactArtifactNamespace *namespace_ = nullptr;
+  const auto result =
+      wyl_fact_artifact_namespace_open_provisioned_pair (pair, &namespace_);
+  if (result != WYRELOG_E_OK)
+    return result;
+  const auto open_result =
+      wyl_fact_store_open_identified_pinned (namespace_, identity, mode,
+      out_result);
+  wyl_fact_artifact_namespace_free (namespace_);
+  return open_result;
+}
+
 extern "C" void
 wyl_secure_duckdb_bridge_free (WylSecureDuckdbBridge *self)
 {

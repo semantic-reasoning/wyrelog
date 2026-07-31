@@ -134,6 +134,59 @@ struct Fixture
   }
 };
 
+struct ProvisionedPairFixture
+{
+  static constexpr const char *operation_uuid =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
+  gchar *root = nullptr;
+  gchar *graph_path = nullptr;
+  gchar *stage_path = nullptr;
+  gchar *final_path = nullptr;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphProvisionedPair *pair = nullptr;
+
+  ProvisionedPairFixture ()
+  {
+    g_autoptr (GError) error = nullptr;
+    g_autofree gchar *created_root =
+        g_dir_make_tmp ("wyl-secure-pair-XXXXXX", &error);
+    g_assert_no_error (error);
+    auto canonical_root = fs::canonical (created_root);
+    root = g_strdup (canonical_root.c_str ());
+    g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+    g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+        &locator, TRUE, &directory), ==, WYRELOG_E_OK);
+    graph_path = wyl_fact_graph_directory_descriptive_path (&directory);
+    stage_path = g_build_filename (graph_path,
+        "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
+    final_path = g_build_filename (graph_path, "facts.duckdb", nullptr);
+    g_assert_true (g_file_set_contents (stage_path, "", 0, nullptr));
+    g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+    g_assert_cmpint (link (stage_path, final_path), ==, 0);
+    g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&directory, operation_uuid, &pair), ==, WYRELOG_E_OK);
+  }
+
+  ~ProvisionedPairFixture ()
+  {
+    wyl_fact_graph_provisioned_pair_free (pair);
+    wyl_fact_graph_directory_clear (&directory);
+    wyl_fact_graph_locator_clear (&locator);
+    wyl_fact_graph_resolver_clear (&resolver);
+    g_free (stage_path);
+    g_free (final_path);
+    g_free (graph_path);
+    remove_tree (root);
+    g_free (root);
+  }
+};
+
 struct SecureDatabase
 {
   WylSecureDuckdbFileSystem *
@@ -1030,6 +1083,110 @@ static const WylFactStoreIdentity pinned_identity = {
 };
 
 static void
+test_provisioned_pair_pinned_modes (void)
+{
+  ProvisionedPairFixture fixture;
+  WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+  struct stat before, initialized;
+  g_assert_cmpint (g_stat (fixture.final_path, &before), ==, 0);
+  g_assert_cmpint (before.st_size, ==, 0);
+  g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+      (fixture.pair, &pinned_identity,
+          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
+  g_assert_cmpint (g_stat (fixture.final_path, &initialized), ==, 0);
+  g_assert_cmpint (initialized.st_size, >, 0);
+  g_assert_cmpuint (initialized.st_nlink, ==, 2);
+
+  g_autofree gchar *before_bytes = nullptr;
+  gsize before_size = 0;
+  g_assert_true (g_file_get_contents (fixture.final_path, &before_bytes,
+      &before_size, nullptr));
+  result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+  g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+      (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+          &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
+  g_autofree gchar *after_bytes = nullptr;
+  gsize after_size = 0;
+  g_assert_true (g_file_get_contents (fixture.final_path, &after_bytes,
+      &after_size, nullptr));
+  g_assert_cmpuint (after_size, ==, before_size);
+  g_assert_cmpint (memcmp (after_bytes, before_bytes, before_size), ==, 0);
+
+  g_autofree gchar *wal =
+      g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
+  g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
+}
+
+struct PairRendezvousRemoval
+{
+  WylFactStorePinnedRendezvous target;
+  const gchar *stage_path;
+  gboolean fired;
+};
+
+static void
+remove_pair_stage_at_rendezvous (WylFactStorePinnedRendezvous rendezvous,
+    gpointer user_data)
+{
+  auto *removal = static_cast<PairRendezvousRemoval *> (user_data);
+  if (!removal->fired && rendezvous == removal->target) {
+    g_assert_cmpint (unlink (removal->stage_path), ==, 0);
+    removal->fired = TRUE;
+  }
+}
+
+static void
+test_provisioned_pair_pinned_rendezvous (void)
+{
+  for (int value = WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
+      value <= WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE; value++) {
+    ProvisionedPairFixture fixture;
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *before_bytes = nullptr;
+    gsize before_size = 0;
+    g_assert_true (g_file_get_contents (fixture.final_path, &before_bytes,
+        &before_size, nullptr));
+    g_autofree gchar *lock_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
+    struct stat lock_before, lock_after;
+    g_assert_cmpint (g_stat (lock_path, &lock_before), ==, 0);
+    PairRendezvousRemoval removal = {
+      static_cast<WylFactStorePinnedRendezvous> (value),
+      fixture.stage_path,
+      FALSE,
+    };
+    wyl_fact_store_pinned_set_test_hook (remove_pair_stage_at_rendezvous,
+        &removal);
+    result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (fixture.pair, &pinned_identity,
+            WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
+        WYRELOG_E_POLICY);
+    g_assert_true (removal.fired);
+    g_autofree gchar *after_bytes = nullptr;
+    gsize after_size = 0;
+    g_assert_true (g_file_get_contents (fixture.final_path, &after_bytes,
+        &after_size, nullptr));
+    g_assert_cmpuint (after_size, ==, before_size);
+    g_assert_cmpint (memcmp (after_bytes, before_bytes, before_size), ==, 0);
+    g_assert_cmpint (g_stat (lock_path, &lock_after), ==, 0);
+    g_assert_cmpuint (lock_after.st_dev, ==, lock_before.st_dev);
+    g_assert_cmpuint (lock_after.st_ino, ==, lock_before.st_ino);
+    g_autofree gchar *wal =
+        g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
+    g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
+  }
+}
+
+static void
 test_pinned_identified_modes_and_identity (void)
 {
   Fixture fixture (false, true);
@@ -1872,6 +2029,10 @@ main (int argc, char **argv)
       test_main_symlink_substitution_fails_closed);
   g_test_add_func ("/secure-duckdb-filesystem/pinned-identified/modes",
       test_pinned_identified_modes_and_identity);
+  g_test_add_func ("/secure-duckdb-filesystem/provisioned-pair/modes",
+      test_provisioned_pair_pinned_modes);
+  g_test_add_func ("/secure-duckdb-filesystem/provisioned-pair/rendezvous",
+      test_provisioned_pair_pinned_rendezvous);
   g_test_add_func (
     "/secure-duckdb-filesystem/pinned-identified/validate-no-write",
     test_pinned_validate_only_does_not_initialize);
