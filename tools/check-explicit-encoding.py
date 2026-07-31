@@ -70,6 +70,7 @@ PATH_CLASS = object()
 PATH_VALUE = object()
 PATH_ITERABLE = object()
 NEXT_BUILTIN = object()
+ITER_BUILTIN = object()
 
 BUILTIN_OPEN = CallableValue("open", 1, 3)
 BOUND_PATH_OPEN = CallableValue("Path.open", 0, 2)
@@ -129,6 +130,7 @@ class Scope:
     parent: int | None
     global_names: set[str] = field(default_factory=set)
     nonlocal_names: set[str] = field(default_factory=set)
+    future_values: dict[str, object] = field(default_factory=dict)
 
 
 class LocalBindingCollector(ast.NodeVisitor):
@@ -216,6 +218,61 @@ class LocalBindingCollector(ast.NodeVisitor):
         self.nonlocal_names.update(node.names)
 
 
+class FutureAssignmentCollector(ast.NodeVisitor):
+    """Collect same-scope assignments without entering deferred scopes."""
+
+    def __init__(self) -> None:
+        self.assignments: list[tuple[list[str], ast.AST | None]] = []
+
+    @staticmethod
+    def names(target: ast.AST) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [
+                name
+                for item in target.elts
+                for name in FutureAssignmentCollector.names(item)
+            ]
+        if isinstance(target, ast.Starred):
+            return FutureAssignmentCollector.names(target.value)
+        return []
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        names = [
+            name
+            for target in node.targets
+            for name in self.names(target)
+        ]
+        if names:
+            self.assignments.append((names, node.value))
+        self.visit(node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        names = self.names(node.target)
+        if names:
+            self.assignments.append((names, node.value))
+        if node.value is not None:
+            self.visit(node.value)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        names = self.names(node.target)
+        if names:
+            self.assignments.append((names, node.value))
+        self.visit(node.value)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
 class PythonScanner(ast.NodeVisitor):
     PATH_METHODS = {
         "resolve",
@@ -243,6 +300,7 @@ class PythonScanner(ast.NodeVisitor):
         self.findings: list[Finding] = []
         self.errors: list[Finding] = []
         self.scopes = [Scope({}, set(), "module", None)]
+        self.exception_state_sinks: list[list[list[Scope]]] = []
 
     def location(self, node: ast.AST) -> Location:
         line = getattr(node, "lineno", 1)
@@ -260,20 +318,36 @@ class PythonScanner(ast.NodeVisitor):
 
     def resolve(self, name: str) -> object:
         index: int | None = len(self.scopes) - 1
+        crossed_scope = False
         while index is not None:
             scope = self.scopes[index]
             if name in scope.global_names:
                 index = 0
                 scope = self.scopes[index]
+                crossed_scope = True
+            if crossed_scope and name in scope.future_values:
+                fallback = {
+                    "open": BUILTIN_OPEN,
+                    "next": NEXT_BUILTIN,
+                    "iter": ITER_BUILTIN,
+                }.get(name, UNKNOWN)
+                current = scope.values.get(
+                    name,
+                    fallback if scope.kind == "module" else UNKNOWN,
+                )
+                return merge_values(current, scope.future_values[name])
             if name in scope.values:
                 return scope.values[name]
             if name in scope.local_names:
                 return UNKNOWN
             index = scope.parent
+            crossed_scope = True
         if name == "open":
             return BUILTIN_OPEN
         if name == "next":
             return NEXT_BUILTIN
+        if name == "iter":
+            return ITER_BUILTIN
         return UNKNOWN
 
     def binding_scope(self, name: str) -> int:
@@ -295,6 +369,9 @@ class PythonScanner(ast.NodeVisitor):
         index = self.binding_scope(name)
         self.scopes[index].values[name] = value
         self.scopes[index].local_names.add(name)
+        for sink in self.exception_state_sinks:
+            if sink and len(sink[0]) == len(self.scopes):
+                sink.append(self.capture_state())
 
     def lexical_parent(self, skip_class: bool = False) -> int | None:
         index: int | None = len(self.scopes) - 1
@@ -319,6 +396,7 @@ class PythonScanner(ast.NodeVisitor):
                 scope.parent,
                 set(scope.global_names),
                 set(scope.nonlocal_names),
+                dict(scope.future_values),
             )
             for scope in state
         ]
@@ -340,6 +418,48 @@ class PythonScanner(ast.NodeVisitor):
                 ]
                 scope.values[name] = merge_values(*possible)
         self.scopes = joined
+
+    def precompute_future(self, statements: list[ast.stmt]) -> None:
+        collector = FutureAssignmentCollector()
+        for statement in statements:
+            collector.visit(statement)
+        if not collector.assignments:
+            return
+
+        saved = self.capture_state()
+        targets: set[tuple[int, str]] = set()
+        for _iteration in range(64):
+            changed = False
+            for names, expression in collector.assignments:
+                assigned = self.value(expression)
+                for name in names:
+                    index = self.binding_scope(name)
+                    targets.add((index, name))
+                    current = self.scopes[index].values.get(name, UNKNOWN)
+                    merged = merge_values(current, assigned)
+                    if merged != current or name not in self.scopes[index].values:
+                        self.scopes[index].values[name] = merged
+                        self.scopes[index].local_names.add(name)
+                        changed = True
+            if not changed:
+                break
+        else:
+            self.error(
+                statements[0],
+                "future-binding analysis did not reach a fixed point",
+            )
+
+        future = {
+            (index, name): self.scopes[index].values.get(name, UNKNOWN)
+            for index, name in targets
+        }
+        self.restore_state(saved)
+        for (index, name), value in future.items():
+            existing = self.scopes[index].future_values.get(name, UNKNOWN)
+            self.scopes[index].future_values[name] = merge_values(
+                existing,
+                value,
+            )
 
     def bind_target(self, target: ast.AST, value: object) -> bool:
         if isinstance(target, ast.Name):
@@ -374,6 +494,8 @@ class PythonScanner(ast.NodeVisitor):
                     result = BUILTIN_OPEN
                 elif candidate is BUILTINS_MODULE and node.attr == "next":
                     result = NEXT_BUILTIN
+                elif candidate is BUILTINS_MODULE and node.attr == "iter":
+                    result = ITER_BUILTIN
                 elif candidate is PATH_CLASS:
                     result = {
                         "open": UNBOUND_PATH_OPEN,
@@ -403,6 +525,13 @@ class PythonScanner(ast.NodeVisitor):
                     iterable = self.value(node.args[0])
                     results.append(
                         PATH_VALUE
+                        if has_value(iterable, PATH_ITERABLE)
+                        else UNKNOWN
+                    )
+                elif candidate is ITER_BUILTIN and node.args:
+                    iterable = self.value(node.args[0])
+                    results.append(
+                        PATH_ITERABLE
                         if has_value(iterable, PATH_ITERABLE)
                         else UNKNOWN
                     )
@@ -450,6 +579,12 @@ class PythonScanner(ast.NodeVisitor):
                 compact,
             ):
                 return PATH_ITERABLE
+            if re.search(
+                r"(?:dict|Mapping|MutableMapping)"
+                r"\[(?:pathlib\.)?Path,",
+                compact,
+            ):
+                return PATH_ITERABLE
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
             return merge_values(
                 self.annotation_value(node.left),
@@ -457,6 +592,15 @@ class PythonScanner(ast.NodeVisitor):
             )
         if isinstance(node, ast.Subscript):
             container = self.annotation_name(node.value)
+            if container in {"dict", "Mapping", "MutableMapping"}:
+                if isinstance(node.slice, ast.Tuple) and node.slice.elts:
+                    key = self.annotation_value(node.slice.elts[0])
+                    return (
+                        PATH_ITERABLE
+                        if has_value(key, PATH_VALUE)
+                        else UNKNOWN
+                    )
+                return UNKNOWN
             element = self.annotation_value(node.slice)
             if container in {
                 "list",
@@ -538,6 +682,19 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(node, ast.NamedExpr):
             self.visit_NamedExpr(node)
             return
+        if isinstance(node, ast.IfExp) and allow_top_callable:
+            self.scan_expression(node.test)
+            self.scan_expression(
+                node.body,
+                allow_top_callable=bool(callable_values(self.value(node.body))),
+            )
+            self.scan_expression(
+                node.orelse,
+                allow_top_callable=bool(
+                    callable_values(self.value(node.orelse))
+                ),
+            )
+            return
         if isinstance(node, ast.Call):
             protected = callable_values(self.value(node.func))
             seen: set[CallableValue] = set()
@@ -571,6 +728,11 @@ class PythonScanner(ast.NodeVisitor):
 
     def visit_Expr(self, node: ast.Expr) -> None:
         self.scan_expression(node.value)
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self.precompute_future(node.body)
+        for statement in node.body:
+            self.visit(statement)
 
     def visit_Call(self, node: ast.Call) -> None:
         self.scan_expression(node)
@@ -664,6 +826,8 @@ class PythonScanner(ast.NodeVisitor):
                 self.bind(name, BUILTIN_OPEN)
             elif node.module == "builtins" and item.name == "next":
                 self.bind(name, NEXT_BUILTIN)
+            elif node.module == "builtins" and item.name == "iter":
+                self.bind(name, ITER_BUILTIN)
             elif node.module == "pathlib" and item.name == "Path":
                 self.bind(name, PATH_CLASS)
             else:
@@ -710,6 +874,7 @@ class PythonScanner(ast.NodeVisitor):
         self.bind(node.name, UNKNOWN)
         outer_state = self.capture_state()
         self.scopes.append(self.function_scope(node))
+        self.precompute_future(node.body)
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
@@ -777,16 +942,27 @@ class PythonScanner(ast.NodeVisitor):
         self.join_states(body_state, else_state)
 
     def visit_While(self, node: ast.While) -> None:
-        self.scan_expression(node.test)
         before = self.capture_state()
-        for statement in node.body:
-            self.visit(statement)
-        body_state = self.capture_state()
-        self.join_states(before, body_state)
+        head = before
+        for _iteration in range(64):
+            self.restore_state(head)
+            self.scan_expression(node.test)
+            for statement in node.body:
+                self.visit(statement)
+            body_state = self.capture_state()
+            self.join_states(head, before, body_state)
+            next_head = self.capture_state()
+            if next_head == head:
+                head = next_head
+                break
+            head = next_head
+        else:
+            self.error(node, "while analysis did not reach a fixed point")
+        self.restore_state(head)
         for statement in node.orelse:
             self.visit(statement)
         else_state = self.capture_state()
-        self.join_states(before, body_state, else_state)
+        self.join_states(head, else_state)
 
     def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
         self.scan_expression(node.iter)
@@ -796,15 +972,26 @@ class PythonScanner(ast.NodeVisitor):
             if has_value(self.value(node.iter), PATH_ITERABLE)
             else UNKNOWN
         )
-        self.bind_target(node.target, element)
-        for statement in node.body:
-            self.visit(statement)
-        body_state = self.capture_state()
-        self.join_states(before, body_state)
+        head = before
+        for _iteration in range(64):
+            self.restore_state(head)
+            self.bind_target(node.target, element)
+            for statement in node.body:
+                self.visit(statement)
+            body_state = self.capture_state()
+            self.join_states(head, before, body_state)
+            next_head = self.capture_state()
+            if next_head == head:
+                head = next_head
+                break
+            head = next_head
+        else:
+            self.error(node, "for analysis did not reach a fixed point")
+        self.restore_state(head)
         for statement in node.orelse:
             self.visit(statement)
         else_state = self.capture_state()
-        self.join_states(before, body_state, else_state)
+        self.join_states(head, else_state)
 
     visit_AsyncFor = visit_For
 
@@ -821,9 +1008,11 @@ class PythonScanner(ast.NodeVisitor):
     def visit_Try(self, node: ast.Try) -> None:
         before = self.capture_state()
         exception_states = [before]
+        self.exception_state_sinks.append(exception_states)
         for statement in node.body:
             self.visit(statement)
             exception_states.append(self.capture_state())
+        self.exception_state_sinks.pop()
         try_state = self.capture_state()
         handler_states: list[list[Scope]] = []
         for handler in node.handlers:
@@ -982,26 +1171,37 @@ def command_words(segment: ShellSegment) -> tuple[str, list[str]] | None:
         "until",
         "do",
         "!",
-        "command",
     }
     while words and (
         words[0] in reserved
         or ("=" in words[0] and not words[0].startswith("="))
     ):
         words.pop(0)
-    while words and Path(words[0]).name in {"exec", "env"}:
+    while words and Path(words[0]).name in {"command", "exec", "env"}:
         wrapper = Path(words.pop(0)).name
+        if wrapper == "command":
+            while words and words[0] == "-p":
+                words.pop(0)
+            if words and words[0] in {"-v", "-V"}:
+                return None
+            continue
         if wrapper == "exec":
             while words and words[0].startswith("-"):
-                words.pop(0)
+                option = words.pop(0)
+                if option in {"-a", "--argv0"}:
+                    if not words:
+                        return None
+                    words.pop(0)
             continue
         while words:
             word = words[0]
-            if word in {"-u", "--unset"}:
+            if word in {"-u", "--unset", "-C", "--chdir"}:
                 if len(words) < 2:
                     return None
                 del words[:2]
-            elif word.startswith("--unset=") or word.startswith("-"):
+            elif word.startswith(("--unset=", "--chdir=")):
+                words.pop(0)
+            elif word.startswith("-"):
                 words.pop(0)
             elif "=" in word and not word.startswith("="):
                 words.pop(0)
@@ -1034,12 +1234,14 @@ def is_python_stdin(segment: ShellSegment) -> bool:
             index += 2
             continue
         if argument == "--":
-            return index + 1 < len(arguments) and arguments[index + 1] == "-"
+            if index + 1 == len(arguments):
+                return True
+            return arguments[index + 1] == "-"
         if argument.startswith("-"):
             index += 1
             continue
         return False
-    return False
+    return True
 
 
 def lex_shell_command(
@@ -1264,7 +1466,17 @@ def scan_python(
         return [], [error]
     scanner = PythonScanner(path, line_map)
     scanner.visit(tree)
-    return scanner.findings, scanner.errors
+    def unique(items: list[Finding]) -> list[Finding]:
+        seen: set[tuple[Location, str]] = set()
+        output: list[Finding] = []
+        for item in items:
+            key = (item.location, item.message)
+            if key not in seen:
+                seen.add(key)
+                output.append(item)
+        return output
+
+    return unique(scanner.findings), unique(scanner.errors)
 
 
 def scan_shell(
@@ -1825,6 +2037,28 @@ op("x")
                     0,
                 ),
                 (
+                    "for reaches a multi-iteration callable fixed point",
+                    """op = harmless
+for item in items:
+    previous = op
+    op = open
+    previous("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "while reaches a multi-iteration callable fixed point",
+                    """op = harmless
+while condition:
+    previous = op
+    op = open
+    previous("x")
+""",
+                    1,
+                    0,
+                ),
+                (
                     "try keeps normal-path callable",
                     """op = open
 try:
@@ -1855,6 +2089,21 @@ try:
     op = open
     risky()
     op = harmless
+except Exception:
+    pass
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "try keeps nested intermediate exception callable",
+                    """op = harmless
+try:
+    if condition:
+        op = open
+        risky()
+        op = harmless
 except Exception:
     pass
 op("x")
@@ -1915,6 +2164,45 @@ def function():
                     0,
                 ),
                 (
+                    "future closure binding is visible to nested body",
+                    """def outer():
+    def inner():
+        op("x")
+    op = open
+    inner()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "future global binding is visible to deferred body",
+                    """def function():
+    global op
+    op("x")
+    op = open
+function()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "IfExp identical callable aliases deduplicate",
+                    """op = open if condition else open
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "IfExp mixed callable aliases do not escape",
+                    """from pathlib import Path
+op = open if condition else Path.open
+op("x")
+""",
+                    2,
+                    0,
+                ),
+                (
                     "protected call still scans Path receiver",
                     """from pathlib import Path
 Path(open("x")).read_text(encoding="utf-8")
@@ -1956,6 +2244,34 @@ for path in paths:
 root = Path("x")
 paths = (path for path in root.glob("*"))
 next(paths).read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "iter and next preserve Path",
+                    """from pathlib import Path
+paths = iter(Path(".").glob("*"))
+next(paths).read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dict Path values are not Path keys",
+                    """from pathlib import Path
+mapping: dict[str, Path]
+mapping.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "dict Path keys propagate through iteration",
+                    """from pathlib import Path
+mapping: dict[Path, str]
+for path in mapping:
+    path.read_text()
 """,
                     1,
                     0,
@@ -2064,12 +2380,57 @@ PY
                     0,
                 ),
                 (
-                    "implicit interactive source ignores heredoc",
+                    "implicit interactive source reads heredoc",
                     """python3 <<PY
 open("x")
 PY
 """,
+                    1,
                     0,
+                ),
+                (
+                    "implicit stdin after Python option",
+                    """python3 -q <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "implicit stdin after option terminator",
+                    """python3 -- <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "command wrapper options preserve executable",
+                    """command -p python3 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "env chdir wrapper preserves executable",
+                    """env -C /tmp python3 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "exec argv0 wrapper preserves executable",
+                    """exec -a py python3 - <<PY
+open("x")
+PY
+""",
+                    1,
                     0,
                 ),
                 (
