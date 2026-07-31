@@ -729,6 +729,58 @@ out:
   return rc;
 }
 
+wyrelog_error_t
+    wyl_service_permission_receipt_encode
+    (const wyl_policy_service_permission_receipt_t * receipt,
+    gchar ** out_document, gsize * out_len)
+{
+  if (out_document == NULL || out_len == NULL)
+    return WYRELOG_E_INVALID;
+  *out_document = NULL;
+  *out_len = 0;
+  if (receipt == NULL || !field_is_valid (receipt->request_id)
+      || !field_is_valid (receipt->actor_identity)
+      || !field_is_valid (receipt->audit_id)
+      || !field_is_valid (receipt->manifest_fingerprint)
+      || !field_is_valid (receipt->pre_digest)
+      || !field_is_valid (receipt->post_digest))
+    return WYRELOG_E_INVALID;
+  GString *out = g_string_sized_new (512);
+  g_string_append (out, "{\"version\":1,\"request_id\":");
+  append_json_string (out, receipt->request_id);
+  g_string_append (out, ",\"actor_identity\":");
+  append_json_string (out, receipt->actor_identity);
+  g_string_append (out, ",\"audit_id\":");
+  append_json_string (out, receipt->audit_id);
+  g_string_append (out, ",\"manifest_fingerprint\":");
+  append_json_string (out, receipt->manifest_fingerprint);
+  g_string_append_printf (out, ",\"operation_count\":%" G_GUINT64_FORMAT
+      ",\"applied_at_us\":%" G_GINT64_FORMAT ",\"pre_generation\":%"
+      G_GUINT64_FORMAT ",\"pre_digest\":", receipt->operation_count,
+      receipt->applied_at_us, receipt->pre_generation);
+  append_json_string (out, receipt->pre_digest);
+  g_string_append_printf (out, ",\"post_generation\":%" G_GUINT64_FORMAT
+      ",\"post_digest\":", receipt->post_generation);
+  append_json_string (out, receipt->post_digest);
+  g_string_append (out, "}\n");
+  *out_len = out->len;
+  *out_document = g_string_free (out, FALSE);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_service_permission_receipt_write_new_owner_only
+    (const gchar * path,
+    const wyl_policy_service_permission_receipt_t * receipt)
+{
+  g_autofree gchar *document = NULL;
+  gsize len = 0;
+  wyrelog_error_t rc =
+      wyl_service_permission_receipt_encode (receipt, &document, &len);
+  return rc == WYRELOG_E_OK ?
+      write_new_owner_only_document (path, document, len) : rc;
+}
+
 /* Audit action recorded for a durable #618 remediation apply. */
 #define WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION \
   "service.permission_closure.remediate"

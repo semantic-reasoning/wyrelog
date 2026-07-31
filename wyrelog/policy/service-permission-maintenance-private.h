@@ -40,6 +40,29 @@ wyrelog_error_t wyl_service_permission_manifest_read_owner_only
     (const gchar * path, WylServicePermissionManifest * out_manifest);
 
 /*
+ * Canonical v1 JSON encoding of a durable remediation-apply receipt. A given
+ * receipt encodes byte-for-byte identically on every call, so a replayed apply
+ * (which returns the frozen receipt verbatim) serialises to the same document
+ * as its original apply. Returns WYRELOG_E_INVALID for a receipt missing a
+ * required field. On success *out_document is a NUL-terminated heap string of
+ * *out_len bytes the caller frees with g_free.
+ */
+wyrelog_error_t wyl_service_permission_receipt_encode
+    (const wyl_policy_service_permission_receipt_t * receipt,
+    gchar ** out_document, gsize * out_len);
+
+/*
+ * Encode |receipt| and write it to |path| as a brand-new owner-only regular
+ * file (O_CREAT | O_EXCL | O_NOFOLLOW, mode 0600) under an owner-only parent
+ * directory, fail-closed on symlink/hardlink/pre-existing target. Never
+ * overwrites: an existing |path| is WYRELOG_E_POLICY. This is the offline
+ * apply's durable receipt sink; owner-only file access is the authz boundary.
+ */
+wyrelog_error_t wyl_service_permission_receipt_write_new_owner_only
+    (const gchar * path,
+    const wyl_policy_service_permission_receipt_t * receipt);
+
+/*
  * Offline dry-run of a canonical removal manifest. Adopts a bare maintenance
  * handle over |store|, opens a maintenance-exclusive #371 authority
  * transaction, verifies the manifest's pre-state (store_generation +

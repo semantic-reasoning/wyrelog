@@ -798,6 +798,36 @@ if host_machine.system() != 'windows' and build_client
     depends : [wyctl_exe, wyrelogd_exe],
   )
 
+  # The offline flow provisions an encrypted store via a production daemon,
+  # which requires the fact store to be built in.
+  if get_option('enable_fact_store').allowed()
+    # Offline service-permission-closure operator flow. The seed helper opens the
+    # encrypted store under its KeyProvider to inject an unsafe closure and to
+    # read back closure/receipt counts, which the shell harness cannot do against
+    # an encrypted store with sqlite3 directly.
+    check_service_permission_closure_seed = executable(
+      'check-service-permission-closure-seed',
+      'check-service-permission-closure-seed.c',
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+    )
+
+    test('service-permission-closure', sh,
+      args : [
+        meson.current_source_dir() / 'check-service-permission-closure.sh',
+        wyctl_exe.full_path(),
+        wyrelogd_exe.full_path(),
+        check_service_permission_closure_seed.full_path(),
+        python3.full_path(),
+      ],
+      depends : [
+        wyctl_exe, wyrelogd_exe, check_service_permission_closure_seed,
+      ],
+      is_parallel : false,
+      timeout : 120,
+    )
+  endif
+
   test('packaged-install-readiness', sh,
     args : [
       meson.current_source_dir() / 'check-packaged-install-readiness.sh',
