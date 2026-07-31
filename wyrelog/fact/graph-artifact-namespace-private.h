@@ -108,6 +108,18 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION,
 } WylFactArtifactNamespaceTestFault;
 
+#ifndef G_OS_WIN32
+typedef enum
+{
+  WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN = 0,
+  WYL_FACT_ARTIFACT_PAIR_ACCESS_READER_BINDING,
+  WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING,
+} WylFactArtifactPairAccessForTest;
+void wyl_fact_artifact_namespace_pair_access_reset_for_test (void);
+gboolean wyl_fact_artifact_namespace_pair_access_observed_for_test
+    (WylFactArtifactPairAccessForTest access, gint expected_access_mode);
+#endif
+
 /* Private, process-local, one-shot fault injection for namespace tests. */
 void wyl_fact_artifact_namespace_set_test_fault
     (WylFactArtifactNamespaceTestFault fault);
@@ -122,12 +134,6 @@ wyrelog_error_t wyl_fact_artifact_namespace_open
     (const WylFactGraphDirectory * directory,
     const WylFactGraphRegularFile * main_file,
     WylFactArtifactNamespace ** out_namespace);
-#ifndef G_OS_WIN32
-/* Imports only the immutable authority held by an exact retained pair. */
-wyrelog_error_t wyl_fact_artifact_namespace_open_provisioned_pair
-    (WylFactGraphProvisionedPair * pair,
-    WylFactArtifactNamespace ** out_namespace);
-#endif
 void wyl_fact_artifact_namespace_free (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_revalidate
     (WylFactArtifactNamespace * namespace_);

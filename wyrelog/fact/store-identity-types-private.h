@@ -75,11 +75,14 @@ wyrelog_error_t wyl_fact_store_open_identified_pinned
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
 #ifndef G_OS_WIN32
 /* One-shot handoff from the exact retained provisioning pair into the bounded
- * DuckDB filesystem.  It accepts no artifact pathname or descriptor. */
+ * DuckDB filesystem.  It accepts no artifact pathname or descriptor and is
+ * the only callable API that consumes this operation-bound authority. */
 wyrelog_error_t wyl_fact_store_open_identified_provisioned_pair_pinned
     (WylFactGraphProvisionedPair * pair,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
+void wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
+    (WylFactStorePinnedRendezvous rendezvous, wyrelog_error_t error);
 #endif
 void wyl_fact_store_pinned_set_test_hook
     (WylFactStorePinnedTestHook hook, gpointer user_data);

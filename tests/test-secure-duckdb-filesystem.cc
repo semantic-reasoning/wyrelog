@@ -24,6 +24,10 @@
 #include "fact/secure-duckdb-filesystem-private.hpp"
 #include "fact/store-identity-private.h"
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 namespace fs = std::filesystem;
 
 extern "C"
@@ -186,6 +190,19 @@ struct ProvisionedPairFixture
     g_free (root);
   }
 };
+
+static std::vector<std::string>
+snapshot_directory_names (const gchar *path)
+{
+  std::vector<std::string> names;
+  g_autoptr (GDir) directory = g_dir_open (path, 0, nullptr);
+  g_assert_nonnull (directory);
+  const gchar *name;
+  while ((name = g_dir_read_name (directory)) != nullptr)
+    names.emplace_back (name);
+  std::sort (names.begin (), names.end ());
+  return names;
+}
 
 struct SecureDatabase
 {
@@ -1090,11 +1107,16 @@ test_provisioned_pair_pinned_modes (void)
   struct stat before, initialized;
   g_assert_cmpint (g_stat (fixture.final_path, &before), ==, 0);
   g_assert_cmpint (before.st_size, ==, 0);
+  wyl_fact_artifact_namespace_pair_access_reset_for_test ();
   g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
       (fixture.pair, &pinned_identity,
           WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
+  g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
+      (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, O_RDONLY));
+  g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
+      (WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING, O_RDWR));
   g_assert_cmpint (g_stat (fixture.final_path, &initialized), ==, 0);
   g_assert_cmpint (initialized.st_size, >, 0);
   g_assert_cmpuint (initialized.st_nlink, ==, 2);
@@ -1104,10 +1126,15 @@ test_provisioned_pair_pinned_modes (void)
   g_assert_true (g_file_get_contents (fixture.final_path, &before_bytes,
       &before_size, nullptr));
   result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+  wyl_fact_artifact_namespace_pair_access_reset_for_test ();
   g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
       (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
           &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
+  g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
+      (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, O_RDONLY));
+  g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
+      (WYL_FACT_ARTIFACT_PAIR_ACCESS_READER_BINDING, O_RDONLY));
   g_autofree gchar *after_bytes = nullptr;
   gsize after_size = 0;
   g_assert_true (g_file_get_contents (fixture.final_path, &after_bytes,
@@ -1120,22 +1147,19 @@ test_provisioned_pair_pinned_modes (void)
   g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
 }
 
-struct PairRendezvousRemoval
+struct PairRendezvousMarker
 {
   WylFactStorePinnedRendezvous target;
-  const gchar *stage_path;
   gboolean fired;
 };
 
 static void
-remove_pair_stage_at_rendezvous (WylFactStorePinnedRendezvous rendezvous,
+mark_pair_rendezvous (WylFactStorePinnedRendezvous rendezvous,
     gpointer user_data)
 {
-  auto *removal = static_cast<PairRendezvousRemoval *> (user_data);
-  if (!removal->fired && rendezvous == removal->target) {
-    g_assert_cmpint (unlink (removal->stage_path), ==, 0);
-    removal->fired = TRUE;
-  }
+  auto *marker = static_cast<PairRendezvousMarker *> (user_data);
+  if (!marker->fired && rendezvous == marker->target)
+    marker->fired = TRUE;
 }
 
 static void
@@ -1146,43 +1170,46 @@ test_provisioned_pair_pinned_rendezvous (void)
     ProvisionedPairFixture fixture;
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    struct stat stage_before, final_before;
+    g_assert_cmpint (g_stat (fixture.stage_path, &stage_before), ==, 0);
+    g_assert_cmpint (g_stat (fixture.final_path, &final_before), ==, 0);
+    g_assert_cmpuint (stage_before.st_size, ==, 0);
+    g_assert_cmpuint (final_before.st_size, ==, 0);
+    const auto names_before = snapshot_directory_names (fixture.graph_path);
+    g_autofree gchar *lock_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
+    g_assert_false (g_file_test (lock_path, G_FILE_TEST_EXISTS));
+    PairRendezvousMarker marker = {
+      static_cast<WylFactStorePinnedRendezvous> (value),
+      FALSE,
+    };
+    wyl_fact_store_pinned_set_test_hook (mark_pair_rendezvous, &marker);
+    wyl_fact_store_pinned_set_pair_rendezvous_error_for_test (marker.target,
+        WYRELOG_E_POLICY);
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
         (fixture.pair, &pinned_identity,
             WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
-        WYRELOG_E_OK);
-    g_autofree gchar *before_bytes = nullptr;
-    gsize before_size = 0;
-    g_assert_true (g_file_get_contents (fixture.final_path, &before_bytes,
-        &before_size, nullptr));
-    g_autofree gchar *lock_path =
-        g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
-    struct stat lock_before, lock_after;
-    g_assert_cmpint (g_stat (lock_path, &lock_before), ==, 0);
-    PairRendezvousRemoval removal = {
-      static_cast<WylFactStorePinnedRendezvous> (value),
-      fixture.stage_path,
-      FALSE,
-    };
-    wyl_fact_store_pinned_set_test_hook (remove_pair_stage_at_rendezvous,
-        &removal);
-    result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
-    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
         WYRELOG_E_POLICY);
-    g_assert_true (removal.fired);
-    g_autofree gchar *after_bytes = nullptr;
-    gsize after_size = 0;
-    g_assert_true (g_file_get_contents (fixture.final_path, &after_bytes,
-        &after_size, nullptr));
-    g_assert_cmpuint (after_size, ==, before_size);
-    g_assert_cmpint (memcmp (after_bytes, before_bytes, before_size), ==, 0);
-    g_assert_cmpint (g_stat (lock_path, &lock_after), ==, 0);
-    g_assert_cmpuint (lock_after.st_dev, ==, lock_before.st_dev);
-    g_assert_cmpuint (lock_after.st_ino, ==, lock_before.st_ino);
+    g_assert_true (marker.fired);
+    struct stat stage_after, final_after;
+    g_assert_cmpint (g_stat (fixture.stage_path, &stage_after), ==, 0);
+    g_assert_cmpint (g_stat (fixture.final_path, &final_after), ==, 0);
+    g_assert_cmpuint (stage_after.st_dev, ==, stage_before.st_dev);
+    g_assert_cmpuint (stage_after.st_ino, ==, stage_before.st_ino);
+    g_assert_cmpuint (stage_after.st_nlink, ==, stage_before.st_nlink);
+    g_assert_cmpuint (stage_after.st_size, ==, stage_before.st_size);
+    g_assert_cmpuint (final_after.st_dev, ==, final_before.st_dev);
+    g_assert_cmpuint (final_after.st_ino, ==, final_before.st_ino);
+    g_assert_cmpuint (final_after.st_nlink, ==, final_before.st_nlink);
+    g_assert_cmpuint (final_after.st_size, ==, final_before.st_size);
+    g_assert_true (snapshot_directory_names (fixture.graph_path)
+        == names_before);
+    g_assert_false (g_file_test (lock_path, G_FILE_TEST_EXISTS));
     g_autofree gchar *wal =
         g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
     g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
+        ==, WYRELOG_E_OK);
   }
 }
 

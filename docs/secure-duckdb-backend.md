@@ -32,14 +32,38 @@ the retained filesystem health after handle and temporary-root cleanup.
 best-effort void fallback.
 
 `wyl_fact_store_open_identified_pinned()` is the one-shot identified-store
-consumer of this backend. It brackets bounded construction, typed identity
-SQL, checked finalization, and final namespace validation with the common
-in-process identity guard. Identity values are passed only as prepared
-parameters and returned as exact tagged null, signed-64-bit, or byte cells;
-the adapter never uses display conversion or SQL interpolation. No live
-DuckDB handle escapes. The pathname identity API remains available for legacy
-callers but is not a provisioning authority. #611 and #544 own the later
-retained-pair lifecycle and coordinator consumption.
+consumer for an already constructed generic namespace. The POSIX retained
+provisioning-pair consumer is instead
+`wyl_fact_store_open_identified_provisioned_pair_pinned()`. That is the only
+callable API accepting the opaque operation-bound pair: no pair-to-generic
+namespace factory is declared, and the pair cannot be passed to generic
+namespace, lease, main-binding, or raw-descriptor APIs.
+
+The retained pair pins the exact identity validated by the #595 opener, an
+independent full root/tenant/graph chain, an `O_RDONLY` held final descriptor,
+and a separately acquired and identity-checked `O_RDWR` final descriptor.
+Direct reads and reader bindings duplicate only the read descriptor; only a
+writer binding may duplicate the writable descriptor. Every duplicate and
+I/O/close boundary revalidates the held descriptors, both retained names, and
+the complete directory chain. The generic namespace continues to require an
+unaliased `nlink=1` main artifact.
+
+For the operation-bound entry, R0 through R5 are authority-only preflight
+rendezvous. All six execute, with pair revalidation after each, before the
+hidden namespace factory creates the lock or DuckDB can inspect or initialize
+the database. This ordering makes every injected rendezvous failure leave a
+fresh retained pair, database bytes, lock, WAL, temporary names, and aliases
+unchanged. Once preflight succeeds, the ordinary pinned lifecycle performs
+bounded construction, typed identity SQL, checked finalization, and final
+validation under the common in-process identity guard. Identity values use
+prepared parameters and exact tagged cells; no display conversion, SQL
+interpolation, live DuckDB handle, pathname, or descriptor escapes.
+
+#611 completes this private storage handoff. #544 remains responsible for
+persisting and selecting the canonical operation UUID, calling the sole pair
+entry at the coordinator-defined point, recording its result, and applying
+startup/recovery/HTTP ordering. The legacy pathname identity API remains
+available for existing callers but is not provisioning authority.
 
 ## Version upgrade procedure
 
