@@ -48,19 +48,21 @@ I/O/close boundary revalidates the held descriptors, both retained names, and
 the complete directory chain. The generic namespace continues to require an
 unaliased `nlink=1` main artifact.
 
-For the operation-bound entry, R0 through R5 are authority-only preflight
-rendezvous. All six execute, with pair revalidation after each, before the
-hidden namespace factory creates the lock or DuckDB can inspect or initialize
-the database. This ordering makes every injected rendezvous failure leave a
-fresh retained pair, database bytes, lock, WAL, temporary names, and aliases
-unchanged. Once preflight succeeds, the ordinary pinned lifecycle performs
+The operation-bound entry has a distinct authority preflight immediately
+before the hidden namespace factory. It revalidates the pair before lock
+creation or DuckDB inspection, so a fresh database can fail there without
+changing database bytes, retained names, aliases, lock, WAL, or temporary
+state. R0 through R5 keep their ordinary lifecycle meanings: before
+construction, after construction, before identity work, after identity work,
+before finalization, and at final revalidation. The actual lifecycle performs
 bounded construction, typed identity SQL, checked finalization, and final
 validation under the common in-process identity guard. Identity values use
 prepared parameters and exact tagged cells; no display conversion, SQL
 interpolation, live DuckDB handle, pathname, or descriptor escapes.
 Test-only control follows the same ownership boundary: the generic and pair
-entries consume independently synchronized one-shot controls, and the pair's
-inner generic core always receives an explicit empty control.
+entries consume independently synchronized one-shot controls. The pair passes
+its own lifecycle control explicitly into the inner core, which never consumes
+the generic global control.
 
 #611 completes this private storage handoff. #544 remains responsible for
 persisting and selecting the canonical operation UUID, calling the sole pair
