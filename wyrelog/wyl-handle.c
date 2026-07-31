@@ -1254,6 +1254,30 @@ wyl_handle_get_policy_store (WylHandle *self)
 }
 
 wyrelog_error_t
+wyl_handle_adopt_offline_maintenance_store (wyl_policy_store_t *store,
+    WylHandle **out_handle)
+{
+  if (out_handle != NULL)
+    *out_handle = NULL;
+  if (store == NULL || out_handle == NULL) {
+    /* Own the store on every outcome: a rejected adoption still closes it. */
+    wyl_policy_store_close (store);
+    return WYRELOG_E_INVALID;
+  }
+  /* The GObject constructor already builds the service-auth authority. We
+   * install the store and a fixed non-zero generation, and deliberately open
+   * no engine pair, audit connection, resolver, exchange, or publication
+   * subsystem: an offline maintenance handle only drives store-owned authority
+   * transactions. Because no engine pair is reloaded, the #614 unsafe-closure
+   * latch never fires, so a plain acquire_write over this handle succeeds. */
+  WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
+  self->policy_store = store;
+  self->policy_store_generation = 1;
+  *out_handle = self;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_handle_policy_store_pin_current (WylHandle *self,
     wyl_policy_store_t **out_store)
 {

@@ -68,6 +68,20 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
  * valid until wyl_shutdown or g_object_unref.
  */
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
+
+/*
+ * Wraps an already-open policy |store| into a bare, offline maintenance
+ * handle. The handle is constructed with only its service-auth authority (built
+ * by the GObject constructor); no engine pair, audit connection, resolver,
+ * exchange, or publication subsystem is started, and the #614 unsafe-closure
+ * reload latch is never armed, so a plain acquire_write over the returned
+ * handle succeeds. The handle takes ownership of |store| on every outcome and
+ * closes it when the last reference is released (or immediately on a failure
+ * that produced no handle). Reserved for the offline #618 service permission
+ * remediation lane.
+ */
+wyrelog_error_t wyl_handle_adopt_offline_maintenance_store
+    (wyl_policy_store_t * store, WylHandle ** out_handle);
 /* Accessed only while the handle's service-auth authority monitor is held. */
 WylServiceAuthUnavailableReason
 wyl_handle_service_auth_unavailable_reason_locked (WylHandle * self);

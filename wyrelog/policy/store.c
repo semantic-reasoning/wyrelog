@@ -160,6 +160,10 @@ struct wyl_policy_store_t
   gboolean encrypted;
   gboolean key_materialized;
   gboolean suppress_close_persist;
+  /* Opened under a maintenance-exclusive lease: persist-on-close re-verifies
+   * the pinned store-file identity before writing, failing closed on a
+   * substitution performed after the lease was taken (unit-1 deferred gate). */
+  gboolean maintenance_exclusive;
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
@@ -8156,6 +8160,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   self->next_service_authority_transaction_id = 1;
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
+  self->maintenance_exclusive = opts->maintenance_exclusive;
   self->canonical_path = g_strdup (effective_path);
   self->canonical_dirfd = -1;
   wyrelog_error_t rc = WYRELOG_E_OK;
@@ -8382,7 +8387,16 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   if (store == NULL)
     return;
   if (store->db != NULL) {
-    if (store->encrypted && !store->suppress_close_persist)
+    /* A maintenance-exclusive store re-verifies the pinned store-file identity
+     * before persisting so an offline remediation never writes its encrypted
+     * image over a file substituted after the lease was taken; the deferred
+     * unit-1 gate fails closed by skipping the persist. */
+    gboolean persist = store->encrypted && !store->suppress_close_persist;
+    if (persist && store->maintenance_exclusive && store->lease != NULL
+        && wyl_policy_store_lease_verify_store_identity (store->lease)
+        != WYRELOG_E_OK)
+      persist = FALSE;
+    if (persist)
       (void) persist_policy_store_encrypted (store);
     sqlite3_close (store->db);
     store->db = NULL;
