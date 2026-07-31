@@ -1459,13 +1459,6 @@ G_GNUC_INTERNAL wyrelog_error_t
     namespace_unref (n);
     return rc;
   }
-  gint direct_read_fd = duplicate_cloexec (n->main_fd);
-  if (direct_read_fd < 0) {
-    namespace_unref (n);
-    return WYRELOG_E_IO;
-  }
-  pair_access_observe (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, direct_read_fd);
-  close (direct_read_fd);
   *o = n;
   return WYRELOG_E_OK;
 }
@@ -1644,6 +1637,8 @@ duplicate_imported_main (WylFactArtifactNamespace *n, gint *out_fd)
       close (fd);
     return WYRELOG_E_POLICY;
   }
+  if (n->provisioned_pair != NULL)
+    pair_access_observe (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, fd);
   *out_fd = fd;
   return WYRELOG_E_OK;
 }
