@@ -189,6 +189,19 @@ def provider_is_needed(output: str, helper: Path) -> bool:
     return helper.name in output
 
 
+def missing_runtime_dependencies(name: str, output: str, helper: Path,
+                                 library: Path) -> set[str]:
+    missing = set()
+    if not provider_is_needed(output, library):
+        missing.add(library.name)
+    if (
+        name == SERVICE_EXECUTABLE_NAME
+        and not provider_is_needed(output, helper)
+    ):
+        missing.add(helper.name)
+    return missing
+
+
 def install_manifest_is_clean(manifest: Path, helper: Path,
                               header: Path) -> bool:
     data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -289,12 +302,38 @@ def self_test() -> int:
             "dyld_info", "-imports", str(artifact)]:
         return 1
     helper = Path("/tmp/libtest-daemon-http-decide-seed-helper.so")
+    library = Path("/tmp/libwyrelog.so.0")
     if not provider_is_needed(
             " 0x0000000000000001 (NEEDED) Shared library: "
             "[libtest-daemon-http-decide-seed-helper.so]",
             helper):
         return 1
     if provider_is_needed("libwyrelog.so.0", helper):
+        return 1
+    if missing_runtime_dependencies(
+            SERVICE_EXECUTABLE_NAME,
+            library.name,
+            helper,
+            library) != {helper.name}:
+        return 1
+    if missing_runtime_dependencies(
+            "test-daemon-http-decide",
+            library.name,
+            helper,
+            library):
+        return 1
+    for name in EXPECTED_EXECUTABLE_NAMES:
+        if missing_runtime_dependencies(
+                name,
+                helper.name,
+                helper,
+                library) != {library.name}:
+            return 1
+    if missing_runtime_dependencies(
+            SERVICE_EXECUTABLE_NAME,
+            f"{helper.name}\n{library.name}",
+            helper,
+            library):
         return 1
     return 0
 
@@ -428,15 +467,17 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        if not provider_is_needed(provider, helper):
+        missing_dependencies = missing_runtime_dependencies(
+            executable.name,
+            provider,
+            helper,
+            library,
+        )
+        if missing_dependencies:
             print(
-                f"{executable} has no runtime dependency on {helper.name}",
-                file=sys.stderr,
-            )
-            return 1
-        if not provider_is_needed(provider, library):
-            print(
-                f"{executable} has no runtime dependency on {library.name}",
+                f"{executable} runtime dependencies missing:",
+                *sorted(missing_dependencies),
+                sep="\n  ",
                 file=sys.stderr,
             )
             return 1
