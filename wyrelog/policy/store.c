@@ -1985,8 +1985,15 @@ wyl_policy_store_role_is_service_eligible (wyl_policy_store_t *store,
       ") "
       "SELECT 1 FROM role_closure rc "
       "JOIN role_permissions rp ON rp.role_id = rc.effective_role_id "
-      "JOIN permissions p ON p.perm_id = rp.perm_id "
-      "WHERE p.class != 'basic' " "LIMIT 1;";
+      "LEFT JOIN permissions p ON p.perm_id = rp.perm_id "
+      "WHERE NOT ("
+      "  (p.perm_id = 'wr.stream.read' AND p.perm_name = 'stream read'"
+      "    AND p.class = 'basic')"
+      "  OR (p.perm_id = 'wr.stream.list' AND p.perm_name = 'stream list'"
+      "    AND p.class = 'basic')"
+      "  OR (p.perm_id = 'wr.svc.read_decision'"
+      "    AND p.perm_name = 'service decision read' AND p.class = 'basic')"
+      ") OR p.perm_id IS NULL " "LIMIT 1;";
   gboolean has_control = FALSE;
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -7260,6 +7267,8 @@ wyrelog_error_t
       (txn->write_lease, txn->handle);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (txn->store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (txn->store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_service_schema (txn->store);
   if (rc == WYRELOG_E_OK) {
