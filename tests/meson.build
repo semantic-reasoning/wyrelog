@@ -984,6 +984,16 @@ test('policy-store-service-schema', test_policy_store_service_schema,
   timeout : 90,
 )
 
+test_service_permission_receipt = executable('test-service-permission-receipt',
+  'test-service-permission-receipt.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+)
+
+test('service-permission-receipt', test_service_permission_receipt,
+  timeout : 90,
+)
+
 test_fact_schema = executable('test-fact-schema',
   'test-fact-schema.c',
   'fact-test-support.c',
