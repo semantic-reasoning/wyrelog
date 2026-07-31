@@ -18,7 +18,7 @@ rather than a silent blind spot.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 import sys
@@ -69,6 +69,7 @@ PATHLIB_MODULE = object()
 PATH_CLASS = object()
 PATH_VALUE = object()
 PATH_ITERABLE = object()
+NEXT_BUILTIN = object()
 
 BUILTIN_OPEN = CallableValue("open", 1, 3)
 BOUND_PATH_OPEN = CallableValue("Path.open", 0, 2)
@@ -77,6 +78,36 @@ BOUND_READ_TEXT = CallableValue("Path.read_text", None, 0)
 UNBOUND_READ_TEXT = CallableValue("Path.read_text", None, 1)
 BOUND_WRITE_TEXT = CallableValue("Path.write_text", None, 1)
 UNBOUND_WRITE_TEXT = CallableValue("Path.write_text", None, 2)
+
+
+@dataclass(frozen=True)
+class PossibleValue:
+    alternatives: frozenset[object]
+
+
+def alternatives(value: object) -> frozenset[object]:
+    if isinstance(value, PossibleValue):
+        return value.alternatives
+    return frozenset({value})
+
+
+def merge_values(*values: object) -> object:
+    merged = frozenset().union(*(alternatives(value) for value in values))
+    if len(merged) == 1:
+        return next(iter(merged))
+    return PossibleValue(merged)
+
+
+def has_value(value: object, expected: object) -> bool:
+    return expected in alternatives(value)
+
+
+def callable_values(value: object) -> tuple[CallableValue, ...]:
+    return tuple(
+        item
+        for item in alternatives(value)
+        if isinstance(item, CallableValue)
+    )
 
 
 @dataclass
@@ -94,6 +125,10 @@ class ScanResult:
 class Scope:
     values: dict[str, object]
     local_names: set[str]
+    kind: str
+    parent: int | None
+    global_names: set[str] = field(default_factory=set)
+    nonlocal_names: set[str] = field(default_factory=set)
 
 
 class LocalBindingCollector(ast.NodeVisitor):
@@ -101,6 +136,8 @@ class LocalBindingCollector(ast.NodeVisitor):
 
     def __init__(self) -> None:
         self.names: set[str] = set()
+        self.global_names: set[str] = set()
+        self.nonlocal_names: set[str] = set()
 
     def bind_target(self, target: ast.AST) -> None:
         if isinstance(target, ast.Name):
@@ -160,15 +197,40 @@ class LocalBindingCollector(ast.NodeVisitor):
         self.bind_target(node.target)
         self.visit(node.value)
 
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            self.bind_target(target)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        if node.type is not None:
+            self.visit(node.type)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.global_names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocal_names.update(node.names)
+
 
 class PythonScanner(ast.NodeVisitor):
     PATH_METHODS = {
         "resolve",
         "absolute",
+        "expanduser",
         "joinpath",
+        "readlink",
+        "relative_to",
+        "rename",
+        "replace",
         "with_name",
+        "with_stem",
         "with_suffix",
     }
+    PATH_CLASS_METHODS = {"cwd", "home"}
     PATH_ITERATORS = {"glob", "rglob", "iterdir"}
 
     def __init__(
@@ -180,7 +242,7 @@ class PythonScanner(ast.NodeVisitor):
         self.line_map = line_map
         self.findings: list[Finding] = []
         self.errors: list[Finding] = []
-        self.scopes = [Scope({}, set())]
+        self.scopes = [Scope({}, set(), "module", None)]
 
     def location(self, node: ast.AST) -> Location:
         line = getattr(node, "lineno", 1)
@@ -197,34 +259,103 @@ class PythonScanner(ast.NodeVisitor):
         self.errors.append(Finding(self.location(node), message))
 
     def resolve(self, name: str) -> object:
-        for scope in reversed(self.scopes):
+        index: int | None = len(self.scopes) - 1
+        while index is not None:
+            scope = self.scopes[index]
+            if name in scope.global_names:
+                index = 0
+                scope = self.scopes[index]
             if name in scope.values:
                 return scope.values[name]
             if name in scope.local_names:
                 return UNKNOWN
+            index = scope.parent
         if name == "open":
             return BUILTIN_OPEN
+        if name == "next":
+            return NEXT_BUILTIN
         return UNKNOWN
 
+    def binding_scope(self, name: str) -> int:
+        current = len(self.scopes) - 1
+        scope = self.scopes[current]
+        if name in scope.global_names:
+            return 0
+        if name in scope.nonlocal_names:
+            index = scope.parent
+            while index not in {None, 0}:
+                parent = self.scopes[index]
+                if name in parent.local_names:
+                    return index
+                index = parent.parent
+            return scope.parent if scope.parent is not None else 0
+        return current
+
     def bind(self, name: str, value: object) -> None:
-        self.scopes[-1].values[name] = value
-        self.scopes[-1].local_names.add(name)
+        index = self.binding_scope(name)
+        self.scopes[index].values[name] = value
+        self.scopes[index].local_names.add(name)
+
+    def lexical_parent(self, skip_class: bool = False) -> int | None:
+        index: int | None = len(self.scopes) - 1
+        if skip_class:
+            while index is not None and self.scopes[index].kind == "class":
+                index = self.scopes[index].parent
+        return index
+
+    def capture_state(self) -> list[Scope]:
+        return self.copy_state(self.scopes)
+
+    def restore_state(self, state: list[Scope]) -> None:
+        self.scopes = self.copy_state(state)
+
+    @staticmethod
+    def copy_state(state: list[Scope]) -> list[Scope]:
+        return [
+            Scope(
+                dict(scope.values),
+                set(scope.local_names),
+                scope.kind,
+                scope.parent,
+                set(scope.global_names),
+                set(scope.nonlocal_names),
+            )
+            for scope in state
+        ]
+
+    def join_states(self, *states: list[Scope]) -> None:
+        joined = self.copy_state(states[0])
+        for index, scope in enumerate(joined):
+            scope.local_names = set().union(
+                *(state[index].local_names for state in states)
+            )
+            names = set().union(
+                *(set(state[index].values) for state in states)
+            )
+            scope.values = {}
+            for name in names:
+                possible = [
+                    state[index].values.get(name, UNKNOWN)
+                    for state in states
+                ]
+                scope.values[name] = merge_values(*possible)
+        self.scopes = joined
 
     def bind_target(self, target: ast.AST, value: object) -> bool:
         if isinstance(target, ast.Name):
             self.bind(target.id, value)
             return True
         if isinstance(target, (ast.Tuple, ast.List)):
-            if isinstance(value, CallableValue):
+            if callable_values(value):
                 return False
             for item in target.elts:
                 self.bind_target(item, UNKNOWN)
             return True
         if isinstance(target, ast.Starred):
-            if isinstance(value, CallableValue):
+            if callable_values(value):
                 return False
             return self.bind_target(target.value, UNKNOWN)
-        return not isinstance(value, CallableValue)
+        return not callable_values(value)
 
     def value(self, node: ast.AST | None) -> object:
         if node is None:
@@ -233,63 +364,124 @@ class PythonScanner(ast.NodeVisitor):
             return self.resolve(node.id)
         if isinstance(node, ast.Attribute):
             owner = self.value(node.value)
-            if owner in {BUILTINS_MODULE, IO_MODULE} and node.attr == "open":
-                return BUILTIN_OPEN
-            if owner is PATH_CLASS:
-                return {
-                    "open": UNBOUND_PATH_OPEN,
-                    "read_text": UNBOUND_READ_TEXT,
-                    "write_text": UNBOUND_WRITE_TEXT,
-                }.get(node.attr, UNKNOWN)
-            if owner is PATH_VALUE:
-                if node.attr == "parent":
-                    return PATH_VALUE
-                return {
-                    "open": BOUND_PATH_OPEN,
-                    "read_text": BOUND_READ_TEXT,
-                    "write_text": BOUND_WRITE_TEXT,
-                }.get(node.attr, UNKNOWN)
-            if owner is PATHLIB_MODULE and node.attr == "Path":
-                return PATH_CLASS
-            return UNKNOWN
+            results: list[object] = []
+            for candidate in alternatives(owner):
+                result = UNKNOWN
+                if (
+                    candidate in {BUILTINS_MODULE, IO_MODULE}
+                    and node.attr == "open"
+                ):
+                    result = BUILTIN_OPEN
+                elif candidate is BUILTINS_MODULE and node.attr == "next":
+                    result = NEXT_BUILTIN
+                elif candidate is PATH_CLASS:
+                    result = {
+                        "open": UNBOUND_PATH_OPEN,
+                        "read_text": UNBOUND_READ_TEXT,
+                        "write_text": UNBOUND_WRITE_TEXT,
+                    }.get(node.attr, UNKNOWN)
+                elif candidate is PATH_VALUE:
+                    if node.attr == "parent":
+                        result = PATH_VALUE
+                    else:
+                        result = {
+                            "open": BOUND_PATH_OPEN,
+                            "read_text": BOUND_READ_TEXT,
+                            "write_text": BOUND_WRITE_TEXT,
+                        }.get(node.attr, UNKNOWN)
+                elif candidate is PATHLIB_MODULE and node.attr == "Path":
+                    result = PATH_CLASS
+                results.append(result)
+            return merge_values(*results)
         if isinstance(node, ast.Call):
             callable_value = self.value(node.func)
-            if callable_value is PATH_CLASS:
-                return PATH_VALUE
+            results: list[object] = []
+            for candidate in alternatives(callable_value):
+                if candidate is PATH_CLASS:
+                    results.append(PATH_VALUE)
+                elif candidate is NEXT_BUILTIN and node.args:
+                    iterable = self.value(node.args[0])
+                    results.append(
+                        PATH_VALUE
+                        if has_value(iterable, PATH_ITERABLE)
+                        else UNKNOWN
+                    )
             if isinstance(node.func, ast.Attribute):
                 owner = self.value(node.func.value)
-                if owner is PATH_VALUE and node.func.attr in self.PATH_METHODS:
-                    return PATH_VALUE
+                if has_value(owner, PATH_VALUE):
+                    if node.func.attr in self.PATH_METHODS:
+                        results.append(PATH_VALUE)
+                    elif node.func.attr in self.PATH_ITERATORS:
+                        results.append(PATH_ITERABLE)
                 if (
-                    owner is PATH_VALUE
-                    and node.func.attr in self.PATH_ITERATORS
+                    has_value(owner, PATH_CLASS)
+                    and node.func.attr in self.PATH_CLASS_METHODS
                 ):
-                    return PATH_ITERABLE
-            return UNKNOWN
+                    results.append(PATH_VALUE)
+            return merge_values(*(results or [UNKNOWN]))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            if self.value(node.left) is PATH_VALUE:
+            if has_value(self.value(node.left), PATH_VALUE):
                 return PATH_VALUE
         if isinstance(node, ast.IfExp):
             left = self.value(node.body)
             right = self.value(node.orelse)
-            if left is right:
-                return left
+            return merge_values(left, right)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            if any(has_value(self.value(item), PATH_VALUE) for item in node.elts):
+                return PATH_ITERABLE
+        if isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)
+        ):
+            return self.comprehension_value(node)
         return UNKNOWN
 
-    def annotation_is_path(self, node: ast.AST | None) -> bool:
+    def annotation_value(self, node: ast.AST | None) -> object:
         if node is None:
-            return False
-        if self.value(node) is PATH_CLASS:
-            return True
+            return UNKNOWN
+        if has_value(self.value(node), PATH_CLASS):
+            return PATH_VALUE
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value in {"Path", "pathlib.Path"}
+            compact = node.value.replace(" ", "")
+            if compact in {"Path", "pathlib.Path"}:
+                return PATH_VALUE
+            if re.search(
+                r"(?:list|set|tuple|Iterable|Iterator|Sequence|"
+                r"Generator)\[(?:pathlib\.)?Path(?:[,\]])",
+                compact,
+            ):
+                return PATH_ITERABLE
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-            return self.annotation_is_path(node.left) or self.annotation_is_path(
-                node.right
+            return merge_values(
+                self.annotation_value(node.left),
+                self.annotation_value(node.right),
             )
         if isinstance(node, ast.Subscript):
-            return self.annotation_is_path(node.slice)
-        return False
+            container = self.annotation_name(node.value)
+            element = self.annotation_value(node.slice)
+            if container in {
+                "list",
+                "set",
+                "tuple",
+                "Iterable",
+                "Iterator",
+                "Sequence",
+                "Generator",
+            } and has_value(element, PATH_VALUE):
+                return PATH_ITERABLE
+            return element
+        if isinstance(node, ast.Tuple):
+            return merge_values(
+                *(self.annotation_value(item) for item in node.elts)
+            )
+        return UNKNOWN
+
+    @staticmethod
+    def annotation_name(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return ""
 
     @staticmethod
     def keyword(call: ast.Call, name: str) -> ast.AST | None:
@@ -347,22 +539,27 @@ class PythonScanner(ast.NodeVisitor):
             self.visit_NamedExpr(node)
             return
         if isinstance(node, ast.Call):
-            callable_value = self.value(node.func)
-            if isinstance(callable_value, CallableValue):
-                self.check_encoding_call(node, callable_value)
-            else:
-                self.scan_expression(node.func)
+            protected = callable_values(self.value(node.func))
+            seen: set[CallableValue] = set()
+            for callable_value in protected:
+                if callable_value not in seen:
+                    self.check_encoding_call(node, callable_value)
+                    seen.add(callable_value)
+            # A protected outer callable never makes its receiver inert:
+            # Path(open(...)).read_text(...) must still inspect open(...).
+            self.scan_expression(node.func, allow_top_callable=True)
             for arg in node.args:
                 self.scan_expression(arg)
             for item in node.keywords:
                 self.scan_expression(item.value)
             return
         if isinstance(node, (ast.Name, ast.Attribute)):
-            node_value = self.value(node)
-            if isinstance(node_value, CallableValue) and not allow_top_callable:
+            protected = callable_values(self.value(node))
+            if protected and not allow_top_callable:
+                names = ", ".join(sorted({item.name for item in protected}))
                 self.error(
                     node,
-                    f"protected callable {node_value.name} escapes static "
+                    f"protected callable {names} escapes static "
                     "analysis",
                 )
                 return
@@ -397,26 +594,33 @@ class PythonScanner(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         assigned = self.value(node.value)
-        allow = isinstance(assigned, CallableValue)
+        allow = bool(callable_values(assigned))
         self.scan_expression(node.value, allow_top_callable=allow)
         for target in node.targets:
             if not self.bind_target(target, assigned):
+                names = ", ".join(
+                    sorted({item.name for item in callable_values(assigned)})
+                )
                 self.error(
                     target,
-                    f"protected callable {assigned.name} must be assigned "
+                    f"protected callable {names} must be assigned "
                     "only to simple names",
                 )
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         assigned = self.value(node.value)
-        if self.annotation_is_path(node.annotation):
-            assigned = PATH_VALUE
-        allow = isinstance(assigned, CallableValue)
+        annotated = self.annotation_value(node.annotation)
+        if annotated is not UNKNOWN:
+            assigned = annotated
+        allow = bool(callable_values(assigned))
         self.scan_expression(node.value, allow_top_callable=allow)
         if not self.bind_target(node.target, assigned):
+            names = ", ".join(
+                sorted({item.name for item in callable_values(assigned)})
+            )
             self.error(
                 node.target,
-                f"protected callable {assigned.name} must be assigned only "
+                f"protected callable {names} must be assigned only "
                 "to a simple name",
             )
 
@@ -427,12 +631,15 @@ class PythonScanner(ast.NodeVisitor):
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         assigned = self.value(node.value)
-        allow = isinstance(assigned, CallableValue)
+        allow = bool(callable_values(assigned))
         self.scan_expression(node.value, allow_top_callable=allow)
         if not self.bind_target(node.target, assigned):
+            names = ", ".join(
+                sorted({item.name for item in callable_values(assigned)})
+            )
             self.error(
                 node.target,
-                f"protected callable {assigned.name} must be assigned only "
+                f"protected callable {names} must be assigned only "
                 "to a simple name",
             )
 
@@ -455,6 +662,8 @@ class PythonScanner(ast.NodeVisitor):
             name = item.asname or item.name
             if node.module in {"builtins", "io"} and item.name == "open":
                 self.bind(name, BUILTIN_OPEN)
+            elif node.module == "builtins" and item.name == "next":
+                self.bind(name, NEXT_BUILTIN)
             elif node.module == "pathlib" and item.name == "Path":
                 self.bind(name, PATH_CLASS)
             else:
@@ -464,7 +673,10 @@ class PythonScanner(ast.NodeVisitor):
         collector = LocalBindingCollector()
         for statement in node.body:
             collector.visit(statement)
-        values = {name: UNKNOWN for name in collector.names}
+        local_names = (
+            collector.names - collector.global_names - collector.nonlocal_names
+        )
+        values = {name: UNKNOWN for name in local_names}
         arguments = (
             list(node.args.posonlyargs)
             + list(node.args.args)
@@ -475,13 +687,16 @@ class PythonScanner(ast.NodeVisitor):
         if node.args.kwarg is not None:
             arguments.append(node.args.kwarg)
         for argument in arguments:
-            values[argument.arg] = (
-                PATH_VALUE
-                if self.annotation_is_path(argument.annotation)
-                else UNKNOWN
-            )
-            collector.names.add(argument.arg)
-        return Scope(values, collector.names)
+            values[argument.arg] = self.annotation_value(argument.annotation)
+            local_names.add(argument.arg)
+        return Scope(
+            values,
+            local_names,
+            "function",
+            self.lexical_parent(skip_class=True),
+            collector.global_names,
+            collector.nonlocal_names,
+        )
 
     def visit_FunctionDef(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef
@@ -493,10 +708,12 @@ class PythonScanner(ast.NodeVisitor):
         ]:
             self.scan_expression(default)
         self.bind(node.name, UNKNOWN)
+        outer_state = self.capture_state()
         self.scopes.append(self.function_scope(node))
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
+        self.restore_state(outer_state)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -510,7 +727,14 @@ class PythonScanner(ast.NodeVisitor):
             )
         }
         values = {name: UNKNOWN for name in names}
-        self.scopes.append(Scope(values, names))
+        self.scopes.append(
+            Scope(
+                values,
+                names,
+                "function",
+                self.lexical_parent(skip_class=True),
+            )
+        )
         self.scan_expression(node.body)
         self.scopes.pop()
 
@@ -522,35 +746,65 @@ class PythonScanner(ast.NodeVisitor):
         for decorator in node.decorator_list:
             self.scan_expression(decorator)
         self.bind(node.name, UNKNOWN)
-        self.scopes.append(Scope({}, set()))
+        collector = LocalBindingCollector()
+        for statement in node.body:
+            collector.visit(statement)
+        self.scopes.append(
+            Scope(
+                {},
+                set(),
+                "class",
+                self.lexical_parent(),
+                collector.global_names,
+                collector.nonlocal_names,
+            )
+        )
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
 
     def visit_If(self, node: ast.If) -> None:
         self.scan_expression(node.test)
+        before = self.capture_state()
+        self.restore_state(before)
         for statement in node.body:
             self.visit(statement)
+        body_state = self.capture_state()
+        self.restore_state(before)
         for statement in node.orelse:
             self.visit(statement)
+        else_state = self.capture_state()
+        self.join_states(body_state, else_state)
 
     def visit_While(self, node: ast.While) -> None:
         self.scan_expression(node.test)
+        before = self.capture_state()
         for statement in node.body:
             self.visit(statement)
+        body_state = self.capture_state()
+        self.join_states(before, body_state)
         for statement in node.orelse:
             self.visit(statement)
+        else_state = self.capture_state()
+        self.join_states(before, body_state, else_state)
 
     def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
         self.scan_expression(node.iter)
+        before = self.capture_state()
         element = (
-            PATH_VALUE if self.value(node.iter) is PATH_ITERABLE else UNKNOWN
+            PATH_VALUE
+            if has_value(self.value(node.iter), PATH_ITERABLE)
+            else UNKNOWN
         )
         self.bind_target(node.target, element)
         for statement in node.body:
             self.visit(statement)
+        body_state = self.capture_state()
+        self.join_states(before, body_state)
         for statement in node.orelse:
             self.visit(statement)
+        else_state = self.capture_state()
+        self.join_states(before, body_state, else_state)
 
     visit_AsyncFor = visit_For
 
@@ -565,17 +819,27 @@ class PythonScanner(ast.NodeVisitor):
     visit_AsyncWith = visit_With
 
     def visit_Try(self, node: ast.Try) -> None:
+        before = self.capture_state()
+        exception_states = [before]
         for statement in node.body:
             self.visit(statement)
+            exception_states.append(self.capture_state())
+        try_state = self.capture_state()
+        handler_states: list[list[Scope]] = []
         for handler in node.handlers:
+            self.join_states(*exception_states)
             if handler.type is not None:
                 self.scan_expression(handler.type)
             if handler.name is not None:
                 self.bind(handler.name, UNKNOWN)
             for statement in handler.body:
                 self.visit(statement)
+            handler_states.append(self.capture_state())
+        self.restore_state(try_state)
         for statement in node.orelse:
             self.visit(statement)
+        normal_state = self.capture_state()
+        self.join_states(normal_state, *handler_states)
         for statement in node.finalbody:
             self.visit(statement)
 
@@ -595,12 +859,19 @@ class PythonScanner(ast.NodeVisitor):
         | ast.GeneratorExp
         | ast.DictComp,
     ) -> None:
-        self.scopes.append(Scope({}, set()))
+        self.scopes.append(
+            Scope(
+                {},
+                set(),
+                "comprehension",
+                self.lexical_parent(skip_class=True),
+            )
+        )
         for generator in node.generators:
             self.scan_expression(generator.iter)
             element = (
                 PATH_VALUE
-                if self.value(generator.iter) is PATH_ITERABLE
+                if has_value(self.value(generator.iter), PATH_ITERABLE)
                 else UNKNOWN
             )
             self.bind_target(generator.target, element)
@@ -613,6 +884,32 @@ class PythonScanner(ast.NodeVisitor):
             self.scan_expression(node.elt)
         self.scopes.pop()
 
+    def comprehension_value(
+        self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp
+    ) -> object:
+        self.scopes.append(
+            Scope(
+                {},
+                set(),
+                "comprehension",
+                self.lexical_parent(skip_class=True),
+            )
+        )
+        for generator in node.generators:
+            element = (
+                PATH_VALUE
+                if has_value(self.value(generator.iter), PATH_ITERABLE)
+                else UNKNOWN
+            )
+            self.bind_target(generator.target, element)
+        element_value = self.value(node.elt)
+        self.scopes.pop()
+        return (
+            PATH_ITERABLE
+            if has_value(element_value, PATH_VALUE)
+            else UNKNOWN
+        )
+
     visit_ListComp = visit_comprehension_expression
     visit_SetComp = visit_comprehension_expression
     visit_GeneratorExp = visit_comprehension_expression
@@ -623,7 +920,7 @@ class PythonScanner(ast.NodeVisitor):
 class HereDoc:
     delimiter: str
     strip_tabs: bool
-    python: bool
+    selected: bool
     operator_line: int
     operator_column: int
 
@@ -635,7 +932,14 @@ class ShellWord:
     end: int
 
 
-def shell_word(command: str, start: int) -> tuple[str, int]:
+@dataclass
+class ShellSegment:
+    pipeline: int
+    words: list[ShellWord] = field(default_factory=list)
+    stdin_events: list[tuple[str, int]] = field(default_factory=list)
+
+
+def shell_word(command: str, start: int) -> tuple[str, int, bool]:
     output: list[str] = []
     index = start
     quote: str | None = None
@@ -665,45 +969,87 @@ def shell_word(command: str, start: int) -> tuple[str, int]:
             continue
         output.append(char)
         index += 1
-    return "".join(output), index
+    return "".join(output), index, quote is None
 
 
-def command_is_python(words: list[ShellWord], position: int) -> bool:
-    separators = {";", "&&", "||", "|", "&", "(", ")"}
-    start = 0
-    for word in words:
-        if word.end <= position and word.value in separators:
-            start = word.end
-    segment = [
-        word.value
-        for word in words
-        if start <= word.start < position and word.value not in separators
-    ]
-    reserved = {"if", "then", "elif", "while", "until", "do", "!", "command"}
-    while segment and (
-        segment[0] in reserved
-        or ("=" in segment[0] and not segment[0].startswith("="))
+def command_words(segment: ShellSegment) -> tuple[str, list[str]] | None:
+    words = [word.value for word in segment.words]
+    reserved = {
+        "if",
+        "then",
+        "elif",
+        "while",
+        "until",
+        "do",
+        "!",
+        "command",
+    }
+    while words and (
+        words[0] in reserved
+        or ("=" in words[0] and not words[0].startswith("="))
     ):
-        segment.pop(0)
-    if segment and segment[0] == "env":
-        segment.pop(0)
-        while segment and (
-            segment[0].startswith("-")
-            or ("=" in segment[0] and not segment[0].startswith("="))
-        ):
-            segment.pop(0)
-    return bool(
-        segment
-        and segment[0] in {"$PYTHON", "${PYTHON}", "python", "python3"}
-    )
+        words.pop(0)
+    while words and Path(words[0]).name in {"exec", "env"}:
+        wrapper = Path(words.pop(0)).name
+        if wrapper == "exec":
+            while words and words[0].startswith("-"):
+                words.pop(0)
+            continue
+        while words:
+            word = words[0]
+            if word in {"-u", "--unset"}:
+                if len(words) < 2:
+                    return None
+                del words[:2]
+            elif word.startswith("--unset=") or word.startswith("-"):
+                words.pop(0)
+            elif "=" in word and not word.startswith("="):
+                words.pop(0)
+            else:
+                break
+    if not words:
+        return None
+    return words[0], words[1:]
+
+
+def is_python_stdin(segment: ShellSegment) -> bool:
+    command = command_words(segment)
+    if command is None:
+        return False
+    executable, arguments = command
+    name = Path(executable).name
+    if executable not in {"$PYTHON", "${PYTHON}"} and not re.fullmatch(
+        r"python(?:3(?:\.[0-9]+)*)?", name
+    ):
+        return False
+
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "-":
+            return True
+        if argument in {"-c", "-m"} or argument.startswith(("-c", "-m")):
+            return False
+        if argument in {"-W", "-X"}:
+            index += 2
+            continue
+        if argument == "--":
+            return index + 1 < len(arguments) and arguments[index + 1] == "-"
+        if argument.startswith("-"):
+            index += 1
+            continue
+        return False
+    return False
 
 
 def lex_shell_command(
     command: str,
     positions: list[tuple[int, int]],
-) -> list[HereDoc]:
-    words: list[ShellWord] = []
-    operators: list[tuple[int, bool, str, int]] = []
+) -> tuple[list[HereDoc], list[tuple[int, str]]]:
+    segments = [ShellSegment(0)]
+    heredocs: list[HereDoc] = []
+    errors: list[tuple[int, str]] = []
+    pipeline = 0
     index = 0
     while index < len(command):
         char = command[index]
@@ -715,17 +1061,30 @@ def lex_shell_command(
                 index += 1
             continue
         if command.startswith("&&", index) or command.startswith("||", index):
-            words.append(ShellWord(command[index : index + 2], index, index + 2))
+            pipeline += 1
+            segments.append(ShellSegment(pipeline))
             index += 2
             continue
-        if char in ";|&()":
-            words.append(ShellWord(char, index, index + 1))
+        if char == "|":
+            segments.append(ShellSegment(pipeline))
+            index += 1
+            continue
+        if char in ";&()":
+            pipeline += 1
+            segments.append(ShellSegment(pipeline))
             index += 1
             continue
         if command.startswith("<<", index) and not command.startswith(
             "<<<", index
         ):
             operator = index
+            descriptor = 0
+            if (
+                segments[-1].words
+                and segments[-1].words[-1].end == operator
+                and segments[-1].words[-1].value.isdigit()
+            ):
+                descriptor = int(segments[-1].words.pop().value)
             index += 2
             strip_tabs = False
             if index < len(command) and command[index] == "-":
@@ -733,31 +1092,107 @@ def lex_shell_command(
                 index += 1
             while index < len(command) and command[index] in " \t":
                 index += 1
-            delimiter, end = shell_word(command, index)
-            if delimiter:
-                operators.append((operator, strip_tabs, delimiter, end))
-                index = end
+            delimiter, end, closed = shell_word(command, index)
+            if not delimiter or not closed:
+                errors.append((operator, "malformed heredoc delimiter"))
+                index = max(end, index + 1)
                 continue
-        value, end = shell_word(command, index)
+            line, column = positions[operator]
+            heredoc_index = len(heredocs)
+            heredocs.append(
+                HereDoc(
+                    delimiter,
+                    strip_tabs,
+                    False,
+                    line,
+                    column,
+                )
+            )
+            if descriptor == 0:
+                segments[-1].stdin_events.append(
+                    ("heredoc", heredoc_index)
+                )
+            index = end
+            continue
+        if char == "<":
+            operator = index
+            descriptor = 0
+            if (
+                segments[-1].words
+                and segments[-1].words[-1].end == operator
+                and segments[-1].words[-1].value.isdigit()
+            ):
+                descriptor = int(segments[-1].words.pop().value)
+            if command.startswith(("<<<", "<&", "<>"), index):
+                errors.append(
+                    (operator, "unsupported input redirection syntax")
+                )
+                index += 2
+                continue
+            index += 1
+            while index < len(command) and command[index] in " \t":
+                index += 1
+            _target, end, closed = shell_word(command, index)
+            if end == index or not closed:
+                errors.append((operator, "malformed input redirection"))
+                index = max(end, index + 1)
+                continue
+            if descriptor == 0:
+                segments[-1].stdin_events.append(("other", -1))
+            index = end
+            continue
+        if char == ">":
+            operator = index
+            if segments[-1].words and (
+                segments[-1].words[-1].end == operator
+                and segments[-1].words[-1].value.isdigit()
+            ):
+                segments[-1].words.pop()
+            index += 2 if command.startswith((">>", ">&"), index) else 1
+            while index < len(command) and command[index] in " \t":
+                index += 1
+            _target, end, closed = shell_word(command, index)
+            if end == index or not closed:
+                errors.append((operator, "malformed output redirection"))
+                index = max(end, index + 1)
+                continue
+            index = end
+            continue
+        value, end, closed = shell_word(command, index)
         if end == index:
             index += 1
             continue
-        words.append(ShellWord(value, index, end))
+        if not closed:
+            errors.append((index, "unterminated shell quote"))
+        segments[-1].words.append(ShellWord(value, index, end))
         index = end
 
-    heredocs: list[HereDoc] = []
-    for operator, strip_tabs, delimiter, _end in operators:
-        line, column = positions[operator]
-        heredocs.append(
-            HereDoc(
-                delimiter,
-                strip_tabs,
-                command_is_python(words, operator),
-                line,
-                column,
-            )
-        )
-    return heredocs
+    for pipeline_id in {segment.pipeline for segment in segments}:
+        group = [
+            segment for segment in segments if segment.pipeline == pipeline_id
+        ]
+        for target_index, segment in enumerate(group):
+            if not is_python_stdin(segment):
+                continue
+            if segment.stdin_events:
+                kind, heredoc_index = segment.stdin_events[-1]
+                if kind == "heredoc":
+                    heredocs[heredoc_index] = replace(
+                        heredocs[heredoc_index],
+                        selected=True,
+                    )
+                continue
+            for producer in reversed(group[:target_index]):
+                if not producer.stdin_events:
+                    continue
+                kind, heredoc_index = producer.stdin_events[-1]
+                if kind == "heredoc":
+                    heredocs[heredoc_index] = replace(
+                        heredocs[heredoc_index],
+                        selected=True,
+                    )
+                break
+    return heredocs, errors
 
 
 def continued_shell_command(
@@ -774,6 +1209,16 @@ def continued_shell_command(
         index = 0
         while index < len(line):
             char = line[index]
+            if (
+                char == "#"
+                and not single
+                and not double
+                and (
+                    index == 0
+                    or line[index - 1] in " \t\r\n;|&()"
+                )
+            ):
+                break
             if char == "\\" and not single:
                 if index == len(line) - 1:
                     continuation = True
@@ -792,7 +1237,8 @@ def continued_shell_command(
         if not continuation:
             command.append("\n")
             positions.append((line_index + 1, len(line) + 1))
-            return "".join(command), positions, line_index + 1
+            if not single and not double:
+                return "".join(command), positions, line_index + 1
         line_index += 1
     return "".join(command), positions, line_index
 
@@ -832,7 +1278,17 @@ def scan_shell(
         command, positions, next_line = continued_shell_command(
             lines, line_index
         )
-        heredocs = lex_shell_command(command, positions)
+        heredocs, command_errors = lex_shell_command(command, positions)
+        for position, message in command_errors:
+            original_line, original_column = positions[
+                min(position, len(positions) - 1)
+            ]
+            errors.append(
+                Finding(
+                    Location(path, original_line, original_column),
+                    message,
+                )
+            )
         line_index = next_line
         for heredoc in heredocs:
             body: list[str] = []
@@ -865,7 +1321,7 @@ def scan_shell(
                     )
                 )
                 return findings, errors
-            if heredoc.python:
+            if heredoc.selected:
                 selected = "\n".join(body) + ("\n" if body else "")
                 found, broken = scan_python(selected, path, line_map)
                 findings.extend(found)
@@ -1061,12 +1517,15 @@ def write_fixture(root: Path, relative: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def historical_fixture(root: Path) -> None:
+def clean_unit_fixture(root: Path) -> None:
     for relative in HISTORICAL_PYTHON_UNITS:
         write_fixture(root, relative, "#!/usr/bin/env python3\n")
     for relative in HISTORICAL_SHELL_UNITS:
         write_fixture(root, relative, "#!/bin/sh\n")
 
+
+def historical_fixture(root: Path) -> None:
+    clean_unit_fixture(root)
     read_calls = {
         "tests/test-daemon-startup-recovery-boundary.py": 7,
         "tests/test-fact-root-writer-lease-boundary.py": 8,
@@ -1110,6 +1569,26 @@ PY
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def fixture_case(
+    root: Path,
+    relative: str,
+    source: str,
+    expected_findings: int,
+    expected_errors: int,
+    label: str,
+) -> ScanResult:
+    clean_unit_fixture(root)
+    write_fixture(root, relative, source)
+    result = scan_root(root)
+    require(
+        len(result.findings) == expected_findings
+        and len(result.errors) == expected_errors,
+        f"{label}: expected F={expected_findings}/E={expected_errors}, "
+        f"got F={len(result.findings)}/E={len(result.errors)}",
+    )
+    return result
 
 
 def clean_control_source() -> str:
@@ -1302,6 +1781,355 @@ python \\
                 any("UTF-8" in item.message for item in invalid_result.errors),
                 "invalid UTF-8 must fail closed",
             )
+
+            python_cases = (
+                (
+                    "if keeps pre-branch callable",
+                    """op = open
+if condition:
+    op = harmless
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "if joins protected and harmless branches",
+                    """if condition:
+    op = open
+else:
+    op = harmless
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "while keeps zero-iteration callable",
+                    """op = open
+while condition:
+    op = harmless
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "for keeps zero-iteration callable",
+                    """op = open
+for item in items:
+    op = harmless
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "try keeps normal-path callable",
+                    """op = open
+try:
+    risky()
+except Exception:
+    op = harmless
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "try keeps pre-assignment exception callable",
+                    """op = open
+try:
+    op = harmless
+except Exception:
+    pass
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "try keeps intermediate exception callable",
+                    """op = harmless
+try:
+    op = open
+    risky()
+    op = harmless
+except Exception:
+    pass
+op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "method skips class open binding",
+                    """class Example:
+    open = harmless
+    def method(self):
+        open("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "method does not capture class callable alias",
+                    """class Example:
+    op = open
+    def method(self):
+        op("x")
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "class body still scans callable alias",
+                    """class Example:
+    op = open
+    op("x")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "global declaration resolves before assignment",
+                    """op = open
+def function():
+    global op
+    op("x")
+    op = harmless
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "nonlocal declaration resolves before assignment",
+                    """def outer():
+    op = open
+    def inner():
+        nonlocal op
+        op("x")
+        op = harmless
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "protected call still scans Path receiver",
+                    """from pathlib import Path
+Path(open("x")).read_text(encoding="utf-8")
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "protected call still scans encoding argument",
+                    """from pathlib import Path
+path = Path("x")
+path.read_text(encoding=choose(open))
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "Path collection is not a Path value",
+                    """from pathlib import Path
+paths: list[Path]
+paths.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "Path collection loop target is a Path",
+                    """from pathlib import Path
+paths: list[Path]
+for path in paths:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "assigned generator and next preserve Path",
+                    """from pathlib import Path
+root = Path("x")
+paths = (path for path in root.glob("*"))
+next(paths).read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "comprehension target is a Path",
+                    """from pathlib import Path
+root = Path("x")
+texts = [path.read_text() for path in root.rglob("*")]
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "Path cwd and return methods preserve Path",
+                    """from pathlib import Path
+Path.cwd().expanduser().rename("x").replace("y").read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "Path home preserves Path",
+                    """from pathlib import Path
+Path.home().read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "branch join preserves Path provenance",
+                    """from pathlib import Path
+path = Path("x")
+if condition:
+    path = unknown
+path.read_text()
+""",
+                    1,
+                    0,
+                ),
+            )
+            python_unit = HISTORICAL_PYTHON_UNITS[0]
+            for label, source, findings, errors in python_cases:
+                fixture_case(
+                    root,
+                    python_unit,
+                    "#!/usr/bin/env python3\n" + source,
+                    findings,
+                    errors,
+                    label,
+                )
+
+            shell_cases = (
+                (
+                    "absolute Python executable",
+                    """/usr/bin/python3 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "versioned Python executable",
+                    """python3.12 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "env unset wrapper",
+                    """env -u PYTHONWARNINGS python3 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "exec wrapper",
+                    """exec python3 - <<PY
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "script source ignores heredoc",
+                    """python3 script.py <<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "command source ignores heredoc",
+                    """python3 -c pass <<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "implicit interactive source ignores heredoc",
+                    """python3 <<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "pipeline producer feeds Python stdin",
+                    """cat <<PY | python3 -
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "non-stdin descriptor heredoc is ignored",
+                    """python3 - 3<<PY
+open("x")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "last stdin heredoc wins clean",
+                    """python3 - <<OLD <<PY
+open("x")
+OLD
+open("x", encoding="utf-8")
+PY
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "last stdin heredoc wins dirty",
+                    """python3 - <<OLD <<PY
+open("x", encoding="utf-8")
+OLD
+open("x")
+PY
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "unsupported input syntax fails closed",
+                    """python3 - <<<'open("x")'
+""",
+                    0,
+                    1,
+                ),
+            )
+            shell_unit = HISTORICAL_SHELL_UNITS[0]
+            for label, source, findings, errors in shell_cases:
+                fixture_case(
+                    root,
+                    shell_unit,
+                    "#!/bin/sh\n" + source,
+                    findings,
+                    errors,
+                    label,
+                )
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
