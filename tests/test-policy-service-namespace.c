@@ -262,13 +262,16 @@ test_authorization_is_kind_aware (void)
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
           "svc:registered", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+  /* #614: a custom permission persisted with class 'basic' is control-plane,
+   * so a service principal can no longer be granted it directly. */
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:registered", "app.read", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+          "svc:registered", "app.read", "tenant-a", TRUE), ==,
+      WYRELOG_E_POLICY);
   gboolean has_permission = FALSE;
   g_assert_cmpint (wyl_policy_store_subject_has_permission (store,
           "svc:registered", "app.read", "tenant-a", &has_permission), ==,
       WYRELOG_E_OK);
-  g_assert_true (has_permission);
+  g_assert_false (has_permission);
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
 
