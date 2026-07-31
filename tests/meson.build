@@ -197,7 +197,8 @@ if build_client
   test_daemon_http_decide_deps += daemon_http_private_dep
   test_daemon_http_decide_link_with = []
   test_daemon_http_decide_targets = []
-  if host_machine.system() != 'windows'
+  if (host_machine.system() != 'windows' and
+      get_option('enable_fact_store').allowed())
     test_daemon_http_decide_private_companion = static_library(
       'test-daemon-http-decide-private-companion',
       '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
@@ -299,25 +300,27 @@ if build_client
     check_daemon_http_decide_private_symbols = find_program(
       '../tools/check-daemon-http-decide-private-symbols.py',
     )
-    test_daemon_http_decide_target_paths = []
-    foreach target : test_daemon_http_decide_targets
-      test_daemon_http_decide_target_paths += [target.full_path()]
-    endforeach
-    test('daemon-http-decide-private-symbols',
-      check_daemon_http_decide_private_symbols,
-      args : [
-        test_daemon_http_decide_private_companion.full_path(),
-        libwyrelog.full_path(),
-      ] + test_daemon_http_decide_target_paths,
-      depends : [
-        test_daemon_http_decide_private_companion,
-        libwyrelog,
-      ] + test_daemon_http_decide_targets,
-    )
     test('daemon-http-decide-private-symbols-self-test',
       check_daemon_http_decide_private_symbols,
       args : ['--self-test'],
     )
+    if get_option('enable_fact_store').allowed()
+      test_daemon_http_decide_target_paths = []
+      foreach target : test_daemon_http_decide_targets
+        test_daemon_http_decide_target_paths += [target.full_path()]
+      endforeach
+      test('daemon-http-decide-private-symbols',
+        check_daemon_http_decide_private_symbols,
+        args : [
+          test_daemon_http_decide_private_companion.full_path(),
+          libwyrelog.full_path(),
+        ] + test_daemon_http_decide_target_paths,
+        depends : [
+          test_daemon_http_decide_private_companion,
+          libwyrelog,
+        ] + test_daemon_http_decide_targets,
+      )
+    endif
   endif
 
   test_daemon_http_guards = executable('test-daemon-http-guards',
