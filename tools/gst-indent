@@ -1,24 +1,54 @@
 #!/bin/sh
-# wyrelog code style formatter (based on GStreamer's gst-indent)
-# Wraps GNU indent with project coding style options.
-# Run twice for idempotency.
+# wyrelog code style formatter (based on GStreamer's gst-indent).
 
-INDENT=""
-for i in gnuindent gindent indent; do
-  if command -v "$i" > /dev/null 2>&1; then
-    version=$("$i" --version 2>&1 | head -1)
-    case "$version" in
-      *GNU*) INDENT="$i"; break ;;
-    esac
+EXPECTED_VERSION="GNU indent 2.2.13"
+INDENT=
+FOUND_VERSIONS=
+
+for candidate in gnuindent gindent indent; do
+  if ! command -v "$candidate" > /dev/null 2>&1; then
+    continue
   fi
+
+  version=$("$candidate" --version 2>&1 | head -1)
+  if [ "$version" = "$EXPECTED_VERSION" ]; then
+    INDENT=$candidate
+    break
+  fi
+
+  case "$version" in
+    *GNU\ indent*)
+      FOUND_VERSIONS="${FOUND_VERSIONS}
+  $candidate: $version"
+      ;;
+  esac
 done
 
 if [ -z "$INDENT" ]; then
-  echo "GNU indent not found. Install it (e.g., brew install gnu-indent)" >&2
+  if [ -n "$FOUND_VERSIONS" ]; then
+    echo "format: GNU indent 2.2.13 is required; incompatible versions found:$FOUND_VERSIONS" >&2
+  else
+    echo "format: GNU indent 2.2.13 is required but was not found in PATH" >&2
+  fi
+  echo "format: run tools/install-gnu-indent.sh <absolute-prefix> or install gnu-indent 2.2.13" >&2
   exit 1
 fi
 
+if [ "${1-}" = "--check-version" ]; then
+  if [ "$#" -ne 1 ]; then
+    echo "usage: tools/gst-indent --check-version" >&2
+    exit 2
+  fi
+  echo "$EXPECTED_VERSION"
+  exit 0
+fi
+
 for f in "$@"; do
+  if [ ! -f "$f" ]; then
+    echo "format: input is not a regular file: $f" >&2
+    exit 1
+  fi
+
   "$INDENT" \
     --braces-on-if-line \
     --case-brace-indentation0 \

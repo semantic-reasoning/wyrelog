@@ -16,6 +16,26 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install pinned GNU indent
+        run: |
+          python3 --version
+          format_prefix="$RUNNER_TEMP/gnu-indent"
+          ./tools/install-gnu-indent.sh "$format_prefix"
+          echo "$format_prefix/bin" >> "$GITHUB_PATH"
+
+      - name: Check tracked C formatting
+        run: |
+          ./tools/check-format.sh --all
+          ./tools/test-format-tooling.sh
+
   build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
