@@ -32,6 +32,8 @@ EXECUTABLE_IMPORTS = {
     SEED_SYMBOL,
     STORAGE_OPEN_SYMBOL,
     LOAD_SYMBOL,
+    LOCK_ACQUIRE_SYMBOL,
+    LOCK_RELEASE_SYMBOL,
 }
 
 
@@ -67,6 +69,30 @@ def wyl_symbols(output: str, macho: bool) -> set[str]:
         if re.fullmatch(r"wyl_[A-Za-z0-9_]+", candidate):
             symbols.add(candidate)
     return symbols
+
+
+def dynamic_defined_external_symbols(output: str, macho: bool) -> set[str]:
+    symbols = set()
+    for line in output.splitlines():
+        match = re.fullmatch(
+            r"\s*[0-9A-Fa-f]+\s+[A-Za-z?]\s+(\S+)\s*",
+            line,
+        )
+        if match is None:
+            continue
+        candidate = match.group(1).split("@", 1)[0]
+        if macho and candidate.startswith("_"):
+            candidate = candidate[1:]
+        symbols.add(candidate)
+    return symbols
+
+
+def helper_exports_are_exact(exports: set[str]) -> bool:
+    return exports == {SEED_SYMBOL}
+
+
+def missing_executable_imports(imports: set[str]) -> set[str]:
+    return EXECUTABLE_IMPORTS - imports
 
 
 def find_tool(*names: str) -> str:
@@ -106,6 +132,13 @@ def defined_symbols(artifact: Path, macho: bool) -> set[str]:
 
 def exported_symbols(artifact: Path, macho: bool) -> set[str]:
     return wyl_symbols(
+        run(exported_command(find_tool("nm", "llvm-nm"), artifact, macho)),
+        macho,
+    )
+
+
+def dynamic_external_exports(artifact: Path, macho: bool) -> set[str]:
+    return dynamic_defined_external_symbols(
         run(exported_command(find_tool("nm", "llvm-nm"), artifact, macho)),
         macho,
     )
@@ -159,6 +192,41 @@ def self_test() -> int:
 """
     if wyl_symbols(macho, True) != {SEED_SYMBOL, LOAD_SYMBOL}:
         return 1
+    adversarial_helper_exports = """
+00000001 T wyl_test_daemon_http_seed_prepared_operation
+00000002 T unintended_helper_export
+"""
+    parsed_helper_exports = dynamic_defined_external_symbols(
+        adversarial_helper_exports,
+        False,
+    )
+    if parsed_helper_exports != {SEED_SYMBOL, "unintended_helper_export"}:
+        return 1
+    if helper_exports_are_exact(parsed_helper_exports):
+        return 1
+    if not helper_exports_are_exact({SEED_SYMBOL}):
+        return 1
+    macho_helper_exports = """
+00000001 T _wyl_test_daemon_http_seed_prepared_operation
+00000002 T _unintended_helper_export
+"""
+    if dynamic_defined_external_symbols(macho_helper_exports, True) != {
+        SEED_SYMBOL,
+        "unintended_helper_export",
+    }:
+        return 1
+    lockless_imports = {
+        SEED_SYMBOL,
+        STORAGE_OPEN_SYMBOL,
+        LOAD_SYMBOL,
+    }
+    if missing_executable_imports(lockless_imports) != {
+        LOCK_ACQUIRE_SYMBOL,
+        LOCK_RELEASE_SYMBOL,
+    }:
+        return 1
+    if missing_executable_imports(EXECUTABLE_IMPORTS):
+        return 1
     artifact = Path("/tmp/test-daemon-http-decide")
     if defined_command("nm", artifact, False) != [
             "nm", "--defined-only", str(artifact)]:
@@ -209,7 +277,7 @@ def main() -> int:
 
     macho = sys.platform == "darwin"
     try:
-        helper_exports = exported_symbols(helper, macho)
+        helper_exports = dynamic_external_exports(helper, macho)
         helper_definitions = defined_symbols(helper, macho)
         library_exports = exported_symbols(library, macho)
         library_definitions = defined_symbols(library, macho)
@@ -227,9 +295,9 @@ def main() -> int:
         print(error, file=sys.stderr)
         return 1
 
-    if helper_exports != {SEED_SYMBOL}:
+    if not helper_exports_are_exact(helper_exports):
         print(
-            "seed helper exported Wyl symbols mismatch:",
+            "seed helper dynamic external exports mismatch:",
             *sorted(helper_exports),
             sep="\n  ",
             file=sys.stderr,
@@ -297,7 +365,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        missing_imports = EXECUTABLE_IMPORTS - imports
+        missing_imports = missing_executable_imports(imports)
         if missing_imports:
             print(
                 f"{executable} seed/provider imports missing:",
