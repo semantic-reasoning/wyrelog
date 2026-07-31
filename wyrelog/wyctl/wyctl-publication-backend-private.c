@@ -36,7 +36,7 @@ adapter_plan (gpointer self, const WyctlPublicationPlan *request,
     WyctlPublicationPlan *out_plan)
 {
   return WYCTL_PUB_CONCRETE (plan) ((const WyctlPublicationConcreteBackend *)
-             self, request, out_plan);
+      self, request, out_plan);
 }
 
 static wyrelog_error_t
@@ -44,7 +44,7 @@ adapter_prepare (gpointer self, const WyctlPublicationPlan *plan,
     WyctlPublicationReceipt *out_receipt)
 {
   return WYCTL_PUB_CONCRETE (prepare) ((const WyctlPublicationConcreteBackend *)
-             self, plan, out_receipt);
+      self, plan, out_receipt);
 }
 
 static wyrelog_error_t
@@ -55,8 +55,8 @@ adapter_stage_exact (gpointer self, const WyctlPublicationPlan *plan,
     WyctlPublicationResult *out_result, gboolean *out_replayed)
 {
   return WYCTL_PUB_CONCRETE (stage_exact) ((const
-             WyctlPublicationConcreteBackend *) self, plan, credential_id,
-             credential_secret, out_receipt, out_result, out_replayed);
+          WyctlPublicationConcreteBackend *) self, plan, credential_id,
+      credential_secret, out_receipt, out_result, out_replayed);
 }
 
 static wyrelog_error_t
@@ -67,8 +67,8 @@ adapter_receipt_target_acquire (gpointer self,
     WyctlPublicationReceiptTargetKind *out_kind)
 {
   return WYCTL_PUB_CONCRETE (receipt_target_acquire) ((const
-             WyctlPublicationConcreteBackend *) self, plan, receipt,
-             require_destination, out_lease, out_kind);
+          WyctlPublicationConcreteBackend *) self, plan, receipt,
+      require_destination, out_lease, out_kind);
 }
 
 static wyrelog_error_t
@@ -79,8 +79,8 @@ adapter_receipt_target_inspect (gpointer self,
     WyctlPublicationResult *out_result)
 {
   return WYCTL_PUB_CONCRETE (receipt_target_inspect) ((const
-             WyctlPublicationConcreteBackend *) self, lease,
-             expected_credential_id, expected_credential_secret, out_result);
+          WyctlPublicationConcreteBackend *) self, lease,
+      expected_credential_id, expected_credential_secret, out_result);
 }
 
 static wyrelog_error_t
@@ -91,8 +91,8 @@ adapter_receipt_target_commit (gpointer self,
     WyctlPublicationResult *out_result)
 {
   return WYCTL_PUB_CONCRETE (receipt_target_commit) ((const
-             WyctlPublicationConcreteBackend *) self, lease,
-             expected_credential_id, expected_credential_secret, out_result);
+          WyctlPublicationConcreteBackend *) self, lease,
+      expected_credential_id, expected_credential_secret, out_result);
 }
 
 static void
@@ -100,7 +100,7 @@ adapter_receipt_target_release (gpointer self,
     WyctlPublicationReceiptTargetLease *lease)
 {
   WYCTL_PUB_CONCRETE (receipt_target_release) ((const
-      WyctlPublicationConcreteBackend *) self, lease);
+          WyctlPublicationConcreteBackend *) self, lease);
 }
 
 /* Conformance-path shims: the concrete functions take an extra plan the vtable
@@ -117,9 +117,8 @@ adapter_commit (gpointer self, WyctlPublicationReceipt *receipt,
 
   plan_borrow_from_receipt (receipt, &plan);
   return WYCTL_PUB_CONCRETE (commit) ((const WyctlPublicationConcreteBackend *)
-             self, &plan, receipt, credential_id,
-             credential_secret != NULL ? credential_secret->text : NULL,
-             out_result);
+      self, &plan, receipt, credential_id,
+      credential_secret != NULL ? credential_secret->text : NULL, out_result);
 }
 
 static wyrelog_error_t
@@ -132,9 +131,8 @@ adapter_inspect (gpointer self, const WyctlPublicationReceipt *receipt,
 
   plan_borrow_from_receipt (receipt, &plan);
   return WYCTL_PUB_CONCRETE (inspect) ((const WyctlPublicationConcreteBackend *)
-             self, &plan, receipt, expected_credential_id,
-             expected_credential_secret,
-             out_result);
+      self, &plan, receipt, expected_credential_id,
+      expected_credential_secret, out_result);
 }
 
 static wyrelog_error_t
@@ -147,9 +145,8 @@ adapter_resync (gpointer self, const WyctlPublicationReceipt *receipt,
 
   plan_borrow_from_receipt (receipt, &plan);
   return WYCTL_PUB_CONCRETE (resync) ((const WyctlPublicationConcreteBackend *)
-             self, &plan, receipt, expected_credential_id,
-             expected_credential_secret,
-             out_result);
+      self, &plan, receipt, expected_credential_id,
+      expected_credential_secret, out_result);
 }
 
 static wyrelog_error_t
@@ -162,9 +159,8 @@ adapter_cleanup (gpointer self, const WyctlPublicationReceipt *receipt,
 
   plan_borrow_from_receipt (receipt, &plan);
   return WYCTL_PUB_CONCRETE (cleanup) ((const WyctlPublicationConcreteBackend *)
-             self, &plan, receipt, expected_credential_id,
-             expected_credential_secret,
-             out_result);
+      self, &plan, receipt, expected_credential_id,
+      expected_credential_secret, out_result);
 }
 
 /* Read-only accessor shim: identical signature to the concrete free function,
@@ -173,7 +169,7 @@ static wyrelog_error_t
 adapter_root_identity (gpointer self, gchar **out_identity)
 {
   return WYCTL_PUB_CONCRETE (root_identity) ((const
-             WyctlPublicationConcreteBackend *) self, out_identity);
+          WyctlPublicationConcreteBackend *) self, out_identity);
 }
 
 static const WyctlPublicationBackendVTable adapter_vtable = {
