@@ -11,6 +11,7 @@
 #include "auth/mfa-enrollment-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/decide.h"
+#include "wyrelog/policy/service-permission-maintenance-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
@@ -139,6 +140,15 @@ typedef struct
   gchar *from_keyprovider_path;
   gchar *to_keyprovider_path;
 } WyctlKeyOptions;
+
+typedef struct
+{
+  gchar *store_path;
+  gchar *keyprovider_path;
+  gchar *manifest_path;
+  gchar *output_path;
+  gchar *receipt_path;
+} WyctlServicePermissionClosureOptions;
 
 typedef struct
 {
@@ -3975,6 +3985,220 @@ run_service_credential (const WyctlOptions *global_opts, gint argc,
   return 2;
 }
 
+/*
+ * Open the encrypted policy store named by --store under an owner-restricted
+ * KeyProvider spec, taking it maintenance-exclusive: the offline
+ * service-permission-closure tool runs daemon-stopped and pins the store
+ * file's own identity under a #371 maintenance lease (fail-closed on
+ * symlink/hardlink/owner/mode drift, WYRELOG_E_BUSY when a daemon or peer
+ * already holds the store). --keyprovider is mandatory; owner-only file access
+ * to the store, key, manifest, and receipt is the only authz boundary. The
+ * minted provider is consumed under the open-ownership contract.
+ */
+static wyrelog_error_t
+service_permission_closure_open_store (const
+    WyctlServicePermissionClosureOptions *opts, wyl_policy_store_t **out_store)
+{
+  if (opts->store_path == NULL || opts->store_path[0] == '\0'
+      || opts->keyprovider_path == NULL || opts->keyprovider_path[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyl_keyprovider_file_t *keyprovider =
+      wyl_keyprovider_file_new_from_spec (opts->keyprovider_path);
+  if (keyprovider == NULL)
+    return WYRELOG_E_IO;
+  wyl_policy_store_open_options_t open_opts = {
+    .path = opts->store_path,
+    .keyprovider_vtable = wyl_keyprovider_file_get_vtable (),
+    .keyprovider_state = keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+    .maintenance_exclusive = TRUE,
+  };
+  return wyl_policy_store_open_with_options (&open_opts, out_store);
+}
+
+/* Stable, secret-free progress line: category counts and the authority digest
+ * only. Never prints subjects, permissions, scopes, or manifest contents. */
+static void
+service_permission_closure_print_analysis (const
+    WylPolicyPermissionClosureAnalysis *analysis, const gchar *status)
+{
+  gchar digest[65];
+  for (guint i = 0; i < 32; i++)
+    g_snprintf (digest + i * 2, 3, "%02x", analysis->digest[i]);
+  g_print ("status=%s generation=%" G_GUINT64_FORMAT
+      " digest=%s operations=%u unsafe_permissions=%u"
+      " dangling_subjects=%u dangling_roles=%u\n", status,
+      analysis->generation, digest, analysis->removals->len,
+      analysis->unsafe_permission_count, analysis->dangling_subject_count,
+      analysis->dangling_role_count);
+  sodium_memzero (digest, sizeof digest);
+}
+
+/* inspect: read-only. Analyze the persisted closure and, when it is unsafe,
+ * write a fresh owner-only canonical removal manifest to --output. Never
+ * mutates and never emits subjects/permissions to the log. */
+static int
+run_service_permission_closure_inspect (gint argc, gchar **argv)
+{
+  WyctlServicePermissionClosureOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Encrypted policy store", "PATH"},
+    {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
+        "Policy KeyProvider spec", "SPEC"},
+    {"output", 0, 0, G_OPTION_ARG_STRING, &opts.output_path,
+        "Create owner-only removal manifest", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- inspect offline service permission closure");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1 || opts.store_path == NULL || opts.keyprovider_path == NULL
+      || opts.output_path == NULL) {
+    g_printerr
+        ("wyctl: inspect requires --store, --keyprovider, and --output\n");
+    return 2;
+  }
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = service_permission_closure_open_store (&opts, &store);
+  WylPolicyPermissionClosureAnalysis analysis = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_analyze_service_permission_closure (store, &analysis);
+  if (rc == WYRELOG_E_OK && analysis.removals->len == 0) {
+    service_permission_closure_print_analysis (&analysis, "clean");
+  } else if (rc == WYRELOG_E_OK) {
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+    WylServicePermissionManifest manifest = { 0 };
+    rc = wyl_request_id_new (request_id, sizeof request_id);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_permission_manifest_from_analysis (&analysis,
+          request_id, &manifest);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_permission_manifest_write_new_owner_only
+          (opts.output_path, &manifest);
+    if (rc == WYRELOG_E_OK)
+      service_permission_closure_print_analysis (&analysis, "manifest_created");
+    wyl_service_permission_manifest_clear (&manifest);
+  }
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+  if (store != NULL)
+    wyl_policy_store_close (store);
+  if (rc != WYRELOG_E_OK)
+    g_printerr ("wyctl: service permission closure inspect failed: %s\n",
+        wyrelog_error_string (rc));
+  return rc == WYRELOG_E_OK ? 0 : 1;
+}
+
+/* dry-run and apply share manifest ingestion and store opening. dry-run
+ * validates in an always-rolled-back transaction and emits no receipt; apply
+ * drives the #371 maintenance write and writes the immutable receipt to
+ * --receipt. Both consume the store (the maintenance handle closes it). */
+static int
+run_service_permission_closure_manifest_command (gboolean apply, gint argc,
+    gchar **argv)
+{
+  WyctlServicePermissionClosureOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Encrypted policy store", "PATH"},
+    {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
+        "Policy KeyProvider spec", "SPEC"},
+    {"manifest", 0, 0, G_OPTION_ARG_STRING, &opts.manifest_path,
+        "Owner-only canonical removal manifest", "PATH"},
+    {"receipt", 0, 0, G_OPTION_ARG_STRING, &opts.receipt_path,
+        "Create owner-only durable apply receipt", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new (apply ?
+      "- apply offline service permission closure removals" :
+      "- dry-run offline service permission closure removals");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1 || opts.store_path == NULL || opts.keyprovider_path == NULL
+      || opts.manifest_path == NULL || (apply && opts.receipt_path == NULL)
+      || (!apply && opts.receipt_path != NULL)) {
+    g_printerr ("wyctl: %s requires --store, --keyprovider, --manifest%s\n",
+        apply ? "apply" : "dry-run", apply ? ", and --receipt" : "");
+    return 2;
+  }
+  WylServicePermissionManifest manifest = { 0 };
+  wyrelog_error_t rc = wyl_service_permission_manifest_read_owner_only
+      (opts.manifest_path, &manifest);
+  wyl_policy_store_t *store = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = service_permission_closure_open_store (&opts, &store);
+  if (rc == WYRELOG_E_OK && !apply) {
+    /* dry-run: adopt consumes the store on every outcome. */
+    rc = wyl_service_permission_maintenance_dry_run (store, &manifest);
+    store = NULL;
+    if (rc == WYRELOG_E_OK)
+      g_print ("status=dry_run_valid request_id=%s operations=%u\n",
+          manifest.request_id, manifest.operations->len);
+  } else if (rc == WYRELOG_E_OK) {
+    wyl_policy_service_permission_receipt_t receipt = { 0 };
+    rc = wyl_service_permission_maintenance_apply (store, &manifest, &receipt);
+    store = NULL;               /* apply always consumes the store */
+    if (rc == WYRELOG_E_OK) {
+      /* Durable removal is already committed; a failure to persist the receipt
+       * leaves no receipt but the change stands. Recover by replaying this
+       * exact apply (idempotent by request_id) with a fresh --receipt path. */
+      rc = wyl_service_permission_receipt_write_new_owner_only
+          (opts.receipt_path, &receipt);
+      if (rc != WYRELOG_E_OK)
+        g_printerr ("status=RECEIPT_OUTPUT_FAILED request_id=%s audit_id=%s"
+            " recovery=\"replay this exact apply with the same manifest and a"
+            " fresh --receipt path\"\n", receipt.request_id,
+            receipt.audit_id == NULL ? "" : receipt.audit_id);
+    }
+    if (rc == WYRELOG_E_OK)
+      g_print ("status=applied request_id=%s operations=%" G_GUINT64_FORMAT
+          " actor=%s audit_id=%s applied_at_us=%" G_GINT64_FORMAT
+          " pre_generation=%" G_GUINT64_FORMAT " post_generation=%"
+          G_GUINT64_FORMAT "\n", receipt.request_id, receipt.operation_count,
+          receipt.actor_identity, receipt.audit_id == NULL ? "" :
+          receipt.audit_id, receipt.applied_at_us, receipt.pre_generation,
+          receipt.post_generation);
+    wyl_policy_service_permission_receipt_clear (&receipt);
+  }
+  if (store != NULL)
+    wyl_policy_store_close (store);
+  wyl_service_permission_manifest_clear (&manifest);
+  if (rc != WYRELOG_E_OK)
+    g_printerr ("wyctl: service permission closure %s failed: %s\n",
+        apply ? "apply" : "dry-run", wyrelog_error_string (rc));
+  return rc == WYRELOG_E_OK ? 0 : 1;
+}
+
+static int
+run_service_permission_closure (gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing service-permission-closure command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "inspect") == 0)
+    return run_service_permission_closure_inspect (argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "dry-run") == 0)
+    return run_service_permission_closure_manifest_command (FALSE,
+        argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "apply") == 0)
+    return run_service_permission_closure_manifest_command (TRUE,
+        argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown service-permission-closure command: %s\n",
+      argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -4040,6 +4264,8 @@ main (int argc, char **argv)
     return run_service_principal (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-credential") == 0)
     return run_service_credential (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "service-permission-closure") == 0)
+    return run_service_permission_closure (argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;
