@@ -1858,6 +1858,8 @@ const gchar *wyl_policy_store_approved_data_plane_permission_id (gsize idx);
 wyrelog_error_t wyl_policy_store_role_is_service_eligible
     (wyl_policy_store_t * store, const gchar * role_id,
     gboolean * out_eligible);
+wyrelog_error_t wyl_policy_store_validate_service_permission_closure
+    (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *
