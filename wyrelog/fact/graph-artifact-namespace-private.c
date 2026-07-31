@@ -6,6 +6,9 @@
 #endif
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#ifndef G_OS_WIN32
+#include "fact/graph-provisioned-pair-internal.h"
+#endif
 #include "wyl-id-private.h"
 #include <string.h>
 
@@ -790,6 +793,7 @@ struct WylFactArtifactNamespace
   gint lock_pin_fd;
   guint64 lock_device, lock_inode;
   WylFactArtifactLockDomain *lock_domain;
+  WylFactGraphProvisionedPair *provisioned_pair;
 };
 struct WylFactArtifactLockDomain
 {
@@ -980,7 +984,7 @@ check_directory (WylFactArtifactNamespace *n)
 }
 
 static wyrelog_error_t
-check (WylFactArtifactNamespace *n)
+check_generic (WylFactArtifactNamespace *n)
 {
   struct stat held, named;
   if (check_directory (n) != WYRELOG_E_OK || n->main_fd < 0
@@ -997,6 +1001,35 @@ check (WylFactArtifactNamespace *n)
       || (guint64) named.st_ino != n->main_inode)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+check_provisioned_pair (WylFactArtifactNamespace *n)
+{
+  struct stat directory, held;
+  if (n == NULL || n->provisioned_pair == NULL
+      || wyl_fact_graph_provisioned_pair_revalidate (n->provisioned_pair)
+      != WYRELOG_E_OK || n->fd < 0 || fstat (n->fd, &directory) != 0
+      || !S_ISDIR (directory.st_mode) || (directory.st_mode & 07777) != 0700
+      || (guint64) directory.st_uid != n->owner
+      || (guint64) directory.st_dev != n->device
+      || (guint64) directory.st_ino != n->inode || n->main_fd < 0
+      || fstat (n->main_fd, &held) != 0 || !S_ISREG (held.st_mode)
+      || held.st_nlink != 2 || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_uid != n->owner
+      || (guint64) held.st_dev != n->main_device
+      || (guint64) held.st_ino != n->main_inode)
+    return WYRELOG_E_POLICY;
+  gint flags = fcntl (n->main_fd, F_GETFL);
+  return flags >= 0 && (flags & O_ACCMODE) == O_RDWR
+      ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+check (WylFactArtifactNamespace *n)
+{
+  return n != NULL && n->provisioned_pair != NULL
+      ? check_provisioned_pair (n) : check_generic (n);
 }
 
 static gint
@@ -1034,6 +1067,7 @@ namespace_unref (WylFactArtifactNamespace *n)
   if (n->lock_pin_fd >= 0)
     close (n->lock_pin_fd);
   release_lock_domain (n);
+  wyl_fact_graph_provisioned_pair_free (n->provisioned_pair);
   g_free (n);
 }
 
@@ -1304,6 +1338,72 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+    wyl_fact_artifact_namespace_open_provisioned_pair
+    (WylFactGraphProvisionedPair * pair, WylFactArtifactNamespace ** o) {
+  if (o != NULL)
+    *o = NULL;
+  if (pair == NULL || o == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gint fd = duplicate_cloexec (pair->directory.graph_fd);
+  gint main_fd = duplicate_cloexec (pair->writable_final_fd);
+  if (fd < 0 || main_fd < 0) {
+    if (fd >= 0)
+      close (fd);
+    if (main_fd >= 0)
+      close (main_fd);
+    return WYRELOG_E_IO;
+  }
+  rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  struct stat directory, main;
+  if (rc == WYRELOG_E_OK
+      && (fstat (fd, &directory) != 0 || !S_ISDIR (directory.st_mode)
+          || (directory.st_mode & 07777) != 0700
+          || directory.st_uid != geteuid ()
+          || (guint64) directory.st_dev != pair->directory.graph_device
+          || (guint64) directory.st_ino != pair->directory.graph_inode
+          || fstat (main_fd, &main) != 0 || !S_ISREG (main.st_mode)
+          || main.st_nlink != 2 || (main.st_mode & 07777) != 0600
+          || main.st_uid != geteuid ()
+          || (guint64) main.st_dev != pair->expected_device
+          || (guint64) main.st_ino != pair->expected_inode
+          || (fcntl (main_fd, F_GETFL) & O_ACCMODE) != O_RDWR))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK) {
+    close (fd);
+    close (main_fd);
+    return rc;
+  }
+  WylFactArtifactNamespace *n = g_try_new0 (WylFactArtifactNamespace, 1);
+  if (n == NULL) {
+    close (fd);
+    close (main_fd);
+    return WYRELOG_E_NOMEM;
+  }
+  n->references = 1;
+  n->fd = fd;
+  n->main_fd = main_fd;
+  n->lock_pin_fd = -1;
+  n->device = directory.st_dev;
+  n->inode = directory.st_ino;
+  n->owner = directory.st_uid;
+  n->main_device = main.st_dev;
+  n->main_inode = main.st_ino;
+  n->provisioned_pair = wyl_fact_graph_provisioned_pair_ref (pair);
+  rc = pin_lock_domain (n);
+  if (rc == WYRELOG_E_OK)
+    rc = check_provisioned_pair (n);
+  if (rc != WYRELOG_E_OK) {
+    namespace_unref (n);
+    return rc;
+  }
+  *o = n;
+  return WYRELOG_E_OK;
+}
+
 void
 wyl_fact_artifact_namespace_free (WylFactArtifactNamespace *n)
 {
@@ -1495,6 +1595,19 @@ main_binding_matches_unlocked (WylFactArtifactMainBinding *binding)
   WylFactArtifactMutationLease *lease = binding->lease;
   WylFactArtifactNamespace *namespace_ = lease->namespace_;
   struct stat pinned, named;
+  if (namespace_->provisioned_pair != NULL) {
+    if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
+        || !S_ISREG (pinned.st_mode) || pinned.st_nlink != 2
+        || (pinned.st_mode & 07777) != 0600
+        || (guint64) pinned.st_uid != namespace_->owner
+        || (guint64) pinned.st_dev != binding->device
+        || (guint64) pinned.st_ino != binding->inode
+        || binding->device != namespace_->main_device
+        || binding->inode != namespace_->main_inode
+        || check_provisioned_pair (namespace_) != WYRELOG_E_OK)
+      return WYRELOG_E_POLICY;
+    return WYRELOG_E_OK;
+  }
   if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
       || !S_ISREG (pinned.st_mode) || pinned.st_nlink != 1
       || (pinned.st_mode & 07777) != 0600
@@ -1727,9 +1840,12 @@ main_binding_revalidate_fd_unlocked (WylFactArtifactMainBinding *binding,
 {
   wyrelog_error_t result = main_binding_revalidate_unlocked (binding);
   struct stat working;
+  guint64 required_links =
+      binding->lease->namespace_->provisioned_pair != NULL ? 2 : 1;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
-          || !S_ISREG (working.st_mode) || working.st_nlink != 1
+          || !S_ISREG (working.st_mode)
+          || (guint64) working.st_nlink != required_links
           || (working.st_mode & 07777) != 0600
           || (guint64) working.st_uid != binding->lease->namespace_->owner
           || (guint64) working.st_dev != binding->device
@@ -1752,20 +1868,24 @@ wyrelog_error_t
     return WYRELOG_E_POLICY;
 
   g_mutex_lock (&lease->mutex);
-  wyrelog_error_t result = lease_revalidate_without_named_main_unlocked (lease);
+  wyrelog_error_t result = lease->namespace_->provisioned_pair != NULL
+      ? lease_revalidate_unlocked (lease)
+      : lease_revalidate_without_named_main_unlocked (lease);
   if (result != WYRELOG_E_OK)
     goto done;
   struct stat named;
-  if (fstatat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
+  if (lease->namespace_->provisioned_pair == NULL
+      && fstatat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
           &named, AT_SYMLINK_NOFOLLOW) != 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
     goto done;
   }
-  if (!S_ISREG (named.st_mode) || named.st_nlink != 1
-      || (named.st_mode & 07777) != 0600
-      || (guint64) named.st_uid != lease->namespace_->owner
-      || (guint64) named.st_dev != lease->namespace_->main_device
-      || (guint64) named.st_ino != lease->namespace_->main_inode) {
+  if (lease->namespace_->provisioned_pair == NULL
+      && (!S_ISREG (named.st_mode) || named.st_nlink != 1
+          || (named.st_mode & 07777) != 0600
+          || (guint64) named.st_uid != lease->namespace_->owner
+          || (guint64) named.st_dev != lease->namespace_->main_device
+          || (guint64) named.st_ino != lease->namespace_->main_inode)) {
     result = WYRELOG_E_POLICY;
     goto done;
   }
@@ -1774,11 +1894,18 @@ wyrelog_error_t
     goto done;
   if (namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
-    result = namespace_test_main_open_aba (lease->namespace_);
+    result = lease->namespace_->provisioned_pair != NULL
+        ? WYRELOG_E_POLICY : namespace_test_main_open_aba (lease->namespace_);
     goto done;
   }
-  gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
-      O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  gint fd = -1;
+  if (lease->namespace_->provisioned_pair != NULL)
+    result = duplicate_imported_main (lease->namespace_, &fd);
+  else
+    fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
+        O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  if (result != WYRELOG_E_OK)
+    goto done;
   if (fd < 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
         : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
@@ -1788,8 +1915,9 @@ wyrelog_error_t
   if (namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE))
   {
-    result = namespace_test_substitute_regular (lease->namespace_,
-        name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
+    result = lease->namespace_->provisioned_pair != NULL
+        ? WYRELOG_E_POLICY : namespace_test_substitute_regular
+        (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
     if (result != WYRELOG_E_OK) {
       close (fd);
       goto done;
@@ -1883,8 +2011,10 @@ reader_main_binding_matches_unlocked (WylFactArtifactReaderMainBinding *binding)
   WylFactArtifactMutationLease *lease = binding->lease;
   WylFactArtifactNamespace *namespace_ = lease->namespace_;
   struct stat pinned;
+  guint64 required_links = namespace_->provisioned_pair != NULL ? 2 : 1;
   if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
-      || !S_ISREG (pinned.st_mode) || pinned.st_nlink != 1
+      || !S_ISREG (pinned.st_mode)
+      || (guint64) pinned.st_nlink != required_links
       || (pinned.st_mode & 07777) != 0600
       || (guint64) pinned.st_uid != namespace_->owner
       || (guint64) pinned.st_dev != binding->device
@@ -1916,9 +2046,12 @@ static wyrelog_error_t
 {
   wyrelog_error_t result = reader_main_binding_revalidate_unlocked (binding);
   struct stat working;
+  guint64 required_links =
+      binding->lease->namespace_->provisioned_pair != NULL ? 2 : 1;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
-          || !S_ISREG (working.st_mode) || working.st_nlink != 1
+          || !S_ISREG (working.st_mode)
+          || (guint64) working.st_nlink != required_links
           || (working.st_mode & 07777) != 0600
           || (guint64) working.st_uid != binding->lease->namespace_->owner
           || (guint64) working.st_dev != binding->device
@@ -1949,18 +2082,26 @@ wyrelog_error_t
   if (namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO))
   {
-    result = namespace_test_substitute_fifo (lease->namespace_,
-        name_for (WYL_FACT_ARTIFACT_MAIN));
+    result = lease->namespace_->provisioned_pair != NULL
+        ? WYRELOG_E_POLICY : namespace_test_substitute_fifo
+        (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN));
     if (result != WYRELOG_E_OK)
       goto done;
   }
   if (namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
-    result = namespace_test_main_open_aba (lease->namespace_);
+    result = lease->namespace_->provisioned_pair != NULL
+        ? WYRELOG_E_POLICY : namespace_test_main_open_aba (lease->namespace_);
     goto done;
   }
-  gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
-      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+  gint fd = -1;
+  if (lease->namespace_->provisioned_pair != NULL)
+    result = duplicate_imported_main (lease->namespace_, &fd);
+  else
+    fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+  if (result != WYRELOG_E_OK)
+    goto done;
   if (fd < 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
         : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
@@ -1970,8 +2111,9 @@ wyrelog_error_t
   if (namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE))
   {
-    result = namespace_test_substitute_regular (lease->namespace_,
-        name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
+    result = lease->namespace_->provisioned_pair != NULL
+        ? WYRELOG_E_POLICY : namespace_test_substitute_regular
+        (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
     if (result != WYRELOG_E_OK) {
       close (fd);
       goto done;

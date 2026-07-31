@@ -3971,6 +3971,96 @@ test_duckdb_temp_root (void)
 #endif
 }
 
+#ifndef G_OS_WIN32
+static void
+test_provisioned_pair_namespace (void)
+{
+  const gint baseline_fds = count_open_fds ();
+  static const gchar operation_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
+  g_autofree gchar *base = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_resolver_open (base, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+          TRUE, &directory), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&directory);
+  g_autofree gchar *tenant_path = g_path_get_dirname (graph_path);
+  g_autofree gchar *stage_path = g_build_filename (graph_path,
+      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
+      NULL);
+  g_autofree gchar *lock_path =
+      g_build_filename (graph_path, "facts.duckdb.lock", NULL);
+  g_assert_true (g_file_set_contents (stage_path, "", 0, NULL));
+  g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+  g_assert_cmpint (link (stage_path, final_path), ==, 0);
+
+  /* The generic constructor remains exactly nlink=1. */
+  gint generic_fd = open (final_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (generic_fd, >=, 0);
+  struct stat generic_stat;
+  g_assert_cmpint (fstat (generic_fd, &generic_stat), ==, 0);
+  WylFactGraphRegularFile generic =
+      (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  generic.fd = generic_fd;
+  generic.device = generic_stat.st_dev;
+  generic.inode = generic_stat.st_ino;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open (&directory, &generic,
+          &namespace_), ==, WYRELOG_E_POLICY);
+  g_assert_null (namespace_);
+  wyl_fact_graph_regular_file_clear (&generic);
+
+  WylFactGraphProvisionedPair *pair = NULL;
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&directory, operation_uuid, &pair), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair (pair,
+          &namespace_), ==, WYRELOG_E_OK);
+
+  /* Namespace ownership is independent of both caller inputs. */
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (namespace_), ==,
+      WYRELOG_E_OK);
+
+  WylFactArtifactMutationLease *lease = NULL;
+  WylFactArtifactMainBinding *binding = NULL;
+  gint fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &binding, &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fcntl (fd, F_GETFL) & O_ACCMODE, ==, O_RDWR);
+  g_assert_cmpint (pwrite (fd, "pair", 4, 0), ==, 4);
+  g_assert_cmpint (ftruncate (fd, 4), ==, 0);
+  g_assert_cmpint (fsync (fd), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_close (binding, &fd), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_main_binding_free (binding);
+  wyl_fact_artifact_mutation_lease_free (lease);
+
+  g_assert_cmpint (unlink (stage_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (namespace_), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_namespace_free (namespace_);
+  g_assert_cmpint (unlink (final_path), ==, 0);
+  g_assert_cmpint (unlink (lock_path), ==, 0);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+  g_assert_cmpint (count_open_fds (), ==, baseline_fds);
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -4003,5 +4093,9 @@ main (int argc, char **argv)
       test_existing_sidecar_reopen);
   g_test_add_func ("/fact-artifact-namespace/duckdb-temp-root",
       test_duckdb_temp_root);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/fact-artifact-namespace/provisioned-pair",
+      test_provisioned_pair_namespace);
+#endif
   return g_test_run ();
 }

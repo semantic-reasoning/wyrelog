@@ -14,6 +14,12 @@ types = (
 windows = (
     root / "wyrelog/fact/secure-duckdb-bridge-windows-private.c"
 ).read_text()
+locator_types = (
+    root / "wyrelog/fact/graph-locator-private.h"
+).read_text()
+namespace_types = (
+    root / "wyrelog/fact/graph-artifact-namespace-private.h"
+).read_text()
 
 for forbidden in ("#include <duckdb.h>", "#include <duckdb.hpp>", "ToString"):
     if forbidden in core:
@@ -53,6 +59,8 @@ for required in (
     "wyl_fact_artifact_mutation_lease_revalidate",
     "WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT",
     "WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE",
+    "wyl_fact_store_open_identified_provisioned_pair_pinned",
+    "wyl_fact_artifact_namespace_open_provisioned_pair",
 ):
     if required not in bridge:
         raise SystemExit(f"pinned source adapter lost contract: {required}")
@@ -64,5 +72,17 @@ if "unsuitable" not in header or "security-sensitive provisioning" not in header
     raise SystemExit("legacy pathname warning is missing")
 if "returns no live DuckDB handle" not in types:
     raise SystemExit("pinned one-shot handle boundary is missing")
+if "typedef struct WylFactGraphProvisionedPair" not in locator_types:
+    raise SystemExit("retained-pair authority is not opaque")
+if "wyl_fact_artifact_namespace_open_provisioned_pair" not in namespace_types:
+    raise SystemExit("operation namespace handoff is missing")
+pair_declaration = types.split(
+    "wyl_fact_store_open_identified_provisioned_pair_pinned", 1
+)[1].split(";", 1)[0]
+for forbidden in ("gchar", "gint", "WylFactGraphDirectory"):
+    if forbidden in pair_declaration:
+        raise SystemExit(
+            f"pair handoff exposes raw or mutable authority: {forbidden}"
+        )
 if "WYL_FACT_STORE_IDENTITY_RESULT_OPEN" not in windows:
     raise SystemExit("Windows fail-closed result classification is missing")

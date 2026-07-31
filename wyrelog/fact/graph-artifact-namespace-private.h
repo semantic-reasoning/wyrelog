@@ -122,6 +122,12 @@ wyrelog_error_t wyl_fact_artifact_namespace_open
     (const WylFactGraphDirectory * directory,
     const WylFactGraphRegularFile * main_file,
     WylFactArtifactNamespace ** out_namespace);
+#ifndef G_OS_WIN32
+/* Imports only the immutable authority held by an exact retained pair. */
+wyrelog_error_t wyl_fact_artifact_namespace_open_provisioned_pair
+    (WylFactGraphProvisionedPair * pair,
+    WylFactArtifactNamespace ** out_namespace);
+#endif
 void wyl_fact_artifact_namespace_free (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_revalidate
     (WylFactArtifactNamespace * namespace_);
