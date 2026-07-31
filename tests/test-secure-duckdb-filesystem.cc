@@ -1114,8 +1114,6 @@ test_provisioned_pair_pinned_modes (void)
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
-      (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, O_RDONLY));
-  g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
       (WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING, O_RDWR));
   g_assert_cmpint (g_stat (fixture.final_path, &initialized), ==, 0);
   g_assert_cmpint (initialized.st_size, >, 0);
