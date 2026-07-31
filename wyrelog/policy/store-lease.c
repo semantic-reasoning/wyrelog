@@ -340,6 +340,21 @@ wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
   return ok ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+/* MoveFileExW cannot rename the fresh image onto the canonical name while this
+ * pin keeps that name occupied: FILE_SHARE_DELETE only defers the deletion, so
+ * the name stays claimed until the last handle closes. Drop the pin here, after
+ * the caller has re-verified the store identity, so the atomic replace lands. */
+void
+wyl_policy_store_lease_release_store_pin (wyl_policy_store_lease_t *lease)
+{
+  if (lease == NULL || !lease->maintenance)
+    return;
+  if (lease->store_handle != INVALID_HANDLE_VALUE) {
+    CloseHandle (lease->store_handle);
+    lease->store_handle = INVALID_HANDLE_VALUE;
+  }
+}
+
 void
 wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
 {
@@ -347,7 +362,7 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
     return;
   g_mutex_lock (&lease_registry_mutex);
   registry_unbind_all (lease);
-  if (lease->maintenance)
+  if (lease->maintenance && lease->store_handle != INVALID_HANDLE_VALUE)
     CloseHandle (lease->store_handle);
   CloseHandle (lease->lock_handle);
   CloseHandle (lease->parent_handle);
@@ -586,6 +601,14 @@ wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
       && (guint64) st.st_uid == lease->store_uid
       && (guint32) st.st_mode == lease->store_mode) ? WYRELOG_E_OK :
       WYRELOG_E_POLICY;
+}
+
+/* No-op on POSIX: renameat replaces the canonical name atomically even while
+ * the pinned store descriptor stays open, so the pin is held until release. */
+void
+wyl_policy_store_lease_release_store_pin (wyl_policy_store_lease_t *lease)
+{
+  (void) lease;
 }
 
 wyrelog_error_t

@@ -8396,6 +8396,11 @@ wyl_policy_store_close (wyl_policy_store_t *store)
         && wyl_policy_store_lease_verify_store_identity (store->lease)
         != WYRELOG_E_OK)
       persist = FALSE;
+    /* Identity is now confirmed; drop the pinned store-file handle so the
+     * atomic replace can rename the fresh image onto the canonical name on
+     * platforms where an open target handle would otherwise block it. */
+    if (persist && store->maintenance_exclusive && store->lease != NULL)
+      wyl_policy_store_lease_release_store_pin (store->lease);
     if (persist)
       (void) persist_policy_store_encrypted (store);
     sqlite3_close (store->db);
