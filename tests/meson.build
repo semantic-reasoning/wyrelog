@@ -174,6 +174,25 @@ if build_client
     test_daemon_http_decide_deps += service_exchange_private_dep
   endif
   test_daemon_http_decide_deps += daemon_http_private_dep
+  test_daemon_http_decide_link_with = []
+  test_daemon_http_decide_targets = []
+  if host_machine.system() != 'windows'
+    test_daemon_http_decide_private_companion = static_library(
+      'test-daemon-http-decide-private-companion',
+      '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+      '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+      '../wyrelog/auth/service-credential-operation-storage-private.c',
+      include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+      dependencies : wyrelog_deps,
+      c_args : wyrelog_c_args,
+      gnu_symbol_visibility : 'hidden',
+      build_by_default : false,
+      install : false,
+    )
+    test_daemon_http_decide_link_with += [
+      test_daemon_http_decide_private_companion,
+    ]
+  endif
   test_daemon_http_decide = executable('test-daemon-http-decide',
     'test-daemon-http-decide.c',
     '../wyrelog/daemon/auth-registry-private.c',
@@ -184,7 +203,9 @@ if build_client
     c_args : test_daemon_http_decide_c_args,
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_daemon_http_decide_deps,
+    link_with : test_daemon_http_decide_link_with,
   )
+  test_daemon_http_decide_targets += [test_daemon_http_decide]
 
   test('daemon-http-decide', test_daemon_http_decide, timeout : 240)
 
@@ -198,7 +219,9 @@ if build_client
     c_args : test_daemon_http_decide_c_args + '-DWYL_TEST_VARIANT_REFRESH',
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_daemon_http_decide_deps,
+    link_with : test_daemon_http_decide_link_with,
   )
+  test_daemon_http_decide_targets += [test_daemon_http_decide_refresh]
 
   test('daemon-http-decide-refresh', test_daemon_http_decide_refresh,
     timeout : 960,
@@ -214,7 +237,9 @@ if build_client
     c_args : test_daemon_http_decide_c_args + '-DWYL_TEST_VARIANT_SERVICE',
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_daemon_http_decide_deps,
+    link_with : test_daemon_http_decide_link_with,
   )
+  test_daemon_http_decide_targets += [test_daemon_http_decide_service]
 
   test('daemon-http-decide-service', test_daemon_http_decide_service,
     timeout : 240,
@@ -231,10 +256,44 @@ if build_client
       c_args : test_daemon_http_decide_c_args + '-DWYL_TEST_VARIANT_AUDIT',
       include_directories : [wyrelog_inc, include_directories('../wyrelog')],
       dependencies : test_daemon_http_decide_deps,
+      link_with : test_daemon_http_decide_link_with,
     )
+    test_daemon_http_decide_targets += [test_daemon_http_decide_audit]
 
     test('daemon-http-decide-audit', test_daemon_http_decide_audit,
       timeout : 240,
+    )
+  endif
+
+  test('daemon-http-decide-private-companion-boundary', python3,
+    args : [
+      meson.current_source_dir() / 'test-daemon-http-decide-private-companion-boundary.py',
+      meson.current_source_dir() / 'meson.build',
+    ],
+  )
+
+  if host_machine.system() != 'windows'
+    check_daemon_http_decide_private_symbols = find_program(
+      '../tools/check-daemon-http-decide-private-symbols.py',
+    )
+    test_daemon_http_decide_target_paths = []
+    foreach target : test_daemon_http_decide_targets
+      test_daemon_http_decide_target_paths += [target.full_path()]
+    endforeach
+    test('daemon-http-decide-private-symbols',
+      check_daemon_http_decide_private_symbols,
+      args : [
+        test_daemon_http_decide_private_companion.full_path(),
+        libwyrelog.full_path(),
+      ] + test_daemon_http_decide_target_paths,
+      depends : [
+        test_daemon_http_decide_private_companion,
+        libwyrelog,
+      ] + test_daemon_http_decide_targets,
+    )
+    test('daemon-http-decide-private-symbols-self-test',
+      check_daemon_http_decide_private_symbols,
+      args : ['--self-test'],
     )
   endif
 

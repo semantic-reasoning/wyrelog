@@ -26,6 +26,7 @@ FORBIDDEN_EXPORT_PREFIXES = (
 )
 
 FORBIDDEN_EXPORT_EXACT = {
+    "wyl_service_credential_operation_coordinator_begin_or_replay_locked",
     "wyl_service_credential_operation_handoff_target_digest",
 }
 
@@ -228,8 +229,10 @@ The Import Tables
 0003 T wyl_service_credential_operation_handoff_target_digest
 0004 T wyl_service_credential_operation_handoff_target_digest_extra
 0005 T safe_wyl_policy_store_handoff_embedded
+0006 T wyl_service_credential_operation_coordinator_begin_or_replay_locked
 """
     if forbidden_runtime_exports(runtime_fixture) != {
+            "wyl_service_credential_operation_coordinator_begin_or_replay_locked",
             "wyl_service_credential_operation_coordinator_maintain_expired",
             "wyl_service_credential_operation_coordinator_maintain_expired_locked",
             "wyl_service_credential_operation_handoff_target_digest",
@@ -239,8 +242,10 @@ The Import Tables
 0001 T _wyl_service_credential_operation_coordinator_maintain_expired
 0002 T _wyl_service_credential_operation_handoff_target_digest
 0003 T __wyl_service_credential_operation_handoff_target_digest
+0004 T _wyl_service_credential_operation_coordinator_begin_or_replay_locked
 """
     if forbidden_runtime_exports(macho_runtime_fixture, "macho") != {
+            "wyl_service_credential_operation_coordinator_begin_or_replay_locked",
             "wyl_service_credential_operation_coordinator_maintain_expired",
             "wyl_service_credential_operation_handoff_target_digest",
     }:
