@@ -258,12 +258,29 @@ def destructuring_components(
     if not starred:
         return tuple_components(value, len(targets))
     candidates = alternatives(value)
-    if not any(isinstance(item, TupleValue) for item in candidates):
+    if not any(
+        isinstance(item, (TupleValue, IterableValue))
+        or item is PATH_ITERABLE
+        for item in candidates
+    ):
         return None
     star_index = starred[0]
     suffix_count = len(targets) - star_index - 1
     components: list[list[object]] = [[] for _target in targets]
     for candidate in candidates:
+        if isinstance(candidate, IterableValue) or candidate is PATH_ITERABLE:
+            element = (
+                candidate.element
+                if isinstance(candidate, IterableValue)
+                else PATH_VALUE
+            )
+            for index, items in enumerate(components):
+                items.append(
+                    IterableValue(element)
+                    if index == star_index
+                    else element
+                )
+            continue
         if (
             not isinstance(candidate, TupleValue)
             or len(candidate.elements) < len(targets) - 1
@@ -927,6 +944,18 @@ class PythonScanner(ast.NodeVisitor):
         return merge_values(*(selected or [UNKNOWN]))
 
     @staticmethod
+    def dynamic_tuple_slice(value: object) -> object:
+        selected: list[object] = []
+        for candidate in alternatives(value):
+            if isinstance(candidate, TupleValue):
+                selected.append(
+                    IterableValue(merge_values(*candidate.elements))
+                )
+            else:
+                selected.append(UNKNOWN)
+        return merge_values(*(selected or [UNKNOWN]))
+
+    @staticmethod
     def value_origin(node: ast.AST) -> frozenset[tuple[int, int]]:
         return frozenset(
             {
@@ -1084,7 +1113,7 @@ class PythonScanner(ast.NodeVisitor):
                     return (
                         self.tuple_slice(owner, selected_slice)
                         if selected_slice is not None
-                        else UNKNOWN
+                        else self.dynamic_tuple_slice(owner)
                     )
                 return self.tuple_index(
                     owner,
@@ -1461,6 +1490,15 @@ class PythonScanner(ast.NodeVisitor):
                 "in-place mapping union",
                 require_proven=True,
             )
+            if left is not None and (
+                left.ambiguous or len(left.origins) > 1
+            ):
+                self.error(
+                    node.target,
+                    "in-place mapping union with ambiguous aliases "
+                    "is unsupported",
+                )
+                return
             right = self.require_mapping(
                 right_value,
                 node.value,
@@ -1468,7 +1506,6 @@ class PythonScanner(ast.NodeVisitor):
                 require_proven=True,
             )
             if left is None or right is None:
-                self.bind(node.target.id, UNKNOWN)
                 return
             updated = mapping_union(
                 left,
@@ -2413,20 +2450,29 @@ def scan_python(
     path: Path,
     line_map: list[tuple[int, int]] | None = None,
 ) -> tuple[list[Finding], list[Finding]]:
-    try:
-        tree = ast.parse(source, filename=path.as_posix())
-    except SyntaxError as exc:
+    def syntax_error(
+        exc: SyntaxError,
+        operation: str,
+    ) -> Finding:
         line = exc.lineno or 1
         column = exc.offset or 1
         if line_map is not None and 1 <= line <= len(line_map):
             original_line, offset = line_map[line - 1]
             line = original_line
             column += offset
-        error = Finding(
+        return Finding(
             Location(path, line, column),
-            f"cannot parse selected Python: {exc.msg}",
+            f"cannot {operation} selected Python: {exc.msg}",
         )
-        return [], [error]
+
+    try:
+        tree = ast.parse(source, filename=path.as_posix())
+    except SyntaxError as exc:
+        return [], [syntax_error(exc, "parse")]
+    try:
+        compile(tree, path.as_posix(), "exec")
+    except SyntaxError as exc:
+        return [], [syntax_error(exc, "compile")]
     scanner = PythonScanner(path, line_map)
     scanner.visit(tree)
 
@@ -3658,6 +3704,55 @@ for value in middle:
                     0,
                 ),
                 (
+                    "starred list unpack preserves head and rest Paths",
+                    """from pathlib import Path
+values: list[Path]
+head, *rest = values
+head.read_text()
+for path in rest:
+    path.read_text()
+""",
+                    2,
+                    0,
+                ),
+                (
+                    "starred Sequence unpack preserves every position",
+                    """from pathlib import Path
+values: Sequence[Path]
+head, *middle, tail = values
+head.read_text()
+for path in middle:
+    path.read_text()
+tail.read_text()
+""",
+                    3,
+                    0,
+                ),
+                (
+                    "nested iterable starred unpack preserves tuple element",
+                    """from pathlib import Path
+values: list[tuple[Path, Path]]
+(left, right), *rest = values
+left.read_text()
+right.read_text()
+for pair in rest:
+    pair[0].read_text()
+""",
+                    3,
+                    0,
+                ),
+                (
+                    "starred list string neighbor stays clean",
+                    """values: list[str]
+head, *rest = values
+head.read_text()
+for value in rest:
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
                     "dict item subscript preserves Path value",
                     """from pathlib import Path
 mapping: dict[str, Path]
@@ -3762,12 +3857,42 @@ for path in item[1:]:
                     0,
                 ),
                 (
-                    "dynamic tuple slice stays unknown",
+                    "dynamic tuple slice receiver stays clean",
                     """from pathlib import Path
 item: tuple[Path, Path]
 item[start:].read_text()
 """,
                     0,
+                    0,
+                ),
+                (
+                    "dynamic tuple lower slice remains iterable",
+                    """from pathlib import Path
+item: tuple[str, Path]
+for path in item[start:]:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dynamic tuple upper slice remains iterable",
+                    """from pathlib import Path
+item: tuple[str, Path]
+for path in item[:stop]:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dynamic tuple step slice remains iterable",
+                    """from pathlib import Path
+item: tuple[str, Path]
+for path in item[::step]:
+    path.read_text()
+""",
+                    1,
                     0,
                 ),
                 (
@@ -4048,6 +4173,56 @@ mapping |= make_mapping()
 """,
                     0,
                     1,
+                ),
+                (
+                    "ambiguous in-place mapping union fails before mutation",
+                    """from pathlib import Path
+a = {"x": Path("x")}
+b = {"x": "value"}
+mapping = a if condition else b
+mapping |= {"x": "replacement"}
+for value in a.values():
+    value.read_text()
+for value in b.values():
+    value.read_text()
+""",
+                    1,
+                    1,
+                ),
+                (
+                    "multiple starred assignment fails compiler validation",
+                    """first, *middle, *tail = values
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "module return fails compiler validation",
+                    """return
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "module continue fails compiler validation",
+                    """continue
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "module nonlocal fails compiler validation",
+                    """nonlocal missing
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "compiler validation never executes code",
+                    """raise RuntimeError("not executed")
+""",
+                    0,
+                    0,
                 ),
                 (
                     "comprehension target is a Path",
