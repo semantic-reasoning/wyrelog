@@ -1490,15 +1490,6 @@ class PythonScanner(ast.NodeVisitor):
                 "in-place mapping union",
                 require_proven=True,
             )
-            if left is not None and (
-                left.ambiguous or len(left.origins) > 1
-            ):
-                self.error(
-                    node.target,
-                    "in-place mapping union with ambiguous aliases "
-                    "is unsupported",
-                )
-                return
             right = self.require_mapping(
                 right_value,
                 node.value,
@@ -1506,6 +1497,14 @@ class PythonScanner(ast.NodeVisitor):
                 require_proven=True,
             )
             if left is None or right is None:
+                return
+            if left.ambiguous or len(left.origins) > 1:
+                if contains_path(left) or contains_path(right):
+                    self.error(
+                        node.target,
+                        "in-place mapping union with ambiguous aliases "
+                        "is unsupported",
+                    )
                 return
             updated = mapping_union(
                 left,
@@ -4187,6 +4186,49 @@ for value in b.values():
     value.read_text()
 """,
                     1,
+                    1,
+                ),
+                (
+                    "clean ambiguous in-place mapping union stays clean",
+                    """a = {"x": "first"}
+b = {"x": "second"}
+mapping = a if condition else b
+mapping |= {"x": "replacement"}
+for value in a.values():
+    value.read_text()
+for value in b.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "clean ambiguous in-place union rejects Path RHS",
+                    """from pathlib import Path
+a = {"x": "first"}
+b = {"x": "second"}
+mapping = a if condition else b
+mapping |= {"x": Path("x")}
+for value in a.values():
+    value.read_text()
+for value in b.values():
+    value.read_text()
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "ambiguous in-place union unknown RHS errors once",
+                    """a = {"x": "first"}
+b = {"x": "second"}
+mapping = a if condition else b
+mapping |= make_mapping()
+for value in a.values():
+    value.read_text()
+for value in b.values():
+    value.read_text()
+""",
+                    0,
                     1,
                 ),
                 (
