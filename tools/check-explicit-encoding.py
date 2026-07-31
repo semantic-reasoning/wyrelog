@@ -99,9 +99,8 @@ class MappingValue:
 
 
 @dataclass(frozen=True)
-class PairValue:
-    first: object
-    second: object
+class TupleValue:
+    elements: tuple[object, ...]
 
 
 @dataclass(frozen=True)
@@ -129,14 +128,14 @@ def merge_values(*values: object) -> object:
     mappings = tuple(
         item for item in candidates if isinstance(item, MappingValue)
     )
-    pairs = tuple(item for item in candidates if isinstance(item, PairValue))
+    tuples = tuple(item for item in candidates if isinstance(item, TupleValue))
     iterables = tuple(
         item for item in candidates if isinstance(item, IterableValue)
     )
     merged_items = {
         item
         for item in candidates
-        if not isinstance(item, (MappingValue, PairValue, IterableValue))
+        if not isinstance(item, (MappingValue, TupleValue, IterableValue))
     }
     if len(mappings) == 1:
         merged_items.add(mappings[0])
@@ -151,13 +150,19 @@ def merge_values(*values: object) -> object:
                 ambiguous=True,
             )
         )
-    if len(pairs) == 1:
-        merged_items.add(pairs[0])
-    elif pairs:
+    tuple_arities = {len(item.elements) for item in tuples}
+    if len(tuples) == 1 or len(tuple_arities) > 1:
+        merged_items.update(tuples)
+    elif tuples:
+        arity = len(tuples[0].elements)
         merged_items.add(
-            PairValue(
-                merge_values(*(item.first for item in pairs)),
-                merge_values(*(item.second for item in pairs)),
+            TupleValue(
+                tuple(
+                    merge_values(
+                        *(item.elements[index] for item in tuples)
+                    )
+                    for index in range(arity)
+                )
             )
         )
     if len(iterables) == 1:
@@ -194,9 +199,8 @@ def contains_path(value: object) -> bool:
             contains_path(candidate.key) or contains_path(candidate.value)
         ):
             return True
-        if isinstance(candidate, PairValue) and (
-            contains_path(candidate.first)
-            or contains_path(candidate.second)
+        if isinstance(candidate, TupleValue) and any(
+            contains_path(item) for item in candidate.elements
         ):
             return True
         if isinstance(candidate, IterableValue) and contains_path(
@@ -215,29 +219,99 @@ def iterable_element(value: object) -> object:
             elements.append(candidate.key)
         elif isinstance(candidate, IterableValue):
             elements.append(candidate.element)
-        elif isinstance(candidate, PairValue):
-            elements.append(
-                merge_values(candidate.first, candidate.second)
-            )
+        elif isinstance(candidate, TupleValue):
+            elements.append(merge_values(*candidate.elements))
         else:
             elements.append(UNKNOWN)
     return merge_values(*(elements or [UNKNOWN]))
 
 
-def pair_components(value: object) -> tuple[object, object] | None:
+def tuple_components(
+    value: object,
+    arity: int,
+) -> tuple[object, ...] | None:
     candidates = alternatives(value)
-    if not any(isinstance(item, PairValue) for item in candidates):
+    if not any(isinstance(item, TupleValue) for item in candidates):
         return None
-    first: list[object] = []
-    second: list[object] = []
+    components: list[list[object]] = [[] for _index in range(arity)]
     for candidate in candidates:
-        if isinstance(candidate, PairValue):
-            first.append(candidate.first)
-            second.append(candidate.second)
+        if (
+            isinstance(candidate, TupleValue)
+            and len(candidate.elements) == arity
+        ):
+            for index, item in enumerate(candidate.elements):
+                components[index].append(item)
+            continue
+        for items in components:
+            items.append(UNKNOWN)
+    return tuple(merge_values(*items) for items in components)
+
+
+def mapping_from_entries(
+    entries: tuple[tuple[object, object], ...],
+    *,
+    complete: bool,
+    origins: frozenset[tuple[int, int]],
+) -> MappingValue:
+    return MappingValue(
+        merge_values(
+            *(tuple(item[0] for item in entries) or (UNKNOWN,))
+        ),
+        merge_values(
+            *(tuple(item[1] for item in entries) or (UNKNOWN,))
+        ),
+        entries,
+        complete,
+        origins,
+    )
+
+
+def mapping_store(
+    mapping: MappingValue,
+    key: object,
+    value: object,
+) -> MappingValue:
+    if mapping.complete and isinstance(key, LiteralValue):
+        entries = list(mapping.entries)
+        for index, (existing_key, _existing_value) in enumerate(entries):
+            if existing_key == key:
+                entries[index] = (key, value)
+                break
         else:
-            first.append(UNKNOWN)
-            second.append(UNKNOWN)
-    return merge_values(*first), merge_values(*second)
+            entries.append((key, value))
+        return mapping_from_entries(
+            tuple(entries),
+            complete=True,
+            origins=mapping.origins,
+        )
+    return MappingValue(
+        merge_values(mapping.key, key),
+        merge_values(mapping.value, value),
+        origins=mapping.origins,
+        ambiguous=mapping.ambiguous,
+    )
+
+
+def mapping_union(
+    left: MappingValue,
+    right: MappingValue,
+    origins: frozenset[tuple[int, int]],
+) -> MappingValue:
+    if left.complete and right.complete:
+        combined = mapping_from_entries(
+            left.entries,
+            complete=True,
+            origins=origins,
+        )
+        for key, value in right.entries:
+            combined = mapping_store(combined, key, value)
+        return combined
+    return MappingValue(
+        merge_values(left.key, right.key),
+        merge_values(left.value, right.value),
+        origins=origins,
+        ambiguous=left.ambiguous or right.ambiguous,
+    )
 
 
 @dataclass
@@ -475,6 +549,7 @@ class PythonScanner(ast.NodeVisitor):
         self.errors: list[Finding] = []
         self.scopes = [Scope({}, set(), "module", None)]
         self.exception_state_sinks: list[list[list[Scope]]] = []
+        self.speculative_value_depth = 0
 
     def location(self, node: ast.AST) -> Location:
         line = getattr(node, "lineno", 1)
@@ -605,12 +680,16 @@ class PythonScanner(ast.NodeVisitor):
         for _iteration in range(64):
             changed = False
             for binding in collector.bindings:
-                assigned = (
-                    binding.static_value
-                    if binding.is_static
-                    else self.value(binding.expression)
-                )
-                annotated = self.annotation_value(binding.annotation)
+                self.speculative_value_depth += 1
+                try:
+                    assigned = (
+                        binding.static_value
+                        if binding.is_static
+                        else self.value(binding.expression)
+                    )
+                    annotated = self.annotation_value(binding.annotation)
+                finally:
+                    self.speculative_value_depth -= 1
                 if annotated is not UNKNOWN:
                     assigned = annotated
                 for name in binding.names:
@@ -649,10 +728,10 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(target, (ast.Tuple, ast.List)):
             if callable_values(value):
                 return False
-            pair = pair_components(value)
-            if pair is not None and len(target.elts) == 2:
-                self.bind_target(target.elts[0], pair[0])
-                self.bind_target(target.elts[1], pair[1])
+            components = tuple_components(value, len(target.elts))
+            if components is not None:
+                for item, component in zip(target.elts, components):
+                    self.bind_target(item, component)
                 return True
             for item in target.elts:
                 self.bind_target(item, UNKNOWN)
@@ -705,31 +784,7 @@ class PythonScanner(ast.NodeVisitor):
                     "mapping mutation with ambiguous aliases is unsupported",
                 )
             return True
-        entries = list(mapping.entries)
-        replaced = False
-        if mapping.complete and isinstance(key, LiteralValue):
-            for index, (existing_key, _existing_value) in enumerate(entries):
-                if existing_key == key:
-                    entries[index] = (key, assigned)
-                    replaced = True
-                    break
-            if not replaced:
-                entries.append((key, assigned))
-            updated = MappingValue(
-                merge_values(*(item[0] for item in entries)),
-                merge_values(*(item[1] for item in entries)),
-                tuple(entries),
-                True,
-                mapping.origins,
-                mapping.ambiguous,
-            )
-        else:
-            updated = MappingValue(
-                merge_values(mapping.key, key),
-                merge_values(mapping.value, assigned),
-                origins=mapping.origins,
-                ambiguous=mapping.ambiguous,
-            )
+        updated = mapping_store(mapping, key, assigned)
         aliases = [
             (scope_index, name)
             for scope_index, scope in enumerate(self.scopes)
@@ -748,19 +803,85 @@ class PythonScanner(ast.NodeVisitor):
         return True
 
     @staticmethod
-    def pair_index(
+    def static_integer(node: ast.AST) -> int | None:
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, int)
+            and not isinstance(node.value, bool)
+        ):
+            return node.value
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, (ast.USub, ast.UAdd))
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, int)
+            and not isinstance(node.operand.value, bool)
+        ):
+            return (
+                -node.operand.value
+                if isinstance(node.op, ast.USub)
+                else node.operand.value
+            )
+        return None
+
+    @staticmethod
+    def tuple_index(
         value: object,
-        index: int,
+        index: int | None,
     ) -> object:
         selected: list[object] = []
         for candidate in alternatives(value):
-            if isinstance(candidate, PairValue):
-                selected.append(
-                    candidate.first if index == 0 else candidate.second
-                )
-            else:
+            if not isinstance(candidate, TupleValue):
                 selected.append(UNKNOWN)
+                continue
+            if index is None:
+                selected.append(merge_values(*candidate.elements))
+                continue
+            normalized = (
+                index
+                if index >= 0
+                else len(candidate.elements) + index
+            )
+            selected.append(
+                candidate.elements[normalized]
+                if 0 <= normalized < len(candidate.elements)
+                else UNKNOWN
+            )
         return merge_values(*(selected or [UNKNOWN]))
+
+    @staticmethod
+    def value_origin(node: ast.AST) -> frozenset[tuple[int, int]]:
+        return frozenset(
+            {
+                (
+                    getattr(node, "lineno", 0),
+                    getattr(node, "col_offset", 0),
+                )
+            }
+        )
+
+    def require_mapping(
+        self,
+        value: object,
+        node: ast.AST,
+        operation: str,
+    ) -> MappingValue | None:
+        candidates = alternatives(value)
+        mappings = tuple(
+            item for item in candidates if isinstance(item, MappingValue)
+        )
+        if len(candidates) == 1 and len(mappings) == 1:
+            return mappings[0]
+        if (
+            mappings
+            and contains_path(value)
+            and self.speculative_value_depth == 0
+        ):
+            self.error(
+                node,
+                f"{operation} with an unproven mapping is unsupported",
+            )
+        return None
 
     def value(self, node: ast.AST | None) -> object:
         if node is None:
@@ -841,7 +962,9 @@ class PythonScanner(ast.NodeVisitor):
                     if node.func.attr == "items":
                         results.append(
                             IterableValue(
-                                PairValue(candidate.key, candidate.value)
+                                TupleValue(
+                                    (candidate.key, candidate.value)
+                                )
                             )
                         )
                     elif node.func.attr == "keys":
@@ -852,13 +975,36 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             if has_value(self.value(node.left), PATH_VALUE):
                 return PATH_VALUE
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            left_value = self.value(node.left)
+            right_value = self.value(node.right)
+            left = self.require_mapping(
+                left_value,
+                node.left,
+                "mapping union",
+            )
+            right = self.require_mapping(
+                right_value,
+                node.right,
+                "mapping union",
+            )
+            if left is not None and right is not None:
+                return mapping_union(
+                    left,
+                    right,
+                    self.value_origin(node),
+                )
+            return merge_values(left_value, right_value)
         if isinstance(node, ast.Subscript):
             owner = self.value(node.value)
-            if (
-                isinstance(node.slice, ast.Constant)
-                and node.slice.value in {0, 1}
+            if any(
+                isinstance(candidate, TupleValue)
+                for candidate in alternatives(owner)
             ):
-                return self.pair_index(owner, node.slice.value)
+                return self.tuple_index(
+                    owner,
+                    self.static_integer(node.slice),
+                )
             key = self.value(node.slice)
             selected: list[object] = []
             for candidate in alternatives(owner):
@@ -880,41 +1026,46 @@ class PythonScanner(ast.NodeVisitor):
             left = self.value(node.body)
             right = self.value(node.orelse)
             return merge_values(left, right)
-        if isinstance(node, ast.Tuple) and len(node.elts) == 2:
-            return PairValue(
-                self.value(node.elts[0]),
-                self.value(node.elts[1]),
+        if isinstance(node, ast.Tuple):
+            return TupleValue(
+                tuple(self.value(item) for item in node.elts)
             )
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        if isinstance(node, (ast.List, ast.Set)):
             elements = tuple(self.value(item) for item in node.elts)
             return IterableValue(
                 merge_values(*(elements or (UNKNOWN,)))
             )
         if isinstance(node, ast.Dict):
-            entries = tuple(
-                (self.value(key), self.value(value))
-                for key, value in zip(node.keys, node.values)
-                if key is not None
+            origin = self.value_origin(node)
+            mapping = mapping_from_entries(
+                (),
+                complete=True,
+                origins=origin,
             )
-            complete = len(entries) == len(node.values)
-            return MappingValue(
-                merge_values(
-                    *(tuple(item[0] for item in entries) or (UNKNOWN,))
-                ),
-                merge_values(
-                    *(tuple(item[1] for item in entries) or (UNKNOWN,))
-                ),
-                entries,
-                complete,
-                frozenset(
-                    {
-                        (
-                            getattr(node, "lineno", 0),
-                            getattr(node, "col_offset", 0),
-                        )
-                    }
-                ),
-            )
+            for key_node, value_node in zip(node.keys, node.values):
+                value = self.value(value_node)
+                if key_node is not None:
+                    mapping = mapping_store(
+                        mapping,
+                        self.value(key_node),
+                        value,
+                    )
+                    continue
+                expanded = self.require_mapping(
+                    value,
+                    value_node,
+                    "mapping expansion",
+                )
+                if expanded is None:
+                    mapping = MappingValue(
+                        merge_values(mapping.key, UNKNOWN),
+                        merge_values(mapping.value, value),
+                        origins=origin,
+                        ambiguous=True,
+                    )
+                    continue
+                mapping = mapping_union(mapping, expanded, origin)
+            return mapping
         if isinstance(
             node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)
         ):
@@ -1000,20 +1151,9 @@ class PythonScanner(ast.NodeVisitor):
                     return IterableValue(
                         self.annotation_value(elements[0])
                     )
-                if len(elements) == 2:
-                    return PairValue(
-                        self.annotation_value(elements[0]),
-                        self.annotation_value(elements[1]),
-                    )
-                return IterableValue(
-                    merge_values(
-                        *(
-                            tuple(
-                                self.annotation_value(item)
-                                for item in elements
-                            )
-                            or (UNKNOWN,)
-                        )
+                return TupleValue(
+                    tuple(
+                        self.annotation_value(item) for item in elements
                     )
                 )
             element = self.annotation_value(node.slice)
@@ -1031,9 +1171,7 @@ class PythonScanner(ast.NodeVisitor):
             values = tuple(
                 self.annotation_value(item) for item in node.elts
             )
-            if len(values) == 2:
-                return PairValue(values[0], values[1])
-            return merge_values(*(values or (UNKNOWN,)))
+            return TupleValue(values)
         return UNKNOWN
 
     @staticmethod
@@ -2606,7 +2744,7 @@ def self_test() -> bool:
             UNKNOWN,
             PATH_ITERABLE,
             MappingValue(UNKNOWN, PATH_VALUE),
-            IterableValue(PairValue(PATH_VALUE, UNKNOWN)),
+            IterableValue(TupleValue((PATH_VALUE, UNKNOWN))),
         )
         expected_merge = merge_values(*lattice_inputs)
         expected_element = iterable_element(expected_merge)
@@ -2619,6 +2757,17 @@ def self_test() -> bool:
             require(
                 iterable_element(merged) == expected_element,
                 "iterable projection must be exhaustive and order invariant",
+            )
+        tuple_inputs = (
+            TupleValue((PATH_VALUE, UNKNOWN, PATH_VALUE)),
+            TupleValue((UNKNOWN, PATH_VALUE, UNKNOWN)),
+            UNKNOWN,
+        )
+        expected_tuple_merge = merge_values(*tuple_inputs)
+        for ordering in permutations(tuple_inputs):
+            require(
+                merge_values(*ordering) == expected_tuple_merge,
+                "fixed tuple lattice merge must be order invariant",
             )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3268,11 +3417,91 @@ for key, (left, right) in mapping.items():
                     0,
                 ),
                 (
+                    "fixed three-tuple preserves every Path",
+                    """from pathlib import Path
+values: tuple[Path, Path, Path]
+first, second, third = values
+first.read_text()
+second.read_text()
+third.read_text()
+""",
+                    3,
+                    0,
+                ),
+                (
+                    "nested fixed tuples preserve exact components",
+                    """from pathlib import Path
+values: tuple[str, tuple[Path, Path], str]
+label, (left, right), suffix = values
+left.read_text()
+right.read_text()
+""",
+                    2,
+                    0,
+                ),
+                (
+                    "fixed three-tuple strings stay clean",
+                    """values: tuple[str, str, str]
+first, second, third = values
+first.read_text()
+second.read_text()
+third.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
                     "dict item subscript preserves Path value",
                     """from pathlib import Path
 mapping: dict[str, Path]
 for item in mapping.items():
     item[1].read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "negative tuple index preserves last Path",
+                    """from pathlib import Path
+mapping: dict[str, Path]
+for item in mapping.items():
+    item[-1].read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "negative tuple index preserves exact middle Path",
+                    """from pathlib import Path
+item: tuple[str, Path, str]
+item[-2].read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "negative tuple index keeps exact string clean",
+                    """from pathlib import Path
+item: tuple[str, Path, str]
+item[-3].read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "out of range tuple index stays unknown",
+                    """from pathlib import Path
+item: tuple[str, Path]
+item[-3].read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "dynamic tuple index conservatively preserves Path",
+                    """from pathlib import Path
+item: tuple[str, Path]
+item[index].read_text()
 """,
                     1,
                     0,
@@ -3344,6 +3573,116 @@ mapping["x"] = "value"
 """,
                     0,
                     1,
+                ),
+                (
+                    "mapping expansion preserves Path value",
+                    """from pathlib import Path
+base = {"x": Path("x")}
+mapping = {**base}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "mapping expansion known overwrite removes stale Path",
+                    """from pathlib import Path
+base = {"x": Path("x")}
+mapping = {**base, "x": "value"}
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "mapping expansion later Path wins",
+                    """from pathlib import Path
+base = {"x": Path("x")}
+mapping = {"x": "value", **base}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "multiple mapping expansions honor clean precedence",
+                    """from pathlib import Path
+first = {"x": Path("x")}
+second = {"x": "value"}
+mapping = {**first, **second}
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "multiple mapping expansions honor Path precedence",
+                    """from pathlib import Path
+first = {"x": "value"}
+second = {"x": Path("x")}
+mapping = {**first, **second}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "mapping expansion string neighbor stays clean",
+                    """base = {"x": "value"}
+mapping = {**base}
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "mapping union preserves Path value",
+                    """from pathlib import Path
+base = {"x": Path("x")}
+mapping = base | {}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "mapping union known overwrite removes stale Path",
+                    """from pathlib import Path
+base = {"x": Path("x")}
+mapping = base | {"x": "value"}
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "mapping union right Path wins",
+                    """from pathlib import Path
+base = {"x": "value"}
+mapping = base | {"x": Path("x")}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "mapping union string neighbor stays clean",
+                    """base = {"x": "value"}
+mapping = {} | base
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
                 ),
                 (
                     "comprehension target is a Path",
