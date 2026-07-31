@@ -1,0 +1,18 @@
+#!/bin/sh
+# Check the prospective index through the repository's shared format gate.
+
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "pre-commit: not inside a Git worktree" >&2
+  exit 1
+}
+
+CHECKER=$(mktemp)
+trap 'rm -f "$CHECKER"' EXIT HUP INT TERM
+if ! git -C "$REPO_ROOT" show :tools/check-format.sh > "$CHECKER"; then
+  echo "pre-commit: prospective index is missing tools/check-format.sh" >&2
+  exit 1
+fi
+chmod +x "$CHECKER"
+"$CHECKER" --staged
