@@ -351,12 +351,75 @@ check_permission_state_transition_ready_allows_decide (void)
   return 0;
 }
 
+/*
+ * An unsafe persisted service closure discovered at reload must fail service
+ * auth CLOSED without failing the reload or human auth: the daemon boots, the
+ * service branch latches unavailable, and human decisions keep working.
+ */
+static gint
+check_unsafe_service_closure_latches_service_auth_at_reload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  wyl_policy_service_principal_info_t principal = { 0 };
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 90;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  /* A clean boot leaves service auth available. */
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason)
+      != WYRELOG_E_OK)
+    return 91;
+  if (reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    return 92;
+
+  /* Register a service principal (safe), then plant an unsafe control-plane
+   * direct permission via raw SQL, bypassing the closure mutation guard. */
+  if (wyl_policy_store_create_service_principal (store,
+          "svc:closure:reload-unsafe", "reload unsafe", "admin-user",
+          "req-closure-reload-unsafe", &principal) != WYRELOG_E_OK)
+    return 93;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO direct_permissions "
+          "(subject_id, perm_id, scope, granted_at) VALUES "
+          "('svc:closure:reload-unsafe', 'wr.service_credential.manage', "
+          "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
+    return 94;
+
+  /* (b) The reload itself succeeds: the daemon would still boot. */
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 95;
+
+  /* (a) Service auth is latched unavailable with the closure reason. */
+  reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason)
+      != WYRELOG_E_BUSY)
+    return 96;
+  if (reason != WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE)
+    return 97;
+
+  /* (c) Human auth still works end to end despite the service latch: this
+   * readiness probe logs in a human principal, grants, reloads, and decides. */
+  if (wyl_daemon_check_policy_snapshot_reload_ready (handle) != WYRELOG_E_OK)
+    return 98;
+
+  return 0;
+}
+
 int
 main (void)
 {
   gint rc;
 
   if ((rc = check_policy_audit_facts_ready_loads_read_engine ()) != 0)
+    return rc;
+  if ((rc =
+          check_unsafe_service_closure_latches_service_auth_at_reload ()) != 0)
     return rc;
   if ((rc = check_direct_permission_grant_ready_allows_decide ()) != 0)
     return rc;

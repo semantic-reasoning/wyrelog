@@ -2161,6 +2161,52 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   return rc;
 }
 
+/*
+ * Validates the persisted service-permission closure held by |write_lease|.
+ * An unsafe closure (a service subject already holding an effective
+ * non-allowlisted/control-plane permission) is NOT a reload failure: it
+ * latches service auth unavailable through the write lease and returns
+ * WYRELOG_E_OK so human auth and the daemon stay up.  Only an infrastructure
+ * failure (store IO, lease loss) propagates a non-OK code.
+ */
+static wyrelog_error_t
+wyl_handle_validate_service_permission_closure (WylHandle *self,
+    WylServiceAuthWriteLease *write_lease)
+{
+  if (!WYL_IS_HANDLE (self) || write_lease == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store
+      (write_lease, self, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_POLICY)
+    return rc;
+  return wyl_service_auth_write_lease_mark_unavailable (write_lease, self,
+      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
+}
+
+/*
+ * Reloads the engine pair and re-validates the persisted service closure
+ * under a caller-supplied write lease.  A snapshot/engine failure propagates;
+ * an unsafe closure only latches service auth (see the validator above) and
+ * still returns WYRELOG_E_OK.
+ */
+static wyrelog_error_t
+wyl_handle_reload_engine_pair_with_service_auth_write (WylHandle *self,
+    WylServiceAuthWriteLease *write_lease)
+{
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  self->engine_pair_poisoned = FALSE;
+  return wyl_handle_validate_service_permission_closure (self, write_lease);
+}
+
 wyrelog_error_t
 wyl_handle_reload_engine_pair (WylHandle *self)
 {
@@ -2169,10 +2215,36 @@ wyl_handle_reload_engine_pair (WylHandle *self)
   if (self->template_dir == NULL)
     return WYRELOG_E_INVALID;
 
-  g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  /*
+   * The engine pair backs both human and service auth.  A standalone reload
+   * (daemon boot readiness checks, HTTP reload) takes a fresh service-auth
+   * WRITE lease so it can re-validate the persisted service closure and latch
+   * service auth on an unsafe result -- without failing the reload.  A reload
+   * nested under a lease the current thread already owns (or issued while the
+   * authority is closing/latched) cannot take a second lease; there the
+   * closure is the lease owner's or the mutation guard's responsibility, so we
+   * fall back to a plain engine reload.  Both cases return WYRELOG_E_OK on a
+   * safe or already-latched closure, keeping the daemon and human auth up.
+   */
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t acquire_rc = wyl_service_auth_authority_acquire_write
+      (self->service_auth_authority, self, NULL, &lease);
+  if (acquire_rc == WYRELOG_E_BUSY) {
+    g_autofree gchar *template_dir = g_strdup (self->template_dir);
+    wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+    if (rc == WYRELOG_E_OK)
+      self->engine_pair_poisoned = FALSE;
+    return rc;
+  }
+  if (acquire_rc != WYRELOG_E_OK)
+    return acquire_rc;
+
+  wyrelog_error_t rc =
+      wyl_handle_reload_engine_pair_with_service_auth_write (self, lease);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
   if (rc == WYRELOG_E_OK)
-    self->engine_pair_poisoned = FALSE;
+    rc = release_rc;
+  wyl_service_auth_write_lease_free (lease);
   return rc;
 }
 
