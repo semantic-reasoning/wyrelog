@@ -28,13 +28,19 @@ HELPER_CLOSURE = {
     LOCK_ACQUIRE_SYMBOL,
     LOCK_RELEASE_SYMBOL,
 }
-EXECUTABLE_IMPORTS = {
-    SEED_SYMBOL,
+COMMON_EXECUTABLE_IMPORTS = {
     STORAGE_OPEN_SYMBOL,
     LOAD_SYMBOL,
     LOCK_ACQUIRE_SYMBOL,
     LOCK_RELEASE_SYMBOL,
 }
+EXPECTED_EXECUTABLE_NAMES = {
+    "test-daemon-http-decide",
+    "test-daemon-http-decide-refresh",
+    "test-daemon-http-decide-service",
+    "test-daemon-http-decide-audit",
+}
+SERVICE_EXECUTABLE_NAME = "test-daemon-http-decide-service"
 
 
 def run(command: list[str]) -> str:
@@ -89,8 +95,19 @@ def helper_exports_are_exact(exports: set[str]) -> bool:
     return exports == {SEED_SYMBOL}
 
 
-def missing_executable_imports(imports: set[str]) -> set[str]:
-    return EXECUTABLE_IMPORTS - imports
+def missing_executable_imports(name: str, imports: set[str]) -> set[str]:
+    required = set(COMMON_EXECUTABLE_IMPORTS)
+    if name == SERVICE_EXECUTABLE_NAME:
+        required.add(SEED_SYMBOL)
+    return required - imports
+
+
+def executable_names_are_exact(executables: list[Path]) -> bool:
+    names = [executable.name for executable in executables]
+    return (
+        len(names) == len(EXPECTED_EXECUTABLE_NAMES)
+        and set(names) == EXPECTED_EXECUTABLE_NAMES
+    )
 
 
 def find_tool(*names: str) -> str:
@@ -201,7 +218,8 @@ def self_test() -> int:
 0x0000000100001050 __wyl_not_normalized (from libunintended.dylib)
 0x0000000100001060 prefix_wyl_not_a_symbol (from libunintended.dylib)
 """
-    if wyl_symbols(macho_dyld_imports, True) != EXECUTABLE_IMPORTS:
+    service_imports = wyl_symbols(macho_dyld_imports, True)
+    if service_imports != COMMON_EXECUTABLE_IMPORTS | {SEED_SYMBOL}:
         return 1
     adversarial_helper_exports = """
 00000001 T wyl_test_daemon_http_seed_prepared_operation
@@ -226,17 +244,30 @@ def self_test() -> int:
         "unintended_helper_export",
     }:
         return 1
-    lockless_imports = {
-        SEED_SYMBOL,
-        STORAGE_OPEN_SYMBOL,
-        LOAD_SYMBOL,
-    }
-    if missing_executable_imports(lockless_imports) != {
-        LOCK_ACQUIRE_SYMBOL,
-        LOCK_RELEASE_SYMBOL,
-    }:
+    if missing_executable_imports(
+            SERVICE_EXECUTABLE_NAME,
+            COMMON_EXECUTABLE_IMPORTS) != {SEED_SYMBOL}:
         return 1
-    if missing_executable_imports(EXECUTABLE_IMPORTS):
+    if missing_executable_imports(
+            "test-daemon-http-decide",
+            COMMON_EXECUTABLE_IMPORTS):
+        return 1
+    missing_common_import = COMMON_EXECUTABLE_IMPORTS - {LOCK_RELEASE_SYMBOL}
+    if missing_executable_imports(
+            "test-daemon-http-decide-audit",
+            missing_common_import) != {LOCK_RELEASE_SYMBOL}:
+        return 1
+    if missing_executable_imports(SERVICE_EXECUTABLE_NAME, service_imports):
+        return 1
+    expected_executables = [
+        Path("/tmp") / name for name in sorted(EXPECTED_EXECUTABLE_NAMES)
+    ]
+    if not executable_names_are_exact(expected_executables):
+        return 1
+    if executable_names_are_exact(expected_executables[:-1]):
+        return 1
+    if executable_names_are_exact(
+            expected_executables + [expected_executables[0]]):
         return 1
     artifact = Path("/tmp/test-daemon-http-decide")
     if defined_command("nm", artifact, False) != [
@@ -284,6 +315,14 @@ def main() -> int:
     header = Path(sys.argv[3])
     library = Path(sys.argv[4])
     executables = [Path(argument) for argument in sys.argv[5:]]
+    if not executable_names_are_exact(executables):
+        print(
+            "daemon HTTP executable basename set mismatch:",
+            *sorted(executable.name for executable in executables),
+            sep="\n  ",
+            file=sys.stderr,
+        )
+        return 1
     artifacts = [manifest, helper, header, library, *executables]
     missing = [artifact for artifact in artifacts if not artifact.is_file()]
     if missing:
@@ -380,7 +419,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        missing_imports = missing_executable_imports(imports)
+        missing_imports = missing_executable_imports(executable.name, imports)
         if missing_imports:
             print(
                 f"{executable} seed/provider imports missing:",
