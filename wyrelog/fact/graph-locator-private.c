@@ -6,6 +6,9 @@
 #endif
 #endif
 #include "fact/graph-locator-private.h"
+#ifndef G_OS_WIN32
+#include "fact/graph-provisioned-pair-internal.h"
+#endif
 #include "wyl-id-private.h"
 
 #include <string.h>
@@ -1208,6 +1211,206 @@ wyrelog_error_t
   out_final->device = device;
   out_final->inode = inode;
   out_final->size_bytes = size;
+  return WYRELOG_E_OK;
+}
+
+static gint
+duplicate_cloexec (gint fd)
+{
+#ifdef F_DUPFD_CLOEXEC
+  return fcntl (fd, F_DUPFD_CLOEXEC, 3);
+#else
+  gint duplicate = dup (fd);
+  if (duplicate >= 0 && fcntl (duplicate, F_SETFD, FD_CLOEXEC) != 0) {
+    close (duplicate);
+    duplicate = -1;
+  }
+  return duplicate;
+#endif
+}
+
+static wyrelog_error_t
+directory_clone (WylFactGraphDirectory *source,
+    WylFactGraphDirectory *destination)
+{
+  *destination = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  if (source == NULL || source->root_path == NULL
+      || source->tenant_component == NULL || source->graph_component == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = directory_revalidate (source);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  destination->root_fd = duplicate_cloexec (source->root_fd);
+  destination->tenant_fd = duplicate_cloexec (source->tenant_fd);
+  destination->graph_fd = duplicate_cloexec (source->graph_fd);
+  destination->root_path = try_strdup (source->root_path);
+  destination->tenant_component = try_strdup (source->tenant_component);
+  destination->graph_component = try_strdup (source->graph_component);
+  if (destination->root_fd < 0 || destination->tenant_fd < 0
+      || destination->graph_fd < 0 || destination->root_path == NULL
+      || destination->tenant_component == NULL
+      || destination->graph_component == NULL) {
+    wyl_fact_graph_directory_clear (destination);
+    return WYRELOG_E_NOMEM;
+  }
+  destination->root_device = source->root_device;
+  destination->root_inode = source->root_inode;
+  destination->tenant_device = source->tenant_device;
+  destination->tenant_inode = source->tenant_inode;
+  destination->graph_device = source->graph_device;
+  destination->graph_inode = source->graph_inode;
+  /* Test callbacks belong to the mint operation, not to the independently
+   * owned authority. */
+  destination->checkpoint = NULL;
+  destination->checkpoint_data = NULL;
+  rc = directory_revalidate (destination);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_graph_directory_clear (destination);
+  return rc;
+}
+
+static wyrelog_error_t
+provisioned_pair_fd_revalidate (WylFactGraphProvisionedPair *pair, gint fd,
+    gboolean require_writable)
+{
+  struct stat held;
+  if (fd < 0 || fstat (fd, &held) != 0 || !S_ISREG (held.st_mode)
+      || held.st_nlink != 2 || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_uid != pair->expected_owner
+      || held.st_uid != geteuid ()
+      || (guint64) held.st_dev != pair->expected_device
+      || (guint64) held.st_ino != pair->expected_inode)
+    return WYRELOG_E_POLICY;
+  if (require_writable) {
+    gint flags = fcntl (fd, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDWR)
+      return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_fact_graph_provisioned_pair_revalidate
+    (WylFactGraphProvisionedPair * pair) {
+  if (pair == NULL || pair->references <= 0 || pair->operation_uuid == NULL
+      || pair->stage_basename == NULL || pair->held_final_fd < 0)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *derived_stage = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation
+      (pair->operation_uuid, &derived_stage);
+  if (rc != WYRELOG_E_OK
+      || g_strcmp0 (derived_stage, pair->stage_basename) != 0)
+    return WYRELOG_E_POLICY;
+  rc = directory_revalidate (&pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_fd_revalidate (pair, pair->held_final_fd, FALSE);
+  if (rc == WYRELOG_E_OK && pair->writable_final_fd >= 0)
+    rc = provisioned_pair_fd_revalidate (pair, pair->writable_final_fd, TRUE);
+  struct stat named;
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_stat (&pair->directory, pair->stage_basename,
+        "facts.duckdb", &named);
+  if (rc == WYRELOG_E_OK
+      && ((guint64) named.st_dev != pair->expected_device
+          || (guint64) named.st_ino != pair->expected_inode))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (&pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_stat (&pair->directory, pair->stage_basename,
+        "facts.duckdb", &named);
+  if (rc == WYRELOG_E_OK
+      && ((guint64) named.st_dev != pair->expected_device
+          || (guint64) named.st_ino != pair->expected_inode))
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+WylFactGraphProvisionedPair *
+wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair *pair)
+{
+  if (pair != NULL)
+    g_atomic_int_inc (&pair->references);
+  return pair;
+}
+
+void
+wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair *pair)
+{
+  if (pair == NULL || !g_atomic_int_dec_and_test (&pair->references))
+    return;
+  if (pair->writable_final_fd >= 0)
+    close (pair->writable_final_fd);
+  if (pair->held_final_fd >= 0)
+    close (pair->held_final_fd);
+  wyl_fact_graph_directory_clear (&pair->directory);
+  g_free (pair->operation_uuid);
+  g_free (pair->stage_basename);
+  g_free (pair);
+}
+
+wyrelog_error_t
+    wyl_fact_graph_directory_open_provisioned_pair_exact
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphProvisionedPair ** out_pair)
+{
+  if (out_pair != NULL)
+    *out_pair = NULL;
+  if (directory == NULL || out_pair == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphRegularFile held =
+      (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  wyrelog_error_t rc =
+      wyl_fact_graph_directory_open_provisioned_final_exact (directory,
+      operation_uuid, &held);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylFactGraphProvisionedPair *pair =
+      g_try_new0 (WylFactGraphProvisionedPair, 1);
+  if (pair == NULL) {
+    wyl_fact_graph_regular_file_clear (&held);
+    return WYRELOG_E_NOMEM;
+  }
+  pair->references = 1;
+  pair->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  pair->held_final_fd = held.fd;
+  held.fd = -1;
+  pair->writable_final_fd = -1;
+  pair->expected_device = held.device;
+  pair->expected_inode = held.inode;
+  pair->expected_owner = (guint64) geteuid ();
+  pair->operation_uuid = try_strdup (operation_uuid);
+  rc = provisioning_stage_name_from_operation (operation_uuid,
+      &pair->stage_basename);
+  if (pair->operation_uuid == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_clone (directory, &pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-pair-pre-writable-open",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc == WYRELOG_E_OK) {
+    pair->writable_final_fd = openat (pair->directory.graph_fd,
+        "facts.duckdb", O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (pair->writable_final_fd < 0)
+      rc = errno_to_resolver_error (errno);
+  }
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-pair-post-writable-open",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_graph_provisioned_pair_free (pair);
+    return rc;
+  }
+  *out_pair = pair;
   return WYRELOG_E_OK;
 }
 

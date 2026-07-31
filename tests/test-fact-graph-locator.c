@@ -186,6 +186,21 @@ remove_tree (const gchar *path)
   g_assert_cmpint (g_rmdir (path), ==, 0);
 }
 
+static gint
+count_open_fds (void)
+{
+  long limit = sysconf (_SC_OPEN_MAX);
+  if (limit < 0 || limit > 4096)
+    limit = 4096;
+  gint count = 0;
+  for (gint fd = 0; fd < limit; fd++) {
+    errno = 0;
+    if (fcntl (fd, F_GETFD) >= 0 || errno != EBADF)
+      count++;
+  }
+  return count;
+}
+
 static gchar *
 make_root (void)
 {
@@ -818,6 +833,141 @@ test_posix_resolver_provisioned_final_rejects_directory_replacement (void)
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);
   remove_tree (root);
+}
+
+static void
+test_posix_provisioned_pair_authority (void)
+{
+  const gint baseline_fds = count_open_fds ();
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphProvisionedPair *pair = NULL;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *stage_path = g_build_filename (graph_path,
+      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
+      NULL);
+
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, "01890F47-3C4B-7CC2-B8C4-DC0C0C070544", &pair), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (pair);
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &pair), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_null (pair);
+  create_provisioned_pair (stage_path, final_path);
+  g_autofree gchar *third_alias =
+      g_build_filename (graph_path, "third-alias", NULL);
+  g_assert_cmpint (link (final_path, third_alias), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_null (pair);
+  g_assert_cmpint (g_remove (third_alias), ==, 0);
+  gint generic_fd = -1;
+  g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
+          "facts.duckdb", TRUE, &generic_fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (generic_fd, ==, -1);
+
+  g_autofree gchar *final_backup = g_strdup_printf ("%s-acquire", final_path);
+  g_autofree gchar *stage_backup = g_strdup_printf ("%s-acquire", stage_path);
+  ProvisionedFinalReplacement replacement = {
+    "provisioned-final-validated", stage_path, stage_backup, FALSE
+  };
+  graph.checkpoint = replace_provisioned_name;
+  graph.checkpoint_data = &replacement;
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_true (replacement.fired);
+  g_assert_null (pair);
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+  g_assert_cmpint (g_rename (stage_backup, stage_path), ==, 0);
+
+  replacement = (ProvisionedFinalReplacement) {
+  "provisioned-pair-pre-writable-open", final_path, final_backup, FALSE};
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_true (replacement.fired);
+  g_assert_null (pair);
+  g_assert_cmpint (g_remove (final_path), ==, 0);
+  g_assert_cmpint (g_rename (final_backup, final_path), ==, 0);
+
+  replacement = (ProvisionedFinalReplacement) {
+  "provisioned-pair-post-writable-open", final_path, final_backup, FALSE};
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_true (replacement.fired);
+  g_assert_null (pair);
+  g_assert_cmpint (g_remove (final_path), ==, 0);
+  g_assert_cmpint (g_rename (final_backup, final_path), ==, 0);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  /* The authority owns the complete chain and both final-file handles. */
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *tenant_path = g_path_get_dirname (graph_path);
+  g_autofree gchar *graph_backup = g_strdup_printf ("%s-chain", graph_path);
+  g_assert_cmpint (g_rename (graph_path, graph_backup), ==, 0);
+  g_assert_cmpint (g_mkdir (graph_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_assert_cmpint (g_rename (graph_backup, graph_path), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *tenant_backup = g_strdup_printf ("%s-chain", tenant_path);
+  g_assert_cmpint (g_rename (tenant_path, tenant_backup), ==, 0);
+  g_assert_cmpint (g_mkdir (tenant_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+  g_assert_cmpint (g_rename (tenant_backup, tenant_path), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *root_backup = g_strdup_printf ("%s-chain", root);
+  g_assert_cmpint (g_rename (root, root_backup), ==, 0);
+  g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rename (root_backup, root), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  /* Replacing both canonical names with a new valid pair must not retarget
+   * the immutable identity captured by the exact opener. */
+  g_autofree gchar *old_stage = g_strdup_printf ("%s-old", stage_path);
+  g_autofree gchar *old_final = g_strdup_printf ("%s-old", final_path);
+  g_assert_cmpint (g_rename (stage_path, old_stage), ==, 0);
+  g_assert_cmpint (g_rename (final_path, old_final), ==, 0);
+  create_provisioned_pair (stage_path, final_path);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  remove_tree (root);
+  g_assert_cmpint (count_open_fds (), ==, baseline_fds);
 }
 
 static void
@@ -1477,6 +1627,8 @@ main (int argc, char **argv)
       test_posix_resolver_exact_stage_create_sync_failure);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-final-exact",
       test_posix_resolver_open_provisioned_final_exact);
+  g_test_add_func ("/fact-graph-locator/posix/provisioned-pair-authority",
+      test_posix_provisioned_pair_authority);
   g_test_add_func
       ("/fact-graph-locator/posix/provisioned-final-directory-replacement",
       test_posix_resolver_provisioned_final_rejects_directory_replacement);
