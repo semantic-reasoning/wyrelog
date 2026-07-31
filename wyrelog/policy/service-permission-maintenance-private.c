@@ -13,6 +13,8 @@
 
 #include "service-permission-maintenance-private.h"
 
+#include "wyl-handle-private.h"
+
 #include <chronoid/ksuid.h>
 #include <sodium.h>
 #include <string.h>
@@ -724,5 +726,357 @@ win_out:
 out:
   sodium_memzero (document, WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1);
   g_free (document);
+  return rc;
+}
+
+/* Audit action recorded for a durable #618 remediation apply. */
+#define WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION \
+  "service.permission_closure.remediate"
+
+static void
+digest_to_hex (const guint8 digest[32], gchar out_hex[65])
+{
+  for (guint i = 0; i < 32; i++)
+    g_snprintf (out_hex + i * 2, 3, "%02x", digest[i]);
+}
+
+/* BLAKE2b of the canonical manifest document, as lowercase hex. Two manifests
+ * fingerprint identically iff they encode byte-for-byte identically, which is
+ * the idempotency key against a stored receipt's request id. */
+static wyrelog_error_t
+manifest_fingerprint_hex (const WylServicePermissionManifest *manifest,
+    gchar out_hex[65])
+{
+  g_autofree gchar *document = NULL;
+  gsize len = 0;
+  wyrelog_error_t rc =
+      wyl_service_permission_manifest_encode (manifest, &document, &len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint8 digest[32];
+  if (crypto_generichash (digest, sizeof digest, (const guint8 *) document,
+          len, NULL, 0) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  else
+    digest_to_hex (digest, out_hex);
+  sodium_memzero (digest, sizeof digest);
+  return rc;
+}
+
+/* Stable identity of the operating-system principal running the offline
+ * remediation, recorded in the receipt and audit trail. */
+static wyrelog_error_t
+maintenance_actor_identity (gchar **out_actor)
+{
+  *out_actor = NULL;
+#ifdef G_OS_WIN32
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return WYRELOG_E_IO;
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0) {
+    CloseHandle (token);
+    return WYRELOG_E_IO;
+  }
+  user = g_malloc (needed);
+  if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
+          &needed)) {
+    g_free (user);
+    CloseHandle (token);
+    return WYRELOG_E_IO;
+  }
+  DWORD sid_len = GetLengthSid (user->User.Sid);
+  guint8 digest[32];
+  gboolean ok = sid_len > 0 && crypto_generichash (digest, sizeof digest,
+      user->User.Sid, sid_len, NULL, 0) == 0;
+  g_free (user);
+  CloseHandle (token);
+  if (!ok)
+    return WYRELOG_E_CRYPTO;
+  gchar hex[65];
+  digest_to_hex (digest, hex);
+  sodium_memzero (digest, sizeof digest);
+  *out_actor = g_strdup_printf ("windows-sid-sha256:%s", hex);
+#else
+  *out_actor = g_strdup_printf ("posix-uid:%" G_GUINT64_FORMAT,
+      (guint64) geteuid ());
+#endif
+  return *out_actor == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+new_audit_id (gchar out[WYL_ID_STRING_BUF])
+{
+  wyl_id_t id = WYL_ID_NIL;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  return rc == WYRELOG_E_OK ? wyl_id_format (&id, out, WYL_ID_STRING_BUF) : rc;
+}
+
+/* Confirm the manifest's declared pre-state still matches the live authority
+ * snapshot before any mutation. A generation or digest drift means the store
+ * moved under the manifest, so the removal set is stale and must be rejected
+ * up front rather than applied against unexpected state. */
+static wyrelog_error_t
+verify_manifest_pre_state (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest, guint64 *out_generation,
+    guint8 out_digest[32])
+{
+  guint64 generation = 0;
+  guint8 digest[32] = { 0 };
+  wyrelog_error_t rc =
+      wyl_policy_store_service_permission_authority_snapshot (store,
+      &generation, digest);
+  if (rc == WYRELOG_E_OK
+      && (generation != manifest->store_generation
+          || memcmp (digest, manifest->store_digest, 32) != 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    *out_generation = generation;
+    memcpy (out_digest, digest, 32);
+  }
+  sodium_memzero (digest, sizeof digest);
+  return rc;
+}
+
+/* Apply every manifest operation as a removal-only mutation inside the active
+ * transaction savepoint. Each op maps to the existing DELETE helper for its
+ * kind; nothing here grants, reclassifies, or publishes. */
+static wyrelog_error_t
+apply_manifest_removals (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest)
+{
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < manifest->operations->len; i++) {
+    const WylPolicyPermissionClosureRemoval *op =
+        g_ptr_array_index (manifest->operations, i);
+    rc = op->action == WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
+        wyl_policy_store_revoke_direct_permission (store, op->subject_id,
+        op->right_id, op->scope) :
+        wyl_policy_store_revoke_role_membership (store, op->subject_id,
+        op->right_id, op->scope);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest)
+{
+  WylHandle *handle = NULL;
+  wyrelog_error_t rc =
+      wyl_handle_adopt_offline_maintenance_store (store, &handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;                  /* adopt consumed/closed the store */
+  store = wyl_handle_get_policy_store (handle);
+  if (!manifest_shape_valid (manifest)) {
+    g_object_unref (handle);
+    return WYRELOG_E_INVALID;
+  }
+
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *transaction = NULL;
+  gboolean maintenance_claimed = FALSE;
+  guint64 pre_generation = 0;
+  guint8 pre_digest[32] = { 0 };
+
+  rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_service_auth_write_lease_claim_maintenance (lease, handle);
+    maintenance_claimed = rc == WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_begin (store, handle,
+        lease, &transaction);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_enter_participant
+        (transaction, store);
+  /* Reject a stale manifest before touching any row. */
+  if (rc == WYRELOG_E_OK)
+    rc = verify_manifest_pre_state (store, manifest, &pre_generation,
+        pre_digest);
+  if (rc == WYRELOG_E_OK)
+    rc = apply_manifest_removals (store, manifest);
+  /* A valid manifest fully cleans the closure; re-analyze to assert it. */
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyPermissionClosureAnalysis post = { 0 };
+    rc = wyl_policy_store_analyze_service_permission_closure (store, &post);
+    if (rc == WYRELOG_E_OK
+        && (post.removals == NULL || post.removals->len != 0
+            || post.unsafe_permission_count != 0
+            || post.dangling_subject_count != 0
+            || post.dangling_role_count != 0))
+      rc = WYRELOG_E_POLICY;
+    wyl_policy_permission_closure_analysis_clear (&post);
+  }
+  /* Always roll back: a dry-run never commits, writes no receipt, and leaves
+   * no durable change behind. */
+  if (transaction != NULL) {
+    wyrelog_error_t rollback_rc =
+        wyl_policy_store_service_authority_transaction_rollback (transaction);
+    if (rc == WYRELOG_E_OK)
+      rc = rollback_rc;
+    wyl_policy_store_service_authority_transaction_free (transaction);
+  }
+  if (maintenance_claimed)
+    (void) wyl_service_auth_write_lease_unclaim_maintenance (lease, handle);
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
+  }
+  sodium_memzero (pre_digest, sizeof pre_digest);
+  g_object_unref (handle);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest,
+    wyl_policy_service_permission_receipt_t *out_receipt)
+{
+  if (out_receipt == NULL) {
+    wyl_policy_store_close (store);
+    return WYRELOG_E_INVALID;
+  }
+  memset (out_receipt, 0, sizeof *out_receipt);
+  WylHandle *handle = NULL;
+  wyrelog_error_t rc =
+      wyl_handle_adopt_offline_maintenance_store (store, &handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;                  /* adopt consumed/closed the store */
+  store = wyl_handle_get_policy_store (handle);
+
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *transaction = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  WylServiceAuthorityWriteIntentOutcome intent = { 0 };
+  g_autofree gchar *actor = NULL;
+  gboolean maintenance_claimed = FALSE;
+  gboolean replay = FALSE;
+  gboolean found = FALSE;
+  guint64 pre_generation = 0;
+  guint64 post_generation = 0;
+  guint8 pre_digest[32] = { 0 };
+  guint8 post_digest[32] = { 0 };
+  gchar fingerprint[65] = { 0 };
+  gchar receipt_audit_id[WYL_ID_STRING_BUF] = { 0 };
+
+  if (!manifest_shape_valid (manifest))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = manifest_fingerprint_hex (manifest, fingerprint);
+  if (rc == WYRELOG_E_OK)
+    rc = maintenance_actor_identity (&actor);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_service_auth_write_lease_claim_maintenance (lease, handle);
+    maintenance_claimed = rc == WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_begin (store, handle,
+        lease, &transaction);
+
+  /* Idempotency first: a receipt already frozen under this request id replays
+   * verbatim when the manifest fingerprint matches (apply nothing), and is a
+   * hard conflict when the same request id carries a different manifest. */
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_permission_receipt_lookup (store,
+        manifest->request_id, &found, out_receipt);
+  if (rc == WYRELOG_E_OK && found) {
+    if (g_strcmp0 (out_receipt->manifest_fingerprint, fingerprint) == 0)
+      replay = TRUE;
+    else
+      rc = WYRELOG_E_POLICY;
+  }
+
+  /* Fresh apply: verify pre-state, then mutate under a maintenance write
+   * intent. The closure is deliberately NOT pre-validated for completeness;
+   * commit re-runs the #614 validator at the choke point. */
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = verify_manifest_pre_state (store, manifest, &pre_generation,
+        pre_digest);
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = wyl_policy_store_service_authority_prepare_commit_evidence
+        (transaction, store, &evidence);
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = wyl_policy_store_service_authority_transaction_acquire_write_intent
+        (transaction, store, NULL, &intent);
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = apply_manifest_removals (store, manifest);
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = wyl_policy_store_service_permission_authority_snapshot (store,
+        &post_generation, post_digest);
+  gint64 applied_at = g_get_real_time ();
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = new_audit_id (receipt_audit_id);
+  gboolean audit_inserted = FALSE;
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = wyl_policy_store_append_audit_event_full (store, receipt_audit_id,
+        applied_at, actor, WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION,
+        manifest->request_id, fingerprint, NULL, manifest->request_id,
+        WYL_DECISION_ALLOW, &audit_inserted);
+  if (rc == WYRELOG_E_OK && !replay && !audit_inserted)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && !replay) {
+    gchar pre_hex[65];
+    gchar post_hex[65];
+    digest_to_hex (pre_digest, pre_hex);
+    digest_to_hex (post_digest, post_hex);
+    out_receipt->request_id = g_strdup (manifest->request_id);
+    out_receipt->actor_identity = g_strdup (actor);
+    out_receipt->audit_id = g_strdup (receipt_audit_id);
+    out_receipt->manifest_fingerprint = g_strdup (fingerprint);
+    out_receipt->operation_count = manifest->operations->len;
+    out_receipt->applied_at_us = applied_at;
+    out_receipt->pre_generation = pre_generation;
+    out_receipt->pre_digest = g_strdup (pre_hex);
+    out_receipt->post_generation = post_generation;
+    out_receipt->post_digest = g_strdup (post_hex);
+    if (out_receipt->request_id == NULL || out_receipt->actor_identity == NULL
+        || out_receipt->audit_id == NULL
+        || out_receipt->manifest_fingerprint == NULL
+        || out_receipt->pre_digest == NULL || out_receipt->post_digest == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = wyl_policy_store_service_permission_receipt_insert (store,
+        out_receipt);
+
+  /* Commit runs the #614 closure re-validation at the choke point: a manifest
+   * that fails to fully clean the closure fails here and the whole transaction
+   * rolls back with no receipt. A replay or any earlier failure rolls back. */
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = wyl_policy_store_service_authority_transaction_commit (transaction);
+  else if (transaction != NULL)
+    (void) wyl_policy_store_service_authority_transaction_rollback
+        (transaction);
+
+  if (evidence != NULL)
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  if (transaction != NULL)
+    wyl_policy_store_service_authority_transaction_free (transaction);
+  if (maintenance_claimed)
+    (void) wyl_service_auth_write_lease_unclaim_maintenance (lease, handle);
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
+  }
+  sodium_memzero (pre_digest, sizeof pre_digest);
+  sodium_memzero (post_digest, sizeof post_digest);
+  sodium_memzero (fingerprint, sizeof fingerprint);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_permission_receipt_clear (out_receipt);
+  /* Never publish / reclassify / clear a latch / start resolver or exchange:
+   * the durable write happens through persist-on-close (identity re-verified
+   * when maintenance-exclusive) as the handle's last reference drops. */
+  g_object_unref (handle);
   return rc;
 }

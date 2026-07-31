@@ -1004,6 +1004,16 @@ test('service-permission-manifest', test_service_permission_manifest,
   timeout : 90,
 )
 
+test_service_permission_maintenance = executable('test-service-permission-maintenance',
+  'test-service-permission-maintenance.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+)
+
+test('service-permission-maintenance', test_service_permission_maintenance,
+  timeout : 90,
+)
+
 test_fact_schema = executable('test-fact-schema',
   'test-fact-schema.c',
   'fact-test-support.c',

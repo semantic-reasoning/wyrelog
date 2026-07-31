@@ -39,4 +39,36 @@ wyrelog_error_t wyl_service_permission_manifest_write_new_owner_only
 wyrelog_error_t wyl_service_permission_manifest_read_owner_only
     (const gchar * path, WylServicePermissionManifest * out_manifest);
 
+/*
+ * Offline dry-run of a canonical removal manifest. Adopts a bare maintenance
+ * handle over |store|, opens a maintenance-exclusive #371 authority
+ * transaction, verifies the manifest's pre-state (store_generation +
+ * store_digest) against a fresh authority snapshot (rejecting a stale manifest
+ * before any mutation), applies the manifest removals inside the transaction,
+ * re-analyzes and asserts the resulting service permission closure is clean,
+ * then ALWAYS rolls back. No receipt is written and no durable state changes.
+ * Returns WYRELOG_E_OK when the manifest is valid and would fully clean the
+ * closure, a typed error otherwise. Consumes |store| on every outcome.
+ */
+wyrelog_error_t wyl_service_permission_maintenance_dry_run
+    (wyl_policy_store_t * store, const WylServicePermissionManifest * manifest);
+
+/*
+ * Offline apply of a canonical removal manifest. Adopts a bare maintenance
+ * handle over |store| and drives a maintenance-exclusive #371 write
+ * transaction: idempotent replay by request_id (identical fingerprint replays
+ * the frozen receipt and applies nothing; a different fingerprint under the
+ * same request_id is a WYRELOG_E_POLICY conflict), pre-state verification
+ * (stale manifest rejected before mutation), removal-only application, an
+ * immutable remediation receipt bound to the pre/post generation+digest, and
+ * commit at the #614 closure-validation choke point (a manifest that fails to
+ * fully clean the closure rolls the whole transaction back with no receipt).
+ * On success |out_receipt| owns freshly duplicated strings the caller releases
+ * with wyl_policy_service_permission_receipt_clear. Consumes |store| on every
+ * outcome. The durable write happens via persist-on-close by the caller.
+ */
+wyrelog_error_t wyl_service_permission_maintenance_apply
+    (wyl_policy_store_t * store, const WylServicePermissionManifest * manifest,
+    wyl_policy_service_permission_receipt_t * out_receipt);
+
 G_END_DECLS;
