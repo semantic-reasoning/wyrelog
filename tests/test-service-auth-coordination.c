@@ -1513,6 +1513,59 @@ test_authority_transaction_commit_and_claim (void)
   wyl_service_auth_write_lease_free (lease);
 }
 
+/* #614 regression: a service-affecting permission mutation driven through the
+ * coordinator's ALREADY-HELD write lease and its open authority transaction
+ * must re-validate the service permission closure at commit as a participant
+ * in that SAME transaction. It must never trigger a second transaction/lease
+ * acquisition, which surfaces as WYRELOG_E_BUSY on the held-lease commit path
+ * (the exact failure a stale rebase of the enforcement produced). */
+static void
+test_authority_transaction_service_closure_no_busy (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  /* Register a service principal and give it an allowlisted data-plane grant
+   * up front, each self-managing its own authority scope. */
+  wyl_policy_service_principal_info_t principal = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_service_principal (store,
+          "svc:closure:regress", "closure regress", "admin-user",
+          "closure-regress-request", &principal), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&principal);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+          "svc:closure:regress", "wr.stream.read", "svc-scope"), ==,
+      WYRELOG_E_OK);
+
+  /* Hold one write lease across the whole path, exactly like the credential
+   * operation coordinator does. */
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+
+  /* Open the authority transaction on the held lease and revoke the grant as
+   * a plain mutation inside that transaction's savepoint. */
+  g_autoptr (WylServiceAuthorityTransaction) txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (store,
+          "svc:closure:regress", "wr.stream.read", "svc-scope"), ==,
+      WYRELOG_E_OK);
+
+  /* The commit runs the closure re-validation as a participant in this same
+   * transaction. It must return E_OK and, above all, never E_BUSY. */
+  wyrelog_error_t commit_rc =
+      wyl_policy_store_service_authority_transaction_commit (txn);
+  g_assert_cmpint (commit_rc, !=, WYRELOG_E_BUSY);
+  g_assert_cmpint (commit_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_get_state
+      (txn), ==, WYL_SERVICE_AUTHORITY_TXN_COMMITTED);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
 static void
 test_authority_transaction_rollback_and_cleanup (void)
 {
@@ -3188,6 +3241,8 @@ main (int argc, char **argv)
       test_unavailable_latch_fresh_handle_and_close_interaction);
   g_test_add_func ("/service-auth/transaction/commit-claim",
       test_authority_transaction_commit_and_claim);
+  g_test_add_func ("/service-auth/transaction/service-closure-no-busy",
+      test_authority_transaction_service_closure_no_busy);
   g_test_add_func ("/service-auth/transaction/rollback-cleanup",
       test_authority_transaction_rollback_and_cleanup);
   g_test_add_func ("/service-auth/transaction/reject-outer",
