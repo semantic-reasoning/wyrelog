@@ -150,16 +150,15 @@ def merge_values(*values: object) -> object:
                 ambiguous=True,
             )
         )
-    tuple_arities = {len(item.elements) for item in tuples}
-    if len(tuples) == 1 or len(tuple_arities) > 1:
-        merged_items.update(tuples)
-    elif tuples:
-        arity = len(tuples[0].elements)
+    tuple_groups: dict[int, list[TupleValue]] = {}
+    for item in tuples:
+        tuple_groups.setdefault(len(item.elements), []).append(item)
+    for arity, group in tuple_groups.items():
         merged_items.add(
             TupleValue(
                 tuple(
                     merge_values(
-                        *(item.elements[index] for item in tuples)
+                        *(item.elements[index] for item in group)
                     )
                     for index in range(arity)
                 )
@@ -244,6 +243,44 @@ def tuple_components(
             continue
         for items in components:
             items.append(UNKNOWN)
+    return tuple(merge_values(*items) for items in components)
+
+
+def destructuring_components(
+    value: object,
+    targets: list[ast.expr],
+) -> tuple[object, ...] | None:
+    starred = [
+        index
+        for index, target in enumerate(targets)
+        if isinstance(target, ast.Starred)
+    ]
+    if not starred:
+        return tuple_components(value, len(targets))
+    candidates = alternatives(value)
+    if not any(isinstance(item, TupleValue) for item in candidates):
+        return None
+    star_index = starred[0]
+    suffix_count = len(targets) - star_index - 1
+    components: list[list[object]] = [[] for _target in targets]
+    for candidate in candidates:
+        if (
+            not isinstance(candidate, TupleValue)
+            or len(candidate.elements) < len(targets) - 1
+        ):
+            for items in components:
+                items.append(UNKNOWN)
+            continue
+        for index in range(star_index):
+            components[index].append(candidate.elements[index])
+        middle_end = len(candidate.elements) - suffix_count
+        components[star_index].append(
+            TupleValue(candidate.elements[star_index:middle_end])
+        )
+        for offset in range(suffix_count):
+            components[star_index + 1 + offset].append(
+                candidate.elements[middle_end + offset]
+            )
     return tuple(merge_values(*items) for items in components)
 
 
@@ -728,7 +765,7 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(target, (ast.Tuple, ast.List)):
             if callable_values(value):
                 return False
-            components = tuple_components(value, len(target.elts))
+            components = destructuring_components(value, target.elts)
             if components is not None:
                 for item, component in zip(target.elts, components):
                     self.bind_target(item, component)
@@ -739,7 +776,7 @@ class PythonScanner(ast.NodeVisitor):
         if isinstance(target, ast.Starred):
             if callable_values(value):
                 return False
-            return self.bind_target(target.value, UNKNOWN)
+            return self.bind_target(target.value, value)
         return not callable_values(value)
 
     def update_mapping_target(
@@ -785,6 +822,19 @@ class PythonScanner(ast.NodeVisitor):
                 )
             return True
         updated = mapping_store(mapping, key, assigned)
+        self.rebind_mapping_aliases(
+            current,
+            updated,
+            target.value.id,
+        )
+        return True
+
+    def rebind_mapping_aliases(
+        self,
+        current: object,
+        updated: MappingValue,
+        fallback_name: str,
+    ) -> None:
         aliases = [
             (scope_index, name)
             for scope_index, scope in enumerate(self.scopes)
@@ -792,37 +842,49 @@ class PythonScanner(ast.NodeVisitor):
             if value is current
         ]
         if not aliases:
-            self.bind(target.value.id, updated)
-            return True
+            self.bind(fallback_name, updated)
+            return
         for scope_index, name in aliases:
             self.scopes[scope_index].values[name] = updated
             self.scopes[scope_index].local_names.add(name)
         for sink in self.exception_state_sinks:
             if sink and len(sink[0]) == len(self.scopes):
                 sink.append(self.capture_state())
-        return True
 
     @staticmethod
     def static_integer(node: ast.AST) -> int | None:
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, int)
-            and not isinstance(node.value, bool)
         ):
-            return node.value
+            return int(node.value)
         if (
             isinstance(node, ast.UnaryOp)
             and isinstance(node.op, (ast.USub, ast.UAdd))
             and isinstance(node.operand, ast.Constant)
             and isinstance(node.operand.value, int)
-            and not isinstance(node.operand.value, bool)
         ):
             return (
-                -node.operand.value
+                -int(node.operand.value)
                 if isinstance(node.op, ast.USub)
-                else node.operand.value
+                else int(node.operand.value)
             )
         return None
+
+    @classmethod
+    def static_slice(cls, node: ast.Slice) -> slice | None:
+        values: list[int | None] = []
+        for bound in (node.lower, node.upper, node.step):
+            if bound is None:
+                values.append(None)
+                continue
+            value = cls.static_integer(bound)
+            if value is None:
+                return None
+            values.append(value)
+        if values[2] == 0:
+            return None
+        return slice(*values)
 
     @staticmethod
     def tuple_index(
@@ -850,6 +912,21 @@ class PythonScanner(ast.NodeVisitor):
         return merge_values(*(selected or [UNKNOWN]))
 
     @staticmethod
+    def tuple_slice(
+        value: object,
+        selected_slice: slice,
+    ) -> object:
+        selected: list[object] = []
+        for candidate in alternatives(value):
+            if isinstance(candidate, TupleValue):
+                selected.append(
+                    TupleValue(candidate.elements[selected_slice])
+                )
+            else:
+                selected.append(UNKNOWN)
+        return merge_values(*(selected or [UNKNOWN]))
+
+    @staticmethod
     def value_origin(node: ast.AST) -> frozenset[tuple[int, int]]:
         return frozenset(
             {
@@ -865,6 +942,8 @@ class PythonScanner(ast.NodeVisitor):
         value: object,
         node: ast.AST,
         operation: str,
+        *,
+        require_proven: bool = False,
     ) -> MappingValue | None:
         candidates = alternatives(value)
         mappings = tuple(
@@ -873,8 +952,7 @@ class PythonScanner(ast.NodeVisitor):
         if len(candidates) == 1 and len(mappings) == 1:
             return mappings[0]
         if (
-            mappings
-            and contains_path(value)
+            (require_proven or (mappings and contains_path(value)))
             and self.speculative_value_depth == 0
         ):
             self.error(
@@ -1001,6 +1079,13 @@ class PythonScanner(ast.NodeVisitor):
                 isinstance(candidate, TupleValue)
                 for candidate in alternatives(owner)
             ):
+                if isinstance(node.slice, ast.Slice):
+                    selected_slice = self.static_slice(node.slice)
+                    return (
+                        self.tuple_slice(owner, selected_slice)
+                        if selected_slice is not None
+                        else UNKNOWN
+                    )
                 return self.tuple_index(
                     owner,
                     self.static_integer(node.slice),
@@ -1055,6 +1140,7 @@ class PythonScanner(ast.NodeVisitor):
                     value,
                     value_node,
                     "mapping expansion",
+                    require_proven=True,
                 )
                 if expanded is None:
                     mapping = MappingValue(
@@ -1350,6 +1436,51 @@ class PythonScanner(ast.NodeVisitor):
             )
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.op, ast.BitOr) and isinstance(
+            node.target,
+            ast.Name,
+        ):
+            current = self.value(node.target)
+            right_value = self.value(node.value)
+            mapping_operation = any(
+                isinstance(candidate, MappingValue)
+                for candidate in (
+                    alternatives(current) | alternatives(right_value)
+                )
+            )
+            if not mapping_operation:
+                self.scan_expression(node.target)
+                self.scan_expression(node.value)
+                self.bind_target(node.target, UNKNOWN)
+                return
+            self.scan_expression(node.target)
+            self.scan_expression(node.value)
+            left = self.require_mapping(
+                current,
+                node.target,
+                "in-place mapping union",
+                require_proven=True,
+            )
+            right = self.require_mapping(
+                right_value,
+                node.value,
+                "in-place mapping union",
+                require_proven=True,
+            )
+            if left is None or right is None:
+                self.bind(node.target.id, UNKNOWN)
+                return
+            updated = mapping_union(
+                left,
+                right,
+                left.origins,
+            )
+            self.rebind_mapping_aliases(
+                current,
+                updated,
+                node.target.id,
+            )
+            return
         self.scan_expression(node.target)
         self.scan_expression(node.value)
         self.bind_target(node.target, UNKNOWN)
@@ -2761,13 +2892,45 @@ def self_test() -> bool:
         tuple_inputs = (
             TupleValue((PATH_VALUE, UNKNOWN, PATH_VALUE)),
             TupleValue((UNKNOWN, PATH_VALUE, UNKNOWN)),
+            TupleValue((PATH_VALUE, UNKNOWN)),
             UNKNOWN,
         )
         expected_tuple_merge = merge_values(*tuple_inputs)
+
+        def left_merge(values: tuple[object, ...]) -> object:
+            merged = values[0]
+            for value in values[1:]:
+                merged = merge_values(merged, value)
+            return merged
+
+        def right_merge(values: tuple[object, ...]) -> object:
+            merged = values[-1]
+            for value in reversed(values[:-1]):
+                merged = merge_values(value, merged)
+            return merged
+
         for ordering in permutations(tuple_inputs):
             require(
                 merge_values(*ordering) == expected_tuple_merge,
-                "fixed tuple lattice merge must be order invariant",
+                "flat fixed tuple merge must be order invariant",
+            )
+            require(
+                left_merge(ordering) == expected_tuple_merge,
+                "fixed tuple merge must be left associative",
+            )
+            require(
+                right_merge(ordering) == expected_tuple_merge,
+                "fixed tuple merge must be right associative",
+            )
+        for value in tuple_inputs:
+            require(
+                merge_values(value, value) == value,
+                "fixed tuple merge must be idempotent",
+            )
+            require(
+                merge_values(value, expected_tuple_merge)
+                == merge_values(expected_tuple_merge, value),
+                "fixed tuple merge must be commutative",
             )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3451,6 +3614,50 @@ third.read_text()
                     0,
                 ),
                 (
+                    "starred suffix preserves exact Path slice",
+                    """from pathlib import Path
+values: tuple[str, Path, Path]
+head, *rest = values
+for path in rest:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "starred middle preserves exact tuple",
+                    """from pathlib import Path
+values: tuple[str, Path, Path, str]
+head, *middle, tail = values
+left, right = middle
+left.read_text()
+right.read_text()
+""",
+                    2,
+                    0,
+                ),
+                (
+                    "nested starred target preserves Path slice",
+                    """from pathlib import Path
+values: tuple[str, tuple[str, Path, Path], str]
+head, (label, *paths), tail = values
+for path in paths:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "starred string slice stays clean",
+                    """values: tuple[str, str, str, str]
+head, *middle, tail = values
+for value in middle:
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
                     "dict item subscript preserves Path value",
                     """from pathlib import Path
 mapping: dict[str, Path]
@@ -3504,6 +3711,63 @@ item: tuple[str, Path]
 item[index].read_text()
 """,
                     1,
+                    0,
+                ),
+                (
+                    "true tuple index selects second component",
+                    """from pathlib import Path
+item: tuple[str, Path]
+item[True].read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "false tuple index selects first component",
+                    """from pathlib import Path
+item: tuple[str, Path]
+item[False].read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "exact tuple slice preserves Tuple receiver",
+                    """from pathlib import Path
+item: tuple[Path, Path]
+item[:].read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "reversed tuple slice preserves exact components",
+                    """from pathlib import Path
+item: tuple[str, Path]
+first, second = item[::-1]
+first.read_text()
+second.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "tuple slice remains iterable",
+                    """from pathlib import Path
+item: tuple[str, Path]
+for path in item[1:]:
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "dynamic tuple slice stays unknown",
+                    """from pathlib import Path
+item: tuple[Path, Path]
+item[start:].read_text()
+""",
+                    0,
                     0,
                 ),
                 (
@@ -3642,6 +3906,49 @@ for value in mapping.values():
                     0,
                 ),
                 (
+                    "unknown mapping expansion fails closed once",
+                    """base = make_mapping()
+mapping = {**base}
+""",
+                    0,
+                    1,
+                ),
+                (
+                    "known Path then unknown expansion stays conservative",
+                    """from pathlib import Path
+known = {"x": Path("x")}
+unknown = make_mapping()
+mapping = {**known, **unknown}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    1,
+                ),
+                (
+                    "unknown then known Path expansion stays conservative",
+                    """from pathlib import Path
+unknown = make_mapping()
+known = {"x": Path("x")}
+mapping = {**unknown, **known}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    1,
+                ),
+                (
+                    "unknown then known clean expansion has one error",
+                    """unknown = make_mapping()
+known = {"x": "value"}
+mapping = {**unknown, **known}
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    1,
+                ),
+                (
                     "mapping union preserves Path value",
                     """from pathlib import Path
 base = {"x": Path("x")}
@@ -3683,6 +3990,64 @@ for value in mapping.values():
 """,
                     0,
                     0,
+                ),
+                (
+                    "in-place mapping union adds Path",
+                    """from pathlib import Path
+mapping = {"x": "value"}
+mapping |= {"x": Path("x")}
+for path in mapping.values():
+    path.read_text()
+""",
+                    1,
+                    0,
+                ),
+                (
+                    "aliased in-place mapping union adds Path everywhere",
+                    """from pathlib import Path
+mapping = {"x": "value"}
+alias = mapping
+alias |= {"x": Path("x")}
+for path in mapping.values():
+    path.read_text()
+for path in alias.values():
+    path.read_text()
+""",
+                    2,
+                    0,
+                ),
+                (
+                    "in-place mapping union removes stale Path",
+                    """from pathlib import Path
+mapping = {"x": Path("x")}
+mapping |= {"x": "value"}
+for value in mapping.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "aliased in-place union removes stale Path everywhere",
+                    """from pathlib import Path
+mapping = {"x": Path("x")}
+alias = mapping
+alias |= {"x": "value"}
+for value in mapping.values():
+    value.read_text()
+for value in alias.values():
+    value.read_text()
+""",
+                    0,
+                    0,
+                ),
+                (
+                    "in-place mapping union unknown RHS fails closed",
+                    """mapping = {}
+mapping |= make_mapping()
+""",
+                    0,
+                    1,
                 ),
                 (
                     "comprehension target is a Path",
