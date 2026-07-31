@@ -1,5 +1,24 @@
 fs = import('fs')
 python3 = find_program('python3')
+# Boundary checkers read repository sources.  Make an encoding-less read a
+# hard error so a checker can never silently fall back to the machine
+# locale's codec.  This asserts strictness; it does not change the default.
+#
+# Coverage is deliberately limited to the tests whose Python was audited and
+# annotated by the change that introduced this environment.  Other tests that
+# drive $PYTHON heredocs (wyrelogd-healthz, wyrelogd-conf-gate, ...) are not
+# covered yet; attach this env to one only together with the audit of its
+# Python, otherwise a latent encoding-less read turns into a test failure.
+#
+# Both variables need Python 3.10 or newer, where PYTHONWARNDEFAULTENCODING
+# and the EncodingWarning category were introduced.  Below that the pair is
+# inert rather than fatal: the unknown variable is ignored outright and the
+# unknown warning category prints "Invalid -W option ignored" on stderr
+# without failing the run, so the tests keep passing and merely lose the
+# assertion.
+python_strict_encoding_env = environment()
+python_strict_encoding_env.set('PYTHONWARNDEFAULTENCODING', '1')
+python_strict_encoding_env.set('PYTHONWARNINGS', 'error::EncodingWarning')
 if host_machine.system() == 'windows'
   advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
     required : true)
@@ -111,6 +130,7 @@ if host_machine.system() != 'windows'
         python3.full_path(),
       ],
       depends : wyrelogd_exe,
+      env : python_strict_encoding_env,
     )
     if get_option('enable_audit').allowed()
       test('wyrelogd-bootstrap-admin', sh,
@@ -122,6 +142,7 @@ if host_machine.system() != 'windows'
           python3.full_path(),
         ],
         depends : [wyrelogd_exe, wyctl_exe],
+        env : python_strict_encoding_env,
         timeout : 180,
       )
     endif
@@ -806,6 +827,7 @@ test('fact-root-writer-lease', test_fact_root_writer_lease,
 test('fact-root-writer-lease-boundary', python3,
   args : [files('test-fact-root-writer-lease-boundary.py'),
     meson.project_source_root()],
+  env : python_strict_encoding_env,
 )
 
 if host_machine.system() == 'windows'
@@ -2218,7 +2240,8 @@ endif
 
 test('fact-store-pinned-boundary', python3,
   args : [files('test-fact-store-pinned-boundary.py'),
-    meson.project_source_root()])
+    meson.project_source_root()],
+  env : python_strict_encoding_env)
 
 if host_machine.system() != 'windows'
   test('duckdb-numeric-boundary', python3,
@@ -2296,7 +2319,8 @@ if get_option('enable_audit').allowed()
 
   test('service-exchange-projector-boundary', python3,
     args : [files('test-service-exchange-projector-boundary.py'),
-      meson.project_source_root()])
+      meson.project_source_root()],
+    env : python_strict_encoding_env)
 
   test_daemon_startup_recovery = executable(
     'test-daemon-startup-recovery',
@@ -2309,7 +2333,8 @@ if get_option('enable_audit').allowed()
     env : audit_conn_test_env, timeout : 60)
   test('daemon-startup-recovery-boundary', python3,
     args : [files('test-daemon-startup-recovery-boundary.py'),
-      meson.project_source_root()])
+      meson.project_source_root()],
+    env : python_strict_encoding_env)
 
   test_audit_emit = executable('test-audit-emit',
     'test-audit-emit.c',
