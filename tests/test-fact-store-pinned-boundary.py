@@ -8,21 +8,25 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1])
-core = (root / "wyrelog/fact/store-identity-private.c").read_text()
-bridge = (root / "wyrelog/fact/secure-duckdb-bridge-private.cc").read_text()
-header = (root / "wyrelog/fact/store-private.h").read_text()
+core = (root / "wyrelog/fact/store-identity-private.c").read_text(
+    encoding="utf-8"
+)
+bridge = (root / "wyrelog/fact/secure-duckdb-bridge-private.cc").read_text(
+    encoding="utf-8"
+)
+header = (root / "wyrelog/fact/store-private.h").read_text(encoding="utf-8")
 types = (
     root / "wyrelog/fact/store-identity-types-private.h"
-).read_text()
+).read_text(encoding="utf-8")
 windows = (
     root / "wyrelog/fact/secure-duckdb-bridge-windows-private.c"
-).read_text()
+).read_text(encoding="utf-8")
 locator_types = (
     root / "wyrelog/fact/graph-locator-private.h"
-).read_text()
+).read_text(encoding="utf-8")
 namespace_types = (
     root / "wyrelog/fact/graph-artifact-namespace-private.h"
-).read_text()
+).read_text(encoding="utf-8")
 
 for forbidden in ("#include <duckdb.h>", "#include <duckdb.hpp>", "ToString"):
     if forbidden in core:
@@ -91,11 +95,30 @@ if "WYL_FACT_STORE_IDENTITY_RESULT_OPEN" not in windows:
     raise SystemExit("Windows fail-closed result classification is missing")
 
 if sys.platform != "win32":
+    # pkg-config and the compiler emit output in the toolchain locale's
+    # codec, which need not be UTF-8.  Name the codec explicitly so the read
+    # never falls back to the machine locale, and pair it with a non-raising
+    # error handler so a stray byte cannot crash the boundary check.  The
+    # handler differs by what the text is used for:
+    #
+    #   - pkg-config --cflags is re-emitted as compiler argv, so it must
+    #     round-trip byte-for-byte.  errors="surrogateescape" parks an
+    #     undecodable byte in a lone surrogate that re-encodes to the very
+    #     same byte, preserving a non-UTF-8 include path verbatim.
+    #     errors="replace" would substitute U+FFFD and hand the compiler a
+    #     path that does not exist, reporting a nonexistent -I directory as
+    #     "sole operation entry does not compile".
+    #   - the compile probes' stdout/stderr below are only ever shown to a
+    #     human in a failure message, so errors="replace" is right there: a
+    #     visible U+FFFD beats a lone surrogate that would itself raise on
+    #     the way out to the terminal.
     cflags = subprocess.run(
         ["pkg-config", "--cflags", "glib-2.0"],
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.split()
     compiler = shlex.split(os.environ.get("CC", "cc"))
     common = compiler + [
@@ -122,6 +145,8 @@ static void consume(WylFactGraphProvisionedPair *pair,
 }
 """,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
     )
     if positive.returncode:
@@ -145,6 +170,8 @@ static void escape(WylFactGraphProvisionedPair *pair) {
 }
 """,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
     )
     if negative.returncode == 0:

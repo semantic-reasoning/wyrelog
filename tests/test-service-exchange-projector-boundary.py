@@ -8,10 +8,11 @@ import sys
 root = Path(sys.argv[1])
 header_path = root / "wyrelog/auth/service-exchange-projector-private.h"
 source_path = root / "wyrelog/auth/service-exchange-projector-private.c"
-header = header_path.read_text()
-source = source_path.read_text()
-meson = (root / "wyrelog/meson.build").read_text()
-public = "\n".join(p.read_text() for p in (root / "wyrelog").glob("*.h"))
+header = header_path.read_text(encoding="utf-8")
+source = source_path.read_text(encoding="utf-8")
+meson = (root / "wyrelog/meson.build").read_text(encoding="utf-8")
+public = "\n".join(p.read_text(encoding="utf-8")
+                   for p in (root / "wyrelog").glob("*.h"))
 
 PROJECTOR = "wyl_service_exchange_project_committed"
 VALIDATOR = "wyl_service_exchange_projection_ack_validate_receipt"
@@ -145,7 +146,24 @@ for path in root.rglob("*"):
         continue
     if path in {header_path, source_path} or "build" in path.parts:
         continue
-    text = path.read_text(errors="ignore")
+    # The codec is explicit so the sweep reads the same bytes on every
+    # locale.  Left to the locale default this sweep goes wrong in both
+    # directions:
+    #
+    #   - false negative: cp949 is a double-byte codec, so a UTF-8 lead
+    #     byte can swallow the byte that follows it as a trail byte.  The
+    #     "\xe2\x80\xa6" of a comment's "..." consumes the first character
+    #     of whatever comes next, truncating an identifier that starts
+    #     immediately after UTF-8 punctuation and hiding the consumer.
+    #   - false positive: with the errors="ignore" this call used to pass,
+    #     an elided byte splices its neighbours together and can fabricate
+    #     a needle that is not in the file, failing the build on a phantom
+    #     leak.
+    #
+    # errors="replace" fixes the second: U+FFFD occupies the position and
+    # keeps the neighbours apart, so a match here is always a real
+    # identifier.
+    text = path.read_text(encoding="utf-8", errors="replace")
     if PROJECTOR in text or VALIDATOR in text:
         if path.name not in {
             "test-service-exchange-projector.c",

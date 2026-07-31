@@ -43,10 +43,10 @@ new = (
 )
 for rel in ("decision.dl", "lobac/decision.dl"):
     path = dst / rel
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if old not in text:
         raise SystemExit(f"{rel}: guarded permission rule not found")
-    path.write_text(text.replace(old, new))
+    path.write_text(text.replace(old, new), encoding="utf-8")
 PY
 
 if "$WYRELOGD" --template-dir "$TMPDIR/access" --policy-db "$POLICY_DB" \
