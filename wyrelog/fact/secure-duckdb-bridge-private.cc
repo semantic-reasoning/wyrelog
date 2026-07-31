@@ -13,6 +13,10 @@
 
 #include <duckdb.hpp>
 
+extern "C" G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+    (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
+
 static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5",
     "secure DuckDB bridge requires DuckDB v1.5.5 headers");
 
@@ -43,6 +47,9 @@ namespace {
   wyrelog_error_t pinned_test_authority_error = WYRELOG_E_OK;
   wyrelog_error_t pinned_test_finalize_error = WYRELOG_E_OK;
   wyrelog_error_t pinned_test_r5_error = WYRELOG_E_OK;
+  WylFactStorePinnedRendezvous pinned_pair_test_error_rendezvous =
+      WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
+  wyrelog_error_t pinned_pair_test_error = WYRELOG_E_OK;
 
   struct PinnedTestControl
   {
@@ -51,6 +58,8 @@ namespace {
     wyrelog_error_t authority_error;
     wyrelog_error_t finalize_error;
     wyrelog_error_t r5_error;
+    WylFactStorePinnedRendezvous pair_error_rendezvous;
+    wyrelog_error_t pair_error;
 
     void
     Fire (WylFactStorePinnedRendezvous rendezvous) const
@@ -70,12 +79,17 @@ namespace {
       pinned_test_authority_error,
       pinned_test_finalize_error,
       pinned_test_r5_error,
+      pinned_pair_test_error_rendezvous,
+      pinned_pair_test_error,
     };
     pinned_test_hook = nullptr;
     pinned_test_hook_data = nullptr;
     pinned_test_authority_error = WYRELOG_E_OK;
     pinned_test_finalize_error = WYRELOG_E_OK;
     pinned_test_r5_error = WYRELOG_E_OK;
+    pinned_pair_test_error_rendezvous =
+        WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
+    pinned_pair_test_error = WYRELOG_E_OK;
     return result;
   }
 
@@ -455,6 +469,15 @@ wyl_fact_store_pinned_set_test_stage_errors
   pinned_test_r5_error = r5_error;
 }
 
+extern "C" void
+wyl_fact_store_pinned_set_pair_rendezvous_error_for_test
+    (WylFactStorePinnedRendezvous rendezvous, wyrelog_error_t error)
+{
+  std::lock_guard<std::mutex> lock (pinned_test_hook_mutex);
+  pinned_pair_test_error_rendezvous = rendezvous;
+  pinned_pair_test_error = error;
+}
+
 extern "C" wyrelog_error_t
 wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
     const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
@@ -583,9 +606,32 @@ wyl_fact_store_open_identified_provisioned_pair_pinned
       || !wyl_fact_store_identity_mode_is_valid (mode))
     return WYRELOG_E_INVALID;
   *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
+
+  /* A fresh INITIALIZE_IF_EMPTY open can mutate the database during DuckDB
+   * construction, before the generic R1 rendezvous.  Operation-bound hooks
+   * therefore form a complete authority-only preflight: every injected seam
+   * runs before lock creation or any storage access.  The generic lifecycle
+   * below consumes an empty test control and retains its existing semantics
+   * for callers that already hold a generic namespace. */
+  const auto control = take_pinned_test_control ();
+  for (int value = WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT;
+      value <= WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE; value++) {
+    const auto rendezvous =
+        static_cast<WylFactStorePinnedRendezvous> (value);
+    control.Fire (rendezvous);
+    if (control.pair_error != WYRELOG_E_OK
+        && control.pair_error_rendezvous == rendezvous)
+      return control.pair_error;
+    const auto authority_result =
+        wyl_fact_graph_provisioned_pair_revalidate (pair);
+    if (authority_result != WYRELOG_E_OK)
+      return authority_result;
+  }
+
   WylFactArtifactNamespace *namespace_ = nullptr;
   const auto result =
-      wyl_fact_artifact_namespace_open_provisioned_pair (pair, &namespace_);
+      wyl_fact_artifact_namespace_open_provisioned_pair_internal (pair,
+      &namespace_);
   if (result != WYRELOG_E_OK)
     return result;
   const auto open_result =

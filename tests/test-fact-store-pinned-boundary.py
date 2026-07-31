@@ -2,6 +2,9 @@
 """Lock the pinned identity opener to typed, bounded storage authority."""
 
 from pathlib import Path
+import os
+import shlex
+import subprocess
 import sys
 
 root = Path(sys.argv[1])
@@ -74,8 +77,8 @@ if "returns no live DuckDB handle" not in types:
     raise SystemExit("pinned one-shot handle boundary is missing")
 if "typedef struct WylFactGraphProvisionedPair" not in locator_types:
     raise SystemExit("retained-pair authority is not opaque")
-if "wyl_fact_artifact_namespace_open_provisioned_pair" not in namespace_types:
-    raise SystemExit("operation namespace handoff is missing")
+if "wyl_fact_artifact_namespace_open_provisioned_pair" in namespace_types:
+    raise SystemExit("operation pair escapes through the generic namespace API")
 pair_declaration = types.split(
     "wyl_fact_store_open_identified_provisioned_pair_pinned", 1
 )[1].split(";", 1)[0]
@@ -86,3 +89,63 @@ for forbidden in ("gchar", "gint", "WylFactGraphDirectory"):
         )
 if "WYL_FACT_STORE_IDENTITY_RESULT_OPEN" not in windows:
     raise SystemExit("Windows fail-closed result classification is missing")
+
+if sys.platform != "win32":
+    cflags = subprocess.run(
+        ["pkg-config", "--cflags", "glib-2.0"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    compiler = shlex.split(os.environ.get("CC", "cc"))
+    common = compiler + [
+        "-std=c11",
+        "-fsyntax-only",
+        "-I",
+        str(root),
+        "-I",
+        str(root / "wyrelog"),
+        *cflags,
+        "-x",
+        "c",
+        "-",
+    ]
+    positive = subprocess.run(
+        common,
+        input="""
+#include "fact/store-identity-types-private.h"
+static void consume(WylFactGraphProvisionedPair *pair,
+                    const WylFactStoreIdentity *identity,
+                    WylFactStoreIdentityResult *result) {
+  (void) wyl_fact_store_open_identified_provisioned_pair_pinned(
+      pair, identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, result);
+}
+""",
+        text=True,
+        capture_output=True,
+    )
+    if positive.returncode:
+        raise SystemExit(
+            "sole operation entry does not compile:\n" + positive.stderr
+        )
+    negative = subprocess.run(
+        common
+        + [
+            "-Werror=implicit-function-declaration",
+            "-Werror=incompatible-pointer-types",
+        ],
+        input="""
+#include "fact/graph-artifact-namespace-private.h"
+static void escape(WylFactGraphProvisionedPair *pair) {
+  WylFactArtifactNamespace *namespace_ = 0;
+  WylFactArtifactMutationLease *lease = 0;
+  (void) wyl_fact_artifact_namespace_open_provisioned_pair(
+      pair, &namespace_);
+  (void) wyl_fact_artifact_namespace_acquire_reader_guard(pair, &lease);
+}
+""",
+        text=True,
+        capture_output=True,
+    )
+    if negative.returncode == 0:
+        raise SystemExit("operation pair compiled against generic authority APIs")
