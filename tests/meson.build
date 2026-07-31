@@ -994,6 +994,16 @@ test('service-permission-receipt', test_service_permission_receipt,
   timeout : 90,
 )
 
+test_service_permission_manifest = executable('test-service-permission-manifest',
+  'test-service-permission-manifest.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('service-permission-manifest', test_service_permission_manifest,
+  timeout : 90,
+)
+
 test_fact_schema = executable('test-fact-schema',
   'test-fact-schema.c',
   'fact-test-support.c',

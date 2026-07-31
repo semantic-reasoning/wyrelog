@@ -51,6 +51,7 @@ wyrelog_sources = files(
   'fact/reconcile-private.c',
   'fact/root-writer-lease-private.c',
   'fact/schema.c',
+  'policy/service-permission-maintenance-private.c',
   'policy/store.c',
   'policy/store-lease.c',
   'wyl-boot.c',
