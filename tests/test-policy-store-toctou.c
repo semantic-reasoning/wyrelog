@@ -36,6 +36,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/policy/store-lease-private.h"
 #include "wyrelog/wyl-keyprovider-dev-private.h"
 
 #include <sys/stat.h>
@@ -384,6 +385,299 @@ test_parent_directory_symlink_is_permitted (void)
   return 0;
 }
 
+/* --- #618 maintenance-exclusive store-file identity pinning ---
+ *
+ * The offline remediation tool takes the store under a maintenance lease that,
+ * atop the existing exclusive flock, opens and pins the STORE FILE's own
+ * identity (dev/ino/nlink/owner/mode) and fails closed on any substitution.
+ * These exercise the POSIX raw-lease contract directly. */
+#ifndef G_OS_WIN32
+static gboolean
+write_owner_only_store (const gchar *path)
+{
+  if (!g_file_set_contents (path, "store", 5, NULL))
+    return FALSE;
+  return g_chmod (path, 0600) == 0;
+}
+
+/* A clean owner-only store is accepted and its identity re-verifies OK. */
+static gint
+test_maintenance_acquire_pins_clean_store (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 500;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  if (!write_owner_only_store (store)) {
+    rmrf (dir);
+    return 501;
+  }
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (rc != WYRELOG_E_OK || lease == NULL) {
+    if (lease != NULL)
+      wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 502;
+  }
+  if (wyl_policy_store_lease_verify_store_identity (lease) != WYRELOG_E_OK) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 503;
+  }
+  wyl_policy_store_lease_release (lease);
+  rmrf (dir);
+  return 0;
+}
+
+/* A symlink at the store path is refused (O_NOFOLLOW ELOOP). */
+static gint
+test_maintenance_symlink_rejected (void)
+{
+  if (!can_create_symlinks ()) {
+    g_printerr ("test_maintenance_symlink_rejected: skipped"
+        " (no symlink-create privilege)\n");
+    return 0;
+  }
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 510;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  g_autofree gchar *target = g_build_filename (dir, "real.sqlite", NULL);
+  if (!write_owner_only_store (target)) {
+    rmrf (dir);
+    return 511;
+  }
+  if (create_file_symlink (target, store) != 0) {
+    rmrf (dir);
+    return 512;
+  }
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (lease != NULL) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 513;
+  }
+  if (rc != WYRELOG_E_POLICY) {
+    rmrf (dir);
+    return 514;
+  }
+  rmrf (dir);
+  return 0;
+}
+
+/* A hardlinked store (st_nlink == 2) is refused. */
+static gint
+test_maintenance_hardlink_rejected (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 520;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  g_autofree gchar *alias = g_build_filename (dir, "alias.sqlite", NULL);
+  if (!write_owner_only_store (store)) {
+    rmrf (dir);
+    return 521;
+  }
+  if (link (store, alias) != 0) {
+    rmrf (dir);
+    return 522;
+  }
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (lease != NULL) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 523;
+  }
+  if (rc != WYRELOG_E_POLICY) {
+    rmrf (dir);
+    return 524;
+  }
+  rmrf (dir);
+  return 0;
+}
+
+/* A group/world-accessible store (0644) is refused. */
+static gint
+test_maintenance_loose_mode_rejected (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 530;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  if (!g_file_set_contents (store, "store", 5, NULL)
+      || g_chmod (store, 0644) != 0) {
+    rmrf (dir);
+    return 531;
+  }
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (lease != NULL) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 532;
+  }
+  if (rc != WYRELOG_E_POLICY) {
+    rmrf (dir);
+    return 533;
+  }
+  rmrf (dir);
+  return 0;
+}
+
+/* A store owned by a different uid is refused. Requires root to arrange the
+ * foreign ownership; skipped (soft success) otherwise. */
+static gint
+test_maintenance_wrong_owner_rejected (void)
+{
+  if (geteuid () != 0) {
+    g_printerr ("test_maintenance_wrong_owner_rejected: skipped"
+        " (requires root to chown to a foreign uid)\n");
+    return 0;
+  }
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 540;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  if (!write_owner_only_store (store)) {
+    rmrf (dir);
+    return 541;
+  }
+  if (chown (store, 1, 1) != 0) {
+    rmrf (dir);
+    return 542;
+  }
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (lease != NULL) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 543;
+  }
+  if (rc != WYRELOG_E_POLICY) {
+    rmrf (dir);
+    return 544;
+  }
+  rmrf (dir);
+  return 0;
+}
+
+/* verify_store_identity is OK while the store is unchanged and E_POLICY once
+ * the store file is replaced by a different inode under the held lease. */
+static gint
+test_maintenance_verify_detects_swap (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 550;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  if (!write_owner_only_store (store)) {
+    rmrf (dir);
+    return 551;
+  }
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (rc != WYRELOG_E_OK || lease == NULL) {
+    if (lease != NULL)
+      wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 552;
+  }
+  if (wyl_policy_store_lease_verify_store_identity (lease) != WYRELOG_E_OK) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 553;
+  }
+  /* Replace the store with a fresh, distinct inode. The held descriptor keeps
+   * the original inode number allocated, so the recreated file differs. */
+  if (g_remove (store) != 0 || !write_owner_only_store (store)) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 554;
+  }
+  if (wyl_policy_store_lease_verify_store_identity (lease) != WYRELOG_E_POLICY) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 555;
+  }
+  wyl_policy_store_lease_release (lease);
+  rmrf (dir);
+  return 0;
+}
+
+/* A second maintenance acquire on the same store is refused with BUSY while
+ * the first lease is held (exclusivity). */
+static gint
+test_maintenance_second_acquire_busy (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 560;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  if (!write_owner_only_store (store)) {
+    rmrf (dir);
+    return 561;
+  }
+  wyl_policy_store_lease_t *first = NULL;
+  if (wyl_policy_store_lease_acquire_maintenance (store, &first)
+      != WYRELOG_E_OK || first == NULL) {
+    if (first != NULL)
+      wyl_policy_store_lease_release (first);
+    rmrf (dir);
+    return 562;
+  }
+  wyl_policy_store_lease_t *second = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &second);
+  if (second != NULL) {
+    wyl_policy_store_lease_release (second);
+    wyl_policy_store_lease_release (first);
+    rmrf (dir);
+    return 563;
+  }
+  if (rc != WYRELOG_E_BUSY) {
+    wyl_policy_store_lease_release (first);
+    rmrf (dir);
+    return 564;
+  }
+  wyl_policy_store_lease_release (first);
+  rmrf (dir);
+  return 0;
+}
+
+/* An absent store is not a fresh-create case for remediation: NOT_FOUND. */
+static gint
+test_maintenance_absent_store_not_found (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 570;
+  g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
+  wyl_policy_store_lease_t *lease = NULL;
+  wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
+      &lease);
+  if (lease != NULL) {
+    wyl_policy_store_lease_release (lease);
+    rmrf (dir);
+    return 571;
+  }
+  if (rc != WYRELOG_E_NOT_FOUND) {
+    rmrf (dir);
+    return 572;
+  }
+  rmrf (dir);
+  return 0;
+}
+#endif /* !G_OS_WIN32 */
+
 int
 main (void)
 {
@@ -405,6 +699,40 @@ main (void)
     g_printerr ("test_parent_directory_symlink_is_permitted failed: %d\n", rc);
     return rc;
   }
+#ifndef G_OS_WIN32
+  if ((rc = test_maintenance_acquire_pins_clean_store ()) != 0) {
+    g_printerr ("test_maintenance_acquire_pins_clean_store failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_symlink_rejected ()) != 0) {
+    g_printerr ("test_maintenance_symlink_rejected failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_hardlink_rejected ()) != 0) {
+    g_printerr ("test_maintenance_hardlink_rejected failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_loose_mode_rejected ()) != 0) {
+    g_printerr ("test_maintenance_loose_mode_rejected failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_wrong_owner_rejected ()) != 0) {
+    g_printerr ("test_maintenance_wrong_owner_rejected failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_verify_detects_swap ()) != 0) {
+    g_printerr ("test_maintenance_verify_detects_swap failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_second_acquire_busy ()) != 0) {
+    g_printerr ("test_maintenance_second_acquire_busy failed: %d\n", rc);
+    return rc;
+  }
+  if ((rc = test_maintenance_absent_store_not_found ()) != 0) {
+    g_printerr ("test_maintenance_absent_store_not_found failed: %d\n", rc);
+    return rc;
+  }
+#endif /* !G_OS_WIN32 */
 
   return 0;
 }
