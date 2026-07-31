@@ -11,6 +11,10 @@ typedef struct wyl_policy_store_lease_t wyl_policy_store_lease_t;
 
 wyrelog_error_t wyl_policy_store_lease_acquire (const gchar * path,
     wyl_policy_store_lease_t ** out_lease);
+wyrelog_error_t wyl_policy_store_lease_acquire_maintenance (const gchar * path,
+    wyl_policy_store_lease_t ** out_lease);
+wyrelog_error_t wyl_policy_store_lease_verify_store_identity (const
+    wyl_policy_store_lease_t * lease);
 void wyl_policy_store_lease_release (wyl_policy_store_lease_t * lease);
 
 const gchar *wyl_policy_store_lease_resolved_path (const

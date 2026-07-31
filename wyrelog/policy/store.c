@@ -7706,7 +7706,10 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 
   gboolean provider_backed = opts->require_encrypted || self->keyprovider.owned;
   if (!path_is_memory_db (effective_path) && provider_backed) {
-    rc = wyl_policy_store_lease_acquire (effective_path, &self->lease);
+    rc = opts->maintenance_exclusive
+        ? wyl_policy_store_lease_acquire_maintenance (effective_path,
+        &self->lease)
+        : wyl_policy_store_lease_acquire (effective_path, &self->lease);
     if (rc != WYRELOG_E_OK)
       goto fail;
     g_free (self->canonical_path);

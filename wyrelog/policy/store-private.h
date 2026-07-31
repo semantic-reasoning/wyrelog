@@ -557,6 +557,11 @@ typedef struct
   gpointer keyprovider_state;
   void (*keyprovider_state_free) (gpointer state);
   gboolean require_encrypted;
+  /* Take the store under a maintenance-exclusive lease that also pins and
+   * verifies the store file's own identity (symlink/reparse/hardlink/owner/
+   * mode/stale fail closed), not just the parent directory. Used by the
+   * offline remediation tool; the daemon leaves this unset. */
+  gboolean maintenance_exclusive;
   const wyl_policy_store_cvk_runtime_t *service_cvk_runtime;
   const wyl_policy_store_rotation_runtime_t *rotation_runtime;
 } wyl_policy_store_open_options_t;

@@ -44,11 +44,22 @@ struct wyl_policy_store_lease_t
   HANDLE lock_handle;
   guint64 parent_volume;
   guint64 parent_file_index;
+  gboolean maintenance;
+  HANDLE store_handle;
+  guint64 store_volume;
+  guint64 store_file_index;
+  guint32 store_nlink;
 #else
   int parent_dirfd;
   int lock_fd;
   guint64 parent_dev;
   guint64 parent_ino;
+  gboolean maintenance;
+  int store_fd;
+  guint64 store_dev;
+  guint64 store_ino;
+  guint64 store_uid;
+  guint32 store_mode;
 #endif
 };
 
@@ -134,8 +145,46 @@ win_parent_identity (HANDLE handle, guint64 *volume, guint64 *index)
   return TRUE;
 }
 
-wyrelog_error_t
-wyl_policy_store_lease_acquire (const gchar *path,
+/* Pin the store file itself under an already-held maintenance lease. The
+ * store is opened relative to the pinned parent through its final component
+ * with the reparse point refused, rejecting symlinks, junctions, mount
+ * points, directories, and hardlinked (nNumberOfLinks != 1) inodes so the
+ * offline remediation tool fails closed on substitution. */
+static wyrelog_error_t
+pin_store_file (wyl_policy_store_lease_t *lease)
+{
+  wchar_t *wstore = (wchar_t *) g_utf8_to_utf16 (lease->resolved_path, -1,
+      NULL, NULL, NULL);
+  if (wstore == NULL)
+    return WYRELOG_E_INVALID;
+  HANDLE handle = CreateFileW (wstore, READ_CONTROL | FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  DWORD last_error = handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
+  g_free (wstore);
+  if (handle == INVALID_HANDLE_VALUE)
+    return (last_error == ERROR_FILE_NOT_FOUND
+        || last_error == ERROR_PATH_NOT_FOUND) ? WYRELOG_E_NOT_FOUND :
+        WYRELOG_E_IO;
+  BY_HANDLE_FILE_INFORMATION info;
+  if (!GetFileInformationByHandle (handle, &info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      || info.nNumberOfLinks != 1) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
+  lease->store_handle = handle;
+  lease->store_volume = info.dwVolumeSerialNumber;
+  lease->store_file_index =
+      ((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow;
+  lease->store_nlink = info.nNumberOfLinks;
+  lease->maintenance = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+lease_acquire_internal (const gchar *path, gboolean maintenance,
     wyl_policy_store_lease_t **out_lease)
 {
   if (path == NULL || path[0] == '\0' || out_lease == NULL)
@@ -219,8 +268,29 @@ wyl_policy_store_lease_acquire (const gchar *path,
   registry_bind (lease, path_key);
   registry_bind (lease, location_key);
   g_mutex_unlock (&lease_registry_mutex);
+  if (maintenance) {
+    wyrelog_error_t prc = pin_store_file (lease);
+    if (prc != WYRELOG_E_OK) {
+      wyl_policy_store_lease_release (lease);
+      return prc;
+    }
+  }
   *out_lease = lease;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_acquire (const gchar *path,
+    wyl_policy_store_lease_t **out_lease)
+{
+  return lease_acquire_internal (path, FALSE, out_lease);
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_acquire_maintenance (const gchar *path,
+    wyl_policy_store_lease_t **out_lease)
+{
+  return lease_acquire_internal (path, TRUE, out_lease);
 }
 
 wyrelog_error_t
@@ -235,6 +305,39 @@ wyl_policy_store_lease_verify_parent (const wyl_policy_store_lease_t *lease)
       WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+/* Re-resolve the store's final component and confirm it is still the same
+ * regular, non-reparse, non-hardlinked inode pinned at acquisition. Catches a
+ * substitution performed after the maintenance lease was taken. */
+wyrelog_error_t
+wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
+    *lease)
+{
+  if (lease == NULL || !lease->maintenance
+      || lease->store_handle == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_INVALID;
+  wchar_t *wstore = (wchar_t *) g_utf8_to_utf16 (lease->resolved_path, -1,
+      NULL, NULL, NULL);
+  if (wstore == NULL)
+    return WYRELOG_E_INVALID;
+  HANDLE handle = CreateFileW (wstore, READ_CONTROL | FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  g_free (wstore);
+  if (handle == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_POLICY;
+  BY_HANDLE_FILE_INFORMATION info;
+  gboolean ok = GetFileInformationByHandle (handle, &info)
+      && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      && !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      && info.nNumberOfLinks == lease->store_nlink
+      && info.nNumberOfLinks == 1
+      && (guint64) info.dwVolumeSerialNumber == lease->store_volume
+      && (((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow)
+      == lease->store_file_index;
+  CloseHandle (handle);
+  return ok ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 void
 wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
 {
@@ -242,6 +345,8 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
     return;
   g_mutex_lock (&lease_registry_mutex);
   registry_unbind_all (lease);
+  if (lease->maintenance)
+    CloseHandle (lease->store_handle);
   CloseHandle (lease->lock_handle);
   CloseHandle (lease->parent_handle);
   g_mutex_unlock (&lease_registry_mutex);
@@ -271,8 +376,47 @@ lock_nonblocking (int fd)
       WYRELOG_E_IO;
 }
 
-wyrelog_error_t
-wyl_policy_store_lease_acquire (const gchar *path,
+/* Pin the store file itself under an already-held maintenance lease. The
+ * store is opened relative to the pinned parent dirfd with O_NOFOLLOW so a
+ * symlink at the final component (ELOOP) is refused, and the inode is
+ * required to be a regular file, unshared (st_nlink == 1), owned by the
+ * effective user, and owner-only (no group/other bits) so the offline
+ * remediation tool fails closed on substitution, hardlinking, wrong owner,
+ * or loose mode. A missing store is not a fresh-create case here: the tool
+ * remediates an existing store, so ENOENT is NOT_FOUND. */
+static wyrelog_error_t
+pin_store_file (wyl_policy_store_lease_t *lease)
+{
+  int fd = openat (lease->parent_dirfd, lease->basename,
+      O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    if (errno == ELOOP)
+      return WYRELOG_E_POLICY;
+    if (errno == ENOENT)
+      return WYRELOG_E_NOT_FOUND;
+    return WYRELOG_E_IO;
+  }
+  struct stat st;
+  if (fstat (fd, &st) != 0) {
+    close (fd);
+    return WYRELOG_E_IO;
+  }
+  if (!S_ISREG (st.st_mode) || st.st_nlink != 1 || st.st_uid != geteuid ()
+      || (st.st_mode & 0077) != 0) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  lease->store_fd = fd;
+  lease->store_dev = st.st_dev;
+  lease->store_ino = st.st_ino;
+  lease->store_uid = st.st_uid;
+  lease->store_mode = st.st_mode;
+  lease->maintenance = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+lease_acquire_internal (const gchar *path, gboolean maintenance,
     wyl_policy_store_lease_t **out_lease)
 {
   if (path == NULL || path[0] == '\0' || out_lease == NULL)
@@ -385,8 +529,61 @@ wyl_policy_store_lease_acquire (const gchar *path,
   registry_bind (lease, location_key);
   registry_bind (lease, inode_key);
   g_mutex_unlock (&lease_registry_mutex);
+  if (maintenance) {
+    wyrelog_error_t prc = pin_store_file (lease);
+    if (prc != WYRELOG_E_OK) {
+      wyl_policy_store_lease_release (lease);
+      return prc;
+    }
+  }
   *out_lease = lease;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_acquire (const gchar *path,
+    wyl_policy_store_lease_t **out_lease)
+{
+  return lease_acquire_internal (path, FALSE, out_lease);
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_acquire_maintenance (const gchar *path,
+    wyl_policy_store_lease_t **out_lease)
+{
+  return lease_acquire_internal (path, TRUE, out_lease);
+}
+
+/* Re-resolve the store's final component through the pinned parent dirfd and
+ * confirm it is still the same regular, unshared, owner-only inode captured at
+ * acquisition. A re-fstat of the retained descriptor alone cannot see a name
+ * repointed to a fresh inode, so the check re-opens by name (O_NOFOLLOW) and
+ * compares against the recorded dev/ino/uid/mode. Catches a swap performed
+ * after the maintenance lease was taken (used before the persist-on-close
+ * durable write). */
+wyrelog_error_t
+wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
+    *lease)
+{
+  if (lease == NULL || !lease->maintenance || lease->store_fd < 0
+      || lease->parent_dirfd < 0)
+    return WYRELOG_E_INVALID;
+  int fd = openat (lease->parent_dirfd, lease->basename,
+      O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    return (errno == ELOOP || errno == ENOENT) ? WYRELOG_E_POLICY :
+        WYRELOG_E_IO;
+  struct stat st;
+  int rc = fstat (fd, &st);
+  close (fd);
+  if (rc != 0)
+    return WYRELOG_E_IO;
+  return (S_ISREG (st.st_mode) && st.st_nlink == 1
+      && (guint64) st.st_dev == lease->store_dev
+      && (guint64) st.st_ino == lease->store_ino
+      && (guint64) st.st_uid == lease->store_uid
+      && (guint32) st.st_mode == lease->store_mode) ? WYRELOG_E_OK :
+      WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t
@@ -426,6 +623,8 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
     return;
   g_mutex_lock (&lease_registry_mutex);
   registry_unbind_all (lease);
+  if (lease->maintenance)
+    close (lease->store_fd);
   close (lease->lock_fd);
   close (lease->parent_dirfd);
   g_mutex_unlock (&lease_registry_mutex);
