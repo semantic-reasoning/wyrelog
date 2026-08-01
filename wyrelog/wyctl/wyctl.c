@@ -895,9 +895,9 @@ readiness_reason_from_body (const gchar *body)
 static int
 run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlOptions opts = {
-    .daemon_url = global_opts->daemon_url,
-    .timeout_ms_arg = global_opts->timeout_ms_arg,
+  g_auto (WyctlOptions) opts = {
+    .daemon_url = g_strdup (global_opts->daemon_url),
+    .timeout_ms_arg = g_strdup (global_opts->timeout_ms_arg),
     .readiness = global_opts->readiness,
   };
   GOptionEntry entries[] = {
@@ -925,7 +925,7 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
 
   /* Resolve the CLI flags against GSettings defaults. The resolver
    * returns an owned copy or NULL; the original opts.* slots stay
-   * owned by GOptionContext so we never assign back into them. */
+   * owned by the local option holder so we never assign back into them. */
   g_autofree gchar *daemon_url = wyctl_resolve_string_option (opts.daemon_url,
       global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
@@ -3356,7 +3356,7 @@ static int
 run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceCredentialOptions opts = { 0 };
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Service subject; must be svc:<tenant>:... with <tenant> equal to "
@@ -3459,7 +3459,7 @@ static int
 run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceCredentialOptions opts = { 0 };
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"credential-id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
         "Credential id to rotate", "CREDENTIAL_ID"},
@@ -3571,7 +3571,7 @@ static int
 run_service_principal_create (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServicePrincipalOptions opts = { 0 };
+  g_auto (WyctlServicePrincipalOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Service subject; must be svc:<tenant>:... with <tenant> equal to "
@@ -3650,7 +3650,7 @@ static int
 run_service_principal_list (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServicePrincipalOptions opts = { 0 };
+  g_auto (WyctlServicePrincipalOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
@@ -3717,7 +3717,7 @@ static int
 run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServicePrincipalOptions opts = { 0 };
+  g_auto (WyctlServicePrincipalOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Service subject to disable", "SUBJECT_ID"},
@@ -3828,7 +3828,7 @@ static int
 run_service_credential_list (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceCredentialOptions opts = { 0 };
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Service subject whose credentials to list", "SUBJECT_ID"},
@@ -3901,7 +3901,7 @@ static int
 run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceCredentialOptions opts = { 0 };
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"credential-id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
         "Credential id to revoke", "CREDENTIAL_ID"},
@@ -4039,7 +4039,7 @@ static int
 run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceCredentialOptions opts = { 0 };
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
         "Durable operation request id to recover", "ID"},
@@ -4111,7 +4111,7 @@ static int
 run_service_credential_status (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceCredentialOptions opts = { 0 };
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
@@ -4416,7 +4416,7 @@ run_service_permission_closure (gint argc, gchar **argv)
 int
 main (int argc, char **argv)
 {
-  WyctlOptions opts = { 0 };
+  g_auto (WyctlOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
         "Daemon URL", "URL"},
