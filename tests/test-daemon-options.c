@@ -348,6 +348,221 @@ test_credential_roots_disjoint_enforced (void)
   g_free (opts.profile_arg);
 }
 
+static void
+test_parser_repeated_strings_replace_owned_values (void)
+{
+  g_auto (WylDaemonOptions) opts = {
+    .config_path = (gchar *) "borrowed-config",
+    .profile_arg = (gchar *) "system",
+    .template_dir = "borrowed-template",
+    .policy_store_path = "borrowed-policy",
+    .policy_keyprovider_path = "borrowed-keyprovider",
+    .audit_store_path = "borrowed-audit",
+    .fact_root = "borrowed-facts",
+    .fact_store_mode = "per-tenant-graph",
+    .operation_root = "borrowed-operations",
+    .credential_publication_root = "borrowed-publication",
+    .event_spool_dir = "borrowed-spool",
+    .system_url = "borrowed-url",
+    .listen_port_arg = (gchar *) "8000",
+    .event_queue_limit_arg = (gchar *) "100",
+    .bootstrap_admin_subject = "borrowed-subject",
+    .listen_port = -1,
+  };
+  gchar *argv[] = {
+    (gchar *) "test-daemon-options",
+    (gchar *) "--config=first-config",
+    (gchar *) "--config=last-config",
+    (gchar *) "--profile=system",
+    (gchar *) "--profile=service",
+    (gchar *) "--template-dir=first-template",
+    (gchar *) "--template-dir=last-template",
+    (gchar *) "--policy-db=first-policy",
+    (gchar *) "--policy-db=last-policy",
+    (gchar *) "--policy-keyprovider=first-keyprovider",
+    (gchar *) "--policy-keyprovider=last-keyprovider",
+    (gchar *) "--audit-db=first-audit",
+    (gchar *) "--audit-db=last-audit",
+    (gchar *) "--fact-root=first-facts",
+    (gchar *) "--fact-root=last-facts",
+    (gchar *) "--fact-store-mode=first-mode",
+    (gchar *) "--fact-store-mode=last-mode",
+    (gchar *) "--operation-root=first-operations",
+    (gchar *) "--operation-root=last-operations",
+    (gchar *) "--credential-publication-root=first-publication",
+    (gchar *) "--credential-publication-root=last-publication",
+    (gchar *) "--event-spool-dir=first-spool",
+    (gchar *) "--event-spool-dir=last-spool",
+    (gchar *) "--system-url=first-url",
+    (gchar *) "--system-url=last-url",
+    (gchar *) "--event-queue-limit=200",
+    (gchar *) "--event-queue-limit=300",
+#ifdef WYL_HAS_DAEMON_HTTP
+    (gchar *) "--listen-port=8100",
+    (gchar *) "--listen-port=8200",
+#endif
+    (gchar *) "--bootstrap-admin-subject=first-subject",
+    (gchar *) "--bootstrap-admin-subject=last-subject",
+    NULL,
+  };
+  gint argc = (gint) G_N_ELEMENTS (argv) - 1;
+  gchar **argv_ptr = argv;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_parse_options (&argc, &argv_ptr, &opts, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (argc, ==, 1);
+  g_assert_cmpstr (opts.config_path, ==, "last-config");
+  g_assert_cmpstr (opts.profile_arg, ==, "service");
+  g_assert_cmpstr (opts.template_dir, ==, "last-template");
+  g_assert_cmpstr (opts.policy_store_path, ==, "last-policy");
+  g_assert_cmpstr (opts.policy_keyprovider_path, ==, "last-keyprovider");
+  g_assert_cmpstr (opts.audit_store_path, ==, "last-audit");
+  g_assert_cmpstr (opts.fact_root, ==, "last-facts");
+  g_assert_cmpstr (opts.fact_store_mode, ==, "last-mode");
+  g_assert_cmpstr (opts.operation_root, ==, "last-operations");
+  g_assert_cmpstr (opts.credential_publication_root, ==, "last-publication");
+  g_assert_cmpstr (opts.event_spool_dir, ==, "last-spool");
+  g_assert_cmpstr (opts.system_url, ==, "last-url");
+  g_assert_cmpstr (opts.event_queue_limit_arg, ==, "300");
+#ifdef WYL_HAS_DAEMON_HTTP
+  g_assert_cmpstr (opts.listen_port_arg, ==, "8200");
+#endif
+  g_assert_cmpstr (opts.bootstrap_admin_subject, ==, "last-subject");
+}
+
+static void
+test_parser_failure_keeps_owned_values_clearable (void)
+{
+  g_auto (WylDaemonOptions) opts = {
+    .template_dir = "borrowed-template",
+    .listen_port = -1,
+  };
+  gchar *argv[] = {
+    (gchar *) "test-daemon-options",
+    (gchar *) "--policy-db=/owned/policy",
+    (gchar *) "--definitely-unknown",
+    NULL,
+  };
+  gint argc = (gint) G_N_ELEMENTS (argv) - 1;
+  gchar **argv_ptr = argv;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_false (wyl_daemon_parse_options (&argc, &argv_ptr, &opts, &error));
+  g_assert_error (error, G_OPTION_ERROR, G_OPTION_ERROR_UNKNOWN_OPTION);
+  g_assert_cmpstr (opts.policy_store_path, ==, "/owned/policy");
+}
+
+static void
+test_resolve_failure_keeps_config_values_clearable (void)
+{
+  gchar *path = make_tmp_conf ("[daemon]\n"
+      "profile=invalid\n"
+      "policy_db=/conf/policy\n"
+      "policy_keyprovider=file:/conf/key\n"
+      "audit_db=/conf/audit\n"
+      "fact_root=/conf/facts\n"
+      "operation_root=/conf/operations\n"
+      "credential_publication_root=/conf/publication\n"
+      "event_spool_dir=/conf/spool\n"
+      "system_url=http://conf.example/\n"
+      "event_queue_limit=200\n" "bootstrap_admin_subject=conf-subject\n", 0640);
+  g_auto (WylDaemonOptions) opts = {
+    .template_dir = "borrowed-template",
+    .listen_port = -1,
+  };
+  g_autofree gchar *config_arg = g_strdup_printf ("--config=%s", path);
+  gchar *argv[] = {
+    (gchar *) "test-daemon-options",
+    config_arg,
+    NULL,
+  };
+  gint argc = (gint) G_N_ELEMENTS (argv) - 1;
+  gchar **argv_ptr = argv;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_parse_options (&argc, &argv_ptr, &opts, &error));
+  g_assert_no_error (error);
+  g_assert_false (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE);
+  g_assert_cmpstr (opts.policy_store_path, ==, "/conf/policy");
+
+  remove_tmp_conf (path);
+}
+
+static void
+test_config_profile_info_values_are_clearable (void)
+{
+  gchar *path = make_tmp_conf ("[daemon]\n"
+      "profile=service\n"
+      "policy_db=/conf/policy\n"
+      "policy_keyprovider=file:/conf/key\n"
+      "audit_db=/conf/audit\n"
+      "fact_root=/conf/facts\n"
+      "event_spool_dir=/conf/spool\n"
+      "system_url=http://conf.example/\n" "event_queue_limit=200\n", 0640);
+  g_auto (WylDaemonOptions) opts = {
+    .template_dir = "borrowed-template",
+    .show_profile_info = TRUE,
+    .listen_port = -1,
+  };
+  g_autofree gchar *config_arg = g_strdup_printf ("--config=%s", path);
+  gchar *argv[] = {
+    (gchar *) "test-daemon-options",
+    config_arg,
+    NULL,
+  };
+  gint argc = (gint) G_N_ELEMENTS (argv) - 1;
+  gchar **argv_ptr = argv;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_parse_options (&argc, &argv_ptr, &opts, &error));
+  g_assert_no_error (error);
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (opts.profile, ==, WYL_DAEMON_PROFILE_SERVICE);
+  g_assert_cmpstr (opts.policy_store_path, ==, "/conf/policy");
+  g_assert_cmpuint (opts.event_queue_limit, ==, 200);
+
+  remove_tmp_conf (path);
+}
+
+static void
+test_clear_preserves_borrowed_and_static_ownership (void)
+{
+  WylDaemonOptions opts = {
+    .config_path = (gchar *) "borrowed-config",
+    .profile_arg = (gchar *) "service",
+    .template_dir = "borrowed-template",
+    .fact_root = "borrowed-facts",
+    .operation_root = "borrowed-operations",
+    .credential_publication_root = "borrowed-publication",
+    .show_profile_info = TRUE,
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+
+  /* profile-info resolution installs static profile defaults alongside the
+   * borrowed initializer values. Clearing must free neither class. */
+  opts.config_path = NULL;
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_nonnull (opts.policy_store_path);
+  g_assert_nonnull (opts.audit_store_path);
+  g_assert_nonnull (opts.fact_store_mode);
+
+  wyl_daemon_options_clear (&opts);
+  g_assert_null (opts.profile_arg);
+  g_assert_null (opts.template_dir);
+  g_assert_null (opts.policy_store_path);
+  g_assert_null (opts.operation_root);
+  g_assert_cmpint (opts.listen_port, ==, -1);
+
+  /* A second clear is a no-op, making explicit cleanup and g_auto cleanup
+   * composable for callers with multiple exits. */
+  wyl_daemon_options_clear (&opts);
+}
+
 /* ------------------------------------------------------------------ */
 /* permission gate                                                    */
 /* ------------------------------------------------------------------ */
@@ -689,6 +904,16 @@ main (int argc, char **argv)
       test_credential_roots_not_defaulted_in_production);
   g_test_add_func ("/daemon-options/credential-roots/disjoint-enforced",
       test_credential_roots_disjoint_enforced);
+  g_test_add_func ("/daemon-options/ownership/repeated-strings",
+      test_parser_repeated_strings_replace_owned_values);
+  g_test_add_func ("/daemon-options/ownership/parse-failure",
+      test_parser_failure_keeps_owned_values_clearable);
+  g_test_add_func ("/daemon-options/ownership/resolve-failure",
+      test_resolve_failure_keeps_config_values_clearable);
+  g_test_add_func ("/daemon-options/ownership/config-profile-info",
+      test_config_profile_info_values_are_clearable);
+  g_test_add_func ("/daemon-options/ownership/borrowed-and-static",
+      test_clear_preserves_borrowed_and_static_ownership);
 
 #ifndef G_OS_WIN32
   g_test_add_func ("/daemon-options/perm/0640-loads", test_perm_0640_loads);
