@@ -2144,6 +2144,7 @@ static gboolean
         gboolean have_subject = FALSE;
         gboolean have_tenant = FALSE;
         while (TRUE) {
+          g_clear_pointer (&nested_key, g_free);
           if (!json_parse_string (&cursor, &nested_key) ||
               !json_consume (&cursor, ':'))
             goto fail;
