@@ -486,7 +486,14 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
        * another link to the source - reject rather than "converge" a file
        * onto itself.  A source that cannot be opened for any reason is
        * skipped: the target-digest match below is independent proof and must
-       * not wedge a legitimate replay. */
+       * not wedge a legitimate replay.
+       *
+       * This is belt-and-suspenders behind the secure opener's nlink==1
+       * invariant: both wyl_fact_graph_directory_open_file (the target probe)
+       * and wyl_fact_graph_resolver_open_relative_regular (the source open)
+       * fail closed on nlink!=1, so two distinct names can never reach one
+       * inode and this explicit identity check cannot currently fire.  It is
+       * kept so aliasing stays rejected even if that invariant is relaxed. */
       {
         wyrelog_error_t alias = wyl_fact_graph_resolver_open_relative_regular
             (&resolver, record->source_relative_path, &source);
