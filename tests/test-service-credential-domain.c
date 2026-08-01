@@ -1503,6 +1503,31 @@ test_handoff_checked_rotate_stale_rollback_and_replay (void)
   assert_mutation_effects_equal (mutation_effects (handle), committed);
 
   wyl_service_credential_handoff_result_clear (&replay);
+  wyl_policy_store_service_authority_transaction_fail_once (store_of (handle),
+      WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+  g_assert_cmpint
+      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+          old.credential.credential_id, "admin", "handoff-rotate", 0,
+          &handoff, &runtime, &replay), ==, WYRELOG_E_IO);
+  g_assert_null (replay.credential.credential_id);
+  g_assert_null (replay.handoff.credential_id);
+  assert_mutation_effects_equal (mutation_effects (handle), committed);
+  WylServiceAuthUnavailableReason reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+
+  g_assert_cmpint
+      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+          old.credential.credential_id, "admin", "handoff-rotate", 0,
+          &handoff, &runtime, &replay), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (replay.credential.credential_id, ==,
+      out.credential.credential_id);
+  assert_mutation_effects_equal (mutation_effects (handle), committed);
+
+  wyl_service_credential_handoff_result_clear (&replay);
   wyl_service_credential_handoff_result_clear (&out);
   wyl_service_credential_issue_result_clear (&old);
   g_free (probe.actor_subject_id);

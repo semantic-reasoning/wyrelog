@@ -1597,7 +1597,7 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+  if (rc == WYRELOG_E_OK && !replay && mutation.registry_participant != NULL)
     rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !replay)
     rc = service_mutation_reconcile_operation_fence (&mutation,
