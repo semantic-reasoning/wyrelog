@@ -189,6 +189,220 @@ typedef struct
   gchar *guard_risk_arg;
 } WyctlServicePrincipalOptions;
 
+static void
+wyctl_options_clear (WyctlOptions *opts)
+{
+  g_clear_pointer (&opts->daemon_url, g_free);
+  g_clear_pointer (&opts->timeout_ms_arg, g_free);
+  /* opts->settings is borrowed from main()'s GSettings owner. */
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlOptions, wyctl_options_clear);
+
+static void
+wyctl_policy_options_clear (WyctlPolicyOptions *opts)
+{
+  g_clear_pointer (&opts->user, g_free);
+  g_clear_pointer (&opts->permission, g_free);
+  g_clear_pointer (&opts->resource, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlPolicyOptions,
+    wyctl_policy_options_clear);
+
+static void
+wyctl_audit_options_clear (WyctlAuditOptions *opts)
+{
+  g_clear_pointer (&opts->filter, g_free);
+  g_clear_pointer (&opts->limit_arg, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlAuditOptions, wyctl_audit_options_clear);
+
+static void
+wyctl_policy_permission_options_clear (WyctlPolicyPermissionOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->perm, g_free);
+  g_clear_pointer (&opts->scope, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlPolicyPermissionOptions,
+    wyctl_policy_permission_options_clear);
+
+static void
+wyctl_policy_role_options_clear (WyctlPolicyRoleOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->role, g_free);
+  g_clear_pointer (&opts->scope, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlPolicyRoleOptions,
+    wyctl_policy_role_options_clear);
+
+static void
+wyctl_graph_options_clear (WyctlGraphOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlGraphOptions, wyctl_graph_options_clear);
+
+static void
+wyctl_fact_schema_options_clear (WyctlFactSchemaOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->namespace_id, g_free);
+  g_clear_pointer (&opts->relation, g_free);
+  g_clear_pointer (&opts->schema_version_arg, g_free);
+  g_clear_pointer (&opts->columns_arg, g_free);
+  g_clear_pointer (&opts->max_rows_arg, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactSchemaOptions,
+    wyctl_fact_schema_options_clear);
+
+static void
+wyctl_fact_put_options_clear (WyctlFactPutOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->namespace_id, g_free);
+  g_clear_pointer (&opts->relation, g_free);
+  g_clear_pointer (&opts->schema_version_arg, g_free);
+  g_clear_pointer (&opts->batch_id, g_free);
+  g_clear_pointer (&opts->idempotency_key, g_free);
+  g_clear_pointer (&opts->format, g_free);
+  g_clear_pointer (&opts->input, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactPutOptions,
+    wyctl_fact_put_options_clear);
+
+static void
+wyctl_datalog_query_options_clear (WyctlDatalogQueryOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->query, g_free);
+  g_clear_pointer (&opts->output, g_free);
+  g_clear_pointer (&opts->limit_arg, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlDatalogQueryOptions,
+    wyctl_datalog_query_options_clear);
+
+static void
+wyctl_key_options_clear (WyctlKeyOptions *opts)
+{
+  g_clear_pointer (&opts->keyprovider_path, g_free);
+  g_clear_pointer (&opts->store_path, g_free);
+  g_clear_pointer (&opts->from_keyprovider_path, g_free);
+  g_clear_pointer (&opts->to_keyprovider_path, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlKeyOptions, wyctl_key_options_clear);
+
+static void
+    wyctl_service_permission_closure_options_clear
+    (WyctlServicePermissionClosureOptions * opts)
+{
+  g_clear_pointer (&opts->store_path, g_free);
+  g_clear_pointer (&opts->keyprovider_path, g_free);
+  g_clear_pointer (&opts->manifest_path, g_free);
+  g_clear_pointer (&opts->output_path, g_free);
+  g_clear_pointer (&opts->receipt_path, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlServicePermissionClosureOptions,
+    wyctl_service_permission_closure_options_clear);
+
+static void
+wyctl_mfa_options_clear (WyctlMfaOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->store_path, g_free);
+  g_clear_pointer (&opts->keyprovider_path, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlMfaOptions, wyctl_mfa_options_clear);
+
+static void
+wyctl_service_token_options_clear (WyctlServiceTokenOptions *opts)
+{
+  g_clear_pointer (&opts->credential_file, g_free);
+  g_clear_pointer (&opts->token_output, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlServiceTokenOptions,
+    wyctl_service_token_options_clear);
+
+static void
+wyctl_service_credential_options_clear (WyctlServiceCredentialOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->credential_id, g_free);
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->destination, g_free);
+  g_clear_pointer (&opts->expires_at_us_arg, g_free);
+  g_clear_pointer (&opts->request_id, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlServiceCredentialOptions,
+    wyctl_service_credential_options_clear);
+
+static void
+wyctl_service_principal_options_clear (WyctlServicePrincipalOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->display_name, g_free);
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlServicePrincipalOptions,
+    wyctl_service_principal_options_clear);
+
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlSensitiveText,
     wyctl_sensitive_text_clear);
 
