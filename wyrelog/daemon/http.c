@@ -352,6 +352,12 @@ typedef struct _WylDaemonHttpContext
   gboolean service_response_last_canary_seen;
   gboolean service_response_last_all_zero;
   WylDaemonServiceResponseAuthoritySnapshot service_response_authority;
+  WylDaemonServiceResponseCheckpoint service_response_checkpoint;
+  gpointer service_response_checkpoint_data;
+  WylDaemonServiceResponseRetireCheckpoint service_response_retire_checkpoint;
+  gpointer service_response_retire_checkpoint_data;
+  void (*service_due_write_checkpoint) (gpointer data);
+  gpointer service_due_write_checkpoint_data;
   GPtrArray *refresh_generated_ids;
   WylHumanRefreshTestLatch refresh_latch;
   /* Test-only escrow publication backend injection. When set, the service
@@ -387,6 +393,14 @@ typedef struct
   gsize len;
 } WylSensitiveServiceTokenResponse;
 
+static void wyl_daemon_http_context_unref (gpointer data);
+static WylDaemonHttpContext *wyl_daemon_http_context_ref
+    (WylDaemonHttpContext * ctx);
+#ifdef WYL_TEST_DAEMON_HTTP
+static void service_response_test_checkpoint (WylDaemonHttpContext * ctx,
+    gint phase, const WylServiceAuthReservation * reservation);
+#endif
+
 static void
     wyl_sensitive_service_token_response_free
     (WylSensitiveServiceTokenResponse * response)
@@ -414,7 +428,13 @@ static void
     }
 #endif
     g_free (response->text);
+#ifdef WYL_TEST_DAEMON_HTTP
+    service_response_test_checkpoint (response->ctx,
+        WYL_DAEMON_SERVICE_RESPONSE_BODY_WIPED, NULL);
+#endif
   }
+  wyl_daemon_http_context_unref (response->ctx);
+  sodium_memzero (response, sizeof *response);
   g_free (response);
 }
 
@@ -585,6 +605,24 @@ wyl_daemon_http_context_ref (WylDaemonHttpContext *ctx)
     g_atomic_int_inc (&ctx->ref_count);
   return ctx;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+static void
+service_response_test_checkpoint (WylDaemonHttpContext *ctx, gint phase,
+    const WylServiceAuthReservation *reservation)
+{
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  WylDaemonServiceResponseCheckpoint checkpoint =
+      ctx->service_response_checkpoint;
+  gpointer data = ctx->service_response_checkpoint_data;
+  g_mutex_unlock (&ctx->lock);
+  if (checkpoint != NULL)
+    checkpoint (phase, reservation != NULL ? reservation->session_id : NULL,
+        reservation != NULL ? reservation->jti : NULL, data);
+}
+#endif
 
 static gboolean human_refresh_dispatch_owned (WylDaemonHttpContext * ctx);
 
@@ -2300,6 +2338,48 @@ wyl_daemon_http_reset_service_response_authority_for_test (SoupServer *server)
   g_mutex_lock (&ctx->lock);
   memset (&ctx->service_response_authority, 0,
       sizeof ctx->service_response_authority);
+  ctx->service_response_wipe_count = 0;
+  ctx->service_response_last_canary_seen = FALSE;
+  ctx->service_response_last_all_zero = FALSE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_set_service_response_checkpoint_for_test (SoupServer *server,
+    WylDaemonServiceResponseCheckpoint checkpoint, gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->service_response_checkpoint = checkpoint;
+  ctx->service_response_checkpoint_data = data;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_set_service_response_retire_checkpoint_for_test
+    (SoupServer * server,
+    WylDaemonServiceResponseRetireCheckpoint checkpoint, gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->service_response_retire_checkpoint = checkpoint;
+  ctx->service_response_retire_checkpoint_data = data;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_set_service_due_write_checkpoint_for_test (SoupServer *server,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->service_due_write_checkpoint = checkpoint;
+  ctx->service_due_write_checkpoint_data = data;
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -2586,7 +2666,7 @@ build_service_token_response (WylDaemonHttpContext *ctx,
       g_try_new0 (WylSensitiveServiceTokenResponse, 1);
   if (response == NULL)
     return NULL;
-  response->ctx = ctx;
+  response->ctx = wyl_daemon_http_context_ref (ctx);
   g_autoptr (GString) json = g_string_new ("{\"access_token\":");
   append_json_string (json, access_token);
   g_string_append_c (json, '}');
@@ -2612,6 +2692,7 @@ static wyrelog_error_t service_token_exchange_core_with_authority
     (WylDaemonHttpContext * ctx,
     const WylDaemonServiceTokenRequest * request, guint * out_status,
     gchar ** out_body, guint * out_retry_after,
+    WylSensitiveServiceTokenResponse ** out_sensitive_response,
     WylServiceResponseAuthority ** out_authority);
 static wyrelog_error_t copy_access_token_secret (WylDaemonHttpContext * ctx,
     guint8 out_secret[WYL_DAEMON_JWT_KEY_LEN]);
@@ -2693,39 +2774,43 @@ service_response_authority_try_strdup (const gchar *value)
   return copy;
 }
 
-static void
-    service_response_authority_fail_stop_unclaimed
-    (WylServiceResponseAuthority * authority)
-{
-  if (authority == NULL || authority->handle == NULL)
-    return;
-  WylServiceAuthWriteLease *lease = NULL;
-  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (authority->handle),
-      authority->handle, NULL, &lease);
-  if (rc == WYRELOG_E_OK)
-    (void) wyl_service_auth_write_lease_mark_unavailable (lease,
-        authority->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
-  if (lease != NULL) {
-    (void) wyl_service_auth_write_lease_release (lease);
-    wyl_service_auth_write_lease_free (lease);
-  }
-}
+static wyrelog_error_t service_auth_retire_exact (WylDaemonHttpContext * ctx,
+    const WylServiceAuthReservation * reservation);
+static void service_response_authority_complete
+    (WylServiceResponseAuthority * authority,
+    WylServiceResponseAuthorityOutcome outcome);
 
 static void
 service_response_authority_free (WylServiceResponseAuthority *authority)
 {
   if (authority == NULL)
     return;
+  WylDaemonHttpContext *ctx = authority->ctx;
   if (g_atomic_int_get (&authority->activated)
       && g_atomic_int_get (&authority->outcome)
-      == WYL_SERVICE_RESPONSE_AUTHORITY_PENDING)
-    service_response_authority_fail_stop_unclaimed (authority);
+      == WYL_SERVICE_RESPONSE_AUTHORITY_PENDING) {
 #ifdef WYL_TEST_DAEMON_HTTP
-  if (authority->ctx != NULL) {
-    g_mutex_lock (&authority->ctx->lock);
-    authority->ctx->service_response_authority.destroyed++;
-    g_mutex_unlock (&authority->ctx->lock);
+    g_mutex_lock (&ctx->lock);
+    ctx->service_response_authority.unclaimed_fallbacks++;
+    g_mutex_unlock (&ctx->lock);
+    service_response_test_checkpoint (ctx,
+        WYL_DAEMON_SERVICE_RESPONSE_UNCLAIMED_FALLBACK,
+        &authority->reservation);
+#endif
+    wyrelog_error_t rc = service_auth_retire_exact (ctx,
+        &authority->reservation);
+    service_response_authority_complete (authority,
+        rc == WYRELOG_E_OK ? WYL_SERVICE_RESPONSE_AUTHORITY_ABORTED
+        : WYL_SERVICE_RESPONSE_AUTHORITY_CLEANUP_FAILED);
+  }
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (ctx != NULL) {
+    g_mutex_lock (&ctx->lock);
+    ctx->service_response_authority.destroyed++;
+    g_mutex_unlock (&ctx->lock);
+    service_response_test_checkpoint (ctx,
+        WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DESTROYED,
+        &authority->reservation);
   }
 #endif
   wyl_sensitive_string_free (authority->reservation.session_id);
@@ -2788,29 +2873,35 @@ service_response_authority_complete (WylServiceResponseAuthority *authority,
 {
   if (authority == NULL)
     return;
+#ifdef WYL_TEST_DAEMON_HTTP
+  WylDaemonHttpContext *ctx = authority->ctx;
+#endif
   if (!g_atomic_int_compare_and_exchange (&authority->outcome,
           WYL_SERVICE_RESPONSE_AUTHORITY_PENDING, outcome)) {
 #ifdef WYL_TEST_DAEMON_HTTP
-    g_mutex_lock (&authority->ctx->lock);
-    authority->ctx->service_response_authority.duplicate_outcomes++;
-    g_mutex_unlock (&authority->ctx->lock);
+    g_mutex_lock (&ctx->lock);
+    ctx->service_response_authority.duplicate_outcomes++;
+    g_mutex_unlock (&ctx->lock);
 #endif
     return;
   }
 #ifdef WYL_TEST_DAEMON_HTTP
-  g_mutex_lock (&authority->ctx->lock);
+  g_mutex_lock (&ctx->lock);
   if (outcome == WYL_SERVICE_RESPONSE_AUTHORITY_FINISHED)
-    authority->ctx->service_response_authority.finished++;
+    ctx->service_response_authority.finished++;
   else if (outcome == WYL_SERVICE_RESPONSE_AUTHORITY_ABORTED)
-    authority->ctx->service_response_authority.aborted++;
+    ctx->service_response_authority.aborted++;
   else
-    authority->ctx->service_response_authority.cleanup_failed++;
-  g_mutex_unlock (&authority->ctx->lock);
+    ctx->service_response_authority.cleanup_failed++;
+  g_mutex_unlock (&ctx->lock);
+  gint phase = outcome == WYL_SERVICE_RESPONSE_AUTHORITY_FINISHED
+      ? WYL_DAEMON_SERVICE_RESPONSE_FINISHED
+      : outcome == WYL_SERVICE_RESPONSE_AUTHORITY_ABORTED
+      ? WYL_DAEMON_SERVICE_RESPONSE_ABORTED
+      : WYL_DAEMON_SERVICE_RESPONSE_CLEANUP_FAILED;
+  service_response_test_checkpoint (ctx, phase, &authority->reservation);
 #endif
 }
-
-static wyrelog_error_t service_auth_retire_exact (WylDaemonHttpContext * ctx,
-    const WylServiceAuthReservation * reservation);
 
 static void
 service_response_finished (SoupServer *server, SoupServerMessage *msg,
@@ -2965,6 +3056,14 @@ service_auth_retire_exact (WylDaemonHttpContext *ctx,
 {
   if (ctx == NULL || reservation == NULL)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  WylDaemonServiceResponseRetireCheckpoint retire_checkpoint =
+      ctx->service_response_retire_checkpoint;
+  gpointer retire_checkpoint_data =
+      ctx->service_response_retire_checkpoint_data;
+  g_mutex_unlock (&ctx->lock);
+#endif
   WylServiceAuthWriteLease *lease = NULL;
   WylServiceAuthRegistryMaintenanceParticipant *maintenance = NULL;
   WylServiceRetiredLivePair retired = { 0 };
@@ -2977,6 +3076,11 @@ service_auth_retire_exact (WylDaemonHttpContext *ctx,
       &lease);
   if (rc != WYRELOG_E_OK)
     return rc;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (retire_checkpoint != NULL)
+    retire_checkpoint (reservation->session_id, reservation->jti,
+        retire_checkpoint_data);
+#endif
   rc = wyl_service_auth_registry_maintenance_participant_new_for_write
       (ctx->service_auth_registry, ctx->handle, lease, &maintenance);
   if (rc == WYRELOG_E_OK)
@@ -3217,11 +3321,21 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
 
   if (ctx == NULL || now_seconds < 0)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  void (*write_checkpoint) (gpointer data) = ctx->service_due_write_checkpoint;
+  gpointer write_checkpoint_data = ctx->service_due_write_checkpoint_data;
+  g_mutex_unlock (&ctx->lock);
+#endif
   rc = wyl_service_auth_authority_acquire_write
       (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
       &lease);
   if (rc != WYRELOG_E_OK)
     return rc;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (write_checkpoint != NULL)
+    write_checkpoint (write_checkpoint_data);
+#endif
   rc = wyl_service_auth_registry_copy_due (ctx->service_auth_registry,
       now_seconds, WYL_SERVICE_AUTH_RETIRE_BATCH_MAX, &due);
   if (rc != WYRELOG_E_OK)
@@ -3322,15 +3436,16 @@ service_token_response_set_error (guint status, const gchar *code,
 static wyrelog_error_t
 service_token_exchange_prepare (WylDaemonHttpContext *ctx,
     const gchar *credential_id, const gchar *credential_secret,
-    gsize credential_secret_len, gchar **out_body,
+    gsize credential_secret_len,
+    WylSensitiveServiceTokenResponse **out_response,
     WylServiceResponseAuthority **out_authority)
 {
-  if (out_body != NULL)
-    *out_body = NULL;
+  if (out_response != NULL)
+    *out_response = NULL;
   if (out_authority != NULL)
     *out_authority = NULL;
   if (ctx == NULL || credential_id == NULL || credential_secret == NULL
-      || credential_secret_len == 0 || out_body == NULL
+      || credential_secret_len == 0 || out_response == NULL
       || out_authority == NULL)
     return WYRELOG_E_INVALID;
 
@@ -3494,6 +3609,9 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
     (void) service_publication_context_unlock (ctx, WYRELOG_E_OK);
   }
   if (pre_handoff_failed) {
+    service_response_test_checkpoint (ctx,
+        WYL_DAEMON_SERVICE_RESPONSE_ACTIVE_PRE_HANDOFF_FAILURE,
+        &response_authority->reservation);
     rc = service_auth_retire_exact (ctx, &response_authority->reservation);
     service_response_authority_complete (response_authority,
         rc == WYRELOG_E_OK ? WYL_SERVICE_RESPONSE_AUTHORITY_ABORTED
@@ -3501,8 +3619,7 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
     return WYRELOG_E_IO;
   }
 #endif
-  *out_body = g_steal_pointer (&response->text);
-  response->len = 0;
+  *out_response = g_steal_pointer (&response);
   *out_authority = g_steal_pointer (&response_authority);
   return WYRELOG_E_OK;
 }
@@ -3511,6 +3628,7 @@ static wyrelog_error_t
 service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
     const WylDaemonServiceTokenRequest *request, guint *out_status,
     gchar **out_body, guint *out_retry_after,
+    WylSensitiveServiceTokenResponse **out_sensitive_response,
     WylServiceResponseAuthority **out_authority)
 {
   if (out_status != NULL)
@@ -3519,10 +3637,12 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
     *out_body = NULL;
   if (out_retry_after != NULL)
     *out_retry_after = 0;
+  if (out_sensitive_response != NULL)
+    *out_sensitive_response = NULL;
   if (out_authority != NULL)
     *out_authority = NULL;
   if (ctx == NULL || request == NULL || out_status == NULL || out_body == NULL
-      || out_authority == NULL)
+      || out_sensitive_response == NULL || out_authority == NULL)
     return WYRELOG_E_INVALID;
 
   if (!request->transport_ok) {
@@ -3622,10 +3742,10 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
     return WYRELOG_E_OK;
   }
 
-  g_autofree gchar *body = NULL;
+  g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
   g_autoptr (WylServiceResponseAuthority) response_authority = NULL;
   rc = service_token_exchange_prepare (ctx, credential_id, credential_secret,
-      strlen (credential_secret), &body, &response_authority);
+      strlen (credential_secret), &response, &response_authority);
   if (rc == WYRELOG_E_AUTH) {
     *out_status = 401;
     *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
@@ -3637,13 +3757,13 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
     *out_body = g_strdup_printf ("{\"error\":\"service_token_unavailable\"}");
     return WYRELOG_E_OK;
   }
-  if (rc != WYRELOG_E_OK || body == NULL) {
+  if (rc != WYRELOG_E_OK || response == NULL) {
     *out_status = 500;
     *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
         WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
     return WYRELOG_E_OK;
   }
-  *out_body = g_steal_pointer (&body);
+  *out_sensitive_response = g_steal_pointer (&response);
   *out_authority = g_steal_pointer (&response_authority);
   *out_status = 200;
   return WYRELOG_E_OK;
@@ -3654,9 +3774,14 @@ service_token_exchange_core (WylDaemonHttpContext *ctx,
     const WylDaemonServiceTokenRequest *request, guint *out_status,
     gchar **out_body, guint *out_retry_after)
 {
+  g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
   g_autoptr (WylServiceResponseAuthority) authority = NULL;
   wyrelog_error_t rc = service_token_exchange_core_with_authority (ctx, request,
-      out_status, out_body, out_retry_after, &authority);
+      out_status, out_body, out_retry_after, &response, &authority);
+  if (rc == WYRELOG_E_OK && response != NULL) {
+    *out_body = g_steal_pointer (&response->text);
+    response->len = 0;
+  }
   if (authority != NULL)
     service_response_authority_complete (authority,
         WYL_SERVICE_RESPONSE_AUTHORITY_FINISHED);
@@ -3670,9 +3795,10 @@ service_token_exchange_handle (SoupServerMessage *msg,
   guint status = 0;
   guint retry_after = 0;
   g_autofree gchar *body = NULL;
+  g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
   g_autoptr (WylServiceResponseAuthority) response_authority = NULL;
   wyrelog_error_t rc = service_token_exchange_core_with_authority (ctx, request,
-      &status, &body, &retry_after, &response_authority);
+      &status, &body, &retry_after, &response, &response_authority);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
     return;
@@ -3685,6 +3811,9 @@ service_token_exchange_handle (SoupServerMessage *msg,
   }
   if (response_authority != NULL) {
 #ifdef WYL_TEST_DAEMON_HTTP
+    service_response_test_checkpoint (ctx,
+        WYL_DAEMON_SERVICE_RESPONSE_PRE_HANDOFF,
+        &response_authority->reservation);
     g_mutex_lock (&ctx->lock);
     ctx->service_response_authority.attached++;
     g_mutex_unlock (&ctx->lock);
@@ -3693,11 +3822,39 @@ service_token_exchange_handle (SoupServerMessage *msg,
         WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DATA,
         g_steal_pointer (&response_authority),
         (GDestroyNotify) service_response_authority_free);
+#ifdef WYL_TEST_DAEMON_HTTP
+    gboolean force_unclaimed_fallback = FALSE;
+    if (service_publication_context_lock (ctx) == WYRELOG_E_OK) {
+      force_unclaimed_fallback = service_publication_fault_is_locked (ctx,
+          WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK,
+          TRUE);
+      (void) service_publication_context_unlock (ctx, WYRELOG_E_OK);
+    }
+    if (force_unclaimed_fallback) {
+      g_object_set_data (G_OBJECT (msg),
+          WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DATA, NULL);
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
+      return;
+    }
+#endif
   }
   soup_server_message_set_status (msg, status, NULL);
-  soup_server_message_set_response (msg, "application/json",
-      SOUP_MEMORY_COPY, body != NULL ? body : "{}", body != NULL ?
-      strlen (body) : 2);
+  if (response != NULL) {
+    SoupMessageHeaders *headers =
+        soup_server_message_get_response_headers (msg);
+    soup_message_headers_set_content_type (headers, "application/json", NULL);
+    SoupMessageBody *message_body = soup_server_message_get_response_body (msg);
+    WylSensitiveServiceTokenResponse *body_owner = g_steal_pointer (&response);
+    g_autoptr (GBytes) bytes = g_bytes_new_with_free_func (body_owner->text,
+        body_owner->len,
+        (GDestroyNotify) wyl_sensitive_service_token_response_free, body_owner);
+    soup_message_body_append_bytes (message_body, bytes);
+    soup_message_body_complete (message_body);
+  } else {
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, body != NULL ? body : "{}", body != NULL ?
+        strlen (body) : 2);
+  }
 }
 
 static void
@@ -3748,9 +3905,14 @@ wyl_daemon_http_publish_service_token_for_test (SoupServer *server,
     gsize credential_secret_len, gchar **out_body)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
   g_autoptr (WylServiceResponseAuthority) authority = NULL;
   wyrelog_error_t rc = service_token_exchange_prepare (ctx, credential_id,
-      credential_secret, credential_secret_len, out_body, &authority);
+      credential_secret, credential_secret_len, &response, &authority);
+  if (rc == WYRELOG_E_OK && response != NULL) {
+    *out_body = g_steal_pointer (&response->text);
+    response->len = 0;
+  }
   if (authority != NULL)
     service_response_authority_complete (authority,
         WYL_SERVICE_RESPONSE_AUTHORITY_FINISHED);
