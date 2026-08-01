@@ -663,6 +663,75 @@ test_move_publish_rejects_missing_tenant (void)
   move_fixture_teardown (&fx);
 }
 
+typedef struct
+{
+  const gchar *point;
+  MoveFixture *fx;
+  guint fired;
+  gchar *aside;
+} RootSwapFault;
+
+static wyrelog_error_t
+swap_root_at_point (const gchar *point, gpointer user_data)
+{
+  RootSwapFault *swap = user_data;
+  if (g_strcmp0 (point, swap->point) == 0 && swap->fired == 0) {
+    swap->fired++;
+    /* Move the entire root aside and stand up a fresh secure directory at the
+     * same path.  The resolver's pinned root inode no longer matches, so the
+     * next lease reassert must fail closed. */
+    g_assert_cmpint (g_rename (swap->fx->root, swap->aside), ==, 0);
+    g_assert_true (wyl_test_create_secure_directory (swap->fx->root, NULL));
+  }
+  return WYRELOG_E_OK;
+}
+
+/*
+ * Repeated revalidation.  A root-directory inode swap injected mid-flight (at
+ * the unit's "source-verified" seam, before staging) must be caught by the
+ * next lease reassert: the move fails closed with E_POLICY, publishes nothing
+ * and leaves the journal MOVING with the source intact.  Restoring the real
+ * root and replaying then converges.
+ */
+static void
+test_move_publish_rejects_root_identity_drift (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  g_autofree gchar *aside = g_strconcat (fx.root, ".aside", NULL);
+  RootSwapFault swap = {.point = "source-verified",.fx = &fx,.fired = 0,
+    .aside = aside
+  };
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  ctx.checkpoint = swap_root_at_point;
+  ctx.checkpoint_data = &swap;
+
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (swap.fired, ==, 1);
+
+  /* Restore the real root: drop the decoy and rename the aside copy back. */
+  g_assert_true (wyl_test_remove_empty_directory (fx.root, NULL));
+  g_assert_cmpint (g_rename (aside, fx.root), ==, 0);
+
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (fx.source_abs, G_FILE_TEST_IS_REGULAR));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  WylFactReconcileMoveContext clean = move_context (&fx);
+  outcome = WYL_FACT_RECONCILE_MOVE_UNCHANGED_REPLAY;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&clean, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome, ==, WYL_FACT_RECONCILE_MOVE_APPLIED);
+  assert_final_matches_source (&fx);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVED);
+
+  move_fixture_teardown (&fx);
+}
+
 /* A record that has not reached MOVING must not authorize the move phase. */
 static void
 test_move_publish_rejects_prepared_state (void)
@@ -800,6 +869,8 @@ main (int argc, char **argv)
       test_move_publish_rejects_generation_drift);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-missing-tenant",
       test_move_publish_rejects_missing_tenant);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-root-identity-drift",
+      test_move_publish_rejects_root_identity_drift);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
       test_move_publish_rejects_prepared_state);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-invalid-arguments",
