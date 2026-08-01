@@ -981,20 +981,18 @@ test('fact-root-writer-lease-boundary', python3,
   env : python_strict_encoding_env,
 )
 
-if host_machine.system() != 'windows'
-  test_fact_reconcile_move = executable('test-fact-reconcile-move',
-    'test-fact-reconcile-move.c',
-    'fact-test-support.c',
-    c_args : fact_test_support_c_args,
-    include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep]
-      + fact_test_support_deps,
-  )
+test_fact_reconcile_move = executable('test-fact-reconcile-move',
+  'test-fact-reconcile-move.c',
+  'fact-test-support.c',
+  c_args : fact_test_support_c_args,
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep]
+    + fact_test_support_deps,
+)
 
-  test('fact-reconcile-move', test_fact_reconcile_move,
-    timeout : 60,
-  )
-endif
+test('fact-reconcile-move', test_fact_reconcile_move,
+  timeout : 60,
+)
 
 if host_machine.system() == 'windows'
   fact_graph_locator_windows_env = environment()
