@@ -161,6 +161,8 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   WylFactGraphRegularFile source = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
   WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyGraphAuthorityRecord *graph_authority = NULL;
+  WylPolicyTenantAuthorityRecord *tenant_authority = NULL;
   gboolean copied = FALSE;
   gboolean run_cas = FALSE;
 
@@ -200,6 +202,37 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
     rc = WYRELOG_E_INVALID;
     goto out;
   }
+
+  /* Authority-generation validation: the graph the record binds must still
+   * sit at the generations reconciliation prepared against, and the owning
+   * tenant must exist.  This is a fail-closed gate, not a generation-atomic
+   * CAS: the authoritative atomic guard remains the attempt-gated journal
+   * transition plus the unique active-operation index (the transition API is
+   * intentionally unchanged).  The graph generations are re-read and
+   * re-checked immediately before the CAS so this window stays tight. */
+  rc = wyl_policy_store_read_graph_authority (ctx->store, record->tenant_id,
+      record->graph_id, &graph_authority);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (graph_authority->lifecycle_generation
+      != record->expected_lifecycle_generation
+      || graph_authority->reconciliation_generation
+      != record->expected_reconciliation_generation) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  g_clear_pointer (&graph_authority, wyl_policy_graph_authority_record_free);
+
+  rc = wyl_policy_store_read_tenant_authority (ctx->store, record->tenant_id,
+      &tenant_authority);
+  if (rc != WYRELOG_E_OK) {
+    /* The tenant must exist for reconciliation to publish under it.  We do
+     * not gate on sealed/lifecycle_state here to avoid rejecting legitimate
+     * reconciliation. */
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  g_clear_pointer (&tenant_authority, wyl_policy_tenant_authority_record_free);
 
   rc = wyl_fact_graph_locator_init (&locator, record->tenant_id,
       record->graph_id);
@@ -328,6 +361,8 @@ out:
   wyl_fact_graph_directory_clear (&directory);
   wyl_fact_graph_locator_clear (&locator);
   wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&graph_authority, wyl_policy_graph_authority_record_free);
+  g_clear_pointer (&tenant_authority, wyl_policy_tenant_authority_record_free);
   wyl_policy_fact_reconcile_journal_record_free (record);
   return rc;
 }
