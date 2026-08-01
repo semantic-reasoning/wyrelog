@@ -128,12 +128,27 @@ wyrelog_error_t wyl_client_service_credential_get (WylClient * client,
     const gchar * credential_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
+wyrelog_error_t wyl_client_service_credential_get_for_tenant
+    (WylClient * client, const gchar * credential_id,
+    const gchar * target_tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential * out_credential);
 wyrelog_error_t wyl_client_service_credential_list (WylClient * client,
     const gchar * subject_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialList * out_credentials);
+wyrelog_error_t wyl_client_service_credential_list_for_tenant
+    (WylClient * client, const gchar * subject_id,
+    const gchar * target_tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialList * out_credentials);
 wyrelog_error_t wyl_client_service_credential_revoke (WylClient * client,
     const gchar * credential_id, const gchar * request_id,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential * out_credential);
+wyrelog_error_t wyl_client_service_credential_revoke_for_tenant
+    (WylClient * client, const gchar * credential_id,
+    const gchar * request_id, const gchar * target_tenant,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
 void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
@@ -147,6 +162,12 @@ wyrelog_error_t wyl_client_service_credential_rotate (WylClient * client,
     const gchar * credential_id, const gchar * request_id,
     const gchar * destination, gint64 expires_at_us, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialHandoffReceipt * out_receipt);
+wyrelog_error_t wyl_client_service_credential_rotate_for_tenant
+    (WylClient * client, const gchar * credential_id,
+    const gchar * request_id, const gchar * destination,
+    gint64 expires_at_us, const gchar * target_tenant,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialHandoffReceipt * out_receipt);
 void wyl_client_service_token_result_clear (WylClientServiceTokenResult *
     value);
@@ -394,6 +415,11 @@ wyrelog_error_t wyl_client_service_credential_operation_reconcile
     (WylClient * client,
     const WylClientServiceCredentialOperationReconcileRequest * request,
     WylClientServiceCredentialOperationReconcileResult * out_result);
+wyrelog_error_t wyl_client_service_credential_operation_reconcile_for_tenant
+    (WylClient * client, const gchar * target_tenant,
+    const WylClientServiceCredentialOperationReconcileRequest * request,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialOperationReconcileResult * out_result);
 
 void wyl_client_service_credential_operation_status_entry_clear
     (WylClientServiceCredentialOperationStatusEntry * entry);
@@ -410,6 +436,11 @@ wyrelog_error_t wyl_client_service_credential_operation_status_list
     (WylClient * client, gint64 guard_timestamp, const gchar * guard_loc_class,
     gint64 guard_risk,
     WylClientServiceCredentialOperationStatusList * out_list);
+wyrelog_error_t
+    wyl_client_service_credential_operation_status_list_for_tenant
+    (WylClient * client, const gchar * target_tenant,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialOperationStatusList * out_list);
 /*
  * Drives server-side recovery for one durable operation identified by its
  * canonical request id and returns the resulting record, including the
@@ -420,6 +451,11 @@ wyrelog_error_t wyl_client_service_credential_operation_status_list
  */
 wyrelog_error_t wyl_client_service_credential_operation_recover
     (WylClient * client, const gchar * request_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialOperationStatusEntry * out_entry);
+wyrelog_error_t wyl_client_service_credential_operation_recover_for_tenant
+    (WylClient * client, const gchar * target_tenant,
+    const gchar * request_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry * out_entry);
 
