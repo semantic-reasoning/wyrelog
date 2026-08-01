@@ -397,6 +397,123 @@ create_pre_537_schema (sqlite3 *db)
 }
 
 static void
+install_pre_sealed_generation_tenant_guards (sqlite3 *db,
+    gboolean malformed_insert)
+{
+  exec_ok (db,
+      "CREATE TRIGGER tenant_authority_insert_guard "
+      "BEFORE INSERT ON tenants BEGIN "
+      "SELECT CASE WHEN NOT ("
+      "typeof(NEW.lifecycle_generation)='integer' AND "
+      "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+      "typeof(NEW.reconciliation_generation)='integer' AND "
+      "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
+      "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
+      "SELECT CASE WHEN NOT ("
+      "NEW.lifecycle_state='legacy_unclassified' AND "
+      "NEW.lifecycle_generation=0 AND NEW.reconciliation_generation=0) "
+      "THEN RAISE(ABORT,'invalid tenant authority') END;" "END;");
+  if (malformed_insert)
+    exec_ok (db,
+        "DROP TRIGGER tenant_authority_insert_guard;"
+        "CREATE TRIGGER tenant_authority_insert_guard "
+        "BEFORE INSERT ON tenants BEGIN "
+        "SELECT RAISE(ABORT,'unowned tenant guard'); END;");
+  exec_ok (db,
+      "CREATE TRIGGER tenant_authority_update_guard "
+      "BEFORE UPDATE ON tenants BEGIN "
+      "SELECT CASE WHEN NOT ("
+      "typeof(NEW.lifecycle_generation)='integer' AND "
+      "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+      "typeof(NEW.reconciliation_generation)='integer' AND "
+      "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
+      "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
+      "SELECT CASE WHEN NOT ("
+      "NEW.lifecycle_state='legacy_unclassified' OR "
+      "(NEW.lifecycle_state IN ('active','sealing') AND NEW.sealed=0) OR "
+      "(NEW.lifecycle_state IN ('sealed','unsealing') AND NEW.sealed=1)) "
+      "THEN RAISE(ABORT,'invalid tenant authority') END; "
+      "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
+      "NEW.lifecycle_generation!=OLD.lifecycle_generation "
+      "THEN RAISE(ABORT,'invalid tenant lifecycle generation') END; "
+      "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND ("
+      "OLD.lifecycle_generation=9223372036854775807 OR "
+      "NEW.lifecycle_generation!=OLD.lifecycle_generation+1 OR NOT ("
+      "(OLD.lifecycle_state='legacy_unclassified' AND "
+      " NEW.lifecycle_state IN ('active','sealed')) OR "
+      "(OLD.lifecycle_state='active' AND NEW.lifecycle_state='sealing') OR "
+      "(OLD.lifecycle_state='sealing' AND "
+      " NEW.lifecycle_state IN ('active','sealed')) OR "
+      "(OLD.lifecycle_state='sealed' AND NEW.lifecycle_state='unsealing') OR "
+      "(OLD.lifecycle_state='unsealing' AND "
+      " NEW.lifecycle_state IN ('active','sealed')))) "
+      "THEN RAISE(ABORT,'illegal tenant lifecycle transition') END; "
+      "SELECT CASE WHEN NEW.reconciliation_generation<"
+      "OLD.reconciliation_generation OR "
+      "NEW.reconciliation_generation>OLD.reconciliation_generation+1 "
+      "THEN RAISE(ABORT,'invalid tenant reconciliation generation') END; "
+      "SELECT CASE WHEN OLD.lifecycle_state='legacy_unclassified' AND "
+      "NEW.lifecycle_state IN ('active','sealed') AND "
+      "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
+      "THEN RAISE(ABORT,'tenant promotion requires reconciliation') END; "
+      "SELECT CASE WHEN NOT (OLD.lifecycle_state='legacy_unclassified' AND "
+      "NEW.lifecycle_state IN ('active','sealed')) AND "
+      "NEW.reconciliation_generation!=OLD.reconciliation_generation "
+      "THEN RAISE(ABORT,'unexpected tenant reconciliation generation') END; "
+      "END;");
+}
+
+static void
+test_pre_sealed_generation_guards_migrate (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "DROP TRIGGER tenant_authority_insert_guard;"
+      "DROP TRIGGER tenant_authority_update_guard;"
+      "ALTER TABLE tenants DROP COLUMN sealed_generation;");
+  install_pre_sealed_generation_tenant_guards (db, FALSE);
+  exec_ok (db,
+      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) VALUES"
+      "('pre-guard-open',0,1,1),('pre-guard-sealed',1,1,1);");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM tenants WHERE "
+          "(tenant_id='pre-guard-open' AND sealed_generation=0) OR "
+          "(tenant_id='pre-guard-sealed' AND sealed_generation=1);"), ==, 2);
+  exec_rejected (db,
+      "UPDATE tenants SET sealed=0 WHERE tenant_id='pre-guard-sealed';");
+  exec_rejected (db,
+      "UPDATE tenants SET sealed_generation=2 "
+      "WHERE tenant_id='pre-guard-open';");
+}
+
+static void
+test_unknown_preexisting_tenant_guard_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "DROP TRIGGER tenant_authority_insert_guard;"
+      "DROP TRIGGER tenant_authority_update_guard;"
+      "ALTER TABLE tenants DROP COLUMN sealed_generation;");
+  install_pre_sealed_generation_tenant_guards (db, TRUE);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM pragma_table_info('tenants') "
+          "WHERE name='sealed_generation';"), ==, 0);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND "
+          "name='tenant_authority_insert_guard' AND "
+          "sql LIKE '%unowned tenant guard%';"), ==, 1);
+}
+
+static void
 test_pre_537_rows_migrate_idempotently (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1901,6 +2018,10 @@ main (int argc, char **argv)
       test_dangling_provisioning_record_fails_closed);
   g_test_add_func ("/policy/graph-authority/pre-537-idempotent",
       test_pre_537_rows_migrate_idempotently);
+  g_test_add_func ("/policy/graph-authority/pre-sealed-guards",
+      test_pre_sealed_generation_guards_migrate);
+  g_test_add_func ("/policy/graph-authority/unknown-tenant-guard",
+      test_unknown_preexisting_tenant_guard_fails_closed);
   g_test_add_func ("/policy/graph-authority/identity-state-constraints",
       test_graph_identity_and_state_constraints);
   g_test_add_func ("/policy/graph-authority/tenant-state-constraints",
