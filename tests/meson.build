@@ -685,6 +685,14 @@ if build_client and host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  test('wyctl-option-ownership-runtime', python3,
+    args : [
+      files('test-wyctl-option-ownership.py'),
+      wyctl_exe.full_path(),
+    ],
+    depends : wyctl_exe,
+  )
+
   # End-to-end: drives wyctl as a subprocess against an in-process daemon
   # so the policy mutation subcommands exercise the full client -> HTTP
   # -> handler path, including bearer-only credentials and the privileged
@@ -2106,6 +2114,20 @@ test('check-wyctl-operation-delegation',
 
 test('check-wyctl-operation-delegation-self-test',
   check_wyctl_operation_delegation,
+  args : ['--self-test'],
+)
+
+check_wyctl_option_ownership = find_program(
+  '../tools/check-wyctl-option-ownership.py',
+)
+
+test('check-wyctl-option-ownership',
+  check_wyctl_option_ownership,
+  args : [meson.project_source_root() / 'wyrelog' / 'wyctl' / 'wyctl.c'],
+)
+
+test('check-wyctl-option-ownership-self-test',
+  check_wyctl_option_ownership,
   args : ['--self-test'],
 )
 
