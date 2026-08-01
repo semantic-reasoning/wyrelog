@@ -5385,7 +5385,8 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
 static gint
 send_raw_reconcile_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, const gchar *body,
-    guint *out_status, gchar **out_body, gchar **out_request_id)
+    const gchar *access_token, guint *out_status, gchar **out_body,
+    gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 166;
@@ -5405,6 +5406,12 @@ send_raw_reconcile_full (SoupSession *session, const gchar *method,
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 167;
+  if (access_token != NULL) {
+    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+        access_token);
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+        "Authorization", authorization);
+  }
   g_autoptr (GBytes) request_bytes = g_bytes_new_static (body, strlen (body));
   soup_message_set_request_body_from_bytes (msg, "application/json",
       request_bytes);
@@ -5435,7 +5442,16 @@ send_raw_reconcile (SoupSession *session, const gchar *method,
     guint *out_status, gchar **out_body)
 {
   return send_raw_reconcile_full (session, method, base_url, query, body,
-      out_status, out_body, NULL);
+      NULL, out_status, out_body, NULL);
+}
+
+static gint
+send_raw_reconcile_bearer (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, const gchar *access_token,
+    const gchar *body, guint *out_status, gchar **out_body)
+{
+  return send_raw_reconcile_full (session, method, base_url, query, body,
+      access_token, out_status, out_body, NULL);
 }
 #endif
 
@@ -6874,23 +6890,22 @@ static gint
 check_service_credential_operation_reconcile_contract (SoupServer *server,
     WylHandle *handle, const gchar *base_url)
 {
-  (void) server;
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
-  g_autofree gchar *login_body = NULL;
   g_autofree gchar *body = NULL;
 
-  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
-  gint rc = send_raw_login (session, "POST", base_url,
-      "username=http-allow-user&skip_mfa=true", &status, &login_body);
-  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
-  if (rc != 0)
-    return rc;
-  if (status != 200)
-    return 1921;
-  g_autofree gchar *session_token = extract_json_string (login_body,
-      "session_token");
-  if (session_token == NULL)
+  /* Keep the deterministic management session live while this fixture writes
+   * permission facts directly; production retirement behavior is covered by
+   * the dedicated authority-race tests. */
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (server);
+  wyl_id_t session_id = WYL_ID_NIL;
+  gchar session_token[WYL_ID_STRING_BUF] = { 0 };
+  g_autofree gchar *access_token = NULL;
+  if (wyl_id_new (&session_id) != WYRELOG_E_OK
+      || wyl_id_format (&session_id, session_token,
+          sizeof session_token) != WYRELOG_E_OK
+      || !seed_management_human_access_token (server, session_token,
+          "http-allow-user", &access_token))
     return 1922;
   gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
   if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
@@ -6901,23 +6916,28 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
       "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
       issue_request_id);
-  g_autofree gchar *escaped_session = g_uri_escape_string (session_token,
-      NULL, TRUE);
   g_autofree gchar *query =
-      g_strdup_printf
-      ("session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69", escaped_session);
-  rc = send_raw_reconcile (session, "POST", base_url, NULL, issue_body,
+      g_strdup ("tenant=tenant-a&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69");
+  gint rc = send_raw_reconcile (session, "POST", base_url, NULL, issue_body,
       &status, &body);
   if (rc != 0 || status != 401)
     return 1923;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean tenant_created = FALSE;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &tenant_created)
+      != WYRELOG_E_OK)
+    return 1923;
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, issue_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, issue_body, &status, &body);
   if (rc != 0 || status != 403)
     return 1923;
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  wyrelog_error_t grant_rc = wyl_policy_store_grant_direct_permission (store,
+  wyrelog_error_t grant_rc = wyl_policy_store_set_principal_state (store,
+      "http-allow-user", "authenticated");
+  if (grant_rc != WYRELOG_E_OK)
+    return 1923;
+  grant_rc = wyl_policy_store_grant_direct_permission (store,
       "http-allow-user", "wr.service_credential.manage", session_token);
   if (grant_rc != WYRELOG_E_OK)
     return 1923;
@@ -6971,8 +6991,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   wyl_service_credential_issue_result_clear (&issue_result);
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, issue_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, issue_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"status\":\"committed\"") == NULL ||
@@ -6993,8 +7013,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       "\"operation\":\"issue\",\"target\":{\"subject\":"
       "\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}");
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query,
-      noncanonical_request_body, &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, noncanonical_request_body, &status, &body);
   if (rc != 0 || status != 400)
     return 1929;
   g_autofree gchar *unknown_operation_body = g_strdup_printf
@@ -7002,9 +7022,29 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
       issue_request_id);
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query,
-      unknown_operation_body, &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, unknown_operation_body, &status, &body);
   if (rc != 0 || status != 400)
+    return 1929;
+
+  g_autofree gchar *mismatched_issue_body = g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:reconcile:issue\","
+      "\"tenant\":\"__wr_default\"}}", issue_request_id);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, mismatched_issue_body, &status, &body);
+  if (rc != 0 || status != 400)
+    return 1929;
+
+  g_autofree gchar *unknown_rotate_body = g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
+      "\"target\":{\"old_credential_id\":"
+      "\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"}}", issue_request_id);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, unknown_rotate_body, &status, &body);
+  if (rc != 0 || status != 404)
     return 1929;
 
   if (prepare_service_credential_subject (handle, "svc:reconcile:rotate",
@@ -7045,8 +7085,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       "\"target\":{\"old_credential_id\":\"%s\"}}",
       rotate_request_id, rotate_old_credential_id);
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, rotate_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, rotate_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"status\":\"committed\"") == NULL ||
@@ -7076,8 +7116,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1939;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, pending_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, pending_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -7087,8 +7127,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1940;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, pending_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, pending_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -7104,8 +7144,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
           NULL) != WYRELOG_E_OK)
     return 1942;
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, conflict_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, conflict_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 409 ||
@@ -7118,8 +7158,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       "\"target\":{\"subject\":\"svc:reconcile:bad\",\"tenant\":\"tenant-a\","
       "\"extra\":\"x\"}}", pending_request_id);
   g_clear_pointer (&body, g_free);
-  rc = send_raw_reconcile (session, "POST", base_url, query, invalid_body,
-      &status, &body);
+  rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
+      access_token, invalid_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 ||
@@ -8146,13 +8186,12 @@ sp_body_leaks_root (const gchar *body, const gchar *r1, const gchar *r2,
       || (r3 != NULL && strstr (body, r3) != NULL);
 }
 
-#ifdef WYL_HAS_FACT_STORE
-/* Canonical service credential id used as the immutable rotate target of a
- * seeded PREPARED rotate operation.  Its bytes are never resolved: the record
- * only needs a canonical old_credential_id so recover can classify it. */
-static const gchar *const STATUS_ROTATE_OLD_CREDENTIAL_ID =
-    "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+static gint send_raw_service_principal_bearer (SoupSession * session,
+    const gchar * method, const gchar * base_url, const gchar * path,
+    const gchar * query, const gchar * access_token, const gchar * body,
+    guint * out_status, gchar ** out_body);
 
+#ifdef WYL_HAS_FACT_STORE
 /* Immediately after the seed helper returns, load through libwyrelog and
  * acquire/release the production lifecycle lock.  Besides validating the
  * durable tuple, this proves the executable consumes the library's storage,
@@ -8360,15 +8399,16 @@ status_body_leaks_secret (const gchar *body)
 
 /* Drives the durable operation status + recover HTTP contract against the
  * SYSTEM-profile handoff server.  Seeds three PREPARED operations (a tenant-a
- * issue, a tenant-b issue, and a tenant-a rotate whose tenant_id is NULL but
- * whose subject_id attributes it to tenant-a) and asserts tenant scoping,
- * non-secret output, and recover classification.  Returns 0 on success. */
+ * issue, a tenant-b issue, and a tenant-a rotate whose target is established
+ * by the old credential) and asserts tenant scoping, non-secret output, and
+ * recover classification. Returns 0 on success. */
 static gint
 check_service_credential_operation_status_recover (SoupServer *server,
-    SoupSession *session, const gchar *base_url, const gchar *session_token,
-    const gchar *operation_root)
+    SoupSession *session, const gchar *base_url, const gchar *access_token,
+    const gchar *operation_root, const gchar *rotate_old_credential_id)
 {
-  if (operation_root == NULL)
+  if (operation_root == NULL || access_token == NULL
+      || rotate_old_credential_id == NULL)
     return 2110;
 
   gchar issue_a_id[WYL_REQUEST_ID_STRING_BUF];
@@ -8385,42 +8425,33 @@ check_service_credential_operation_status_recover (SoupServer *server,
   if (seed_rc != 0)
     return seed_rc;
   seed_rc = seed_prepared_operation (operation_root, issue_b_id,
-      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-b:worker", "tenant-b",
-      NULL);
+      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:misleading",
+      "tenant-b", NULL);
   if (seed_rc != 0)
     return seed_rc;
   seed_rc = seed_prepared_operation (operation_root, rotate_a_id,
-      WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE, "svc:tenant-a:worker", NULL,
-      STATUS_ROTATE_OLD_CREDENTIAL_ID);
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE, "svc:tenant-b:misleading",
+      NULL, rotate_old_credential_id);
   if (seed_rc != 0)
     return seed_rc;
 
-  /* The seeds above write durable operation files directly, bypassing the
-   * authenticated path that would normally register a tenant.  tenant-a is
-   * already an active policy-store entry, but tenant-b is not, yet the check
-   * below issues a legitimate tenant-b recover.  Session token auth rejects a
-   * session whose tenant is not active, so register tenant-b symmetrically
-   * with tenant-a to keep that recover from being 401'd. */
+  /* The seeds bypass the authenticated path that normally registers a target,
+   * so register tenant-b symmetrically with the already-active tenant-a. */
   if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-b", TRUE,
           FALSE) != WYRELOG_E_OK)
     return 2128;
 
-  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
-          "human-principal-admin", "tenant-a"))
-    return 2112;
-  g_autofree gchar *tenant_a_query = g_strdup_printf
-      ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0", session_token);
+  g_autofree gchar *tenant_a_query = g_strdup
+      ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
 
   guint status = 0;
   g_autofree gchar *body = NULL;
 
-  /* Status listing for tenant-a: the tenant-a issue and the rotate (attributed
-   * by subject_id though its tenant_id is NULL) appear; the tenant-b issue does
-   * not.  The output must carry no secret-adjacent field. */
-  if (send_raw_service_principal_full (session, "GET", base_url,
-          "/service-credential-operations", tenant_a_query, NULL, &status,
-          &body) != 0 || status != 200 || body == NULL
+  /* Status listing for tenant-a includes its issue and the rotate resolved
+   * through the old credential; subject_id is never used for scope. */
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
+          "/service-credential-operations", tenant_a_query, access_token,
+          NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, issue_a_id) == NULL
       || strstr (body, rotate_a_id) == NULL
       || strstr (body, issue_b_id) != NULL
@@ -8433,37 +8464,31 @@ check_service_credential_operation_status_recover (SoupServer *server,
   /* A tenant with no operations of its own lists an empty array, not an
    * error. */
   g_clear_pointer (&body, g_free);
-  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
-          "human-principal-admin", "__wr_default"))
-    return 2114;
-  g_autofree gchar *default_query = g_strdup_printf
-      ("session_token=%s&tenant=__wr_default&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0", session_token);
-  if (send_raw_service_principal_full (session, "GET", base_url,
-          "/service-credential-operations", default_query, NULL, &status,
-          &body) != 0 || status != 200 || body == NULL
+  g_autofree gchar *default_query = g_strdup
+      ("tenant=__wr_default&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
+          "/service-credential-operations", default_query, access_token,
+          NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"operations\":[]") == NULL)
     return 2115;
 
   /* The bare status collection rejects a POST; it must not shadow the recover
    * or reconcile sibling handlers. */
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
-          "/service-credential-operations", default_query, "{}", &status,
-          &body) != 0 || status != 405)
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          "/service-credential-operations", default_query, access_token,
+          "{}", &status, &body) != 0 || status != 405)
     return 2116;
 
   /* Recover the tenant-a issue: no server-side commit evidence exists yet, so
    * it classifies as pending and returns 200. */
-  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
-          "human-principal-admin", "tenant-a"))
-    return 2117;
   g_autofree gchar *recover_a_body = g_strdup_printf
       ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_a_id);
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-credential-operations/recover", tenant_a_query,
-          recover_a_body, &status, &body) != 0 || status != 200 || body == NULL
+          access_token, recover_a_body, &status, &body) != 0 || status != 200
+      || body == NULL
       || strstr (body, "\"recovery\":\"pending\"") == NULL
       || strstr (body, issue_a_id) == NULL || status_body_leaks_secret (body))
     return 2118;
@@ -8475,15 +8500,17 @@ check_service_credential_operation_status_recover (SoupServer *server,
   g_autofree gchar *recover_unknown_body = g_strdup_printf
       ("{\"version\":\"1\",\"request_id\":\"%s\"}", unknown_id);
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-credential-operations/recover", tenant_a_query,
-          recover_unknown_body, &status, &body) != 0 || status != 404)
+          access_token, recover_unknown_body, &status, &body) != 0
+      || status != 404)
     return 2120;
 
   /* A 27-character alphanumeric but noncanonical request id is a 400. */
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-credential-operations/recover", tenant_a_query,
+          access_token,
           "{\"version\":\"1\",\"request_id\":"
           "\"abcdefghijklmnopqrstuvwxyz0\"}", &status, &body) != 0
       || status != 400)
@@ -8504,10 +8531,10 @@ check_service_credential_operation_status_recover (SoupServer *server,
   g_autofree gchar *recover_cross_body = g_strdup_printf
       ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_b_id);
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-credential-operations/recover", tenant_a_query,
-          recover_cross_body, &status, &body) != 0 || status != 404
-      || (body != NULL && strstr (body, issue_b_id) != NULL))
+          access_token, recover_cross_body, &status, &body) != 0
+      || status != 404 || (body != NULL && strstr (body, issue_b_id) != NULL))
     return 2123;
   WylServiceCredentialOperationState post_state = 0;
   gint64 post_updated_at_us = 0;
@@ -8520,16 +8547,13 @@ check_service_credential_operation_status_recover (SoupServer *server,
 
   /* A legitimate tenant-b recover of the same operation still classifies as
    * pending: the cross-tenant attempt neither advanced nor consumed it. */
-  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
-          "human-principal-admin", "tenant-b"))
-    return 2125;
-  g_autofree gchar *tenant_b_query = g_strdup_printf
-      ("session_token=%s&tenant=tenant-b&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0", session_token);
+  g_autofree gchar *tenant_b_query = g_strdup
+      ("tenant=tenant-b&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-credential-operations/recover", tenant_b_query,
-          recover_cross_body, &status, &body) != 0 || status != 200
+          access_token, recover_cross_body, &status, &body) != 0
+      || status != 200
       || body == NULL || strstr (body, "\"recovery\":\"pending\"") == NULL
       || strstr (body, issue_b_id) == NULL || status_body_leaks_secret (body))
     return 2126;
@@ -8537,19 +8561,14 @@ check_service_credential_operation_status_recover (SoupServer *server,
   /* The recover handler owns ONLY its exact path; a deeper subpath is unknown
    * and must 404 rather than be served by longest-prefix routing. */
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-credential-operations/recover/extra", tenant_a_query,
-          recover_a_body, &status, &body) != 0 || status != 404)
+          access_token, recover_a_body, &status, &body) != 0 || status != 404)
     return 2127;
 
   return 0;
 }
 #endif /* WYL_HAS_FACT_STORE */
-
-static gint send_raw_service_principal_bearer (SoupSession * session,
-    const gchar * method, const gchar * base_url, const gchar * path,
-    const gchar * query, const gchar * access_token, const gchar * body,
-    guint * out_status, gchar ** out_body);
 
 static gint
 check_service_principal_management_contract (void)
@@ -9223,7 +9242,8 @@ check_service_principal_management_contract (void)
 #ifdef WYL_HAS_FACT_STORE
   {
     gint status_recover_rc = check_service_credential_operation_status_recover
-        (http.server, session, base_url, session_token, operation_root);
+        (http.server, session, base_url, access_token, operation_root,
+        rotate_successor_id);
     if (status_recover_rc != 0) {
       rc = status_recover_rc;
       goto cleanup;

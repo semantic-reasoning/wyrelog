@@ -5365,21 +5365,6 @@ service_credential_parse_expiry (const gchar *text, gint64 *out_expiry)
   return TRUE;
 }
 
-static gboolean
-service_credential_subject_matches_tenant (const gchar *subject,
-    const gchar *tenant)
-{
-  if (subject == NULL || tenant == NULL || !g_str_has_prefix (subject, "svc:"))
-    return FALSE;
-  const gchar *tenant_start = subject + strlen ("svc:");
-  const gchar *tenant_end = strchr (tenant_start, ':');
-  if (tenant_end == NULL || tenant_end == tenant_start)
-    return FALSE;
-  return strlen (tenant) == (gsize) (tenant_end - tenant_start)
-      && memcmp (tenant_start, tenant,
-      (gsize) (tenant_end - tenant_start)) == 0;
-}
-
 /* Run the built escrow handoff inputs through the daemon handoff module and map
  * its return code onto the service-credential HTTP contract.  Success emits the
  * module's non-secret JSON receipt; the credential material is delivered only
@@ -8864,6 +8849,10 @@ static gchar *service_credential_operation_reconcile_build_response
   return g_string_free (g_steal_pointer (&body), FALSE);
 }
 
+static wyrelog_error_t service_credential_id_matches_target
+    (wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * target_tenant, gboolean * out_matches);
+
 static gboolean
 service_credential_operation_reconcile_execute (SoupServer *server,
     SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx)
@@ -8873,13 +8862,22 @@ service_credential_operation_reconcile_execute (SoupServer *server,
         WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_DENIED);
     return FALSE;
   }
-  if (!authorize_guarded_session_action (server, msg, query, ctx,
-          "wr.service_credential.manage", NULL,
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL;
+  g_autoptr (WylSession) session = NULL;
+  gint64 guard_timestamp = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  gint64 guard_risk = 0;
+  if (!service_principal_management_authorize_session (server, msg, query, ctx,
+          "wr.service_credential.manage",
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_INVALID,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_DENIED,
-          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED, NULL))
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED,
+          &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
+          &guard_risk, NULL))
     return FALSE;
+  const gchar *target_tenant = lookup_request_tenant (query);
 
   g_autofree gchar *body = NULL;
   if (!request_body_dup (msg, 4096, &body)) {
@@ -8903,6 +8901,57 @@ service_credential_operation_reconcile_execute (SoupServer *server,
         ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE
         : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
     return FALSE;
+  }
+
+  WylManagementReauthorization reauthorization = {
+    .handle = ctx->handle,
+    .session = session,
+    .session_id = auth.session_id,
+    .actor = actor,
+    .action = "wr.service_credential.manage",
+    .target_tenant = target_tenant,
+    .decision_request_id = ensure_request_id_header (msg),
+    .guard_timestamp = guard_timestamp,
+    .guard_loc_class = guard_loc_class,
+    .guard_risk = guard_risk,
+  };
+  rc = management_reauthorize_inside_write (&reauthorization, actor);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_AUTH || rc == WYRELOG_E_POLICY)
+      set_json_error (msg, 403,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_DENIED);
+    else if (rc == WYRELOG_E_NOT_FOUND)
+      set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
+    else
+      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+          rc == WYRELOG_E_BUSY ?
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE :
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
+  gboolean target_matches = FALSE;
+  if (g_strcmp0 (request.operation, "issue") == 0) {
+    target_matches = g_strcmp0 (request.tenant, target_tenant) == 0;
+    if (!target_matches) {
+      set_json_error (msg, 400,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_INVALID);
+      return FALSE;
+    }
+  } else {
+    rc = service_credential_id_matches_target (write.store,
+        request.old_credential_id, target_tenant, &target_matches);
+    if (rc == WYRELOG_E_NOT_FOUND || (rc == WYRELOG_E_OK && !target_matches)) {
+      set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
+      return FALSE;
+    }
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+          rc == WYRELOG_E_BUSY ?
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE :
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+      return FALSE;
+    }
   }
 
   g_autoptr (WylServiceAuthorityTransaction) txn = NULL;
@@ -9021,6 +9070,52 @@ static const gchar *service_credential_operation_kind_string
   return kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ? "rotate" : "issue";
 }
 
+/* Resolve an operation's authoritative target tenant without deriving scope
+ * from its subject string. ISSUE journals carry tenant_id directly; ROTATE
+ * journals inherit scope only from the old credential stored in the pinned
+ * policy snapshot. */
+static wyrelog_error_t
+service_credential_id_matches_target (wyl_policy_store_t *store,
+    const gchar *credential_id, const gchar *target_tenant,
+    gboolean *out_matches)
+{
+  if (store == NULL || credential_id == NULL || target_tenant == NULL
+      || out_matches == NULL)
+    return WYRELOG_E_INVALID;
+  *out_matches = FALSE;
+
+  wyl_policy_service_credential_info_t credential = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_lookup_service_credential_by_id
+      (store, credential_id, &credential);
+  if (rc == WYRELOG_E_OK)
+    *out_matches = g_strcmp0 (credential.tenant_id, target_tenant) == 0;
+  wyl_policy_service_credential_info_clear (&credential);
+  return rc;
+}
+
+static wyrelog_error_t
+service_credential_operation_record_matches_target (wyl_policy_store_t *store,
+    const WylServiceCredentialOperationRecord *record,
+    const gchar *target_tenant, gboolean *out_matches)
+{
+  if (store == NULL || record == NULL || target_tenant == NULL
+      || out_matches == NULL)
+    return WYRELOG_E_INVALID;
+  *out_matches = FALSE;
+
+  if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
+    if (record->tenant_id == NULL)
+      return WYRELOG_E_INVALID;
+    *out_matches = g_strcmp0 (record->tenant_id, target_tenant) == 0;
+    return WYRELOG_E_OK;
+  }
+  if (record->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
+      || record->old_credential_id == NULL)
+    return WYRELOG_E_INVALID;
+  return service_credential_id_matches_target (store,
+      record->old_credential_id, target_tenant, out_matches);
+}
+
 static const gchar *service_credential_operation_recovery_string
     (WylServiceCredentialOperationRecoveryOutcome outcome)
 {
@@ -9084,18 +9179,28 @@ service_credential_operation_status_execute (SoupServer *server,
         WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_DENIED);
     return FALSE;
   }
-  if (!authorize_guarded_session_action (server, msg, query, ctx,
-          "wr.service_credential.manage", NULL,
+  WylServiceAuthReadLease *read_lease = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_credential.manage",
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_INVALID,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_DENIED,
-          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED, NULL))
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED,
+          NULL, NULL, &read_lease))
     return FALSE;
 
-  const gchar *tenant = lookup_required_query_string (query, "tenant");
-  if (tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant)) {
-    set_json_error (msg, 400,
-        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_INVALID);
+  const gchar *target_tenant = lookup_request_tenant (query);
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = wyl_service_auth_read_lease_get_policy_store
+      (read_lease, ctx->handle, &store);
+  if (rc != WYRELOG_E_OK) {
+    if (!service_management_read_release (msg, &read_lease,
+            WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED))
+      return FALSE;
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        rc == WYRELOG_E_BUSY ?
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_UNAVAILABLE :
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED);
     return FALSE;
   }
 
@@ -9110,7 +9215,7 @@ service_credential_operation_status_execute (SoupServer *server,
         WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
     WylServiceCredentialOperationStatusList list = { 0 };
     gboolean storage_opened = FALSE;
-    wyrelog_error_t rc = wyl_service_credential_operation_storage_open
+    rc = wyl_service_credential_operation_storage_open
         (ctx->operation_root, &storage);
     if (rc == WYRELOG_E_OK) {
       storage_opened = TRUE;
@@ -9125,8 +9230,19 @@ service_credential_operation_status_execute (SoupServer *server,
       for (gsize i = 0; i < list.n_entries; i++) {
         const WylServiceCredentialOperationRecord *record =
             &list.entries[i].record;
-        if (!service_credential_subject_matches_tenant (record->subject_id,
-                tenant))
+        gboolean target_matches = FALSE;
+        wyrelog_error_t match_rc =
+            service_credential_operation_record_matches_target (store,
+            record, target_tenant, &target_matches);
+        /* A rotate whose old credential has disappeared is indistinguishable
+         * from an operation outside this target and is therefore omitted. */
+        if (match_rc == WYRELOG_E_NOT_FOUND)
+          continue;
+        if (match_rc != WYRELOG_E_OK) {
+          rc = match_rc;
+          break;
+        }
+        if (!target_matches)
           continue;
         if (!first)
           g_string_append_c (out, ',');
@@ -9139,6 +9255,9 @@ service_credential_operation_status_execute (SoupServer *server,
       wyl_service_credential_operation_storage_clear (&storage);
     wyl_service_credential_operation_root_anchor_clear (&anchor);
     if (rc != WYRELOG_E_OK) {
+      if (!service_management_read_release (msg, &read_lease,
+              WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED))
+        return FALSE;
       guint status;
       const gchar *err;
       switch (rc) {
@@ -9162,6 +9281,9 @@ service_credential_operation_status_execute (SoupServer *server,
   }
 
   g_string_append (out, "]}");
+  if (!service_management_read_release (msg, &read_lease,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED))
+    return FALSE;
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
@@ -9247,20 +9369,23 @@ service_credential_operation_recover_execute (SoupServer *server,
         WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED);
     return FALSE;
   }
-  if (!authorize_guarded_session_action (server, msg, query, ctx,
-          "wr.service_credential.manage", NULL,
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL;
+  g_autoptr (WylSession) session = NULL;
+  gint64 guard_timestamp = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  gint64 guard_risk = 0;
+  if (!service_principal_management_authorize_session (server, msg, query, ctx,
+          "wr.service_credential.manage",
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED,
-          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED, NULL))
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED,
+          &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
+          &guard_risk, NULL))
     return FALSE;
 
-  const gchar *tenant = lookup_required_query_string (query, "tenant");
-  if (tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant)) {
-    set_json_error (msg, 400,
-        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID);
-    return FALSE;
-  }
+  const gchar *target_tenant = lookup_request_tenant (query);
 
   g_autofree gchar *body = NULL;
   if (!request_body_dup (msg, 4096, &body)) {
@@ -9284,6 +9409,44 @@ service_credential_operation_recover_execute (SoupServer *server,
     return FALSE;
   }
 
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        rc == WYRELOG_E_BUSY ?
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_UNAVAILABLE :
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED);
+    return FALSE;
+  }
+
+  WylManagementReauthorization reauthorization = {
+    .handle = ctx->handle,
+    .session = session,
+    .session_id = auth.session_id,
+    .actor = actor,
+    .action = "wr.service_credential.manage",
+    .target_tenant = target_tenant,
+    .decision_request_id = ensure_request_id_header (msg),
+    .guard_timestamp = guard_timestamp,
+    .guard_loc_class = guard_loc_class,
+    .guard_risk = guard_risk,
+  };
+  rc = management_reauthorize_inside_write (&reauthorization, actor);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_AUTH || rc == WYRELOG_E_POLICY)
+      set_json_error (msg, 403,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED);
+    else if (rc == WYRELOG_E_NOT_FOUND)
+      set_json_error (msg, 404,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND);
+    else
+      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+          rc == WYRELOG_E_BUSY ?
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_UNAVAILABLE :
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED);
+    return FALSE;
+  }
+
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -9298,7 +9461,7 @@ service_credential_operation_recover_execute (SoupServer *server,
       WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING;
   gboolean storage_opened = FALSE;
   gboolean lock_acquired = FALSE;
-  wyrelog_error_t rc = wyl_service_credential_operation_storage_open
+  rc = wyl_service_credential_operation_storage_open
       (ctx->operation_root, &storage);
   if (rc == WYRELOG_E_OK) {
     storage_opened = TRUE;
@@ -9306,20 +9469,19 @@ service_credential_operation_recover_execute (SoupServer *server,
         &anchor);
   }
 
-  /* Gate on the record's owning tenant BEFORE any write.  A read-only load
-   * resolves the operation's tenant without taking the lifecycle lock and
-   * without checkpointing PREPARED->SERVER_COMMITTED, so a cross-tenant or
-   * unknown request_id can never mutate durable state.  Unknown, unreadable
-   * (decode/policy failure), and cross-tenant all collapse to one uniform 404
-   * so the endpoint is not an existence oracle for another tenant. */
+  /* Resolve the operation target while the service WRITE lease is held but
+   * before acquiring the operation lifecycle lock or checkpointing. Unknown,
+   * unreadable, and cross-target records collapse to one uniform 404. */
   if (rc == WYRELOG_E_OK) {
     wyrelog_error_t probe_rc =
         wyl_service_credential_operation_coordinator_load (&storage, &anchor,
         request_id, &probe);
-    gboolean tenant_ok = probe_rc == WYRELOG_E_OK
-        && service_credential_subject_matches_tenant (probe.subject_id, tenant);
+    gboolean target_matches = FALSE;
+    if (probe_rc == WYRELOG_E_OK)
+      probe_rc = service_credential_operation_record_matches_target
+          (write.store, &probe, target_tenant, &target_matches);
     wyl_service_credential_operation_record_clear (&probe);
-    if (!tenant_ok) {
+    if (probe_rc != WYRELOG_E_OK || !target_matches) {
       set_json_error (msg, 404,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND);
       if (storage_opened)
@@ -9337,7 +9499,7 @@ service_credential_operation_recover_execute (SoupServer *server,
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_operation_coordinator_recover (&storage,
-        &anchor, wyl_handle_get_policy_store (ctx->handle), NULL, request_id,
+        &anchor, write.store, NULL, request_id,
         g_get_real_time (), &outcome, &record);
   if (lock_acquired)
     wyl_service_credential_operation_coordinator_lock_release (&storage,
