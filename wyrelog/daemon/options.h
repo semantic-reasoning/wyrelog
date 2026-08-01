@@ -9,6 +9,11 @@ typedef enum
   WYL_DAEMON_PROFILE_SERVICE = 1,
 } WylDaemonProfile;
 
+/* Initialize with wyl_daemon_options_init() or a zero/designated initializer.
+ * Any string present before parsing is borrowed. Parsing and resolution own
+ * only the strings they allocate, and wyl_daemon_options_clear() releases
+ * exactly those strings before resetting the structure. Once parsing starts,
+ * do not copy the structure; clear the original owner on every exit. */
 typedef struct
 {
   /* String fields supplied by a designated initializer are borrowed. The
