@@ -42,6 +42,10 @@ G_GNUC_INTERNAL gboolean wyl_session_is_active_private (const
     WylSession * session);
 G_GNUC_INTERNAL gboolean wyl_session_is_active_human_private (const
     WylSession * session);
+/* TRUE only after this exact live human session completed an MFA transition.
+ * Skip-MFA login, service sessions, and token refresh never set this bit. */
+G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
+    WylSession * session);
 G_GNUC_INTERNAL wyrelog_error_t wyl_session_copy_persistent_id_private (const
     WylSession * session, wyl_id_t * out_id);
 G_GNUC_INTERNAL gchar *wyl_session_dup_service_jti_private (const

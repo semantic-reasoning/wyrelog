@@ -2163,7 +2163,7 @@ test_session_username_c_args = [
 test_session_username = executable('test-session-username',
   'test-session-username.c',
   c_args : test_session_username_c_args,
-  dependencies : [wyrelog_dep, wirelog_dep],
+  dependencies : [wyrelog_dep, wirelog_dep, service_session_private_dep],
 )
 
 test('session-username', test_session_username,
@@ -2173,7 +2173,7 @@ test('session-username', test_session_username,
 test_session_username_lifecycle = executable('test-session-username-lifecycle',
   'test-session-username.c',
   c_args : test_session_username_c_args + '-DWYL_TEST_VARIANT_LIFECYCLE',
-  dependencies : [wyrelog_dep, wirelog_dep],
+  dependencies : [wyrelog_dep, wirelog_dep, service_session_private_dep],
 )
 
 test('session-username-lifecycle', test_session_username_lifecycle)

@@ -5,6 +5,7 @@
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-session-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -571,8 +572,12 @@ check_mfa_verify_authenticates_engine_principal (void)
     return 86;
   if (session == NULL)
     return 87;
+  if (wyl_session_is_mfa_assured_private (session))
+    return 233;
   if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
     return 88;
+  if (!wyl_session_is_mfa_assured_private (session))
+    return 234;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "login-user");
@@ -990,6 +995,8 @@ check_login_skip_mfa_authenticates_principal (void)
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 155;
+  if (wyl_session_is_mfa_assured_private (session))
+    return 235;
 
   PrincipalStateExpect expect = {
     .subject_id = "skip-mfa-user",

@@ -84,6 +84,7 @@ check_exact_copy_and_accessors (void)
   if (wyl_session_get_auth_method_private (session)
       != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
       || !wyl_session_is_active_private (session)
+      || wyl_session_is_mfa_assured_private (session)
       || wyl_session_copy_persistent_id_private (session, &copied_id)
       != WYRELOG_E_OK || !wyl_id_equal (&copied_id, &expected_id)
       || g_strcmp0 (copied_jti, expected_jti) != 0
