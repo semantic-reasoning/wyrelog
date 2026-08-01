@@ -115,6 +115,29 @@ reconcile_move_copy_exact (gint src_fd, gint dst_fd, guint64 size)
   return WYRELOG_E_OK;
 }
 
+/* True when two evidence records name the same native file identity: the same
+ * device+inode on POSIX, or the same volume serial and 16-byte file id on
+ * Windows.  Used to reject a canonical target that is merely another link to
+ * the source. */
+static gboolean
+same_native_identity (const WylPolicyFactReconcileArtifactEvidence *a,
+    const WylPolicyFactReconcileArtifactEvidence *b)
+{
+  if (a->identity_kind != b->identity_kind)
+    return FALSE;
+  switch (a->identity_kind) {
+    case WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_POSIX:
+      return a->posix_device == b->posix_device
+          && a->posix_inode == b->posix_inode;
+    case WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS:
+      return a->windows_volume_serial == b->windows_volume_serial
+          && memcmp (a->windows_file_id, b->windows_file_id,
+          sizeof a->windows_file_id) == 0;
+    default:
+      return FALSE;
+  }
+}
+
 /* The one canonical published artifact name for every graph. */
 #define WYL_FACT_RECONCILE_MOVE_FINAL_BASENAME "facts.duckdb"
 
@@ -257,6 +280,15 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
     }
   }
 
+  /* Lexical aliasing: the recorded source and canonical target must be
+   * distinct relative paths.  Publishing a file onto its own name is never a
+   * legitimate move, regardless of what the filesystem currently holds. */
+  if (g_strcmp0 (record->source_relative_path,
+          record->canonical_relative_path) == 0) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+
   /* Reassert that the lease still authorizes this resolver before each
    * filesystem mutation.  Root-identity or resolver drift between gates fails
    * closed with the journal left MOVING, never a false MOVED. */
@@ -281,6 +313,29 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
       close (target_fd);
       if (rc != WYRELOG_E_OK)
         goto out;
+
+      /* Identity aliasing (best-effort): if the source still opens and shares
+       * the present target's native identity, the canonical name is merely
+       * another link to the source - reject rather than "converge" a file
+       * onto itself.  A source that cannot be opened for any reason is
+       * skipped: the target-digest match below is independent proof and must
+       * not wedge a legitimate replay. */
+      {
+        wyrelog_error_t alias = wyl_fact_graph_resolver_open_relative_regular
+            (&resolver, record->source_relative_path, &source);
+        if (alias == WYRELOG_E_OK) {
+          WylPolicyFactReconcileArtifactEvidence alias_ev;
+          alias = wyl_fact_reconcile_capture_artifact_evidence (source.fd,
+              &alias_ev);
+          if (alias == WYRELOG_E_OK
+              && same_native_identity (&alias_ev, &target_ev))
+            rc = WYRELOG_E_POLICY;
+        }
+        wyl_fact_graph_regular_file_clear (&source);
+        if (rc != WYRELOG_E_OK)
+          goto out;
+      }
+
       if (target_ev.size_bytes == record->source_evidence.size_bytes
           && target_ev.digest_algorithm
           == record->source_evidence.digest_algorithm
