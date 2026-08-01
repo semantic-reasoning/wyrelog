@@ -1407,7 +1407,7 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
   if (rc == WYRELOG_E_OK && replay)
     rc = service_mutation_load_retired_predecessor (&mutation,
         old_credential_id, &predecessor);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+  if (rc == WYRELOG_E_OK && !replay && mutation.registry_participant != NULL) {
     rc = wyl_service_auth_selector_init_credential_generation
         (&mutation.invalidation_selector, predecessor.credential_id,
         predecessor.generation);
@@ -1490,7 +1490,7 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
         runtime->data, runtime->credential_runtime,
         runtime->old_credential_generation, cvk, cvk_len, &policy_handoff,
         &stored, &escrow, &predecessor);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+  if (rc == WYRELOG_E_OK && !replay && mutation.registry_participant != NULL) {
     rc = wyl_service_auth_selector_init_credential_generation
         (&mutation.invalidation_selector, predecessor.credential_id,
         predecessor.generation);
