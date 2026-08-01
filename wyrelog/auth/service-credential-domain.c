@@ -477,45 +477,60 @@ wyl_service_principal_disable_keyed_with_runtime (WylHandle *handle,
 }
 
 wyrelog_error_t
-wyl_tenant_set_sealed_with_runtime (WylHandle *handle,
-    const gchar *tenant_id, gboolean sealed,
-    const wyl_tenant_seal_runtime_t *runtime, gboolean *out_changed)
+wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
+    const gchar *tenant_id, const gchar *actor_subject_id,
+    const gchar *request_id, guint32 receipt_version,
+    const wyl_tenant_seal_runtime_t *runtime,
+    WylServiceRetirementOutcome *retirement)
 {
-  if (out_changed != NULL)
-    *out_changed = FALSE;
-  if (handle == NULL || out_changed == NULL)
+  if (retirement != NULL)
+    memset (retirement, 0, sizeof *retirement);
+  if (handle == NULL || runtime == NULL || runtime->authorization == NULL
+      || runtime->authorization->authorize == NULL || retirement == NULL)
     return WYRELOG_E_INVALID;
-  if (runtime != NULL && runtime->before_gate != NULL)
+  if (runtime->before_gate != NULL)
     runtime->before_gate (runtime->data);
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
-  if (runtime != NULL) {
-    mutation.before_invalidation = runtime->before_invalidation;
-    mutation.before_write_release = runtime->before_write_release;
-    mutation.fault_data = runtime->data;
-  }
-  if (rc == WYRELOG_E_OK && sealed && runtime != NULL)
+  mutation.before_invalidation = runtime->before_invalidation;
+  mutation.before_write_release = runtime->before_write_release;
+  mutation.fault_data = runtime->data;
+  if (rc == WYRELOG_E_OK)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
-  if (rc == WYRELOG_E_OK && runtime != NULL
-      && runtime->after_write_acquired != NULL)
+  if (rc == WYRELOG_E_OK && runtime->after_write_acquired != NULL)
     runtime->after_write_acquired (runtime->data);
   if (rc == WYRELOG_E_OK)
-    rc = service_mutation_start_transaction (&mutation);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
-    rc = service_mutation_prepare_commit_evidence (&mutation);
-  gchar stored_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES] = { 0 };
-  gboolean changed = FALSE;
+    rc = service_mutation_authorize (&mutation, runtime->authorization,
+        actor_subject_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_set_tenant_sealed_core (mutation.transaction,
-        mutation.store, tenant_id, sealed, stored_tenant, &changed);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+    rc = service_mutation_start_transaction (&mutation);
+  WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
+  gboolean receipt_found = FALSE;
+  gchar stored_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES] = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_seal_tenant_keyed_precheck_core
+        (mutation.transaction, mutation.store, tenant_id, actor_subject_id,
+        request_id, receipt_version, &receipt_found, &stored_retirement,
+        stored_tenant);
+  if (rc == WYRELOG_E_OK && !receipt_found
+      && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
+  if (rc == WYRELOG_E_OK && !receipt_found) {
+    mutation.authority_write_attempted = TRUE;
+    rc = wyl_policy_store_seal_tenant_keyed_core (mutation.transaction,
+        mutation.store, tenant_id, actor_subject_id, request_id,
+        receipt_version, &stored_retirement, stored_tenant);
+  }
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
+      && stored_retirement.disposition ==
+      WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION) {
     rc = wyl_service_auth_selector_init_tenant
         (&mutation.invalidation_selector, stored_tenant);
     mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
-  if (rc == WYRELOG_E_OK)
-    *out_changed = changed;
+  if (rc == WYRELOG_E_OK || rc == WYRELOG_E_CONFLICT)
+    copy_retirement_outcome (&stored_retirement, retirement);
   return rc;
 }
 

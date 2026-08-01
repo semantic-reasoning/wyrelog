@@ -79,12 +79,17 @@ typedef struct
 
 typedef struct
 {
+  /* Tenant sealing is a retirement operation: registry participation and
+   * execution-boundary authorization are borrowed for the complete call.
+   * authorization is mandatory and runs after WRITE acquisition on every
+   * attempt, including exact receipt replay. */
   WylServiceAuthRegistry *registry;
   void (*before_gate) (gpointer data);
   void (*after_write_acquired) (gpointer data);
   void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
   void (*before_write_release) (WylServiceAuthWriteLease * lease,
       gpointer data);
+  const wyl_service_credential_mutation_authorization_t *authorization;
   gpointer data;
 } wyl_tenant_seal_runtime_t;
 
@@ -455,9 +460,11 @@ wyrelog_error_t wyl_service_principal_disable_keyed_with_runtime
     guint32 receipt_version,
     const wyl_service_principal_disable_runtime_t * runtime,
     WylServiceRetirementOutcome * retirement, wyl_service_principal_t * out);
-wyrelog_error_t wyl_tenant_set_sealed_with_runtime
-    (WylHandle * handle, const gchar * tenant_id, gboolean sealed,
-    const wyl_tenant_seal_runtime_t * runtime, gboolean * out_changed);
+wyrelog_error_t wyl_tenant_seal_keyed_with_runtime
+    (WylHandle * handle, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, const wyl_tenant_seal_runtime_t * runtime,
+    WylServiceRetirementOutcome * retirement);
 
 /* Credential outputs follow the same zero-init, non-aliasing, caller-owned,
  * reuse and failure-clears contract above. Issue or rotation success transfers

@@ -1642,6 +1642,14 @@ wyl_daemon_http_get_handle_for_test (SoupServer *server)
   return ctx != NULL ? ctx->handle : NULL;
 }
 
+static wyrelog_error_t
+tenant_seal_test_authorize (gpointer data, const gchar *actor_subject_id)
+{
+  (void) data;
+  return g_strcmp0 (actor_subject_id, "admin") == 0 ?
+      WYRELOG_E_OK : WYRELOG_E_AUTH;
+}
+
 wyrelog_error_t
 wyl_daemon_http_seal_tenant_for_test (SoupServer *server,
     const gchar *tenant_id, void (*after_write_acquired) (gpointer data),
@@ -1650,14 +1658,22 @@ wyl_daemon_http_seal_tenant_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL)
     return WYRELOG_E_INVALID;
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  wyrelog_error_t rc = wyl_request_id_new (request_id, sizeof request_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = tenant_seal_test_authorize,
+  };
   wyl_tenant_seal_runtime_t runtime = {
     .registry = ctx->service_auth_registry,
     .after_write_acquired = after_write_acquired,
+    .authorization = &authorization,
     .data = data,
   };
-  gboolean changed = FALSE;
-  return wyl_tenant_set_sealed_with_runtime (ctx->handle, tenant_id, TRUE,
-      &runtime, &changed);
+  WylServiceRetirementOutcome outcome = { 0 };
+  return wyl_tenant_seal_keyed_with_runtime (ctx->handle, tenant_id, "admin",
+      request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime, &outcome);
 }
 
 wyrelog_error_t
@@ -6517,9 +6533,23 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   WylDaemonHttpContext *ctx = user_data;
+  gboolean sealing = g_strcmp0 (action, "seal") == 0;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
   g_autofree gchar *actor = NULL;
-  if (!authorize_tenant_management (server, msg, query, ctx, &actor))
+  g_autoptr (WylSession) session = NULL;
+  gint64 guard_timestamp = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  gint64 guard_risk = 0;
+  if (sealing) {
+    if (!service_principal_management_authorize_session (server, msg, query,
+            ctx, "wr.tenant.manage", "tenant_auth_required",
+            "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed",
+            &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
+            &guard_risk, NULL))
+      return;
+  } else if (!authorize_tenant_management (server, msg, query, ctx, &actor)) {
     return;
+  }
 
   if (g_strcmp0 (action, "create") != 0
       && g_strcmp0 (action, "seal") != 0 && g_strcmp0 (action, "unseal") != 0) {
@@ -6529,12 +6559,33 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   gboolean changed = FALSE;
   wyrelog_error_t rc = WYRELOG_E_INVALID;
-  if (g_strcmp0 (action, "seal") == 0) {
+  if (sealing) {
+    const gchar *request_id = ensure_request_id_header (msg);
+    WylManagementReauthorization reauthorization = {
+      .ctx = ctx,
+      .handle = ctx->handle,
+      .session = session,
+      .session_id = auth.session_id,
+      .actor = actor,
+      .action = "wr.tenant.manage",
+      .target_tenant = NULL,
+      .decision_request_id = request_id,
+      .guard_timestamp = guard_timestamp,
+      .guard_loc_class = guard_loc_class,
+      .guard_risk = guard_risk,
+    };
+    wyl_service_credential_mutation_authorization_t authorization = {
+      .authorize = management_reauthorize_inside_write,
+      .data = &reauthorization,
+    };
     wyl_tenant_seal_runtime_t runtime = {
       .registry = ctx->service_auth_registry,
+      .authorization = &authorization,
     };
-    rc = wyl_tenant_set_sealed_with_runtime (ctx->handle, tenant, TRUE,
-        &runtime, &changed);
+    WylServiceRetirementOutcome outcome = { 0 };
+    rc = wyl_tenant_seal_keyed_with_runtime (ctx->handle, tenant, actor,
+        request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime, &outcome);
+    changed = outcome.transitioned_now;
   } else {
     g_auto (WylDaemonPolicyWrite) write = { 0 };
     rc = wyl_daemon_policy_write_acquire (ctx, &write);
@@ -6554,12 +6605,20 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 403, "tenant_mutation_denied");
     return;
   }
+  if (rc == WYRELOG_E_AUTH) {
+    set_json_error (msg, 403, "tenant_denied");
+    return;
+  }
+  if (rc == WYRELOG_E_BUSY) {
+    set_json_error (msg, 503, "tenant_mutation_unavailable");
+    return;
+  }
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "tenant_mutation_failed");
     return;
   }
 
-  if (changed) {
+  if (changed && !sealing) {
     g_autofree gchar *audit_action = g_strdup_printf ("tenant_%s", action);
     rc = emit_tenant_lifecycle_audit (ctx, actor, tenant, audit_action,
         ensure_request_id_header (msg));
