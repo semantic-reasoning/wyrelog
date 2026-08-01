@@ -481,7 +481,7 @@ test_cancellation_lifecycle_contention (void)
       wyl_session_dup_id_string (operator_session);
   set_handoff_permission (handle, "operator", operator_session_id, TRUE);
   g_autoptr (WylSession) original_session =
-      handoff_human_session_new ("admin", "tenant-a");
+      handoff_human_session_new ("admin", WYL_TENANT_DEFAULT);
   g_autofree gchar *original_session_id =
       wyl_session_dup_id_string (original_session);
   set_handoff_permission (handle, "admin", original_session_id, TRUE);
@@ -536,6 +536,7 @@ test_cancellation_lifecycle_contention (void)
   WylServiceCredentialOperationHandoffExecuteRuntime execute_runtime = {
     .session = original_session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -1455,7 +1456,7 @@ test_authenticated_cancellation_and_executor_gate (void)
   /* The unchanged journal is now stopped by maintenance ATTENTION before the
    * original actor's runtime, auth, unseal, or publication callbacks. */
   g_autoptr (WylSession) original_session =
-      handoff_human_session_new ("admin", "tenant-a");
+      handoff_human_session_new ("admin", WYL_TENANT_DEFAULT);
   g_autofree gchar *original_session_id =
       wyl_session_dup_id_string (original_session);
   set_handoff_permission (handle, "admin", original_session_id, TRUE);
@@ -1474,6 +1475,7 @@ test_authenticated_cancellation_and_executor_gate (void)
   WylServiceCredentialOperationHandoffExecuteRuntime execute_runtime = {
     .session = original_session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
