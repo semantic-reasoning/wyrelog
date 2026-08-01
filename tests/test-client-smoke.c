@@ -669,6 +669,15 @@ main (void)
       || token_result.access_token.text != NULL)
     return 246;
   http.status = 0;
+  g_autoptr (WylClient) management_client = NULL;
+  if (wyl_client_new (local_base_url, &management_client) != WYRELOG_E_OK)
+    return 279;
+  http.body = "{\"session_token\":\"management-session\","
+      "\"username\":\"alice\",\"tenant\":\"__wr_default\","
+      "\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\"," "\"access_token\":\"management-access\"}";
+  if (wyl_client_login_skip_mfa (management_client, "alice") != WYRELOG_E_OK)
+    return 280;
   g_auto (WylClientServicePrincipal)
   principal = { 0 };
   g_auto (WylClientServicePrincipalList)
@@ -714,14 +723,16 @@ main (void)
 
   http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
       "\"display_name\":\"Worker\",\"state\":\"active\"}}";
-  if (wyl_client_service_principal_create (local_client, "svc:alice:worker",
-          "Worker", 123, "public", 49, &principal) != WYRELOG_E_OK
+  if (wyl_client_service_principal_create (management_client,
+          "svc:alice:worker", "Worker", 123, "public", 49,
+          &principal) != WYRELOG_E_OK
       || g_strcmp0 (principal.subject_id, "svc:alice:worker") != 0
       || g_strcmp0 (principal.display_name, "Worker") != 0
       || g_strcmp0 (http.last_path, "/service-principals") != 0
       || g_strcmp0 (http.last_method, "POST") != 0
       || strstr (http.last_body, "svc:alice:worker") == NULL
-      || g_strcmp0 (http.last_session_token, "session-1") != 0)
+      || http.last_session_token != NULL
+      || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
     return 232;
   if (!client_last_response_is (local_client, 200, NULL))
     return 539;
@@ -803,7 +814,7 @@ main (void)
   http.body = "{\"service_principals\":[{\"subject_id\":\""
       "svc:alice:worker\",\"display_name\":\"Worker\","
       "\"state\":\"active\"}]}";
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_OK || principal_list.len != 1
       || g_strcmp0 (principal_list.items[0].subject_id,
           "svc:alice:worker") != 0
@@ -818,14 +829,14 @@ main (void)
       || http.request_count != principal_success_request_count)
     return 553;
   http.body = "{\"ok\":true}";
-  if (wyl_client_service_principal_disable (local_client,
+  if (wyl_client_service_principal_disable (management_client,
           "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path,
           "/service-principals/svc:alice:worker/disable") != 0)
     return 234;
-  if (wyl_client_service_principal_create (local_client, "alice", "bad", 123,
-          "public", 49, &principal) != WYRELOG_E_INVALID)
+  if (wyl_client_service_principal_create (management_client, "alice", "bad",
+          123, "public", 49, &principal) != WYRELOG_E_INVALID)
     return 235;
   const gchar *mock_credential_json =
       "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
@@ -835,13 +846,14 @@ main (void)
       "\"expires_at_us\":3,\"last_used_at_us\":-1,\"revoked_by\":\"alice\","
       "\"revoked_at_us\":4,\"rotated_from_id\":null}}";
   http.body = mock_credential_json;
-  if (wyl_client_service_credential_get (local_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
+  if (wyl_client_service_credential_get_for_tenant (management_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "tenant-a", 123, "public", 49,
           &credential) != WYRELOG_E_OK
       || g_strcmp0 (http.last_path,
           "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
       || g_strcmp0 (credential.state, "revoked") != 0
-      || !client_last_response_is (local_client, 200, NULL))
+      || g_strcmp0 (http.last_tenant, "tenant-a") != 0
+      || !client_last_response_is (management_client, 200, NULL))
     return 236;
 
   http.status = 401;
@@ -854,12 +866,14 @@ main (void)
     return 543;
   http.status = 0;
   http.body = "{\"service_credentials\":[]}";
-  if (wyl_client_service_credential_list (local_client, "svc:alice:worker",
-          123, "public", 49, &credential_list) != WYRELOG_E_OK
+  if (wyl_client_service_credential_list_for_tenant (management_client,
+          "svc:alice:worker", "tenant-a", 123, "public", 49,
+          &credential_list) != WYRELOG_E_OK
       || credential_list.len != 0
       || g_strcmp0 (http.last_path,
           "/service-principals/svc:alice:worker/credentials") != 0
-      || !client_last_response_is (local_client, 200, NULL))
+      || g_strcmp0 (http.last_tenant, "tenant-a") != 0
+      || !client_last_response_is (management_client, 200, NULL))
     return 237;
   guint credential_success_request_count = http.request_count;
   if (wyl_client_service_credential_get (local_client,
@@ -869,20 +883,21 @@ main (void)
       || http.request_count != credential_success_request_count)
     return 554;
   http.body = mock_credential_json;
-  if (wyl_client_service_credential_revoke (local_client,
+  if (wyl_client_service_credential_revoke_for_tenant (management_client,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
-          "222222222222222222222222222", 123, "public", 49,
+          "222222222222222222222222222", "tenant-a", 123, "public", 49,
           &credential) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "DELETE") != 0
-      || strstr (http.last_body, "request_id") == NULL)
+      || strstr (http.last_body, "request_id") == NULL
+      || g_strcmp0 (http.last_tenant, "tenant-a") != 0)
     return 238;
-  if (wyl_client_service_credential_revoke (local_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "bad", 123, "public", 49,
-          &credential) != WYRELOG_E_INVALID)
+  if (wyl_client_service_credential_revoke_for_tenant (management_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "bad", "tenant-a", 123,
+          "public", 49, &credential) != WYRELOG_E_INVALID)
     return 239;
   WylClientServiceCredentialIssueRequest issue_request = {
     .subject_id = "svc:alice:worker",
-    .tenant_id = "__wr_default",
+    .tenant_id = "tenant-a",
     .request_id = "333333333333333333333333333",
     .destination = "issue.json",
     .expires_at_us = 4102444800000000,
@@ -894,7 +909,7 @@ main (void)
       "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
       "\"delivered\":true}";
   wyrelog_error_t issue_rc = wyl_client_service_credential_issue
-      (local_client, &issue_request, 123, "public", 49, &issue_result);
+      (management_client, &issue_request, 123, "public", 49, &issue_result);
   if (issue_rc != WYRELOG_E_OK
       || g_strcmp0 (issue_result.state, "terminal") != 0
       || g_strcmp0 (issue_result.credential_id,
@@ -910,22 +925,23 @@ main (void)
    */
   if (strstr (http.last_body, "\"expires_at_us\":\"") == NULL
       || strstr (http.last_body, "\"destination\"") == NULL
-      || strstr (http.last_body, "\"destination\":\"issue.json\"") == NULL)
+      || strstr (http.last_body, "\"destination\":\"issue.json\"") == NULL
+      || g_strcmp0 (http.last_tenant, "tenant-a") != 0)
     return 244;
   http.status = 409;
-  if (wyl_client_service_credential_issue (local_client, &issue_request,
+  if (wyl_client_service_credential_issue (management_client, &issue_request,
           123, "public", 49, &issue_result) != WYRELOG_E_POLICY
       || issue_result.state != NULL || issue_result.credential_id != NULL)
     return 242;
   http.status = 0;
-  issue_request.tenant_id = "other-tenant";
-  if (wyl_client_service_credential_issue (local_client, &issue_request,
+  issue_request.tenant_id = "bad tenant";
+  if (wyl_client_service_credential_issue (management_client, &issue_request,
           123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
     return 243;
-  issue_request.tenant_id = "__wr_default";
+  issue_request.tenant_id = "tenant-a";
   /* A missing destination must fail closed before any request is sent. */
   issue_request.destination = NULL;
-  if (wyl_client_service_credential_issue (local_client, &issue_request,
+  if (wyl_client_service_credential_issue (management_client, &issue_request,
           123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
     return 245;
   issue_request.destination = "issue.json";
@@ -935,15 +951,16 @@ main (void)
       "\"destination\":\"issue.json\","
       "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
       "\"delivered\":true}";
-  if (wyl_client_service_credential_rotate (local_client,
+  if (wyl_client_service_credential_rotate_for_tenant (management_client,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
           "444444444444444444444444444", "issue.json", 4102444800000000,
-          123, "public", 49, &issue_result) != WYRELOG_E_OK
+          "tenant-a", 123, "public", 49, &issue_result) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path,
           "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv/rotate") != 0
       || strstr (http.last_body, "\"expires_at_us\":\"") == NULL
       || strstr (http.last_body, "\"destination\":\"issue.json\"") == NULL
+      || g_strcmp0 (http.last_tenant, "tenant-a") != 0
       || issue_result.generation != 2 || !issue_result.delivered
       || g_strcmp0 (issue_result.credential_id,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0)
@@ -1045,9 +1062,13 @@ main (void)
       "\"tenant\":\"tenant-a\"},\"status\":\"committed\","
       "\"credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"generation\":7}";
-  http.body = reconcile_issue_response;
   if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_OK)
+          &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
+    return 281;
+  http.body = reconcile_issue_response;
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+          &reconcile_result) != WYRELOG_E_OK)
     return 210;
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED ||
@@ -1058,9 +1079,12 @@ main (void)
   if (g_strcmp0 (http.last_method, "POST") != 0 ||
       g_strcmp0 (http.last_path,
           "/service-credential-operations/reconcile") != 0 ||
-      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      g_strcmp0 (http.last_tenant, "tenant-a") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
+      g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
+      g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "49") != 0 ||
       g_strcmp0 (http.last_body, reconcile_issue_body) != 0 ||
       !client_last_response_is (local_client, 200, NULL))
     return 212;
@@ -1097,8 +1121,9 @@ main (void)
       "\"old_credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"},"
       "\"status\":\"not_committed_terminal\"}";
   http.body = reconcile_rotate_response;
-  if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_OK)
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+          &reconcile_result) != WYRELOG_E_OK)
     return 213;
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL
@@ -1114,8 +1139,9 @@ main (void)
       "{\"error\":\"operation_request_conflict\"}";
   http.status = 409;
   http.body = reconcile_conflict_body;
-  if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_OK)
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+          &reconcile_result) != WYRELOG_E_OK)
     return 216;
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT
@@ -1134,8 +1160,9 @@ main (void)
   http.body = "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
       "\"tenant\":\"tenant-a\",\"extra\":\"x\"}}";
-  if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_IO
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+          &reconcile_result) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 200, NULL))
     return 219;
   if (reconcile_result.kind != 0 || reconcile_result.credential_id != NULL ||
@@ -1169,14 +1196,15 @@ main (void)
 
   http.status = 0;
   http.body = "{\"version\":1,\"operations\":[]}";
-  if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, &status_list) != WYRELOG_E_OK)
+  if (wyl_client_service_credential_operation_status_list_for_tenant
+      (local_client, "tenant-a", 123, "public", 69,
+          &status_list) != WYRELOG_E_OK)
     return 252;
   if (status_list.n_entries != 0 || status_list.entries != NULL)
     return 253;
   if (g_strcmp0 (http.last_method, "GET") != 0 ||
       g_strcmp0 (http.last_path, "/service-credential-operations") != 0 ||
-      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      g_strcmp0 (http.last_tenant, "tenant-a") != 0 ||
       http.last_session_token != NULL || http.last_body != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
@@ -1326,9 +1354,9 @@ main (void)
       "\"expected_generation\":1,\"successor_generation\":2,"
       "\"created_at_us\":10,\"updated_at_us\":20,\"expires_at_us\":30,"
       "\"recovery\":\"server_committed\"}";
-  if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
-          &recovered) != WYRELOG_E_OK)
+  if (wyl_client_service_credential_operation_recover_for_tenant
+      (local_client, "tenant-a", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public",
+          69, &recovered) != WYRELOG_E_OK)
     return 267;
   if (g_strcmp0 (recovered.request_id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
       recovered.operation !=
@@ -1345,7 +1373,7 @@ main (void)
   if (g_strcmp0 (http.last_method, "POST") != 0 ||
       g_strcmp0 (http.last_path,
           "/service-credential-operations/recover") != 0 ||
-      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      g_strcmp0 (http.last_tenant, "tenant-a") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_body,

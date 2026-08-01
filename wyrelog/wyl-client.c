@@ -749,7 +749,8 @@ client_send_service_management_message (WylClient *client,
 }
 
 static wyrelog_error_t
-client_service_management_request (WylClient *client, const gchar *method,
+client_service_management_request_for_tenant (WylClient *client,
+    const gchar *target_tenant, const gchar *method,
     const gchar *path, const gchar *body, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body,
     guint *out_status)
@@ -759,35 +760,30 @@ client_service_management_request (WylClient *client, const gchar *method,
   if (out_status != NULL)
     *out_status = 0;
   if (client == NULL || !WYL_IS_CLIENT (client) || method == NULL
+      || target_tenant == NULL
+      || !wyl_policy_store_tenant_id_is_valid (target_tenant)
       || path == NULL || path[0] != '/' || guard_timestamp < 0
       || guard_loc_class == NULL || guard_risk < 0 || guard_risk > 100
       || !wyl_guard_loc_class_is_valid (guard_loc_class))
     return WYRELOG_E_INVALID;
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
-  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
-  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  g_autofree gchar *auth_tenant = wyl_client_dup_tenant (client);
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
-  if (base_url == NULL || tenant == NULL || tenant[0] == '\0'
-      || (session_token == NULL && access_token == NULL))
+  if (base_url == NULL || g_strcmp0 (auth_tenant, WYL_TENANT_DEFAULT) != 0
+      || access_token == NULL || access_token[0] == '\0')
     return WYRELOG_E_INVALID;
   while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
     base_url[strlen (base_url) - 1] = '\0';
-  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  if (!wyl_client_secret_url_is_canonical_literal_loopback (base_url))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *escaped_tenant =
+      g_uri_escape_string (target_tenant, NULL, TRUE);
   g_autofree gchar *escaped_loc =
       g_uri_escape_string (guard_loc_class, NULL, TRUE);
-  g_autofree gchar *escaped_session = session_token != NULL
-      ? g_uri_escape_string (session_token, NULL, TRUE) : NULL;
-  g_autofree gchar *uri = NULL;
-  if (access_token != NULL) {
-    uri = g_strdup_printf ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
-        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT, base_url, path,
-        escaped_tenant, guard_timestamp, escaped_loc, guard_risk);
-  } else {
-    uri = g_strdup_printf ("%s%s?tenant=%s&session_token=%s"
-        "&guard_timestamp=%" G_GINT64_FORMAT "&guard_loc_class=%s"
-        "&guard_risk=%" G_GINT64_FORMAT, base_url, path, escaped_tenant,
-        escaped_session, guard_timestamp, escaped_loc, guard_risk);
-  }
+  g_autofree gchar *uri = g_strdup_printf
+      ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
+      "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT, base_url, path,
+      escaped_tenant, guard_timestamp, escaped_loc, guard_risk);
   g_autoptr (SoupMessage) message = soup_message_new (method, uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
@@ -799,12 +795,10 @@ client_service_management_request (WylClient *client, const gchar *method,
         request_body);
     g_bytes_unref (request_body);
   }
-  if (access_token != NULL) {
-    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-        access_token);
-    soup_message_headers_replace (soup_message_get_request_headers (message),
-        "Authorization", authorization);
-  }
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  soup_message_headers_replace (soup_message_get_request_headers (message),
+      "Authorization", authorization);
   g_autoptr (GBytes) response = NULL;
   guint status = 0;
   wyrelog_error_t rc = client_send_service_management_message (client,
@@ -838,6 +832,17 @@ client_service_management_request (WylClient *client, const gchar *method,
   if (out_body != NULL)
     *out_body = g_steal_pointer (&response);
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+client_service_management_request (WylClient *client, const gchar *method,
+    const gchar *path, const gchar *body, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body,
+    guint *out_status)
+{
+  return client_service_management_request_for_tenant (client,
+      WYL_TENANT_DEFAULT, method, path, body, guard_timestamp,
+      guard_loc_class, guard_risk, out_body, out_status);
 }
 
 wyrelog_error_t
@@ -1011,8 +1016,9 @@ client_service_secret_is_valid (const WylClientSensitiveText *secret)
 }
 
 wyrelog_error_t
-wyl_client_service_credential_get (WylClient *client,
-    const gchar *credential_id, gint64 guard_timestamp,
+wyl_client_service_credential_get_for_tenant (WylClient *client,
+    const gchar *credential_id, const gchar *target_tenant,
+    gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential *out_credential)
 {
@@ -1029,8 +1035,9 @@ wyl_client_service_credential_get (WylClient *client,
   wyl_client_service_credential_clear (out_credential);
   escaped = g_uri_escape_string (credential_id, NULL, TRUE);
   path = g_strdup_printf ("/service-credentials/%s", escaped);
-  wyrelog_error_t rc = client_service_management_request (client, "GET", path,
-      NULL, guard_timestamp, guard_loc_class, guard_risk, &body, NULL);
+  wyrelog_error_t rc = client_service_management_request_for_tenant (client,
+      target_tenant, "GET", path, NULL, guard_timestamp, guard_loc_class,
+      guard_risk, &body, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   body_data = g_bytes_get_data (body, &body_size);
@@ -1039,8 +1046,20 @@ wyl_client_service_credential_get (WylClient *client,
 }
 
 wyrelog_error_t
-wyl_client_service_credential_list (WylClient *client,
-    const gchar *subject_id, gint64 guard_timestamp,
+wyl_client_service_credential_get (WylClient *client,
+    const gchar *credential_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential *out_credential)
+{
+  return wyl_client_service_credential_get_for_tenant (client, credential_id,
+      WYL_TENANT_DEFAULT, guard_timestamp, guard_loc_class, guard_risk,
+      out_credential);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_list_for_tenant (WylClient *client,
+    const gchar *subject_id, const gchar *target_tenant,
+    gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialList *out_credentials)
 {
@@ -1056,8 +1075,9 @@ wyl_client_service_credential_list (WylClient *client,
   wyl_client_service_credential_list_clear (out_credentials);
   escaped = g_uri_escape_string (subject_id, NULL, TRUE);
   path = g_strdup_printf ("/service-principals/%s/credentials", escaped);
-  wyrelog_error_t rc = client_service_management_request (client, "GET", path,
-      NULL, guard_timestamp, guard_loc_class, guard_risk, &body, NULL);
+  wyrelog_error_t rc = client_service_management_request_for_tenant (client,
+      target_tenant, "GET", path, NULL, guard_timestamp, guard_loc_class,
+      guard_risk, &body, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   body_data = g_bytes_get_data (body, &body_size);
@@ -1066,8 +1086,20 @@ wyl_client_service_credential_list (WylClient *client,
 }
 
 wyrelog_error_t
-wyl_client_service_credential_revoke (WylClient *client,
+wyl_client_service_credential_list (WylClient *client,
+    const gchar *subject_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialList *out_credentials)
+{
+  return wyl_client_service_credential_list_for_tenant (client, subject_id,
+      WYL_TENANT_DEFAULT, guard_timestamp, guard_loc_class, guard_risk,
+      out_credentials);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_revoke_for_tenant (WylClient *client,
     const gchar *credential_id, const gchar *request_id,
+    const gchar *target_tenant,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential *out_credential)
 {
@@ -1090,14 +1122,25 @@ wyl_client_service_credential_revoke (WylClient *client,
     return WYRELOG_E_NOMEM;
   append_json_string (json, request_id);
   g_string_append_c (json, '}');
-  wyrelog_error_t rc = client_service_management_request (client, "DELETE",
-      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
-      NULL);
+  wyrelog_error_t rc = client_service_management_request_for_tenant (client,
+      target_tenant, "DELETE", path, json->str, guard_timestamp,
+      guard_loc_class, guard_risk, &body, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   body_data = g_bytes_get_data (body, &body_size);
   return wyl_client_service_credential_decode (body_data, body_size,
       out_credential);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_revoke (WylClient *client,
+    const gchar *credential_id, const gchar *request_id,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential *out_credential)
+{
+  return wyl_client_service_credential_revoke_for_tenant (client,
+      credential_id, request_id, WYL_TENANT_DEFAULT, guard_timestamp,
+      guard_loc_class, guard_risk, out_credential);
 }
 
 wyrelog_error_t
@@ -1110,7 +1153,6 @@ wyl_client_service_credential_issue (WylClient *client,
   g_autoptr (GString) json = NULL;
   g_autofree gchar *path = NULL;
   g_autoptr (GBytes) body = NULL;
-  g_autofree gchar *selected_tenant = NULL;
   if (!client_service_management_begin (client))
     return WYRELOG_E_INVALID;
   if (out_receipt == NULL || request == NULL
@@ -1123,10 +1165,6 @@ wyl_client_service_credential_issue (WylClient *client,
       /* The receipt is non-secret, but the daemon still enforces a
        * loopback-only transport for issue, so keep the client fail-fast. */
       || !client_secret_transport_is_safe (client))
-    return WYRELOG_E_INVALID;
-  selected_tenant = wyl_client_dup_tenant (client);
-  if (selected_tenant == NULL
-      || g_strcmp0 (selected_tenant, request->tenant_id) != 0)
     return WYRELOG_E_INVALID;
   wyl_client_service_credential_handoff_receipt_clear (out_receipt);
   escaped_subject = g_uri_escape_string (request->subject_id, NULL, TRUE);
@@ -1142,18 +1180,19 @@ wyl_client_service_credential_issue (WylClient *client,
   append_json_string (json, request->destination);
   g_string_append_printf (json, ",\"expires_at_us\":\"%" G_GINT64_FORMAT "\"}",
       request->expires_at_us);
-  wyrelog_error_t rc = client_service_management_request (client, "POST",
-      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
-      NULL);
+  wyrelog_error_t rc = client_service_management_request_for_tenant (client,
+      request->tenant_id, "POST", path, json->str, guard_timestamp,
+      guard_loc_class, guard_risk, &body, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   return client_decode_handoff_receipt (body, out_receipt);
 }
 
 wyrelog_error_t
-wyl_client_service_credential_rotate (WylClient *client,
+wyl_client_service_credential_rotate_for_tenant (WylClient *client,
     const gchar *credential_id, const gchar *request_id,
-    const gchar *destination, gint64 expires_at_us, gint64 guard_timestamp,
+    const gchar *destination, gint64 expires_at_us,
+    const gchar *target_tenant, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialHandoffReceipt *out_receipt)
 {
@@ -1182,12 +1221,25 @@ wyl_client_service_credential_rotate (WylClient *client,
   append_json_string (json, destination);
   g_string_append_printf (json, ",\"expires_at_us\":\"%" G_GINT64_FORMAT "\"}",
       expires_at_us);
-  wyrelog_error_t rc = client_service_management_request (client, "POST",
-      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
-      NULL);
+  wyrelog_error_t rc = client_service_management_request_for_tenant (client,
+      target_tenant, "POST", path, json->str, guard_timestamp,
+      guard_loc_class, guard_risk, &body, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   return client_decode_handoff_receipt (body, out_receipt);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_rotate (WylClient *client,
+    const gchar *credential_id, const gchar *request_id,
+    const gchar *destination, gint64 expires_at_us, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialHandoffReceipt *out_receipt)
+{
+  return wyl_client_service_credential_rotate_for_tenant (client,
+      credential_id, request_id, destination, expires_at_us,
+      WYL_TENANT_DEFAULT, guard_timestamp, guard_loc_class, guard_risk,
+      out_receipt);
 }
 
 wyrelog_error_t
@@ -1805,6 +1857,11 @@ static gboolean parse_reconcile_response_json
     (const gchar * data, gsize size,
     const WylClientServiceCredentialOperationReconcileRequest * request,
     WylClientServiceCredentialOperationReconcileResult * out_result);
+static wyrelog_error_t client_service_credential_operations_message_new
+    (WylClient * client, const gchar * target_tenant, const gchar * suffix,
+    const gchar * method, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    SoupMessage ** out_message);
 
 static gboolean
     client_service_credential_operation_reconcile_build_body
@@ -1838,9 +1895,11 @@ static gboolean
 }
 
 wyrelog_error_t
-    wyl_client_service_credential_operation_reconcile
+    wyl_client_service_credential_operation_reconcile_for_tenant
     (WylClient * client,
+    const gchar * target_tenant,
     const WylClientServiceCredentialOperationReconcileRequest * request,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationReconcileResult * out_result)
 {
   if (!client_service_management_begin (client))
@@ -1850,45 +1909,12 @@ wyrelog_error_t
   if (out_result == NULL || !client_reconcile_request_is_valid (request))
     return WYRELOG_E_INVALID;
 
-  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
-  if (base_url == NULL)
-    return WYRELOG_E_INVALID;
-  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
-    base_url[strlen (base_url) - 1] = '\0';
-
-  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
-  if (tenant == NULL || tenant[0] == '\0')
-    return WYRELOG_E_INVALID;
-
-  g_autofree gchar *access_token = wyl_client_dup_access_token (client);
-  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
-  gboolean has_access = access_token != NULL && access_token[0] != '\0';
-  gboolean has_session = session_token != NULL && session_token[0] != '\0';
-  if (!has_access && !has_session)
-    return WYRELOG_E_INVALID;
-
-  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
-  g_autofree gchar *uri = NULL;
-  if (has_access) {
-    uri = g_strdup_printf ("%s/service-credential-operations/reconcile"
-        "?tenant=%s", base_url, escaped_tenant);
-  } else {
-    g_autofree gchar *escaped_session =
-        g_uri_escape_string (session_token, NULL, TRUE);
-    uri = g_strdup_printf ("%s/service-credential-operations/reconcile"
-        "?tenant=%s&session_token=%s", base_url, escaped_tenant,
-        escaped_session);
-  }
-
-  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
-  if (message == NULL)
-    return WYRELOG_E_INVALID;
-  if (has_access) {
-    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-        access_token);
-    soup_message_headers_replace (soup_message_get_request_headers (message),
-        "Authorization", authorization);
-  }
+  g_autoptr (SoupMessage) message = NULL;
+  wyrelog_error_t rc = client_service_credential_operations_message_new
+      (client, target_tenant, "/reconcile", "POST", guard_timestamp,
+      guard_loc_class, guard_risk, &message);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   g_autoptr (GString) json = g_string_new (NULL);
   if (!client_service_credential_operation_reconcile_build_body (request, json))
@@ -1899,7 +1925,7 @@ wyrelog_error_t
 
   g_autoptr (GBytes) response_body = NULL;
   guint status = 0;
-  wyrelog_error_t rc = client_send_service_management_message (client, message,
+  rc = client_send_service_management_message (client, message,
       &response_body, &status);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1927,6 +1953,21 @@ wyrelog_error_t
   if (status == 403)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_client_service_credential_operation_reconcile
+    (WylClient * client,
+    const WylClientServiceCredentialOperationReconcileRequest * request,
+    WylClientServiceCredentialOperationReconcileResult * out_result)
+{
+  if (out_result != NULL)
+    wyl_client_service_credential_operation_reconcile_result_clear (out_result);
+  (void) client;
+  (void) request;
+  /* The legacy ABI has no guard context and therefore cannot satisfy the
+   * management envelope.  Fail locally instead of sending a weaker request. */
+  return WYRELOG_E_INVALID;
 }
 
 typedef struct
@@ -2649,7 +2690,8 @@ fail:
  * authorization accepts the request. */
 static wyrelog_error_t
 client_service_credential_operations_message_new (WylClient *client,
-    const gchar *suffix, const gchar *method, gint64 guard_timestamp,
+    const gchar *target_tenant, const gchar *suffix, const gchar *method,
+    gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk, SoupMessage **out_message)
 {
   if (out_message == NULL)
@@ -2666,54 +2708,44 @@ client_service_credential_operations_message_new (WylClient *client,
   while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
     base_url[strlen (base_url) - 1] = '\0';
 
-  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
-  if (tenant == NULL || tenant[0] == '\0')
+  if (target_tenant == NULL
+      || !wyl_policy_store_tenant_id_is_valid (target_tenant))
     return WYRELOG_E_INVALID;
 
+  g_autofree gchar *auth_tenant = wyl_client_dup_tenant (client);
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
-  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
   gboolean has_access = access_token != NULL && access_token[0] != '\0';
-  gboolean has_session = session_token != NULL && session_token[0] != '\0';
-  if (!has_access && !has_session)
+  if (g_strcmp0 (auth_tenant, WYL_TENANT_DEFAULT) != 0 || !has_access
+      || !wyl_client_secret_url_is_canonical_literal_loopback (base_url))
     return WYRELOG_E_INVALID;
 
-  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_tenant =
+      g_uri_escape_string (target_tenant, NULL, TRUE);
   g_autofree gchar *escaped_loc =
       g_uri_escape_string (guard_loc_class, NULL, TRUE);
-  g_autofree gchar *uri = NULL;
-  if (has_access) {
-    uri = g_strdup_printf ("%s/service-credential-operations%s?tenant=%s"
-        "&guard_timestamp=%" G_GINT64_FORMAT
-        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-        base_url, suffix, escaped_tenant, guard_timestamp, escaped_loc,
-        guard_risk);
-  } else {
-    g_autofree gchar *escaped_session =
-        g_uri_escape_string (session_token, NULL, TRUE);
-    uri = g_strdup_printf ("%s/service-credential-operations%s"
-        "?tenant=%s&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
-        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-        base_url, suffix, escaped_tenant, escaped_session, guard_timestamp,
-        escaped_loc, guard_risk);
-  }
+  g_autofree gchar *uri = g_strdup_printf
+      ("%s/service-credential-operations%s?tenant=%s"
+      "&guard_timestamp=%" G_GINT64_FORMAT
+      "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+      base_url, suffix, escaped_tenant, guard_timestamp, escaped_loc,
+      guard_risk);
 
   g_autoptr (SoupMessage) message = soup_message_new (method, uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
-  if (has_access) {
-    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-        access_token);
-    soup_message_headers_replace (soup_message_get_request_headers (message),
-        "Authorization", authorization);
-  }
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  soup_message_headers_replace (soup_message_get_request_headers (message),
+      "Authorization", authorization);
   *out_message = g_steal_pointer (&message);
   return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-wyl_client_service_credential_operation_status_list (WylClient *client,
-    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
-    WylClientServiceCredentialOperationStatusList *out_list)
+    wyl_client_service_credential_operation_status_list_for_tenant
+    (WylClient * client, const gchar * target_tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialOperationStatusList * out_list)
 {
   if (!client_service_management_begin (client))
     return WYRELOG_E_INVALID;
@@ -2726,8 +2758,8 @@ wyl_client_service_credential_operation_status_list (WylClient *client,
 
   g_autoptr (SoupMessage) message = NULL;
   wyrelog_error_t rc = client_service_credential_operations_message_new
-      (client, "", "GET", guard_timestamp, guard_loc_class, guard_risk,
-      &message);
+      (client, target_tenant, "", "GET", guard_timestamp, guard_loc_class,
+      guard_risk, &message);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -2759,8 +2791,18 @@ wyl_client_service_credential_operation_status_list (WylClient *client,
 }
 
 wyrelog_error_t
-wyl_client_service_credential_operation_recover (WylClient *client,
-    const gchar *request_id, gint64 guard_timestamp,
+wyl_client_service_credential_operation_status_list (WylClient *client,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialOperationStatusList *out_list)
+{
+  return wyl_client_service_credential_operation_status_list_for_tenant
+      (client, WYL_TENANT_DEFAULT, guard_timestamp, guard_loc_class,
+      guard_risk, out_list);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_operation_recover_for_tenant (WylClient *client,
+    const gchar *target_tenant, const gchar *request_id, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry *out_entry)
 {
@@ -2776,8 +2818,8 @@ wyl_client_service_credential_operation_recover (WylClient *client,
 
   g_autoptr (SoupMessage) message = NULL;
   wyrelog_error_t rc = client_service_credential_operations_message_new
-      (client, "/recover", "POST", guard_timestamp, guard_loc_class,
-      guard_risk, &message);
+      (client, target_tenant, "/recover", "POST", guard_timestamp,
+      guard_loc_class, guard_risk, &message);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -2814,6 +2856,17 @@ wyl_client_service_credential_operation_recover (WylClient *client,
   if (status == 503)
     return WYRELOG_E_BUSY;
   return WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_client_service_credential_operation_recover (WylClient *client,
+    const gchar *request_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialOperationStatusEntry *out_entry)
+{
+  return wyl_client_service_credential_operation_recover_for_tenant (client,
+      WYL_TENANT_DEFAULT, request_id, guard_timestamp, guard_loc_class,
+      guard_risk, out_entry);
 }
 
 void
