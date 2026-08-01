@@ -736,6 +736,8 @@ wyl_daemon_http_context_unref (gpointer data)
       sizeof ctx->service_token_limiter_key);
   g_clear_pointer (&ctx->service_token_limiter,
       wyl_service_exchange_limiter_free);
+  g_clear_pointer (&ctx->service_exchange_limiter,
+      wyl_service_exchange_limiter_free);
 #endif
   g_free (ctx->policy_keyprovider_path);
   g_free (ctx->fact_root);
