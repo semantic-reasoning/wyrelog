@@ -1048,7 +1048,7 @@ test_local_failure_rolls_back (void)
         "service_retirement_receipts BEGIN SELECT RAISE(ABORT,'fault'); END;");
     g_assert_cmpint (wyl_service_principal_disable (handle,
             "svc:receipt-fault", "admin",
-            "000000000000000000000000113", &principal), !=, WYRELOG_E_OK);
+            "000000000000000000000000113", &principal), ==, WYRELOG_E_INTERNAL);
     g_assert_null (principal.subject_id);
     exec_ok (db, "DROP TRIGGER fail_retirement_receipt;");
     g_assert_cmpint (wyl_service_principal_get (handle, "svc:receipt-fault",
@@ -1458,6 +1458,44 @@ test_keyed_disable_receipt_semantics (void)
           "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
 
   exec_ok (db,
+      "DROP TRIGGER trg_service_retirement_no_update;"
+      "CREATE TEMP TABLE saved_terminal_fingerprint AS "
+      "SELECT input_fingerprint FROM service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000111';"
+      "UPDATE service_retirement_receipts SET input_fingerprint=zeroblob(32) "
+      "WHERE request_id='000000000000000000000000111';");
+  g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
+          reservation.principal, "operator-b", terminal_request, 1,
+          &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpint (outcome.disposition, ==, 0);
+  g_assert_null (principal.subject_id);
+  g_assert_cmpuint (probe.invalidation_calls, ==, 1);
+  exec_ok (db,
+      "UPDATE service_retirement_receipts SET input_fingerprint="
+      "(SELECT input_fingerprint FROM saved_terminal_fingerprint) WHERE "
+      "request_id='000000000000000000000000111';"
+      "DROP TABLE saved_terminal_fingerprint;"
+      "CREATE TEMP TABLE saved_principal_terminal AS SELECT disabled_by,"
+      "disabled_at_us,updated_at_us FROM service_principals WHERE "
+      "subject_id='svc:receipt:principal';"
+      "UPDATE service_principals SET disabled_by='forged-actor',"
+      "disabled_at_us=disabled_at_us+1,updated_at_us=updated_at_us+1 WHERE "
+      "subject_id='svc:receipt:principal';");
+  g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
+          reservation.principal, "operator-b", terminal_request, 1,
+          &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpint (outcome.disposition, ==, 0);
+  g_assert_null (principal.subject_id);
+  g_assert_cmpuint (probe.invalidation_calls, ==, 1);
+  exec_ok (db,
+      "UPDATE service_principals SET "
+      "disabled_by=(SELECT disabled_by FROM saved_principal_terminal),"
+      "disabled_at_us=(SELECT disabled_at_us FROM saved_principal_terminal),"
+      "updated_at_us=(SELECT updated_at_us FROM saved_principal_terminal) "
+      "WHERE subject_id='svc:receipt:principal';"
+      "DROP TABLE saved_principal_terminal;");
+
+  exec_ok (db,
       "UPDATE audit_events SET action=action||char(0)||'corrupt' "
       "WHERE request_id=" "'000000000000000000000000110';");
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
@@ -1465,7 +1503,7 @@ test_keyed_disable_receipt_semantics (void)
           &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
-  g_assert_cmpuint (probe.authorization_calls, ==, 7);
+  g_assert_cmpuint (probe.authorization_calls, ==, 9);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
 
   exec_ok (db, "DROP TRIGGER trg_service_retirement_no_delete;");
@@ -1477,7 +1515,7 @@ test_keyed_disable_receipt_semantics (void)
           &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
-  g_assert_cmpuint (probe.authorization_calls, ==, 8);
+  g_assert_cmpuint (probe.authorization_calls, ==, 10);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   wyl_service_auth_registry_unref (registry);
 }
@@ -1809,8 +1847,8 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
       "BEGIN SELECT RAISE(ABORT,'fault'); END;");
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
           "tenant-receipt-fault", "operator",
-          "00000000000000000000000021A", 1, &runtime, &outcome), !=,
-      WYRELOG_E_OK);
+          "00000000000000000000000021A", 1, &runtime, &outcome), ==,
+      WYRELOG_E_INTERNAL);
   exec_ok (handle_db (handle), "DROP TRIGGER fail_tenant_seal_receipt;");
   g_assert_cmpint (scalar_int64 (handle_db (handle),
           "SELECT sealed FROM tenants WHERE "

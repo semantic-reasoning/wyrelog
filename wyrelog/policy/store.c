@@ -15426,6 +15426,18 @@ service_retirement_receipt_lookup (wyl_policy_store_t *store,
     sodium_memzero (out, sizeof *out);
     return final_step == SQLITE_DONE ? WYRELOG_E_INTERNAL : WYRELOG_E_IO;
   }
+  guint8 expected_fingerprint[crypto_generichash_BYTES] = { 0 };
+  rc = service_retirement_fingerprint (out->receipt_version, out->operation,
+      out->resource_id, out->has_tenant_id ? out->tenant_id : NULL,
+      out->actor_subject_id, expected_fingerprint);
+  gboolean fingerprint_valid = rc == WYRELOG_E_OK
+      && sodium_memcmp (expected_fingerprint, out->input_fingerprint,
+      sizeof expected_fingerprint) == 0;
+  sodium_memzero (expected_fingerprint, sizeof expected_fingerprint);
+  if (!fingerprint_valid) {
+    sodium_memzero (out, sizeof *out);
+    return rc == WYRELOG_E_OK ? WYRELOG_E_INTERNAL : rc;
+  }
   *out_found = TRUE;
   rc = service_retirement_validate_audit (store, out);
   if (rc == WYRELOG_E_OK)
@@ -15613,6 +15625,57 @@ service_retirement_validate_tenant_replay (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
+service_retirement_read_terminal_event (wyl_policy_store_t *store,
+    const ServiceRetirementReceipt *receipt, const gchar *subject_id,
+    const gchar *tenant_id, gchar actor_subject_id[129], gint64 *created_at_us)
+{
+  gboolean principal = receipt->operation ==
+      WYL_POLICY_SERVICE_RETIREMENT_PRINCIPAL_DISABLE;
+  const gchar *sql = principal ?
+      "SELECT actor_subject_id,created_at_us,NULL,NULL "
+      "FROM service_principal_events WHERE subject_id=? AND "
+      "event='disabled' AND generation=?;" :
+      "SELECT actor_subject_id,created_at_us,subject_id,tenant_id "
+      "FROM service_credential_events WHERE credential_id=? AND "
+      "event='revoked' AND generation=?;";
+  sqlite3_stmt *stmt = NULL;
+  memset (actor_subject_id, 0, 129);
+  *created_at_us = 0;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, receipt->resource_id);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 2,
+          (sqlite3_int64) receipt->authority_generation) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step != SQLITE_ROW)
+    rc = step == SQLITE_DONE ? WYRELOG_E_INTERNAL : WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (!service_retirement_copy_text_column (stmt, 0, actor_subject_id,
+              129, FALSE, NULL)
+          || sqlite3_column_type (stmt, 1) != SQLITE_INTEGER
+          || sqlite3_column_int64 (stmt, 1) <= 0
+          || (!principal
+              && (!service_retirement_text_column_equals (stmt, 2, subject_id)
+                  || !service_retirement_text_column_equals (stmt, 3,
+                      tenant_id)))))
+    rc = WYRELOG_E_INTERNAL;
+  if (rc == WYRELOG_E_OK) {
+    *created_at_us = sqlite3_column_int64 (stmt, 1);
+    step = sqlite3_step (stmt);
+    if (step != SQLITE_DONE)
+      rc = step == SQLITE_ROW ? WYRELOG_E_INTERNAL : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (actor_subject_id, 129);
+    *created_at_us = 0;
+  }
+  return rc;
+}
+
+static wyrelog_error_t
 service_retirement_validate_principal_terminal (wyl_policy_store_t *store,
     const ServiceRetirementReceipt *receipt,
     wyl_policy_service_principal_info_t *out)
@@ -15622,14 +15685,22 @@ service_retirement_validate_principal_terminal (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID
       || rc == WYRELOG_E_POLICY)
     rc = WYRELOG_E_INTERNAL;
+  gchar transition_actor[129] = { 0 };
+  gint64 transition_at_us = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_read_terminal_event (store, receipt, NULL, NULL,
+        transition_actor, &transition_at_us);
   if (rc == WYRELOG_E_OK && (!g_str_equal (out->state, "disabled")
           || out->generation != receipt->authority_generation
+          || g_strcmp0 (out->disabled_by, transition_actor) != 0
+          || out->disabled_at_us != transition_at_us
+          || out->updated_at_us != transition_at_us
           || (receipt->transitioned
-              && (g_strcmp0 (out->disabled_by,
+              && (g_strcmp0 (transition_actor,
                       receipt->actor_subject_id) != 0
-                  || out->disabled_at_us != receipt->created_at_us
-                  || out->updated_at_us != receipt->created_at_us))))
+                  || transition_at_us != receipt->created_at_us))))
     rc = WYRELOG_E_INTERNAL;
+  sodium_memzero (transition_actor, sizeof transition_actor);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
@@ -15645,15 +15716,23 @@ service_retirement_validate_credential_terminal (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID
       || rc == WYRELOG_E_POLICY)
     rc = WYRELOG_E_INTERNAL;
+  gchar transition_actor[129] = { 0 };
+  gint64 transition_at_us = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_read_terminal_event (store, receipt,
+        out->subject_id, out->tenant_id, transition_actor, &transition_at_us);
   if (rc == WYRELOG_E_OK && (!g_str_equal (out->state, "revoked")
           || out->generation != receipt->authority_generation
           || g_strcmp0 (out->tenant_id, receipt->tenant_id) != 0
+          || g_strcmp0 (out->revoked_by, transition_actor) != 0
+          || out->revoked_at_us != transition_at_us
+          || out->updated_at_us != transition_at_us
           || (receipt->transitioned
-              && (g_strcmp0 (out->revoked_by,
+              && (g_strcmp0 (transition_actor,
                       receipt->actor_subject_id) != 0
-                  || out->revoked_at_us != receipt->created_at_us
-                  || out->updated_at_us != receipt->created_at_us))))
+                  || transition_at_us != receipt->created_at_us))))
     rc = WYRELOG_E_INTERNAL;
+  sodium_memzero (transition_actor, sizeof transition_actor);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_credential_info_clear (out);
   return rc;
@@ -15823,7 +15902,7 @@ service_retirement_receipt_insert (wyl_policy_store_t *store,
     rc = WYRELOG_E_IO;
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
-    rc = (step & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_CONFLICT : WYRELOG_E_IO;
+    rc = (step & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_INTERNAL : WYRELOG_E_IO;
   sqlite3_finalize (stmt);
   return rc;
 }
