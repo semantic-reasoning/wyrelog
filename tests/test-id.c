@@ -406,6 +406,21 @@ check_request_id_generation_validation (void)
 }
 
 static gint
+check_request_id_canonical_validation (void)
+{
+  gchar generated[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (generated, sizeof generated) != WYRELOG_E_OK)
+    return 265;
+  if (!wyl_request_id_is_canonical (generated))
+    return 266;
+  if (wyl_request_id_is_canonical (NULL)
+      || wyl_request_id_is_canonical ("short-request-id")
+      || wyl_request_id_is_canonical ("abcdefghijklmnopqrstuvwxyz0"))
+    return 267;
+  return 0;
+}
+
+static gint
 check_request_id_uniqueness (void)
 {
   GHashTable *seen = g_hash_table_new_full (g_str_hash, g_str_equal,
@@ -502,6 +517,8 @@ main (void)
   if ((rc = check_request_id_generation ()) != 0)
     return rc;
   if ((rc = check_request_id_generation_validation ()) != 0)
+    return rc;
+  if ((rc = check_request_id_canonical_validation ()) != 0)
     return rc;
   if ((rc = check_request_id_uniqueness ()) != 0)
     return rc;

@@ -780,6 +780,18 @@ main (void)
   reconcile_request.subject_id = "svc:client:reconcile";
   reconcile_request.tenant_id = "tenant-a";
 
+  /* Shape alone is insufficient: this is 27 alphanumeric characters but is
+   * outside the canonical KSUID range. Reconcile must reject it locally. */
+  g_free (http.last_path);
+  http.last_path = g_strdup ("__unset__");
+  reconcile_request.request_id = "abcdefghijklmnopqrstuvwxyz0";
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
+    return 209;
+  if (g_strcmp0 (http.last_path, "__unset__") != 0)
+    return 208;
+  reconcile_request.request_id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
+
   const gchar *reconcile_issue_body =
       "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
@@ -996,6 +1008,15 @@ main (void)
   if (wyl_client_service_credential_operation_recover (local_client,
           "not-canonical", 123, "public", 69, &recovered) != WYRELOG_E_INVALID)
     return 265;
+  /* A 27-character alphanumeric non-KSUID must also fail before HTTP. */
+  g_free (http.last_path);
+  http.last_path = g_strdup ("__unset__");
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "abcdefghijklmnopqrstuvwxyz0", 123, "public", 69,
+          &recovered) != WYRELOG_E_INVALID)
+    return 279;
+  if (g_strcmp0 (http.last_path, "__unset__") != 0)
+    return 280;
   if (wyl_client_service_credential_operation_recover (local_client,
           "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
           NULL) != WYRELOG_E_INVALID)
