@@ -525,12 +525,15 @@ import flow.
 drive the loopback-only escrow handoff. Issue mints the first
 credential for a service subject; rotate supersedes an existing
 credential id. Both talk to the local daemon over its loopback listener
-and require a bearer session that holds `wr.service_credential.manage`.
+and require a live, MFA-assured human bearer session that holds
+`wr.service_credential.manage`. The bearer is always authenticated in the
+management resolver tenant `__wr_default`; `--tenant` independently selects
+the credential target.
 
 ```
 wyctl service-credential issue \
   --tenant <tenant> \
-  --subject svc:<tenant>:<name> \
+  --subject <service-subject-id> \
   --destination <escrow-file-name> \
   --expires-at-us <epoch-microseconds> \
   [--request-id <id>] \
@@ -545,14 +548,23 @@ wyctl service-credential rotate \
   --access-token-file <path>
 ```
 
-`--subject` must be `svc:<tenant>:...` with `<tenant>` equal to
-`--tenant`; rotate names the credential to supersede with
-`--credential-id` instead. `--destination` is the escrow publication
+`--subject` identifies the service principal and does not encode or establish
+the target tenant; rotate names the credential to supersede with
+`--credential-id` instead. The daemon requires the issue body's tenant and the
+selected target to match exactly. For rotate, list, revoke, status, and recover,
+it derives the authoritative tenant from stored credential or operation state
+and rejects a different selected target without revealing whether the object
+exists. `--destination` is the escrow publication
 file and `--expires-at-us` is the absolute publication expiry in epoch
 microseconds and must be greater than zero. Both are mandatory. The
 `--access-token-file` bearer token may instead come from `wyctl`
 configuration, and the guard flags `--guard-timestamp`,
 `--guard-loc-class`, and `--guard-risk` carry policy-guard context.
+
+Service-principal management is global rather than tenant-targeted. Its
+`--tenant` may be omitted or explicitly set to `__wr_default`; any other value
+is rejected locally. Credential commands still require `--tenant` because it
+selects the managed target, not the bearer session tenant.
 
 ### Idempotency
 

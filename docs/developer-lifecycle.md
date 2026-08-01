@@ -222,17 +222,48 @@ is never a valid retry checkpoint.
 The daemon publishes the Service Credential API as one feature-gated route
 set. The management routes are `/service-principals` and
 `/service-credentials`; the audit-enabled build adds the loopback-only
-`POST /auth/service-token`, and the fact-store-enabled build adds
-`POST /service-credential-operations/reconcile`. A build without an owning
-feature does not register that feature's route or a compatibility stub.
+`POST /auth/service-token`, and the fact-store-enabled build adds the
+`/service-credential-operations` collection plus its `reconcile` and `recover`
+actions. A build without an owning feature does not register that feature's
+route or a compatibility stub.
 
 The exact management paths are `POST` and `GET /service-principals`,
 `POST /service-principals/{subject}/disable`, `POST` and `GET
 /service-principals/{subject}/credentials`, `GET /service-credentials/{id}`,
 `POST /service-credentials/{id}/rotate`, and `DELETE
-/service-credentials/{id}`. No operation-status GET, alias, legacy, hidden, or
-alternate route is supported. Reconciliation is POST-only and returns
-sanitized, non-secret terminal evidence; it never returns a credential secret.
+/service-credentials/{id}`. The fact-store-enabled operation paths are `GET
+/service-credential-operations`, `POST
+/service-credential-operations/reconcile`, and `POST
+/service-credential-operations/recover`. No alias, legacy, hidden, or alternate
+route is supported. Reconciliation and recovery return sanitized, non-secret
+operation evidence; they never return a credential secret.
+
+All eleven management routes share one authorization envelope. They are
+SYSTEM-profile, actual-listener-and-peer loopback endpoints that accept only an
+`Authorization: Bearer` human session. The session must be live, ACTIVE,
+MFA-assured, and rooted in the sole resolver tenant `__wr_default`; refreshing
+a token does not create MFA assurance. Every request supplies strict guard
+context and is authorized again while its READ or WRITE service-authority lease
+is held. Principal routes require `wr.service_principal.manage`; credential and
+operation routes require `wr.service_credential.manage`.
+
+The management bearer tenant and the managed target tenant are deliberately
+different concepts. Credential and operation requests select their target with
+the `tenant` query parameter while authentication stays rooted in
+`__wr_default`. Principal management is global: an omitted principal tenant or
+an explicit `__wr_default` is accepted, and a non-default principal tenant is a
+usage error. For credential IDs and operation records, the authority derives
+the tenant from stored credential or journal state and requires an exact match
+with the selected target. Unknown IDs, missing authoritative records, and
+cross-target probes therefore share the same not-found response and do not
+leak existence across tenants.
+
+Client callers that manage a non-default target use the additive
+`*_for_tenant` credential and operation APIs. The legacy methods remain ABI
+compatible and select `__wr_default` as their target, so they fail closed
+rather than silently borrowing the authenticated client's tenant for a
+non-default management operation. Issue already carries its target explicitly
+in `WylClientServiceCredentialIssueRequest.tenant_id`.
 
 Service-token exchange accepts only a strict JSON credential ID/secret body
 over actual loopback transport. Non-loopback requests, malformed or oversized
@@ -267,12 +298,13 @@ any authentication, state read, or write. The caller must hold
 design and the durable state machine behind this contract.
 
 The request body is a strict JSON object; every field value is a quoted string
-on the wire. Issue requires `version` (`"1"`), `tenant` (equal to the request
-tenant, and the `{subject}` must be `svc:<tenant>:...`), `request_id`,
-`destination`, and `expires_at_us`. Rotate requires `version`, `request_id`,
-`destination`, and `expires_at_us`; its principal is the retired credential's
-subject. `request_id` is exactly 27 ASCII-alphanumeric characters (a canonical
-KSUID); it is the idempotency key. `destination` names the escrow publication
+on the wire. Issue requires `version` (`"1"`), `tenant` (equal to the selected
+target tenant), `request_id`, `destination`, and `expires_at_us`. The subject
+path identifies the principal but does not encode or establish the target
+tenant. Rotate requires `version`, `request_id`, `destination`, and
+`expires_at_us`; its principal and authoritative target tenant come from the
+retired credential. `request_id` is exactly 27 ASCII-alphanumeric characters
+(a canonical KSUID); it is the idempotency key. `destination` names the escrow publication
 target and `expires_at_us` is a quoted decimal count of microseconds since the
 epoch that must parse and be strictly greater than zero. Both `destination` and
 `expires_at_us` are mandatory: the daemon never server-recomputes an expiry.
