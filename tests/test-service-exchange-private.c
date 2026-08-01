@@ -182,6 +182,8 @@ assert_denied_case (WylHandle *handle, const gchar *credential_id,
 static void
 test_denials_share_one_category (void)
 {
+  static const gchar *revoke_request_id = "000000000000000000000000233";
+  static const gchar *disable_request_id = "000000000000000000000000234";
   g_auto (Fixture) fixture = { 0 };
   fixture_init (&fixture);
   WylHandle *handle = fixture.handle;
@@ -204,7 +206,7 @@ test_denials_share_one_category (void)
 
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          issued.credential.credential_id, "admin", "exchange-revoke",
+          issued.credential.credential_id, "admin", revoke_request_id,
           &revoked), ==, WYRELOG_E_OK);
   wyl_service_credential_clear (&revoked);
   assert_denied_case (handle, issued.credential.credential_id, secret,
@@ -220,7 +222,7 @@ test_denials_share_one_category (void)
 
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable (handle,
-          "svc:exchange:worker", "admin", "exchange-disable", &principal),
+          "svc:exchange:worker", "admin", disable_request_id, &principal),
       ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   assert_denied_case (handle, issued.credential.credential_id, secret,

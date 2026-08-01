@@ -178,6 +178,7 @@ check_projected_lifecycle_event (WylHandle *handle, const gchar *request_id,
 static gint
 check_service_lifecycle_audit_reconciliation (void)
 {
+  static const gchar *revoke_request_id = "000000000000000000000000235";
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-lifecycle-audit-XXXXXX", NULL);
   g_autofree gchar *policy = g_build_filename (dir, "policy.db", NULL);
   g_autofree gchar *audit = g_build_filename (dir, "audit.db", NULL);
@@ -224,14 +225,17 @@ check_service_lifecycle_audit_reconciliation (void)
   g_autofree gchar *rotate_copy = g_strndup (rotate_secret, rotate_len);
   wyl_service_credential_t revoked = { 0 };
   if (wyl_service_credential_revoke (handle,
-          rotated.credential.credential_id, "admin", "sla-revoke", &revoked)
+          rotated.credential.credential_id, "admin", revoke_request_id,
+          &revoked)
       != WYRELOG_E_OK)
     return 706;
   wyl_service_credential_clear (&revoked);
   sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (db, "SELECT count(*) FROM audit_intentions WHERE "
-          "state='pending' AND request_id LIKE 'sla-%';", -1, &stmt, NULL)
+          "state='pending' AND (request_id LIKE 'sla-%' OR "
+          "request_id=?);", -1, &stmt, NULL) != SQLITE_OK
+      || sqlite3_bind_text (stmt, 1, revoke_request_id, -1, SQLITE_STATIC)
       != SQLITE_OK || sqlite3_step (stmt) != SQLITE_ROW
       || sqlite3_column_int64 (stmt, 0) != 4)
     return 707;
@@ -267,7 +271,7 @@ check_service_lifecycle_audit_reconciliation (void)
       || !check_projected_lifecycle_event (handle, "sla-rotate",
           "service.credential.rotate", issued.credential.credential_id,
           &rotate_id)
-      || !check_projected_lifecycle_event (handle, "sla-revoke",
+      || !check_projected_lifecycle_event (handle, revoke_request_id,
           "service.credential.revoke", rotated.credential.credential_id,
           &revoke_id))
     return 712;
