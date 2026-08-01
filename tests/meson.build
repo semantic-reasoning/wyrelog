@@ -639,7 +639,7 @@ if build_client and host_machine.system() != 'windows'
     c_args : [
       '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
     ],
-    dependencies : [glib_dep, gio_dep],
+    dependencies : [glib_dep, gio_dep, libsoup_dep],
   )
 
   test('wyctl-service-principal', test_wyctl_service_principal,
