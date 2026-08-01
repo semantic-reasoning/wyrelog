@@ -896,8 +896,6 @@ static int
 run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   g_auto (WyctlOptions) opts = {
-    .daemon_url = g_strdup (global_opts->daemon_url),
-    .timeout_ms_arg = g_strdup (global_opts->timeout_ms_arg),
     .readiness = global_opts->readiness,
   };
   GOptionEntry entries[] = {
@@ -923,13 +921,17 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
 
-  /* Resolve the CLI flags against GSettings defaults. The resolver
-   * returns an owned copy or NULL; the original opts.* slots stay
-   * owned by the local option holder so we never assign back into them. */
-  g_autofree gchar *daemon_url = wyctl_resolve_string_option (opts.daemon_url,
+  /* Local status flags override borrowed top-level flags.  Keep both parser
+   * destinations separate so GOptionContext never overwrites an owned default.
+   * The resolver returns the only owned copy used below. */
+  const gchar *daemon_url_arg = opts.daemon_url != NULL ? opts.daemon_url :
+      global_opts->daemon_url;
+  const gchar *timeout_ms_arg_input = opts.timeout_ms_arg != NULL ?
+      opts.timeout_ms_arg : global_opts->timeout_ms_arg;
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option (daemon_url_arg,
       global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
-      wyctl_resolve_uint_option_as_string (opts.timeout_ms_arg,
+      wyctl_resolve_uint_option_as_string (timeout_ms_arg_input,
       global_opts->settings, "default-timeout-ms");
 
   if (daemon_url == NULL || daemon_url[0] == '\0') {

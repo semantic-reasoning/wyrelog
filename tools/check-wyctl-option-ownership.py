@@ -211,12 +211,12 @@ def check_text(text: str, expected_fields=EXPECTED_FIELDS,
             f"{expected_reassignments}, found {assignments}")
 
     if "run_status" in expected_sites:
-        if "g_auto (WyctlOptions) opts = {\n    .daemon_url = g_strdup " \
-                "(global_opts->daemon_url)," not in text:
-            violations.append("run_status must own its daemon URL default")
-        if ".timeout_ms_arg = g_strdup " \
-                "(global_opts->timeout_ms_arg)," not in text:
-            violations.append("run_status must own its timeout default")
+        if "opts.daemon_url != NULL ? opts.daemon_url :\n      " \
+                "global_opts->daemon_url" not in text:
+            violations.append("run_status must keep daemon URL parsers separate")
+        if "opts.timeout_ms_arg != NULL ?\n      opts.timeout_ms_arg : " \
+                "global_opts->timeout_ms_arg" not in text:
+            violations.append("run_status must keep timeout parsers separate")
     return violations
 
 
