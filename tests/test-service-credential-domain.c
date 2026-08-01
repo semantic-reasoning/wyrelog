@@ -1402,6 +1402,10 @@ test_handoff_checked_rotate_stale_rollback_and_replay (void)
   g_assert_cmpint (wyl_service_credential_issue (handle,
           "svc:handoff:rotate", "tenant-a", "admin", "handoff-rotate-seed",
           0, &old), ==, WYRELOG_E_OK);
+  g_auto (CredentialRegistryFixture) registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&registry, handle,
+          old.credential.credential_id, old.credential.generation,
+          old.credential.subject_id, old.credential.tenant_id, TRUE));
 
   CollisionRuntime collision = { 0 };
   wyl_service_credential_runtime_t credential_runtime = {
@@ -1413,6 +1417,7 @@ test_handoff_checked_rotate_stale_rollback_and_replay (void)
     .authorize = probe_mutation_authorization,.data = &probe,
   };
   wyl_service_credential_rotate_runtime_t runtime = {
+    .registry = registry.registry,
     .credential_runtime = &credential_runtime,
     .old_credential_generation = old.credential.generation + 1,
     .authorization = &authorization,
@@ -1451,6 +1456,8 @@ test_handoff_checked_rotate_stale_rollback_and_replay (void)
   g_assert_cmpstr (out.handoff.actor_subject_id, ==, "admin");
   g_assert_cmpstr (out.credential.rotated_from_id, ==,
       old.credential.credential_id);
+  g_assert_true (credential_registry_fixture_is (&registry,
+          WYL_SERVICE_AUTH_REVOKED));
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM service_credential_events "
           "WHERE request_id='handoff-rotate' AND actor_subject_id='admin';"),
@@ -1461,6 +1468,15 @@ test_handoff_checked_rotate_stale_rollback_and_replay (void)
   MutationEffects committed = mutation_effects (handle);
   guint ids = collision.ids;
   guint allocs = collision.allocs;
+  WylServiceAuthSelector retired_selector = { 0 };
+  g_assert_cmpint (wyl_service_auth_selector_init_credential_generation
+      (&retired_selector, old.credential.credential_id,
+          old.credential.generation), ==, WYRELOG_E_OK);
+  /* Exact replay consumes the durable handoff receipt.  Corrupting the
+   * predecessor selector index proves replay never invokes the registry
+   * invalidation path: a repeated selector would fail closed here. */
+  g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
+      (registry.registry, &retired_selector));
   wyl_service_credential_handoff_result_t replay = { 0 };
   probe.calls = 0;
   g_assert_cmpint
