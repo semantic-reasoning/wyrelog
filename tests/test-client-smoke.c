@@ -2036,14 +2036,17 @@ main (void)
       || !client_last_response_is (local_client, 403,
           "remote_before_transport"))
     return 551;
+  /* The server thread owns polling the listener. Stop and join that loop
+   * before disconnect closes its file descriptors; otherwise poll can observe
+   * a concurrently closed descriptor on platforms such as macOS. */
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
   soup_server_disconnect (http.server);
   if (wyl_client_service_principal_list (local_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 0, NULL))
     return 552;
 
-  g_main_loop_quit (http.loop);
-  g_thread_join (thread);
   g_clear_object (&http.server);
   g_clear_pointer (&http.last_method, g_free);
   g_clear_pointer (&http.last_path, g_free);
