@@ -2747,12 +2747,8 @@ run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
 
   /* Resolve --store and --keyprovider from CLI / GSettings (CLI wins;
    * empty falls back to the default-policy-store / default-keyprovider
-   * keys). The resolved values live in the g_autofree locals; we
-   * overwrite opts.store_path / opts.keyprovider_path so downstream
-   * validation/open sees the resolved value. The original
-   * GOptionContext-owned strings in those slots are dropped (small
-   * one-shot leak absorbed at CLI tear-down — same pattern as
-   * elsewhere in wyctl). */
+   * keys), then transfer the resolved values to the option holder used by
+   * downstream validation/open. */
   gboolean online = opts.access_token_file != NULL &&
       opts.access_token_file[0] != '\0';
   gboolean explicit_store = opts.store_path != NULL
@@ -2768,8 +2764,10 @@ run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
       g_strdup (opts.keyprovider_path) :
       wyctl_resolve_string_option (opts.keyprovider_path,
       global_opts->settings, "default-keyprovider");
-  opts.store_path = store_path;
-  opts.keyprovider_path = keyprovider_path;
+  g_clear_pointer (&opts.store_path, g_free);
+  opts.store_path = g_steal_pointer (&store_path);
+  g_clear_pointer (&opts.keyprovider_path, g_free);
+  opts.keyprovider_path = g_steal_pointer (&keyprovider_path);
 
   if (online) {
     if (explicit_store || explicit_keyprovider) {
@@ -2826,19 +2824,17 @@ run_mfa_reset (const WyctlOptions *global_opts, gint argc, gchar **argv)
 
   /* Resolve --store and --keyprovider from CLI / GSettings (CLI wins;
    * empty falls back to the default-policy-store / default-keyprovider
-   * keys). The resolved values live in the g_autofree locals; we
-   * overwrite opts.store_path / opts.keyprovider_path so downstream
-   * validation/open sees the resolved value. The original
-   * GOptionContext-owned strings in those slots are dropped (small
-   * one-shot leak absorbed at CLI tear-down — same pattern as
-   * elsewhere in wyctl). */
+   * keys), then transfer the resolved values to the option holder used by
+   * downstream validation/open. */
   g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
       global_opts->settings, "default-policy-store");
   g_autofree gchar *keyprovider_path =
       wyctl_resolve_string_option (opts.keyprovider_path,
       global_opts->settings, "default-keyprovider");
-  opts.store_path = store_path;
-  opts.keyprovider_path = keyprovider_path;
+  g_clear_pointer (&opts.store_path, g_free);
+  opts.store_path = g_steal_pointer (&store_path);
+  g_clear_pointer (&opts.keyprovider_path, g_free);
+  opts.keyprovider_path = g_steal_pointer (&keyprovider_path);
 
   int validate_rc = wyctl_mfa_validate_common_options (&opts);
   if (validate_rc != 0)
