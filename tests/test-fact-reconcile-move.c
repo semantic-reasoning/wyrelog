@@ -9,8 +9,18 @@
 
 #include <fcntl.h>
 #include <string.h>
+
+#ifndef G_OS_WIN32
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
 
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-locator-private.h"
@@ -59,9 +69,15 @@ write_secure_file (const gchar *root, const gchar *name, const gchar *bytes,
 static gint
 open_regular (const gchar *path)
 {
-  gint fd = open (path, O_RDONLY | O_CLOEXEC);
+  gint fd = g_open (path, O_RDONLY | O_BINARY | O_CLOEXEC, 0);
   g_assert_cmpint (fd, >=, 0);
   return fd;
+}
+
+static void
+close_regular (gint fd)
+{
+  g_assert_true (g_close (fd, NULL));
 }
 
 static void
@@ -71,26 +87,33 @@ test_capture_known_vector (void)
   g_autofree gchar *path = write_secure_file (root, "abc.bin", "abc", 3);
   gint fd = open_regular (path);
 
-  struct stat st;
-  g_assert_cmpint (fstat (fd, &st), ==, 0);
-
   WylPolicyFactReconcileArtifactEvidence evidence;
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd,
           &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpuint (evidence.version, ==,
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1);
+#ifdef G_OS_WIN32
+  g_assert_cmpint (evidence.identity_kind, ==,
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS);
+  /* POSIX identity fields are unused on Windows. */
+  g_assert_cmpuint (evidence.posix_device, ==, 0);
+  g_assert_cmpuint (evidence.posix_inode, ==, 0);
+#else
+  struct stat st;
+  g_assert_cmpint (fstat (fd, &st), ==, 0);
   g_assert_cmpint (evidence.identity_kind, ==,
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_POSIX);
   g_assert_cmpuint (evidence.posix_device, ==, (guint64) st.st_dev);
   g_assert_cmpuint (evidence.posix_inode, ==, (guint64) st.st_ino);
+  g_assert_cmpuint (evidence.windows_volume_serial, ==, 0);
+#endif
   g_assert_cmpuint (evidence.size_bytes, ==, 3);
   g_assert_cmpint (evidence.digest_algorithm, ==,
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256);
   g_assert_cmpmem (evidence.digest, sizeof evidence.digest, sha256_abc,
       sizeof sha256_abc);
-  g_assert_cmpuint (evidence.windows_volume_serial, ==, 0);
 
-  g_assert_cmpint (close (fd), ==, 0);
+  close_regular (fd);
   (void) g_remove (path);
   g_assert_true (wyl_test_remove_empty_directory (root, NULL));
 }
@@ -113,14 +136,20 @@ test_capture_reproduces_across_inodes (void)
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd_b, &ev_b),
       ==, WYRELOG_E_OK);
 
-  /* Different inodes, identical bytes: size and digest reproduce exactly. */
+  /* Distinct native identities, identical bytes: size and digest reproduce
+   * exactly. */
+#ifdef G_OS_WIN32
+  g_assert_cmpint (memcmp (ev_a.windows_file_id, ev_b.windows_file_id,
+          sizeof ev_a.windows_file_id), !=, 0);
+#else
   g_assert_cmpuint (ev_a.posix_inode, !=, ev_b.posix_inode);
+#endif
   g_assert_cmpuint (ev_a.size_bytes, ==, ev_b.size_bytes);
   g_assert_cmpmem (ev_a.digest, sizeof ev_a.digest, ev_b.digest,
       sizeof ev_b.digest);
 
-  g_assert_cmpint (close (fd_a), ==, 0);
-  g_assert_cmpint (close (fd_b), ==, 0);
+  close_regular (fd_a);
+  close_regular (fd_b);
   (void) g_remove (path_a);
   (void) g_remove (path_b);
   g_assert_true (wyl_test_remove_empty_directory (root, NULL));
@@ -135,6 +164,10 @@ test_capture_rejects_bad_input (void)
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (0, NULL), ==,
       WYRELOG_E_INVALID);
 
+#ifndef G_OS_WIN32
+  /* A directory fd is not a regular file; the POSIX opener can hand one to the
+   * capture, which must reject it.  Windows cannot open a directory as a CRT
+   * fd, so this path is POSIX-only. */
   g_autofree gchar *root = make_root ();
   gint dir_fd = open (root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   g_assert_cmpint (dir_fd, >=, 0);
@@ -142,6 +175,7 @@ test_capture_rejects_bad_input (void)
           &evidence), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (close (dir_fd), ==, 0);
   g_assert_true (wyl_test_remove_empty_directory (root, NULL));
+#endif
 }
 
 typedef struct
@@ -227,7 +261,7 @@ move_fixture_setup (MoveFixture *fx, const gchar *payload, gssize payload_len)
   gint fd = open_regular (fx->source_abs);
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd,
           &fx->source_ev), ==, WYRELOG_E_OK);
-  g_assert_cmpint (close (fd), ==, 0);
+  close_regular (fd);
 
   g_assert_cmpint (wyl_policy_store_open (NULL, &fx->store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (fx->store), ==,
@@ -370,7 +404,7 @@ assert_final_matches_source (const MoveFixture *fx)
   WylPolicyFactReconcileArtifactEvidence ev;
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd, &ev), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (close (fd), ==, 0);
+  close_regular (fd);
   g_assert_cmpuint (ev.size_bytes, ==, fx->source_ev.size_bytes);
   g_assert_cmpmem (ev.digest, sizeof ev.digest, fx->source_ev.digest,
       sizeof fx->source_ev.digest);
@@ -442,6 +476,7 @@ fault_at_point (const gchar *point, gpointer user_data)
   return WYRELOG_E_OK;
 }
 
+#ifndef G_OS_WIN32
 /*
  * Publish-then-CAS crux.  stage_create yields a non-exact stage whose publish
  * fires "stage-linked" then "stage-unlinked"; the latter fires after the
@@ -450,6 +485,7 @@ fault_at_point (const gchar *point, gpointer user_data)
  * present and the journal still MOVING; a clean re-run must converge on the
  * durable target with a CAS only.  (There is no "stage-parent-synced" point
  * on the non-exact path; that point belongs to the exact-provisioning path.)
+ * The staging checkpoint names are POSIX-specific, so this seam is POSIX-only.
  */
 static void
 test_move_publish_crux_target_durable_before_cas (void)
@@ -483,6 +519,7 @@ test_move_publish_crux_target_durable_before_cas (void)
 
   move_fixture_teardown (&fx);
 }
+#endif /* !G_OS_WIN32 */
 
 /* Interruption before any copy/publish: the move unit's own "source-verified"
  * point fires after the source is re-verified but before staging.  Faulting
@@ -618,11 +655,16 @@ test_move_publish_source_identity_mismatch (void)
   WylPolicyFactReconcileArtifactEvidence fresh;
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd, &fresh),
       ==, WYRELOG_E_OK);
-  g_assert_cmpint (close (fd), ==, 0);
+  close_regular (fd);
   g_assert_cmpuint (fresh.size_bytes, ==, fx.source_ev.size_bytes);
   g_assert_cmpmem (fresh.digest, sizeof fresh.digest, fx.source_ev.digest,
       sizeof fx.source_ev.digest);
+#ifdef G_OS_WIN32
+  g_assert_cmpint (memcmp (fresh.windows_file_id, fx.source_ev.windows_file_id,
+          sizeof fresh.windows_file_id), !=, 0);
+#else
   g_assert_cmpuint (fresh.posix_inode, !=, fx.source_ev.posix_inode);
+#endif
 
   WylFactReconcileMoveContext ctx = move_context (&fx);
   WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
@@ -684,6 +726,12 @@ test_move_publish_rejects_missing_tenant (void)
   move_fixture_teardown (&fx);
 }
 
+/*
+ * The following two seams depend on POSIX filesystem semantics that Windows
+ * does not share: renaming a directory that has live open handles, and
+ * replacing a file whose handle is still open.  They are registered POSIX-only.
+ */
+#ifndef G_OS_WIN32
 typedef struct
 {
   const gchar *point;
@@ -811,6 +859,7 @@ test_move_publish_reopen_verify_rejects_swap (void)
 
   move_fixture_teardown (&fx);
 }
+#endif /* !G_OS_WIN32 */
 
 /*
  * Lexical aliasing.  A record whose source and canonical relative paths are
@@ -834,11 +883,13 @@ test_move_publish_rejects_lexical_alias (void)
   move_fixture_teardown (&fx);
 }
 
+#ifndef G_OS_WIN32
 /*
  * Identity aliasing on the present branch.  A canonical target hardlinked onto
  * the source inode is byte- and identity-equal, but it is merely another link
  * to the source rather than an independent published artifact: the move must
- * reject it, leaving both links intact and the journal MOVING.
+ * reject it, leaving both links intact and the journal MOVING.  POSIX-only
+ * because it constructs the alias with link().
  */
 static void
 test_move_publish_rejects_identity_alias (void)
@@ -859,6 +910,7 @@ test_move_publish_rejects_identity_alias (void)
 
   move_fixture_teardown (&fx);
 }
+#endif /* !G_OS_WIN32 */
 
 /*
  * Source-absent present branch.  A durable, distinct-inode copy of our own
@@ -1010,9 +1062,11 @@ main (int argc, char **argv)
       test_move_publish_happy_path);
   g_test_add_func ("/fact/reconcile-move/publish/idempotent-replay",
       test_move_publish_idempotent_replay);
+#ifndef G_OS_WIN32
   g_test_add_func
       ("/fact/reconcile-move/publish/crux-target-durable-before-cas",
       test_move_publish_crux_target_durable_before_cas);
+#endif
   g_test_add_func ("/fact/reconcile-move/publish/interrupt-before-copy",
       test_move_publish_interrupt_before_copy);
   g_test_add_func ("/fact/reconcile-move/publish/lease-contention",
@@ -1027,14 +1081,18 @@ main (int argc, char **argv)
       test_move_publish_rejects_generation_drift);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-missing-tenant",
       test_move_publish_rejects_missing_tenant);
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact/reconcile-move/publish/rejects-root-identity-drift",
       test_move_publish_rejects_root_identity_drift);
   g_test_add_func ("/fact/reconcile-move/publish/reopen-verify-rejects-swap",
       test_move_publish_reopen_verify_rejects_swap);
+#endif
   g_test_add_func ("/fact/reconcile-move/publish/rejects-lexical-alias",
       test_move_publish_rejects_lexical_alias);
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact/reconcile-move/publish/rejects-identity-alias",
       test_move_publish_rejects_identity_alias);
+#endif
   g_test_add_func ("/fact/reconcile-move/publish/present-converges-no-source",
       test_move_publish_present_converges_without_source);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
