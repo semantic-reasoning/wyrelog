@@ -289,6 +289,17 @@ wyl_service_principal_create (WylHandle *handle, const gchar *subject_id,
     const gchar *display_name, const gchar *actor_subject_id,
     const gchar *request_id, wyl_service_principal_t *out)
 {
+  return wyl_service_principal_create_with_runtime (handle, subject_id,
+      display_name, actor_subject_id, request_id, NULL, out);
+}
+
+wyrelog_error_t
+wyl_service_principal_create_with_runtime (WylHandle *handle,
+    const gchar *subject_id, const gchar *display_name,
+    const gchar *actor_subject_id, const gchar *request_id,
+    const wyl_service_principal_create_runtime_t *runtime,
+    wyl_service_principal_t *out)
+{
   if (out != NULL)
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
@@ -296,6 +307,9 @@ wyl_service_principal_create (WylHandle *handle, const gchar *subject_id,
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_principal_info_t stored = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation,
+        runtime != NULL ? runtime->authorization : NULL, actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   if (rc == WYRELOG_E_OK)
@@ -385,6 +399,9 @@ wyl_service_principal_disable_with_runtime (WylHandle *handle,
   if (rc == WYRELOG_E_OK && runtime != NULL
       && runtime->after_write_acquired != NULL)
     runtime->after_write_acquired (runtime->data);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation,
+        runtime != NULL ? runtime->authorization : NULL, actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
@@ -788,6 +805,9 @@ wyl_service_credential_revoke_with_runtime (WylHandle *handle,
       && runtime->after_write_acquired != NULL)
     runtime->after_write_acquired (runtime->data);
   wyl_policy_service_credential_info_t stored = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation,
+        runtime != NULL ? runtime->authorization : NULL, actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
