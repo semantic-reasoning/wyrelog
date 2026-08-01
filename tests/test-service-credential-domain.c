@@ -7189,6 +7189,48 @@ test_keyed_revoke_receipt_semantics (void)
   assert_mutation_effects_equal (terminal, expected_terminal);
 
   exec_ok (db_of (handle),
+      "DROP TRIGGER trg_service_retirement_no_update;"
+      "CREATE TEMP TABLE saved_revoke_fingerprint AS "
+      "SELECT input_fingerprint FROM service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000221';"
+      "UPDATE service_retirement_receipts SET input_fingerprint=zeroblob(32) "
+      "WHERE request_id='000000000000000000000000221';");
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-b", terminal_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpint (outcome.disposition, ==, 0);
+  g_assert_null (revoked.credential_id);
+  assert_mutation_effects_equal (mutation_effects (handle), terminal);
+  exec_ok (db_of (handle),
+      "UPDATE service_retirement_receipts SET input_fingerprint="
+      "(SELECT input_fingerprint FROM saved_revoke_fingerprint) WHERE "
+      "request_id='000000000000000000000000221';"
+      "DROP TABLE saved_revoke_fingerprint;"
+      "CREATE TEMP TABLE saved_credential_terminal AS SELECT revoked_by,"
+      "revoked_at_us,updated_at_us FROM service_credentials WHERE "
+      "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+      "WHERE request_id='000000000000000000000000221');"
+      "UPDATE service_credentials SET revoked_by='forged-actor',"
+      "revoked_at_us=revoked_at_us+1,updated_at_us=updated_at_us+1 WHERE "
+      "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+      "WHERE request_id='000000000000000000000000221');");
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-b", terminal_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpint (outcome.disposition, ==, 0);
+  g_assert_null (revoked.credential_id);
+  assert_mutation_effects_equal (mutation_effects (handle), terminal);
+  exec_ok (db_of (handle),
+      "UPDATE service_credentials SET "
+      "revoked_by=(SELECT revoked_by FROM saved_credential_terminal),"
+      "revoked_at_us=(SELECT revoked_at_us FROM saved_credential_terminal),"
+      "updated_at_us=(SELECT updated_at_us FROM saved_credential_terminal) "
+      "WHERE credential_id=(SELECT resource_id FROM "
+      "service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000221');"
+      "DROP TABLE saved_credential_terminal;");
+
+  exec_ok (db_of (handle),
       "UPDATE audit_events SET action=action||char(0)||'corrupt' "
       "WHERE request_id=" "'000000000000000000000000220';");
   g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
@@ -7196,7 +7238,7 @@ test_keyed_revoke_receipt_semantics (void)
           1, &runtime, &outcome, &revoked), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (revoked.credential_id);
-  g_assert_cmpuint (probe.calls, ==, 7);
+  g_assert_cmpuint (probe.calls, ==, 9);
   assert_mutation_effects_equal (mutation_effects (handle), terminal);
 
   g_free (probe.actor_subject_id);

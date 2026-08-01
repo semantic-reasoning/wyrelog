@@ -10603,6 +10603,182 @@ check_retirement_postcommit_http_fault_matrix (void)
 }
 
 static gint
+retirement_http_exec (sqlite3 *db, const gchar *sql)
+{
+  return sqlite3_exec (db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : 1;
+}
+
+static gint
+check_retirement_corruption_http_matrix (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
+  wyl_service_principal_t principal = { 0 };
+  if (wyl_service_principal_create (env.handle, "svc:tenant-a:corrupt-http",
+          "Corruption HTTP", "human-principal-admin", "corrupt-http-create",
+          &principal) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2640;
+  }
+  wyl_service_principal_clear (&principal);
+  wyl_service_credential_issue_result_t issued = { 0 };
+  if (wyl_service_credential_issue (env.handle,
+          "svc:tenant-a:corrupt-http", "tenant-a", "human-principal-admin",
+          "corrupt-http-issue", CONTRACT_FUTURE_EXPIRES_AT_US, &issued)
+      != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2641;
+  }
+  g_autofree gchar *credential_id = g_strdup (issued.credential.credential_id);
+  wyl_service_credential_issue_result_clear (&issued);
+  g_autofree gchar *principal_path = g_strdup
+      ("/service-principals/svc:tenant-a:corrupt-http/disable");
+  g_autofree gchar *credential_path = g_strdup_printf
+      ("/service-credentials/%s", credential_id);
+  const gchar *principal_transition =
+      "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000240\"}";
+  const gchar *principal_terminal =
+      "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000241\"}";
+  const gchar *credential_transition =
+      "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000242\"}";
+  const gchar *credential_terminal =
+      "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000243\"}";
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          principal_path, env.query, env.access_token, principal_transition,
+          &status, &body) != 0 || status != 200) {
+    rc = 2642;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          principal_path, env.query, env.access_token, principal_terminal,
+          &status, &body) != 0 || status != 200) {
+    rc = 2643;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "DELETE", env.base_url,
+          credential_path, env.tenant_query, env.access_token,
+          credential_transition, &status, &body) != 0 || status != 200) {
+    rc = 2644;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "DELETE", env.base_url,
+          credential_path, env.tenant_query, env.access_token,
+          credential_terminal, &status, &body) != 0 || status != 200) {
+    rc = 2645;
+    goto cleanup;
+  }
+  sqlite3 *db = wyl_policy_store_get_db
+      (wyl_handle_get_policy_store (env.handle));
+  gint64 effects_before = 0;
+  const gchar *effects_sql =
+      "SELECT (SELECT count(*) FROM service_retirement_receipts)+"
+      "(SELECT count(*) FROM service_principal_events)+"
+      "(SELECT count(*) FROM service_credential_events)+"
+      "(SELECT count(*) FROM audit_events)+"
+      "(SELECT count(*) FROM audit_intentions);";
+  if (!policy_count_rows (env.handle, effects_sql, &effects_before)) {
+    rc = 2646;
+    goto cleanup;
+  }
+  if (retirement_http_exec (db,
+          "DROP TRIGGER trg_service_retirement_no_update;"
+          "CREATE TEMP TABLE saved_http_principal AS SELECT disabled_by,"
+          "disabled_at_us,updated_at_us FROM service_principals WHERE "
+          "subject_id='svc:tenant-a:corrupt-http';"
+          "UPDATE service_principals SET disabled_by='forged-http',"
+          "disabled_at_us=disabled_at_us+1,updated_at_us=updated_at_us+1 WHERE "
+          "subject_id='svc:tenant-a:corrupt-http';") != 0) {
+    rc = 2652;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          principal_path, env.query, env.access_token, principal_terminal,
+          &status, &body) != 0 || status != 500 || body == NULL
+      || strstr (body, "service_principal_failed") == NULL) {
+    rc = 2647;
+    goto cleanup;
+  }
+  gint64 effects_after = 0;
+  if (!policy_count_rows (env.handle, effects_sql, &effects_after)
+      || effects_after != effects_before) {
+    rc = 2648;
+    goto cleanup;
+  }
+  if (retirement_http_exec (db,
+          "UPDATE service_principals SET "
+          "disabled_by=(SELECT disabled_by FROM saved_http_principal),"
+          "disabled_at_us=(SELECT disabled_at_us FROM saved_http_principal),"
+          "updated_at_us=(SELECT updated_at_us FROM saved_http_principal) WHERE "
+          "subject_id='svc:tenant-a:corrupt-http';"
+          "DROP TABLE saved_http_principal;"
+          "CREATE TEMP TABLE saved_http_credential AS SELECT revoked_by,"
+          "revoked_at_us,updated_at_us FROM service_credentials WHERE "
+          "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+          "WHERE request_id='000000000000000000000000243');"
+          "UPDATE service_credentials SET revoked_by='forged-http',"
+          "revoked_at_us=revoked_at_us+1,updated_at_us=updated_at_us+1 WHERE "
+          "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+          "WHERE request_id='000000000000000000000000243');") != 0) {
+    rc = 2653;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "DELETE", env.base_url,
+          credential_path, env.tenant_query, env.access_token,
+          credential_terminal, &status, &body) != 0 || status != 500
+      || body == NULL || strstr (body, "service_credential_failed") == NULL) {
+    rc = 2649;
+    goto cleanup;
+  }
+  if (!policy_count_rows (env.handle, effects_sql, &effects_after)
+      || effects_after != effects_before) {
+    rc = 2650;
+    goto cleanup;
+  }
+  if (retirement_http_exec (db,
+          "UPDATE service_credentials SET "
+          "revoked_by=(SELECT revoked_by FROM saved_http_credential),"
+          "revoked_at_us=(SELECT revoked_at_us FROM saved_http_credential),"
+          "updated_at_us=(SELECT updated_at_us FROM saved_http_credential) WHERE "
+          "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+          "WHERE request_id='000000000000000000000000243');"
+          "DROP TABLE saved_http_credential;"
+          "CREATE TEMP TABLE saved_http_fingerprint AS SELECT input_fingerprint "
+          "FROM service_retirement_receipts WHERE "
+          "request_id='000000000000000000000000241';"
+          "UPDATE service_retirement_receipts SET input_fingerprint=zeroblob(32) "
+          "WHERE request_id='000000000000000000000000241';") != 0) {
+    rc = 2654;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          principal_path, env.query, env.access_token, principal_terminal,
+          &status, &body) != 0 || status != 500 || body == NULL
+      || strstr (body, "service_principal_failed") == NULL
+      || !policy_count_rows (env.handle, effects_sql, &effects_after)
+      || effects_after != effects_before) {
+    rc = 2651;
+    goto cleanup;
+  }
+
+cleanup:
+  service_denial_env_clear (&env);
+  return rc;
+}
+
+static gint
 send_raw_service_management_forwarded_spoof (SoupSession *session,
     const gchar *method, const gchar *base_url, const gchar *path,
     const gchar *query, const gchar *access_token, const gchar *body,
@@ -12209,6 +12385,11 @@ main (void)
   gint retirement_fault_rc = check_retirement_postcommit_http_fault_matrix ();
   if (retirement_fault_rc != 0) {
     result = retirement_fault_rc;
+    goto cleanup;
+  }
+  gint retirement_corruption_rc = check_retirement_corruption_http_matrix ();
+  if (retirement_corruption_rc != 0) {
+    result = retirement_corruption_rc;
     goto cleanup;
   }
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
