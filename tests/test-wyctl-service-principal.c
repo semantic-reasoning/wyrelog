@@ -163,9 +163,9 @@ test_service_principal_local_and_remote_invalid (void)
           "service_principal_create_failed"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "INJECTED_DIAGNOSTIC"));
 
-  soup_server_disconnect (http.server);
   g_main_loop_quit (http.loop);
   g_thread_join (g_steal_pointer (&thread));
+  soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
   g_assert_cmpint (g_unlink (token_path), ==, 0);
