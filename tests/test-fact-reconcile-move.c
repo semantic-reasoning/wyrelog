@@ -236,11 +236,11 @@ move_fixture_setup (MoveFixture *fx, const gchar *payload, gssize payload_len)
 }
 
 static void
-move_fixture_seed_moving (MoveFixture *fx)
+move_fixture_seed_moving_canonical (MoveFixture *fx, const gchar *canonical_rel)
 {
   WylPolicyFactReconcileJournalInput input = {
     MOVE_OP, MOVE_TENANT, MOVE_GRAPH, 0, 0, 1, 1, MOVE_STORE_UUID,
-    fx->source_rel, fx->canonical_rel, fx->source_ev
+    fx->source_rel, canonical_rel, fx->source_ev
   };
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
@@ -252,6 +252,12 @@ move_fixture_seed_moving (MoveFixture *fx)
           MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
           WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+}
+
+static void
+move_fixture_seed_moving (MoveFixture *fx)
+{
+  move_fixture_seed_moving_canonical (fx, fx->canonical_rel);
 }
 
 static void
@@ -477,8 +483,9 @@ test_move_publish_lease_contention (void)
   move_fixture_teardown (&fx);
 }
 
+/* Caller tenant identity must match the journal record before any fs work. */
 static void
-test_move_publish_identity_mismatch (void)
+test_move_publish_tenant_mismatch (void)
 {
   MoveFixture fx;
   move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
@@ -486,6 +493,81 @@ test_move_publish_identity_mismatch (void)
 
   WylFactReconcileMoveContext ctx = move_context (&fx);
   ctx.tenant_id = "tenant-other";
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Basename authority: the publish name is the fixed "facts.duckdb".  A record
+ * whose canonical path names a different basename in the correct graph dir is
+ * accepted by the journal (which validates only path shape) but must be
+ * rejected by the move phase, publishing nothing under either name.
+ */
+static void
+test_move_publish_rejects_foreign_basename (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  g_autofree gchar *evil_rel = g_build_filename (fx.tenant_component,
+      fx.graph_component, "evil.duckdb", NULL);
+  move_fixture_seed_moving_canonical (&fx, evil_rel);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+
+  g_autofree gchar *evil_abs = g_build_filename (fx.graph_dir, "evil.duckdb",
+      NULL);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (evil_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Copy-path source identity gate.  The recorded evidence pins the source
+ * file's POSIX device+inode as well as its size+digest.  Re-creating the
+ * source at a fresh inode with byte-identical content keeps the digest+size
+ * pre-check happy but must still be rejected by the full evidence_equal
+ * identity comparison, publishing nothing.
+ */
+static void
+test_move_publish_source_identity_mismatch (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  /* Replace the source with a fresh inode holding identical bytes: create a
+   * sibling then atomically rename it over the recorded source name. */
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *replacement = g_build_filename (fx.graph_dir,
+      "legacy.new", NULL);
+  g_assert_true (g_file_set_contents (replacement, "duckdb-artifact-payload",
+          -1, NULL));
+  g_assert_true (wyl_test_secure_regular_file (replacement, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_rename (replacement, fx.source_abs), ==, 0);
+
+  /* Prove the digest+size still match but the inode identity changed. */
+  gint fd = open_regular (fx.source_abs);
+  WylPolicyFactReconcileArtifactEvidence fresh;
+  g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd, &fresh),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (close (fd), ==, 0);
+  g_assert_cmpuint (fresh.size_bytes, ==, fx.source_ev.size_bytes);
+  g_assert_cmpmem (fresh.digest, sizeof fresh.digest, fx.source_ev.digest,
+      sizeof fx.source_ev.digest);
+  g_assert_cmpuint (fresh.posix_inode, !=, fx.source_ev.posix_inode);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
   WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
   g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
       WYRELOG_E_POLICY);
@@ -622,8 +704,12 @@ main (int argc, char **argv)
       test_move_publish_interrupt_before_copy);
   g_test_add_func ("/fact/reconcile-move/publish/lease-contention",
       test_move_publish_lease_contention);
-  g_test_add_func ("/fact/reconcile-move/publish/identity-mismatch",
-      test_move_publish_identity_mismatch);
+  g_test_add_func ("/fact/reconcile-move/publish/tenant-mismatch",
+      test_move_publish_tenant_mismatch);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-foreign-basename",
+      test_move_publish_rejects_foreign_basename);
+  g_test_add_func ("/fact/reconcile-move/publish/source-identity-mismatch",
+      test_move_publish_source_identity_mismatch);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
       test_move_publish_rejects_prepared_state);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-invalid-arguments",
