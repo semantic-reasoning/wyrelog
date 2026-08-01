@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep human and service bearer authentication in one resolver authority."""
+"""Keep bearer parsing singular and pin each reviewed service READ owner."""
 
 import re
 import sys
@@ -66,11 +66,144 @@ def check(path: Path) -> list[str]:
     ):
         errors.append("resolve_bearer_session alias is forbidden")
 
-    authority_symbols = (
+    resolver_authority_symbols = (
         "wyl_service_auth_authority_acquire_read",
         "wyl_service_auth_read_lease_get_policy_store",
         "wyl_service_auth_registry_lookup",
+        "wyl_service_auth_read_lease_release_terminal",
     )
+    management_counts = {
+        "service_principal_management_authorize_session": {
+            "wyl_service_auth_authority_acquire_read": 1,
+            "wyl_service_auth_read_lease_get_policy_store": 1,
+            "management_target_is_active": 1,
+            "wyl_service_auth_read_lease_release_terminal": 8,
+        },
+        "service_management_read_release": {
+            "wyl_service_auth_read_lease_release_terminal": 1,
+        },
+        "service_credential_operation_status_execute": {
+            "wyl_service_auth_read_lease_get_policy_store": 1,
+        },
+    }
+    management_edges = {
+        "service_principal_management_authorize_session": {
+            "service_principal_management_authorize": 1,
+            "service_credential_issue_handler": 1,
+            "service_credential_rotate_handler": 1,
+            "service_credential_revoke_handler": 1,
+            "service_principal_create_handler": 1,
+            "service_principal_disable_handler": 1,
+            "service_credential_operation_reconcile_execute": 1,
+            "service_credential_operation_recover_execute": 1,
+        },
+        "service_principal_management_authorize": {
+            "service_credential_list_handler": 1,
+            "service_credential_get_handler": 1,
+            "service_principal_list_handler": 1,
+            "service_credential_operation_status_execute": 1,
+        },
+        "service_management_read_release": {
+            "service_credential_list_handler": 4,
+            "service_credential_get_handler": 2,
+            "service_principal_list_handler": 1,
+            "service_credential_operation_status_execute": 3,
+        },
+    }
+    management_spans: dict[str, tuple[int, int]] = {}
+    for name in management_counts:
+        try:
+            management_spans[name] = function_span(source, name)
+        except ValueError as exc:
+            errors.append(str(exc))
+    for name, expected in management_counts.items():
+        if name not in management_spans:
+            continue
+        owner_start, owner_end = management_spans[name]
+        owner_body = source[owner_start:owner_end]
+        for symbol, count in expected.items():
+            occurrences = len(re.findall(r"\b" + symbol + r"\b", owner_body))
+            calls = len(re.findall(r"\b" + symbol + r"\s*\(", owner_body))
+            if calls != count or occurrences != calls:
+                errors.append(
+                    f"{name} must own exactly {count} direct {symbol} call(s); "
+                    f"found {calls} calls/{occurrences} references"
+                )
+        if (
+            "wyl_handle_get_policy_store" in owner_body
+            or "wyl_service_auth_read_lease_free" in owner_body
+            or re.search(
+                r"\bwyl_service_auth_read_lease_release\s*\(", owner_body
+            )
+        ):
+            errors.append(
+                f"{name} must use only its pinned READ store and terminal release"
+            )
+    authorize_span = management_spans.get(
+        "service_principal_management_authorize_session"
+    )
+    if authorize_span is not None:
+        owner_start, owner_end = authorize_span
+        acquire = source.find(
+            "wyl_service_auth_authority_acquire_read", owner_start, owner_end
+        )
+        get_store = source.find(
+            "wyl_service_auth_read_lease_get_policy_store", owner_start, owner_end
+        )
+        target_check = source.find(
+            "management_target_is_active", owner_start, owner_end
+        )
+        release = source.find(
+            "wyl_service_auth_read_lease_release_terminal", owner_start, owner_end
+        )
+        ordered = (acquire, get_store, target_check, release)
+        if any(position < 0 for position in ordered) or list(ordered) != sorted(ordered):
+            errors.append(
+                "management authorization must acquire/get/check its pinned "
+                "READ store before any terminal release"
+            )
+    for callee, expected_owners in management_edges.items():
+        pattern = r"\b" + re.escape(callee) + r"\s*\("
+        calls = len(re.findall(pattern, source))
+        occurrences = len(re.findall(r"\b" + re.escape(callee) + r"\b", source))
+        expected_calls = 1 + sum(expected_owners.values())
+        if calls != expected_calls or occurrences != calls:
+            errors.append(
+                f"{callee} call-site closure mismatch: expected {expected_calls} "
+                f"definition/calls, found {calls} calls/{occurrences} references"
+            )
+        for owner, count in expected_owners.items():
+            try:
+                owner_start, owner_end = function_span(source, owner)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            actual = len(re.findall(pattern, source[owner_start:owner_end]))
+            if actual != count:
+                errors.append(
+                    f"{owner} must call {callee} exactly {count} time(s); "
+                    f"found {actual}"
+                )
+    status_span = management_spans.get(
+        "service_credential_operation_status_execute"
+    )
+    if status_span is not None:
+        owner_start, owner_end = status_span
+        authorize = source.find(
+            "service_principal_management_authorize", owner_start, owner_end
+        )
+        get_store = source.find(
+            "wyl_service_auth_read_lease_get_policy_store", owner_start, owner_end
+        )
+        release = source.find(
+            "service_management_read_release", owner_start, owner_end
+        )
+        ordered = (authorize, get_store, release)
+        if any(position < 0 for position in ordered) or list(ordered) != sorted(ordered):
+            errors.append(
+                "operation status must authorize, consume the transferred READ "
+                "store, then release it"
+            )
     registry_test_span: tuple[int, int] | None = None
     try:
         registry_test_span = function_span(
@@ -79,21 +212,56 @@ def check(path: Path) -> list[str]:
     except ValueError as exc:
         if "found 0" not in str(exc):
             errors.append(str(exc))
-    for symbol in authority_symbols:
+    if registry_test_span is not None:
+        test_start, test_end = registry_test_span
+        test_body = source[test_start:test_end]
+        registry_occurrences = len(
+            re.findall(r"\bwyl_service_auth_registry_lookup\b", test_body)
+        )
+        registry_calls = len(
+            re.findall(r"\bwyl_service_auth_registry_lookup\s*\(", test_body)
+        )
+        if registry_calls != 1 or registry_occurrences != registry_calls:
+            errors.append(
+                "registry test seam must own exactly one direct registry lookup"
+            )
+    for symbol in resolver_authority_symbols:
         positions = [match.start() for match in re.finditer(r"\b" + symbol + r"\b", source)]
-        production_positions = [pos for pos in positions if start <= pos < end]
+        resolver_positions = [pos for pos in positions if start <= pos < end]
+        resolver_calls = [
+            start + match.start()
+            for match in re.finditer(
+                r"\b" + symbol + r"\s*\(", source[start:end]
+            )
+        ]
         permitted_test_positions: list[int] = []
         if symbol == "wyl_service_auth_registry_lookup" and registry_test_span is not None:
             test_start, test_end = registry_test_span
             permitted_test_positions = [
                 pos for pos in positions if test_start <= pos < test_end
             ]
+        permitted_management_positions = [
+            pos
+            for pos in positions
+            if any(
+                owner_start <= pos < owner_end
+                and symbol in management_counts[name]
+                for name, (owner_start, owner_end) in management_spans.items()
+            )
+        ]
         if (
-            len(production_positions) != 1
+            len(resolver_positions) != 1
+            or len(resolver_calls) != 1
             or len(permitted_test_positions) > 1
-            or len(positions) != len(production_positions) + len(permitted_test_positions)
+            or len(positions)
+            != len(resolver_positions)
+            + len(permitted_test_positions)
+            + len(permitted_management_positions)
         ):
-            errors.append(f"{symbol} must occur exactly once inside resolve_bearer_session")
+            errors.append(
+                f"{symbol} must occur once in resolve_bearer_session and only in "
+                "reviewed management READ owners"
+            )
     body = source[start:end]
     if not re.search(r"registry_state\s*!=\s*WYL_SERVICE_AUTH_ACTIVE", body):
         errors.append("ACTIVE registry-state rejection is missing from resolve_bearer_session")
@@ -127,9 +295,12 @@ def check(path: Path) -> list[str]:
         errors.append("service authority checks/publication/release ordering is invalid")
     terminal_positions = [
         match.start()
-        for match in re.finditer(r"\bwyl_service_auth_read_lease_release_terminal\s*\(", source)
+        for match in re.finditer(
+            r"\bwyl_service_auth_read_lease_release_terminal\s*\(",
+            source[service_start:service_end],
+        )
     ]
-    if len(terminal_positions) != 1 or not (service_start <= terminal_positions[0] < service_end):
+    if len(terminal_positions) != 1:
         errors.append("terminal release must occur exactly once inside the service branch")
     if re.search(r"\bwyl_service_auth_read_lease_release\s*\(", source[service_start:service_end]):
         errors.append("resolver must use the exactly-once terminal release boundary")
@@ -157,7 +328,7 @@ def check(path: Path) -> list[str]:
         wrapper = source[wrapper_start:wrapper_end]
         if len(re.findall(r"\bresolve_bearer_session\s*\(", wrapper)) != 1:
             errors.append("test wrapper must forward exactly once to resolve_bearer_session")
-        if any(symbol in wrapper for symbol in authority_symbols):
+        if any(symbol in wrapper for symbol in resolver_authority_symbols):
             errors.append("test wrapper must not reproduce service resolution")
     except ValueError as exc:
         errors.append(str(exc))
