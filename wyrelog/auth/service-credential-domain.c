@@ -1583,6 +1583,8 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
   gboolean replay = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
+  if (rc == WYRELOG_E_OK && runtime->after_write_acquired != NULL)
+    runtime->after_write_acquired (runtime->data);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_authorize (&mutation, runtime->authorization,
         actor_subject_id);

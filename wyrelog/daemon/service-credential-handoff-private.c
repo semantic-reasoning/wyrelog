@@ -235,6 +235,10 @@ wyl_daemon_service_credential_handoff (const
 
   /* ISSUE never consumes rotate_runtime. */
   rotate_runtime.registry = ctx->registry;
+#ifdef WYL_TEST_DAEMON_HTTP
+  rotate_runtime.after_write_acquired = ctx->rotate_after_write_acquired;
+  rotate_runtime.data = ctx->rotate_after_write_acquired_data;
+#endif
 
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = ctx->session,
