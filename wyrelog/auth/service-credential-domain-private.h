@@ -22,6 +22,24 @@ typedef struct
 
 typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
 
+typedef wyrelog_error_t (*wyl_service_credential_mutation_authorize_fn)
+  (gpointer data, const gchar * actor_subject_id);
+
+/* Optional execution-boundary authorization, borrowed for one mutation call.
+ * authorize runs exactly once after the service WRITE lease is acquired and
+ * before fence lookup, CVK access, transaction start or credential RNG. It
+ * MUST be non-reentrant and MUST NOT call service mutation APIs on handle. */
+typedef struct
+{
+  wyl_service_credential_mutation_authorize_fn authorize;
+  gpointer data;
+} wyl_service_credential_mutation_authorization_t;
+
+typedef struct
+{
+  const wyl_service_credential_mutation_authorization_t *authorization;
+} wyl_service_principal_create_runtime_t;
+
 typedef struct
 {
   /* Borrowed for the complete call.  NULL keeps the legacy authority-only
@@ -33,6 +51,7 @@ typedef struct
   void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
   void (*before_write_release) (WylServiceAuthWriteLease * lease,
       gpointer data);
+  const wyl_service_credential_mutation_authorization_t *authorization;
   gpointer data;
 } wyl_service_principal_disable_runtime_t;
 
@@ -110,19 +129,6 @@ typedef struct
   gpointer data;
 } wyl_service_credential_verify_runtime_t;
 
-typedef wyrelog_error_t (*wyl_service_credential_mutation_authorize_fn)
-  (gpointer data, const gchar * actor_subject_id);
-
-/* Optional execution-boundary authorization, borrowed for one mutation call.
- * authorize runs exactly once after the service WRITE lease is acquired and
- * before fence lookup, CVK access, transaction start or credential RNG. It
- * MUST be non-reentrant and MUST NOT call service mutation APIs on handle. */
-typedef struct
-{
-  wyl_service_credential_mutation_authorize_fn authorize;
-  gpointer data;
-} wyl_service_credential_mutation_authorization_t;
-
 typedef struct
 {
   const wyl_service_credential_mutation_authorization_t *authorization;
@@ -151,6 +157,7 @@ typedef struct
   /* Borrowed for the complete call. */
   WylServiceAuthRegistry *registry;
   void (*after_write_acquired) (gpointer data);
+  const wyl_service_credential_mutation_authorization_t *authorization;
   gpointer data;
 } wyl_service_credential_revoke_runtime_t;
 
@@ -401,6 +408,12 @@ void wyl_service_principal_clear (wyl_service_principal_t * principal);
 wyrelog_error_t wyl_service_principal_create (WylHandle * handle,
     const gchar * subject_id, const gchar * display_name,
     const gchar * actor_subject_id, const gchar * request_id,
+    wyl_service_principal_t * out);
+wyrelog_error_t wyl_service_principal_create_with_runtime
+    (WylHandle * handle, const gchar * subject_id,
+    const gchar * display_name, const gchar * actor_subject_id,
+    const gchar * request_id,
+    const wyl_service_principal_create_runtime_t * runtime,
     wyl_service_principal_t * out);
 wyrelog_error_t wyl_service_principal_get (WylHandle * handle,
     const gchar * subject_id, wyl_service_principal_t * out);

@@ -1166,6 +1166,48 @@ test_mutation_authorization_denial_inside_write_lease (void)
     .authorize = probe_mutation_authorization,
     .data = &probe,
   };
+  wyl_service_principal_create_runtime_t create_runtime = {
+    .authorization = &authorization,
+  };
+  wyl_service_principal_t denied_principal = { 0 };
+  gint64 principal_count = scalar (db_of (handle),
+      "SELECT count(*) FROM service_principals;");
+  g_assert_cmpint (wyl_service_principal_create_with_runtime (handle,
+          "svc:authorize:denied", "denied", "admin", "authorize-create",
+          &create_runtime, &denied_principal), ==, WYRELOG_E_POLICY);
+  g_assert_null (denied_principal.subject_id);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (probe.actor_subject_id, ==, "admin");
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_principals;"), ==, principal_count);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='authorize-create';"), ==, 0);
+
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
+  wyl_service_principal_disable_runtime_t disable_runtime = {
+    .authorization = &authorization,
+  };
+  g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
+          "svc:authorize:worker", "admin", "authorize-disable",
+          &disable_runtime, &denied_principal), ==, WYRELOG_E_POLICY);
+  g_assert_null (denied_principal.subject_id);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (probe.actor_subject_id, ==, "admin");
+  wyl_service_principal_t active_principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_get (handle, "svc:authorize:worker",
+          &active_principal), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (active_principal.state, ==, "active");
+  wyl_service_principal_clear (&active_principal);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='authorize-disable';"), ==, 0);
+
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
   wyl_service_credential_issue_runtime_t issue_runtime = {
     .authorization = &authorization,
     .credential_runtime = &credential_runtime,
@@ -1188,6 +1230,21 @@ test_mutation_authorization_denial_inside_write_lease (void)
           "svc:authorize:worker", "tenant-a", "admin", "authorize-seed", 0,
           &seed), ==, WYRELOG_E_OK);
   before = mutation_effects (handle);
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
+  wyl_service_credential_revoke_runtime_t revoke_runtime = {
+    .authorization = &authorization,
+  };
+  wyl_service_credential_t denied_revoke = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke_with_runtime (handle,
+          seed.credential.credential_id, "admin", "authorize-revoke",
+          &revoke_runtime, &denied_revoke), ==, WYRELOG_E_POLICY);
+  g_assert_null (denied_revoke.credential_id);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (probe.actor_subject_id, ==, "admin");
+  assert_mutation_effects_equal (mutation_effects (handle), before);
+
   probe.calls = 0;
   probe.saw_write_lease = FALSE;
   memset (&collision, 0, sizeof collision);
