@@ -6856,17 +6856,18 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   (void) server;
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
+  g_autofree gchar *login_body = NULL;
   g_autofree gchar *body = NULL;
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   gint rc = send_raw_login (session, "POST", base_url,
-      "username=http-allow-user&skip_mfa=true", &status, &body);
+      "username=http-allow-user&skip_mfa=true", &status, &login_body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (rc != 0)
     return rc;
   if (status != 200)
     return 1921;
-  g_autofree gchar *session_token = extract_json_string (body,
+  g_autofree gchar *session_token = extract_json_string (login_body,
       "session_token");
   if (session_token == NULL)
     return 1922;
