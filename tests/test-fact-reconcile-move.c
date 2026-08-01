@@ -732,6 +732,65 @@ test_move_publish_rejects_root_identity_drift (void)
   move_fixture_teardown (&fx);
 }
 
+/* Overwrite the just-published final with foreign bytes when the "published"
+ * seam fires, keeping it a secure regular file so the reopen still succeeds
+ * but the digest no longer matches the recorded source. */
+static wyrelog_error_t
+corrupt_published_at_point (const gchar *point, gpointer user_data)
+{
+  MoveFixture *fx = user_data;
+  if (g_strcmp0 (point, "published") == 0) {
+    g_autoptr (GError) error = NULL;
+    g_assert_true (g_file_set_contents (fx->final_abs, "corrupted-artifact",
+            -1, NULL));
+    g_assert_true (wyl_test_secure_regular_file (fx->final_abs, &error));
+    g_assert_no_error (error);
+  }
+  return WYRELOG_E_OK;
+}
+
+/*
+ * Post-publish reopen-verify.  If the durable final's bytes change between the
+ * atomic publish and the CAS, the reopen digest no longer matches the recorded
+ * source: the move fails closed with E_POLICY and the journal stays MOVING.
+ * Restoring the correct bytes and replaying converges via the idempotent
+ * target branch.
+ */
+static void
+test_move_publish_reopen_verify_rejects_swap (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  ctx.checkpoint = corrupt_published_at_point;
+  ctx.checkpoint_data = &fx;
+
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  /* Restore the correct published bytes, then replay: the idempotent target
+   * branch recognises our own artifact and commits the CAS. */
+  g_autoptr (GError) error = NULL;
+  g_assert_true (g_file_set_contents (fx.final_abs, "duckdb-artifact-payload",
+          -1, NULL));
+  g_assert_true (wyl_test_secure_regular_file (fx.final_abs, &error));
+  g_assert_no_error (error);
+
+  WylFactReconcileMoveContext clean = move_context (&fx);
+  outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&clean, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome, ==, WYL_FACT_RECONCILE_MOVE_UNCHANGED_REPLAY);
+  assert_final_matches_source (&fx);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVED);
+
+  move_fixture_teardown (&fx);
+}
+
 /* A record that has not reached MOVING must not authorize the move phase. */
 static void
 test_move_publish_rejects_prepared_state (void)
@@ -871,6 +930,8 @@ main (int argc, char **argv)
       test_move_publish_rejects_missing_tenant);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-root-identity-drift",
       test_move_publish_rejects_root_identity_drift);
+  g_test_add_func ("/fact/reconcile-move/publish/reopen-verify-rejects-swap",
+      test_move_publish_reopen_verify_rejects_swap);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
       test_move_publish_rejects_prepared_state);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-invalid-arguments",
