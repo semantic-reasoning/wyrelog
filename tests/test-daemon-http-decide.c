@@ -4316,7 +4316,6 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
   return 0;
 }
 
-#ifdef WYL_HAS_AUDIT
 static wyrelog_error_t
 sign_test_access_token_with_jti (SoupServer *server, const gchar *jti,
     const gchar *session_id, const gchar *subject,
@@ -4364,7 +4363,29 @@ sign_test_access_token (SoupServer *server, const gchar *session_id,
       session_id, subject, principal_state, issuer, audience, issued_at,
       out_token);
 }
-#endif
+
+static gboolean
+seed_management_human_access_token (SoupServer *server,
+    const gchar *session_id, const gchar *subject, gchar **out_access_token)
+{
+  if (out_access_token == NULL)
+    return FALSE;
+  *out_access_token = NULL;
+  wyl_id_t jti_id = WYL_ID_NIL;
+  gchar jti[WYL_ID_STRING_BUF] = { 0 };
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  return key_id != NULL && wyl_id_new (&jti_id) == WYRELOG_E_OK
+      && wyl_id_format (&jti_id, jti, sizeof jti) == WYRELOG_E_OK
+      && wyl_daemon_http_seed_mfa_human_session_for_test (server, session_id,
+      subject, WYL_TENANT_DEFAULT)
+      && wyl_daemon_http_store_human_access_token_for_test (server, jti,
+      session_id, subject, WYL_TENANT_DEFAULT, key_id, now,
+      now + WYL_JWT_ACCESS_TTL_SECONDS)
+      && sign_test_access_token_with_jti (server, jti, session_id, subject,
+      "authenticated", "wyrelogd", "wyrelog-client", now,
+      out_access_token) == WYRELOG_E_OK;
+}
 
 static gint
 send_raw_logout_full (SoupSession *session, const gchar *method,
@@ -8525,6 +8546,11 @@ check_service_credential_operation_status_recover (SoupServer *server,
 }
 #endif /* WYL_HAS_FACT_STORE */
 
+static gint send_raw_service_principal_bearer (SoupSession * session,
+    const gchar * method, const gchar * base_url, const gchar * path,
+    const gchar * query, const gchar * access_token, const gchar * body,
+    guint * out_status, gchar ** out_body);
+
 static gint
 check_service_principal_management_contract (void)
 {
@@ -8558,6 +8584,7 @@ check_service_principal_management_contract (void)
   g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
   MainLoopReadyBarrier barrier = { 0 };
   gchar session_token[WYL_ID_STRING_BUF];
+  g_autofree gchar *access_token = NULL;
   wyl_id_t session_id_value = WYL_ID_NIL;
   guint status = 0;
   guint issue_stage_calls = 0;
@@ -8671,8 +8698,8 @@ check_service_principal_management_contract (void)
   wyl_daemon_http_set_publication_override_for_test (http.server,
       &sp_publication_vtable, &publication);
 
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server, session_token,
-          "human-principal-admin", "__wr_default")) {
+  if (!seed_management_human_access_token (http.server, session_token,
+          "human-principal-admin", &access_token)) {
     rc = 1979;
     goto cleanup;
   }
@@ -8714,12 +8741,10 @@ check_service_principal_management_contract (void)
     rc = 1989;
     goto cleanup;
   }
-  query =
-      g_strdup_printf
-      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
-      session_token);
-  if (send_raw_service_principal_full (session, "POST", base_url,
-          "/service-principals", query, create_body, &status, &body) != 0
+  query = g_strdup ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          "/service-principals", query, access_token, create_body, &status,
+          &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -8731,8 +8756,9 @@ check_service_principal_management_contract (void)
   }
 
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "GET", base_url,
-          "/service-principals", query, NULL, &status, &body) != 0
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
+          "/service-principals", query, access_token, NULL, &status,
+          &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"service_principals\":[") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -8742,9 +8768,10 @@ check_service_principal_management_contract (void)
   }
 
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "GET", base_url,
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
           "/service-principals/svc:tenant-a:worker/credentials",
-          query, NULL, &status, &body) != 0 || status != 200 || body == NULL
+          query, access_token, NULL, &status, &body) != 0 || status != 200
+      || body == NULL
       || strstr (body, "\"service_credentials\":[") == NULL
       || strstr (body, "credential_secret") != NULL) {
     rc = 1984;
@@ -8752,9 +8779,10 @@ check_service_principal_management_contract (void)
   }
 
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "GET", base_url,
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
           "/service-credentials/wlc_000000000000000000000000000",
-          query, NULL, &status, &body) != 0 || status != 404 || body == NULL
+          query, access_token, NULL, &status, &body) != 0 || status != 404
+      || body == NULL
       || strstr (body, "service_credential_not_found") == NULL) {
     rc = 1985;
     goto cleanup;
@@ -8765,19 +8793,18 @@ check_service_principal_management_contract (void)
     rc = 1986;
     goto cleanup;
   }
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
-          session_token, "human-principal-admin", "tenant-a")) {
+  if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
+          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1988;
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
-  tenant_query = g_strdup_printf
-      ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0", session_token);
+  tenant_query = g_strdup
+      ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-principals/svc:tenant-b:worker/credentials",
-          tenant_query,
+          tenant_query, access_token,
           "{\"version\":\"1\",\"tenant\":\"tenant-a\","
           "\"request_id\":\"000000000000000000000000000\"}",
           &status, &body) != 0 || status != 400 || body == NULL
@@ -8799,9 +8826,10 @@ check_service_principal_management_contract (void)
    * loopback in-process, and there is no seam to spoof a non-loopback peer, so
    * the production 403 loopback gate is covered at the module level rather
    * than here. */
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/credentials",
-          tenant_query, issue_body, &status, &body) != 0 || status != 200
+          tenant_query, access_token, issue_body, &status, &body) != 0
+      || status != 200
       || body == NULL || strstr (body, "credential_secret") != NULL
       || strstr (body, "\"state\":\"terminal\"") == NULL
       || strstr (body, "\"delivered\":true") == NULL
@@ -8903,9 +8931,10 @@ check_service_principal_management_contract (void)
    * conflict which came from the library request_id fence. */
   {
     g_autofree gchar *replay_id = NULL;
-    if (send_raw_service_principal_full (session, "POST", base_url,
+    if (send_raw_service_principal_bearer (session, "POST", base_url,
             "/service-principals/svc:tenant-a:worker/credentials",
-            tenant_query, issue_body, &status, &body) != 0 || status != 200
+            tenant_query, access_token, issue_body, &status, &body) != 0
+        || status != 200
         || body == NULL || strstr (body, "credential_secret") != NULL
         || strstr (body, "\"state\":\"terminal\"") == NULL
         || strstr (body, "\"delivered\":true") == NULL
@@ -8928,14 +8957,12 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
-          session_token, "human-principal-admin", "__wr_default")) {
+  if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
+          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1989;
     goto cleanup;
   }
-  query = g_strdup_printf
-      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
-      session_token);
+  query = g_strdup ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
           "human-principal-admin", "http-credential-read",
           CONTRACT_FUTURE_EXPIRES_AT_US,
@@ -8954,17 +8981,16 @@ check_service_principal_management_contract (void)
     rc = 1997;
     goto cleanup;
   }
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
-          session_token, "human-principal-admin", "tenant-a")) {
+  if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
+          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     rc = 1998;
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
-  query = g_strdup_printf
-      ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0", session_token);
+  query = g_strdup
+      ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
       rotate_seed.credential.credential_id);
   g_clear_pointer (&body, g_free);
@@ -8972,8 +8998,8 @@ check_service_principal_management_contract (void)
   memset (&publication, 0, sizeof publication);
   /* Rotate delivers the successor secret via the escrow file too; assert the
    * non-secret receipt naming a fresh successor credential. */
-  if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
-          query,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          rotate_path, query, access_token,
           "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
           "\"destination\":\"rotate.json\","
           "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
@@ -9021,8 +9047,8 @@ check_service_principal_management_contract (void)
    * same non-secret successor receipt (idempotency), not a 409 conflict. */
   {
     g_autofree gchar *replay_rotate_id = NULL;
-    if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
-            query,
+    if (send_raw_service_principal_bearer (session, "POST", base_url,
+            rotate_path, query, access_token,
             "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
             "\"destination\":\"rotate.json\","
             "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
@@ -9057,19 +9083,17 @@ check_service_principal_management_contract (void)
   wyl_service_credential_issue_result_clear (&rotate_seed);
   cross_tenant_rotate_path = g_strdup_printf
       ("/service-credentials/%s/rotate", issued.credential.credential_id);
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
-          session_token, "human-principal-admin", "__wr_default")) {
+  if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
+          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 2001;
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
-  query = g_strdup_printf
-      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
-      session_token);
+  query = g_strdup ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
-          cross_tenant_rotate_path, query,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          cross_tenant_rotate_path, query, access_token,
           "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\","
           "\"destination\":\"rotate.json\","
           "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
@@ -9090,23 +9114,24 @@ check_service_principal_management_contract (void)
   credential_path = g_strdup_printf
       ("/service-credentials/%s", issued.credential.credential_id);
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "GET", base_url,
-          credential_path, query, NULL, &status, &body) != 0 || status != 404
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
+          credential_path, query, access_token, NULL, &status, &body) != 0
+      || status != 404
       || body == NULL || strstr (body, "service_credential_not_found") == NULL
       || strstr (body, "credential_secret") != NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1988;
     goto cleanup;
   }
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
-          session_token, "human-principal-admin", "tenant-a")) {
+  if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
+          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1993;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "DELETE", base_url,
-          credential_path, tenant_query,
+  if (send_raw_service_principal_bearer (session, "DELETE", base_url,
+          credential_path, tenant_query, access_token,
           "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
           &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"state\":\"revoked\"") == NULL
@@ -9116,8 +9141,8 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "DELETE", base_url,
-          credential_path, tenant_query,
+  if (send_raw_service_principal_bearer (session, "DELETE", base_url,
+          credential_path, tenant_query, access_token,
           "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
           &status, &body) != 0 || status != 409 || body == NULL
       || strstr (body, "service_credential_conflict") == NULL
@@ -9128,8 +9153,8 @@ check_service_principal_management_contract (void)
   }
   wyl_service_credential_issue_result_clear (&issued);
 
-  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
-          session_token, "human-principal-admin", "__wr_default")) {
+  if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
+          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1996;
     goto cleanup;
   }
@@ -9169,9 +9194,10 @@ check_service_principal_management_contract (void)
   }
 #else
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
-          NULL, &status, &body) != 0 || status != 200 || body == NULL
+          access_token, NULL, &status, &body) != 0 || status != 200
+      || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
       || strstr (body, "\"state\":\"disabled\"") == NULL
@@ -9183,8 +9209,9 @@ check_service_principal_management_contract (void)
 #endif
 
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "GET", base_url,
-          "/service-principals", query, NULL, &status, &body) != 0
+  if (send_raw_service_principal_bearer (session, "GET", base_url,
+          "/service-principals", query, access_token, NULL, &status,
+          &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"state\":\"disabled\"") == NULL
       || strstr (body, "\"disabled_by\":\"human-principal-admin\"")
@@ -9345,6 +9372,8 @@ typedef struct
   SoupSession *session;
   gchar *base_url;
   gchar *query;
+  gchar *tenant_query;
+  gchar *access_token;
   gchar session_token[WYL_ID_STRING_BUF];
 } ServiceDenialEnv;
 
@@ -9422,8 +9451,8 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   wyl_daemon_http_set_publication_override_for_test (env->http.server,
       &sp_publication_vtable, &env->publication);
 
-  if (!wyl_daemon_http_seed_human_session_for_test (env->http.server,
-          env->session_token, "human-principal-admin", "tenant-a"))
+  if (!seed_management_human_access_token (env->http.server,
+          env->session_token, "human-principal-admin", &env->access_token))
     return 2110;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
   gboolean tenant_created = FALSE;
@@ -9462,9 +9491,10 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
     return 2116;
   if (wyl_handle_reload_engine_pair (env->handle) != WYRELOG_E_OK)
     return 2117;
-  env->query = g_strdup_printf ("session_token=%s&tenant=tenant-a&"
-      "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
-      env->session_token);
+  env->query = g_strdup
+      ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+  env->tenant_query = g_strdup ("tenant=tenant-a&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0");
   return 0;
 }
 
@@ -9488,6 +9518,8 @@ service_denial_env_clear (ServiceDenialEnv *env)
   g_free (env->publication.staged_secret);
   g_free (env->base_url);
   g_free (env->query);
+  g_free (env->tenant_query);
+  g_free (env->access_token);
   if (env->handoff_dir != NULL) {
     sp_remove_tree (env->operation_root);
     sp_remove_tree (env->publication_root);
@@ -9681,23 +9713,25 @@ check_service_management_inactive_session_denied (void)
   /* Force the resolvable human session into a non-ACTIVE in-memory state so
    * the only remaining denial is the is_active_human gate. */
   if (!wyl_daemon_http_seed_human_session_with_state_for_test (env.http.server,
-          env.session_token, "human-principal-admin", "tenant-a",
+          env.session_token, "human-principal-admin", WYL_TENANT_DEFAULT,
           WYL_SESSION_STATE_CLOSED)) {
     rc = 2300;
     goto out;
   }
-  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
-          "/service-principals", env.query, NULL, &status, &body) != 0
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, env.access_token, NULL, &status,
+          &body) != 0
       || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL) {
     rc = 2301;
     goto out;
   }
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
-          "/service-credentials/wlc_000000000000000000000000000", env.query,
-          NULL, &status, &body) != 0 || status != 403 || body == NULL
-      || strstr (body, "service_credential_denied") == NULL) {
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-credentials/wlc_000000000000000000000000000",
+          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      || status != 403
+      || body == NULL || strstr (body, "service_credential_denied") == NULL) {
     rc = 2302;
     goto out;
   }
@@ -9738,8 +9772,9 @@ check_service_management_permission_mapping (void)
     rc = 2400;
     goto out;
   }
-  if (send_raw_service_principal_full (env_a.session, "POST", env_a.base_url,
+  if (send_raw_service_principal_bearer (env_a.session, "POST", env_a.base_url,
           "/service-principals", env_a.query,
+          env_a.access_token,
           "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
           &status, &body) != 0 || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL) {
@@ -9749,10 +9784,11 @@ check_service_management_permission_mapping (void)
   g_clear_pointer (&body, g_free);
   /* Control: the credential action is authorized (404 not-found, never a
    * 403 denial), proving the armed principal permission is not consulted. */
-  if (send_raw_service_principal_full (env_a.session, "GET", env_a.base_url,
-          "/service-credentials/wlc_000000000000000000000000000", env_a.query,
-          NULL, &status, &body) != 0 || status == 403 || body == NULL
-      || strstr (body, "service_credential_denied") != NULL) {
+  if (send_raw_service_principal_bearer (env_a.session, "GET", env_a.base_url,
+          "/service-credentials/wlc_000000000000000000000000000",
+          env_a.tenant_query, env_a.access_token, NULL, &status, &body) != 0
+      || status == 403
+      || body == NULL || strstr (body, "service_credential_denied") != NULL) {
     rc = 2402;
     goto out;
   }
@@ -9778,9 +9814,9 @@ check_service_management_permission_mapping (void)
     goto out;
   }
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (env_b.session, "POST", env_b.base_url,
+  if (send_raw_service_principal_bearer (env_b.session, "POST", env_b.base_url,
           "/service-credentials/wlc_000000000000000000000000000/rotate",
-          env_b.query,
+          env_b.tenant_query, env_b.access_token,
           "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
           "\"destination\":\"rotate.json\",\"expires_at_us\":\""
           CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
@@ -9791,8 +9827,9 @@ check_service_management_permission_mapping (void)
   }
   g_clear_pointer (&body, g_free);
   /* Control: the principal action is authorized (200 list, never a 403). */
-  if (send_raw_service_principal_full (env_b.session, "GET", env_b.base_url,
-          "/service-principals", env_b.query, NULL, &status, &body) != 0
+  if (send_raw_service_principal_bearer (env_b.session, "GET", env_b.base_url,
+          "/service-principals", env_b.query, env_b.access_token, NULL,
+          &status, &body) != 0
       || status == 403 || body == NULL
       || strstr (body, "service_principal_denied") != NULL) {
     rc = 2407;
@@ -9869,8 +9906,9 @@ check_service_management_populated_secret_leak (void)
   /* Single-credential read: populated 200 that never carries the secret. */
   credential_path = g_strdup_printf ("/service-credentials/%s",
       issued.credential.credential_id);
-  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
-          credential_path, env.query, NULL, &status, &body) != 0
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          credential_path, env.tenant_query, env.access_token, NULL, &status,
+          &body) != 0
       || status != 200 || body == NULL
       || strstr (body, issued.credential.credential_id) == NULL
       || strstr (body, plaintext) != NULL) {
@@ -9880,9 +9918,11 @@ check_service_management_populated_secret_leak (void)
   g_clear_pointer (&body, g_free);
   /* Per-principal credentials list: a non-empty array naming the credential,
    * still with no secret anywhere in the body. */
-  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
-          "/service-principals/svc:tenant-a:worker/credentials", env.query,
-          NULL, &status, &body) != 0 || status != 200 || body == NULL
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals/svc:tenant-a:worker/credentials",
+          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      || status != 200
+      || body == NULL
       || strstr (body, "\"service_credentials\":[") == NULL
       || strstr (body, issued.credential.credential_id) == NULL
       || strstr (body, plaintext) != NULL) {
