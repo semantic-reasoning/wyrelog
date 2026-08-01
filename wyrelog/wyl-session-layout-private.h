@@ -15,6 +15,9 @@ struct _WylSession
   gchar *username;
   gchar *tenant;
   wyl_session_state_t state;
+  /* Monotonic live-session proof provenance.  This is deliberately private:
+   * neither public session ABI nor JWT claims may synthesize it. */
+  volatile gint mfa_assured;
   wyl_session_auth_method_t auth_method;
   gchar *service_jti;
   gchar *service_subject_id;

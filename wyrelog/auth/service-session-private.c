@@ -96,6 +96,14 @@ wyl_session_is_active_human_private (const WylSession *session)
       && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
 }
 
+gboolean
+wyl_session_is_mfa_assured_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+      && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
+      && g_atomic_int_get ((gint *) & session->mfa_assured) != 0;
+}
+
 wyrelog_error_t
 wyl_session_copy_persistent_id_private (const WylSession *session,
     wyl_id_t *out_id)

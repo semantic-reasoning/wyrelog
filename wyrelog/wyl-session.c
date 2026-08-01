@@ -738,8 +738,11 @@ mark_session_mfa_verified (WylHandle *handle, WylSession *session)
   if (rc != WYRELOG_E_OK || state != WYL_PRINCIPAL_STATE_AUTHENTICATED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_principal_state (handle, session->username,
+  rc = transition_principal_state (handle, session->username,
       WYL_PRINCIPAL_STATE_MFA_REQUIRED, state);
+  if (rc == WYRELOG_E_OK)
+    g_atomic_int_set ((gint *) & session->mfa_assured, 1);
+  return rc;
 }
 
 wyrelog_error_t
