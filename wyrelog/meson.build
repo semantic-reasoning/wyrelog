@@ -49,6 +49,7 @@ wyrelog_sources = files(
   'fact/graph-locator-private.c',
   'fact/graph-artifact-namespace-private.c',
   'fact/reconcile-private.c',
+  'fact/reconcile-move-private.c',
   'fact/root-writer-lease-private.c',
   'fact/schema.c',
   'policy/service-permission-maintenance-private.c',
