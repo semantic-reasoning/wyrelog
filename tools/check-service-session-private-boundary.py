@@ -114,6 +114,7 @@ MANIFEST["wyl_session_get_service_expires_at_seconds_private"][
     "tests/test-service-exchange-private.c"] = 1
 
 CONDITIONAL_COMPILED_OWNERS = frozenset({
+    FUTURE_OWNER,
     "tests/test-service-exchange-private.c",
 })
 

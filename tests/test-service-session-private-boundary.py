@@ -74,7 +74,10 @@ def main() -> int:
     guard_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard_module)
 
-    conditional_owner = "tests/test-service-exchange-private.c"
+    conditional_owners = (
+        "wyrelog/auth/service-exchange-private.c",
+        "tests/test-service-exchange-private.c",
+    )
     unconditional_owner = "wyrelog/auth/service-session-private.c"
     synthetic_root = Path("/synthetic-service-session-boundary").resolve()
     required_c_owners = {
@@ -83,10 +86,12 @@ def main() -> int:
     }
     compiled = {
         str((synthetic_root / path).resolve()): []
-        for path in required_c_owners if path != conditional_owner
+        for path in required_c_owners if path not in conditional_owners
     }
+    assert guard_module.CONDITIONAL_COMPILED_OWNERS == frozenset(
+        conditional_owners)
     allowed_conditional = guard_module.allowed_uncompiled_owners(
-        [conditional_owner])
+        list(conditional_owners))
     guard_module.validate_compiled_owners(
         synthetic_root, guard_module.MANIFEST, compiled, allowed_conditional)
 
@@ -97,10 +102,14 @@ def main() -> int:
         except guard_module.BoundaryError as error:
             assert fragment in str(error)
 
-    expect_boundary_error(
-        lambda: guard_module.validate_compiled_owners(
-            synthetic_root, guard_module.MANIFEST, compiled, frozenset()),
-        conditional_owner)
+    for missing_owner in conditional_owners:
+        allowance_without_owner = frozenset(
+            owner for owner in conditional_owners if owner != missing_owner)
+        expect_boundary_error(
+            lambda allowed=allowance_without_owner:
+                guard_module.validate_compiled_owners(
+                    synthetic_root, guard_module.MANIFEST, compiled, allowed),
+            missing_owner)
     compiled_without_unconditional = dict(compiled)
     compiled_without_unconditional.pop(
         str((synthetic_root / unconditional_owner).resolve()))
@@ -109,14 +118,16 @@ def main() -> int:
             synthetic_root, guard_module.MANIFEST,
             compiled_without_unconditional, allowed_conditional),
         unconditional_owner)
-    compiled_with_conditional = dict(compiled)
-    compiled_with_conditional[
-        str((synthetic_root / conditional_owner).resolve())] = []
-    expect_boundary_error(
-        lambda: guard_module.validate_compiled_owners(
-            synthetic_root, guard_module.MANIFEST,
-            compiled_with_conditional, allowed_conditional),
-        "present in compile database")
+    for stale_owner in conditional_owners:
+        compiled_with_conditional = dict(compiled)
+        compiled_with_conditional[
+            str((synthetic_root / stale_owner).resolve())] = []
+        expect_boundary_error(
+            lambda database=compiled_with_conditional:
+                guard_module.validate_compiled_owners(
+                    synthetic_root, guard_module.MANIFEST,
+                    database, allowed_conditional),
+            stale_owner)
     expect_boundary_error(
         lambda: guard_module.allowed_uncompiled_owners(
             [unconditional_owner]),
@@ -125,21 +136,24 @@ def main() -> int:
         lambda: guard_module.allowed_uncompiled_owners(
             ["tests/not-a-manifest-owner.c"]),
         "not a current MANIFEST")
-    for noncanonical in (
-            "./tests/test-service-exchange-private.c",
-            "tests//test-service-exchange-private.c",
-            "tests/../tests/test-service-exchange-private.c",
-            "tests\\test-service-exchange-private.c",
-            "/tests/test-service-exchange-private.c",
-            "tests/test-service-exchange-private.cc"):
+    for conditional_owner in conditional_owners:
+        parent, name = conditional_owner.rsplit("/", 1)
+        stem = name.removesuffix(".c")
+        for noncanonical in (
+                f"./{conditional_owner}",
+                f"{parent}//{name}",
+                f"{parent}/../{parent}/{name}",
+                conditional_owner.replace("/", "\\"),
+                f"/{conditional_owner}",
+                f"{parent}/{stem}.cc"):
+            expect_boundary_error(
+                lambda value=noncanonical:
+                    guard_module.allowed_uncompiled_owners([value]),
+                "non-canonical")
         expect_boundary_error(
-            lambda value=noncanonical:
-                guard_module.allowed_uncompiled_owners([value]),
-            "non-canonical")
-    expect_boundary_error(
-        lambda: guard_module.allowed_uncompiled_owners(
-            [conditional_owner, conditional_owner]),
-        "duplicate")
+            lambda owner=conditional_owner:
+                guard_module.allowed_uncompiled_owners([owner, owner]),
+            "duplicate")
     expect_boundary_error(
         lambda: guard_module.validate_allowance_scope(
             "{}", allowed_conditional),
@@ -147,7 +161,7 @@ def main() -> int:
     fixture_allowance_result = subprocess.run([
         sys.executable, str(guard), str(synthetic_root),
         "--fixture-symbol", PROTECTED[0], "--fixture-manifest", "{}",
-        "--allow-uncompiled-owner", conditional_owner, "--", *compiler,
+        "--allow-uncompiled-owner", conditional_owners[0], "--", *compiler,
     ], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert fixture_allowance_result.returncode == 1
     assert "cannot be used with --fixture-manifest" \
