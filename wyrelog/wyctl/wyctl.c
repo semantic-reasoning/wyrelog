@@ -1043,7 +1043,7 @@ static int
 run_auth_service_token (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlServiceTokenOptions opts = { 0 };
+  g_auto (WyctlServiceTokenOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"credential-file", 0, 0, G_OPTION_ARG_STRING, &opts.credential_file,
         "Protected service credential file", "PATH"},
@@ -1237,7 +1237,7 @@ static int
 run_policy_decision_command (const WyctlOptions *global_opts,
     const gchar *command, gint argc, gchar **argv)
 {
-  WyctlPolicyOptions opts = { 0 };
+  g_auto (WyctlPolicyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"user", 0, 0, G_OPTION_ARG_STRING, &opts.user, "Decision user", "USER"},
     {"permission", 0, 0, G_OPTION_ARG_STRING, &opts.permission,
@@ -1295,7 +1295,7 @@ static int
 run_policy_permission_mutation_command (const WyctlOptions *global_opts,
     const gchar *command, gint argc, gchar **argv)
 {
-  WyctlPolicyPermissionOptions opts = { 0 };
+  g_auto (WyctlPolicyPermissionOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Mutation subject", "SUBJECT_ID"},
@@ -1433,7 +1433,7 @@ static int
 run_policy_role_mutation_command (const WyctlOptions *global_opts,
     const gchar *command, gint argc, gchar **argv)
 {
-  WyctlPolicyRoleOptions opts = { 0 };
+  g_auto (WyctlPolicyRoleOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Mutation subject", "SUBJECT_ID"},
@@ -1680,7 +1680,7 @@ fact_remote_exit (WylClient *client, const gchar *command,
 static int
 run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlGraphOptions opts = { 0 };
+  g_auto (WyctlGraphOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
@@ -1807,7 +1807,7 @@ static int
 run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
-  WyctlFactSchemaOptions opts = { 0 };
+  g_auto (WyctlFactSchemaOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
@@ -1923,7 +1923,7 @@ convert_csv_to_tsv (const gchar *input, gsize size)
 static int
 run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlFactPutOptions opts = { 0 };
+  g_auto (WyctlFactPutOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
@@ -2093,7 +2093,7 @@ parse_query_limit (const gchar *raw, guint *out_limit)
 static int
 run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlDatalogQueryOptions opts = { 0 };
+  g_auto (WyctlDatalogQueryOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
@@ -2190,7 +2190,7 @@ run_datalog (const WyctlOptions *global_opts, gint argc, gchar **argv)
 static int
 run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlAuditOptions opts = { 0 };
+  g_auto (WyctlAuditOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"filter", 0, 0, G_OPTION_ARG_STRING, &opts.filter,
         "Audit event filter", "FILTER"},
@@ -2719,7 +2719,7 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
 static int
 run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlMfaOptions opts = { 0 };
+  g_auto (WyctlMfaOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Principal subject id to enroll", "SUBJECT"},
@@ -2800,7 +2800,7 @@ run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
 static int
 run_mfa_reset (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  WyctlMfaOptions opts = { 0 };
+  g_auto (WyctlMfaOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Principal subject id to reset", "SUBJECT"},
@@ -3092,7 +3092,7 @@ run_key_status_recovery (const WyctlKeyOptions *opts)
 static int
 run_key_status (gint argc, gchar **argv)
 {
-  WyctlKeyOptions opts = { 0 };
+  g_auto (WyctlKeyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
         "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
@@ -3150,7 +3150,7 @@ run_key_status (gint argc, gchar **argv)
 static int
 run_key_rotate (gint argc, gchar **argv)
 {
-  WyctlKeyOptions opts = { 0 };
+  g_auto (WyctlKeyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
         "Encrypted policy store path", "PATH"},
@@ -3231,7 +3231,7 @@ run_key_rotate (gint argc, gchar **argv)
 static int
 run_key_recover (gint argc, gchar **argv)
 {
-  WyctlKeyOptions opts = { 0 };
+  g_auto (WyctlKeyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
         "Encrypted policy store path", "PATH"},
@@ -4255,7 +4255,7 @@ service_permission_closure_print_analysis (const
 static int
 run_service_permission_closure_inspect (gint argc, gchar **argv)
 {
-  WyctlServicePermissionClosureOptions opts = { 0 };
+  g_auto (WyctlServicePermissionClosureOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
         "Encrypted policy store", "PATH"},
@@ -4317,7 +4317,7 @@ static int
 run_service_permission_closure_manifest_command (gboolean apply, gint argc,
     gchar **argv)
 {
-  WyctlServicePermissionClosureOptions opts = { 0 };
+  g_auto (WyctlServicePermissionClosureOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
         "Encrypted policy store", "PATH"},
