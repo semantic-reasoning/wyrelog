@@ -10,14 +10,11 @@
  * write its bearer access token to a temp file, then exec the wyctl binary
  * against the live daemon and assert the CLI exit code.
  *
- * Why this seeds via the daemon-http test seams instead of
- * wyl_client_login_skip_mfa: a service subject must be svc:<tenant>:... where
- * <tenant> is an alphanumeric-bounded tenant segment, so the default tenant
- * (__wr_default, which login binds to) is not a legal service-subject tenant.
- * The operator's bearer session must therefore be bound to a real tenant
- * (tenant-a here), which login_skip_mfa cannot express. seed_human_session +
- * issue_human_tokens give a bearer token bound to that tenant -- the same
- * seeding shape check_service_principal_management_contract uses.
+ * The management envelope deliberately separates authentication from the
+ * selected credential target: the bearer is an MFA-assured human in the sole
+ * resolver tenant (__wr_default), while --tenant selects tenant-a only as the
+ * managed target. The daemon test seams provide that exact live session and
+ * signed bearer shape without weakening MFA.
  *
  * Scope note: this test deliberately does NOT reach the delivered=yes escrow
  * receipt. That outcome needs an encrypted keyprovider store to seal a service
@@ -63,8 +60,7 @@
 #error "WYL_TEST_WYCTL_PATH must be defined by the build."
 #endif
 
-/* A real, alphanumeric-bounded tenant so svc:<tenant>:worker is a legal
- * service subject; the default tenant would be rejected by the validator. */
+/* Non-default managed target kept independent from the management bearer. */
 #define WYL_TEST_SERVICE_TENANT "tenant-a"
 
 /* A future absolute expiry in epoch microseconds (2030-01-01) so the daemon's
@@ -136,8 +132,8 @@ write_token_file (const gchar *token)
   return token_path;
 }
 
-/* Seed one bearer operator bound to WYL_TEST_SERVICE_TENANT and return the
- * path to a temp file holding its access token (owned by the caller). */
+/* Seed one default-tenant, MFA-assured management bearer and return the path to
+ * a temp file holding its access token (owned by the caller). */
 static gchar *
 seed_bearer_operator (SoupServer *server, WylHandle *handle,
     const gchar *subject, gboolean grant_manage)
@@ -148,8 +144,8 @@ seed_bearer_operator (SoupServer *server, WylHandle *handle,
   g_assert_cmpint (wyl_id_format (&session_id, session_text,
           sizeof session_text), ==, WYRELOG_E_OK);
 
-  g_assert_true (wyl_daemon_http_seed_human_session_for_test (server,
-          session_text, subject, WYL_TEST_SERVICE_TENANT));
+  g_assert_true (wyl_daemon_http_seed_mfa_human_session_for_test (server,
+          session_text, subject, WYL_TENANT_DEFAULT));
 
   g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
       session_text);
@@ -165,7 +161,7 @@ seed_bearer_operator (SoupServer *server, WylHandle *handle,
   g_autofree gchar *access = NULL;
   g_autofree gchar *refresh = NULL;
   g_assert_cmpint (wyl_daemon_http_issue_human_tokens_for_test (server, session,
-          session_text, subject, WYL_TEST_SERVICE_TENANT, &access, &refresh),
+          session_text, subject, WYL_TENANT_DEFAULT, &access, &refresh),
       ==, WYRELOG_E_OK);
   g_assert_nonnull (access);
 
@@ -240,6 +236,7 @@ main (void)
       &runtime, &error);
   if (http.server == NULL)
     return 4;
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
   GThread *thread = g_thread_new ("wyctl-svc-cred-daemon",
       test_http_server_thread, &http);
 
@@ -254,6 +251,10 @@ main (void)
   if (port <= 0)
     return 6;
   g_autofree gchar *base_url = g_strdup_printf ("http://127.0.0.1:%d", port);
+  gchar recover_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  if (wyl_request_id_new (recover_request_id, sizeof recover_request_id)
+      != WYRELOG_E_OK)
+    return 7;
 
   /* (a) Authorized operator: authenticated + active session + the manage
    * grant. (b) Control operator: authenticated + active session but no
