@@ -2523,6 +2523,7 @@ test_revoke_registry_compound (void)
   g_assert_cmpint (scalar (db_of (fixture.handle),
           "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
       ==, 1);
+  wyl_service_credential_clear (&out);
   wyl_service_credential_issue_result_clear (&issued);
 }
 
