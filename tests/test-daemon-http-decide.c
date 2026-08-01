@@ -7747,6 +7747,7 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   if (response_authority.created != 1 || response_authority.complete != 1
       || response_authority.attached != 1
       || response_authority.finished != 1 || response_authority.aborted != 0
+      || response_authority.cleanup_failed != 0
       || response_authority.destroyed != 1
       || response_authority.duplicate_outcomes != 0)
     return 19591;
@@ -7961,8 +7962,8 @@ check_service_publication_fault_matrix (void)
         FALSE, FALSE, 1, FALSE, TRUE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE, 1, 1,
         FALSE, FALSE, 1, FALSE, FALSE, TRUE},
-    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT, 1, 1, TRUE,
-        TRUE, 1, FALSE, FALSE, FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF, 1, 1, FALSE,
+        FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE, 1, 1, TRUE, FALSE,
         1, FALSE, FALSE, FALSE},
   };
@@ -8000,6 +8001,23 @@ check_service_publication_fault_matrix (void)
     if (server == NULL) {
       wyl_service_credential_issue_result_clear (&issued);
       return 2120 + (gint) i;
+    }
+
+    g_autofree gchar *unrelated_body = NULL;
+    g_autofree gchar *unrelated_token = NULL;
+    if (cases[i].fault ==
+        WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF) {
+      if (wyl_daemon_http_publish_service_token_for_test (server,
+              issued.credential.credential_id, credential_secret,
+              credential_secret_len, &unrelated_body) != WYRELOG_E_OK
+          || unrelated_body == NULL
+          || (unrelated_token = extract_json_string (unrelated_body,
+                  "access_token")) == NULL) {
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2130 + (gint) i;
+      }
     }
 
     wyl_daemon_http_set_service_publication_fault_for_test (server,
@@ -8114,6 +8132,184 @@ check_service_publication_fault_matrix (void)
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
       return 2220 + (gint) i;
+    }
+    if (unrelated_token != NULL) {
+      /* The response-loss path has already retired this exact authority.
+       * Replaying that same authority cleanup is deliberately idempotent. */
+      if (wyl_daemon_http_retire_service_auth_exact_for_test (server,
+              claims.session_id, claims.jti, claims.credential_id,
+              claims.credential_generation, claims.subject, claims.tenant,
+              claims.expires_at) != WYRELOG_E_OK) {
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2225 + (gint) i;
+      }
+      g_clear_pointer (&resolved_session, g_free);
+      g_clear_pointer (&resolved_actor, g_free);
+      g_clear_pointer (&resolved_tenant, g_free);
+      if (wyl_daemon_http_resolve_bearer_for_test (server, unrelated_token,
+              &resolved_session, &resolved_actor,
+              &resolved_tenant) != WYRELOG_E_OK) {
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2230 + (gint) i;
+      }
+
+      guint8 unrelated_secret[32];
+      g_autoptr (GBytes) unrelated_payload = NULL;
+      wyl_jwt_access_claims_t unrelated_claims = { 0 };
+      if (wyl_daemon_http_copy_access_token_secret (server, unrelated_secret,
+              sizeof unrelated_secret) != WYRELOG_E_OK
+          || wyl_jwt_verify_hs256_access_token (unrelated_token,
+              unrelated_secret, sizeof unrelated_secret, key_id, "wyrelogd",
+              "wyrelog-client", g_get_real_time () / G_USEC_PER_SEC,
+              &unrelated_payload) != WYRELOG_E_OK
+          || wyl_jwt_parse_access_claims_json (unrelated_payload,
+              &unrelated_claims) != WYRELOG_E_OK) {
+        sodium_memzero (unrelated_secret, sizeof unrelated_secret);
+        wyl_jwt_access_claims_clear (&unrelated_claims);
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2235 + (gint) i;
+      }
+      sodium_memzero (unrelated_secret, sizeof unrelated_secret);
+
+      g_autofree gchar *revoked_body = NULL;
+      g_autofree gchar *revoked_token = NULL;
+      g_autoptr (GBytes) revoked_payload = NULL;
+      wyl_jwt_access_claims_t revoked_claims = { 0 };
+      gboolean revoked_changed = FALSE;
+      if (wyl_daemon_http_publish_service_token_for_test (server,
+              issued.credential.credential_id, credential_secret,
+              credential_secret_len, &revoked_body) != WYRELOG_E_OK
+          || revoked_body == NULL
+          || (revoked_token = extract_json_string (revoked_body,
+                  "access_token")) == NULL
+          || wyl_daemon_http_copy_access_token_secret (server,
+              unrelated_secret, sizeof unrelated_secret) != WYRELOG_E_OK
+          || wyl_jwt_verify_hs256_access_token (revoked_token,
+              unrelated_secret, sizeof unrelated_secret, key_id, "wyrelogd",
+              "wyrelog-client", g_get_real_time () / G_USEC_PER_SEC,
+              &revoked_payload) != WYRELOG_E_OK
+          || wyl_jwt_parse_access_claims_json (revoked_payload,
+              &revoked_claims) != WYRELOG_E_OK
+          || wyl_daemon_http_service_registry_transition_for_test (server,
+              revoked_claims.session_id, revoked_claims.jti,
+              revoked_claims.credential_id,
+              revoked_claims.credential_generation, revoked_claims.subject,
+              revoked_claims.tenant, WYL_DAEMON_SERVICE_REGISTRY_REVOKE,
+              &revoked_changed) != WYRELOG_E_OK
+          || !revoked_changed
+          || wyl_daemon_http_retire_service_auth_exact_for_test (server,
+              revoked_claims.session_id, revoked_claims.jti,
+              revoked_claims.credential_id,
+              revoked_claims.credential_generation, revoked_claims.subject,
+              revoked_claims.tenant,
+              revoked_claims.expires_at) != WYRELOG_E_OK) {
+        sodium_memzero (unrelated_secret, sizeof unrelated_secret);
+        wyl_jwt_access_claims_clear (&revoked_claims);
+        wyl_jwt_access_claims_clear (&unrelated_claims);
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2237 + (gint) i;
+      }
+      sodium_memzero (unrelated_secret, sizeof unrelated_secret);
+      gboolean revoked_found = TRUE;
+      gint revoked_state = WYL_SERVICE_AUTH_PENDING;
+      guint revoked_sessions = 0;
+      guint revoked_access = 0;
+      wyl_daemon_http_service_publication_counts_for_test (server,
+          &revoked_sessions, &revoked_access);
+      if (wyl_daemon_http_lookup_service_registry_for_test (server,
+              revoked_claims.session_id, revoked_claims.jti, &revoked_state,
+              &revoked_found) != WYRELOG_E_OK || revoked_found
+          || revoked_sessions != 1 || revoked_access != 1) {
+        wyl_jwt_access_claims_clear (&revoked_claims);
+        wyl_jwt_access_claims_clear (&unrelated_claims);
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2238 + (gint) i;
+      }
+      wyl_jwt_access_claims_clear (&revoked_claims);
+
+      if (!wyl_daemon_http_mutate_service_session_for_test (server,
+              unrelated_claims.session_id,
+              WYL_DAEMON_SERVICE_SESSION_SUBJECT, "svc:exchange:mismatch", 0)
+          || wyl_daemon_http_retire_service_auth_exact_for_test (server,
+              unrelated_claims.session_id, unrelated_claims.jti,
+              unrelated_claims.credential_id,
+              unrelated_claims.credential_generation,
+              unrelated_claims.subject, unrelated_claims.tenant,
+              unrelated_claims.expires_at) != WYRELOG_E_POLICY) {
+        wyl_jwt_access_claims_clear (&unrelated_claims);
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2240 + (gint) i;
+      }
+      gboolean preserved_found = FALSE;
+      gint preserved_state = WYL_SERVICE_AUTH_PENDING;
+      guint preserved_sessions = 0;
+      guint preserved_access = 0;
+      wyl_daemon_access_token_snapshot_t preserved_snapshot = { 0 };
+      wyl_daemon_http_service_publication_counts_for_test (server,
+          &preserved_sessions, &preserved_access);
+      gboolean access_preserved =
+          wyl_daemon_http_snapshot_access_token_for_test (server,
+          unrelated_claims.jti, &preserved_snapshot);
+      if (wyl_daemon_http_lookup_service_registry_for_test (server,
+              unrelated_claims.session_id, unrelated_claims.jti,
+              &preserved_state, &preserved_found) != WYRELOG_E_OK
+          || !preserved_found || preserved_state != WYL_SERVICE_AUTH_ACTIVE
+          || preserved_sessions != 1 || preserved_access != 1
+          || !access_preserved
+          || g_strcmp0 (preserved_snapshot.jti, unrelated_claims.jti) != 0
+          || g_strcmp0 (preserved_snapshot.session_id,
+              unrelated_claims.session_id) != 0
+          || g_strcmp0 (preserved_snapshot.subject,
+              unrelated_claims.subject) != 0
+          || g_strcmp0 (preserved_snapshot.tenant,
+              unrelated_claims.tenant) != 0
+          || g_strcmp0 (preserved_snapshot.credential_id,
+              unrelated_claims.credential_id) != 0
+          || preserved_snapshot.credential_generation !=
+          unrelated_claims.credential_generation
+          || preserved_snapshot.expires_at != unrelated_claims.expires_at) {
+        wyl_daemon_access_token_snapshot_clear (&preserved_snapshot);
+        wyl_jwt_access_claims_clear (&unrelated_claims);
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2242 + (gint) i;
+      }
+      wyl_daemon_access_token_snapshot_clear (&preserved_snapshot);
+      WylServiceAuthUnavailableReason mismatch_reason =
+          WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+      if (wyl_service_auth_authority_validate_available
+          (wyl_handle_get_service_auth_authority (handle), handle,
+              &mismatch_reason) == WYRELOG_E_OK
+          || mismatch_reason !=
+          WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT) {
+        wyl_jwt_access_claims_clear (&unrelated_claims);
+        wyl_jwt_access_claims_clear (&claims);
+        soup_server_disconnect (server);
+        g_object_unref (server);
+        wyl_service_credential_issue_result_clear (&issued);
+        return 2245 + (gint) i;
+      }
+      wyl_jwt_access_claims_clear (&unrelated_claims);
     }
     wyl_jwt_access_claims_clear (&claims);
     soup_server_disconnect (server);

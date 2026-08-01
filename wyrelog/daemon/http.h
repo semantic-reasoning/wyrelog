@@ -96,6 +96,7 @@ typedef struct
   guint attached;
   guint finished;
   guint aborted;
+  guint cleanup_failed;
   guint destroyed;
   guint duplicate_outcomes;
 } WylDaemonServiceResponseAuthoritySnapshot;
@@ -111,7 +112,7 @@ typedef enum
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE,
-  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE,
 } WylDaemonServicePublicationFault;
 typedef enum
@@ -235,6 +236,10 @@ wyrelog_error_t wyl_daemon_http_lookup_service_registry_for_test
     gint * out_state, gboolean * out_found);
 wyrelog_error_t wyl_daemon_http_retire_due_service_auth_for_test
     (SoupServer * server);
+wyrelog_error_t wyl_daemon_http_retire_service_auth_exact_for_test
+    (SoupServer * server, const gchar * session_id, const gchar * jti,
+    const gchar * credential_id, guint64 generation, const gchar * principal,
+    const gchar * tenant, gint64 expires_at);
 gboolean wyl_daemon_http_mutate_service_session_for_test
     (SoupServer * server, const gchar * session_id, gint field,
     const gchar * text, guint64 number);
