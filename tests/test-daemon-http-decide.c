@@ -7202,6 +7202,9 @@ static gint
 check_service_token_exchange_contract_on_server (SoupServer *server,
     WylHandle *handle, const gchar *base_url)
 {
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *route_access_token = NULL;
+  g_autofree gchar *rate_access_token = NULL;
   prepare_service_token_subject (handle, "svc:exchange:worker");
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 1944;
@@ -7231,7 +7234,7 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
     return 1947;
   if (status != 200 || body == NULL)
     return 1948;
-  g_autofree gchar *access_token = extract_json_string (body, "access_token");
+  access_token = extract_json_string (body, "access_token");
   if (access_token == NULL ||
       strstr (body, "session_token") != NULL ||
       strstr (body, "username") != NULL ||
@@ -7349,8 +7352,7 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
     return 1959;
   if (route_status != 200 || route_body == NULL)
     return 1959;
-  g_autofree gchar *route_access_token = extract_json_string (route_body,
-      "access_token");
+  route_access_token = extract_json_string (route_body, "access_token");
   if (route_access_token == NULL || strstr (route_body, "session_token") != NULL
       || strstr (route_body, "credential_secret") != NULL)
     return 1959;
@@ -7389,8 +7391,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       return 1960 + (gint) i;
     if (status != 200 || body == NULL)
       return 1970 + (gint) i;
-    g_autofree gchar *rate_access_token = extract_json_string (body,
-        "access_token");
+    g_clear_pointer (&rate_access_token, g_free);
+    rate_access_token = extract_json_string (body, "access_token");
     if (rate_access_token == NULL)
       return 1970 + (gint) i;
   }
@@ -8543,6 +8545,7 @@ check_service_principal_management_contract (void)
   g_autofree gchar *http_exchange_body = NULL;
 #ifdef WYL_HAS_AUDIT
   g_autofree gchar *denied_body = NULL;
+  g_autofree gchar *http_exchange_access = NULL;
   guint denied_status = 0;
   guint denied_retry_after = 0;
 #endif
@@ -8873,8 +8876,7 @@ check_service_principal_management_contract (void)
     rc = 1993;
     goto cleanup;
   }
-  g_autofree gchar *http_exchange_access = extract_json_string (body,
-      "access_token");
+  http_exchange_access = extract_json_string (body, "access_token");
   if (http_exchange_access == NULL || strstr (body, "session_token") != NULL
       || strstr (body, "credential_secret") != NULL) {
     rc = 1993;
