@@ -81,6 +81,7 @@ typedef struct
 {
   WylSession *session;
   const gchar *authenticated_actor_subject_id;
+  const gchar *target_tenant;
   gint64 guard_timestamp;
   const gchar *guard_loc_class;
   gint64 guard_risk;

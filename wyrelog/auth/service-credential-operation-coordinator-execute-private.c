@@ -10,6 +10,7 @@
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 #include "policy/store-private.h"
 #include "wyrelog/decide.h"
+#include "wyl-common-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-permission-scope-private.h"
@@ -26,7 +27,6 @@ typedef struct
   const WylServiceCredentialOperationRecord *record;
   const WylServiceCredentialOperationHandoffExecuteRuntime *runtime;
   const gchar *session_resource_id;
-  const gchar *session_tenant;
 } HandoffAuthorization;
 
 static gboolean
@@ -35,6 +35,14 @@ handoff_session_is_active_human (const WylSession *session)
   return WYL_IS_SESSION ((gpointer) session)
       && session->state == WYL_SESSION_STATE_ACTIVE
       && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
+}
+
+static gboolean
+handoff_session_is_mfa_assured (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+      && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
+      && g_atomic_int_get ((gint *) & session->mfa_assured) != 0;
 }
 
 static void
@@ -163,7 +171,8 @@ handoff_session_matches (const HandoffAuthorization *authorization)
   g_autofree gchar *username = NULL;
   g_autofree gchar *session_id = NULL;
   g_autofree gchar *tenant = NULL;
-  if (!handoff_session_is_active_human (authorization->runtime->session))
+  if (!handoff_session_is_active_human (authorization->runtime->session)
+      || !handoff_session_is_mfa_assured (authorization->runtime->session))
     return FALSE;
   username = wyl_session_dup_username (authorization->runtime->session);
   session_id = wyl_session_dup_id_string (authorization->runtime->session);
@@ -173,7 +182,7 @@ handoff_session_matches (const HandoffAuthorization *authorization)
       && g_strcmp0 (username,
       authorization->runtime->authenticated_actor_subject_id) == 0
       && g_strcmp0 (session_id, authorization->session_resource_id) == 0
-      && g_strcmp0 (tenant, authorization->session_tenant) == 0;
+      && g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0;
 }
 
 static wyrelog_error_t
@@ -185,6 +194,15 @@ handoff_authorize (gpointer data, const gchar *actor_subject_id)
           authorization->record->actor_subject_id) != 0
       || !handoff_session_matches (authorization))
     return WYRELOG_E_POLICY;
+
+  gboolean target_active = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_tenant_is_active
+      (wyl_handle_get_policy_store (authorization->handle),
+      authorization->runtime->target_tenant, &target_active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!target_active)
+    return WYRELOG_E_NOT_FOUND;
 
   g_autoptr (wyl_decide_req_t) request = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) response = wyl_decide_resp_new ();
@@ -200,13 +218,77 @@ handoff_authorize (gpointer data, const gchar *actor_subject_id)
       authorization->runtime->guard_timestamp,
       authorization->runtime->guard_loc_class,
       authorization->runtime->guard_risk);
-  wyrelog_error_t rc = wyl_decide (authorization->handle, request, response);
+  rc = wyl_decide (authorization->handle, request, response);
   if (rc == WYRELOG_E_OK
       && wyl_decide_resp_get_decision (response) != WYL_DECISION_ALLOW)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && authorization->runtime->after_authorization != NULL)
     authorization->runtime->after_authorization
         (authorization->runtime->authorization_checkpoint_data);
+  return rc;
+}
+
+static wyrelog_error_t
+handoff_front_authorize (WylHandle *handle,
+    const WylServiceCredentialOperationCoordinatorRequest *request,
+    const WylServiceCredentialOperationHandoffExecuteRuntime *runtime)
+{
+  if (handle == NULL || request == NULL || runtime == NULL
+      || !wyl_policy_store_tenant_id_is_valid (runtime->target_tenant)
+      || !handoff_session_is_active_human (runtime->session)
+      || !handoff_session_is_mfa_assured (runtime->session))
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *session_actor = wyl_session_dup_username (runtime->session);
+  g_autofree gchar *session_tenant = wyl_session_dup_tenant (runtime->session);
+  g_autofree gchar *session_resource =
+      wyl_session_dup_id_string (runtime->session);
+  if (session_actor == NULL || session_tenant == NULL
+      || session_resource == NULL
+      || g_strcmp0 (session_actor,
+          runtime->authenticated_actor_subject_id) != 0
+      || g_strcmp0 (session_actor, request->actor_subject_id) != 0
+      || g_strcmp0 (session_tenant, WYL_TENANT_DEFAULT) != 0)
+    return WYRELOG_E_POLICY;
+
+  gboolean target_active = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_tenant_is_active
+      (wyl_handle_get_policy_store (handle), runtime->target_tenant,
+      &target_active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!target_active)
+    return WYRELOG_E_NOT_FOUND;
+  if (request->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
+    if (g_strcmp0 (request->tenant_id, runtime->target_tenant) != 0)
+      return WYRELOG_E_POLICY;
+  } else if (request->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
+    wyl_service_credential_t old = { 0 };
+    rc = wyl_service_credential_operation_coordinator_get_credential_pinned
+        (handle, runtime->cancellable, request->old_credential_id, &old);
+    if (rc == WYRELOG_E_OK
+        && g_strcmp0 (old.tenant_id, runtime->target_tenant) != 0)
+      rc = WYRELOG_E_NOT_FOUND;
+    wyl_service_credential_clear (&old);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  } else {
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autoptr (wyl_decide_req_t) decision = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) response = wyl_decide_resp_new ();
+  if (decision == NULL || response == NULL)
+    return WYRELOG_E_NOMEM;
+  wyl_decide_req_set_subject_id (decision, session_actor);
+  wyl_decide_req_set_action (decision, HANDOFF_MANAGE_ACTION);
+  wyl_decide_req_set_resource_id (decision, session_resource);
+  wyl_decide_req_set_request_id (decision, runtime->decision_request_id);
+  wyl_decide_req_set_guard_context (decision, runtime->guard_timestamp,
+      runtime->guard_loc_class, runtime->guard_risk);
+  rc = wyl_decide (handle, decision, response);
+  if (rc == WYRELOG_E_OK
+      && wyl_decide_resp_get_decision (response) != WYL_DECISION_ALLOW)
+    rc = WYRELOG_E_POLICY;
   return rc;
 }
 
@@ -1062,6 +1144,7 @@ wyrelog_error_t
       || runtime->guard_risk < 0 || runtime->guard_risk > 100
       || runtime->decision_request_id == NULL
       || runtime->decision_request_id[0] == '\0'
+      || !wyl_policy_store_tenant_id_is_valid (runtime->target_tenant)
       || runtime->publication == NULL || runtime->publication->plan == NULL
       || runtime->publication->stage_exact == NULL
       || runtime->publication->receipt_target_acquire == NULL
@@ -1079,11 +1162,13 @@ wyrelog_error_t
   session_tenant = wyl_session_dup_tenant (runtime->session);
   session_resource_id = wyl_session_dup_id_string (runtime->session);
   if (!handoff_session_is_active_human (runtime->session)
+      || !handoff_session_is_mfa_assured (runtime->session)
       || session_actor == NULL || session_tenant == NULL
       || session_resource_id == NULL
       || !wyl_policy_service_actor_subject_is_valid (session_actor)
       || g_strcmp0 (session_actor,
-          runtime->authenticated_actor_subject_id) != 0)
+          runtime->authenticated_actor_subject_id) != 0
+      || g_strcmp0 (session_tenant, WYL_TENANT_DEFAULT) != 0)
     return WYRELOG_E_POLICY;
 
   rc = wyl_service_credential_operation_coordinator_lock_acquire (storage,
@@ -1100,7 +1185,7 @@ wyrelog_error_t
     goto out;
   }
   if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
-    if (g_strcmp0 (record.tenant_id, session_tenant) != 0) {
+    if (g_strcmp0 (record.tenant_id, runtime->target_tenant) != 0) {
       rc = WYRELOG_E_POLICY;
       goto out;
     }
@@ -1110,7 +1195,7 @@ wyrelog_error_t
         &old_credential);
     if (rc != WYRELOG_E_OK)
       goto out;
-    if (g_strcmp0 (old_credential.tenant_id, session_tenant) != 0) {
+    if (g_strcmp0 (old_credential.tenant_id, runtime->target_tenant) != 0) {
       rc = WYRELOG_E_POLICY;
       goto out;
     }
@@ -1171,7 +1256,6 @@ wyrelog_error_t
     .record = &record,
     .runtime = runtime,
     .session_resource_id = session_resource_id,
-    .session_tenant = session_tenant,
   };
   if (record.state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED) {
     rc = execute_prepared_handoff (handle, &record, runtime, &authorization,
@@ -1409,6 +1493,9 @@ wyrelog_error_t
   local.escrow_id = NULL;
   memset (local.escrow_binding_digest, 0, sizeof local.escrow_binding_digest);
 
+  rc = handoff_front_authorize (handle, &local, runtime);
+  if (rc != WYRELOG_E_OK)
+    goto out;
   rc = handoff_derive_escrow (&local);
   if (rc != WYRELOG_E_OK)
     goto out;

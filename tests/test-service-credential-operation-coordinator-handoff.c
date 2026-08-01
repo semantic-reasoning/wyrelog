@@ -109,12 +109,14 @@ fresh_request_id (gchar *buf)
 static WylSession *
 handoff_human_session_new (const gchar *username, const gchar *tenant)
 {
+  (void) tenant;
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   g_assert_cmpint (wyl_id_new (&session->id), ==, WYRELOG_E_OK);
   session->username = g_strdup (username);
-  session->tenant = g_strdup (tenant);
+  session->tenant = g_strdup ("__wr_default");
   session->state = WYL_SESSION_STATE_ACTIVE;
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+  g_atomic_int_set (&session->mfa_assured, 1);
   return session;
 }
 
@@ -491,6 +493,7 @@ test_frontdoor_issue_happy_path (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -567,6 +570,7 @@ test_frontdoor_retry_is_replay (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -721,6 +725,7 @@ test_frontdoor_malformed_is_invalid (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -808,6 +813,7 @@ test_frontdoor_retired_is_policy (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -852,6 +858,7 @@ test_frontdoor_actor_mismatch_is_policy (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = admin_session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -874,6 +881,7 @@ test_frontdoor_actor_mismatch_is_policy (void)
   WylServiceCredentialOperationHandoffExecuteRuntime intruder_runtime = {
     .session = intruder_session,
     .authenticated_actor_subject_id = "mallory",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,

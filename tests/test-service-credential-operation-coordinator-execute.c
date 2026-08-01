@@ -467,12 +467,14 @@ handoff_test_target_release (gpointer data,
 static WylSession *
 handoff_human_session_new (const gchar *username, const gchar *tenant)
 {
+  (void) tenant;
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   g_assert_cmpint (wyl_id_new (&session->id), ==, WYRELOG_E_OK);
   session->username = g_strdup (username);
-  session->tenant = g_strdup (tenant);
+  session->tenant = g_strdup ("__wr_default");
   session->state = WYL_SESSION_STATE_ACTIVE;
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+  g_atomic_int_set (&session->mfa_assured, 1);
   return session;
 }
 
@@ -878,6 +880,7 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -1620,6 +1623,7 @@ test_handoff_delivery_recovery_matrix (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,
@@ -2002,6 +2006,7 @@ test_handoff_automatic_maintenance_gate (void)
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
     .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
     .guard_timestamp = real_now,
     .guard_loc_class = "trusted",
     .guard_risk = 0,

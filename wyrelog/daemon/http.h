@@ -168,6 +168,9 @@ gboolean wyl_daemon_http_replace_session_for_test
 gboolean wyl_daemon_http_seed_human_session_for_test
     (SoupServer * server, const gchar * session_id, const gchar * subject,
     const gchar * tenant);
+gboolean wyl_daemon_http_seed_mfa_human_session_for_test
+    (SoupServer * server, const gchar * session_id, const gchar * subject,
+    const gchar * tenant);
 gboolean wyl_daemon_http_seed_human_session_with_state_for_test
     (SoupServer * server, const gchar * session_id, const gchar * subject,
     const gchar * tenant, wyl_session_state_t state);

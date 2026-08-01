@@ -175,6 +175,7 @@ wyl_daemon_service_credential_handoff (const
   if (ctx == NULL || inputs == NULL || out_json == NULL
       || ctx->handle == NULL || ctx->session == NULL
       || ctx->authenticated_actor_subject_id == NULL
+      || ctx->target_tenant == NULL
       || ctx->guard_loc_class == NULL || ctx->decision_request_id == NULL)
     return WYRELOG_E_INVALID;
 
@@ -238,6 +239,7 @@ wyl_daemon_service_credential_handoff (const
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = ctx->session,
     .authenticated_actor_subject_id = ctx->authenticated_actor_subject_id,
+    .target_tenant = ctx->target_tenant,
     .guard_timestamp = ctx->guard_timestamp,
     .guard_loc_class = ctx->guard_loc_class,
     .guard_risk = ctx->guard_risk,
