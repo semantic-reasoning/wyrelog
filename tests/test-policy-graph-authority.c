@@ -126,7 +126,8 @@ test_fresh_schema_is_legacy_unclassified (void)
   sqlite3 *db = wyl_policy_store_get_db (store);
 
   const gchar *tenant_columns[] = {
-    "lifecycle_state", "lifecycle_generation", "reconciliation_generation",
+    "lifecycle_state", "lifecycle_generation", "sealed_generation",
+    "reconciliation_generation",
   };
   const gchar *graph_columns[] = {
     "lifecycle_state", "store_uuid", "format_version",
@@ -423,6 +424,11 @@ test_pre_537_rows_migrate_idempotently (void)
           "AND lifecycle_generation=0 AND reconciliation_generation=0;"),
       ==, 2);
   g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM tenants WHERE"
+          " (tenant_id='tenant-open' AND sealed=0 AND sealed_generation=0) OR"
+          " (tenant_id='tenant-sealed' AND sealed=1 AND sealed_generation=1);"),
+      ==, 2);
+  g_assert_cmpint (scalar_int64 (db,
           "SELECT sum(sealed) FROM fact_graphs WHERE graph_id IN "
           "('graph-open','graph-sealed');"), ==, 1);
 }
@@ -561,10 +567,68 @@ test_tenant_state_constraints (void)
       "lifecycle_generation=3 WHERE tenant_id='tenant-a';");
   exec_ok (db,
       "UPDATE tenants SET lifecycle_state='sealed',sealed=1,"
-      "lifecycle_generation=3 WHERE tenant_id='tenant-a';");
+      "sealed_generation=1,lifecycle_generation=3 "
+      "WHERE tenant_id='tenant-a';");
+  exec_ok (db, "UPDATE tenants SET updated_at=2 WHERE tenant_id='tenant-a';");
+  exec_rejected (db,
+      "UPDATE tenants SET sealed_generation=2 WHERE tenant_id='tenant-a';");
+  exec_rejected (db,
+      "UPDATE tenants SET sealed=0,sealed_generation=1 "
+      "WHERE tenant_id='tenant-a';");
+  exec_ok (db,
+      "UPDATE tenants SET lifecycle_state='unsealing',lifecycle_generation=4 "
+      "WHERE tenant_id='tenant-a';");
+  exec_ok (db,
+      "UPDATE tenants SET lifecycle_state='active',sealed=0,"
+      "sealed_generation=2,lifecycle_generation=5 "
+      "WHERE tenant_id='tenant-a';");
   exec_rejected (db,
       "UPDATE tenants SET reconciliation_generation=2 "
       "WHERE tenant_id='tenant-a';");
+
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-generic",
+          &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
+          "tenant-generic", TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT sealed_generation FROM tenants"
+          " WHERE tenant_id='tenant-generic';"), ==, 1);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
+          "tenant-generic", TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT sealed_generation FROM tenants"
+          " WHERE tenant_id='tenant-generic';"), ==, 1);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
+          "tenant-generic", FALSE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT sealed_generation FROM tenants"
+          " WHERE tenant_id='tenant-generic';"), ==, 2);
+}
+
+static void
+test_tenant_sealed_generation_overflow (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  create_pre_537_schema (db);
+  exec_ok (db,
+      "ALTER TABLE tenants ADD COLUMN sealed_generation INTEGER NOT NULL"
+      " DEFAULT 0 CHECK(typeof(sealed_generation)='integer' AND"
+      " sealed_generation BETWEEN 0 AND 9223372036854775807);"
+      "INSERT INTO tenants"
+      " (tenant_id,sealed,sealed_generation,created_at,updated_at)"
+      " VALUES ('tenant-max',0,9223372036854775807,1,1);");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "tenant-max",
+          TRUE), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT sealed FROM tenants WHERE tenant_id='tenant-max';"), ==, 0);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT sealed_generation FROM tenants"
+          " WHERE tenant_id='tenant-max';"), ==, G_MAXINT64);
 }
 
 static void
@@ -1841,6 +1905,8 @@ main (int argc, char **argv)
       test_graph_identity_and_state_constraints);
   g_test_add_func ("/policy/graph-authority/tenant-state-constraints",
       test_tenant_state_constraints);
+  g_test_add_func ("/policy/graph-authority/tenant-sealed-overflow",
+      test_tenant_sealed_generation_overflow);
   g_test_add_func ("/policy/graph-authority/integer-domain-constraints",
       test_integer_domain_constraints);
   g_test_add_func ("/policy/graph-authority/typed-read-list",

@@ -16,6 +16,8 @@ G_STATIC_ASSERT (WYRELOG_E_EXEC == -8);
 G_STATIC_ASSERT (WYRELOG_E_NOT_FOUND == -9);
 G_STATIC_ASSERT (WYRELOG_E_BREAK_GLASS_DISABLED == -10);
 G_STATIC_ASSERT (WYRELOG_E_BUSY == -11);
+G_STATIC_ASSERT (WYRELOG_E_CANCELLED == -12);
+G_STATIC_ASSERT (WYRELOG_E_CONFLICT == -13);
 
 int
 main (void)
@@ -27,6 +29,8 @@ main (void)
   if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_BUSY),
           "resource is busy") != 0)
     return 6;
+  if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_CONFLICT), "conflict") != 0)
+    return 7;
 
   const gchar *version = wyrelog_version_string ();
   if (version == NULL || version[0] == '\0')

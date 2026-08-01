@@ -715,6 +715,7 @@ static const gchar *const required_tables[] = {
   "service_credential_handoff_remediation_actions",
   "service_credential_handoff_retirement_receipts",
   "service_permission_remediation_receipts",
+  "service_retirement_receipts",
 };
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
@@ -1435,7 +1436,152 @@ static const gchar service_schema_ddl[] =
     "CREATE TRIGGER IF NOT EXISTS trg_service_permission_receipt_no_delete"
     " BEFORE DELETE ON service_permission_remediation_receipts"
     " BEGIN SELECT RAISE(ABORT,"
-    "   'service_permission_remediation_receipts is immutable'); END;";
+    "   'service_permission_remediation_receipts is immutable'); END;"
+    "CREATE TABLE IF NOT EXISTS service_retirement_receipts ("
+    " request_id TEXT NOT NULL PRIMARY KEY CHECK(typeof(request_id)='text'"
+    "   AND length(request_id)=27 AND instr(request_id,char(0))=0),"
+    " receipt_version INTEGER NOT NULL CHECK(typeof(receipt_version)='integer'"
+    "   AND receipt_version=1),"
+    " operation TEXT NOT NULL CHECK(operation IN"
+    "   ('principal_disable','credential_revoke','tenant_seal')) ,"
+    " resource_id TEXT NOT NULL CHECK(typeof(resource_id)='text'"
+    "   AND length(resource_id) BETWEEN 1 AND 255"
+    "   AND instr(resource_id,char(0))=0),"
+    " tenant_id TEXT CHECK(tenant_id IS NULL OR (typeof(tenant_id)='text'"
+    "   AND length(tenant_id) BETWEEN 1 AND 255"
+    "   AND instr(tenant_id,char(0))=0)),"
+    " actor_subject_id TEXT NOT NULL CHECK(typeof(actor_subject_id)='text'"
+    "   AND length(actor_subject_id) BETWEEN 1 AND 128"
+    "   AND instr(actor_subject_id,char(0))=0),"
+    " input_fingerprint BLOB NOT NULL CHECK(typeof(input_fingerprint)='blob'"
+    "   AND length(input_fingerprint)=32),"
+    " outcome TEXT NOT NULL CHECK(outcome IN"
+    "   ('transitioned','already_terminal')) ,"
+    " result_state TEXT NOT NULL CHECK(result_state IN"
+    "   ('disabled','revoked','sealed')) ,"
+    " authority_generation INTEGER NOT NULL CHECK("
+    "   typeof(authority_generation)='integer'"
+    "   AND authority_generation BETWEEN 1 AND 9223372036854775807),"
+    " tenant_lifecycle_generation INTEGER CHECK("
+    "   tenant_lifecycle_generation IS NULL OR ("
+    "   typeof(tenant_lifecycle_generation)='integer'"
+    "   AND tenant_lifecycle_generation BETWEEN 0 AND 9223372036854775807)),"
+    " tenant_sealed_generation INTEGER CHECK("
+    "   tenant_sealed_generation IS NULL OR ("
+    "   typeof(tenant_sealed_generation)='integer'"
+    "   AND tenant_sealed_generation BETWEEN 1 AND 9223372036854775807)),"
+    " event_id INTEGER CHECK(event_id IS NULL OR (typeof(event_id)='integer'"
+    "   AND event_id>0)),"
+    " audit_id TEXT NOT NULL UNIQUE CHECK(typeof(audit_id)='text'"
+    "   AND length(audit_id)=36 AND instr(audit_id,char(0))=0),"
+    " created_at_us INTEGER NOT NULL CHECK(typeof(created_at_us)='integer'"
+    "   AND created_at_us>0),"
+    " CHECK((operation='principal_disable'"
+    "     AND length(resource_id) BETWEEN 5 AND 128"
+    "     AND substr(resource_id,1,4)='svc:' AND tenant_id IS NULL"
+    "     AND result_state='disabled'"
+    "     AND tenant_lifecycle_generation IS NULL"
+    "     AND tenant_sealed_generation IS NULL)"
+    "   OR (operation='credential_revoke' AND length(resource_id)=31"
+    "     AND substr(resource_id,1,4)='wlc_' AND tenant_id IS NOT NULL"
+    "     AND result_state='revoked'"
+    "     AND tenant_lifecycle_generation IS NULL"
+    "     AND tenant_sealed_generation IS NULL)"
+    "   OR (operation='tenant_seal' AND tenant_id=resource_id"
+    "     AND result_state='sealed'"
+    "     AND tenant_lifecycle_generation IS NOT NULL"
+    "     AND tenant_sealed_generation IS NOT NULL AND event_id IS NULL)),"
+    " CHECK((outcome='already_terminal' AND event_id IS NULL)"
+    "   OR outcome='transitioned'),"
+    " CHECK(operation='tenant_seal' OR outcome='already_terminal'"
+    "   OR event_id IS NOT NULL),"
+    " FOREIGN KEY(audit_id) REFERENCES audit_events(id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT"
+    ");"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_retirement_event"
+    " ON service_retirement_receipts(operation,event_id)"
+    " WHERE event_id IS NOT NULL;"
+    "CREATE INDEX IF NOT EXISTS idx_service_retirement_diagnostic"
+    " ON service_retirement_receipts"
+    " (operation,resource_id,created_at_us,request_id);"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_retirement_no_update"
+    " BEFORE UPDATE ON service_retirement_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service retirement receipts are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_retirement_no_delete"
+    " BEFORE DELETE ON service_retirement_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service retirement receipts are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_retirement_no_claim_collision"
+    " BEFORE INSERT ON service_retirement_receipts WHEN"
+    " EXISTS(SELECT 1 FROM service_domain_requests"
+    "   WHERE request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_credential_operation_fences"
+    "   WHERE request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_credential_handoff_escrows"
+    "   WHERE request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_credential_handoff_cancellation_claims"
+    "   WHERE cancellation_request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_credential_handoff_remediation_actions"
+    "   WHERE remediation_request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_permission_remediation_receipts"
+    "   WHERE request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_credential_handoff_retirement_receipts"
+    "   WHERE original_request_id=NEW.request_id) OR"
+    " EXISTS(SELECT 1 FROM service_credential_handoff_dispositions"
+    "   WHERE original_request_id=NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service retirement request collides with existing claim'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_domain_no_retirement_collision"
+    " BEFORE INSERT ON service_domain_requests WHEN EXISTS"
+    " (SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service domain request collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_fence_no_retirement_collision"
+    " BEFORE INSERT ON service_credential_operation_fences WHEN EXISTS"
+    " (SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service operation fence collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_escrow_no_retirement_collision"
+    " BEFORE INSERT ON service_credential_handoff_escrows WHEN EXISTS"
+    " (SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service handoff escrow collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_cancellation_no_retirement_collision"
+    " BEFORE INSERT ON service_credential_handoff_cancellation_claims"
+    " WHEN EXISTS(SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.cancellation_request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service cancellation claim collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_remediation_no_retirement_collision"
+    " BEFORE INSERT ON service_credential_handoff_remediation_actions"
+    " WHEN EXISTS(SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.remediation_request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service remediation claim collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_permission_no_retirement_collision"
+    " BEFORE INSERT ON service_permission_remediation_receipts WHEN EXISTS"
+    " (SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service permission claim collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS"
+    " trg_service_handoff_retirement_no_service_retirement_collision"
+    " BEFORE INSERT ON service_credential_handoff_retirement_receipts"
+    " WHEN EXISTS(SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.original_request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service handoff retirement collides with retirement receipt'); END;"
+    "CREATE TRIGGER IF NOT EXISTS"
+    " trg_service_handoff_disposition_no_retirement_collision"
+    " BEFORE INSERT ON service_credential_handoff_dispositions"
+    " WHEN EXISTS(SELECT 1 FROM service_retirement_receipts"
+    "   WHERE request_id=NEW.original_request_id)"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service handoff disposition collides with retirement receipt'); END;";
 
 typedef struct
 {
@@ -1706,6 +1852,28 @@ static const gchar *const service_permission_receipt_needles[] = {
   NULL,
 };
 
+static const gchar *const service_retirement_receipt_needles[] = {
+  "check(typeof(request_id)='text'andlength(request_id)=27andinstr(request_id,char(0))=0)",
+  "check(typeof(receipt_version)='integer'andreceipt_version=1)",
+  "check(operationin('principal_disable','credential_revoke','tenant_seal'))",
+  "check(typeof(resource_id)='text'andlength(resource_id)between1and255andinstr(resource_id,char(0))=0)",
+  "check(tenant_idisnullor(typeof(tenant_id)='text'andlength(tenant_id)between1and255andinstr(tenant_id,char(0))=0))",
+  "check(typeof(actor_subject_id)='text'andlength(actor_subject_id)between1and128andinstr(actor_subject_id,char(0))=0)",
+  "check(typeof(input_fingerprint)='blob'andlength(input_fingerprint)=32)",
+  "check(outcomein('transitioned','already_terminal'))",
+  "check(result_statein('disabled','revoked','sealed'))",
+  "check(typeof(authority_generation)='integer'andauthority_generationbetween1and9223372036854775807)",
+  "check(tenant_lifecycle_generationisnullor(typeof(tenant_lifecycle_generation)='integer'andtenant_lifecycle_generationbetween0and9223372036854775807))",
+  "check(tenant_sealed_generationisnullor(typeof(tenant_sealed_generation)='integer'andtenant_sealed_generationbetween1and9223372036854775807))",
+  "check(event_idisnullor(typeof(event_id)='integer'andevent_id>0))",
+  "check(typeof(audit_id)='text'andlength(audit_id)=36andinstr(audit_id,char(0))=0)",
+  "check(typeof(created_at_us)='integer'andcreated_at_us>0)",
+  "check((operation='principal_disable'andlength(resource_id)between5and128andsubstr(resource_id,1,4)='svc:'andtenant_idisnullandresult_state='disabled'andtenant_lifecycle_generationisnullandtenant_sealed_generationisnull)or(operation='credential_revoke'andlength(resource_id)=31andsubstr(resource_id,1,4)='wlc_'andtenant_idisnotnullandresult_state='revoked'andtenant_lifecycle_generationisnullandtenant_sealed_generationisnull)or(operation='tenant_seal'andtenant_id=resource_idandresult_state='sealed'andtenant_lifecycle_generationisnotnullandtenant_sealed_generationisnotnullandevent_idisnull))",
+  "check((outcome='already_terminal'andevent_idisnull)oroutcome='transitioned')",
+  "check(operation='tenant_seal'oroutcome='already_terminal'orevent_idisnotnull)",
+  NULL,
+};
+
 static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_principals",
         "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
@@ -1770,6 +1938,11 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         "request_id:TEXT:0::1,actor_identity:TEXT:1::0,audit_id:TEXT:0::0,manifest_fingerprint:TEXT:1::0,operation_count:INTEGER:1::0,applied_at_us:INTEGER:1::0,pre_generation:INTEGER:1::0,pre_digest:TEXT:1::0,post_generation:INTEGER:1::0,post_digest:TEXT:1::0",
         service_permission_receipt_needles, 7, "",
       "sqlite_autoindex_service_permission_remediation_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_retirement_receipts",
+        "request_id:TEXT:1::1,receipt_version:INTEGER:1::0,operation:TEXT:1::0,resource_id:TEXT:1::0,tenant_id:TEXT:0::0,actor_subject_id:TEXT:1::0,input_fingerprint:BLOB:1::0,outcome:TEXT:1::0,result_state:TEXT:1::0,authority_generation:INTEGER:1::0,tenant_lifecycle_generation:INTEGER:0::0,tenant_sealed_generation:INTEGER:0::0,event_id:INTEGER:0::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
+        service_retirement_receipt_needles, 18,
+        "0:0:audit_events:audit_id:id:RESTRICT:RESTRICT:NONE",
+      "idx_service_retirement_diagnostic:0:c:0:0:2:operation:0:BINARY:1,1:3:resource_id:0:BINARY:1,2:14:created_at_us:0:BINARY:1,3:0:request_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_retirement_event:1:c:1:0:2:operation:0:BINARY:1,1:12:event_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_2:1:u:0:0:13:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
 };
 
 static const ServiceIndexDescriptor service_index_descriptors[] = {
@@ -1797,6 +1970,10 @@ static const ServiceIndexDescriptor service_index_descriptors[] = {
   {"idx_service_handoff_retirement_resume",
         "service_credential_handoff_retirement_receipts",
       "createuniqueindexidx_service_handoff_retirement_resumeonservice_credential_handoff_retirement_receipts(resume_remediation_request_id)whereresume_remediation_request_idisnotnull"},
+  {"idx_service_retirement_event", "service_retirement_receipts",
+      "createuniqueindexidx_service_retirement_eventonservice_retirement_receipts(operation,event_id)whereevent_idisnotnull"},
+  {"idx_service_retirement_diagnostic", "service_retirement_receipts",
+      "createindexidx_service_retirement_diagnosticonservice_retirement_receipts(operation,resource_id,created_at_us,request_id)"},
 };
 
 static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
@@ -1876,6 +2053,35 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
   {"trg_service_permission_receipt_no_delete",
         "service_permission_remediation_receipts",
       "createtriggertrg_service_permission_receipt_no_deletebeforedeleteonservice_permission_remediation_receiptsbeginselectraise(abort,'service_permission_remediation_receiptsisimmutable');end"},
+  {"trg_service_retirement_no_update", "service_retirement_receipts",
+      "createtriggertrg_service_retirement_no_updatebeforeupdateonservice_retirement_receiptsbeginselectraise(abort,'serviceretirementreceiptsareappend-only');end"},
+  {"trg_service_retirement_no_delete", "service_retirement_receipts",
+      "createtriggertrg_service_retirement_no_deletebeforedeleteonservice_retirement_receiptsbeginselectraise(abort,'serviceretirementreceiptsareappend-only');end"},
+  {"trg_service_retirement_no_claim_collision", "service_retirement_receipts",
+      "createtriggertrg_service_retirement_no_claim_collisionbeforeinsertonservice_retirement_receiptswhenexists(select1fromservice_domain_requestswhererequest_id=new.request_id)orexists(select1fromservice_credential_operation_fenceswhererequest_id=new.request_id)orexists(select1fromservice_credential_handoff_escrowswhererequest_id=new.request_id)orexists(select1fromservice_credential_handoff_cancellation_claimswherecancellation_request_id=new.request_id)orexists(select1fromservice_credential_handoff_remediation_actionswhereremediation_request_id=new.request_id)orexists(select1fromservice_permission_remediation_receiptswhererequest_id=new.request_id)orexists(select1fromservice_credential_handoff_retirement_receiptswhereoriginal_request_id=new.request_id)orexists(select1fromservice_credential_handoff_dispositionswhereoriginal_request_id=new.request_id)beginselectraise(abort,'serviceretirementrequestcollideswithexistingclaim');end"},
+  {"trg_service_domain_no_retirement_collision", "service_domain_requests",
+      "createtriggertrg_service_domain_no_retirement_collisionbeforeinsertonservice_domain_requestswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.request_id)beginselectraise(abort,'servicedomainrequestcollideswithretirementreceipt');end"},
+  {"trg_service_fence_no_retirement_collision",
+        "service_credential_operation_fences",
+      "createtriggertrg_service_fence_no_retirement_collisionbeforeinsertonservice_credential_operation_fenceswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.request_id)beginselectraise(abort,'serviceoperationfencecollideswithretirementreceipt');end"},
+  {"trg_service_escrow_no_retirement_collision",
+        "service_credential_handoff_escrows",
+      "createtriggertrg_service_escrow_no_retirement_collisionbeforeinsertonservice_credential_handoff_escrowswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.request_id)beginselectraise(abort,'servicehandoffescrowcollideswithretirementreceipt');end"},
+  {"trg_service_cancellation_no_retirement_collision",
+        "service_credential_handoff_cancellation_claims",
+      "createtriggertrg_service_cancellation_no_retirement_collisionbeforeinsertonservice_credential_handoff_cancellation_claimswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.cancellation_request_id)beginselectraise(abort,'servicecancellationclaimcollideswithretirementreceipt');end"},
+  {"trg_service_remediation_no_retirement_collision",
+        "service_credential_handoff_remediation_actions",
+      "createtriggertrg_service_remediation_no_retirement_collisionbeforeinsertonservice_credential_handoff_remediation_actionswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.remediation_request_id)beginselectraise(abort,'serviceremediationclaimcollideswithretirementreceipt');end"},
+  {"trg_service_permission_no_retirement_collision",
+        "service_permission_remediation_receipts",
+      "createtriggertrg_service_permission_no_retirement_collisionbeforeinsertonservice_permission_remediation_receiptswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.request_id)beginselectraise(abort,'servicepermissionclaimcollideswithretirementreceipt');end"},
+  {"trg_service_handoff_retirement_no_service_retirement_collision",
+        "service_credential_handoff_retirement_receipts",
+      "createtriggertrg_service_handoff_retirement_no_service_retirement_collisionbeforeinsertonservice_credential_handoff_retirement_receiptswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.original_request_id)beginselectraise(abort,'servicehandoffretirementcollideswithretirementreceipt');end"},
+  {"trg_service_handoff_disposition_no_retirement_collision",
+        "service_credential_handoff_dispositions",
+      "createtriggertrg_service_handoff_disposition_no_retirement_collisionbeforeinsertonservice_credential_handoff_dispositionswhenexists(select1fromservice_retirement_receiptswhererequest_id=new.original_request_id)beginselectraise(abort,'servicehandoffdispositioncollideswithretirementreceipt');end"},
 };
 
 static const BuiltinRole *
@@ -8566,6 +8772,13 @@ static const WylGraphAuthorityColumn graph_authority_columns[] = {
         "DEFAULT 0 CHECK (typeof(lifecycle_generation)='integer' AND "
         "lifecycle_generation BETWEEN 0 AND 9223372036854775807)"},
   {
+        "tenants", "sealed_generation", "INTEGER", TRUE, "0",
+        "CHECK(typeof(sealed_generation)='integer' AND "
+        "sealed_generation BETWEEN 0 AND 9223372036854775807)",
+      "ALTER TABLE tenants ADD COLUMN sealed_generation INTEGER NOT NULL "
+        "DEFAULT 0 CHECK (typeof(sealed_generation)='integer' AND "
+        "sealed_generation BETWEEN 0 AND 9223372036854775807)"},
+  {
         "tenants", "reconciliation_generation", "INTEGER", TRUE, "0",
         "CHECK(typeof(reconciliation_generation)='integer' AND "
         "reconciliation_generation BETWEEN 0 AND 9223372036854775807)",
@@ -8786,12 +8999,15 @@ static const gchar tenant_authority_insert_guard_sql[] =
     "SELECT CASE WHEN NOT ("
     "typeof(NEW.lifecycle_generation)='integer' AND "
     "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.sealed_generation)='integer' AND "
+    "NEW.sealed_generation BETWEEN 0 AND 9223372036854775807 AND "
     "typeof(NEW.reconciliation_generation)='integer' AND "
     "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
     "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
     "SELECT CASE WHEN NOT ("
     "NEW.lifecycle_state='legacy_unclassified' AND "
-    "NEW.lifecycle_generation=0 AND NEW.reconciliation_generation=0) "
+    "NEW.lifecycle_generation=0 AND NEW.sealed_generation=0 AND "
+    "NEW.reconciliation_generation=0) "
     "THEN RAISE(ABORT,'invalid tenant authority') END; END";
 
 static const gchar tenant_authority_update_guard_sql[] =
@@ -8800,6 +9016,8 @@ static const gchar tenant_authority_update_guard_sql[] =
     "SELECT CASE WHEN NOT ("
     "typeof(NEW.lifecycle_generation)='integer' AND "
     "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.sealed_generation)='integer' AND "
+    "NEW.sealed_generation BETWEEN 0 AND 9223372036854775807 AND "
     "typeof(NEW.reconciliation_generation)='integer' AND "
     "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
     "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
@@ -8808,6 +9026,12 @@ static const gchar tenant_authority_update_guard_sql[] =
     "(NEW.lifecycle_state IN ('active','sealing') AND NEW.sealed=0) OR "
     "(NEW.lifecycle_state IN ('sealed','unsealing') AND NEW.sealed=1)) "
     "THEN RAISE(ABORT,'invalid tenant authority') END; "
+    "SELECT CASE WHEN NOT ((NEW.sealed=OLD.sealed AND "
+    "NEW.sealed_generation=OLD.sealed_generation) OR "
+    "(NEW.sealed<>OLD.sealed AND "
+    "OLD.sealed_generation<9223372036854775807 AND "
+    "NEW.sealed_generation=OLD.sealed_generation+1)) "
+    "THEN RAISE(ABORT,'invalid tenant sealed generation') END; "
     "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
     "NEW.lifecycle_generation!=OLD.lifecycle_generation "
     "THEN RAISE(ABORT,'invalid tenant lifecycle generation') END; "
@@ -9374,6 +9598,7 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
 {
   sqlite3 *db = store->db;
   wyrelog_error_t rc;
+  gboolean added_tenant_sealed_generation = FALSE;
   rc = exec_sql (db, fact_graph_provisioning_table_sql);
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (db, fact_graph_provisioning_immutable_trigger_sql);
@@ -9391,10 +9616,21 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
       return rc;
     if (exists && !matches)
       return WYRELOG_E_POLICY;
-    if (!exists && (rc = exec_sql (db,
-                graph_authority_columns[i].alter_sql)) != WYRELOG_E_OK)
-      return rc;
+    if (!exists) {
+      if ((rc = exec_sql (db,
+                  graph_authority_columns[i].alter_sql)) != WYRELOG_E_OK)
+        return rc;
+      if (g_str_equal (graph_authority_columns[i].table, "tenants")
+          && g_str_equal (graph_authority_columns[i].column,
+              "sealed_generation"))
+        added_tenant_sealed_generation = TRUE;
+    }
   }
+  if (added_tenant_sealed_generation
+      && (rc = exec_sql (db,
+              "UPDATE tenants SET sealed_generation=1 WHERE sealed=1")) !=
+      WYRELOG_E_OK)
+    return rc;
   for (gsize i = 0; i < G_N_ELEMENTS (fact_reconcile_evidence_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
     rc = graph_authority_column_status (db,
@@ -9479,6 +9715,9 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  lifecycle_generation INTEGER NOT NULL DEFAULT 0 "
       "    CHECK (typeof(lifecycle_generation) = 'integer' AND "
       "      lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+      "  sealed_generation INTEGER NOT NULL DEFAULT 0 "
+      "    CHECK (typeof(sealed_generation) = 'integer' AND "
+      "      sealed_generation BETWEEN 0 AND 9223372036854775807),"
       "  reconciliation_generation INTEGER NOT NULL DEFAULT 0 "
       "    CHECK (typeof(reconciliation_generation) = 'integer' AND "
       "      reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
@@ -10230,13 +10469,17 @@ wyl_policy_store_set_tenant_sealed (wyl_policy_store_t *store,
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   static const gchar *sql =
-      "UPDATE tenants SET sealed = ?, updated_at = unixepoch() "
-      "WHERE tenant_id = ?;";
+      "UPDATE tenants SET sealed=?,"
+      "sealed_generation=sealed_generation+CASE WHEN sealed<>? THEN 1 ELSE 0 END,"
+      "updated_at=unixepoch() WHERE tenant_id=? AND"
+      " (sealed=? OR sealed_generation<9223372036854775807);";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (sqlite3_bind_int (stmt, 1, sealed ? 1 : 0) != SQLITE_OK ||
-      (rc = bind_text (stmt, 2, tenant_id)) != WYRELOG_E_OK) {
+  if (sqlite3_bind_int (stmt, 1, sealed ? 1 : 0) != SQLITE_OK
+      || sqlite3_bind_int (stmt, 2, sealed ? 1 : 0) != SQLITE_OK
+      || (rc = bind_text (stmt, 3, tenant_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int (stmt, 4, sealed ? 1 : 0) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     return WYRELOG_E_IO;
   }
@@ -10298,8 +10541,9 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK && was_sealed != (sealed ? 1 : 0)) {
     stmt = NULL;
     rc = prepare_stmt (store->db,
-        "UPDATE tenants SET sealed=?,updated_at=unixepoch() "
-        "WHERE tenant_id=? AND sealed=?;", &stmt);
+        "UPDATE tenants SET sealed=?,sealed_generation=sealed_generation+1,"
+        "updated_at=unixepoch() WHERE tenant_id=? AND sealed=?"
+        " AND sealed_generation<9223372036854775807;", &stmt);
     if (rc == WYRELOG_E_OK
         && (sqlite3_bind_int (stmt, 1, sealed ? 1 : 0) != SQLITE_OK
             || (rc = bind_text (stmt, 2, out_tenant)) != WYRELOG_E_OK
@@ -11817,19 +12061,23 @@ wyl_policy_store_transition_tenant_authority (wyl_policy_store_t *store,
       || target_state == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
   rc = prepare_stmt (store->db,
       "UPDATE tenants SET lifecycle_state=?,sealed=?,"
+      "sealed_generation=sealed_generation+CASE WHEN sealed<>? THEN 1 ELSE 0 END,"
       "lifecycle_generation=lifecycle_generation+1,updated_at=unixepoch() "
       "WHERE tenant_id=? AND lifecycle_state=? AND lifecycle_generation=? "
       "AND lifecycle_generation<9223372036854775807 "
-      "AND reconciliation_generation=?;", &stmt);
+      "AND reconciliation_generation=? AND"
+      " (sealed=? OR sealed_generation<9223372036854775807);", &stmt);
   if (rc == WYRELOG_E_OK
       && (bind_text (stmt, 1, target_name) != WYRELOG_E_OK
           || sqlite3_bind_int (stmt, 2, sealed) != SQLITE_OK
-          || bind_text (stmt, 3, tenant_id) != WYRELOG_E_OK
-          || bind_text (stmt, 4, expected_name) != WYRELOG_E_OK
-          || sqlite3_bind_int64 (stmt, 5,
-              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int (stmt, 3, sealed) != SQLITE_OK
+          || bind_text (stmt, 4, tenant_id) != WYRELOG_E_OK
+          || bind_text (stmt, 5, expected_name) != WYRELOG_E_OK
           || sqlite3_bind_int64 (stmt, 6,
-              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 7,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK
+          || sqlite3_bind_int (stmt, 8, sealed) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, FALSE, &applied);
@@ -11879,6 +12127,7 @@ wyl_policy_store_reconcile_tenant_authority (wyl_policy_store_t *store,
   sqlite3_stmt *stmt = NULL;
   rc = prepare_stmt (store->db,
       "UPDATE tenants SET lifecycle_state=?,sealed=?,"
+      "sealed_generation=sealed_generation+CASE WHEN sealed<>? THEN 1 ELSE 0 END,"
       "lifecycle_generation=lifecycle_generation+1,"
       "reconciliation_generation=reconciliation_generation+1,"
       "updated_at=unixepoch() WHERE tenant_id=? "
@@ -11886,16 +12135,21 @@ wyl_policy_store_reconcile_tenant_authority (wyl_policy_store_t *store,
       "AND lifecycle_generation=? "
       "AND lifecycle_generation<9223372036854775807 "
       "AND reconciliation_generation=? "
-      "AND reconciliation_generation<9223372036854775807;", &stmt);
+      "AND reconciliation_generation<9223372036854775807 AND"
+      " (sealed=? OR sealed_generation<9223372036854775807);", &stmt);
   if (rc == WYRELOG_E_OK
       && (bind_text (stmt, 1, target_name) != WYRELOG_E_OK
           || sqlite3_bind_int (stmt, 2,
               target_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED) != SQLITE_OK
-          || bind_text (stmt, 3, tenant_id) != WYRELOG_E_OK
-          || sqlite3_bind_int64 (stmt, 4,
-              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int (stmt, 3,
+              target_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED) != SQLITE_OK
+          || bind_text (stmt, 4, tenant_id) != WYRELOG_E_OK
           || sqlite3_bind_int64 (stmt, 5,
-              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 6,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK
+          || sqlite3_bind_int (stmt, 7,
+              target_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, FALSE, &applied);
@@ -13644,6 +13898,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts',"
       "'service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
@@ -13673,7 +13928,19 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_exchange_audit_no_update',"
       "'trg_service_exchange_audit_no_delete',"
       "'trg_service_permission_receipt_no_update',"
-      "'trg_service_permission_receipt_no_delete') LIMIT 1;", &found);
+      "'trg_service_permission_receipt_no_delete',"
+      "'trg_service_retirement_no_update',"
+      "'trg_service_retirement_no_delete',"
+      "'trg_service_retirement_no_claim_collision',"
+      "'trg_service_domain_no_retirement_collision',"
+      "'trg_service_fence_no_retirement_collision',"
+      "'trg_service_escrow_no_retirement_collision',"
+      "'trg_service_cancellation_no_retirement_collision',"
+      "'trg_service_remediation_no_retirement_collision',"
+      "'trg_service_permission_no_retirement_collision',"
+      "'trg_service_handoff_retirement_no_service_retirement_collision',"
+      "'trg_service_handoff_disposition_no_retirement_collision') LIMIT 1;",
+      &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -13691,6 +13958,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
@@ -13703,6 +13971,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate')) LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
@@ -13740,7 +14009,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
-      "'service_permission_remediation_receipts') LIMIT 1;", &found);
+      "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)

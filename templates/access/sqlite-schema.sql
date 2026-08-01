@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS tenants (
     lifecycle_generation     INTEGER NOT NULL DEFAULT 0
         CHECK (typeof(lifecycle_generation) = 'integer' AND
             lifecycle_generation BETWEEN 0 AND 9223372036854775807),
+    sealed_generation        INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(sealed_generation) = 'integer' AND
+            sealed_generation BETWEEN 0 AND 9223372036854775807),
     reconciliation_generation INTEGER NOT NULL DEFAULT 0
         CHECK (typeof(reconciliation_generation) = 'integer' AND
             reconciliation_generation BETWEEN 0 AND 9223372036854775807),
@@ -429,12 +432,15 @@ BEFORE INSERT ON tenants BEGIN
     SELECT CASE WHEN NOT (
         typeof(NEW.lifecycle_generation) = 'integer' AND
         NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND
+        typeof(NEW.sealed_generation) = 'integer' AND
+        NEW.sealed_generation BETWEEN 0 AND 9223372036854775807 AND
         typeof(NEW.reconciliation_generation) = 'integer' AND
         NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807)
     THEN RAISE(ABORT, 'invalid tenant generation domain') END;
     SELECT CASE WHEN NOT (
         NEW.lifecycle_state = 'legacy_unclassified' AND
         NEW.lifecycle_generation = 0 AND
+        NEW.sealed_generation = 0 AND
         NEW.reconciliation_generation = 0)
     THEN RAISE(ABORT, 'invalid tenant authority') END;
 END;
@@ -444,6 +450,8 @@ BEFORE UPDATE ON tenants BEGIN
     SELECT CASE WHEN NOT (
         typeof(NEW.lifecycle_generation) = 'integer' AND
         NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND
+        typeof(NEW.sealed_generation) = 'integer' AND
+        NEW.sealed_generation BETWEEN 0 AND 9223372036854775807 AND
         typeof(NEW.reconciliation_generation) = 'integer' AND
         NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807)
     THEN RAISE(ABORT, 'invalid tenant generation domain') END;
@@ -452,6 +460,13 @@ BEFORE UPDATE ON tenants BEGIN
         (NEW.lifecycle_state IN ('active', 'sealing') AND NEW.sealed = 0) OR
         (NEW.lifecycle_state IN ('sealed', 'unsealing') AND NEW.sealed = 1))
     THEN RAISE(ABORT, 'invalid tenant authority') END;
+    SELECT CASE WHEN NOT (
+        (NEW.sealed = OLD.sealed AND
+            NEW.sealed_generation = OLD.sealed_generation) OR
+        (NEW.sealed <> OLD.sealed AND
+            OLD.sealed_generation < 9223372036854775807 AND
+            NEW.sealed_generation = OLD.sealed_generation + 1))
+    THEN RAISE(ABORT, 'invalid tenant sealed generation') END;
     SELECT CASE WHEN NEW.lifecycle_state = OLD.lifecycle_state AND
         NEW.lifecycle_generation != OLD.lifecycle_generation
     THEN RAISE(ABORT, 'invalid tenant lifecycle generation') END;
@@ -1601,6 +1616,181 @@ CREATE TRIGGER IF NOT EXISTS trg_service_permission_receipt_no_delete
 BEFORE DELETE ON service_permission_remediation_receipts
 BEGIN
     SELECT RAISE(ABORT, 'service_permission_remediation_receipts is immutable');
+END;
+
+-- ---------------------------------------------------------------------------
+-- Table: service_retirement_receipts
+-- Caller-correlated, immutable evidence for terminal service-authority
+-- mutations. Each caller request key is owned by exactly one claim namespace.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS service_retirement_receipts (
+    request_id TEXT NOT NULL PRIMARY KEY CHECK (typeof(request_id) = 'text'
+        AND length(request_id) = 27 AND instr(request_id, char(0)) = 0),
+    receipt_version INTEGER NOT NULL CHECK (typeof(receipt_version) = 'integer'
+        AND receipt_version = 1),
+    operation TEXT NOT NULL CHECK (operation IN
+        ('principal_disable', 'credential_revoke', 'tenant_seal')),
+    resource_id TEXT NOT NULL CHECK (typeof(resource_id) = 'text'
+        AND length(resource_id) BETWEEN 1 AND 255
+        AND instr(resource_id, char(0)) = 0),
+    tenant_id TEXT CHECK (tenant_id IS NULL OR (typeof(tenant_id) = 'text'
+        AND length(tenant_id) BETWEEN 1 AND 255
+        AND instr(tenant_id, char(0)) = 0)),
+    actor_subject_id TEXT NOT NULL CHECK (typeof(actor_subject_id) = 'text'
+        AND length(actor_subject_id) BETWEEN 1 AND 128
+        AND instr(actor_subject_id, char(0)) = 0),
+    input_fingerprint BLOB NOT NULL CHECK (typeof(input_fingerprint) = 'blob'
+        AND length(input_fingerprint) = 32),
+    outcome TEXT NOT NULL CHECK (outcome IN
+        ('transitioned', 'already_terminal')),
+    result_state TEXT NOT NULL CHECK (result_state IN
+        ('disabled', 'revoked', 'sealed')),
+    authority_generation INTEGER NOT NULL CHECK (
+        typeof(authority_generation) = 'integer'
+        AND authority_generation BETWEEN 1 AND 9223372036854775807),
+    tenant_lifecycle_generation INTEGER CHECK (
+        tenant_lifecycle_generation IS NULL OR (
+        typeof(tenant_lifecycle_generation) = 'integer'
+        AND tenant_lifecycle_generation BETWEEN 0 AND 9223372036854775807)),
+    tenant_sealed_generation INTEGER CHECK (
+        tenant_sealed_generation IS NULL OR (
+        typeof(tenant_sealed_generation) = 'integer'
+        AND tenant_sealed_generation BETWEEN 1 AND 9223372036854775807)),
+    event_id INTEGER CHECK (event_id IS NULL OR (typeof(event_id) = 'integer'
+        AND event_id > 0)),
+    audit_id TEXT NOT NULL UNIQUE CHECK (typeof(audit_id) = 'text'
+        AND length(audit_id) = 36 AND instr(audit_id, char(0)) = 0),
+    created_at_us INTEGER NOT NULL CHECK (typeof(created_at_us) = 'integer'
+        AND created_at_us > 0),
+    CHECK ((operation = 'principal_disable'
+            AND length(resource_id) BETWEEN 5 AND 128
+            AND substr(resource_id, 1, 4) = 'svc:' AND tenant_id IS NULL
+            AND result_state = 'disabled'
+            AND tenant_lifecycle_generation IS NULL
+            AND tenant_sealed_generation IS NULL)
+        OR (operation = 'credential_revoke' AND length(resource_id) = 31
+            AND substr(resource_id, 1, 4) = 'wlc_' AND tenant_id IS NOT NULL
+            AND result_state = 'revoked'
+            AND tenant_lifecycle_generation IS NULL
+            AND tenant_sealed_generation IS NULL)
+        OR (operation = 'tenant_seal' AND tenant_id = resource_id
+            AND result_state = 'sealed'
+            AND tenant_lifecycle_generation IS NOT NULL
+            AND tenant_sealed_generation IS NOT NULL AND event_id IS NULL)),
+    CHECK ((outcome = 'already_terminal' AND event_id IS NULL)
+        OR outcome = 'transitioned'),
+    CHECK (operation = 'tenant_seal' OR outcome = 'already_terminal'
+        OR event_id IS NOT NULL),
+    FOREIGN KEY (audit_id) REFERENCES audit_events (id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_retirement_event
+    ON service_retirement_receipts (operation, event_id)
+    WHERE event_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_service_retirement_diagnostic
+    ON service_retirement_receipts
+        (operation, resource_id, created_at_us, request_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_service_retirement_no_update
+BEFORE UPDATE ON service_retirement_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service retirement receipts are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_retirement_no_delete
+BEFORE DELETE ON service_retirement_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service retirement receipts are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_retirement_no_claim_collision
+BEFORE INSERT ON service_retirement_receipts WHEN
+    EXISTS (SELECT 1 FROM service_domain_requests
+        WHERE request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_credential_operation_fences
+        WHERE request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_credential_handoff_escrows
+        WHERE request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_credential_handoff_cancellation_claims
+        WHERE cancellation_request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_credential_handoff_remediation_actions
+        WHERE remediation_request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_permission_remediation_receipts
+        WHERE request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_credential_handoff_retirement_receipts
+        WHERE original_request_id = NEW.request_id) OR
+    EXISTS (SELECT 1 FROM service_credential_handoff_dispositions
+        WHERE original_request_id = NEW.request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service retirement request collides with existing claim');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_domain_no_retirement_collision
+BEFORE INSERT ON service_domain_requests WHEN EXISTS
+    (SELECT 1 FROM service_retirement_receipts
+        WHERE request_id = NEW.request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service domain request collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_fence_no_retirement_collision
+BEFORE INSERT ON service_credential_operation_fences WHEN EXISTS
+    (SELECT 1 FROM service_retirement_receipts
+        WHERE request_id = NEW.request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service operation fence collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_escrow_no_retirement_collision
+BEFORE INSERT ON service_credential_handoff_escrows WHEN EXISTS
+    (SELECT 1 FROM service_retirement_receipts
+        WHERE request_id = NEW.request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff escrow collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_cancellation_no_retirement_collision
+BEFORE INSERT ON service_credential_handoff_cancellation_claims
+WHEN EXISTS (SELECT 1 FROM service_retirement_receipts
+    WHERE request_id = NEW.cancellation_request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service cancellation claim collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_remediation_no_retirement_collision
+BEFORE INSERT ON service_credential_handoff_remediation_actions
+WHEN EXISTS (SELECT 1 FROM service_retirement_receipts
+    WHERE request_id = NEW.remediation_request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service remediation claim collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_permission_no_retirement_collision
+BEFORE INSERT ON service_permission_remediation_receipts WHEN EXISTS
+    (SELECT 1 FROM service_retirement_receipts
+        WHERE request_id = NEW.request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service permission claim collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS
+trg_service_handoff_retirement_no_service_retirement_collision
+BEFORE INSERT ON service_credential_handoff_retirement_receipts
+WHEN EXISTS (SELECT 1 FROM service_retirement_receipts
+    WHERE request_id = NEW.original_request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff retirement collides with retirement receipt');
+END;
+
+CREATE TRIGGER IF NOT EXISTS
+trg_service_handoff_disposition_no_retirement_collision
+BEFORE INSERT ON service_credential_handoff_dispositions
+WHEN EXISTS (SELECT 1 FROM service_retirement_receipts
+    WHERE request_id = NEW.original_request_id)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff disposition collides with retirement receipt');
 END;
 
 -- ---------------------------------------------------------------------------
