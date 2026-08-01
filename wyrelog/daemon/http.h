@@ -89,6 +89,16 @@ typedef struct
   const gchar *body_json;
   gsize body_len;
 } WylDaemonServiceTokenRequest;
+typedef struct
+{
+  guint created;
+  guint complete;
+  guint attached;
+  guint finished;
+  guint aborted;
+  guint destroyed;
+  guint duplicate_outcomes;
+} WylDaemonServiceResponseAuthoritySnapshot;
 typedef enum
 {
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_NONE = 0,
@@ -310,6 +320,11 @@ void wyl_daemon_http_service_publication_counts_for_test
 void wyl_daemon_http_service_response_wipe_snapshot_for_test
     (SoupServer * server, guint * out_count, gboolean * out_canary_seen,
     gboolean * out_all_zero);
+void wyl_daemon_http_reset_service_response_authority_for_test
+    (SoupServer * server);
+void wyl_daemon_http_service_response_authority_snapshot_for_test
+    (SoupServer * server,
+    WylDaemonServiceResponseAuthoritySnapshot * out_snapshot);
 gboolean
     wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
     (SoupServer * server, const gchar * session_id);

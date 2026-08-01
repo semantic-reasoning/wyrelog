@@ -7730,6 +7730,7 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   guint route_status = 0;
   g_autofree gchar *route_body = NULL;
+  wyl_daemon_http_reset_service_response_authority_for_test (server);
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/auth/service-token", NULL, request_body, &route_status,
           &route_body) != 0)
@@ -7740,6 +7741,15 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   if (route_access_token == NULL || strstr (route_body, "session_token") != NULL
       || strstr (route_body, "credential_secret") != NULL)
     return 1959;
+  WylDaemonServiceResponseAuthoritySnapshot response_authority = { 0 };
+  wyl_daemon_http_service_response_authority_snapshot_for_test (server,
+      &response_authority);
+  if (response_authority.created != 1 || response_authority.complete != 1
+      || response_authority.attached != 1
+      || response_authority.finished != 1 || response_authority.aborted != 0
+      || response_authority.destroyed != 1
+      || response_authority.duplicate_outcomes != 0)
+    return 19591;
 
   guint denied_status = 0;
   guint denied_retry_after = 0;
