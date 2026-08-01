@@ -122,6 +122,17 @@ typedef enum
   WYL_DAEMON_REFRESH_FAULT_PREPUBLICATION,
   WYL_DAEMON_REFRESH_FAULT_RESPONSE_BUILD,
 } WylDaemonRefreshFault;
+typedef enum
+{
+  WYL_DAEMON_RETIREMENT_PRINCIPAL_DISABLE = 1,
+  WYL_DAEMON_RETIREMENT_CREDENTIAL_REVOKE,
+  WYL_DAEMON_RETIREMENT_TENANT_SEAL,
+  WYL_DAEMON_RETIREMENT_CREDENTIAL_ROTATE,
+} WylDaemonRetirementOperation;
+typedef void WylDaemonRetirementResponseCheckpoint
+    (WylDaemonRetirementOperation operation, const gchar * caller_request_id,
+    const gchar * decision_request_id, const gchar * response_json,
+    gpointer data);
 typedef struct
 {
   guint handler_entries;
@@ -139,6 +150,10 @@ typedef wyrelog_error_t
 void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
     (SoupServer * server,
     WylDaemonManagementReauthorizationCheckpoint checkpoint, gpointer data);
+void wyl_daemon_http_set_retirement_response_checkpoint_for_test
+    (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
+    gpointer data);
+void wyl_daemon_http_fail_next_retirement_latch_for_test (SoupServer * server);
 void wyl_daemon_http_set_service_resolver_checkpoint_for_test
     (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,
     gpointer data);

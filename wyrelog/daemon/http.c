@@ -326,6 +326,9 @@ typedef struct _WylDaemonHttpContext
     WylDaemonManagementReauthorizationCheckpoint
       management_reauthorization_checkpoint;
   gpointer management_reauthorization_checkpoint_data;
+  WylDaemonRetirementResponseCheckpoint *retirement_response_checkpoint;
+  gpointer retirement_response_checkpoint_data;
+  gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
   guint resolver_terminal_entries;
   guint refresh_handler_entries;
@@ -5053,6 +5056,30 @@ void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
   ctx->management_reauthorization_checkpoint = checkpoint;
   ctx->management_reauthorization_checkpoint_data = data;
 }
+
+void wyl_daemon_http_set_retirement_response_checkpoint_for_test
+    (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
+    gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->retirement_response_checkpoint = checkpoint;
+  ctx->retirement_response_checkpoint_data = data;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_fail_next_retirement_latch_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_retirement_latch = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
 #endif
 
 static wyrelog_error_t
@@ -5459,6 +5486,37 @@ service_credential_parse_expiry (const gchar *text, gint64 *out_expiry)
  * its return code onto the service-credential HTTP contract.  Success emits the
  * module's non-secret JSON receipt; the credential material is delivered only
  * through the owner-publication escrow file, never in this response. */
+#ifdef WYL_TEST_DAEMON_HTTP
+static void
+retirement_latch_fault_for_test (WylServiceAuthWriteLease *lease, gpointer data)
+{
+  WylDaemonHttpContext *ctx = data;
+  gboolean fail = FALSE;
+  g_mutex_lock (&ctx->lock);
+  fail = ctx->fail_next_retirement_latch;
+  ctx->fail_next_retirement_latch = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  if (fail)
+    wyl_service_auth_write_lease_test_fail_mark_unavailable_once (lease);
+}
+
+static void
+retirement_response_checkpoint_for_test (WylDaemonHttpContext *ctx,
+    WylDaemonRetirementOperation operation, const gchar *caller_request_id,
+    const gchar *decision_request_id, const gchar *response_json)
+{
+  WylDaemonRetirementResponseCheckpoint *checkpoint = NULL;
+  gpointer checkpoint_data = NULL;
+  g_mutex_lock (&ctx->lock);
+  checkpoint = ctx->retirement_response_checkpoint;
+  checkpoint_data = ctx->retirement_response_checkpoint_data;
+  g_mutex_unlock (&ctx->lock);
+  if (checkpoint != NULL)
+    checkpoint (operation, caller_request_id, decision_request_id,
+        response_json, checkpoint_data);
+}
+#endif
+
 static void
 service_credential_handoff_emit (SoupServerMessage *msg,
     WylDaemonHttpContext *ctx, WylSession *session, const gchar *actor,
@@ -5493,6 +5551,12 @@ service_credential_handoff_emit (SoupServerMessage *msg,
       &receipt);
   switch (rc) {
     case WYRELOG_E_OK:
+#ifdef WYL_TEST_DAEMON_HTTP
+      if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
+        retirement_response_checkpoint_for_test (ctx,
+            WYL_DAEMON_RETIREMENT_CREDENTIAL_ROTATE, inputs->request_id,
+            decision_request_id, receipt);
+#endif
       attach_request_id_header (msg);
       soup_server_message_set_status (msg, 200, NULL);
       soup_server_message_set_response (msg, "application/json",
@@ -5978,6 +6042,11 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
     return;
   }
+#ifdef WYL_TEST_DAEMON_HTTP
+  retirement_response_checkpoint_for_test (ctx,
+      WYL_DAEMON_RETIREMENT_CREDENTIAL_REVOKE, values[1],
+      decision_request_id, response);
+#endif
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
@@ -6269,6 +6338,10 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_service_principal_disable_runtime_t runtime = {
     .registry = ctx->service_auth_registry,
     .authorization = &authorization,
+#ifdef WYL_TEST_DAEMON_HTTP
+    .before_invalidation = retirement_latch_fault_for_test,
+    .data = ctx,
+#endif
   };
   wyrelog_error_t rc = wyl_service_principal_disable_keyed_with_runtime
       (ctx->handle, subject_id, actor, values[1],
@@ -6305,6 +6378,12 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED);
     return;
   }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+  retirement_response_checkpoint_for_test (ctx,
+      WYL_DAEMON_RETIREMENT_PRINCIPAL_DISABLE, values[1],
+      decision_request_id, response);
+#endif
 
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
@@ -6459,12 +6538,23 @@ append_tenant_json (const gchar *tenant_id, gboolean sealed, gpointer user_data)
 }
 
 static void
-set_tenant_mutation_json (SoupServerMessage *msg, const gchar *tenant,
-    gboolean changed)
+set_tenant_mutation_json (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
+    const gchar *tenant, gboolean changed, const gchar *caller_request_id,
+    const gchar *decision_request_id)
 {
   g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant\":");
   append_json_string (body, tenant);
   g_string_append_printf (body, ",\"changed\":%s}", changed ? "true" : "false");
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (caller_request_id != NULL)
+    retirement_response_checkpoint_for_test (ctx,
+        WYL_DAEMON_RETIREMENT_TENANT_SEAL, caller_request_id,
+        decision_request_id, body->str);
+#else
+  (void) ctx;
+  (void) caller_request_id;
+  (void) decision_request_id;
+#endif
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
@@ -6637,8 +6727,9 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   gboolean changed = FALSE;
   wyrelog_error_t rc = WYRELOG_E_INVALID;
   WylServiceRetirementOutcome retirement = { 0 };
+  const gchar *decision_request_id = NULL;
   if (sealing) {
-    const gchar *decision_request_id = ensure_request_id_header (msg);
+    decision_request_id = ensure_request_id_header (msg);
     WylManagementReauthorization reauthorization = {
       .ctx = ctx,
       .handle = ctx->handle,
@@ -6728,7 +6819,8 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     }
   }
 
-  set_tenant_mutation_json (msg, tenant, changed);
+  set_tenant_mutation_json (msg, ctx, tenant, changed,
+      sealing ? retirement_values[1] : NULL, decision_request_id);
 }
 
 static void

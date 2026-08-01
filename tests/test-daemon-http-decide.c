@@ -9934,12 +9934,14 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
 }
 
 static void
-service_denial_env_clear (ServiceDenialEnv *env)
+service_denial_env_stop_runtime (ServiceDenialEnv *env)
 {
   if (env->http.loop != NULL)
     g_main_loop_quit (env->http.loop);
-  if (env->thread != NULL)
+  if (env->thread != NULL) {
     g_thread_join (env->thread);
+    env->thread = NULL;
+  }
   g_cond_clear (&env->barrier.changed);
   g_mutex_clear (&env->barrier.mutex);
   if (env->http.server != NULL) {
@@ -9950,11 +9952,109 @@ service_denial_env_clear (ServiceDenialEnv *env)
   g_clear_pointer (&env->context, g_main_context_unref);
   g_clear_object (&env->session);
   g_clear_object (&env->handle);
+  g_clear_pointer (&env->base_url, g_free);
+  g_clear_pointer (&env->access_token, g_free);
+  memset (env->session_token, 0, sizeof env->session_token);
+}
+
+static gint
+service_denial_env_restart (ServiceDenialEnv *env)
+{
+  service_denial_env_stop_runtime (env);
+  g_mutex_init (&env->barrier.mutex);
+  g_cond_init (&env->barrier.changed);
+  env->session = g_object_new (SOUP_TYPE_SESSION, NULL);
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = env->credential_store.policy_path,
+    .policy_keyprovider_path = env->credential_store.key_spec,
+    .audit_store_path = env->credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (env->session == NULL
+      || wyl_handle_open_with_options (&handle_options, &env->handle)
+      != WYRELOG_E_OK)
+    return 2600;
+  wyl_id_t session_id = WYL_ID_NIL;
+  if (wyl_id_new (&session_id) != WYRELOG_E_OK
+      || wyl_id_format (&session_id, env->session_token,
+          sizeof env->session_token) != WYRELOG_E_OK)
+    return 2601;
+  env->context = g_main_context_new ();
+  g_main_context_push_thread_default (env->context);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+    .operation_root = env->operation_root,
+    .credential_publication_root = env->publication_root,
+  };
+  g_autoptr (GError) error = NULL;
+  env->http.loop = g_main_loop_new (env->context, FALSE);
+  env->http.server = wyl_daemon_start_http_server (&opts, env->handle, &error);
+  g_main_context_pop_thread_default (env->context);
+  if (env->http.server == NULL)
+    return 2602;
+  env->thread = g_thread_new ("daemon-http-retirement-restart",
+      test_http_server_thread_ctx, &env->http);
+  g_main_context_invoke_full (env->context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &env->barrier, NULL);
+  g_mutex_lock (&env->barrier.mutex);
+  if (!env->barrier.ready)
+    g_cond_wait_until (&env->barrier.changed, &env->barrier.mutex,
+        g_get_monotonic_time () + 5 * G_USEC_PER_SEC);
+  gboolean ready = env->barrier.ready;
+  g_mutex_unlock (&env->barrier.mutex);
+  if (!ready)
+    return 2603;
+  GSList *uris = soup_server_get_uris (env->http.server);
+  if (uris == NULL)
+    return 2604;
+  env->base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  wyl_daemon_http_set_publication_override_for_test (env->http.server,
+      &sp_publication_vtable, &env->publication);
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (env->http.server);
+  if (env->base_url == NULL
+      || !seed_management_human_access_token (env->http.server,
+          env->session_token, "human-principal-admin", &env->access_token))
+    return 2605;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  if (wyl_policy_store_set_principal_state (store, "human-principal-admin",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, env->session_token,
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+          "human-principal-admin", "wr.service_principal.manage",
+          env->session_token) != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+          "human-principal-admin", "wr.service_principal.manage",
+          env->session_token, "armed") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+          "human-principal-admin", "wr.service_credential.manage",
+          env->session_token) != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+          "human-principal-admin", "wr.service_credential.manage",
+          env->session_token, "armed") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT,
+          "armed") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env->handle) != WYRELOG_E_OK)
+    return 2606;
+  return 0;
+}
+
+static void
+service_denial_env_clear (ServiceDenialEnv *env)
+{
+  service_denial_env_stop_runtime (env);
   g_free (env->publication.staged_secret);
-  g_free (env->base_url);
   g_free (env->query);
   g_free (env->tenant_query);
-  g_free (env->access_token);
   if (env->handoff_dir != NULL) {
     sp_remove_tree (env->operation_root);
     sp_remove_tree (env->publication_root);
@@ -9967,10 +10067,11 @@ service_denial_env_clear (ServiceDenialEnv *env)
 }
 
 static gint
-send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
+send_raw_service_principal_bearer_full (SoupSession *session,
+    const gchar *method,
     const gchar *base_url, const gchar *path, const gchar *query,
     const gchar *access_token, const gchar *body, guint *out_status,
-    gchar **out_body)
+    gchar **out_body, gchar **out_request_id)
 {
   if (access_token == NULL)
     return 164;
@@ -9978,6 +10079,8 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
     return 120;
   *out_status = 0;
   *out_body = NULL;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -10001,11 +10104,502 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
   gint rc = check_response_request_id_header (msg, 178);
   if (rc != 0)
     return rc;
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    const gchar *access_token, const gchar *body, guint *out_status,
+    gchar **out_body)
+{
+  return send_raw_service_principal_bearer_full (session, method, base_url,
+      path, query, access_token, body, out_status, out_body, NULL);
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylDaemonRetirementOperation expected_operation;
+  const gchar *expected_request_id;
+  gboolean entered;
+  gboolean released;
+  gboolean exited;
+  gboolean mismatch;
+  gchar *captured_decision_request_id;
+  gchar *captured_response;
+} RetirementResponseBarrier;
+
+typedef struct
+{
+  const gchar *base_url;
+  const gchar *method;
+  const gchar *path;
+  const gchar *query;
+  const gchar *access_token;
+  const gchar *body;
+  GMutex mutex;
+  GCond changed;
+  gboolean close_now;
+  gint rc;
+  gchar *captured_decision_request_id;
+  gchar *captured_response;
+} DroppedManagementRequest;
+
+static void
+retirement_response_checkpoint (WylDaemonRetirementOperation operation,
+    const gchar *request_id, const gchar *decision_request_id,
+    const gchar *response_json, gpointer data)
+{
+  RetirementResponseBarrier *barrier = data;
+  g_mutex_lock (&barrier->mutex);
+  barrier->mismatch = operation != barrier->expected_operation
+      || g_strcmp0 (request_id, barrier->expected_request_id) != 0;
+  barrier->captured_decision_request_id = g_strdup (decision_request_id);
+  barrier->captured_response = g_strdup (response_json);
+  barrier->entered = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  while (!barrier->released)
+    g_cond_wait (&barrier->changed, &barrier->mutex);
+  barrier->exited = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  g_mutex_unlock (&barrier->mutex);
+}
+
+static gpointer
+dropped_management_request_thread (gpointer data)
+{
+  DroppedManagementRequest *request = data;
+  g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
+      NULL);
+  g_autoptr (GSocketClient) client = g_socket_client_new ();
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) connection = uri != NULL
+      ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
+      g_uri_get_port (uri), NULL, &error) : NULL;
+  if (connection == NULL) {
+    request->rc = 1;
+    return NULL;
+  }
+  g_autofree gchar *target = request->query == NULL ? g_strdup (request->path)
+      : g_strdup_printf ("%s?%s", request->path, request->query);
+  g_autofree gchar *wire = g_strdup_printf
+      ("%s %s HTTP/1.1\r\nHost: %s:%d\r\nAuthorization: Bearer %s\r\n"
+      "Content-Type: application/json\r\nConnection: close\r\n"
+      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s", request->method,
+      target, g_uri_get_host (uri), g_uri_get_port (uri),
+      request->access_token, strlen (request->body), request->body);
+  gsize written = 0;
+  GOutputStream *output = g_io_stream_get_output_stream
+      (G_IO_STREAM (connection));
+  if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
+          &error) || written != strlen (wire)
+      || !g_output_stream_flush (output, NULL, &error)) {
+    request->rc = 2;
+    return NULL;
+  }
+  g_mutex_lock (&request->mutex);
+  while (!request->close_now)
+    g_cond_wait (&request->changed, &request->mutex);
+  g_mutex_unlock (&request->mutex);
+  if (!g_io_stream_close (G_IO_STREAM (connection), NULL, &error))
+    request->rc = 3;
+  else
+    request->rc = 0;
+  return NULL;
+}
+
+static gboolean
+drop_management_response (SoupServer *server,
+    WylDaemonRetirementOperation operation, const gchar *request_id,
+    DroppedManagementRequest *request)
+{
+  RetirementResponseBarrier barrier = {
+    .expected_operation = operation,
+    .expected_request_id = request_id,
+  };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_mutex_init (&request->mutex);
+  g_cond_init (&request->changed);
+  request->rc = -1;
+  wyl_daemon_http_set_retirement_response_checkpoint_for_test (server,
+      retirement_response_checkpoint, &barrier);
+  GThread *thread = g_thread_new ("drop-retirement-response",
+      dropped_management_request_thread, request);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.entered)
+    g_cond_wait_until (&barrier.changed, &barrier.mutex,
+        g_get_monotonic_time () + 30 * G_USEC_PER_SEC);
+  gboolean entered = barrier.entered;
+  g_mutex_unlock (&barrier.mutex);
+  g_mutex_lock (&request->mutex);
+  request->close_now = TRUE;
+  g_cond_broadcast (&request->changed);
+  g_mutex_unlock (&request->mutex);
+  g_thread_join (thread);
+  g_mutex_lock (&barrier.mutex);
+  barrier.released = TRUE;
+  g_cond_broadcast (&barrier.changed);
+  while (entered && !barrier.exited)
+    g_cond_wait (&barrier.changed, &barrier.mutex);
+  g_mutex_unlock (&barrier.mutex);
+  wyl_daemon_http_set_retirement_response_checkpoint_for_test (server, NULL,
+      NULL);
+  gboolean ok = entered && !barrier.mismatch && request->rc == 0;
+  request->captured_decision_request_id =
+      g_steal_pointer (&barrier.captured_decision_request_id);
+  if (barrier.captured_response != NULL) {
+    g_free (request->captured_response);
+    request->captured_response = g_steal_pointer (&barrier.captured_response);
+  }
+  g_cond_clear (&request->changed);
+  g_mutex_clear (&request->mutex);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return ok;
+}
+
+static gboolean
+replay_retirement_response (ServiceDenialEnv *env, const gchar *method,
+    const gchar *path, const gchar *query, const gchar *body,
+    const gchar *caller_request_id, const DroppedManagementRequest *dropped,
+    const gchar *expected_fragment)
+{
+  guint status = 0;
+  g_autofree gchar *response_a = NULL;
+  g_autofree gchar *response_b = NULL;
+  g_autofree gchar *correlation_a = NULL;
+  g_autofree gchar *correlation_b = NULL;
+  if (dropped->captured_response == NULL
+      || dropped->captured_decision_request_id == NULL
+      || !wyl_request_id_is_canonical (dropped->captured_decision_request_id)
+      || g_strcmp0 (dropped->captured_decision_request_id,
+          caller_request_id) == 0)
+    return FALSE;
+  if (send_raw_service_principal_bearer_full (env->session, method,
+          env->base_url, path, query, env->access_token, body, &status,
+          &response_a, &correlation_a) != 0 || status != 200
+      || response_a == NULL || correlation_a == NULL
+      || g_strcmp0 (response_a, dropped->captured_response) != 0
+      || strstr (response_a, expected_fragment) == NULL
+      || !wyl_request_id_is_canonical (correlation_a)
+      || g_strcmp0 (correlation_a, caller_request_id) == 0)
+    return FALSE;
+  if (send_raw_service_principal_bearer_full (env->session, method,
+          env->base_url, path, query, env->access_token, body, &status,
+          &response_b, &correlation_b) != 0 || status != 200
+      || response_b == NULL || correlation_b == NULL
+      || g_strcmp0 (response_b, response_a) != 0
+      || !wyl_request_id_is_canonical (correlation_b)
+      || g_strcmp0 (correlation_b, caller_request_id) == 0
+      || g_strcmp0 (correlation_b, correlation_a) == 0)
+    return FALSE;
+  return TRUE;
+}
+
+static gint
+check_retirement_response_loss_restart_contract (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  gboolean seal_tenant_created = FALSE;
+  if (wyl_policy_store_create_tenant (store, "tenant-drop-seal",
+          &seal_tenant_created) != WYRELOG_E_OK || !seal_tenant_created
+      || wyl_policy_store_grant_direct_permission (store,
+          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT,
+          "armed") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2610;
+  }
+
+  const gchar *disable_subject = "svc:tenant-a:drop-disable";
+  const gchar *revoke_subject = "svc:tenant-a:drop-revoke";
+  const gchar *rotate_subject = "svc:tenant-a:drop-rotate";
+  gchar seed_ids[5][WYL_REQUEST_ID_STRING_BUF] = { {0} };
+  for (guint i = 0; i < G_N_ELEMENTS (seed_ids); i++)
+    if (wyl_request_id_new (seed_ids[i], sizeof seed_ids[i]) != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2611;
+    }
+  wyl_service_principal_t principal = { 0 };
+  if (wyl_service_principal_create (env.handle, disable_subject,
+          "Drop disable", "human-principal-admin", seed_ids[0], &principal)
+      != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2612;
+  }
+  wyl_service_principal_clear (&principal);
+  if (wyl_service_principal_create (env.handle, revoke_subject, "Drop revoke",
+          "human-principal-admin", seed_ids[1], &principal) != WYRELOG_E_OK) {
+    wyl_service_principal_clear (&principal);
+    service_denial_env_clear (&env);
+    return 2613;
+  }
+  wyl_service_principal_clear (&principal);
+  if (wyl_service_principal_create (env.handle, rotate_subject, "Drop rotate",
+          "human-principal-admin", seed_ids[2], &principal) != WYRELOG_E_OK) {
+    wyl_service_principal_clear (&principal);
+    service_denial_env_clear (&env);
+    return 2614;
+  }
+  wyl_service_principal_clear (&principal);
+  wyl_service_credential_issue_result_t revoke_seed = { 0 };
+  wyl_service_credential_issue_result_t rotate_seed = { 0 };
+  if (wyl_service_credential_issue (env.handle, revoke_subject, "tenant-a",
+          "human-principal-admin", seed_ids[3],
+          CONTRACT_FUTURE_EXPIRES_AT_US, &revoke_seed) != WYRELOG_E_OK
+      || wyl_service_credential_issue (env.handle, rotate_subject, "tenant-a",
+          "human-principal-admin", seed_ids[4],
+          CONTRACT_FUTURE_EXPIRES_AT_US, &rotate_seed) != WYRELOG_E_OK) {
+    wyl_service_credential_issue_result_clear (&revoke_seed);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    service_denial_env_clear (&env);
+    return 2615;
+  }
+  g_autofree gchar *revoke_credential =
+      g_strdup (revoke_seed.credential.credential_id);
+  g_autofree gchar *rotate_credential =
+      g_strdup (rotate_seed.credential.credential_id);
+  wyl_service_credential_issue_result_clear (&revoke_seed);
+  wyl_service_credential_issue_result_clear (&rotate_seed);
+  if (revoke_credential == NULL || rotate_credential == NULL) {
+    service_denial_env_clear (&env);
+    return 2616;
+  }
+
+  gchar caller_ids[4][WYL_REQUEST_ID_STRING_BUF] = { {0}
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (caller_ids); i++)
+    if (wyl_request_id_new (caller_ids[i], sizeof caller_ids[i])
+        != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2617;
+    }
+  g_autofree gchar *disable_path = g_strdup_printf
+      ("/service-principals/%s/disable", disable_subject);
+  g_autofree gchar *revoke_path = g_strdup_printf ("/service-credentials/%s",
+      revoke_credential);
+  g_autofree gchar *rotate_path = g_strdup_printf
+      ("/service-credentials/%s/rotate", rotate_credential);
+  g_autofree gchar *seal_query = g_strdup_printf ("name=tenant-drop-seal&%s",
+      env.query);
+  g_autofree gchar *disable_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[0]);
+  g_autofree gchar *revoke_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[1]);
+  g_autofree gchar *seal_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[3]);
+  g_autofree gchar *rotate_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\","
+      "\"destination\":\"drop-rotate.json\",\"expires_at_us\":\"%s\"}",
+      caller_ids[2], CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+  DroppedManagementRequest dropped[4] = {
+    {.base_url = env.base_url,.method = "POST",.path = disable_path,
+          .query = env.query,.access_token = env.access_token,
+        .body = disable_body},
+    {.base_url = env.base_url,.method = "DELETE",.path = revoke_path,
+          .query = env.tenant_query,.access_token = env.access_token,
+        .body = revoke_body},
+    {.base_url = env.base_url,.method = "POST",.path = rotate_path,
+          .query = env.tenant_query,.access_token = env.access_token,
+        .body = rotate_body},
+    {.base_url = env.base_url,.method = "POST",.path = "/tenants/seal",
+          .query = seal_query,.access_token = env.access_token,
+        .body = seal_body},
+  };
+  const WylDaemonRetirementOperation operations[] = {
+    WYL_DAEMON_RETIREMENT_PRINCIPAL_DISABLE,
+    WYL_DAEMON_RETIREMENT_CREDENTIAL_REVOKE,
+    WYL_DAEMON_RETIREMENT_CREDENTIAL_ROTATE,
+    WYL_DAEMON_RETIREMENT_TENANT_SEAL,
+  };
+  g_autofree gchar *probe_body = NULL;
+  for (guint i = 0; i < G_N_ELEMENTS (dropped); i++) {
+    if (!drop_management_response (env.http.server, operations[i],
+            caller_ids[i], &dropped[i])) {
+      guint diagnostic_status = 0;
+      g_autofree gchar *diagnostic_body = NULL;
+      (void) send_raw_service_principal_bearer (env.session,
+          dropped[i].method, env.base_url, dropped[i].path, dropped[i].query,
+          env.access_token, dropped[i].body, &diagnostic_status,
+          &diagnostic_body);
+      g_printerr ("WYRELOG_TEST_DIAG retirement_drop route=%u socket_rc=%d "
+          "captured_id=%s captured_body=%s status=%u body=%s\n", i,
+          dropped[i].rc,
+          dropped[i].captured_decision_request_id != NULL ?
+          dropped[i].captured_decision_request_id : "(null)",
+          dropped[i].captured_response != NULL ?
+          dropped[i].captured_response : "(null)", diagnostic_status,
+          diagnostic_body != NULL ? diagnostic_body : "(null)");
+      g_printerr ("WYRELOG_TEST_DIAG retirement_publication stage=%u "
+          "commit=%u published=%d leases=%u\n", env.publication.stage_calls,
+          env.publication.commit_calls, env.publication.published,
+          env.publication.active_leases);
+      rc = 2618 + (gint) i;
+      goto clear_dropped;
+    }
+  }
+  guint status = 0;
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, env.access_token, NULL, &status,
+          &probe_body) != 0 || status != 200) {
+    rc = 2622;
+    goto clear_dropped;
+  }
+  gint64 receipts_before = 0;
+  gint64 credentials_before = 0;
+  guint stage_before = env.publication.stage_calls;
+  guint commit_before = env.publication.commit_calls;
+  if (!policy_count_rows (env.handle,
+          "SELECT count(*) FROM service_retirement_receipts;", &receipts_before)
+      || receipts_before != 3
+      || !policy_count_rows (env.handle,
+          "SELECT count(*) FROM service_credentials;", &credentials_before)
+      || credentials_before != 3 || stage_before == 0 || commit_before == 0) {
+    rc = 2623;
+    goto clear_dropped;
+  }
+
+  if ((rc = service_denial_env_restart (&env)) != 0)
+    goto clear_dropped;
+  if (!replay_retirement_response (&env, "POST", disable_path, env.query,
+          disable_body, caller_ids[0], &dropped[0], "\"state\":\"disabled\"")) {
+    rc = 2624;
+    goto clear_dropped;
+  }
+  if (!replay_retirement_response (&env, "DELETE", revoke_path,
+          env.tenant_query, revoke_body, caller_ids[1], &dropped[1],
+          "\"state\":\"revoked\"")) {
+    rc = 2625;
+    goto clear_dropped;
+  }
+  if (!replay_retirement_response (&env, "POST", rotate_path,
+          env.tenant_query, rotate_body, caller_ids[2], &dropped[2],
+          "\"state\":\"terminal\"")) {
+    rc = 2626;
+    goto clear_dropped;
+  }
+  if (!replay_retirement_response (&env, "POST", "/tenants/seal",
+          seal_query, seal_body, caller_ids[3], &dropped[3],
+          "\"changed\":true")) {
+    rc = 2627;
+    goto clear_dropped;
+  }
+  gint64 receipts_after = 0;
+  gint64 credentials_after = 0;
+  if (!policy_count_rows (env.handle,
+          "SELECT count(*) FROM service_retirement_receipts;", &receipts_after)
+      || receipts_after != receipts_before
+      || !policy_count_rows (env.handle,
+          "SELECT count(*) FROM service_credentials;", &credentials_after)
+      || credentials_after != credentials_before
+      || env.publication.stage_calls != stage_before
+      || env.publication.commit_calls != commit_before) {
+    rc = 2628;
+    goto clear_dropped;
+  }
+
+clear_dropped:
+  for (guint i = 0; i < G_N_ELEMENTS (dropped); i++) {
+    g_free (dropped[i].captured_decision_request_id);
+    g_free (dropped[i].captured_response);
+  }
+  service_denial_env_clear (&env);
+  return rc;
+}
+
+static gint
+check_retirement_postcommit_http_fault (guint expected_status,
+    gboolean fail_latch)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
+  gchar create_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar caller_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  wyl_service_principal_t principal = { 0 };
+  const gchar *subject = fail_latch ? "svc:tenant-a:fault-500" :
+      "svc:tenant-a:fault-503";
+  if (wyl_request_id_new (create_id, sizeof create_id) != WYRELOG_E_OK
+      || wyl_request_id_new (caller_id, sizeof caller_id) != WYRELOG_E_OK
+      || wyl_service_principal_create (env.handle, subject, "Fault target",
+          "human-principal-admin", create_id, &principal) != WYRELOG_E_OK) {
+    wyl_service_principal_clear (&principal);
+    service_denial_env_clear (&env);
+    return 2630;
+  }
+  wyl_service_principal_clear (&principal);
+  if (fail_latch)
+    wyl_daemon_http_fail_next_retirement_latch_for_test (env.http.server);
+  wyl_policy_store_service_authority_transaction_fail_once
+      (wyl_handle_get_policy_store (env.handle),
+      WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+  g_autofree gchar *path = g_strdup_printf
+      ("/service-principals/%s/disable", subject);
+  g_autofree gchar *body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_id);
+  guint status = 0;
+  g_autofree gchar *response = NULL;
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          path, env.query, env.access_token, body, &status, &response) != 0
+      || status != expected_status || response == NULL
+      || strstr (response, "service_principal_failed") == NULL) {
+    service_denial_env_clear (&env);
+    return fail_latch ? 2631 : 2632;
+  }
+  g_autofree gchar *receipt_sql = g_strdup_printf
+      ("SELECT count(*) FROM service_retirement_receipts WHERE "
+      "request_id='%s';", caller_id);
+  g_autofree gchar *state_sql = g_strdup_printf
+      ("SELECT count(*) FROM service_principals WHERE subject_id='%s' AND "
+      "state='disabled';", subject);
+  gint64 receipt_count = 0;
+  gint64 disabled_count = 0;
+  if (!policy_count_rows (env.handle, receipt_sql, &receipt_count)
+      || receipt_count != 1
+      || !policy_count_rows (env.handle, state_sql, &disabled_count)
+      || disabled_count != 1) {
+    service_denial_env_clear (&env);
+    return fail_latch ? 2633 : 2634;
+  }
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+static gint
+check_retirement_postcommit_http_fault_matrix (void)
+{
+  gint rc = check_retirement_postcommit_http_fault (503, FALSE);
+  if (rc != 0)
+    return rc;
+  return check_retirement_postcommit_http_fault (500, TRUE);
 }
 
 static gint
@@ -11604,6 +12198,17 @@ main (void)
   gint secret_leak_rc = check_service_management_populated_secret_leak ();
   if (secret_leak_rc != 0) {
     result = secret_leak_rc;
+    goto cleanup;
+  }
+  gint retirement_restart_rc =
+      check_retirement_response_loss_restart_contract ();
+  if (retirement_restart_rc != 0) {
+    result = retirement_restart_rc;
+    goto cleanup;
+  }
+  gint retirement_fault_rc = check_retirement_postcommit_http_fault_matrix ();
+  if (retirement_fault_rc != 0) {
+    result = retirement_fault_rc;
     goto cleanup;
   }
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
