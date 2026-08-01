@@ -132,6 +132,13 @@ typedef struct
   guint refresh_id_successes;
   guint publications;
 } WylDaemonRefreshCounters;
+typedef wyrelog_error_t
+    (*WylDaemonManagementReauthorizationCheckpoint) (WylHandle * handle,
+    const gchar * actor, const gchar * action, const gchar * session_id,
+    const gchar * target_tenant, gpointer data);
+void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (SoupServer * server,
+    WylDaemonManagementReauthorizationCheckpoint checkpoint, gpointer data);
 void wyl_daemon_http_set_service_resolver_checkpoint_for_test
     (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,
     gpointer data);

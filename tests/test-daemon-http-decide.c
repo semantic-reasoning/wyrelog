@@ -4387,6 +4387,28 @@ seed_management_human_access_token (SoupServer *server,
       out_access_token) == WYRELOG_E_OK;
 }
 
+static gboolean
+seed_human_tokens_with_assurance (SoupServer *server, const gchar *session_id,
+    const gchar *subject, const gchar *tenant, gboolean mfa_assured,
+    gchar **out_access_token, gchar **out_refresh_token)
+{
+  if (out_access_token == NULL || out_refresh_token == NULL)
+    return FALSE;
+  *out_access_token = NULL;
+  *out_refresh_token = NULL;
+  gboolean seeded = mfa_assured ?
+      wyl_daemon_http_seed_mfa_human_session_for_test (server, session_id,
+      subject, tenant) :
+      wyl_daemon_http_seed_human_session_for_test (server, session_id,
+      subject, tenant);
+  g_autoptr (WylSession) session = seeded ?
+      wyl_daemon_http_ref_session (server, session_id) : NULL;
+  return session != NULL
+      && wyl_daemon_http_issue_human_tokens_for_test (server, session,
+      session_id, subject, tenant, out_access_token, out_refresh_token)
+      == WYRELOG_E_OK;
+}
+
 static gint
 send_raw_logout_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, guint *out_status,
@@ -5302,6 +5324,7 @@ typedef struct
   const gchar *base_url;
   const gchar *path;
   const gchar *query;
+  const gchar *access_token;
   gint rc;
   guint status;
   gchar *body;
@@ -5313,9 +5336,9 @@ actual_route_call_thread (gpointer data)
   ActualRouteCall *call = data;
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   if (call->route == ACTUAL_ROUTE_DISABLE_PRINCIPAL)
-    call->rc = send_raw_service_principal_full (session, "POST",
-        call->base_url, call->path, call->query, NULL, &call->status,
-        &call->body);
+    call->rc = send_raw_policy_mutation_bearer (session, "POST",
+        call->base_url, call->path, call->query, call->access_token,
+        &call->status, &call->body);
   else
     call->rc = send_raw_policy_mutation (session, "POST", call->base_url,
         call->path, call->query, &call->status, &call->body);
@@ -5325,8 +5348,8 @@ actual_route_call_thread (gpointer data)
 static gboolean
 actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     const gchar *path, const gchar *query, ActualRetirementRoute route,
-    const ActualServiceTokens *tokens, const gchar *subject,
-    const gchar *tenant)
+    const gchar *access_token, const ActualServiceTokens *tokens,
+    const gchar *subject, const gchar *tenant)
 {
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   WylServiceAuthReadLease *held = NULL;
@@ -5340,6 +5363,7 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     .base_url = base_url,
     .path = path,
     .query = query,
+    .access_token = access_token,
     .rc = -1,
   };
   g_autoptr (GThread) mutation = g_thread_new ("actual-http-retirement",
@@ -5362,6 +5386,10 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     g_thread_join (g_steal_pointer (&mutation));
   if (resolver != NULL)
     g_thread_join (g_steal_pointer (&resolver));
+  gboolean token_a_retired = actual_service_token_expect (server,
+      tokens->token_a, subject, tenant, FALSE);
+  gboolean token_b_retired = actual_service_token_expect (server,
+      tokens->token_b, subject, tenant, FALSE);
   ok = ok && release_rc == WYRELOG_E_OK && call.rc == 0 && call.status == 200
       && call.body != NULL
       && (route == ACTUAL_ROUTE_DISABLE_PRINCIPAL
@@ -5369,10 +5397,17 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
       : strstr (call.body, "\"changed\":true") != NULL)
       && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
-      && actual_service_token_expect (server, tokens->token_a, subject, tenant,
-      FALSE)
-      && actual_service_token_expect (server, tokens->token_b, subject, tenant,
-      FALSE);
+      && token_a_retired && token_b_retired;
+  if (!ok)
+    g_printerr ("WYRELOG_TEST_DIAG retirement route=%d release=%d call_rc=%d "
+        "status=%u body=%s later_rc=%d later_sid=%s later_actor=%s "
+        "later_tenant=%s token_a_retired=%d token_b_retired=%d\n", route,
+        release_rc, call.rc, call.status,
+        call.body != NULL ? call.body : "(null)", later.rc,
+        later.sid != NULL ? later.sid : "(null)",
+        later.actor != NULL ? later.actor : "(null)",
+        later.tenant != NULL ? later.tenant : "(null)", token_a_retired,
+        token_b_retired);
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
@@ -9197,17 +9232,21 @@ check_service_principal_management_contract (void)
     rc = 2161;
     goto cleanup;
   }
-  tenant_route_query = g_strdup_printf ("name=tenant-route&%s", query);
+  /* Tenant lifecycle routes retain their session-token authorization
+   * contract; do not inherit the Bearer-only management query above. */
+  tenant_route_query = g_strdup_printf ("name=tenant-route&session_token=%s&%s",
+      session_token, query);
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
-          &tenant_route_tokens, "svc:tenant-route:worker", "tenant-route")) {
+          NULL, &tenant_route_tokens, "svc:tenant-route:worker",
+          "tenant-route")) {
     rc = 2162;
     goto cleanup;
   }
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
-          ACTUAL_ROUTE_DISABLE_PRINCIPAL, &principal_route_tokens,
-          "svc:tenant-a:worker", "tenant-a")) {
+          ACTUAL_ROUTE_DISABLE_PRINCIPAL, access_token,
+          &principal_route_tokens, "svc:tenant-a:worker", "tenant-a")) {
     rc = 2163;
     goto cleanup;
   }
@@ -9591,6 +9630,726 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_service_management_forwarded_spoof (SoupSession *session,
+    const gchar *method, const gchar *base_url, const gchar *path,
+    const gchar *query, const gchar *access_token, const gchar *body,
+    guint *out_status, gchar **out_body)
+{
+  if (access_token == NULL || out_status == NULL || out_body == NULL)
+    return 2520;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 2521;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+  soup_message_headers_replace (headers, "Authorization", authorization);
+  /* These attacker-controlled forwarding claims must never replace the
+   * listener and peer socket addresses consumed by the loopback gate. */
+  soup_message_headers_replace (headers, "Forwarded",
+      "for=203.0.113.9;proto=https;host=attacker.invalid");
+  soup_message_headers_replace (headers, "X-Forwarded-For", "203.0.113.9");
+  soup_message_headers_replace (headers, "X-Real-IP", "203.0.113.9");
+  soup_message_headers_replace (headers, "Host", "attacker.invalid");
+  if (body != NULL) {
+    g_autoptr (GBytes) request_bytes = g_bytes_new_static (body, strlen (body));
+    soup_message_set_request_body_from_bytes (msg, "application/json",
+        request_bytes);
+  }
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 2522;
+  gint rc = check_response_request_id_header (msg, 2523);
+  if (rc != 0)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+/* The shared envelope accepts only a default-resolver Bearer whose exact live
+ * human session has completed MFA. Exercise caller classes that can otherwise
+ * look superficially valid, including refresh of an unassured session. */
+static gint
+check_service_management_caller_and_refresh_matrix (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *tenant_access = NULL;
+  g_autofree gchar *tenant_refresh = NULL;
+  g_autofree gchar *session_query = NULL;
+  g_autofree gchar *skip_access = NULL;
+  g_autofree gchar *skip_refresh = NULL;
+  g_autofree gchar *skip_refreshed_access = NULL;
+  g_autofree gchar *assured_access = NULL;
+  g_autofree gchar *assured_refresh = NULL;
+  g_autofree gchar *assured_refreshed_access = NULL;
+  wyl_id_t tenant_id = WYL_ID_NIL;
+  wyl_id_t skip_id = WYL_ID_NIL;
+  wyl_id_t assured_id = WYL_ID_NIL;
+  gchar tenant_session[WYL_ID_STRING_BUF] = { 0 };
+  gchar skip_session[WYL_ID_STRING_BUF] = { 0 };
+  gchar assured_session[WYL_ID_STRING_BUF] = { 0 };
+  wyl_policy_store_t *store = NULL;
+  guint status = 0;
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+
+  if (wyl_id_new (&tenant_id) != WYRELOG_E_OK
+      || wyl_id_new (&skip_id) != WYRELOG_E_OK
+      || wyl_id_new (&assured_id) != WYRELOG_E_OK
+      || wyl_id_format (&tenant_id, tenant_session, sizeof tenant_session)
+      != WYRELOG_E_OK
+      || wyl_id_format (&skip_id, skip_session, sizeof skip_session)
+      != WYRELOG_E_OK
+      || wyl_id_format (&assured_id, assured_session, sizeof assured_session)
+      != WYRELOG_E_OK) {
+    rc = 2530;
+    goto out;
+  }
+  store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_set_principal_state (store, "tenant-local-admin",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "skip-mfa-admin",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "refresh-mfa-admin",
+          "authenticated") != WYRELOG_E_OK) {
+    rc = 2541;
+    goto out;
+  }
+
+  if (!seed_human_tokens_with_assurance (env.http.server, tenant_session,
+          "tenant-local-admin", "tenant-a", TRUE, &tenant_access,
+          &tenant_refresh)
+      || send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, tenant_access, NULL, &status,
+          &body) != 0 || status != 403
+      || body == NULL || strstr (body, "service_principal_denied") == NULL) {
+    g_printerr ("WYRELOG_TEST_DIAG management_caller tenant_local status=%u "
+        "body=%s\n", status, body != NULL ? body : "(null)");
+    rc = 2531;
+    goto out;
+  }
+
+  /* A valid live session id in the query never substitutes for Bearer. */
+  g_clear_pointer (&body, g_free);
+  session_query = g_strdup_printf
+      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+      env.session_token);
+  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
+          "/service-principals", session_query, NULL, &status, &body) != 0
+      || status != 401 || body == NULL
+      || strstr (body, "service_principal_auth_required") == NULL) {
+    rc = 2532;
+    goto out;
+  }
+
+  if (!seed_human_tokens_with_assurance (env.http.server, skip_session,
+          "skip-mfa-admin", WYL_TENANT_DEFAULT, FALSE, &skip_access,
+          &skip_refresh)) {
+    rc = 2533;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, skip_access, NULL, &status,
+          &body) != 0 || status != 403 || body == NULL
+      || strstr (body, "service_principal_denied") == NULL) {
+    rc = 2534;
+    goto out;
+  }
+
+  /* Refresh rotates tokens but cannot mint MFA assurance for a skip-MFA
+   * session. The successor bearer remains denied by the live-session gate. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_refresh (env.session, "POST", env.base_url, skip_refresh,
+          &status, &body) != 0 || status != 200 || body == NULL) {
+    rc = 2535;
+    goto out;
+  }
+  skip_refreshed_access = extract_json_string (body, "access_token");
+  g_clear_pointer (&body, g_free);
+  if (skip_refreshed_access == NULL
+      || send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, skip_refreshed_access, NULL,
+          &status, &body) != 0 || status != 403) {
+    rc = 2536;
+    goto out;
+  }
+
+  /* Conversely, refresh of an already MFA-assured live session preserves the
+   * live assurance bit; the rotated token itself carries no authority to
+   * elevate a different session. */
+  if (!seed_human_tokens_with_assurance (env.http.server, assured_session,
+          "refresh-mfa-admin", WYL_TENANT_DEFAULT, TRUE, &assured_access,
+          &assured_refresh)) {
+    rc = 2537;
+    goto out;
+  }
+  if (wyl_policy_store_set_principal_state (store, "refresh-mfa-admin",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store, "refresh-mfa-admin",
+          "wr.service_principal.manage", assured_session) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, assured_session, "active")
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "refresh-mfa-admin",
+          "wr.service_principal.manage", assured_session, "armed")
+      != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    rc = 2538;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_refresh (env.session, "POST", env.base_url, assured_refresh,
+          &status, &body) != 0 || status != 200 || body == NULL) {
+    rc = 2539;
+    goto out;
+  }
+  assured_refreshed_access = extract_json_string (body, "access_token");
+  g_clear_pointer (&body, g_free);
+  if (assured_refreshed_access == NULL
+      || send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, assured_refreshed_access, NULL,
+          &status, &body) != 0 || status != 200) {
+    rc = 2540;
+    goto out;
+  }
+
+  rc = 0;
+out:
+  service_denial_env_clear (&env);
+  return rc;
+}
+
+typedef enum
+{
+  MANAGEMENT_CHECKPOINT_NOOP,
+  MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT,
+  MANAGEMENT_CHECKPOINT_TARGET_SEALED,
+} ManagementCheckpointMutation;
+
+typedef struct
+{
+  ManagementCheckpointMutation mutation;
+  guint calls;
+} ManagementCheckpointProbe;
+
+static wyrelog_error_t
+management_checkpoint_mutate_authority (WylHandle *handle,
+    const gchar *actor, const gchar *action, const gchar *session_id,
+    const gchar *target_tenant, gpointer data)
+{
+  ManagementCheckpointProbe *probe = data;
+  if (handle == NULL || actor == NULL || action == NULL || session_id == NULL
+      || probe == NULL)
+    return WYRELOG_E_INVALID;
+  probe->calls++;
+  if (probe->mutation == MANAGEMENT_CHECKPOINT_NOOP)
+    return WYRELOG_E_OK;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (probe->mutation == MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT) {
+    wyrelog_error_t rc = wyl_policy_store_set_permission_state (store, actor,
+        action, session_id, "dormant");
+    return rc == WYRELOG_E_OK ? wyl_handle_reload_engine_pair (handle) : rc;
+  }
+  if (target_tenant == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_policy_store_set_tenant_sealed (store, target_tenant, TRUE);
+}
+
+/* Prove the WRITE-lease callback is not ceremonial: authority changes after
+ * the front-door ALLOW are observed synchronously before domain mutation. */
+static gint
+check_service_management_write_reauthorization_matrix (void)
+{
+  ServiceDenialEnv permission_env = { 0 };
+  ServiceDenialEnv tenant_env = { 0 };
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *credential_id = NULL;
+  g_autofree gchar *credential_path = NULL;
+  g_autofree gchar *revoke_body = NULL;
+  wyl_service_principal_t principal = { 0 };
+  wyl_service_credential_issue_result_t issued = { 0 };
+  wyl_service_credential_t after = { 0 };
+  gchar principal_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar revoke_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  ManagementCheckpointProbe permission_probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT,
+  };
+  ManagementCheckpointProbe tenant_probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_TARGET_SEALED,
+  };
+  guint principal_before = 0;
+  guint principal_after = 0;
+  wyl_policy_store_t *permission_store = NULL;
+  guint status = 0;
+  gint rc = service_denial_env_init (&permission_env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+
+  permission_store = wyl_handle_get_policy_store (permission_env.handle);
+  if (wyl_policy_store_foreach_service_principal (permission_store,
+          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+    rc = 2550;
+    goto out;
+  }
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+      (permission_env.http.server, management_checkpoint_mutate_authority,
+      &permission_probe);
+  if (send_raw_service_principal_bearer (permission_env.session, "POST",
+          permission_env.base_url, "/service-principals", permission_env.query,
+          permission_env.access_token,
+          "{\"subject_id\":\"svc:checkpoint:permission\","
+          "\"display_name\":\"Denied\"}", &status, &body) != 0
+      || status != 403 || body == NULL
+      || strstr (body, "service_principal_denied") == NULL
+      || permission_probe.calls != 1
+      || wyl_policy_store_foreach_service_principal (permission_store,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      || principal_after != principal_before) {
+    rc = 2551;
+    goto out;
+  }
+
+  rc = service_denial_env_init (&tenant_env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+  if (wyl_request_id_new (principal_request_id,
+          sizeof principal_request_id) != WYRELOG_E_OK
+      || wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (revoke_request_id, sizeof revoke_request_id)
+      != WYRELOG_E_OK
+      || wyl_service_principal_create (tenant_env.handle,
+          "svc:checkpoint:tenant", "Tenant checkpoint",
+          "human-principal-admin", principal_request_id, &principal)
+      != WYRELOG_E_OK
+      || wyl_service_credential_issue (tenant_env.handle,
+          "svc:checkpoint:tenant", "tenant-a", "human-principal-admin",
+          issue_request_id, CONTRACT_FUTURE_EXPIRES_AT_US, &issued)
+      != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
+    rc = 2552;
+    goto out;
+  }
+  credential_id = g_strdup (issued.credential.credential_id);
+  credential_path = g_strdup_printf ("/service-credentials/%s", credential_id);
+  wyl_service_credential_issue_result_clear (&issued);
+  wyl_service_principal_clear (&principal);
+
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+      (tenant_env.http.server, management_checkpoint_mutate_authority,
+      &tenant_probe);
+  revoke_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (tenant_env.session, "DELETE",
+          tenant_env.base_url, credential_path, tenant_env.tenant_query,
+          tenant_env.access_token, revoke_body, &status, &body) != 0
+      || status != 404 || tenant_probe.calls != 1) {
+    rc = 2553;
+    goto out;
+  }
+  if (wyl_service_credential_get (tenant_env.handle, credential_id, &after)
+      != WYRELOG_E_OK || g_strcmp0 (after.state, "active") != 0
+      || after.revoked_at_us != 0 || after.revoked_by != NULL) {
+    rc = 2554;
+    goto out;
+  }
+  rc = 0;
+out:
+  wyl_service_credential_clear (&after);
+  wyl_service_credential_issue_result_clear (&issued);
+  wyl_service_principal_clear (&principal);
+  service_denial_env_clear (&tenant_env);
+  service_denial_env_clear (&permission_env);
+  return rc;
+}
+
+static gboolean
+service_management_body_leaks_secret (const gchar *body,
+    const gchar *first_canary, const gchar *second_canary)
+{
+  return body == NULL || strstr (body, "credential_secret") != NULL
+      || strstr (body, "secret=") != NULL
+      || (first_canary != NULL && strstr (body, first_canary) != NULL)
+      || (second_canary != NULL && strstr (body, second_canary) != NULL);
+}
+
+/* Every exact management route must consume the real loopback listener/peer
+ * tuple and ignore proxy-controlled address headers. The fact-enabled build
+ * adds the three operation routes, completing the eleven-route matrix. */
+static gint
+check_service_management_loopback_forwarded_matrix (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *issue_body = NULL;
+  g_autofree gchar *rotate_body = NULL;
+  g_autofree gchar *revoke_body = NULL;
+  g_autofree gchar *credential_id = NULL;
+  g_autofree gchar *credential_path = NULL;
+  g_autofree gchar *rotate_path = NULL;
+  g_autofree gchar *successor_id = NULL;
+  g_autofree gchar *successor_path = NULL;
+  g_autofree gchar *issue_secret = NULL;
+  g_autofree gchar *rotate_secret = NULL;
+#ifdef WYL_HAS_FACT_STORE
+  g_autofree gchar *reconcile_body = NULL;
+  g_autofree gchar *recover_body = NULL;
+  g_autofree gchar *recover_access = NULL;
+  g_autofree gchar *recover_refresh = NULL;
+  wyl_id_t recover_session_id = WYL_ID_NIL;
+  gchar recover_session[WYL_ID_STRING_BUF] = { 0 };
+  gchar recover_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  ManagementCheckpointProbe recover_probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_NOOP,
+  };
+#endif
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar rotate_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar revoke_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  guint status = 0;
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+  if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (rotate_request_id, sizeof rotate_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (revoke_request_id, sizeof revoke_request_id)
+      != WYRELOG_E_OK) {
+    rc = 2560;
+    goto out;
+  }
+
+  /* 1: principal create. */
+  if (send_raw_service_management_forwarded_spoof (env.session, "POST",
+          env.base_url, "/service-principals", env.query, env.access_token,
+          "{\"subject_id\":\"svc:forwarded:matrix\","
+          "\"display_name\":\"Forwarded matrix\"}", &status, &body) != 0
+      || status != 200 || service_management_body_leaks_secret (body, NULL,
+          NULL)) {
+    rc = 2561;
+    goto out;
+  }
+
+  /* 2: global principal list. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "GET",
+          env.base_url, "/service-principals", env.query, env.access_token,
+          NULL, &status, &body) != 0 || status != 200
+      || strstr (body, "svc:forwarded:matrix") == NULL
+      || service_management_body_leaks_secret (body, NULL, NULL)) {
+    rc = 2562;
+    goto out;
+  }
+
+  /* 4: credential issue (disable is ordered last so the principal remains
+   * active for the credential matrix). */
+  issue_body = g_strdup_printf
+      ("{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"%s\",\"destination\":\"forwarded-issue.json\","
+      "\"expires_at_us\":\"%s\"}", issue_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "POST",
+          env.base_url,
+          "/service-principals/svc:forwarded:matrix/credentials",
+          env.tenant_query, env.access_token, issue_body, &status, &body) != 0
+      || status != 200 || env.publication.staged_secret == NULL
+      || service_management_body_leaks_secret (body,
+          env.publication.staged_secret, NULL)) {
+    rc = 2563;
+    goto out;
+  }
+  issue_secret = g_strdup (env.publication.staged_secret);
+  credential_id = extract_json_string (body, "credential_id");
+  if (credential_id == NULL) {
+    rc = 2564;
+    goto out;
+  }
+  credential_path = g_strdup_printf ("/service-credentials/%s", credential_id);
+
+  /* 5: principal credential list. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "GET",
+          env.base_url,
+          "/service-principals/svc:forwarded:matrix/credentials",
+          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      || status != 200 || strstr (body, credential_id) == NULL
+      || service_management_body_leaks_secret (body, issue_secret, NULL)) {
+    rc = 2565;
+    goto out;
+  }
+
+  /* 6: credential metadata. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "GET",
+          env.base_url, credential_path, env.tenant_query, env.access_token,
+          NULL, &status, &body) != 0 || status != 200
+      || strstr (body, credential_id) == NULL
+      || service_management_body_leaks_secret (body, issue_secret, NULL)) {
+    rc = 2566;
+    goto out;
+  }
+
+  /* 7: rotate. Reset only the mock publication observation; durable operation
+   * and policy state remain untouched. */
+  g_clear_pointer (&env.publication.staged_secret, g_free);
+  memset (&env.publication, 0, sizeof env.publication);
+  rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
+      credential_id);
+  rotate_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\","
+      "\"destination\":\"forwarded-rotate.json\","
+      "\"expires_at_us\":\"%s\"}", rotate_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "POST",
+          env.base_url, rotate_path, env.tenant_query, env.access_token,
+          rotate_body, &status, &body) != 0 || status != 200
+      || env.publication.staged_secret == NULL
+      || service_management_body_leaks_secret (body, issue_secret,
+          env.publication.staged_secret)) {
+    rc = 2567;
+    goto out;
+  }
+  rotate_secret = g_strdup (env.publication.staged_secret);
+  successor_id = extract_json_string (body, "credential_id");
+  if (successor_id == NULL) {
+    rc = 2568;
+    goto out;
+  }
+  successor_path = g_strdup_printf ("/service-credentials/%s", successor_id);
+
+#ifdef WYL_HAS_FACT_STORE
+  /* 9: operation status collection. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "GET",
+          env.base_url, "/service-credential-operations", env.tenant_query,
+          env.access_token, NULL, &status, &body) != 0 || status != 200
+      || strstr (body, issue_request_id) == NULL
+      || strstr (body, rotate_request_id) == NULL
+      || service_management_body_leaks_secret (body, issue_secret,
+          rotate_secret)) {
+    rc = 2569;
+    goto out;
+  }
+
+  /* 10: exact reconcile. */
+  reconcile_body = g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:forwarded:matrix\","
+      "\"tenant\":\"tenant-a\"}}", issue_request_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "POST",
+          env.base_url, "/service-credential-operations/reconcile",
+          env.tenant_query, env.access_token, reconcile_body, &status, &body)
+      != 0 || status != 200 || strstr (body, issue_request_id) == NULL
+      || service_management_body_leaks_secret (body, issue_secret,
+          rotate_secret)) {
+    rc = 2570;
+    goto out;
+  }
+
+  /* 11: durable operation recovery. */
+  if (wyl_request_id_new (recover_request_id, sizeof recover_request_id)
+      != WYRELOG_E_OK
+      || seed_prepared_operation (env.operation_root, recover_request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:forwarded:matrix",
+          "tenant-a", NULL) != 0) {
+    rc = 2576;
+    goto out;
+  }
+  recover_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", recover_request_id);
+  /* Reconcile performs both its front-door and WRITE-lease decisions. Rearm
+   * the deterministic permission fixture so recover independently proves its
+   * own envelope rather than inheriting the decision-state transition. */
+  wyl_policy_store_t *matrix_store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_id_new (&recover_session_id) != WYRELOG_E_OK
+      || wyl_id_format (&recover_session_id, recover_session,
+          sizeof recover_session) != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (matrix_store,
+          "human-principal-admin", "wr.service_credential.manage",
+          recover_session) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (matrix_store, recover_session,
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (matrix_store,
+          "human-principal-admin", "wr.service_credential.manage",
+          recover_session, "armed") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    rc = 2574;
+    goto out;
+  }
+  if (!seed_human_tokens_with_assurance (env.http.server, recover_session,
+          "human-principal-admin", WYL_TENANT_DEFAULT, TRUE, &recover_access,
+          &recover_refresh)) {
+    rc = 2575;
+    goto out;
+  }
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+      (env.http.server, management_checkpoint_mutate_authority, &recover_probe);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "POST",
+          env.base_url, "/service-credential-operations/recover",
+          env.tenant_query, recover_access, recover_body, &status, &body)
+      != 0 || status != 200 || strstr (body, recover_request_id) == NULL
+      || recover_probe.calls != 1
+      || service_management_body_leaks_secret (body, issue_secret,
+          rotate_secret)) {
+    g_printerr ("WYRELOG_TEST_DIAG management_forwarded recover status=%u "
+        "checkpoint_calls=%u body=%s\n", status, recover_probe.calls,
+        body != NULL ? body : "(null)");
+    rc = 2571;
+    goto out;
+  }
+#endif
+
+  /* 8: revoke the successor. */
+  revoke_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "DELETE",
+          env.base_url, successor_path, env.tenant_query, env.access_token,
+          revoke_body, &status, &body) != 0 || status != 200
+      || service_management_body_leaks_secret (body, issue_secret,
+          rotate_secret)) {
+    rc = 2572;
+    goto out;
+  }
+
+  /* 3: principal disable. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_management_forwarded_spoof (env.session, "POST",
+          env.base_url, "/service-principals/svc:forwarded:matrix/disable",
+          env.query, env.access_token, NULL, &status, &body) != 0
+      || status != 200 || strstr (body, "\"state\":\"disabled\"") == NULL
+      || service_management_body_leaks_secret (body, issue_secret,
+          rotate_secret)) {
+    rc = 2573;
+    goto out;
+  }
+  rc = 0;
+out:
+  service_denial_env_clear (&env);
+  return rc;
+}
+
+/* Principal identity is global. A subject string that looks tenant-scoped may
+ * own credentials in multiple targets; only stored tenant_id controls list and
+ * metadata visibility. */
+static gint
+check_service_management_global_principal_cross_tenant (void)
+{
+  ServiceDenialEnv env = { 0 };
+  wyl_service_principal_t principal = { 0 };
+  wyl_service_credential_issue_result_t tenant_a = { 0 };
+  wyl_service_credential_issue_result_t tenant_b = { 0 };
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *tenant_b_query = NULL;
+  g_autofree gchar *tenant_a_id = NULL;
+  g_autofree gchar *tenant_b_id = NULL;
+  g_autofree gchar *tenant_b_path = NULL;
+  gchar principal_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar tenant_a_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar tenant_b_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  guint status = 0;
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+
+  gboolean created = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_create_tenant (store, "tenant-b", &created)
+      != WYRELOG_E_OK || !created
+      || wyl_request_id_new (principal_request_id,
+          sizeof principal_request_id) != WYRELOG_E_OK
+      || wyl_request_id_new (tenant_a_request_id,
+          sizeof tenant_a_request_id) != WYRELOG_E_OK
+      || wyl_request_id_new (tenant_b_request_id,
+          sizeof tenant_b_request_id) != WYRELOG_E_OK
+      || wyl_service_principal_create (env.handle,
+          "svc:tenant-a:misleading-global", "Global principal",
+          "human-principal-admin", principal_request_id, &principal)
+      != WYRELOG_E_OK
+      || wyl_service_credential_issue (env.handle,
+          "svc:tenant-a:misleading-global", "tenant-a",
+          "human-principal-admin", tenant_a_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US, &tenant_a) != WYRELOG_E_OK
+      || wyl_service_credential_issue (env.handle,
+          "svc:tenant-a:misleading-global", "tenant-b",
+          "human-principal-admin", tenant_b_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US, &tenant_b) != WYRELOG_E_OK
+      || tenant_a.credential.credential_id == NULL
+      || tenant_b.credential.credential_id == NULL) {
+    rc = 2580;
+    goto out;
+  }
+  tenant_a_id = g_strdup (tenant_a.credential.credential_id);
+  tenant_b_id = g_strdup (tenant_b.credential.credential_id);
+  tenant_b_path = g_strdup_printf ("/service-credentials/%s", tenant_b_id);
+  tenant_b_query = g_strdup
+      ("tenant=tenant-b&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals", env.query, env.access_token, NULL, &status,
+          &body) != 0 || status != 200
+      || strstr (body, "svc:tenant-a:misleading-global") == NULL) {
+    rc = 2581;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals/svc:tenant-a:misleading-global/credentials",
+          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      || status != 200 || strstr (body, tenant_a_id) == NULL
+      || strstr (body, tenant_b_id) != NULL) {
+    rc = 2582;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-principals/svc:tenant-a:misleading-global/credentials",
+          tenant_b_query, env.access_token, NULL, &status, &body) != 0
+      || status != 200 || strstr (body, tenant_b_id) == NULL
+      || strstr (body, tenant_a_id) != NULL) {
+    rc = 2583;
+    goto out;
+  }
+
+  /* Known credential plus wrong target collapses to the same 404 family as an
+   * unknown id; the response does not echo the known id. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          tenant_b_path, env.tenant_query, env.access_token, NULL, &status,
+          &body) != 0 || status != 404 || body == NULL
+      || strstr (body, "service_credential_not_found") == NULL
+      || strstr (body, tenant_b_id) != NULL) {
+    rc = 2584;
+    goto out;
+  }
+  rc = 0;
+out:
+  wyl_service_credential_issue_result_clear (&tenant_b);
+  wyl_service_credential_issue_result_clear (&tenant_a);
+  wyl_service_principal_clear (&principal);
+  service_denial_env_clear (&env);
+  return rc;
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -10436,9 +11195,32 @@ main (void)
     result = inactive_denied_rc;
     goto cleanup;
   }
+  gint caller_matrix_rc = check_service_management_caller_and_refresh_matrix ();
+  if (caller_matrix_rc != 0) {
+    result = caller_matrix_rc;
+    goto cleanup;
+  }
   gint permission_mapping_rc = check_service_management_permission_mapping ();
   if (permission_mapping_rc != 0) {
     result = permission_mapping_rc;
+    goto cleanup;
+  }
+  gint write_reauthorization_rc =
+      check_service_management_write_reauthorization_matrix ();
+  if (write_reauthorization_rc != 0) {
+    result = write_reauthorization_rc;
+    goto cleanup;
+  }
+  gint loopback_forwarded_rc =
+      check_service_management_loopback_forwarded_matrix ();
+  if (loopback_forwarded_rc != 0) {
+    result = loopback_forwarded_rc;
+    goto cleanup;
+  }
+  gint cross_tenant_rc =
+      check_service_management_global_principal_cross_tenant ();
+  if (cross_tenant_rc != 0) {
+    result = cross_tenant_rc;
     goto cleanup;
   }
   gint secret_leak_rc = check_service_management_populated_secret_leak ();
@@ -10473,6 +11255,8 @@ cleanup:
   if (result == 0)
     result = check_service_profile_reconcile_denied (handle);
 #endif
+  if (result != 0)
+    g_printerr ("WYRELOG_TEST_DIAG service_variant result=%d\n", result);
   return result;
 }
 #else /* WYL_TEST_VARIANT_AUDIT */
