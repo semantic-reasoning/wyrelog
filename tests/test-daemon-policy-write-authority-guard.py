@@ -196,9 +196,9 @@ def main():
             "(write.store, tenant, NULL);\n"
             "  rc = wyl_daemon_policy_write_acquire (ctx, &write);"),
         "manual-clear": source.replace(
-            "set_tenant_mutation_json (msg, tenant, changed);",
+            "set_tenant_mutation_json (msg, ctx, tenant, changed,",
             "wyl_daemon_policy_write_clear (&write);\n"
-            "  set_tenant_mutation_json (msg, tenant, changed);", 1),
+            "  set_tenant_mutation_json (msg, ctx, tenant, changed,", 1),
         "raw-store-getter": source.replace(
             "wyl_policy_store_create_tenant (write.store, tenant, &changed)",
             "wyl_policy_store_create_tenant "
