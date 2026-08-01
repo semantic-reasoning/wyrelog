@@ -8,6 +8,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 DOMAIN_PATH = ROOT / "wyrelog/auth/service-credential-domain.c"
 HTTP_PATH = ROOT / "wyrelog/daemon/http.c"
+HANDOFF_PATH = ROOT / "wyrelog/daemon/service-credential-handoff-private.c"
+COORDINATOR_PATH = (ROOT / "wyrelog/auth/"
+                    "service-credential-operation-coordinator-execute-private.c")
 
 
 def function_body(source: str, name: str) -> str:
@@ -55,7 +58,16 @@ DOMAIN_FUNCTIONS = {
 }
 
 
-def violations(domain: str, http: str) -> list[str]:
+def mapped_status(body: str, label: str, code: str, status: str, start: int,
+                  errors: list[str]) -> None:
+    code_pos = body.find(code, start)
+    status_pos = body.find(status, code_pos)
+    if code_pos < 0 or status_pos < 0 or status_pos - code_pos > 420:
+        errors.append(f"{label} {code} status mapping changed")
+
+
+def violations(domain: str, http: str, handoff: str,
+               coordinator: str) -> list[str]:
     errors: list[str] = []
     for name, (precheck, core, selector) in DOMAIN_FUNCTIONS.items():
         try:
@@ -91,13 +103,16 @@ def violations(domain: str, http: str) -> list[str]:
         errors.append(str(error))
         return errors
 
-    for body, label, parser, keyed, key in (
+    for body, label, parser, keyed, key, success_token in (
         (principal, "principal", "request_body_dup_strict_json_object",
-         "wyl_service_principal_disable_keyed_with_runtime", "values[1]"),
+         "wyl_service_principal_disable_keyed_with_runtime", "values[1]",
+         "soup_server_message_set_status (msg, 200"),
         (tenant, "tenant", "request_body_dup_strict_json_object",
-         "wyl_tenant_seal_keyed_with_runtime", "retirement_values[1]"),
+         "wyl_tenant_seal_keyed_with_runtime", "retirement_values[1]",
+         "set_tenant_mutation_json"),
         (revoke, "revoke", "request_body_dup_strict_json_object",
-         "wyl_service_credential_revoke_with_runtime", "values[1]"),
+         "wyl_service_credential_revoke_with_runtime", "values[1]",
+         "soup_server_message_set_status (msg, 200"),
     ):
         parser_pos = body.find(parser)
         keyed_pos = body.find(keyed)
@@ -108,6 +123,20 @@ def violations(domain: str, http: str) -> list[str]:
             errors.append(f"{label} handler does not pass the body key")
         if "wyl_service_auth_registry_" in body:
             errors.append(f"{label} handler performs raw registry mutation")
+        keyed_pos = body.find(keyed)
+        registry_pos = body.rfind(
+            ".registry = ctx->service_auth_registry,", 0, keyed_pos)
+        if registry_pos < 0:
+            errors.append(f"{label} handler omits the daemon registry")
+        success_pos = body.find(success_token, keyed_pos)
+        first_success = body.find(success_token)
+        if (success_pos < 0 or keyed_pos > success_pos
+                or first_success != success_pos):
+            errors.append(f"{label} handler can report success before compound mutation")
+        mapped_status(body, label, "if (rc == WYRELOG_E_BUSY)",
+                      "set_json_error (msg, 503", keyed_pos, errors)
+        mapped_status(body, label, "if (rc != WYRELOG_E_OK)",
+                      "set_json_error (msg, 500", keyed_pos, errors)
 
     if "decision_request_id = ensure_request_id_header" not in principal:
         errors.append("principal response correlation is not separate")
@@ -118,12 +147,83 @@ def violations(domain: str, http: str) -> list[str]:
         errors.append("tenant replay does not return recorded wire result")
     if "changed = retirement.transitioned_now" in tenant:
         errors.append("tenant wire result is coupled to selector gating")
+
+    try:
+        rotate = function_body(http, "service_credential_rotate_handler")
+        emit = function_body(http, "service_credential_handoff_emit")
+        handoff_entry = function_body(
+            handoff, "wyl_daemon_service_credential_handoff")
+        execute = function_body(coordinator, "execute_prepared_handoff")
+    except ValueError as error:
+        errors.append(str(error))
+        return errors
+
+    rotate_get = rotate.find("wyl_service_credential_get")
+    generation = rotate.find("guint64 current_generation = current.generation")
+    expected = rotate.find(".expected_generation = current_generation")
+    emit_call = rotate.find("service_credential_handoff_emit")
+    if (-1 in (rotate_get, generation, expected, emit_call)
+            or [rotate_get, generation, expected, emit_call]
+            != sorted((rotate_get, generation, expected, emit_call))):
+        errors.append("rotate handler lost authoritative generation binding")
+    if "wyl_service_auth_registry_" in rotate:
+        errors.append("rotate handler performs raw registry mutation")
+
+    registry_gate = emit.find(
+        "if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)")
+    registry_assignment = emit.find(
+        "hctx.registry = ctx->service_auth_registry", registry_gate)
+    compound = emit.find("wyl_daemon_service_credential_handoff")
+    success = emit.find("case WYRELOG_E_OK:", compound)
+    success_status = emit.find("soup_server_message_set_status (msg, 200",
+                               success)
+    if (-1 in (registry_gate, registry_assignment, compound, success,
+               success_status)
+            or registry_assignment > compound or compound > success
+            or success > success_status):
+        errors.append("rotate HTTP registry/compound/success order changed")
+    mapped_status(emit, "rotate", "case WYRELOG_E_BUSY:",
+                  "set_json_error (msg, 503", compound, errors)
+    mapped_status(emit, "rotate", "default:",
+                  "set_json_error (msg, 500", compound, errors)
+
+    handoff_registry = handoff_entry.find(
+        "rotate_runtime.registry = ctx->registry")
+    handoff_runtime = handoff_entry.find(
+        ".rotate_runtime = inputs->kind == "
+        "WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE")
+    handoff_call = handoff_entry.find(
+        "wyl_service_credential_operation_coordinator_handoff")
+    if (-1 in (handoff_registry, handoff_runtime, handoff_call)
+            or [handoff_registry, handoff_runtime, handoff_call]
+            != sorted((handoff_registry, handoff_runtime, handoff_call))):
+        errors.append("rotate handoff omits registry-aware runtime")
+
+    generation_check = execute.find(
+        "runtime->rotate_runtime->old_credential_generation")
+    expected_check = execute.find("record->expected_generation",
+                                  generation_check)
+    runtime_copy = execute.find(
+        "wyl_service_credential_rotate_runtime_t rotate_runtime",
+        expected_check)
+    checked_rotate = execute.find(
+        "wyl_service_credential_rotate_handoff_checked_with_runtime",
+        runtime_copy)
+    if (-1 in (generation_check, expected_check, runtime_copy, checked_rotate)
+            or [generation_check, expected_check, runtime_copy, checked_rotate]
+            != sorted((generation_check, expected_check, runtime_copy,
+                       checked_rotate))
+            or "!= record->expected_generation" not in
+            execute[generation_check:runtime_copy]):
+        errors.append("rotate coordinator lost generation-checked compound call")
     return errors
 
 
 domain = DOMAIN_PATH.read_text(encoding="utf-8")
 http = HTTP_PATH.read_text(encoding="utf-8")
-actual = violations(domain, http)
+handoff = HANDOFF_PATH.read_text(encoding="utf-8")
+coordinator = COORDINATOR_PATH.read_text(encoding="utf-8")
+actual = violations(domain, http, handoff, coordinator)
 if actual:
     raise SystemExit("; ".join(actual))
 
@@ -133,24 +233,69 @@ mutants = [
     (mutate_function(domain,
                      "wyl_service_principal_disable_keyed_with_runtime",
                      "service_mutation_authorize", "removed_authorize"),
-     http),
+     http, handoff, coordinator),
     (mutate_function(domain, "wyl_tenant_seal_keyed_with_runtime",
                      "if (rc == WYRELOG_E_OK && !receipt_found) {",
-                     "if (rc == WYRELOG_E_OK) {"), http),
+                     "if (rc == WYRELOG_E_OK) {"), http, handoff, coordinator),
     (mutate_function(domain,
                      "wyl_service_credential_revoke_keyed_with_runtime",
                      "WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION",
-                     "WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY"), http),
+                     "WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY"), http,
+     handoff, coordinator),
     (domain, mutate_function(http, "service_principal_disable_handler",
                              "values[1],\n      WYL_SERVICE_RETIREMENT",
                              "decision_request_id,\n      "
-                             "WYL_SERVICE_RETIREMENT")),
+                             "WYL_SERVICE_RETIREMENT"), handoff, coordinator),
     (domain, mutate_function(http, "tenant_mutation_handler",
                              "changed = retirement.recorded_transitioned",
-                             "changed = retirement.transitioned_now")),
+                             "changed = retirement.transitioned_now"), handoff,
+     coordinator),
 ]
-for index, (mutant_domain, mutant_http) in enumerate(mutants):
-    if not violations(mutant_domain, mutant_http):
+
+for function in ("service_principal_disable_handler",
+                 "service_credential_revoke_handler",
+                 "tenant_mutation_handler"):
+    mutants.append((domain, mutate_function(
+        http, function, ".registry = ctx->service_auth_registry,",
+        ".registry = NULL,"), handoff, coordinator))
+
+mutants.extend([
+    (domain, mutate_function(
+        http, "service_credential_handoff_emit",
+        "hctx.registry = ctx->service_auth_registry;",
+        "hctx.registry = NULL;"), handoff, coordinator),
+    (domain, http, mutate_function(
+        handoff, "wyl_daemon_service_credential_handoff",
+        "rotate_runtime.registry = ctx->registry;",
+        "rotate_runtime.registry = NULL;"), coordinator),
+    (domain, mutate_function(
+        http, "service_credential_rotate_handler",
+        ".expected_generation = current_generation,",
+        ".expected_generation = 0,"), handoff, coordinator),
+    (domain, http, handoff, mutate_function(
+        coordinator, "execute_prepared_handoff",
+        "!= record->expected_generation",
+        "== record->expected_generation")),
+    (domain, mutate_function(
+        http, "service_principal_disable_handler",
+        "wyrelog_error_t rc = wyl_service_principal_disable_keyed_with_runtime",
+        "soup_server_message_set_status (msg, 200, NULL);\n  "
+        "wyrelog_error_t rc = wyl_service_principal_disable_keyed_with_runtime"),
+     handoff, coordinator),
+    (domain, mutate_function(
+        http, "service_credential_revoke_handler",
+        "set_json_error (msg, 503,",
+        "set_json_error (msg, 409,"), handoff, coordinator),
+    (domain, mutate_function(
+        http, "service_credential_handoff_emit",
+        "set_json_error (msg, 500,",
+        "set_json_error (msg, 409,"), handoff, coordinator),
+])
+
+for index, (mutant_domain, mutant_http, mutant_handoff,
+            mutant_coordinator) in enumerate(mutants):
+    if not violations(mutant_domain, mutant_http, mutant_handoff,
+                      mutant_coordinator):
         raise SystemExit(f"mutant {index} escaped retirement boundary guard")
 
 sys.exit(0)
