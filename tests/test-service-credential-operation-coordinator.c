@@ -55,7 +55,6 @@ test_request (void)
     r.escrow_binding_digest[i] = (guint8) (i + 1);
   r.expires_at_us = 1;
   r.expires_at_us = 1;
-  r.parent_identity = g_strdup ("parent");
   g_free (r.actor_subject_id);
   r.actor_subject_id = NULL;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
@@ -75,7 +74,6 @@ test_request (void)
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
       (&r));
   r.actor_subject_id[0] = 'a';
-  r.destination = g_strdup ("record");
   g_assert_true (wyl_service_credential_operation_coordinator_request_is_valid
       (&r));
   g_assert_cmpuint (r.expected_generation, ==, 0);
