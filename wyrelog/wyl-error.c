@@ -32,6 +32,8 @@ wyrelog_error_string (wyrelog_error_t err)
       return "resource is busy";
     case WYRELOG_E_CANCELLED:
       return "operation cancelled by caller";
+    case WYRELOG_E_CONFLICT:
+      return "conflict";
   }
   return "unknown error";
 }

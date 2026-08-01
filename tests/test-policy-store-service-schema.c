@@ -23,6 +23,8 @@ static const gchar *const service_tables[] = {
   "service_credential_handoff_cancellation_claims",
   "service_credential_handoff_remediation_actions",
   "service_credential_handoff_retirement_receipts",
+  "service_permission_remediation_receipts",
+  "service_retirement_receipts",
 };
 
 static void
@@ -43,6 +45,18 @@ exec_rejected (sqlite3 *db, const gchar *sql)
   int rc = sqlite3_exec (db, sql, NULL, NULL, &message);
   sqlite3_free (message);
   g_assert_cmpint (rc, !=, SQLITE_OK);
+}
+
+static void
+exec_rejected_with_message (sqlite3 *db, const gchar *sql,
+    const gchar *expected)
+{
+  char *message = NULL;
+  int rc = sqlite3_exec (db, sql, NULL, NULL, &message);
+  g_assert_cmpint (rc, !=, SQLITE_OK);
+  g_assert_nonnull (message);
+  g_assert_nonnull (strstr (message, expected));
+  sqlite3_free (message);
 }
 
 static gint64
@@ -105,7 +119,9 @@ service_object_count (sqlite3 *db)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
-      "'service_credential_handoff_retirement_receipts');");
+      "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts');");
 }
 
 static gchar *
@@ -133,8 +149,9 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
-      "'service_credential_handoff_retirement_receipts') "
-      "ORDER BY type,name;";
+      "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts') " "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
@@ -160,7 +177,9 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
-      "'service_credential_handoff_retirement_receipts') ORDER BY name;";
+      "'service_credential_handoff_retirement_receipts',"
+      "'service_permission_remediation_receipts',"
+      "'service_retirement_receipts') ORDER BY name;";
   g_assert_cmpint (sqlite3_prepare_v2 (db, index_sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW) {
@@ -385,6 +404,170 @@ test_constraints_and_triggers (void)
   exec_rejected (db,
       "UPDATE service_credential_events SET event='revoked' WHERE event_id=1;");
   exec_rejected (db, "DELETE FROM service_credential_events WHERE event_id=1;");
+  g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+      WYRELOG_E_OK);
+}
+
+static void
+test_retirement_receipt_schema_contracts (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM sqlite_schema WHERE"
+          " (type='table' AND name='service_retirement_receipts') OR"
+          " (type='index' AND name IN ('idx_service_retirement_event',"
+          " 'idx_service_retirement_diagnostic')) OR"
+          " (type='trigger' AND name IN ("
+          " 'trg_service_retirement_no_update',"
+          " 'trg_service_retirement_no_delete',"
+          " 'trg_service_retirement_no_claim_collision',"
+          " 'trg_service_domain_no_retirement_collision',"
+          " 'trg_service_fence_no_retirement_collision',"
+          " 'trg_service_escrow_no_retirement_collision',"
+          " 'trg_service_cancellation_no_retirement_collision',"
+          " 'trg_service_remediation_no_retirement_collision',"
+          " 'trg_service_permission_no_retirement_collision',"
+          " 'trg_service_handoff_retirement_no_service_retirement_collision',"
+          " 'trg_service_handoff_disposition_no_retirement_collision'));"),
+      ==, 14);
+
+  exec_ok (db,
+      "INSERT INTO audit_events"
+      " (id,created_at_us,subject_id,action,resource_id,request_id,decision)"
+      " VALUES ('00000000-0000-7000-8000-000000000101',1,'admin',"
+      " 'tenant_seal','__wr_default','000000000000000000000000101',1);"
+      "INSERT INTO service_retirement_receipts"
+      " (request_id,receipt_version,operation,resource_id,tenant_id,"
+      " actor_subject_id,input_fingerprint,outcome,result_state,"
+      " authority_generation,tenant_lifecycle_generation,"
+      " tenant_sealed_generation,event_id,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000101',1,'tenant_seal','__wr_default',"
+      " '__wr_default','admin',zeroblob(32),'already_terminal','sealed',"
+      " 1,0,1,NULL,'00000000-0000-7000-8000-000000000101',1);");
+  g_assert_cmpint (row_count (db, "service_retirement_receipts"), ==, 1);
+  exec_rejected (db,
+      "UPDATE service_retirement_receipts SET created_at_us=2 WHERE"
+      " request_id='000000000000000000000000101';");
+  exec_rejected (db,
+      "DELETE FROM service_retirement_receipts WHERE"
+      " request_id='000000000000000000000000101';");
+  exec_rejected (db,
+      "INSERT INTO service_retirement_receipts"
+      " (request_id,receipt_version,operation,resource_id,tenant_id,"
+      " actor_subject_id,input_fingerprint,outcome,result_state,"
+      " authority_generation,tenant_lifecycle_generation,"
+      " tenant_sealed_generation,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000103',2,'tenant_seal','__wr_default',"
+      " '__wr_default','admin',zeroblob(32),'already_terminal','sealed',"
+      " 1,0,1,'00000000-0000-7000-8000-000000000101',1);");
+
+  exec_rejected_with_message (db,
+      "INSERT INTO service_domain_requests"
+      " (request_id,operation,resource_id,input_fingerprint,created_at_us)"
+      " VALUES ('000000000000000000000000101','tenant_seal',"
+      " '__wr_default',zeroblob(32),1);", "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_credential_operation_fences(request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_credential_handoff_escrows(request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_credential_handoff_cancellation_claims"
+      " (cancellation_request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_permission_remediation_receipts(request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_credential_handoff_retirement_receipts"
+      " (original_request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (original_request_id)"
+      " VALUES ('000000000000000000000000101');",
+      "collides with retirement receipt");
+
+  exec_ok (db,
+      "INSERT INTO service_domain_requests"
+      " (request_id,operation,resource_id,input_fingerprint,created_at_us)"
+      " VALUES ('000000000000000000000000102','principal_disable',"
+      " 'svc:tenant-a:worker',zeroblob(32),1);"
+      "INSERT INTO audit_events"
+      " (id,created_at_us,subject_id,action,resource_id,request_id,decision)"
+      " VALUES ('00000000-0000-7000-8000-000000000102',1,'admin',"
+      " 'principal_disable','svc:tenant-a:worker',"
+      " '000000000000000000000000102',1);");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_retirement_receipts"
+      " (request_id,receipt_version,operation,resource_id,tenant_id,"
+      " actor_subject_id,input_fingerprint,outcome,result_state,"
+      " authority_generation,event_id,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000102',1,'principal_disable',"
+      " 'svc:tenant-a:worker',NULL,'admin',zeroblob(32),'already_terminal',"
+      " 'disabled',1,NULL,'00000000-0000-7000-8000-000000000102',1);",
+      "collides with existing claim");
+
+  exec_ok (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('00000000-0000-7000-8000-000000000104',randomblob(32),"
+      " '000000000000000000000000104',"
+      " '00000000-0000-7000-8000-000000000105',zeroblob(32),NULL,NULL,"
+      " 'admin','not_committed','terminal_not_committed',"
+      " '00000000-0000-7000-8000-000000000106',1);"
+      "INSERT INTO service_credential_handoff_retirement_receipts"
+      " (original_request_id,terminal_kind,raw_journal_snapshot_digest,"
+      " delivery_disposition_id,delivery_audit_id,delivery_proof_digest,"
+      " retention_basis_at_us,retired_at_us) VALUES"
+      " ('000000000000000000000000105','file_published',randomblob(32),"
+      " '00000000-0000-7000-8000-000000000107',"
+      " '00000000-0000-7000-8000-000000000108',randomblob(32),1,"
+      " 2592000000001);"
+      "INSERT INTO audit_events"
+      " (id,created_at_us,subject_id,action,resource_id,request_id,decision)"
+      " VALUES ('00000000-0000-7000-8000-000000000109',1,'admin',"
+      " 'tenant_seal','__wr_default','000000000000000000000000104',1),"
+      " ('00000000-0000-7000-8000-000000000110',1,'admin',"
+      " 'tenant_seal','__wr_default','000000000000000000000000105',1);");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_retirement_receipts"
+      " (request_id,receipt_version,operation,resource_id,tenant_id,"
+      " actor_subject_id,input_fingerprint,outcome,result_state,"
+      " authority_generation,tenant_lifecycle_generation,"
+      " tenant_sealed_generation,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000104',1,'tenant_seal','__wr_default',"
+      " '__wr_default','admin',zeroblob(32),'already_terminal','sealed',"
+      " 1,0,1,'00000000-0000-7000-8000-000000000109',1);",
+      "collides with existing claim");
+  exec_rejected_with_message (db,
+      "INSERT INTO service_retirement_receipts"
+      " (request_id,receipt_version,operation,resource_id,tenant_id,"
+      " actor_subject_id,input_fingerprint,outcome,result_state,"
+      " authority_generation,tenant_lifecycle_generation,"
+      " tenant_sealed_generation,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000105',1,'tenant_seal','__wr_default',"
+      " '__wr_default','admin',zeroblob(32),'already_terminal','sealed',"
+      " 1,0,1,'00000000-0000-7000-8000-000000000110',1);",
+      "collides with existing claim");
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
 }
@@ -1939,6 +2122,8 @@ main (int argc, char **argv)
       test_runtime_and_template_fingerprints);
   g_test_add_func ("/policy/service-schema/constraints",
       test_constraints_and_triggers);
+  g_test_add_func ("/policy/service-schema/retirement-receipts",
+      test_retirement_receipt_schema_contracts);
   g_test_add_func ("/policy/service-schema/handoff-terminal-contracts",
       test_handoff_terminal_schema_contracts);
   g_test_add_func ("/policy/service-schema/handoff-cancellation-contracts",

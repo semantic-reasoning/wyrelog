@@ -63,6 +63,13 @@ typedef enum wyrelog_error_t
    * cancellation as an expected, retryable outcome.
    */
   WYRELOG_E_CANCELLED = -12,
+  /*
+   * A canonical caller idempotency key is already bound to a different
+   * mutation input, actor, target, version, or superseded lineage.  Distinct
+   * from WYRELOG_E_POLICY so transport callers can report a durable request
+   * conflict without misclassifying authority or schema failures.
+   */
+  WYRELOG_E_CONFLICT = -13,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);
