@@ -8785,9 +8785,11 @@ check_service_principal_management_contract (void)
   g_autofree gchar *http_credential_id = NULL;
   g_autofree gchar *rotate_successor_id = NULL;
   g_autofree gchar *http_exchange_body = NULL;
+  g_autofree gchar *first_revoke_response = NULL;
 #ifdef WYL_HAS_AUDIT
   g_autofree gchar *denied_body = NULL;
   g_autofree gchar *http_exchange_access = NULL;
+  g_autofree gchar *oversized_principal_disable_body = NULL;
   guint denied_status = 0;
   guint denied_retry_after = 0;
 #endif
@@ -9489,7 +9491,7 @@ check_service_principal_management_contract (void)
     rc = 1994;
     goto cleanup;
   }
-  g_autofree gchar *first_revoke_response = g_strdup (body);
+  first_revoke_response = g_strdup (body);
   if (!policy_count_rows (handle,
           "SELECT count(*) FROM service_domain_requests;", &requests_before)
       || !policy_count_rows (handle,
@@ -9596,7 +9598,7 @@ check_service_principal_management_contract (void)
     }
   }
   g_clear_pointer (&body, g_free);
-  g_autofree gchar *oversized_principal_disable_body = g_strnfill (1025, 'x');
+  oversized_principal_disable_body = g_strnfill (1025, 'x');
   if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
           access_token, oversized_principal_disable_body, &status,
