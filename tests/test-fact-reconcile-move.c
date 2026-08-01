@@ -15,6 +15,7 @@
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/reconcile-move-private.h"
+#include "wyrelog/fact/root-writer-lease-private.h"
 #include "wyrelog/policy/store-private.h"
 
 #define MOVE_TENANT "tenant-journal"
@@ -360,6 +361,246 @@ test_move_publish_idempotent_replay (void)
   move_fixture_teardown (&fx);
 }
 
+typedef struct
+{
+  const gchar *point;
+  guint fired;
+  wyrelog_error_t rc;
+} CheckpointFault;
+
+static wyrelog_error_t
+fault_at_point (const gchar *point, gpointer user_data)
+{
+  CheckpointFault *fault = user_data;
+  if (g_strcmp0 (point, fault->point) == 0) {
+    fault->fired++;
+    return fault->rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+/*
+ * Publish-then-CAS crux.  stage_create yields a non-exact stage whose publish
+ * fires "stage-linked" then "stage-unlinked"; the latter fires after the
+ * final is linked and the parent directory fsync'd, i.e. after the target is
+ * durable.  Faulting there makes publish report failure with the target
+ * present and the journal still MOVING; a clean re-run must converge on the
+ * durable target with a CAS only.  (There is no "stage-parent-synced" point
+ * on the non-exact path; that point belongs to the exact-provisioning path.)
+ */
+static void
+test_move_publish_crux_target_durable_before_cas (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  CheckpointFault fault = {.point = "stage-unlinked",.fired = 0,.rc =
+        WYRELOG_E_IO
+  };
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  ctx.checkpoint = fault_at_point;
+  ctx.checkpoint_data = &fault;
+
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpuint (fault.fired, ==, 1);
+  /* Target is durable, journal has not advanced past MOVING. */
+  assert_final_matches_source (&fx);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  WylFactReconcileMoveContext clean = move_context (&fx);
+  outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&clean, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome, ==, WYL_FACT_RECONCILE_MOVE_UNCHANGED_REPLAY);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVED);
+  assert_final_matches_source (&fx);
+
+  move_fixture_teardown (&fx);
+}
+
+/* Interruption before any copy/publish: the move unit's own "source-verified"
+ * point fires after the source is re-verified but before staging.  Faulting
+ * there leaves no target and the journal at MOVING; a clean re-run applies. */
+static void
+test_move_publish_interrupt_before_copy (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  CheckpointFault fault = {.point = "source-verified",.fired = 0,.rc =
+        WYRELOG_E_IO
+  };
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  ctx.checkpoint = fault_at_point;
+  ctx.checkpoint_data = &fault;
+
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpuint (fault.fired, ==, 1);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  WylFactReconcileMoveContext clean = move_context (&fx);
+  outcome = WYL_FACT_RECONCILE_MOVE_UNCHANGED_REPLAY;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&clean, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome, ==, WYL_FACT_RECONCILE_MOVE_APPLIED);
+  assert_final_matches_source (&fx);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVED);
+
+  move_fixture_teardown (&fx);
+}
+
+static void
+test_move_publish_lease_contention (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  g_autoptr (WylFactRootWriterLease) held = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fx.root, &held), ==,
+      WYRELOG_E_OK);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_BUSY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+static void
+test_move_publish_identity_mismatch (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  ctx.tenant_id = "tenant-other";
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/* A record that has not reached MOVING must not authorize the move phase. */
+static void
+test_move_publish_rejects_prepared_state (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  /* Prepare only; leave the record in PREPARED (do not transition). */
+  WylPolicyFactReconcileJournalInput input = {
+    MOVE_OP, MOVE_TENANT, MOVE_GRAPH, 0, 0, 1, 1, MOVE_STORE_UUID,
+    fx.source_rel, fx.canonical_rel, fx.source_ev
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx.store,
+          &input, &record, &result), ==, WYRELOG_E_OK);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_PREPARED);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Malformed arguments fail closed with E_INVALID and never touch the store or
+ * filesystem.  (The move unit also carries a defense-in-depth evidence
+ * validity guard, but the journal is immutable-by-trigger and its read path
+ * already validates the V1 evidence contract, so a MOVING record with invalid
+ * evidence cannot be constructed through the store to exercise that guard
+ * directly.)
+ */
+static void
+test_move_publish_rejects_invalid_arguments (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (NULL, &outcome), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, NULL), ==,
+      WYRELOG_E_INVALID);
+
+  WylFactReconcileMoveContext no_store = ctx;
+  no_store.store = NULL;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&no_store, &outcome), ==,
+      WYRELOG_E_INVALID);
+
+  WylFactReconcileMoveContext no_root = ctx;
+  no_root.fact_root = NULL;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&no_root, &outcome), ==,
+      WYRELOG_E_INVALID);
+
+  WylFactReconcileMoveContext no_op = ctx;
+  no_op.op_uuid = NULL;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&no_op, &outcome), ==,
+      WYRELOG_E_INVALID);
+
+  /* No filesystem work and no journal advance on any rejected call. */
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Collision with an unknown artifact.  A pre-existing, secure facts.duckdb
+ * whose content differs from the recorded source must never be overwritten;
+ * the move fails closed and the journal stays MOVING.  (Source and target
+ * share one graph directory, so a same-directory link can never cross
+ * devices; this collision case stands in for cross-device failure.)
+ */
+static void
+test_move_publish_rejects_unknown_target (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  g_assert_true (g_file_set_contents (fx.final_abs, "foreign-artifact", -1,
+          NULL));
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_test_secure_regular_file (fx.final_abs, &error));
+  g_assert_no_error (error);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+
+  /* The foreign artifact is untouched and the journal is unchanged. */
+  g_autofree gchar *contents = NULL;
+  g_assert_true (g_file_get_contents (fx.final_abs, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "foreign-artifact");
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -374,5 +615,20 @@ main (int argc, char **argv)
       test_move_publish_happy_path);
   g_test_add_func ("/fact/reconcile-move/publish/idempotent-replay",
       test_move_publish_idempotent_replay);
+  g_test_add_func
+      ("/fact/reconcile-move/publish/crux-target-durable-before-cas",
+      test_move_publish_crux_target_durable_before_cas);
+  g_test_add_func ("/fact/reconcile-move/publish/interrupt-before-copy",
+      test_move_publish_interrupt_before_copy);
+  g_test_add_func ("/fact/reconcile-move/publish/lease-contention",
+      test_move_publish_lease_contention);
+  g_test_add_func ("/fact/reconcile-move/publish/identity-mismatch",
+      test_move_publish_identity_mismatch);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
+      test_move_publish_rejects_prepared_state);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-invalid-arguments",
+      test_move_publish_rejects_invalid_arguments);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-unknown-target",
+      test_move_publish_rejects_unknown_target);
   return g_test_run ();
 }
