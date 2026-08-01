@@ -121,6 +121,10 @@ wyrelog_error_t wyl_client_service_principal_list (WylClient * client,
 wyrelog_error_t wyl_client_service_principal_disable (WylClient * client,
     const gchar * subject_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_service_principal_disable_with_request_id
+    (WylClient * client, const gchar * subject_id, const gchar * request_id,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServicePrincipal * out_principal);
 void wyl_client_service_credential_clear (WylClientServiceCredential * value);
 void wyl_client_service_credential_list_clear
     (WylClientServiceCredentialList * value);

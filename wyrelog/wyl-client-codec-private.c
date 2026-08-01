@@ -350,6 +350,18 @@ parse_principal_object (JsonCursor *cursor, WylClientServicePrincipal *out)
   gboolean seen_subject = FALSE;
   gboolean seen_display = FALSE;
   gboolean seen_state = FALSE;
+  gboolean seen_generation = FALSE;
+  gboolean seen_created_by = FALSE;
+  gboolean seen_created_at = FALSE;
+  gboolean seen_updated_at = FALSE;
+  gboolean seen_disabled_by = FALSE;
+  gboolean seen_disabled_at = FALSE;
+  guint64 generation = 0;
+  gint64 created_at_us = 0;
+  gint64 updated_at_us = 0;
+  gint64 disabled_at_us = 0;
+  g_autofree gchar *created_by = NULL;
+  g_autofree gchar *disabled_by = NULL;
   if (out == NULL || !take (cursor, '{'))
     return FALSE;
   wyl_client_service_principal_clear (out);
@@ -372,6 +384,35 @@ parse_principal_object (JsonCursor *cursor, WylClientServicePrincipal *out)
           || !string_is_plain_token (out->state))
         goto invalid;
       seen_state = TRUE;
+    } else if (g_strcmp0 (key, "generation") == 0) {
+      if (seen_generation || !parse_uint64 (cursor, &generation)
+          || generation == 0)
+        goto invalid;
+      seen_generation = TRUE;
+    } else if (g_strcmp0 (key, "created_by") == 0) {
+      if (seen_created_by || !parse_string (cursor, &created_by)
+          || !string_is_plain_token (created_by))
+        goto invalid;
+      seen_created_by = TRUE;
+    } else if (g_strcmp0 (key, "created_at_us") == 0) {
+      if (seen_created_at || !parse_int64 (cursor, &created_at_us)
+          || created_at_us <= 0)
+        goto invalid;
+      seen_created_at = TRUE;
+    } else if (g_strcmp0 (key, "updated_at_us") == 0) {
+      if (seen_updated_at || !parse_int64 (cursor, &updated_at_us)
+          || updated_at_us <= 0)
+        goto invalid;
+      seen_updated_at = TRUE;
+    } else if (g_strcmp0 (key, "disabled_by") == 0) {
+      if (seen_disabled_by || !parse_nullable_string (cursor, &disabled_by)
+          || (disabled_by != NULL && !string_is_plain_token (disabled_by)))
+        goto invalid;
+      seen_disabled_by = TRUE;
+    } else if (g_strcmp0 (key, "disabled_at_us") == 0) {
+      if (seen_disabled_at || !parse_int64 (cursor, &disabled_at_us))
+        goto invalid;
+      seen_disabled_at = TRUE;
     } else {
       goto invalid;
     }
@@ -381,7 +422,14 @@ parse_principal_object (JsonCursor *cursor, WylClientServicePrincipal *out)
       goto invalid;
   }
   g_free (key);
-  return seen_subject && seen_display && seen_state;
+  return seen_subject && seen_display && seen_state && seen_generation
+      && seen_created_by && seen_created_at && seen_updated_at
+      && seen_disabled_by && seen_disabled_at
+      && updated_at_us >= created_at_us
+      && ((g_strcmp0 (out->state, "active") == 0 && disabled_by == NULL
+          && disabled_at_us == 0)
+      || (g_strcmp0 (out->state, "disabled") == 0 && disabled_by != NULL
+          && disabled_at_us > 0 && updated_at_us >= disabled_at_us));
 invalid:
   g_free (key);
   wyl_client_service_principal_clear (out);

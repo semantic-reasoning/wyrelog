@@ -183,6 +183,7 @@ typedef struct
   gchar *subject;
   gchar *display_name;
   gchar *tenant;
+  gchar *request_id;
   gchar *access_token_file;
   gchar *guard_timestamp_arg;
   gchar *guard_loc_class;
@@ -394,6 +395,7 @@ wyctl_service_principal_options_clear (WyctlServicePrincipalOptions *opts)
   g_clear_pointer (&opts->subject, g_free);
   g_clear_pointer (&opts->display_name, g_free);
   g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->request_id, g_free);
   g_clear_pointer (&opts->access_token_file, g_free);
   g_clear_pointer (&opts->guard_timestamp_arg, g_free);
   g_clear_pointer (&opts->guard_loc_class, g_free);
@@ -3746,6 +3748,8 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
         "Service subject to disable", "SUBJECT_ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+        "Caller idempotency key", "REQUEST_ID"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
         "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
@@ -3798,8 +3802,18 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
   if (client_rc != 0)
     return client_rc;
 
-  wyrelog_error_t rc = wyl_client_service_principal_disable (client,
-      opts.subject, guard_timestamp, opts.guard_loc_class, guard_risk);
+  gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
+  const gchar *request_id = service_credential_resolve_request_id
+      (opts.request_id, request_id_buf, sizeof request_id_buf);
+  if (request_id == NULL) {
+    g_printerr ("wyctl: failed to mint --request-id\n");
+    return 5;
+  }
+  g_auto (WylClientServicePrincipal) principal = { 0 };
+  wyrelog_error_t rc =
+      wyl_client_service_principal_disable_with_request_id (client,
+      opts.subject, request_id, guard_timestamp, opts.guard_loc_class,
+      guard_risk, &principal);
   int exit_rc = fact_remote_exit (client, "service-principal disable", rc,
       "service_principal_disable_failed");
   if (exit_rc == 0)

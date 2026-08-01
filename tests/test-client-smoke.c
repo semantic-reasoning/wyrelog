@@ -374,10 +374,15 @@ check_service_credential_codecs (void)
   const gchar *principal_json =
       "{\"service_principal\":{\"state\":\"active\","
       "\"display_name\":\"Worker One\","
-      "\"subject_id\":\"svc:tenant:worker\"}}";
+      "\"subject_id\":\"svc:tenant:worker\",\"generation\":1,"
+      "\"created_by\":\"admin\",\"created_at_us\":1,"
+      "\"updated_at_us\":1,\"disabled_by\":null," "\"disabled_at_us\":0}}";
   const gchar *principal_list_json =
       "{\"service_principals\":[{\"subject_id\":\"svc:tenant:worker\","
-      "\"display_name\":\"Worker One\",\"state\":\"active\"}]}";
+      "\"display_name\":\"Worker One\",\"state\":\"active\","
+      "\"generation\":1,\"created_by\":\"admin\","
+      "\"created_at_us\":1,\"updated_at_us\":1,"
+      "\"disabled_by\":null,\"disabled_at_us\":0}]}";
   if (wyl_client_service_principal_decode (principal_json,
           strlen (principal_json), &principal) != WYRELOG_E_OK
       || g_strcmp0 (principal.subject_id, "svc:tenant:worker") != 0
@@ -781,7 +786,10 @@ main (void)
   http.body_size = 0;
 
   http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
-      "\"display_name\":\"Worker\",\"state\":\"active\"}}";
+      "\"display_name\":\"Worker\",\"state\":\"active\","
+      "\"generation\":1,\"created_by\":\"admin\","
+      "\"created_at_us\":1,\"updated_at_us\":1,"
+      "\"disabled_by\":null,\"disabled_at_us\":0}}";
   if (wyl_client_service_principal_create (management_client,
           "svc:alice:worker", "Worker", 123, "public", 49,
           &principal) != WYRELOG_E_OK
@@ -872,7 +880,9 @@ main (void)
   http.status = 0;
   http.body = "{\"service_principals\":[{\"subject_id\":\""
       "svc:alice:worker\",\"display_name\":\"Worker\","
-      "\"state\":\"active\"}]}";
+      "\"state\":\"active\",\"generation\":1,"
+      "\"created_by\":\"admin\",\"created_at_us\":1,"
+      "\"updated_at_us\":1,\"disabled_by\":null," "\"disabled_at_us\":0}]}";
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_OK || principal_list.len != 1
       || g_strcmp0 (principal_list.items[0].subject_id,
@@ -887,13 +897,66 @@ main (void)
       || !client_last_response_is (management_client, 0, NULL)
       || http.request_count != principal_success_request_count)
     return 553;
-  http.body = "{\"ok\":true}";
-  if (wyl_client_service_principal_disable (management_client,
-          "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
+  http.body = "{\"service_principal\":{\"subject_id\":"
+      "\"svc:alice:worker\",\"display_name\":\"Worker\","
+      "\"state\":\"disabled\",\"generation\":2,"
+      "\"created_by\":\"admin\",\"created_at_us\":1,"
+      "\"updated_at_us\":2,\"disabled_by\":\"admin\"," "\"disabled_at_us\":2}}";
+  if (wyl_client_service_principal_disable_with_request_id (management_client,
+          "svc:alice:worker", "222222222222222222222222222", 123,
+          "public", 49, &principal) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path,
-          "/service-principals/svc:alice:worker/disable") != 0)
+          "/service-principals/svc:alice:worker/disable") != 0
+      || g_strcmp0 (http.last_body,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"222222222222222222222222222\"}") != 0
+      || g_strcmp0 (principal.subject_id, "svc:alice:worker") != 0
+      || g_strcmp0 (principal.state, "disabled") != 0)
     return 234;
+  wyl_client_service_principal_clear (&principal);
+  guint keyed_disable_request_count = http.request_count;
+  if (wyl_client_service_principal_disable_with_request_id (management_client,
+          "svc:alice:worker", "bad", 123, "public", 49,
+          &principal) != WYRELOG_E_INVALID
+      || http.request_count != keyed_disable_request_count)
+    return 555;
+  if (wyl_client_service_principal_disable (management_client,
+          "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
+      || http.last_body == NULL
+      || strstr (http.last_body, "{\"version\":\"1\",\"request_id\":\"")
+      != http.last_body)
+    return 556;
+  http.body = "{\"service_principal\":{\"subject_id\":"
+      "\"svc:alice:worker\",\"display_name\":\"Worker\","
+      "\"state\":\"disabled\",\"generation\":2,"
+      "\"created_by\":\"admin\",\"created_at_us\":1,"
+      "\"updated_at_us\":2,\"disabled_by\":\"admin\","
+      "\"disabled_at_us\":2,\"extra\":true}}";
+  if (wyl_client_service_principal_disable_with_request_id (management_client,
+          "svc:alice:worker", "222222222222222222222222223", 123,
+          "public", 49, &principal) != WYRELOG_E_INVALID
+      || principal.subject_id != NULL)
+    return 557;
+  http.status = 409;
+  http.body = "{\"error\":\"service_principal_conflict\"}";
+  if (wyl_client_service_principal_disable_with_request_id (management_client,
+          "svc:alice:worker", "222222222222222222222222224", 123,
+          "public", 49, &principal) != WYRELOG_E_CONFLICT
+      || principal.subject_id != NULL
+      || !client_last_response_is (management_client, 409,
+          "service_principal_conflict"))
+    return 558;
+  http.status = 503;
+  http.body = "{\"error\":\"service_principal_unavailable\"}";
+  if (wyl_client_service_principal_disable_with_request_id (management_client,
+          "svc:alice:worker", "222222222222222222222222225", 123,
+          "public", 49, &principal) != WYRELOG_E_IO
+      || principal.subject_id != NULL
+      || !client_last_response_is (management_client, 503,
+          "service_principal_unavailable"))
+    return 559;
+  http.status = 0;
   if (wyl_client_service_principal_create (management_client, "alice", "bad",
           123, "public", 49, &principal) != WYRELOG_E_INVALID)
     return 235;
@@ -989,7 +1052,7 @@ main (void)
     return 244;
   http.status = 409;
   if (wyl_client_service_credential_issue (management_client, &issue_request,
-          123, "public", 49, &issue_result) != WYRELOG_E_POLICY
+          123, "public", 49, &issue_result) != WYRELOG_E_CONFLICT
       || issue_result.state != NULL || issue_result.credential_id != NULL)
     return 242;
   http.status = 0;

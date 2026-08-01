@@ -141,6 +141,8 @@
   "service_principal_not_found"
 #define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_EXISTS \
   "service_principal_exists"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_CONFLICT \
+  "service_principal_conflict"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED \
   "service_credential_auth_required"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID \
@@ -5945,7 +5947,7 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
-  if (rc == WYRELOG_E_POLICY) {
+  if (rc == WYRELOG_E_CONFLICT) {
     wyl_service_credential_clear (&revoked);
     set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
     return;
@@ -6231,7 +6233,22 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
           &guard_timestamp, &guard_loc_class, &guard_risk, NULL))
     return;
 
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024, fields,
+          G_N_ELEMENTS (fields), values)
+      || g_strcmp0 (values[0], "1") != 0
+      || !wyl_request_id_is_canonical (values[1])) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+
   wyl_service_principal_t principal = { 0 };
+  WylServiceRetirementOutcome retirement = { 0 };
   const gchar *decision_request_id = ensure_request_id_header (msg);
   WylManagementReauthorization reauthorization = {
     .ctx = ctx,
@@ -6253,8 +6270,9 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
     .registry = ctx->service_auth_registry,
     .authorization = &authorization,
   };
-  wyrelog_error_t rc = wyl_service_principal_disable_with_runtime
-      (ctx->handle, subject_id, actor, decision_request_id, &runtime,
+  wyrelog_error_t rc = wyl_service_principal_disable_keyed_with_runtime
+      (ctx->handle, subject_id, actor, values[1],
+      WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime, &retirement,
       &principal);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
@@ -6264,8 +6282,8 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_NOT_FOUND);
     return;
   }
-  if (rc == WYRELOG_E_POLICY) {
-    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED);
+  if (rc == WYRELOG_E_CONFLICT) {
+    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_CONFLICT);
     return;
   }
   if (rc == WYRELOG_E_AUTH) {
@@ -6592,6 +6610,24 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
+  static const WylDaemonHttpStrictJsonField retirement_fields[] = {
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+  };
+  g_auto (GStrv) retirement_values = NULL;
+  if (sealing) {
+    retirement_values = g_new0 (gchar *, G_N_ELEMENTS (retirement_fields) + 1);
+    if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
+            retirement_fields, G_N_ELEMENTS (retirement_fields),
+            retirement_values)
+        || g_strcmp0 (retirement_values[0], "1") != 0
+        || !wyl_request_id_is_canonical (retirement_values[1])) {
+      set_json_error (msg, 400, "invalid_tenant_request");
+      return;
+    }
+  }
+
   if (g_strcmp0 (action, "create") != 0
       && g_strcmp0 (action, "seal") != 0 && g_strcmp0 (action, "unseal") != 0) {
     set_json_error (msg, 501, "tenant_delete_unsupported");
@@ -6602,7 +6638,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   wyrelog_error_t rc = WYRELOG_E_INVALID;
   WylServiceRetirementOutcome retirement = { 0 };
   if (sealing) {
-    const gchar *request_id = ensure_request_id_header (msg);
+    const gchar *decision_request_id = ensure_request_id_header (msg);
     WylManagementReauthorization reauthorization = {
       .ctx = ctx,
       .handle = ctx->handle,
@@ -6612,7 +6648,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .action = "wr.tenant.manage",
       .resource_id = WYL_TENANT_DEFAULT,
       .target_tenant = NULL,
-      .decision_request_id = request_id,
+      .decision_request_id = decision_request_id,
       .guard_timestamp = guard_timestamp,
       .guard_loc_class = guard_loc_class,
       .guard_risk = guard_risk,
@@ -6626,9 +6662,9 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .authorization = &authorization,
     };
     rc = wyl_tenant_seal_keyed_with_runtime (ctx->handle, tenant, actor,
-        request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime,
+        retirement_values[1], WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime,
         &retirement);
-    changed = retirement.transitioned_now;
+    changed = retirement.recorded_transitioned;
   } else {
     g_auto (WylDaemonPolicyWrite) write = { 0 };
     rc = wyl_daemon_policy_write_acquire (ctx, &write);
@@ -6644,8 +6680,25 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 400, "invalid_tenant_request");
     return;
   }
-  if (rc == WYRELOG_E_POLICY) {
-    set_json_error (msg, 403, "tenant_mutation_denied");
+  if (rc == WYRELOG_E_CONFLICT) {
+    if (retirement.disposition == WYL_SERVICE_RETIREMENT_SUPERSEDED) {
+      attach_request_id_header (msg);
+      g_autofree gchar *body = g_strdup_printf
+          ("{\"error\":\"tenant_seal_superseded\","
+          "\"recorded_lifecycle_generation\":%" G_GUINT64_FORMAT ","
+          "\"recorded_sealed_generation\":%" G_GUINT64_FORMAT ","
+          "\"current_lifecycle_generation\":%" G_GUINT64_FORMAT ","
+          "\"current_sealed_generation\":%" G_GUINT64_FORMAT "}",
+          retirement.recorded_tenant_lifecycle_generation,
+          retirement.recorded_tenant_sealed_generation,
+          retirement.current_tenant_lifecycle_generation,
+          retirement.current_tenant_sealed_generation);
+      soup_server_message_set_status (msg, 409, NULL);
+      soup_server_message_set_response (msg, "application/json",
+          SOUP_MEMORY_COPY, body, strlen (body));
+    } else {
+      set_json_error (msg, 409, "tenant_seal_conflict");
+    }
     return;
   }
   if (rc == WYRELOG_E_AUTH) {

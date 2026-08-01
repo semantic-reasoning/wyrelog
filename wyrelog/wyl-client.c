@@ -824,7 +824,7 @@ client_service_management_request_for_tenant (WylClient *client,
     if (status == 403)
       return WYRELOG_E_POLICY;
     if (status == 409)
-      return WYRELOG_E_POLICY;
+      return WYRELOG_E_CONFLICT;
     if (status == 404)
       return WYRELOG_E_NOT_FOUND;
     return WYRELOG_E_IO;
@@ -906,20 +906,58 @@ wyl_client_service_principal_list (WylClient *client, gint64 guard_timestamp,
 }
 
 wyrelog_error_t
+wyl_client_service_principal_disable_with_request_id (WylClient *client,
+    const gchar *subject_id, const gchar *request_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServicePrincipal *out_principal)
+{
+  g_autofree gchar *escaped = NULL;
+  g_autofree gchar *path = NULL;
+  g_autoptr (GString) json = NULL;
+  g_autoptr (GBytes) response = NULL;
+  gsize response_size = 0;
+  const gchar *response_data = NULL;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
+  if (!client_service_subject_is_valid (subject_id)
+      || !wyl_request_id_is_canonical (request_id) || out_principal == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_principal_clear (out_principal);
+  escaped = g_uri_escape_string (subject_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-principals/%s/disable", escaped);
+  json = g_string_new ("{\"version\":\"1\",\"request_id\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, request_id);
+  g_string_append_c (json, '}');
+  wyrelog_error_t rc = client_service_management_request (client, "POST",
+      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &response,
+      NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  response_data = g_bytes_get_data (response, &response_size);
+  return wyl_client_service_principal_decode (response_data, response_size,
+      out_principal);
+}
+
+wyrelog_error_t
 wyl_client_service_principal_disable (WylClient *client,
     const gchar *subject_id, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk)
 {
-  g_autofree gchar *escaped = NULL;
-  g_autofree gchar *path = NULL;
-  if (!client_service_management_begin (client))
+  if (!client_service_management_begin (client)
+      || !client_service_subject_is_valid (subject_id))
     return WYRELOG_E_INVALID;
-  if (!client_service_subject_is_valid (subject_id))
-    return WYRELOG_E_INVALID;
-  escaped = g_uri_escape_string (subject_id, NULL, TRUE);
-  path = g_strdup_printf ("/service-principals/%s/disable", escaped);
-  return client_service_management_request (client, "POST", path, NULL,
-      guard_timestamp, guard_loc_class, guard_risk, NULL, NULL);
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  wyrelog_error_t rc = wyl_request_id_new (request_id, sizeof request_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylClientServicePrincipal principal = { 0 };
+  rc = wyl_client_service_principal_disable_with_request_id (client,
+      subject_id, request_id, guard_timestamp, guard_loc_class, guard_risk,
+      &principal);
+  wyl_client_service_principal_clear (&principal);
+  return rc;
 }
 
 static gboolean

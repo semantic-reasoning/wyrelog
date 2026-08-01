@@ -33,6 +33,7 @@ REQUIRED = {
     "wyl_client_service_principal_clear",
     "wyl_client_service_principal_create",
     "wyl_client_service_principal_disable",
+    "wyl_client_service_principal_disable_with_request_id",
     "wyl_client_service_principal_list",
 }
 
