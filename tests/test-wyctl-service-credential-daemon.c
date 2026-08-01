@@ -52,6 +52,7 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-id-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-session-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -70,11 +71,6 @@
  * expires_at_us > 0 gate is satisfied and the request reaches the escrow
  * handoff (which then fails closed on the missing roots). */
 #define WYL_TEST_FUTURE_EXPIRY_US "1893456000000000"
-
-/* A canonical 27-char alphanumeric request id (WYL_REQUEST_ID_STRING_LEN). It
- * passes the client's is-canonical gate so the recover request reaches the
- * daemon; the unconfigured operation surface then returns 404 NOT_FOUND. */
-#define WYL_TEST_RECOVER_REQUEST_ID "abcdefghijklmnopqrstuvwxyz0"
 
 typedef struct
 {
@@ -366,11 +362,18 @@ main (void)
   assert_wyctl_exit_no_secret (status_authorized_argv, status_ok,
       G_N_ELEMENTS (status_ok));
 
+  /* Mint a canonical request id that this fresh harness has never persisted.
+   * It must pass the exact client/daemon KSUID gate and reach the operation
+   * lookup, where the unknown id produces 404 -> NOT_FOUND -> exit 5. */
+  gchar recover_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (recover_request_id,
+          sizeof recover_request_id), ==, WYRELOG_E_OK);
+
   gchar *recover_authorized_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", base_url,
     "service-credential", "recover",
-    "--request-id", WYL_TEST_RECOVER_REQUEST_ID,
+    "--request-id", recover_request_id,
     "--tenant", WYL_TEST_SERVICE_TENANT,
     "--access-token-file", authorized_token_path,
     "--guard-timestamp", "123",
