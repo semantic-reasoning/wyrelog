@@ -163,6 +163,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyGraphAuthorityRecord *graph_authority = NULL;
   WylPolicyTenantAuthorityRecord *tenant_authority = NULL;
+  gint published_fd = -1;
   gboolean copied = FALSE;
   gboolean run_cas = FALSE;
 
@@ -345,6 +346,36 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
         /* The final may now be durable; never abort by mutable name here. */
         goto out;
       copied = TRUE;
+
+      /* Post-publish reopen-verify.  Reopen the durable final and confirm its
+       * content still reproduces the recorded source digest before the CAS: a
+       * fault or swap between publish and CAS that changed the bytes must fail
+       * closed, never a MOVED over content that no longer matches.  Identity
+       * is deliberately not compared here - the copy has a distinct inode. */
+      if (ctx->checkpoint != NULL) {
+        rc = ctx->checkpoint ("published", ctx->checkpoint_data);
+        if (rc != WYRELOG_E_OK)
+          goto out;
+      }
+      rc = wyl_fact_graph_directory_open_file (&directory,
+          WYL_FACT_RECONCILE_MOVE_FINAL_BASENAME, FALSE, &published_fd);
+      if (rc != WYRELOG_E_OK)
+        goto out;
+      {
+        WylPolicyFactReconcileArtifactEvidence published_ev;
+        rc = wyl_fact_reconcile_capture_artifact_evidence (published_fd,
+            &published_ev);
+        if (rc != WYRELOG_E_OK)
+          goto out;
+        if (published_ev.size_bytes != record->source_evidence.size_bytes
+            || published_ev.digest_algorithm
+            != record->source_evidence.digest_algorithm
+            || memcmp (published_ev.digest, record->source_evidence.digest,
+                sizeof published_ev.digest) != 0) {
+          rc = WYRELOG_E_POLICY;
+          goto out;
+        }
+      }
       run_cas = TRUE;
     } else {
       rc = probe;
@@ -401,6 +432,8 @@ out:
   wyl_fact_graph_resolver_clear (&resolver);
   g_clear_pointer (&graph_authority, wyl_policy_graph_authority_record_free);
   g_clear_pointer (&tenant_authority, wyl_policy_tenant_authority_record_free);
+  if (published_fd >= 0)
+    close (published_fd);
   wyl_policy_fact_reconcile_journal_record_free (record);
   return rc;
 }
