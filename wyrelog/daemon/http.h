@@ -153,6 +153,8 @@ void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
 void wyl_daemon_http_set_retirement_response_checkpoint_for_test
     (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
     gpointer data);
+void wyl_daemon_http_set_rotate_write_checkpoint_for_test
+    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_fail_next_retirement_latch_for_test (SoupServer * server);
 void wyl_daemon_http_set_service_resolver_checkpoint_for_test
     (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,

@@ -5392,6 +5392,8 @@ typedef enum
 {
   ACTUAL_ROUTE_DISABLE_PRINCIPAL,
   ACTUAL_ROUTE_SEAL_TENANT,
+  ACTUAL_ROUTE_REVOKE_CREDENTIAL,
+  ACTUAL_ROUTE_ROTATE_CREDENTIAL,
 } ActualRetirementRoute;
 
 typedef struct
@@ -5412,45 +5414,104 @@ actual_route_call_thread (gpointer data)
 {
   ActualRouteCall *call = data;
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
-  if (call->route == ACTUAL_ROUTE_DISABLE_PRINCIPAL)
-    call->rc = send_raw_service_principal_bearer (session, "POST",
-        call->base_url, call->path, call->query, call->access_token,
-        call->request_body, &call->status, &call->body);
-  else
+  if (call->route == ACTUAL_ROUTE_SEAL_TENANT)
     call->rc = send_raw_policy_mutation_body (session, "POST", call->base_url,
         call->path, call->query, call->request_body, &call->status,
         &call->body);
+  else
+    call->rc = send_raw_service_principal_bearer (session,
+        call->route == ACTUAL_ROUTE_REVOKE_CREDENTIAL ? "DELETE" : "POST",
+        call->base_url, call->path, call->query, call->access_token,
+        call->request_body, &call->status, &call->body);
   return NULL;
+}
+
+static const gchar *
+actual_retirement_request_body (ActualRetirementRoute route)
+{
+  switch (route) {
+    case ACTUAL_ROUTE_DISABLE_PRINCIPAL:
+      return "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000224\"}";
+    case ACTUAL_ROUTE_SEAL_TENANT:
+      return "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000221\"}";
+    case ACTUAL_ROUTE_REVOKE_CREDENTIAL:
+      return "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000226\"}";
+    case ACTUAL_ROUTE_ROTATE_CREDENTIAL:
+      return "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000227\","
+          "\"destination\":\"route-rotate.json\","
+          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
+    default:
+      return NULL;
+  }
+}
+
+static gboolean
+actual_retirement_response_succeeded (ActualRetirementRoute route,
+    const gchar *body)
+{
+  if (body == NULL)
+    return FALSE;
+  switch (route) {
+    case ACTUAL_ROUTE_DISABLE_PRINCIPAL:
+      return strstr (body, "\"state\":\"disabled\"") != NULL;
+    case ACTUAL_ROUTE_SEAL_TENANT:
+      return strstr (body, "\"changed\":true") != NULL;
+    case ACTUAL_ROUTE_REVOKE_CREDENTIAL:
+      return strstr (body, "\"state\":\"revoked\"") != NULL;
+    case ACTUAL_ROUTE_ROTATE_CREDENTIAL:
+      return strstr (body, "\"state\":\"terminal\"") != NULL
+          && strstr (body, "\"delivered\":true") != NULL;
+    default:
+      return FALSE;
+  }
 }
 
 static gboolean
 actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     const gchar *path, const gchar *query, ActualRetirementRoute route,
     const gchar *access_token, const ActualServiceTokens *tokens,
-    const gchar *subject, const gchar *tenant)
+    const gchar *subject, const gchar *tenant,
+    const ActualServiceTokens *unrelated, const gchar *unrelated_subject,
+    const gchar *unrelated_tenant)
 {
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   WylServiceAuthReadLease *held = NULL;
-  if (handle == NULL || tokens == NULL
-      || wyl_service_auth_authority_acquire_read
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-          &held) != WYRELOG_E_OK)
+  CompoundDisableRace write_barrier = {.server = server };
+  g_mutex_init (&write_barrier.mutex);
+  g_cond_init (&write_barrier.changed);
+  if (handle == NULL || tokens == NULL) {
+    g_cond_clear (&write_barrier.changed);
+    g_mutex_clear (&write_barrier.mutex);
     return FALSE;
+  }
+  if (route == ACTUAL_ROUTE_ROTATE_CREDENTIAL) {
+    wyl_daemon_http_set_rotate_write_checkpoint_for_test (server,
+        compound_disable_after_write_acquired, &write_barrier);
+  } else if (wyl_service_auth_authority_acquire_read
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &held) != WYRELOG_E_OK) {
+    g_cond_clear (&write_barrier.changed);
+    g_mutex_clear (&write_barrier.mutex);
+    return FALSE;
+  }
   ActualRouteCall call = {
     .route = route,
     .base_url = base_url,
     .path = path,
     .query = query,
     .access_token = access_token,
-    .request_body = route == ACTUAL_ROUTE_DISABLE_PRINCIPAL ?
-        "{\"version\":\"1\",\"request_id\":"
-        "\"000000000000000000000000224\"}" :
-        "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000221\"}",
+    .request_body = actual_retirement_request_body (route),
     .rc = -1,
   };
   g_autoptr (GThread) mutation = g_thread_new ("actual-http-retirement",
       actual_route_call_thread, &call);
-  gboolean ok = service_resolver_wait_writer_queued (server);
+  gboolean ok = route == ACTUAL_ROUTE_ROTATE_CREDENTIAL ?
+      compound_disable_wait_acquired (&write_barrier) :
+      service_resolver_wait_writer_queued (server);
   ServiceResolverCall later = {
     .server = server,
     .token = tokens->token_a,
@@ -5460,26 +5521,42 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
   if (ok) {
     resolver = g_thread_new ("actual-http-later-resolver",
         service_resolver_call_thread, &later);
-    ok = service_resolver_wait_writer_and_reader (server);
+    ok = route == ACTUAL_ROUTE_ROTATE_CREDENTIAL ?
+        service_resolver_wait_reader_queued (server) :
+        service_resolver_wait_writer_and_reader (server);
   }
-  wyrelog_error_t release_rc = wyl_service_auth_read_lease_release (held);
-  wyl_service_auth_read_lease_free (held);
+  wyrelog_error_t release_rc = WYRELOG_E_OK;
+  if (route == ACTUAL_ROUTE_ROTATE_CREDENTIAL) {
+    g_mutex_lock (&write_barrier.mutex);
+    write_barrier.release = TRUE;
+    g_cond_broadcast (&write_barrier.changed);
+    g_mutex_unlock (&write_barrier.mutex);
+  } else {
+    release_rc = wyl_service_auth_read_lease_release (held);
+    wyl_service_auth_read_lease_free (held);
+  }
   if (mutation != NULL)
     g_thread_join (g_steal_pointer (&mutation));
   if (resolver != NULL)
     g_thread_join (g_steal_pointer (&resolver));
+  if (route == ACTUAL_ROUTE_ROTATE_CREDENTIAL)
+    wyl_daemon_http_set_rotate_write_checkpoint_for_test (server, NULL, NULL);
   gboolean token_a_retired = actual_service_token_expect (server,
       tokens->token_a, subject, tenant, FALSE);
   gboolean token_b_retired = actual_service_token_expect (server,
       tokens->token_b, subject, tenant, FALSE);
+  gboolean unrelated_a_active = unrelated == NULL
+      || actual_service_token_expect (server, unrelated->token_a,
+      unrelated_subject, unrelated_tenant, TRUE);
+  gboolean unrelated_b_active = unrelated == NULL
+      || actual_service_token_expect (server, unrelated->token_b,
+      unrelated_subject, unrelated_tenant, TRUE);
   ok = ok && release_rc == WYRELOG_E_OK && call.rc == 0 && call.status == 200
-      && call.body != NULL
-      && (route == ACTUAL_ROUTE_DISABLE_PRINCIPAL
-      ? strstr (call.body, "\"state\":\"disabled\"") != NULL
-      : strstr (call.body, "\"changed\":true") != NULL)
+      && actual_retirement_response_succeeded (route, call.body)
       && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
-      && token_a_retired && token_b_retired;
+      && token_a_retired && token_b_retired && unrelated_a_active
+      && unrelated_b_active;
   ActualRouteCall replay = call;
   replay.rc = -1;
   replay.status = 0;
@@ -5487,23 +5564,32 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
   if (ok) {
     actual_route_call_thread (&replay);
     ok = replay.rc == 0 && replay.status == 200 && replay.body != NULL
-        && g_strcmp0 (replay.body, call.body) == 0;
+        && g_strcmp0 (replay.body, call.body) == 0
+        && (unrelated == NULL || actual_service_token_expect (server,
+            unrelated->token_a, unrelated_subject, unrelated_tenant, TRUE))
+        && (unrelated == NULL || actual_service_token_expect (server,
+            unrelated->token_b, unrelated_subject, unrelated_tenant, TRUE));
   }
   if (!ok)
     g_printerr ("WYRELOG_TEST_DIAG retirement route=%d release=%d call_rc=%d "
         "status=%u body=%s later_rc=%d later_sid=%s later_actor=%s "
-        "later_tenant=%s token_a_retired=%d token_b_retired=%d\n", route,
+        "later_tenant=%s token_a_retired=%d token_b_retired=%d "
+        "unrelated_a_active=%d unrelated_b_active=%d replay_rc=%d "
+        "replay_status=%u replay_body=%s\n", route,
         release_rc, call.rc, call.status,
         call.body != NULL ? call.body : "(null)", later.rc,
         later.sid != NULL ? later.sid : "(null)",
         later.actor != NULL ? later.actor : "(null)",
         later.tenant != NULL ? later.tenant : "(null)", token_a_retired,
-        token_b_retired);
+        token_b_retired, unrelated_a_active, unrelated_b_active, replay.rc,
+        replay.status, replay.body != NULL ? replay.body : "(null)");
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
   g_free (replay.body);
   g_free (call.body);
+  g_cond_clear (&write_barrier.changed);
+  g_mutex_clear (&write_barrier.mutex);
   return ok;
 }
 #endif
@@ -8868,6 +8954,12 @@ check_service_principal_management_contract (void)
 #ifdef WYL_HAS_AUDIT
   g_auto (ActualServiceTokens) principal_route_tokens = { 0 };
   g_auto (ActualServiceTokens) tenant_route_tokens = { 0 };
+  g_auto (ActualServiceTokens) revoke_route_tokens = { 0 };
+  g_auto (ActualServiceTokens) revoke_unrelated_tokens = { 0 };
+  g_auto (ActualServiceTokens) rotate_route_tokens = { 0 };
+  g_auto (ActualServiceTokens) rotate_unrelated_tokens = { 0 };
+  g_autofree gchar *revoke_route_path = NULL;
+  g_autofree gchar *rotate_route_path = NULL;
   g_autofree gchar *tenant_route_query = NULL;
   wyl_service_principal_t tenant_route_principal = { 0 };
 #endif
@@ -9603,8 +9695,38 @@ check_service_principal_management_contract (void)
 
 #ifdef WYL_HAS_AUDIT
   if (!actual_service_tokens_init (http.server, "svc:tenant-a:worker",
-          "tenant-a", "http-route-disable-token", &principal_route_tokens)) {
+          "tenant-a", "http-route-disable-token", &principal_route_tokens)
+      || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
+          "tenant-a", "http-route-revoke-token", &revoke_route_tokens)
+      || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
+          "tenant-a", "http-route-revoke-unrelated-token",
+          &revoke_unrelated_tokens)
+      || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
+          "tenant-a", "http-route-rotate-token", &rotate_route_tokens)
+      || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
+          "tenant-a", "http-route-rotate-unrelated-token",
+          &rotate_unrelated_tokens)) {
     rc = 2160;
+    goto cleanup;
+  }
+  revoke_route_path = g_strdup_printf
+      ("/service-credentials/%s",
+      revoke_route_tokens.issued.credential.credential_id);
+  rotate_route_path = g_strdup_printf
+      ("/service-credentials/%s/rotate",
+      rotate_route_tokens.issued.credential.credential_id);
+  if (!actual_http_route_retirement_race (http.server, base_url,
+          revoke_route_path, tenant_query, ACTUAL_ROUTE_REVOKE_CREDENTIAL,
+          access_token, &revoke_route_tokens, "svc:tenant-a:worker", "tenant-a",
+          &revoke_unrelated_tokens, "svc:tenant-a:worker", "tenant-a")) {
+    rc = 2167;
+    goto cleanup;
+  }
+  if (!actual_http_route_retirement_race (http.server, base_url,
+          rotate_route_path, tenant_query, ACTUAL_ROUTE_ROTATE_CREDENTIAL,
+          access_token, &rotate_route_tokens, "svc:tenant-a:worker", "tenant-a",
+          &rotate_unrelated_tokens, "svc:tenant-a:worker", "tenant-a")) {
+    rc = 2168;
     goto cleanup;
   }
   tenant_created = FALSE;
@@ -9627,7 +9749,7 @@ check_service_principal_management_contract (void)
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
           NULL, &tenant_route_tokens, "svc:tenant-route:worker",
-          "tenant-route")) {
+          "tenant-route", NULL, NULL, NULL)) {
     rc = 2162;
     goto cleanup;
   }
@@ -9668,7 +9790,8 @@ check_service_principal_management_contract (void)
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
           ACTUAL_ROUTE_DISABLE_PRINCIPAL, access_token,
-          &principal_route_tokens, "svc:tenant-a:worker", "tenant-a")) {
+          &principal_route_tokens, "svc:tenant-a:worker", "tenant-a", NULL,
+          NULL, NULL)) {
     rc = 2163;
     goto cleanup;
   }

@@ -328,6 +328,8 @@ typedef struct _WylDaemonHttpContext
   gpointer management_reauthorization_checkpoint_data;
   WylDaemonRetirementResponseCheckpoint *retirement_response_checkpoint;
   gpointer retirement_response_checkpoint_data;
+  void (*rotate_write_checkpoint) (gpointer data);
+  gpointer rotate_write_checkpoint_data;
   gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
   guint resolver_terminal_entries;
@@ -2390,6 +2392,17 @@ wyl_daemon_http_set_publication_override_for_test (SoupServer *server,
     return;
   ctx->publication_override = vtable;
   ctx->publication_override_data = vtable_data;
+}
+
+void
+wyl_daemon_http_set_rotate_write_checkpoint_for_test (SoupServer *server,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  ctx->rotate_write_checkpoint = checkpoint;
+  ctx->rotate_write_checkpoint_data = data;
 }
 
 gboolean
@@ -5547,6 +5560,8 @@ service_credential_handoff_emit (SoupServerMessage *msg,
   if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
     hctx.registry = ctx->service_auth_registry;
 #ifdef WYL_TEST_DAEMON_HTTP
+  hctx.rotate_after_write_acquired = ctx->rotate_write_checkpoint;
+  hctx.rotate_after_write_acquired_data = ctx->rotate_write_checkpoint_data;
   hctx.publication_override = ctx->publication_override;
   hctx.publication_override_data = ctx->publication_override_data;
 #endif

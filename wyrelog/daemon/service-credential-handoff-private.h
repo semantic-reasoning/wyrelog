@@ -56,6 +56,11 @@ typedef struct
   WylServiceAuthRegistry *registry;
   GCancellable *cancellable;
 #ifdef WYL_TEST_DAEMON_HTTP
+  /* Test-only synchronization at the exact rotate-domain WRITE acquisition.
+   * This distinguishes the retirement mutation from the coordinator's earlier
+   * journal WRITE sections when exercising the routed handler. */
+  void (*rotate_after_write_acquired) (gpointer data);
+  gpointer rotate_after_write_acquired_data;
   /* Test-only publication backend injection.  When publication_override is
    * non-NULL the module drives it (with publication_override_data) instead of
    * opening the production owner-publication backend from
