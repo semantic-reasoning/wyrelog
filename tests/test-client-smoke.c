@@ -17,6 +17,7 @@ typedef struct
   gsize body_size;
   guint status;
   guint request_count;
+  gboolean truncate_response_body;
   gchar *last_method;
   gchar *last_path;
   gchar *last_body;
@@ -141,6 +142,23 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   http->last_guard_risk =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "guard_risk")) : NULL;
+
+  if (http->truncate_response_body) {
+    static const gchar truncated_response[] =
+        "HTTP/1.1 503 Service Unavailable\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 64\r\n" "Connection: close\r\n\r\n" "{\"error\":";
+    g_autoptr (GIOStream) connection =
+        soup_server_message_steal_connection (msg);
+    if (connection != NULL) {
+      GOutputStream *output = g_io_stream_get_output_stream (connection);
+      g_output_stream_write_all (output, truncated_response,
+          sizeof truncated_response - 1, NULL, NULL, NULL);
+      g_output_stream_flush (output, NULL, NULL);
+      g_io_stream_close (connection, NULL, NULL);
+    }
+    return;
+  }
 
   const gchar *body = http->body != NULL ? http->body : "[]";
   soup_server_message_set_status (msg, http->status != 0 ? http->status : 200,
@@ -1980,6 +1998,34 @@ main (void)
   client_access_token = wyl_client_dup_access_token (local_client);
   if (g_strcmp0 (client_access_token, "access-refresh") != 0)
     return 212;
+
+  /* Redirects and otherwise-unmapped responses preserve their metadata before
+   * the established IO mapping is applied. */
+  http.status = 302;
+  http.body = "{\"error\":\"service_management_redirect\"}";
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_IO
+      || !client_last_response_is (local_client, 302,
+          "service_management_redirect"))
+    return 559;
+
+  http.status = 418;
+  http.body = "{\"error\":\"service_management_unmapped\"}";
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_IO
+      || !client_last_response_is (local_client, 418,
+          "service_management_unmapped"))
+    return 560;
+
+  /* The peer sends a complete 503 header and then closes before the declared
+   * response body length. The transport returns IO, but the received status
+   * remains observable and no incomplete error code is retained. */
+  http.truncate_response_body = TRUE;
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_IO
+      || !client_last_response_is (local_client, 503, NULL))
+    return 561;
+  http.truncate_response_body = FALSE;
 
   /* A true pre-response transport failure must replace, not preserve, the
    * metadata from a preceding remote response. */
