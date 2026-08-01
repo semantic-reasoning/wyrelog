@@ -37,6 +37,84 @@ wyrelog_error_t
 wyl_daemon_http_resolve_bearer_for_test(void) {
   return resolve_bearer_session();
 }
+static gboolean
+service_principal_management_authorize_session(void) {
+  wyl_service_auth_authority_acquire_read();
+  wyl_service_auth_read_lease_get_policy_store();
+  management_target_is_active();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  wyl_service_auth_read_lease_release_terminal();
+  return 1;
+}
+static gboolean
+service_principal_management_authorize(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_management_read_release(void) {
+  return wyl_service_auth_read_lease_release_terminal();
+}
+static gboolean
+service_credential_issue_handler(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_credential_rotate_handler(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_credential_revoke_handler(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_principal_create_handler(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_principal_disable_handler(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_credential_operation_reconcile_execute(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_credential_operation_recover_execute(void) {
+  return service_principal_management_authorize_session();
+}
+static gboolean
+service_credential_list_handler(void) {
+  service_principal_management_authorize();
+  service_management_read_release();
+  service_management_read_release();
+  service_management_read_release();
+  return service_management_read_release();
+}
+static gboolean
+service_credential_get_handler(void) {
+  service_principal_management_authorize();
+  service_management_read_release();
+  return service_management_read_release();
+}
+static gboolean
+service_principal_list_handler(void) {
+  service_principal_management_authorize();
+  return service_management_read_release();
+}
+static gboolean
+service_credential_operation_status_execute(void) {
+  service_principal_management_authorize();
+  wyl_service_auth_read_lease_get_policy_store();
+  service_management_read_release();
+  service_management_read_release();
+  return service_management_read_release();
+}
 '''
 
 BASE_WITH_REGISTRY_TEST_SEAM = BASE + r'''
@@ -82,14 +160,94 @@ def main() -> int:
     ]
     if len(mutants) != 26:
         return 3
+    management_mutants = [
+        BASE + "\nstatic void elsewhere(void) { "
+        "wyl_service_auth_authority_acquire_read(); }\n",
+        BASE.replace(
+            "static gboolean\n"
+            "service_principal_management_authorize_session(void) {\n"
+            "  wyl_service_auth_authority_acquire_read();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n",
+            "static gboolean\n"
+            "service_principal_management_authorize_session(void) {\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n"
+            "  wyl_service_auth_authority_acquire_read();\n",
+        ),
+        BASE.replace(
+            "static gboolean\nservice_credential_operation_status_execute(void) {\n"
+            "  service_principal_management_authorize();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n",
+            "static gboolean\nservice_credential_operation_status_execute(void) {\n"
+            "  service_principal_management_authorize();\n"
+            "  wyl_handle_get_policy_store();\n",
+        ),
+        BASE.replace(
+            "static gboolean\nservice_management_read_release(void) {\n"
+            "  return wyl_service_auth_read_lease_release_terminal();\n}",
+            "static gboolean\nservice_management_read_release(void) {\n"
+            "  return wyl_service_auth_read_lease_release();\n}",
+        ),
+        BASE.replace(
+            "static gboolean\n"
+            "service_principal_management_authorize_session(void) {\n"
+            "  wyl_service_auth_authority_acquire_read();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n",
+            "static gboolean\n"
+            "service_principal_management_authorize_session(void) {\n"
+            "  void *alias = wyl_service_auth_authority_acquire_read;\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n",
+        ),
+        BASE.replace(
+            "static gboolean\nservice_management_read_release(void)",
+            "static gboolean\nservice_management_read_release_removed(void)",
+        ),
+        BASE.replace(
+            "static gboolean\n"
+            "service_principal_management_authorize_session(void) {\n"
+            "  wyl_service_auth_authority_acquire_read();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n"
+            "  management_target_is_active();\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n",
+            "static gboolean\n"
+            "service_principal_management_authorize_session(void) {\n"
+            "  wyl_service_auth_authority_acquire_read();\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n"
+            "  management_target_is_active();\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n",
+        ),
+        BASE.replace(
+            "  management_target_is_active();\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n",
+            "  void *target_alias = management_target_is_active;\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n",
+            1,
+        ),
+        BASE + "\nstatic gboolean rogue_management_handler(void) {\n"
+        "  service_principal_management_authorize();\n"
+        "  return service_management_read_release();\n}\n",
+    ]
+    if len(management_mutants) != 9:
+        return 4
     if run(guard, BASE) != 0 or run(guard, BASE_WITH_REGISTRY_TEST_SEAM) != 0:
         return 1
     seam_mutant = BASE_WITH_REGISTRY_TEST_SEAM + (
         "\nstatic void elsewhere(void) { wyl_service_auth_registry_lookup(); }\n"
     )
+    seam_alias_mutant = BASE_WITH_REGISTRY_TEST_SEAM.replace(
+        "  return wyl_service_auth_registry_lookup();",
+        "  void *alias = wyl_service_auth_registry_lookup;\n  return alias != 0;",
+    )
+    seam_missing_mutant = BASE_WITH_REGISTRY_TEST_SEAM.replace(
+        "  return wyl_service_auth_registry_lookup();", "  return 0;"
+    )
     return 0 if (
         all(run(guard, mutant) != 0 for mutant in mutants)
+        and all(run(guard, mutant) != 0 for mutant in management_mutants)
         and run(guard, seam_mutant) != 0
+        and run(guard, seam_alias_mutant) != 0
+        and run(guard, seam_missing_mutant) != 0
     ) else 2
 
 
