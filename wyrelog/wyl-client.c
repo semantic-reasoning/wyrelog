@@ -31,6 +31,9 @@ struct _WylClient
   guint timeout_ms;
 };
 
+#define WYL_CLIENT_LAST_ERROR_CODE_MAX_LEN 127
+#define WYL_CLIENT_ERROR_RESPONSE_SCAN_MAX_LEN 4096
+
 struct _WylClientDecision
 {
   gint decision;
@@ -636,6 +639,115 @@ client_service_subject_is_valid (const gchar *subject)
       && wyl_policy_service_subject_is_valid (subject, strlen (subject));
 }
 
+static void
+client_clear_last_http_error (WylClient *client)
+{
+  client->last_http_status = 0;
+  g_clear_pointer (&client->last_error_code, g_free);
+}
+
+static gboolean
+client_service_management_begin (WylClient *client)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client))
+    return FALSE;
+  client_clear_last_http_error (client);
+  return TRUE;
+}
+
+static gchar *
+parse_service_management_error_code (const gchar *data, gsize size)
+{
+  if (data == NULL || size == 0
+      || size > WYL_CLIENT_ERROR_RESPONSE_SCAN_MAX_LEN)
+    return NULL;
+
+  const gchar *cursor = data;
+  const gchar *limit = data + size;
+#define SKIP_JSON_WS() \
+  G_STMT_START { \
+    while (cursor < limit && (*cursor == ' ' || *cursor == '\t' \
+            || *cursor == '\r' || *cursor == '\n')) \
+      cursor++; \
+  } G_STMT_END
+
+  SKIP_JSON_WS ();
+  if (cursor >= limit || *cursor++ != '{')
+    return NULL;
+  SKIP_JSON_WS ();
+  static const gchar member[] = "\"error\"";
+  if ((gsize) (limit - cursor) < sizeof member - 1
+      || memcmp (cursor, member, sizeof member - 1) != 0)
+    return NULL;
+  cursor += sizeof member - 1;
+  SKIP_JSON_WS ();
+  if (cursor >= limit || *cursor++ != ':')
+    return NULL;
+  SKIP_JSON_WS ();
+  if (cursor >= limit || *cursor++ != '"')
+    return NULL;
+  const gchar *start = cursor;
+  while (cursor < limit && *cursor != '"') {
+    if (!g_ascii_islower ((guchar) * cursor)
+        && !g_ascii_isdigit ((guchar) * cursor)
+        && *cursor != '_')
+      return NULL;
+    if ((gsize) (cursor - start) >= WYL_CLIENT_LAST_ERROR_CODE_MAX_LEN)
+      return NULL;
+    cursor++;
+  }
+  const gchar *code_end = cursor;
+  if (cursor == start || cursor >= limit || *cursor++ != '"')
+    return NULL;
+  SKIP_JSON_WS ();
+  if (cursor >= limit || *cursor++ != '}')
+    return NULL;
+  SKIP_JSON_WS ();
+  if (cursor != limit)
+    return NULL;
+
+  gchar *code = g_strndup (start, (gsize) (code_end - start));
+#undef SKIP_JSON_WS
+  return code;
+}
+
+static void
+client_store_service_management_response (WylClient *client, guint status,
+    GBytes *body)
+{
+  client->last_http_status = status;
+  g_clear_pointer (&client->last_error_code, g_free);
+  if ((status >= 200 && status < 300) || body == NULL)
+    return;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  client->last_error_code = parse_service_management_error_code (data, size);
+}
+
+static wyrelog_error_t
+client_send_service_management_message (WylClient *client,
+    SoupMessage *message, GBytes **out_body, guint *out_status)
+{
+  if (out_body != NULL)
+    *out_body = NULL;
+  if (out_status != NULL)
+    *out_status = 0;
+
+  g_autoptr (GBytes) body = NULL;
+  guint collected_status = 0;
+  wyrelog_error_t rc = client_send_message_collect (client, message, &body,
+      &collected_status);
+  guint status = soup_message_get_status (message);
+  if (status == 0)
+    status = collected_status;
+  client_store_service_management_response (client, status, body);
+  if (out_status != NULL)
+    *out_status = status;
+  if (out_body != NULL)
+    *out_body = g_steal_pointer (&body);
+  return rc;
+}
+
 static wyrelog_error_t
 client_service_management_request (WylClient *client, const gchar *method,
     const gchar *path, const gchar *body, gint64 guard_timestamp,
@@ -695,9 +807,8 @@ client_service_management_request (WylClient *client, const gchar *method,
   }
   g_autoptr (GBytes) response = NULL;
   guint status = 0;
-  wyrelog_error_t rc = client_send_message_collect (client, message, &response,
-      &status);
-  client->last_http_status = status;
+  wyrelog_error_t rc = client_send_service_management_message (client,
+      message, &response, &status);
   if (out_status != NULL)
     *out_status = status;
   if (rc != WYRELOG_E_OK)
@@ -739,6 +850,8 @@ wyl_client_service_principal_create (WylClient *client,
   g_autoptr (GBytes) body = NULL;
   gsize body_size = 0;
   const gchar *body_data;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_principal == NULL || !client_service_subject_is_valid (subject_id)
       || display_name == NULL || display_name[0] == '\0'
       || strlen (display_name) > 4096
@@ -772,6 +885,8 @@ wyl_client_service_principal_list (WylClient *client, gint64 guard_timestamp,
   g_autoptr (GBytes) body = NULL;
   gsize body_size = 0;
   const gchar *body_data;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_principals == NULL)
     return WYRELOG_E_INVALID;
   wyl_client_service_principal_list_clear (out_principals);
@@ -792,6 +907,8 @@ wyl_client_service_principal_disable (WylClient *client,
 {
   g_autofree gchar *escaped = NULL;
   g_autofree gchar *path = NULL;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (!client_service_subject_is_valid (subject_id))
     return WYRELOG_E_INVALID;
   escaped = g_uri_escape_string (subject_id, NULL, TRUE);
@@ -904,8 +1021,10 @@ wyl_client_service_credential_get (WylClient *client,
   g_autoptr (GBytes) body = NULL;
   gsize body_size = 0;
   const gchar *body_data;
-  if (out_credential == NULL || !client_service_credential_id_is_valid
-      (credential_id))
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
+  if (out_credential == NULL
+      || !client_service_credential_id_is_valid (credential_id))
     return WYRELOG_E_INVALID;
   wyl_client_service_credential_clear (out_credential);
   escaped = g_uri_escape_string (credential_id, NULL, TRUE);
@@ -930,6 +1049,8 @@ wyl_client_service_credential_list (WylClient *client,
   g_autoptr (GBytes) body = NULL;
   gsize body_size = 0;
   const gchar *body_data;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_credentials == NULL || !client_service_subject_is_valid (subject_id))
     return WYRELOG_E_INVALID;
   wyl_client_service_credential_list_clear (out_credentials);
@@ -956,6 +1077,8 @@ wyl_client_service_credential_revoke (WylClient *client,
   g_autoptr (GBytes) body = NULL;
   gsize body_size = 0;
   const gchar *body_data;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_credential == NULL || !client_service_credential_id_is_valid
       (credential_id) || !client_service_request_id_is_valid (request_id))
     return WYRELOG_E_INVALID;
@@ -988,6 +1111,8 @@ wyl_client_service_credential_issue (WylClient *client,
   g_autofree gchar *path = NULL;
   g_autoptr (GBytes) body = NULL;
   g_autofree gchar *selected_tenant = NULL;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_receipt == NULL || request == NULL
       || !client_service_subject_is_valid (request->subject_id)
       || request->tenant_id == NULL || request->tenant_id[0] == '\0'
@@ -1036,6 +1161,8 @@ wyl_client_service_credential_rotate (WylClient *client,
   g_autofree gchar *path = NULL;
   g_autoptr (GString) json = NULL;
   g_autoptr (GBytes) body = NULL;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_receipt == NULL || !client_service_credential_id_is_valid
       (credential_id) || !client_service_request_id_is_valid (request_id)
       || !wyl_service_credential_operation_destination_is_valid (destination)
@@ -1220,13 +1347,6 @@ wyl_client_policy_role_revoke (WylClient *client, const gchar *subject,
   return client_policy_mutation_request (client, "policy/roles/revoke",
       subject, "role", role, scope, NULL, guard_timestamp, guard_loc_class,
       guard_risk);
-}
-
-static void
-client_clear_last_http_error (WylClient *client)
-{
-  client->last_http_status = 0;
-  g_clear_pointer (&client->last_error_code, g_free);
 }
 
 static gchar *
@@ -1723,10 +1843,11 @@ wyrelog_error_t
     const WylClientServiceCredentialOperationReconcileRequest * request,
     WylClientServiceCredentialOperationReconcileResult * out_result)
 {
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_result != NULL)
     wyl_client_service_credential_operation_reconcile_result_clear (out_result);
-  if (client == NULL || !WYL_IS_CLIENT (client) || out_result == NULL ||
-      !client_reconcile_request_is_valid (request))
+  if (out_result == NULL || !client_reconcile_request_is_valid (request))
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
@@ -1778,7 +1899,7 @@ wyrelog_error_t
 
   g_autoptr (GBytes) response_body = NULL;
   guint status = 0;
-  wyrelog_error_t rc = client_send_message_collect (client, message,
+  wyrelog_error_t rc = client_send_service_management_message (client, message,
       &response_body, &status);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1791,9 +1912,7 @@ wyrelog_error_t
     return WYRELOG_E_OK;
   }
   if (status == 409) {
-    g_autofree gchar *error_code = parse_simple_json_string_member (data, size,
-        "error");
-    if (g_strcmp0 (error_code, "operation_request_conflict") != 0)
+    if (g_strcmp0 (client->last_error_code, "operation_request_conflict") != 0)
       return WYRELOG_E_IO;
     out_result->kind =
         WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT;
@@ -2596,9 +2715,11 @@ wyl_client_service_credential_operation_status_list (WylClient *client,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusList *out_list)
 {
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_list != NULL)
     wyl_client_service_credential_operation_status_list_clear (out_list);
-  if (client == NULL || !WYL_IS_CLIENT (client) || out_list == NULL ||
+  if (out_list == NULL ||
       guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
       guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
     return WYRELOG_E_INVALID;
@@ -2612,7 +2733,8 @@ wyl_client_service_credential_operation_status_list (WylClient *client,
 
   g_autoptr (GBytes) response_body = NULL;
   guint status = 0;
-  rc = client_send_message_collect (client, message, &response_body, &status);
+  rc = client_send_service_management_message (client, message,
+      &response_body, &status);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -2642,9 +2764,11 @@ wyl_client_service_credential_operation_recover (WylClient *client,
     const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry *out_entry)
 {
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_entry != NULL)
     wyl_client_service_credential_operation_status_entry_clear (out_entry);
-  if (client == NULL || !WYL_IS_CLIENT (client) || out_entry == NULL ||
+  if (out_entry == NULL ||
       !wyl_request_id_is_canonical (request_id) ||
       guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
       guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
@@ -2667,7 +2791,8 @@ wyl_client_service_credential_operation_recover (WylClient *client,
 
   g_autoptr (GBytes) response_body = NULL;
   guint status = 0;
-  rc = client_send_message_collect (client, message, &response_body, &status);
+  rc = client_send_service_management_message (client, message,
+      &response_body, &status);
   if (rc != WYRELOG_E_OK)
     return rc;
 

@@ -14,7 +14,9 @@ typedef struct
   SoupServer *server;
   GMainLoop *loop;
   const gchar *body;
+  gsize body_size;
   guint status;
+  guint request_count;
   gchar *last_method;
   gchar *last_path;
   gchar *last_body;
@@ -69,6 +71,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) server;
   TestHttpServer *http = user_data;
+
+  http->request_count++;
 
   g_free (http->last_method);
   g_free (http->last_path);
@@ -142,7 +146,95 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   soup_server_message_set_status (msg, http->status != 0 ? http->status : 200,
       NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
-      body, strlen (body));
+      body, http->body_size > 0 ? http->body_size : strlen (body));
+}
+
+static gboolean
+client_last_response_is (WylClient *client, guint expected_status,
+    const gchar *expected_error_code)
+{
+  g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
+  return wyl_client_get_last_http_status (client) == expected_status
+      && g_strcmp0 (error_code, expected_error_code) == 0;
+}
+
+typedef wyrelog_error_t (*LocalInvalidServiceManagementCall) (WylClient *);
+
+static wyrelog_error_t
+local_invalid_principal_create (WylClient *client)
+{
+  return wyl_client_service_principal_create (client, "svc:test:worker",
+      "Worker", 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_principal_list (WylClient *client)
+{
+  return wyl_client_service_principal_list (client, 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_principal_disable (WylClient *client)
+{
+  return wyl_client_service_principal_disable (client, "invalid", 123,
+      "public", 10);
+}
+
+static wyrelog_error_t
+local_invalid_credential_get (WylClient *client)
+{
+  return wyl_client_service_credential_get (client,
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_credential_list (WylClient *client)
+{
+  return wyl_client_service_credential_list (client, "svc:test:worker", 123,
+      "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_credential_revoke (WylClient *client)
+{
+  return wyl_client_service_credential_revoke (client,
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+      123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_credential_issue (WylClient *client)
+{
+  return wyl_client_service_credential_issue (client, NULL, 123, "public",
+      10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_credential_rotate (WylClient *client)
+{
+  return wyl_client_service_credential_rotate (client,
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+      "issue.json", 4102444800000000, 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_operation_reconcile (WylClient *client)
+{
+  return wyl_client_service_credential_operation_reconcile (client, NULL, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_operation_status (WylClient *client)
+{
+  return wyl_client_service_credential_operation_status_list (client, 123,
+      "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_operation_recover (WylClient *client)
+{
+  return wyl_client_service_credential_operation_recover (client,
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
 }
 
 static gboolean
@@ -569,6 +661,39 @@ main (void)
   credential_list = { 0 };
   g_auto (WylClientServiceCredentialHandoffReceipt)
   issue_result = { 0 };
+
+  /* Every typed service-management entry point owns request-boundary reset.
+   * Seed a remote failure before each local-invalid call and prove that the
+   * stale metadata is cleared without sending another HTTP request. */
+  static const LocalInvalidServiceManagementCall local_invalid_calls[] = {
+    local_invalid_principal_create,
+    local_invalid_principal_list,
+    local_invalid_principal_disable,
+    local_invalid_credential_get,
+    local_invalid_credential_list,
+    local_invalid_credential_revoke,
+    local_invalid_credential_issue,
+    local_invalid_credential_rotate,
+    local_invalid_operation_reconcile,
+    local_invalid_operation_status,
+    local_invalid_operation_recover,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (local_invalid_calls); i++) {
+    http.status = 400;
+    http.body = "{\"error\":\"stale_remote_failure\"}";
+    if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+            &principal_list) != WYRELOG_E_INVALID
+        || !client_last_response_is (local_client, 400, "stale_remote_failure"))
+      return 546;
+    guint request_count = http.request_count;
+    if (local_invalid_calls[i] (local_client) != WYRELOG_E_INVALID
+        || !client_last_response_is (local_client, 0, NULL)
+        || http.request_count != request_count)
+      return 547;
+  }
+  http.status = 0;
+  http.body_size = 0;
+
   http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
       "\"display_name\":\"Worker\",\"state\":\"active\"}}";
   if (wyl_client_service_principal_create (local_client, "svc:alice:worker",
@@ -580,6 +705,83 @@ main (void)
       || strstr (http.last_body, "svc:alice:worker") == NULL
       || g_strcmp0 (http.last_session_token, "session-1") != 0)
     return 232;
+  if (!client_last_response_is (local_client, 200, NULL))
+    return 539;
+
+  /* A remote 400 records both pieces of response metadata. Reusing the same
+   * client for a local validation failure must clear them without HTTP. */
+  http.status = 400;
+  http.body = "{\"error\":\"invalid_service_principal\"}";
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 400,
+          "invalid_service_principal"))
+    return 540;
+  g_free (http.last_path);
+  http.last_path = g_strdup ("__metadata_local_validation__");
+  if (wyl_client_service_principal_create (local_client, "alice", "bad", 123,
+          "public", 49, &principal) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL)
+      || g_strcmp0 (http.last_path, "__metadata_local_validation__") != 0)
+    return 541;
+
+  /* The dedicated service-management parser accepts exactly one top-level,
+   * bounded snake_case error string and rejects ambiguous or injectable
+   * envelopes while retaining the received status. */
+  const gchar *invalid_error_bodies[] = {
+    "{\"error\":\"\"}",
+    "{\"error\":\"Bad-code\"}",
+    "{\"error\":\"bad\\ncode\"}",
+    "{\"error\":\"bad\ncode\"}",
+    "{\"error\":\"one\",\"error\":\"two\"}",
+    "{\"wrapper\":{\"error\":\"nested\"}}",
+    "{\"error\":\"one\"} trailing",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_error_bodies); i++) {
+    http.body = invalid_error_bodies[i];
+    if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+            &principal_list) != WYRELOG_E_INVALID
+        || !client_last_response_is (local_client, 400, NULL))
+      return 542;
+  }
+
+  static const gchar embedded_nul_error[] = "{\"error\":\"valid\0injected\"}";
+  http.body = embedded_nul_error;
+  http.body_size = sizeof embedded_nul_error - 1;
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 400, NULL))
+    return 548;
+  http.body_size = 0;
+
+  g_autofree gchar *maximum_error_value = g_strnfill (127, 'x');
+  g_autofree gchar *maximum_error_body = g_strdup_printf
+      ("{\"error\":\"%s\"}", maximum_error_value);
+  http.body = maximum_error_body;
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 400, maximum_error_value))
+    return 549;
+
+  g_autofree gchar *oversized_error_value = g_strnfill (128, 'x');
+  g_autofree gchar *oversized_error_body = g_strdup_printf
+      ("{\"error\":\"%s\"}", oversized_error_value);
+  http.body = oversized_error_body;
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 400, NULL))
+    return 542;
+
+  g_autofree gchar *oversized_envelope_padding = g_strnfill (4096, ' ');
+  g_autofree gchar *oversized_envelope = g_strdup_printf
+      ("{\"error\":\"valid\"}%s", oversized_envelope_padding);
+  http.body = oversized_envelope;
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 400, NULL))
+    return 550;
+
+  http.status = 0;
   http.body = "{\"service_principals\":[{\"subject_id\":\""
       "svc:alice:worker\",\"display_name\":\"Worker\","
       "\"state\":\"active\"}]}";
@@ -588,7 +790,8 @@ main (void)
       || g_strcmp0 (principal_list.items[0].subject_id,
           "svc:alice:worker") != 0
       || g_strcmp0 (http.last_method, "GET") != 0
-      || g_strcmp0 (http.last_path, "/service-principals") != 0)
+      || g_strcmp0 (http.last_path, "/service-principals") != 0
+      || !client_last_response_is (local_client, 200, NULL))
     return 233;
   http.body = "{\"ok\":true}";
   if (wyl_client_service_principal_disable (local_client,
@@ -613,14 +816,26 @@ main (void)
           &credential) != WYRELOG_E_OK
       || g_strcmp0 (http.last_path,
           "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
-      || g_strcmp0 (credential.state, "revoked") != 0)
+      || g_strcmp0 (credential.state, "revoked") != 0
+      || !client_last_response_is (local_client, 200, NULL))
     return 236;
+
+  http.status = 401;
+  http.body = "{\"error\":\"service_credential_auth_required\"}";
+  if (wyl_client_service_credential_get (local_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
+          &credential) != WYRELOG_E_AUTH
+      || !client_last_response_is (local_client, 401,
+          "service_credential_auth_required"))
+    return 543;
+  http.status = 0;
   http.body = "{\"service_credentials\":[]}";
   if (wyl_client_service_credential_list (local_client, "svc:alice:worker",
           123, "public", 49, &credential_list) != WYRELOG_E_OK
       || credential_list.len != 0
       || g_strcmp0 (http.last_path,
-          "/service-principals/svc:alice:worker/credentials") != 0)
+          "/service-principals/svc:alice:worker/credentials") != 0
+      || !client_last_response_is (local_client, 200, NULL))
     return 237;
   http.body = mock_credential_json;
   if (wyl_client_service_credential_revoke (local_client,
@@ -780,15 +995,26 @@ main (void)
   reconcile_request.subject_id = "svc:client:reconcile";
   reconcile_request.tenant_id = "tenant-a";
 
+  http.status = 403;
+  http.body = "{\"error\":\"service_credential_reconcile_denied\"}";
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_POLICY
+      || !client_last_response_is (local_client, 403,
+          "service_credential_reconcile_denied"))
+    return 544;
+  http.status = 0;
+
   /* Shape alone is insufficient: this is 27 alphanumeric characters but is
-   * outside the canonical KSUID range. Reconcile must reject it locally. */
+   * outside the canonical KSUID range. Reconcile must reject it locally and
+   * clear the preceding remote failure metadata. */
   g_free (http.last_path);
   http.last_path = g_strdup ("__unset__");
   reconcile_request.request_id = "abcdefghijklmnopqrstuvwxyz0";
   if (wyl_client_service_credential_operation_reconcile (local_client,
           &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
     return 209;
-  if (g_strcmp0 (http.last_path, "__unset__") != 0)
+  if (g_strcmp0 (http.last_path, "__unset__") != 0
+      || !client_last_response_is (local_client, 0, NULL))
     return 208;
   reconcile_request.request_id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
 
@@ -818,7 +1044,8 @@ main (void)
       g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
-      g_strcmp0 (http.last_body, reconcile_issue_body) != 0)
+      g_strcmp0 (http.last_body, reconcile_issue_body) != 0 ||
+      !client_last_response_is (local_client, 200, NULL))
     return 212;
   wyl_client_service_credential_operation_reconcile_result_clear
       (&reconcile_result);
@@ -863,7 +1090,9 @@ main (void)
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT
       || reconcile_result.credential_id != NULL
-      || reconcile_result.generation != 0)
+      || reconcile_result.generation != 0
+      || !client_last_response_is (local_client, 409,
+          "operation_request_conflict"))
     return 217;
   if (g_strcmp0 (http.last_body, reconcile_rotate_body) != 0 ||
       http.status != 409)
@@ -876,7 +1105,8 @@ main (void)
       "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
       "\"tenant\":\"tenant-a\",\"extra\":\"x\"}}";
   if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_IO)
+          &reconcile_request, &reconcile_result) != WYRELOG_E_IO
+      || !client_last_response_is (local_client, 200, NULL))
     return 219;
   if (reconcile_result.kind != 0 || reconcile_result.credential_id != NULL ||
       reconcile_result.generation != 0)
@@ -921,7 +1151,8 @@ main (void)
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
       g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
-      g_strcmp0 (http.last_guard_risk, "69") != 0)
+      g_strcmp0 (http.last_guard_risk, "69") != 0 ||
+      !client_last_response_is (local_client, 200, NULL))
     return 254;
 
   http.body =
@@ -993,8 +1224,18 @@ main (void)
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
           "public", 69, &status_list) != WYRELOG_E_INVALID)
     return 261;
-  if (status_list.n_entries != 0 || status_list.entries != NULL)
+  if (status_list.n_entries != 0 || status_list.entries != NULL
+      || !client_last_response_is (local_client, 400,
+          "invalid_service_credential_operation_status"))
     return 262;
+
+  http.status = 503;
+  http.body = "{\"error\":\"service_credential_operation_busy\"}";
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, &status_list) != WYRELOG_E_BUSY
+      || !client_last_response_is (local_client, 503,
+          "service_credential_operation_busy"))
+    return 545;
   http.status = 0;
 
   g_auto (WylClientServiceCredentialOperationStatusEntry) recovered = { 0 };
@@ -1071,7 +1312,8 @@ main (void)
           "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}") != 0 ||
       g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
       g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
-      g_strcmp0 (http.last_guard_risk, "69") != 0)
+      g_strcmp0 (http.last_guard_risk, "69") != 0 ||
+      !client_last_response_is (local_client, 200, NULL))
     return 269;
   wyl_client_service_credential_operation_status_entry_clear (&recovered);
 
@@ -1082,7 +1324,9 @@ main (void)
           "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
           &recovered) != WYRELOG_E_NOT_FOUND)
     return 270;
-  if (recovered.request_id != NULL || recovered.recovery != NULL)
+  if (recovered.request_id != NULL || recovered.recovery != NULL
+      || !client_last_response_is (local_client, 404,
+          "service_credential_operation_recover_not_found"))
     return 271;
   http.status = 0;
 
@@ -1694,9 +1938,23 @@ main (void)
   if (g_strcmp0 (client_access_token, "access-refresh") != 0)
     return 212;
 
+  /* A true pre-response transport failure must replace, not preserve, the
+   * metadata from a preceding remote response. */
+  http.status = 403;
+  http.body = "{\"error\":\"remote_before_transport\"}";
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_POLICY
+      || !client_last_response_is (local_client, 403,
+          "remote_before_transport"))
+    return 551;
+  soup_server_disconnect (http.server);
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_IO
+      || !client_last_response_is (local_client, 0, NULL))
+    return 552;
+
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
-  soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.last_method, g_free);
   g_clear_pointer (&http.last_path, g_free);
