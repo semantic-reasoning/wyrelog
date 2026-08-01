@@ -5019,10 +5019,12 @@ typedef struct
   WylSession *session;
   const gchar *session_id;
   const gchar *actor;
+  const gchar *expected_session_tenant;
   const gchar *action;
   const gchar *resource_id;
   const gchar *target_tenant;
   const gchar *decision_request_id;
+  gboolean require_mfa;
   gint64 guard_timestamp;
   const gchar *guard_loc_class;
   gint64 guard_risk;
@@ -5030,11 +5032,12 @@ typedef struct
 
 static gboolean
 management_session_matches_live (WylSession *session,
-    const gchar *session_id, const gchar *actor)
+    const gchar *session_id, const gchar *actor,
+    const gchar *expected_session_tenant, gboolean require_mfa)
 {
   if (session == NULL || !WYL_IS_SESSION (session)
       || !wyl_session_is_active_human_private (session)
-      || !wyl_session_is_mfa_assured_private (session))
+      || (require_mfa && !wyl_session_is_mfa_assured_private (session)))
     return FALSE;
   g_autofree gchar *live_session_id = wyl_session_dup_id_string (session);
   g_autofree gchar *live_actor = wyl_session_dup_username (session);
@@ -5042,7 +5045,7 @@ management_session_matches_live (WylSession *session,
   return live_session_id != NULL && live_actor != NULL && live_tenant != NULL
       && g_strcmp0 (live_session_id, session_id) == 0
       && g_strcmp0 (live_actor, actor) == 0
-      && g_strcmp0 (live_tenant, WYL_TENANT_DEFAULT) == 0;
+      && g_strcmp0 (live_tenant, expected_session_tenant) == 0;
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -5104,7 +5107,8 @@ management_reauthorize_inside_write (gpointer data,
   if (authorization == NULL || authorization->handle == NULL
       || g_strcmp0 (actor_subject_id, authorization->actor) != 0
       || !management_session_matches_live (authorization->session,
-          authorization->session_id, authorization->actor))
+          authorization->session_id, authorization->actor,
+          authorization->expected_session_tenant, authorization->require_mfa))
     return WYRELOG_E_AUTH;
 #ifdef WYL_TEST_DAEMON_HTTP
   if (authorization->ctx != NULL
@@ -5314,7 +5318,8 @@ service_principal_management_authorize_session (SoupServer *server,
 
   g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
       auth.session_id);
-  if (!management_session_matches_live (session, auth.session_id, auth.actor)) {
+  if (!management_session_matches_live (session, auth.session_id, auth.actor,
+          WYL_TENANT_DEFAULT, TRUE)) {
     (void) wyl_service_auth_read_lease_release_terminal (&lease);
     set_json_error (msg, 403, denied_code);
     return FALSE;
@@ -5989,9 +5994,11 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
     .session = session,
     .session_id = auth.session_id,
     .actor = actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
     .action = "wr.service_credential.manage",
     .target_tenant = lookup_request_tenant (query),
     .decision_request_id = decision_request_id,
+    .require_mfa = TRUE,
     .guard_timestamp = guard_timestamp,
     .guard_loc_class = guard_loc_class,
     .guard_risk = guard_risk,
@@ -6163,8 +6170,10 @@ service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
     .session = session,
     .session_id = auth.session_id,
     .actor = actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
     .action = "wr.service_principal.manage",
     .decision_request_id = decision_request_id,
+    .require_mfa = TRUE,
     .guard_timestamp = guard_timestamp,
     .guard_loc_class = guard_loc_class,
     .guard_risk = guard_risk,
@@ -6325,8 +6334,10 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
     .session = session,
     .session_id = auth.session_id,
     .actor = actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
     .action = "wr.service_principal.manage",
     .decision_request_id = decision_request_id,
+    .require_mfa = TRUE,
     .guard_timestamp = guard_timestamp,
     .guard_loc_class = guard_loc_class,
     .guard_risk = guard_risk,
@@ -6736,10 +6747,12 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .session = session,
       .session_id = auth.session_id,
       .actor = actor,
+      .expected_session_tenant = WYL_TENANT_DEFAULT,
       .action = "wr.tenant.manage",
       .resource_id = WYL_TENANT_DEFAULT,
       .target_tenant = NULL,
       .decision_request_id = decision_request_id,
+      .require_mfa = FALSE,
       .guard_timestamp = guard_timestamp,
       .guard_loc_class = guard_loc_class,
       .guard_risk = guard_risk,
@@ -9194,9 +9207,11 @@ service_credential_operation_reconcile_execute (SoupServer *server,
     .session = session,
     .session_id = auth.session_id,
     .actor = actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
     .action = "wr.service_credential.manage",
     .target_tenant = target_tenant,
     .decision_request_id = ensure_request_id_header (msg),
+    .require_mfa = TRUE,
     .guard_timestamp = guard_timestamp,
     .guard_loc_class = guard_loc_class,
     .guard_risk = guard_risk,
@@ -9711,9 +9726,11 @@ service_credential_operation_recover_execute (SoupServer *server,
     .session = session,
     .session_id = auth.session_id,
     .actor = actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
     .action = "wr.service_credential.manage",
     .target_tenant = target_tenant,
     .decision_request_id = ensure_request_id_header (msg),
+    .require_mfa = TRUE,
     .guard_timestamp = guard_timestamp,
     .guard_loc_class = guard_loc_class,
     .guard_risk = guard_risk,

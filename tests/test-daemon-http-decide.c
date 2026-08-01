@@ -3208,9 +3208,13 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
       || !actual_service_token_expect (server, active.token_b,
           "svc:resolver:test", "__wr_default", TRUE))
     return FALSE;
+  g_auto (ServiceResolverFixture) transition_pending = { 0 };
+  if (!service_resolver_fixture_init (server, &transition_pending,
+          WYL_SERVICE_AUTH_PENDING, 0))
+    return FALSE;
   CompoundDisableRace race = {
     .server = server,
-    .request_id = "resolver-compound-disable",
+    .request_id = "000000000000000000000000230",
     .rc = WYRELOG_E_INTERNAL,
   };
   g_mutex_init (&race.mutex);
@@ -3248,19 +3252,41 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
 
-  g_auto (ServiceResolverFixture) pending = { 0 };
   gboolean changed = TRUE;
-  if (!ok || !service_resolver_fixture_init (server, &pending,
-          WYL_SERVICE_AUTH_PENDING, 0)
-      || wyl_daemon_http_disable_service_principal_for_test (server,
-          "svc:resolver:test", "resolver-compound-replay", NULL,
-          NULL) != WYRELOG_E_OK
+  if (!ok
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          pending.sid, pending.jti, pending.credential, 9,
+          transition_pending.sid, transition_pending.jti,
+          transition_pending.credential, 9,
           "svc:resolver:test", "__wr_default",
           WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
-      || changed || !service_resolver_expect (server, &pending,
-          pending.token, FALSE))
+      || changed || !service_resolver_expect (server, &transition_pending,
+          transition_pending.token, FALSE))
+    return FALSE;
+
+  /* A fresh keyed no-op against the already disabled principal must not arm
+   * another selector.  The synthetic PENDING tuple can therefore activate;
+   * #376 owns closing that independently impossible publication path in the
+   * real resolver. */
+  g_auto (ServiceResolverFixture) noop_pending = { 0 };
+  changed = FALSE;
+  if (!service_resolver_fixture_init (server, &noop_pending,
+          WYL_SERVICE_AUTH_PENDING, 0)
+      || wyl_daemon_http_disable_service_principal_for_test (server,
+          "svc:resolver:test", "000000000000000000000000231", NULL,
+          NULL) != WYRELOG_E_OK
+      || wyl_daemon_http_service_registry_transition_for_test (server,
+          noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
+          "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK
+      || !changed || !service_resolver_expect (server, &noop_pending,
+          noop_pending.token, TRUE))
+    return FALSE;
+  changed = FALSE;
+  if (wyl_daemon_http_service_registry_transition_for_test (server,
+          noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
+          "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
+      || !changed)
     return FALSE;
   return TRUE;
 }
@@ -3289,6 +3315,13 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
           subject, tenant, TRUE)
       || !actual_service_token_expect (server, active.token_b,
           subject, tenant, TRUE))
+    return FALSE;
+  /* A token that is still PENDING when the first sealing transition commits
+   * must inherit that transition's selector.  A later ACTIVATE therefore
+   * cannot escape the retirement barrier. */
+  g_auto (ServiceResolverFixture) transition_pending = { 0 };
+  if (!service_resolver_fixture_init_tenant (server, &transition_pending,
+          WYL_SERVICE_AUTH_PENDING, 0, tenant))
     return FALSE;
   CompoundDisableRace race = {
     .server = server,
@@ -3331,18 +3364,33 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
 
-  g_auto (ServiceResolverFixture) pending = { 0 };
   gboolean changed = TRUE;
-  if (!ok || !service_resolver_fixture_init_tenant (server, &pending,
+  if (!ok
+      || wyl_daemon_http_service_registry_transition_for_test (server,
+          transition_pending.sid, transition_pending.jti,
+          transition_pending.credential, 9,
+          "svc:resolver:test", tenant,
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
+      || changed || !service_resolver_expect (server, &transition_pending,
+          transition_pending.token, FALSE))
+    return FALSE;
+
+  /* A fresh request key against an already sealed tenant is an authorized
+   * no-op receipt and deliberately creates no new selector.  Prove that a
+   * PENDING tuple introduced after the transition can still activate; bearer
+   * resolution remains denied independently because the tenant is sealed. */
+  g_auto (ServiceResolverFixture) noop_pending = { 0 };
+  changed = FALSE;
+  if (!service_resolver_fixture_init_tenant (server, &noop_pending,
           WYL_SERVICE_AUTH_PENDING, 0, tenant)
       || wyl_daemon_http_seal_tenant_for_test (server, tenant, NULL,
           NULL) != WYRELOG_E_OK
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          pending.sid, pending.jti, pending.credential, 9,
+          noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
           "svc:resolver:test", tenant,
-          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
-      || changed || !service_resolver_expect (server, &pending,
-          pending.token, FALSE))
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK
+      || !changed || !service_resolver_expect (server, &noop_pending,
+          noop_pending.token, FALSE))
     return FALSE;
   return TRUE;
 }
@@ -5770,8 +5818,8 @@ cleanup:
 }
 
 static gint
-check_policy_permission_mutation_contract (WylHandle *handle,
-    WylClient *client, const gchar *base_url)
+check_policy_permission_mutation_contract (SoupServer *server,
+    WylHandle *handle, WylClient *client, const gchar *base_url)
 {
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-policy-admin") != WYRELOG_E_OK)
@@ -5787,6 +5835,15 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 164;
   if (g_strcmp0 (client_tenant, "__wr_default") != 0)
     return 165;
+  /* Tenant management has historically accepted an active human session
+   * created through the explicitly enabled skip-MFA login path.  Keep this
+   * fixture visibly non-MFA so the WRITE-lease reauthorization cannot silently
+   * strengthen the front-door contract. */
+  g_autoptr (WylSession) management_session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (management_session == NULL
+      || wyl_session_is_mfa_assured_private (management_session))
+    return 2228;
   if (grant_tenant_manage_authority (handle, "http-policy-admin")
       != WYRELOG_E_OK)
     return 189;
@@ -6085,7 +6142,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   g_autofree gchar *implicit_tenant_seal_query =
       g_strdup_printf ("name=tenant-a&session_token=%s"
       "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      tenant_session_token);
+      session_token);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
       "/tenants/seal", implicit_tenant_seal_query,
       "{\"version\":\"1\",\"request_id\":"
@@ -7670,7 +7727,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
     return 1982;
   if (wyl_daemon_http_revoke_service_credential_for_test (server,
-          issued.credential.credential_id, "expiry-retire", NULL, NULL)
+          issued.credential.credential_id,
+          "000000000000000000000000232", NULL, NULL)
       != WYRELOG_E_OK)
     return 1983;
   wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE, G_MAXINT64);
@@ -10686,8 +10744,11 @@ check_retirement_corruption_http_matrix (void)
       "SELECT (SELECT count(*) FROM service_retirement_receipts)+"
       "(SELECT count(*) FROM service_principal_events)+"
       "(SELECT count(*) FROM service_credential_events)+"
-      "(SELECT count(*) FROM audit_events)+"
-      "(SELECT count(*) FROM audit_intentions);";
+      "(SELECT count(*) FROM audit_events WHERE action IN "
+      "('service.principal.disable','service.credential.revoke'))+"
+      "(SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+      "ON a.id=i.audit_id WHERE a.action IN "
+      "('service.principal.disable','service.credential.revoke'));";
   if (!policy_count_rows (env.handle, effects_sql, &effects_before)) {
     rc = 2646;
     goto cleanup;
@@ -12522,7 +12583,8 @@ main (void)
   if (decision != WYL_DECISION_DENY)
     return 13;
 
-  raw_rc = check_policy_permission_mutation_contract (handle, client, base_url);
+  raw_rc = check_policy_permission_mutation_contract (http.server, handle,
+      client, base_url);
   if (raw_rc != 0)
     return raw_rc;
 
