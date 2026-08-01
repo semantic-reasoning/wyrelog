@@ -272,6 +272,28 @@ responses. A successful response contains only the short-lived access token;
 session metadata, tenant data, credential secrets, and raw request material are
 never echoed.
 
+Each successful exchange carries an owned copy of its exact service authority
+identity (`session_id`, `jti`, credential ID and generation, principal, tenant,
+and expiry) from activation through the Soup response lifecycle. A failure
+after activation but before response handoff, Soup's `request-aborted`
+terminal signal, or destruction of an activated response identity that received
+neither terminal signal retires only that exact registry/session/access tuple.
+The last case is the fail-closed fallback for transports that discard a message
+without reporting a terminal signal. An already-absent exact tuple makes
+repeated cleanup harmless; a partial, cross-linked, or mismatched tuple leaves
+all observed state intact and latches service authentication unavailable.
+Soup's `request-finished` signal means the response was written and preserves
+the live tuple until explicit invalidation, key rotation, expiry retirement, or
+daemon shutdown.
+
+An aborted delivery does not refund its rate-limit permit and is not an
+idempotent exchange checkpoint. A caller retry performs a new exchange with a
+distinct session ID and JTI. Service bearer state is process-local, so restart
+does not restore an earlier live tuple; normal expiry retirement removes the
+registry entry and both live companions together. The successful JSON response
+buffer remains length-owned by the daemon while Soup writes it and is
+zeroized before release on both finished and aborted response paths.
+
 Client code that carries a credential secret or access token must first accept
 only a canonical literal loopback URL. Hostnames, ambiguous numeric addresses,
 IPv4-mapped IPv6, zone identifiers, userinfo, non-loopback authorities, and

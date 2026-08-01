@@ -99,7 +99,23 @@ typedef struct
   guint cleanup_failed;
   guint destroyed;
   guint duplicate_outcomes;
+  guint unclaimed_fallbacks;
 } WylDaemonServiceResponseAuthoritySnapshot;
+typedef enum
+{
+  WYL_DAEMON_SERVICE_RESPONSE_PRE_HANDOFF = 1,
+  WYL_DAEMON_SERVICE_RESPONSE_ACTIVE_PRE_HANDOFF_FAILURE,
+  WYL_DAEMON_SERVICE_RESPONSE_FINISHED,
+  WYL_DAEMON_SERVICE_RESPONSE_ABORTED,
+  WYL_DAEMON_SERVICE_RESPONSE_CLEANUP_FAILED,
+  WYL_DAEMON_SERVICE_RESPONSE_UNCLAIMED_FALLBACK,
+  WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DESTROYED,
+  WYL_DAEMON_SERVICE_RESPONSE_BODY_WIPED,
+} WylDaemonServiceResponsePhase;
+typedef void (*WylDaemonServiceResponseCheckpoint) (gint phase,
+    const gchar * session_id, const gchar * jti, gpointer data);
+typedef void (*WylDaemonServiceResponseRetireCheckpoint) (const gchar *
+    session_id, const gchar * jti, gpointer data);
 typedef enum
 {
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_NONE = 0,
@@ -113,6 +129,7 @@ typedef enum
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE,
 } WylDaemonServicePublicationFault;
 typedef enum
@@ -327,6 +344,14 @@ void wyl_daemon_http_service_response_wipe_snapshot_for_test
     gboolean * out_all_zero);
 void wyl_daemon_http_reset_service_response_authority_for_test
     (SoupServer * server);
+void wyl_daemon_http_set_service_response_checkpoint_for_test
+    (SoupServer * server, WylDaemonServiceResponseCheckpoint checkpoint,
+    gpointer data);
+void wyl_daemon_http_set_service_response_retire_checkpoint_for_test
+    (SoupServer * server,
+    WylDaemonServiceResponseRetireCheckpoint checkpoint, gpointer data);
+void wyl_daemon_http_set_service_due_write_checkpoint_for_test
+    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_service_response_authority_snapshot_for_test
     (SoupServer * server,
     WylDaemonServiceResponseAuthoritySnapshot * out_snapshot);

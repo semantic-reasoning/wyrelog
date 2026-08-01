@@ -7582,13 +7582,1433 @@ issue_service_token_credential (WylHandle *handle, const gchar *subject_id,
       WYRELOG_E_OK);
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean pre_handoff;
+  gboolean active_pre_handoff_failure;
+  gboolean close_now;
+  gboolean socket_closed;
+  gboolean release_handler;
+  gboolean terminal;
+  gboolean body_wiped;
+  gboolean unclaimed_fallback;
+  gboolean authority_destroyed;
+  gboolean shutdown_on_socket_close;
+  gboolean shutdown_done;
+  SoupServer *shutdown_server;
+  gint terminal_phase;
+  gchar *session_id;
+  gchar *jti;
+} ServiceResponseDeliveryBarrier;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean entered;
+  gboolean release;
+} ServiceResponseRetireBarrier;
+
+typedef enum
+{
+  SERVICE_ABORT_RACE_CREDENTIAL_ROTATE = 1,
+  SERVICE_ABORT_RACE_CREDENTIAL_REVOKE,
+  SERVICE_ABORT_RACE_PRINCIPAL_DISABLE,
+  SERVICE_ABORT_RACE_TENANT_SEAL,
+  SERVICE_ABORT_RACE_EXPIRY,
+  SERVICE_ABORT_PARTIAL_MISMATCH,
+  SERVICE_ABORT_CROSSED_MISMATCH,
+} ServiceAbortRaceKind;
+
+typedef struct
+{
+  SoupServer *server;
+  WylHandle *handle;
+  ServiceAbortRaceKind kind;
+  const gchar *subject;
+  const gchar *tenant;
+  const gchar *credential_id;
+  guint64 credential_generation;
+  GMutex mutex;
+  GCond changed;
+  gboolean acquired;
+  gboolean release;
+  wyrelog_error_t rc;
+} ServiceAbortMutation;
+
+typedef struct
+{
+  const gchar *base_url;
+  const gchar *request_body;
+  ServiceResponseDeliveryBarrier *barrier;
+  gint rc;
+} DroppedServiceTokenResponse;
+
+typedef struct
+{
+  const gchar *base_url;
+  const gchar *request_body;
+  gint rc;
+  guint status;
+  gchar *body;
+} FinishedServiceTokenResponse;
+
+typedef struct
+{
+  GMainContext *context;
+  TestHttpServer http;
+  GThread *thread;
+  gchar *base_url;
+} ServiceResponseTestServer;
+
+static gboolean
+service_response_test_server_start (ServiceResponseTestServer *fixture,
+    WylHandle *handle)
+{
+  g_autoptr (GError) error = NULL;
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  fixture->context = g_main_context_new ();
+  fixture->http.loop = g_main_loop_new (fixture->context, FALSE);
+  g_main_context_push_thread_default (fixture->context);
+  fixture->http.server = wyl_daemon_start_http_server (&options, handle,
+      &error);
+  g_main_context_pop_thread_default (fixture->context);
+  if (fixture->http.server == NULL)
+    return FALSE;
+  fixture->thread = g_thread_new ("service-response-server",
+      test_http_server_thread_ctx, &fixture->http);
+  GSList *uris = soup_server_get_uris (fixture->http.server);
+  if (uris != NULL)
+    fixture->base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  return fixture->base_url != NULL;
+}
+
+static void
+service_response_test_server_stop (ServiceResponseTestServer *fixture)
+{
+  if (fixture->http.server != NULL)
+    soup_server_disconnect (fixture->http.server);
+  if (fixture->http.loop != NULL)
+    g_main_loop_quit (fixture->http.loop);
+  if (fixture->thread != NULL) {
+    g_thread_join (fixture->thread);
+    fixture->thread = NULL;
+  }
+  g_clear_object (&fixture->http.server);
+  g_clear_pointer (&fixture->http.loop, g_main_loop_unref);
+  g_clear_pointer (&fixture->context, g_main_context_unref);
+  g_clear_pointer (&fixture->base_url, g_free);
+}
+
+static void
+service_response_delivery_checkpoint (gint phase, const gchar *session_id,
+    const gchar *jti, gpointer data)
+{
+  ServiceResponseDeliveryBarrier *barrier = data;
+  g_mutex_lock (&barrier->mutex);
+  if (phase == WYL_DAEMON_SERVICE_RESPONSE_PRE_HANDOFF) {
+    g_free (barrier->session_id);
+    g_free (barrier->jti);
+    barrier->session_id = g_strdup (session_id);
+    barrier->jti = g_strdup (jti);
+    barrier->pre_handoff = TRUE;
+    g_cond_broadcast (&barrier->changed);
+    while (!barrier->release_handler) {
+      if (barrier->shutdown_on_socket_close && barrier->socket_closed
+          && !barrier->shutdown_done) {
+        SoupServer *server = barrier->shutdown_server;
+        g_mutex_unlock (&barrier->mutex);
+        wyl_daemon_http_shutdown_service_auth_maintenance_for_test (server);
+        soup_server_disconnect (server);
+        g_mutex_lock (&barrier->mutex);
+        barrier->shutdown_done = TRUE;
+        g_cond_broadcast (&barrier->changed);
+        continue;
+      }
+      g_cond_wait (&barrier->changed, &barrier->mutex);
+    }
+  } else if (phase == WYL_DAEMON_SERVICE_RESPONSE_ACTIVE_PRE_HANDOFF_FAILURE) {
+    g_free (barrier->session_id);
+    g_free (barrier->jti);
+    barrier->session_id = g_strdup (session_id);
+    barrier->jti = g_strdup (jti);
+    barrier->active_pre_handoff_failure = TRUE;
+    g_cond_broadcast (&barrier->changed);
+    while (!barrier->release_handler)
+      g_cond_wait (&barrier->changed, &barrier->mutex);
+  } else if (phase == WYL_DAEMON_SERVICE_RESPONSE_BODY_WIPED) {
+    barrier->body_wiped = TRUE;
+    g_cond_broadcast (&barrier->changed);
+  } else if (phase == WYL_DAEMON_SERVICE_RESPONSE_UNCLAIMED_FALLBACK
+      && g_strcmp0 (barrier->session_id, session_id) == 0
+      && g_strcmp0 (barrier->jti, jti) == 0) {
+    barrier->unclaimed_fallback = TRUE;
+    g_cond_broadcast (&barrier->changed);
+  } else if (phase == WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DESTROYED
+      && g_strcmp0 (barrier->session_id, session_id) == 0
+      && g_strcmp0 (barrier->jti, jti) == 0) {
+    barrier->authority_destroyed = TRUE;
+    g_cond_broadcast (&barrier->changed);
+  } else if (g_strcmp0 (barrier->session_id, session_id) == 0
+      && g_strcmp0 (barrier->jti, jti) == 0) {
+    barrier->terminal = TRUE;
+    barrier->terminal_phase = phase;
+    g_cond_broadcast (&barrier->changed);
+  }
+  g_mutex_unlock (&barrier->mutex);
+}
+
+static void
+service_response_retire_checkpoint (const gchar *session_id,
+    const gchar *jti, gpointer data)
+{
+  (void) session_id;
+  (void) jti;
+  ServiceResponseRetireBarrier *barrier = data;
+  g_mutex_lock (&barrier->mutex);
+  barrier->entered = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  while (!barrier->release)
+    g_cond_wait (&barrier->changed, &barrier->mutex);
+  g_mutex_unlock (&barrier->mutex);
+}
+
+static void
+service_abort_mutation_checkpoint (gpointer data)
+{
+  ServiceAbortMutation *mutation = data;
+  g_mutex_lock (&mutation->mutex);
+  mutation->acquired = TRUE;
+  g_cond_broadcast (&mutation->changed);
+  while (!mutation->release)
+    g_cond_wait (&mutation->changed, &mutation->mutex);
+  g_mutex_unlock (&mutation->mutex);
+}
+
+static gpointer
+service_abort_mutation_thread (gpointer data)
+{
+  ServiceAbortMutation *mutation = data;
+  switch (mutation->kind) {
+    case SERVICE_ABORT_RACE_CREDENTIAL_ROTATE:
+      mutation->rc = wyl_daemon_http_rotate_service_credential_for_test
+          (mutation->server, mutation->credential_id,
+          mutation->credential_generation, "000000000000000000000000240",
+          service_abort_mutation_checkpoint, mutation);
+      break;
+    case SERVICE_ABORT_RACE_CREDENTIAL_REVOKE:
+      mutation->rc = wyl_daemon_http_revoke_service_credential_for_test
+          (mutation->server, mutation->credential_id,
+          "000000000000000000000000241",
+          service_abort_mutation_checkpoint, mutation);
+      break;
+    case SERVICE_ABORT_RACE_PRINCIPAL_DISABLE:
+      mutation->rc = wyl_daemon_http_disable_service_principal_for_test
+          (mutation->server, mutation->subject,
+          "000000000000000000000000242",
+          service_abort_mutation_checkpoint, mutation);
+      break;
+    case SERVICE_ABORT_RACE_TENANT_SEAL:
+      mutation->rc = wyl_daemon_http_seal_tenant_for_test (mutation->server,
+          mutation->tenant, service_abort_mutation_checkpoint, mutation);
+      break;
+    case SERVICE_ABORT_RACE_EXPIRY:
+      mutation->rc = wyl_daemon_http_retire_due_service_auth_for_test
+          (mutation->server);
+      break;
+    case SERVICE_ABORT_PARTIAL_MISMATCH:
+    case SERVICE_ABORT_CROSSED_MISMATCH:
+      mutation->rc = WYRELOG_E_INVALID;
+      break;
+  }
+  return NULL;
+}
+
+static gpointer
+dropped_service_token_response_thread (gpointer data)
+{
+  DroppedServiceTokenResponse *request = data;
+  g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
+      NULL);
+  g_autoptr (GSocketClient) client = g_socket_client_new ();
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) connection = uri != NULL
+      ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
+      g_uri_get_port (uri), NULL, &error) : NULL;
+  if (connection == NULL) {
+    request->rc = 1;
+    return NULL;
+  }
+  g_autofree gchar *wire = g_strdup_printf
+      ("POST /auth/service-token HTTP/1.1\r\nHost: %s:%d\r\n"
+      "Content-Type: application/json\r\nConnection: close\r\n"
+      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+      g_uri_get_host (uri), g_uri_get_port (uri),
+      strlen (request->request_body), request->request_body);
+  gsize written = 0;
+  GOutputStream *output = g_io_stream_get_output_stream
+      (G_IO_STREAM (connection));
+  if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
+          &error) || written != strlen (wire)
+      || !g_output_stream_flush (output, NULL, &error)) {
+    request->rc = 2;
+    return NULL;
+  }
+
+  g_mutex_lock (&request->barrier->mutex);
+  while (!request->barrier->close_now)
+    g_cond_wait (&request->barrier->changed, &request->barrier->mutex);
+  g_mutex_unlock (&request->barrier->mutex);
+  request->rc = g_io_stream_close (G_IO_STREAM (connection), NULL, &error)
+      ? 0 : 3;
+  g_mutex_lock (&request->barrier->mutex);
+  request->barrier->socket_closed = TRUE;
+  g_cond_broadcast (&request->barrier->changed);
+  g_mutex_unlock (&request->barrier->mutex);
+  return NULL;
+}
+
+static gpointer
+finished_service_token_response_thread (gpointer data)
+{
+  FinishedServiceTokenResponse *request = data;
+  g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
+      NULL);
+  g_autoptr (GSocketClient) client = g_socket_client_new ();
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) connection = uri != NULL
+      ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
+      g_uri_get_port (uri), NULL, &error) : NULL;
+  if (connection == NULL) {
+    request->rc = 1;
+    return NULL;
+  }
+  g_socket_set_timeout (g_socket_connection_get_socket (connection), 15);
+  g_autofree gchar *wire = g_strdup_printf
+      ("POST /auth/service-token HTTP/1.1\r\nHost: %s:%d\r\n"
+      "Content-Type: application/json\r\nConnection: close\r\n"
+      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+      g_uri_get_host (uri), g_uri_get_port (uri),
+      strlen (request->request_body), request->request_body);
+  GOutputStream *output = g_io_stream_get_output_stream
+      (G_IO_STREAM (connection));
+  gsize written = 0;
+  if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
+          &error) || written != strlen (wire)
+      || !g_output_stream_flush (output, NULL, &error)) {
+    request->rc = 2;
+    return NULL;
+  }
+
+  g_autoptr (GByteArray) response = g_byte_array_new ();
+  guint8 chunk[1024];
+  GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
+  for (;;) {
+    gssize count = g_input_stream_read (input, chunk, sizeof chunk, NULL,
+        &error);
+    if (count < 0) {
+      request->rc = 3;
+      return NULL;
+    }
+    if (count == 0)
+      break;
+    g_byte_array_append (response, chunk, (guint) count);
+    gsize content_length = 0;
+    if (http_response_parse_content_length (response->data, response->len,
+            &content_length)) {
+      const gchar *headers_end = g_strstr_len ((const gchar *) response->data,
+          response->len, "\r\n\r\n");
+      if (headers_end != NULL) {
+        gsize header_length =
+            (gsize) (headers_end - (const gchar *) response->data);
+        if (response->len >= header_length + 4 + content_length)
+          break;
+      }
+    }
+  }
+  g_byte_array_append (response, (const guint8 *) "\0", 1);
+  gchar *headers_end = strstr ((gchar *) response->data, "\r\n\r\n");
+  if (headers_end == NULL
+      || sscanf ((gchar *) response->data, "HTTP/1.1 %u", &request->status)
+      != 1) {
+    request->rc = 4;
+    return NULL;
+  }
+  request->body = g_strdup (headers_end + 4);
+  return NULL;
+}
+
+static gboolean
+service_response_delivery_wait (ServiceResponseDeliveryBarrier *barrier,
+    gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  while (!*flag
+      && g_cond_wait_until (&barrier->changed, &barrier->mutex, deadline));
+  return *flag;
+}
+
+static gboolean
+service_response_retire_wait (ServiceResponseRetireBarrier *barrier)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  g_mutex_lock (&barrier->mutex);
+  while (!barrier->entered
+      && g_cond_wait_until (&barrier->changed, &barrier->mutex, deadline));
+  gboolean entered = barrier->entered;
+  g_mutex_unlock (&barrier->mutex);
+  return entered;
+}
+
+static gboolean
+service_abort_mutation_wait (ServiceAbortMutation *mutation)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  g_mutex_lock (&mutation->mutex);
+  while (!mutation->acquired
+      && g_cond_wait_until (&mutation->changed, &mutation->mutex, deadline));
+  gboolean acquired = mutation->acquired;
+  g_mutex_unlock (&mutation->mutex);
+  return acquired;
+}
+
+static gboolean
+service_abort_wait_writer_queued (SoupServer *server)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  do {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.writer_active && snapshot.waiting_writers == 1)
+      return TRUE;
+    g_thread_yield ();
+  } while (g_get_monotonic_time () < deadline);
+  return FALSE;
+}
+
+static gint
+check_service_response_delivery_finished (SoupServer *server,
+    const gchar *base_url, const gchar *request_body)
+{
+  guint sessions_before = 0;
+  guint access_before = 0;
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &sessions_before, &access_before);
+  ServiceResponseDeliveryBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  FinishedServiceTokenResponse finished = {
+    .base_url = base_url,
+    .request_body = request_body,
+  };
+  wyl_daemon_http_reset_service_response_authority_for_test (server);
+  wyl_daemon_http_set_service_response_checkpoint_for_test (server,
+      service_response_delivery_checkpoint, &barrier);
+  GThread *thread = g_thread_new ("finished-service-response",
+      finished_service_token_response_thread, &finished);
+
+  g_mutex_lock (&barrier.mutex);
+  gboolean pre_handoff = service_response_delivery_wait (&barrier,
+      &barrier.pre_handoff);
+  barrier.release_handler = TRUE;
+  g_cond_broadcast (&barrier.changed);
+  gboolean terminal = service_response_delivery_wait (&barrier,
+      &barrier.terminal);
+  gboolean body_wiped = service_response_delivery_wait (&barrier,
+      &barrier.body_wiped);
+  gboolean destroyed = service_response_delivery_wait (&barrier,
+      &barrier.authority_destroyed);
+  g_mutex_unlock (&barrier.mutex);
+  g_thread_join (thread);
+  wyl_daemon_http_set_service_response_checkpoint_for_test (server, NULL, NULL);
+
+  guint sessions_after = 0;
+  guint access_after = 0;
+  guint response_wipes = 0;
+  gboolean response_canary = FALSE;
+  gboolean response_all_zero = FALSE;
+  WylDaemonServiceResponseAuthoritySnapshot authority = { 0 };
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &sessions_after, &access_after);
+  wyl_daemon_http_service_response_authority_snapshot_for_test (server,
+      &authority);
+  wyl_daemon_http_service_response_wipe_snapshot_for_test (server,
+      &response_wipes, &response_canary, &response_all_zero);
+  gint result = 0;
+  if (!pre_handoff || finished.rc != 0 || finished.status != 200
+      || finished.body == NULL)
+    result = 195912;
+  else if (!terminal
+      || barrier.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_FINISHED)
+    result = 195913;
+  else if (!body_wiped || !destroyed || response_wipes != 1 || !response_canary
+      || !response_all_zero)
+    result = 195914;
+  else if (authority.created != 1 || authority.complete != 1
+      || authority.attached != 1 || authority.finished != 1
+      || authority.aborted != 0 || authority.cleanup_failed != 0
+      || authority.destroyed != 1 || authority.duplicate_outcomes != 0
+      || authority.unclaimed_fallbacks != 0)
+    result = 195915;
+  else if (sessions_after != sessions_before + 1
+      || access_after != access_before + 1)
+    result = 195916;
+  if (result == 0) {
+    g_autofree gchar *token = extract_json_string (finished.body,
+        "access_token");
+    g_autofree gchar *jti = token != NULL ? access_token_jti (server,
+        token) : NULL;
+    g_autofree gchar *session = NULL;
+    g_autofree gchar *actor = NULL;
+    g_autofree gchar *tenant = NULL;
+    if (token == NULL || jti == NULL
+        || wyl_daemon_http_resolve_bearer_for_test (server, token, &session,
+            &actor, &tenant) != WYRELOG_E_OK
+        || g_strcmp0 (session, barrier.session_id) != 0
+        || g_strcmp0 (jti, barrier.jti) != 0
+        || g_strcmp0 (actor, "svc:exchange:worker") != 0
+        || g_strcmp0 (tenant, "tenant-a") != 0)
+      result = 195917;
+  }
+
+  g_free (finished.body);
+  g_free (barrier.session_id);
+  g_free (barrier.jti);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
+}
+
+static gint
+check_service_response_delivery_abort (SoupServer *server,
+    const gchar *base_url, const gchar *request_body)
+{
+  guint sessions_before = 0;
+  guint access_before = 0;
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &sessions_before, &access_before);
+  ServiceResponseDeliveryBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  DroppedServiceTokenResponse dropped = {
+    .base_url = base_url,
+    .request_body = request_body,
+    .barrier = &barrier,
+  };
+  wyl_daemon_http_reset_service_response_authority_for_test (server);
+  wyl_daemon_http_set_service_response_checkpoint_for_test (server,
+      service_response_delivery_checkpoint, &barrier);
+  GThread *thread = g_thread_new ("dropped-service-response",
+      dropped_service_token_response_thread, &dropped);
+
+  g_mutex_lock (&barrier.mutex);
+  gboolean pre_handoff = service_response_delivery_wait (&barrier,
+      &barrier.pre_handoff);
+  barrier.close_now = TRUE;
+  g_cond_broadcast (&barrier.changed);
+  gboolean socket_closed = service_response_delivery_wait (&barrier,
+      &barrier.socket_closed);
+  barrier.release_handler = TRUE;
+  g_cond_broadcast (&barrier.changed);
+  gboolean terminal = service_response_delivery_wait (&barrier,
+      &barrier.terminal);
+  gboolean body_wiped = service_response_delivery_wait (&barrier,
+      &barrier.body_wiped);
+  gboolean destroyed = service_response_delivery_wait (&barrier,
+      &barrier.authority_destroyed);
+  g_mutex_unlock (&barrier.mutex);
+  g_thread_join (thread);
+  wyl_daemon_http_set_service_response_checkpoint_for_test (server, NULL, NULL);
+
+  guint sessions_after = 0;
+  guint access_after = 0;
+  guint response_wipes = 0;
+  gboolean response_canary = FALSE;
+  gboolean response_all_zero = FALSE;
+  WylDaemonServiceResponseAuthoritySnapshot authority = { 0 };
+  gboolean registry_found = TRUE;
+  gint registry_state = WYL_SERVICE_AUTH_PENDING;
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &sessions_after, &access_after);
+  wyl_daemon_http_service_response_authority_snapshot_for_test (server,
+      &authority);
+  wyl_daemon_http_service_response_wipe_snapshot_for_test (server,
+      &response_wipes, &response_canary, &response_all_zero);
+  wyrelog_error_t lookup_rc = barrier.session_id != NULL && barrier.jti != NULL
+      ? wyl_daemon_http_lookup_service_registry_for_test (server,
+      barrier.session_id, barrier.jti, &registry_state, &registry_found)
+      : WYRELOG_E_INVALID;
+  gint result = 0;
+  if (!pre_handoff || !socket_closed || dropped.rc != 0)
+    result = 19592;
+  else if (!terminal
+      || barrier.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_ABORTED)
+    result = 19593;
+  else if (!body_wiped || !destroyed || response_wipes != 1 || !response_canary
+      || !response_all_zero)
+    result = 19594;
+  else if (authority.created != 1 || authority.complete != 1
+      || authority.attached != 1 || authority.finished != 0
+      || authority.aborted != 1 || authority.cleanup_failed != 0
+      || authority.destroyed != 1 || authority.duplicate_outcomes != 0
+      || authority.unclaimed_fallbacks != 0)
+    result = 19595;
+  else if (sessions_after != sessions_before || access_after != access_before
+      || lookup_rc != WYRELOG_E_OK || registry_found)
+    result = 19596;
+
+  if (result == 0) {
+    g_autofree gchar *aborted_token =
+        wyl_daemon_http_dup_last_service_publication_token_for_test (server);
+    g_autofree gchar *aborted_session = NULL;
+    g_autofree gchar *aborted_actor = NULL;
+    g_autofree gchar *aborted_tenant = NULL;
+    if (aborted_token == NULL
+        || wyl_daemon_http_resolve_bearer_for_test (server, aborted_token,
+            &aborted_session, &aborted_actor,
+            &aborted_tenant) != WYRELOG_E_POLICY
+        || aborted_session != NULL || aborted_actor != NULL
+        || aborted_tenant != NULL)
+      result = 195961;
+  }
+
+  if (result == 0) {
+    g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_service_principal_full (session, "POST", base_url,
+            "/auth/service-token", NULL, request_body, &status, &body) != 0
+        || status != 200 || body == NULL) {
+      result = 19597;
+    } else {
+      g_autofree gchar *token = extract_json_string (body, "access_token");
+      g_autofree gchar *retry_jti = token != NULL
+          ? access_token_jti (server, token) : NULL;
+      g_autofree gchar *retry_session = NULL;
+      g_autofree gchar *retry_actor = NULL;
+      g_autofree gchar *retry_tenant = NULL;
+      if (token == NULL || retry_jti == NULL
+          || wyl_daemon_http_resolve_bearer_for_test (server, token,
+              &retry_session, &retry_actor, &retry_tenant) != WYRELOG_E_OK
+          || g_strcmp0 (retry_session, barrier.session_id) == 0
+          || g_strcmp0 (retry_jti, barrier.jti) == 0)
+        result = 19598;
+    }
+  }
+
+  g_free (barrier.session_id);
+  g_free (barrier.jti);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
+}
+
+static gint
+check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
+    gboolean invalidator_first)
+{
+  g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = NULL;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *request_body = NULL;
+  g_autofree gchar *other_body = NULL;
+  g_autofree gchar *other_token = NULL;
+  g_autofree gchar *other_jti = NULL;
+  g_autofree gchar *other_sid = NULL;
+  g_autofree gchar *other_actor = NULL;
+  g_autofree gchar *other_tenant = NULL;
+  g_autofree gchar *token = NULL;
+  g_autofree gchar *sid = NULL;
+  g_autofree gchar *actor = NULL;
+  g_autofree gchar *tenant = NULL;
+  wyl_service_credential_issue_result_t issued = { 0 };
+  TestHttpServer http = { 0 };
+  GThread *http_thread = NULL;
+  GThread *drop_thread = NULL;
+  GThread *mutation_thread = NULL;
+  ServiceResponseDeliveryBarrier delivery = { 0 };
+  ServiceResponseRetireBarrier retire = { 0 };
+  ServiceAbortMutation mutation = { 0 };
+  gboolean delivery_initialized = FALSE;
+  gboolean retire_initialized = FALSE;
+  gboolean mutation_initialized = FALSE;
+  gint result = 19620 + (gint) kind * 10 + invalidator_first;
+
+  if (!service_credential_store_fixture_init (&credential_store))
+    return result;
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = credential_store.policy_path,
+    .policy_keyprovider_path = credential_store.key_spec,
+    .audit_store_path = credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+    return result;
+  const gchar *subject = "svc:exchange:delivery-race";
+  prepare_service_token_subject (handle, subject);
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    goto cleanup;
+  issue_service_token_credential (handle, subject, "tenant-a",
+      "delivery-race-credential",
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issued);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  request_body = g_strdup_printf
+      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+      issued.credential.credential_id, secret);
+  context = g_main_context_new ();
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  http.server = wyl_daemon_start_http_server (&options, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL)
+    goto cleanup;
+  http_thread = g_thread_new ("delivery-race-server",
+      test_http_server_thread_ctx, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL)
+    goto cleanup;
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  if (base_url == NULL)
+    goto cleanup;
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
+  if (kind == SERVICE_ABORT_CROSSED_MISMATCH) {
+    if (wyl_daemon_http_publish_service_token_for_test (http.server,
+            issued.credential.credential_id, secret, secret_len,
+            &other_body) != WYRELOG_E_OK || other_body == NULL
+        || (other_token = extract_json_string (other_body,
+                "access_token")) == NULL
+        || (other_jti = access_token_jti (http.server, other_token)) == NULL
+        || wyl_daemon_http_resolve_bearer_for_test (http.server, other_token,
+            &other_sid, &other_actor, &other_tenant) != WYRELOG_E_OK)
+      goto cleanup;
+  }
+
+  g_mutex_init (&delivery.mutex);
+  g_cond_init (&delivery.changed);
+  delivery_initialized = TRUE;
+  g_mutex_init (&retire.mutex);
+  g_cond_init (&retire.changed);
+  retire_initialized = TRUE;
+  mutation.server = http.server;
+  mutation.handle = handle;
+  mutation.kind = kind;
+  mutation.subject = subject;
+  mutation.tenant = "tenant-a";
+  mutation.credential_id = issued.credential.credential_id;
+  mutation.credential_generation = issued.credential.generation;
+  mutation.rc = WYRELOG_E_INTERNAL;
+  g_mutex_init (&mutation.mutex);
+  g_cond_init (&mutation.changed);
+  mutation_initialized = TRUE;
+  DroppedServiceTokenResponse dropped = {
+    .base_url = base_url,
+    .request_body = request_body,
+    .barrier = &delivery,
+  };
+  wyl_daemon_http_reset_service_response_authority_for_test (http.server);
+  wyl_daemon_http_set_service_response_checkpoint_for_test (http.server,
+      service_response_delivery_checkpoint, &delivery);
+  if (kind >= SERVICE_ABORT_PARTIAL_MISMATCH)
+    wyl_daemon_http_set_service_publication_fault_for_test (http.server,
+        WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK);
+  if (kind < SERVICE_ABORT_PARTIAL_MISMATCH)
+    wyl_daemon_http_set_service_response_retire_checkpoint_for_test
+        (http.server, service_response_retire_checkpoint, &retire);
+  drop_thread = g_thread_new ("delivery-race-drop",
+      dropped_service_token_response_thread, &dropped);
+
+  g_mutex_lock (&delivery.mutex);
+  gboolean pre_handoff = service_response_delivery_wait (&delivery,
+      &delivery.pre_handoff);
+  delivery.close_now = TRUE;
+  g_cond_broadcast (&delivery.changed);
+  gboolean socket_closed = service_response_delivery_wait (&delivery,
+      &delivery.socket_closed);
+  g_mutex_unlock (&delivery.mutex);
+  if (!pre_handoff || !socket_closed)
+    goto cleanup;
+  g_thread_join (drop_thread);
+  drop_thread = NULL;
+  if (dropped.rc != 0)
+    goto cleanup;
+  if (kind >= SERVICE_ABORT_PARTIAL_MISMATCH) {
+    gboolean mutated = kind == SERVICE_ABORT_PARTIAL_MISMATCH
+        ? wyl_daemon_http_remove_access_token_for_test (http.server,
+        delivery.jti)
+        : wyl_daemon_http_mutate_service_session_for_test (http.server,
+        delivery.session_id, WYL_DAEMON_SERVICE_SESSION_JTI, other_jti, 0);
+    if (!mutated)
+      goto cleanup;
+    g_mutex_lock (&delivery.mutex);
+    delivery.release_handler = TRUE;
+    g_cond_broadcast (&delivery.changed);
+    gboolean mismatch_terminal = service_response_delivery_wait (&delivery,
+        &delivery.terminal);
+    gboolean mismatch_wiped = service_response_delivery_wait (&delivery,
+        &delivery.body_wiped);
+    gboolean mismatch_fallback = service_response_delivery_wait (&delivery,
+        &delivery.unclaimed_fallback);
+    gboolean mismatch_destroyed = service_response_delivery_wait (&delivery,
+        &delivery.authority_destroyed);
+    g_mutex_unlock (&delivery.mutex);
+    WylDaemonServiceResponseAuthoritySnapshot mismatch_authority = { 0 };
+    wyl_daemon_http_service_response_authority_snapshot_for_test (http.server,
+        &mismatch_authority);
+    guint mismatch_sessions = 0;
+    guint mismatch_access = 0;
+    wyl_daemon_http_service_publication_counts_for_test (http.server,
+        &mismatch_sessions, &mismatch_access);
+    gboolean target_found = FALSE;
+    gint target_state = WYL_SERVICE_AUTH_PENDING;
+    WylServiceAuthUnavailableReason mismatch_reason =
+        WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_autofree gchar *mismatch_token =
+        wyl_daemon_http_dup_last_service_publication_token_for_test
+        (http.server);
+    g_autofree gchar *mismatch_sid = NULL;
+    g_autofree gchar *mismatch_actor = NULL;
+    g_autofree gchar *mismatch_tenant = NULL;
+    if (!mismatch_terminal || !mismatch_wiped || !mismatch_fallback
+        || !mismatch_destroyed
+        || delivery.terminal_phase !=
+        WYL_DAEMON_SERVICE_RESPONSE_CLEANUP_FAILED
+        || mismatch_authority.cleanup_failed != 1
+        || mismatch_authority.aborted != 0 || mismatch_authority.finished != 0
+        || mismatch_authority.destroyed != 1
+        || mismatch_authority.unclaimed_fallbacks != 1
+        || mismatch_sessions != (kind == SERVICE_ABORT_PARTIAL_MISMATCH ? 1 : 2)
+        || mismatch_access != (kind == SERVICE_ABORT_PARTIAL_MISMATCH ? 0 : 2)
+        || wyl_daemon_http_lookup_service_registry_for_test (http.server,
+            delivery.session_id, delivery.jti, &target_state,
+            &target_found) != WYRELOG_E_OK
+        || !target_found || target_state != WYL_SERVICE_AUTH_ACTIVE
+        || mismatch_token == NULL
+        || wyl_daemon_http_resolve_bearer_for_test (http.server,
+            mismatch_token, &mismatch_sid, &mismatch_actor,
+            &mismatch_tenant) != WYRELOG_E_POLICY
+        || wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle,
+            &mismatch_reason) == WYRELOG_E_OK
+        || mismatch_reason != WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT)
+      goto cleanup;
+    if (kind == SERVICE_ABORT_CROSSED_MISMATCH) {
+      gboolean other_found = FALSE;
+      gint other_state = WYL_SERVICE_AUTH_PENDING;
+      wyl_daemon_access_token_snapshot_t other_access = { 0 };
+      gchar **other_session_access =
+          wyl_daemon_http_snapshot_session_access_ids_for_test (http.server,
+          other_sid);
+      gboolean other_access_found =
+          wyl_daemon_http_snapshot_access_token_for_test (http.server,
+          other_jti, &other_access);
+      gboolean other_exact = other_sid != NULL && other_jti != NULL
+          && wyl_daemon_http_lookup_service_registry_for_test (http.server,
+          other_sid, other_jti, &other_state, &other_found) == WYRELOG_E_OK
+          && other_found && other_state == WYL_SERVICE_AUTH_ACTIVE
+          && other_access_found && other_session_access != NULL
+          && g_strcmp0 (other_session_access[0], other_jti) == 0
+          && other_session_access[1] == NULL
+          && g_strcmp0 (other_access.jti, other_jti) == 0
+          && g_strcmp0 (other_access.session_id, other_sid) == 0
+          && g_strcmp0 (other_access.subject, other_actor) == 0
+          && g_strcmp0 (other_access.tenant, other_tenant) == 0
+          && g_strcmp0 (other_access.credential_id,
+          issued.credential.credential_id) == 0
+          && other_access.credential_generation == issued.credential.generation;
+      wyl_daemon_access_token_snapshot_clear (&other_access);
+      wyl_daemon_http_sensitive_strv_free_for_test (other_session_access);
+      if (!other_exact)
+        goto cleanup;
+    }
+    result = 0;
+    goto cleanup;
+  }
+  if (kind == SERVICE_ABORT_RACE_EXPIRY) {
+    wyl_daemon_http_set_service_auth_clock_for_test (http.server, TRUE,
+        G_MAXINT64);
+    wyl_daemon_http_set_service_due_write_checkpoint_for_test (http.server,
+        service_abort_mutation_checkpoint, &mutation);
+  }
+
+  if (invalidator_first) {
+    mutation_thread = g_thread_new ("delivery-race-invalidator",
+        service_abort_mutation_thread, &mutation);
+    if (!service_abort_mutation_wait (&mutation))
+      goto cleanup;
+    g_mutex_lock (&delivery.mutex);
+    delivery.release_handler = TRUE;
+    g_cond_broadcast (&delivery.changed);
+    g_mutex_unlock (&delivery.mutex);
+    if (!service_abort_wait_writer_queued (http.server))
+      goto cleanup;
+    g_mutex_lock (&mutation.mutex);
+    mutation.release = TRUE;
+    g_cond_broadcast (&mutation.changed);
+    g_mutex_unlock (&mutation.mutex);
+    g_thread_join (mutation_thread);
+    mutation_thread = NULL;
+    if (!service_response_retire_wait (&retire))
+      goto cleanup;
+    g_mutex_lock (&retire.mutex);
+    retire.release = TRUE;
+    g_cond_broadcast (&retire.changed);
+    g_mutex_unlock (&retire.mutex);
+  } else {
+    g_mutex_lock (&delivery.mutex);
+    delivery.release_handler = TRUE;
+    g_cond_broadcast (&delivery.changed);
+    g_mutex_unlock (&delivery.mutex);
+    if (!service_response_retire_wait (&retire))
+      goto cleanup;
+    mutation_thread = g_thread_new ("delivery-race-invalidator",
+        service_abort_mutation_thread, &mutation);
+    if (!service_abort_wait_writer_queued (http.server))
+      goto cleanup;
+    g_mutex_lock (&retire.mutex);
+    retire.release = TRUE;
+    g_cond_broadcast (&retire.changed);
+    g_mutex_unlock (&retire.mutex);
+    if (!service_abort_mutation_wait (&mutation))
+      goto cleanup;
+    g_mutex_lock (&mutation.mutex);
+    mutation.release = TRUE;
+    g_cond_broadcast (&mutation.changed);
+    g_mutex_unlock (&mutation.mutex);
+    g_thread_join (mutation_thread);
+    mutation_thread = NULL;
+  }
+
+  g_mutex_lock (&delivery.mutex);
+  gboolean terminal = service_response_delivery_wait (&delivery,
+      &delivery.terminal);
+  gboolean body_wiped = service_response_delivery_wait (&delivery,
+      &delivery.body_wiped);
+  gboolean destroyed = service_response_delivery_wait (&delivery,
+      &delivery.authority_destroyed);
+  g_mutex_unlock (&delivery.mutex);
+  WylDaemonServiceResponseAuthoritySnapshot authority = { 0 };
+  wyl_daemon_http_service_response_authority_snapshot_for_test (http.server,
+      &authority);
+  guint sessions = 0;
+  guint access = 0;
+  wyl_daemon_http_service_publication_counts_for_test (http.server, &sessions,
+      &access);
+  token = wyl_daemon_http_dup_last_service_publication_token_for_test
+      (http.server);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (!terminal || !body_wiped || !destroyed
+      || mutation.rc != WYRELOG_E_OK
+      || delivery.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_ABORTED
+      || authority.aborted != 1 || authority.cleanup_failed != 0
+      || authority.finished != 0 || authority.destroyed != 1
+      || authority.unclaimed_fallbacks != 0
+      || sessions != 0 || access != 0 || token == NULL
+      || wyl_daemon_http_resolve_bearer_for_test (http.server, token, &sid,
+          &actor, &tenant) != WYRELOG_E_POLICY
+      || wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &reason) != WYRELOG_E_OK
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    goto cleanup;
+  result = 0;
+
+cleanup:
+  if (http.server != NULL) {
+    wyl_daemon_http_set_service_response_checkpoint_for_test (http.server,
+        NULL, NULL);
+    wyl_daemon_http_set_service_response_retire_checkpoint_for_test
+        (http.server, NULL, NULL);
+    wyl_daemon_http_set_service_due_write_checkpoint_for_test (http.server,
+        NULL, NULL);
+  }
+  if (delivery_initialized) {
+    g_mutex_lock (&delivery.mutex);
+    delivery.close_now = TRUE;
+    delivery.release_handler = TRUE;
+    g_cond_broadcast (&delivery.changed);
+    g_mutex_unlock (&delivery.mutex);
+  }
+  if (retire_initialized) {
+    g_mutex_lock (&retire.mutex);
+    retire.release = TRUE;
+    g_cond_broadcast (&retire.changed);
+    g_mutex_unlock (&retire.mutex);
+  }
+  if (mutation_initialized) {
+    g_mutex_lock (&mutation.mutex);
+    mutation.release = TRUE;
+    g_cond_broadcast (&mutation.changed);
+    g_mutex_unlock (&mutation.mutex);
+  }
+  if (drop_thread != NULL)
+    g_thread_join (drop_thread);
+  if (mutation_thread != NULL)
+    g_thread_join (mutation_thread);
+  if (http.loop != NULL)
+    g_main_loop_quit (http.loop);
+  if (http_thread != NULL)
+    g_thread_join (http_thread);
+  if (http.server != NULL) {
+    soup_server_disconnect (http.server);
+    g_clear_object (&http.server);
+  }
+  if (mutation_initialized) {
+    g_cond_clear (&mutation.changed);
+    g_mutex_clear (&mutation.mutex);
+  }
+  if (retire_initialized) {
+    g_cond_clear (&retire.changed);
+    g_mutex_clear (&retire.mutex);
+  }
+  if (delivery_initialized) {
+    g_cond_clear (&delivery.changed);
+    g_mutex_clear (&delivery.mutex);
+  }
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  wyl_service_credential_issue_result_clear (&issued);
+  return result;
+}
+
+static gint
+check_service_response_shutdown_restart_contract (void)
+{
+  g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+  g_autoptr (WylHandle) handle = NULL;
+  g_autofree gchar *request_body = NULL;
+  g_autofree gchar *fault_token = NULL;
+  g_autofree gchar *fault_session_id = NULL;
+  g_autofree gchar *fault_jti = NULL;
+  g_autofree gchar *abort_token = NULL;
+  g_autofree gchar *abort_session_id = NULL;
+  g_autofree gchar *abort_jti = NULL;
+  g_autofree gchar *finished_token = NULL;
+  g_autofree gchar *finished_session_id = NULL;
+  g_autofree gchar *finished_jti = NULL;
+  g_autofree gchar *expiry_token = NULL;
+  g_autofree gchar *expiry_session_id = NULL;
+  g_autofree gchar *expiry_jti = NULL;
+  g_autofree gchar *resolved_session = NULL;
+  g_autofree gchar *resolved_actor = NULL;
+  g_autofree gchar *resolved_tenant = NULL;
+  wyl_service_credential_issue_result_t issued = { 0 };
+  ServiceResponseTestServer first = { 0 };
+  ServiceResponseTestServer second = { 0 };
+  ServiceResponseTestServer third = { 0 };
+  ServiceResponseDeliveryBarrier fault = { 0 };
+  ServiceResponseDeliveryBarrier shutdown = { 0 };
+  gboolean fault_initialized = FALSE;
+  gboolean shutdown_initialized = FALSE;
+  GThread *fault_thread = NULL;
+  GThread *shutdown_thread = NULL;
+  FinishedServiceTokenResponse fault_response = { 0 };
+  DroppedServiceTokenResponse dropped = { 0 };
+  gint result = 19680;
+
+  if (!service_credential_store_fixture_init (&credential_store))
+    return result;
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = credential_store.policy_path,
+    .policy_keyprovider_path = credential_store.key_spec,
+    .audit_store_path = credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+    return result;
+  prepare_service_token_subject (handle, "svc:exchange:worker");
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    goto cleanup;
+  issue_service_token_credential (handle, "svc:exchange:worker", "tenant-a",
+      "response-lifecycle-credential",
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issued);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  if (secret == NULL)
+    goto cleanup;
+  request_body = g_strdup_printf
+      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+      issued.credential.credential_id, secret);
+  if (!service_response_test_server_start (&first, handle))
+    goto cleanup;
+
+  /* A post-ACTIVE fault is observable only through a raw response.  Hold the
+   * fault immediately before exact retirement so the test proves that the
+   * tuple was genuinely ACTIVE, then require the public 500 to leave no
+   * bearer residue. */
+  g_mutex_init (&fault.mutex);
+  g_cond_init (&fault.changed);
+  fault_initialized = TRUE;
+  wyl_daemon_http_reset_service_response_authority_for_test (first.http.server);
+  wyl_daemon_http_set_service_response_checkpoint_for_test
+      (first.http.server, service_response_delivery_checkpoint, &fault);
+  wyl_daemon_http_set_service_publication_fault_for_test (first.http.server,
+      WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF);
+  fault_response.base_url = first.base_url;
+  fault_response.request_body = request_body;
+  fault_thread = g_thread_new ("service-response-fault",
+      finished_service_token_response_thread, &fault_response);
+  g_mutex_lock (&fault.mutex);
+  gboolean fault_active = service_response_delivery_wait (&fault,
+      &fault.active_pre_handoff_failure);
+  g_mutex_unlock (&fault.mutex);
+  if (!fault_active)
+    goto cleanup;
+  fault_token =
+      wyl_daemon_http_dup_last_service_publication_token_for_test
+      (first.http.server);
+  fault_session_id = g_strdup (fault.session_id);
+  fault_jti = g_strdup (fault.jti);
+  guint sessions = 0;
+  guint access = 0;
+  gboolean found = FALSE;
+  gint state = WYL_SERVICE_AUTH_PENDING;
+  wyl_daemon_http_service_publication_counts_for_test (first.http.server,
+      &sessions, &access);
+  if (fault_token == NULL || fault_session_id == NULL || fault_jti == NULL
+      || sessions != 1 || access != 1
+      || wyl_daemon_http_lookup_service_registry_for_test (first.http.server,
+          fault_session_id, fault_jti, &state, &found) != WYRELOG_E_OK
+      || !found || state != WYL_SERVICE_AUTH_ACTIVE
+      || wyl_daemon_http_resolve_bearer_for_test (first.http.server,
+          fault_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK)
+    goto cleanup;
+  g_mutex_lock (&fault.mutex);
+  fault.release_handler = TRUE;
+  g_cond_broadcast (&fault.changed);
+  gboolean fault_terminal = service_response_delivery_wait (&fault,
+      &fault.terminal);
+  gboolean fault_wiped = service_response_delivery_wait (&fault,
+      &fault.body_wiped);
+  gboolean fault_destroyed = service_response_delivery_wait (&fault,
+      &fault.authority_destroyed);
+  g_mutex_unlock (&fault.mutex);
+  g_thread_join (fault_thread);
+  fault_thread = NULL;
+  wyl_daemon_http_set_service_response_checkpoint_for_test
+      (first.http.server, NULL, NULL);
+  WylDaemonServiceResponseAuthoritySnapshot authority = { 0 };
+  guint response_wipes = 0;
+  gboolean response_canary = FALSE;
+  gboolean response_all_zero = FALSE;
+  wyl_daemon_http_service_response_authority_snapshot_for_test
+      (first.http.server, &authority);
+  wyl_daemon_http_service_response_wipe_snapshot_for_test
+      (first.http.server, &response_wipes, &response_canary,
+      &response_all_zero);
+  sessions = G_MAXUINT;
+  access = G_MAXUINT;
+  found = TRUE;
+  state = WYL_SERVICE_AUTH_ACTIVE;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  wyl_daemon_http_service_publication_counts_for_test (first.http.server,
+      &sessions, &access);
+  if (fault_response.rc != 0 || fault_response.status != 500
+      || fault_response.body == NULL
+      || strstr (fault_response.body, "\"error\":\"service_token_failed\"")
+      == NULL || strstr (fault_response.body, "access_token") != NULL
+      || !fault_terminal || !fault_wiped || !fault_destroyed
+      || fault.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_ABORTED
+      || response_wipes != 1 || !response_canary || !response_all_zero
+      || authority.created != 1 || authority.complete != 1
+      || authority.attached != 0 || authority.finished != 0
+      || authority.aborted != 1 || authority.cleanup_failed != 0
+      || authority.destroyed != 1 || authority.duplicate_outcomes != 0
+      || authority.unclaimed_fallbacks != 0
+      || sessions != 0 || access != 0
+      || wyl_daemon_http_lookup_service_registry_for_test (first.http.server,
+          fault_session_id, fault_jti, &state, &found) != WYRELOG_E_OK
+      || found
+      || wyl_daemon_http_resolve_bearer_for_test (first.http.server,
+          fault_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_POLICY)
+    goto cleanup;
+  g_clear_pointer (&fault_response.body, g_free);
+
+  /* Disconnect keeps the SoupServer and context references alive while the
+   * already-closed request terminalizes.  Context shutdown only suspends
+   * maintenance; exact abort retirement must still succeed before teardown. */
+  g_mutex_init (&shutdown.mutex);
+  g_cond_init (&shutdown.changed);
+  shutdown_initialized = TRUE;
+  wyl_daemon_http_reset_service_response_authority_for_test (first.http.server);
+  wyl_daemon_http_set_service_response_checkpoint_for_test
+      (first.http.server, service_response_delivery_checkpoint, &shutdown);
+  wyl_daemon_http_set_service_publication_fault_for_test (first.http.server,
+      WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK);
+  dropped.base_url = first.base_url;
+  dropped.request_body = request_body;
+  dropped.barrier = &shutdown;
+  shutdown.shutdown_on_socket_close = TRUE;
+  shutdown.shutdown_server = first.http.server;
+  shutdown_thread = g_thread_new ("service-response-shutdown",
+      dropped_service_token_response_thread, &dropped);
+  g_mutex_lock (&shutdown.mutex);
+  gboolean shutdown_pre = service_response_delivery_wait (&shutdown,
+      &shutdown.pre_handoff);
+  shutdown.close_now = TRUE;
+  g_cond_broadcast (&shutdown.changed);
+  gboolean socket_closed = service_response_delivery_wait (&shutdown,
+      &shutdown.socket_closed);
+  gboolean shutdown_done = service_response_delivery_wait (&shutdown,
+      &shutdown.shutdown_done);
+  g_mutex_unlock (&shutdown.mutex);
+  if (!shutdown_pre || !socket_closed || !shutdown_done)
+    goto cleanup;
+  g_thread_join (shutdown_thread);
+  shutdown_thread = NULL;
+  if (dropped.rc != 0)
+    goto cleanup;
+  abort_token =
+      wyl_daemon_http_dup_last_service_publication_token_for_test
+      (first.http.server);
+  abort_session_id = g_strdup (shutdown.session_id);
+  abort_jti = g_strdup (shutdown.jti);
+  guint shutdown_ticks = 0;
+  if (wyl_daemon_http_service_auth_maintenance_active_for_test
+      (first.http.server, &shutdown_ticks))
+    goto cleanup;
+  g_mutex_lock (&shutdown.mutex);
+  shutdown.release_handler = TRUE;
+  g_cond_broadcast (&shutdown.changed);
+  gboolean shutdown_terminal = service_response_delivery_wait (&shutdown,
+      &shutdown.terminal);
+  gboolean shutdown_wiped = service_response_delivery_wait (&shutdown,
+      &shutdown.body_wiped);
+  gboolean shutdown_fallback = service_response_delivery_wait (&shutdown,
+      &shutdown.unclaimed_fallback);
+  gboolean shutdown_destroyed = service_response_delivery_wait (&shutdown,
+      &shutdown.authority_destroyed);
+  g_mutex_unlock (&shutdown.mutex);
+  wyl_daemon_http_set_service_response_checkpoint_for_test
+      (first.http.server, NULL, NULL);
+  memset (&authority, 0, sizeof authority);
+  response_wipes = 0;
+  response_canary = FALSE;
+  response_all_zero = FALSE;
+  wyl_daemon_http_service_response_authority_snapshot_for_test
+      (first.http.server, &authority);
+  wyl_daemon_http_service_response_wipe_snapshot_for_test
+      (first.http.server, &response_wipes, &response_canary,
+      &response_all_zero);
+  sessions = G_MAXUINT;
+  access = G_MAXUINT;
+  found = TRUE;
+  state = WYL_SERVICE_AUTH_ACTIVE;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  wyl_daemon_http_service_publication_counts_for_test (first.http.server,
+      &sessions, &access);
+  if (abort_token == NULL || abort_session_id == NULL || abort_jti == NULL
+      || !shutdown_terminal || !shutdown_wiped || !shutdown_fallback
+      || !shutdown_destroyed
+      || shutdown.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_ABORTED
+      || response_wipes != 1 || !response_canary || !response_all_zero
+      || authority.created != 1 || authority.complete != 1
+      || authority.attached != 1 || authority.finished != 0
+      || authority.aborted != 1 || authority.cleanup_failed != 0
+      || authority.destroyed != 1 || authority.duplicate_outcomes != 0
+      || authority.unclaimed_fallbacks != 1
+      || sessions != 0 || access != 0
+      || wyl_daemon_http_lookup_service_registry_for_test (first.http.server,
+          abort_session_id, abort_jti, &state, &found) != WYRELOG_E_OK
+      || found
+      || wyl_daemon_http_resolve_bearer_for_test (first.http.server,
+          abort_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_POLICY)
+    goto cleanup;
+
+  service_response_test_server_stop (&first);
+  if (wyl_handle_shutdown_ordered (handle) != WYRELOG_E_OK)
+    goto cleanup;
+  g_clear_object (&handle);
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+    goto cleanup;
+  if (!service_response_test_server_start (&second, handle))
+    goto cleanup;
+  sessions = G_MAXUINT;
+  access = G_MAXUINT;
+  found = TRUE;
+  state = WYL_SERVICE_AUTH_ACTIVE;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  wyl_daemon_http_service_publication_counts_for_test (second.http.server,
+      &sessions, &access);
+  if (sessions != 0 || access != 0
+      || wyl_daemon_http_lookup_service_registry_for_test (second.http.server,
+          abort_session_id, abort_jti, &state, &found) != WYRELOG_E_OK
+      || found
+      || wyl_daemon_http_resolve_bearer_for_test (second.http.server,
+          abort_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_POLICY)
+    goto cleanup;
+  gint finished_rc = check_service_response_delivery_finished
+      (second.http.server, second.base_url, request_body);
+  if (finished_rc != 0)
+    goto cleanup;
+  finished_token =
+      wyl_daemon_http_dup_last_service_publication_token_for_test
+      (second.http.server);
+  finished_jti = finished_token != NULL
+      ? access_token_jti (second.http.server, finished_token) : NULL;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  if (finished_token == NULL || finished_jti == NULL
+      || wyl_daemon_http_resolve_bearer_for_test (second.http.server,
+          finished_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK)
+    goto cleanup;
+  finished_session_id = g_strdup (resolved_session);
+  service_response_test_server_stop (&second);
+
+  if (!service_response_test_server_start (&third, handle))
+    goto cleanup;
+  sessions = G_MAXUINT;
+  access = G_MAXUINT;
+  found = TRUE;
+  state = WYL_SERVICE_AUTH_ACTIVE;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  wyl_daemon_http_service_publication_counts_for_test (third.http.server,
+      &sessions, &access);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (sessions != 0 || access != 0
+      || finished_session_id == NULL
+      || wyl_daemon_http_lookup_service_registry_for_test (third.http.server,
+          finished_session_id, finished_jti, &state, &found)
+      != WYRELOG_E_OK || found
+      || wyl_daemon_http_resolve_bearer_for_test (third.http.server,
+          finished_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_POLICY
+      || wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &reason) != WYRELOG_E_OK
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    goto cleanup;
+  gint expiry_finished_rc = check_service_response_delivery_finished
+      (third.http.server, third.base_url, request_body);
+  if (expiry_finished_rc != 0)
+    goto cleanup;
+  expiry_token =
+      wyl_daemon_http_dup_last_service_publication_token_for_test
+      (third.http.server);
+  expiry_jti = expiry_token != NULL
+      ? access_token_jti (third.http.server, expiry_token) : NULL;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  if (expiry_token == NULL || expiry_jti == NULL
+      || wyl_daemon_http_resolve_bearer_for_test (third.http.server,
+          expiry_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK)
+    goto cleanup;
+  expiry_session_id = g_strdup (resolved_session);
+  wyl_daemon_access_token_snapshot_t expiry_access = { 0 };
+  if (!wyl_daemon_http_snapshot_access_token_for_test (third.http.server,
+          expiry_jti, &expiry_access)) {
+    wyl_daemon_access_token_snapshot_clear (&expiry_access);
+    goto cleanup;
+  }
+  wyl_daemon_http_set_service_auth_clock_for_test (third.http.server, TRUE,
+      expiry_access.expires_at);
+  wyl_daemon_access_token_snapshot_clear (&expiry_access);
+  if (wyl_daemon_http_retire_due_service_auth_for_test (third.http.server)
+      != WYRELOG_E_OK)
+    goto cleanup;
+  sessions = G_MAXUINT;
+  access = G_MAXUINT;
+  found = TRUE;
+  state = WYL_SERVICE_AUTH_ACTIVE;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  wyl_daemon_http_service_publication_counts_for_test (third.http.server,
+      &sessions, &access);
+  reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (expiry_session_id == NULL || sessions != 0 || access != 0
+      || wyl_daemon_http_lookup_service_registry_for_test (third.http.server,
+          expiry_session_id, expiry_jti, &state, &found) != WYRELOG_E_OK
+      || found
+      || wyl_daemon_http_resolve_bearer_for_test (third.http.server,
+          expiry_token, &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_POLICY
+      || wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &reason) != WYRELOG_E_OK
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    goto cleanup;
+  result = 0;
+
+cleanup:
+  if (first.http.server != NULL)
+    wyl_daemon_http_set_service_response_checkpoint_for_test
+        (first.http.server, NULL, NULL);
+  if (fault_initialized) {
+    g_mutex_lock (&fault.mutex);
+    fault.release_handler = TRUE;
+    g_cond_broadcast (&fault.changed);
+    g_mutex_unlock (&fault.mutex);
+  }
+  if (shutdown_initialized) {
+    g_mutex_lock (&shutdown.mutex);
+    shutdown.close_now = TRUE;
+    shutdown.release_handler = TRUE;
+    g_cond_broadcast (&shutdown.changed);
+    g_mutex_unlock (&shutdown.mutex);
+  }
+  if (fault_thread != NULL)
+    g_thread_join (fault_thread);
+  if (shutdown_thread != NULL)
+    g_thread_join (shutdown_thread);
+  service_response_test_server_stop (&first);
+  service_response_test_server_stop (&second);
+  service_response_test_server_stop (&third);
+  if (shutdown_initialized) {
+    g_free (shutdown.session_id);
+    g_free (shutdown.jti);
+    g_cond_clear (&shutdown.changed);
+    g_mutex_clear (&shutdown.mutex);
+  }
+  if (fault_initialized) {
+    g_free (fault.session_id);
+    g_free (fault.jti);
+    g_cond_clear (&fault.changed);
+    g_mutex_clear (&fault.mutex);
+  }
+  g_free (fault_response.body);
+  wyl_service_credential_issue_result_clear (&issued);
+  return result;
+}
+
 static gint
 check_service_token_exchange_contract_on_server (SoupServer *server,
     WylHandle *handle, const gchar *base_url)
 {
   g_autofree gchar *access_token = NULL;
   g_autofree gchar *route_access_token = NULL;
-  g_autofree gchar *rate_access_token = NULL;
   prepare_service_token_subject (handle, "svc:exchange:worker");
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 1944;
@@ -7744,13 +9164,38 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   WylDaemonServiceResponseAuthoritySnapshot response_authority = { 0 };
   wyl_daemon_http_service_response_authority_snapshot_for_test (server,
       &response_authority);
+  guint route_response_wipes = 0;
+  gboolean route_response_canary = FALSE;
+  gboolean route_response_all_zero = FALSE;
+  wyl_daemon_http_service_response_wipe_snapshot_for_test (server,
+      &route_response_wipes, &route_response_canary, &route_response_all_zero);
   if (response_authority.created != 1 || response_authority.complete != 1
       || response_authority.attached != 1
       || response_authority.finished != 1 || response_authority.aborted != 0
       || response_authority.cleanup_failed != 0
       || response_authority.destroyed != 1
-      || response_authority.duplicate_outcomes != 0)
+      || response_authority.duplicate_outcomes != 0
+      || response_authority.unclaimed_fallbacks != 0
+      || route_response_wipes != 1 || !route_response_canary
+      || !route_response_all_zero)
     return 19591;
+  g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
+  if (wyl_daemon_http_resolve_bearer_for_test (server, route_access_token,
+          &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK
+      || g_strcmp0 (resolved_actor, "svc:exchange:worker") != 0
+      || g_strcmp0 (resolved_tenant, "tenant-a") != 0)
+    return 195911;
+  gint delivery_finished_rc = check_service_response_delivery_finished
+      (server, base_url, request_body);
+  if (delivery_finished_rc != 0)
+    return delivery_finished_rc;
+  gint delivery_abort_rc = check_service_response_delivery_abort (server,
+      base_url, request_body);
+  if (delivery_abort_rc != 0)
+    return delivery_abort_rc;
 
   guint denied_status = 0;
   guint denied_retry_after = 0;
@@ -7776,21 +9221,9 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       == NULL)
     return 1958;
 
-  /* The direct publication and route request above consume two of the
-   * credential bucket's five permits; exhaust the remaining three here. */
-  for (guint i = 0; i < 3; i++) {
-    g_clear_pointer (&body, g_free);
-    if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
-            request_body, strlen (request_body), &status, &body,
-            &retry_after) != WYRELOG_E_OK)
-      return 1960 + (gint) i;
-    if (status != 200 || body == NULL)
-      return 1970 + (gint) i;
-    g_clear_pointer (&rate_access_token, g_free);
-    rate_access_token = extract_json_string (body, "access_token");
-    if (rate_access_token == NULL)
-      return 1970 + (gint) i;
-  }
+  /* Direct publication, two finished routes, the aborted route, and its retry
+   * consume all five credential-bucket permits. An aborted delivery never
+   * refunds admission, so the next exchange must be rate limited. */
   g_clear_pointer (&body, g_free);
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
           strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
@@ -7840,8 +9273,10 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       != WYRELOG_E_OK || registry_found)
     return 1985;
   g_clear_pointer (&resolved_session, g_free);
+  g_clear_pointer (&resolved_actor, g_free);
+  g_clear_pointer (&resolved_tenant, g_free);
   if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
-          &resolved_session, NULL, NULL) == WYRELOG_E_OK)
+          &resolved_session, &resolved_actor, &resolved_tenant) == WYRELOG_E_OK)
     return 1986;
   guint retired_sessions = 0;
   guint retired_access_tokens = 0;
@@ -7926,6 +9361,20 @@ cleanup:
     g_object_unref (http.server);
   }
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  for (gint kind = SERVICE_ABORT_RACE_CREDENTIAL_ROTATE;
+      result == 0 && kind <= SERVICE_ABORT_RACE_EXPIRY; kind++)
+    for (gint invalidator_first = 0;
+        result == 0 && invalidator_first <= 1; invalidator_first++)
+      result = check_service_response_abort_invalidation_race (kind,
+          invalidator_first);
+  if (result == 0)
+    result = check_service_response_abort_invalidation_race
+        (SERVICE_ABORT_PARTIAL_MISMATCH, FALSE);
+  if (result == 0)
+    result = check_service_response_abort_invalidation_race
+        (SERVICE_ABORT_CROSSED_MISMATCH, FALSE);
+  if (result == 0)
+    result = check_service_response_shutdown_restart_contract ();
   return result;
 }
 
@@ -8048,6 +9497,30 @@ check_service_publication_fault_matrix (void)
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
       return 2140 + (gint) i;
+    }
+    WylDaemonServiceResponseAuthoritySnapshot response_authority = { 0 };
+    wyl_daemon_http_service_response_authority_snapshot_for_test (server,
+        &response_authority);
+    if ((cases[i].fault ==
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF
+            && (response_authority.created != 2
+                || response_authority.complete != 2
+                || response_authority.finished != 1
+                || response_authority.aborted != 1
+                || response_authority.cleanup_failed != 0
+                || response_authority.destroyed != 2))
+        || (cases[i].fault ==
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE
+            && (response_authority.created != 1
+                || response_authority.complete != 1
+                || response_authority.finished != 0
+                || response_authority.aborted != 0
+                || response_authority.cleanup_failed != 1
+                || response_authority.destroyed != 1))) {
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2150 + (gint) i;
     }
 
     guint8 token_secret[32];
