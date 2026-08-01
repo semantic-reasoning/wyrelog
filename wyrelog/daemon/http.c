@@ -5375,12 +5375,7 @@ service_credential_build_json (const wyl_service_credential_t *info)
 static gboolean
 service_credential_request_id_is_valid (const gchar *request_id)
 {
-  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
-    return FALSE;
-  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++)
-    if (!g_ascii_isalnum (request_id[i]))
-      return FALSE;
-  return TRUE;
+  return wyl_request_id_is_canonical (request_id);
 }
 
 static gboolean

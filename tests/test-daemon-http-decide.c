@@ -8605,6 +8605,23 @@ check_service_credential_operation_status_recover (SoupServer *server,
 }
 #endif /* WYL_HAS_FACT_STORE */
 
+static gboolean
+policy_count_rows (WylHandle *handle, const gchar *sql, gint64 *out_count)
+{
+  if (handle == NULL || sql == NULL || out_count == NULL)
+    return FALSE;
+  *out_count = -1;
+  sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
+  sqlite3_stmt *stmt = NULL;
+  if (db == NULL || sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return FALSE;
+  gboolean ok = sqlite3_step (stmt) == SQLITE_ROW;
+  if (ok)
+    *out_count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
 static gint
 check_service_principal_management_contract (void)
 {
@@ -8874,6 +8891,31 @@ check_service_principal_management_contract (void)
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&publication.staged_secret, g_free);
   memset (&publication, 0, sizeof publication);
+  gint64 issue_credentials_before = 0;
+  gint64 issue_credentials_after = 0;
+  if (!policy_count_rows (handle, "SELECT count(*) FROM service_credentials;",
+          &issue_credentials_before)) {
+    rc = 2170;
+    goto cleanup;
+  }
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          "/service-principals/svc:tenant-a:worker/credentials",
+          tenant_query, access_token,
+          "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+          "\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
+          "\"destination\":\"issue.json\",\"expires_at_us\":\""
+          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      || status != 400 || body == NULL
+      || strstr (body, "invalid_service_credential_request") == NULL
+      || strstr (body, "credential_secret") != NULL
+      || publication.stage_calls != 0 || publication.commit_calls != 0
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_credentials;", &issue_credentials_after)
+      || issue_credentials_after != issue_credentials_before) {
+    rc = 2171;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
   /* Issue now delivers the secret out-of-band via the escrow file; the HTTP
    * response is the module's non-secret receipt.  This E2E test exercises the
    * loopback-permitted arm: both the client and server addresses are always
@@ -9050,6 +9092,34 @@ check_service_principal_management_contract (void)
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&publication.staged_secret, g_free);
   memset (&publication, 0, sizeof publication);
+  gint64 rotate_credentials_before = 0;
+  gint64 rotate_credentials_after = 0;
+  if (!policy_count_rows (handle, "SELECT count(*) FROM service_credentials;",
+          &rotate_credentials_before)) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 2172;
+    goto cleanup;
+  }
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          rotate_path, query, access_token,
+          "{\"version\":\"1\",\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
+          "\"destination\":\"rotate.json\",\"expires_at_us\":\""
+          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      || status != 400 || body == NULL
+      || strstr (body, "invalid_service_credential_request") == NULL
+      || strstr (body, "credential_secret") != NULL
+      || publication.stage_calls != 0 || publication.commit_calls != 0
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_credentials;",
+          &rotate_credentials_after)
+      || rotate_credentials_after != rotate_credentials_before) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 2173;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
   /* Rotate delivers the successor secret via the escrow file too; assert the
    * non-secret receipt naming a fresh successor credential. */
   if (send_raw_service_principal_bearer (session, "POST", base_url,
@@ -9183,6 +9253,88 @@ check_service_principal_management_contract (void)
     rc = 1993;
     goto cleanup;
   }
+  g_clear_pointer (&body, g_free);
+  wyl_service_credential_t revoke_before = { 0 };
+  wyl_service_credential_t revoke_after = { 0 };
+  gint64 requests_before = 0;
+  gint64 requests_after = 0;
+  gint64 revoke_events_before = 0;
+  gint64 revoke_events_after = 0;
+  gint64 revoke_audits_before = 0;
+  gint64 revoke_audits_after = 0;
+  gint64 revoke_outbox_before = 0;
+  gint64 revoke_outbox_after = 0;
+  gint64 noncanonical_artifacts = 0;
+  gsize revoke_secret_len = 0;
+  const gchar *revoke_secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &revoke_secret_len);
+  if (revoke_secret == NULL || revoke_secret_len == 0
+      || wyl_service_credential_get (handle,
+          issued.credential.credential_id, &revoke_before) != WYRELOG_E_OK
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_domain_requests;", &requests_before)
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked';", &revoke_events_before)
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_events "
+          "WHERE action='service.credential.revoke';", &revoke_audits_before)
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+          &revoke_outbox_before)) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_clear (&revoke_before);
+    rc = 2174;
+    goto cleanup;
+  }
+  if (send_raw_service_principal_bearer (session, "DELETE", base_url,
+          credential_path, tenant_query, access_token,
+          "{\"version\":\"1\",\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\"}",
+          &status, &body) != 0 || status != 400 || body == NULL
+      || strstr (body, "invalid_service_credential_request") == NULL
+      || strstr (body, "credential_secret") != NULL
+      || strstr (body, revoke_secret) != NULL
+      || wyl_service_credential_get (handle,
+          issued.credential.credential_id, &revoke_after) != WYRELOG_E_OK
+      || g_strcmp0 (revoke_after.state, revoke_before.state) != 0
+      || revoke_after.generation != revoke_before.generation
+      || revoke_after.updated_at_us != revoke_before.updated_at_us
+      || revoke_after.revoked_at_us != revoke_before.revoked_at_us
+      || g_strcmp0 (revoke_after.revoked_by, revoke_before.revoked_by) != 0
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_domain_requests;", &requests_after)
+      || requests_after != requests_before
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked';", &revoke_events_after)
+      || revoke_events_after != revoke_events_before
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_events "
+          "WHERE action='service.credential.revoke';", &revoke_audits_after)
+      || revoke_audits_after != revoke_audits_before
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+          &revoke_outbox_after)
+      || revoke_outbox_after != revoke_outbox_before
+      || !policy_count_rows (handle,
+          "SELECT (SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='abcdefghijklmnopqrstuvwxyz0') + "
+          "(SELECT count(*) FROM service_credential_events "
+          "WHERE request_id='abcdefghijklmnopqrstuvwxyz0') + "
+          "(SELECT count(*) FROM audit_events "
+          "WHERE request_id='abcdefghijklmnopqrstuvwxyz0');",
+          &noncanonical_artifacts)
+      || noncanonical_artifacts != 0) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_clear (&revoke_before);
+    wyl_service_credential_clear (&revoke_after);
+    rc = 2175;
+    goto cleanup;
+  }
+  wyl_service_credential_clear (&revoke_before);
+  wyl_service_credential_clear (&revoke_after);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "DELETE", base_url,
           credential_path, tenant_query, access_token,
