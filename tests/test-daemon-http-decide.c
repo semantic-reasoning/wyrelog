@@ -3264,9 +3264,10 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
     return FALSE;
 
   /* A fresh keyed no-op against the already disabled principal must not arm
-   * another selector.  The synthetic PENDING tuple can therefore activate;
-   * #376 owns closing that independently impossible publication path in the
-   * real resolver. */
+   * another selector.  This synthetic post-transition PENDING tuple can
+   * therefore activate: test-only insertion bypasses #358's authority-checked
+   * production publication boundary, while #372 owns first-transition
+   * invalidation and deliberately does not turn no-op receipts into tombstones. */
   g_auto (ServiceResolverFixture) noop_pending = { 0 };
   changed = FALSE;
   if (!service_resolver_fixture_init (server, &noop_pending,
@@ -8953,6 +8954,7 @@ check_service_principal_management_contract (void)
   guint rotate_commit_calls = 0;
 #ifdef WYL_HAS_AUDIT
   g_auto (ActualServiceTokens) principal_route_tokens = { 0 };
+  g_auto (ActualServiceTokens) principal_unrelated_tokens = { 0 };
   g_auto (ActualServiceTokens) tenant_route_tokens = { 0 };
   g_auto (ActualServiceTokens) revoke_route_tokens = { 0 };
   g_auto (ActualServiceTokens) revoke_unrelated_tokens = { 0 };
@@ -8962,6 +8964,7 @@ check_service_principal_management_contract (void)
   g_autofree gchar *rotate_route_path = NULL;
   g_autofree gchar *tenant_route_query = NULL;
   wyl_service_principal_t tenant_route_principal = { 0 };
+  wyl_service_principal_t principal_unrelated = { 0 };
 #endif
   const gchar *create_body =
       "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"Worker\"}";
@@ -9694,8 +9697,15 @@ check_service_principal_management_contract (void)
   }
 
 #ifdef WYL_HAS_AUDIT
-  if (!actual_service_tokens_init (http.server, "svc:tenant-a:worker",
+  if (wyl_service_principal_create (handle, "svc:tenant-a:observer",
+          "Unrelated route observer", "human-principal-admin",
+          "http-route-unrelated-principal", &principal_unrelated)
+      != WYRELOG_E_OK
+      || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
           "tenant-a", "http-route-disable-token", &principal_route_tokens)
+      || !actual_service_tokens_init (http.server, "svc:tenant-a:observer",
+          "tenant-a", "http-route-disable-unrelated-token",
+          &principal_unrelated_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
           "tenant-a", "http-route-revoke-token", &revoke_route_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
@@ -9749,7 +9759,8 @@ check_service_principal_management_contract (void)
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
           NULL, &tenant_route_tokens, "svc:tenant-route:worker",
-          "tenant-route", NULL, NULL, NULL)) {
+          "tenant-route", &principal_route_tokens, "svc:tenant-a:worker",
+          "tenant-a")) {
     rc = 2162;
     goto cleanup;
   }
@@ -9790,8 +9801,8 @@ check_service_principal_management_contract (void)
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
           ACTUAL_ROUTE_DISABLE_PRINCIPAL, access_token,
-          &principal_route_tokens, "svc:tenant-a:worker", "tenant-a", NULL,
-          NULL, NULL)) {
+          &principal_route_tokens, "svc:tenant-a:worker", "tenant-a",
+          &principal_unrelated_tokens, "svc:tenant-a:observer", "tenant-a")) {
     rc = 2163;
     goto cleanup;
   }
@@ -9852,6 +9863,7 @@ check_service_principal_management_contract (void)
 cleanup:
 #ifdef WYL_HAS_AUDIT
   wyl_service_principal_clear (&tenant_route_principal);
+  wyl_service_principal_clear (&principal_unrelated);
 #endif
   g_free (publication.staged_secret);
   g_main_loop_quit (http.loop);
