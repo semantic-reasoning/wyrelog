@@ -1344,6 +1344,7 @@ main (void)
   if (wyl_client_decision_get_deny_reason (decision_result) != NULL ||
       wyl_client_decision_get_deny_origin (decision_result) != NULL)
     return 181;
+  g_clear_pointer (&decision_result, wyl_client_decision_free);
   if (wyl_client_decide_ex (local_client, NULL, "wr.audit.read", "doc/42",
           &decision_result) != WYRELOG_E_INVALID)
     return 186;
@@ -1407,6 +1408,7 @@ main (void)
     return 188;
   if (decision_result == NULL)
     return 189;
+  g_clear_pointer (&decision_result, wyl_client_decision_free);
   if (wyl_client_decide_with_guard_context_ex (local_client, "alice",
           "wr.audit.read", "doc/42", 123, NULL, 69,
           &decision_result) != WYRELOG_E_INVALID)
