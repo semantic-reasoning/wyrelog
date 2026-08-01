@@ -7229,16 +7229,14 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
           strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
     return 1947;
+  g_autofree gchar *access_token = extract_json_string (body, "access_token");
   if (status != 200 || body == NULL ||
-      extract_json_string (body, "access_token") == NULL ||
+      access_token == NULL ||
       strstr (body, "session_token") != NULL ||
       strstr (body, "username") != NULL ||
       strstr (body, "tenant") != NULL ||
       strstr (body, "principal_state") != NULL)
     return 1948;
-  g_autofree gchar *access_token = extract_json_string (body, "access_token");
-  if (access_token == NULL)
-    return 1949;
 
   guint8 secret_key[32];
   if (wyl_daemon_http_copy_access_token_secret (server, secret_key,
@@ -7346,8 +7344,11 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autofree gchar *route_body = NULL;
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/auth/service-token", NULL, request_body, &route_status,
-          &route_body) != 0 || route_status != 200 || route_body == NULL
-      || extract_json_string (route_body, "access_token") == NULL
+          &route_body) != 0)
+    return 1959;
+  g_autofree gchar *route_access_token = extract_json_string (route_body,
+      "access_token");
+  if (route_status != 200 || route_body == NULL || route_access_token == NULL
       || strstr (route_body, "session_token") != NULL
       || strstr (route_body, "credential_secret") != NULL)
     return 1959;
@@ -7384,8 +7385,9 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
             request_body, strlen (request_body), &status, &body,
             &retry_after) != WYRELOG_E_OK)
       return 1960 + (gint) i;
-    if (status != 200 || body == NULL ||
-        extract_json_string (body, "access_token") == NULL)
+    g_autofree gchar *rate_access_token = extract_json_string (body,
+        "access_token");
+    if (status != 200 || body == NULL || rate_access_token == NULL)
       return 1970 + (gint) i;
   }
   g_clear_pointer (&body, g_free);
@@ -8859,8 +8861,13 @@ check_service_principal_management_contract (void)
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/auth/service-token", NULL, http_exchange_body, &status, &body)
-      != 0 || status != 200 || body == NULL
-      || extract_json_string (body, "access_token") == NULL
+      != 0) {
+    rc = 1993;
+    goto cleanup;
+  }
+  g_autofree gchar *http_exchange_access = extract_json_string (body,
+      "access_token");
+  if (status != 200 || body == NULL || http_exchange_access == NULL
       || strstr (body, "session_token") != NULL
       || strstr (body, "credential_secret") != NULL) {
     rc = 1993;
