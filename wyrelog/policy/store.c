@@ -15329,6 +15329,7 @@ service_retirement_outcome_from_receipt (const ServiceRetirementReceipt
   out->operation = receipt->operation;
   out->transitioned_now =
       disposition == WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION;
+  out->recorded_transitioned = receipt->transitioned;
   out->replayed = disposition == WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY;
   out->receipt_version = receipt->receipt_version;
   out->recorded_authority_generation = receipt->authority_generation;

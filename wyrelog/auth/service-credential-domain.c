@@ -311,6 +311,7 @@ copy_retirement_outcome (const WylPolicyServiceRetirementOutcome *source,
   memset (target, 0, sizeof *target);
   target->disposition = (WylServiceRetirementDisposition) source->disposition;
   target->transitioned_now = source->transitioned_now;
+  target->recorded_transitioned = source->recorded_transitioned;
   target->replayed = source->replayed;
   target->recorded_authority_generation = source->recorded_authority_generation;
   target->recorded_tenant_lifecycle_generation =

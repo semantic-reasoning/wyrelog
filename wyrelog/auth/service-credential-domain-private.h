@@ -36,6 +36,7 @@ typedef struct
 {
   WylServiceRetirementDisposition disposition;
   gboolean transitioned_now;
+  gboolean recorded_transitioned;
   gboolean replayed;
   guint64 recorded_authority_generation;
   guint64 recorded_tenant_lifecycle_generation;
