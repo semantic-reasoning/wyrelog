@@ -20,6 +20,8 @@ FUNCTIONS = (
     "tenant_delete_handler",
     "policy_permission_grant_handler", "policy_permission_revoke_handler",
     "policy_role_grant_handler", "policy_role_revoke_handler",
+    "service_credential_operation_reconcile_execute",
+    "service_credential_operation_recover_execute",
     "wyl_daemon_http_configure_tenant_for_test",
 )
 ALLOW_ACQUIRE = {
@@ -32,6 +34,7 @@ ALLOW_ACQUIRE = {
     "wyl_daemon_http_policy_write_for_test",
     "wyl_daemon_http_configure_tenant_for_test",
     "service_credential_operation_reconcile_execute",
+    "service_credential_operation_recover_execute",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
@@ -422,6 +425,39 @@ def raw_global_invariants(tokens, defs, check_directives=True):
     bad_routes=[f"{name}={count}" for name,count in route_counts.items() if count!=1]
     if bad_routes: raise GuardError("route cardinality mismatch: "+", ".join(bad_routes))
 
+def validate_recover_write_boundary(defs):
+    name="service_credential_operation_recover_execute"
+    items=defs.get(name,[])
+    # The raw source contract above requires this owner.  Active preprocessed
+    # source legitimately omits it when fact-store support is disabled.
+    if not items: return
+    if len(items)!=1: raise GuardError("recover WRITE owner cardinality mismatch")
+    values=[value for _,value in items[0][2]]
+    calls=(
+        "wyl_daemon_policy_write_acquire",
+        "management_reauthorize_inside_write",
+        "wyl_service_credential_operation_coordinator_lock_acquire",
+        "wyl_service_credential_operation_coordinator_recover",
+    )
+    positions={symbol:[i for i,value in enumerate(values)
+        if value==symbol and i+1<len(values) and values[i+1]=="("]
+        for symbol in calls}
+    bad=[f"{symbol}={len(found)}" for symbol,found in positions.items()
+        if len(found)!=1]
+    if bad: raise GuardError("recover WRITE call cardinality mismatch: "+", ".join(bad))
+    write_store=[i for i in range(len(values)-2)
+        if values[i:i+3]==["write",".","store"]]
+    if len(write_store)!=2:
+        raise GuardError(f"recover pinned WRITE store cardinality mismatch: {len(write_store)}")
+    ordered=[positions[calls[0]][0],positions[calls[1]][0],write_store[0],
+        positions[calls[2]][0],positions[calls[3]][0],write_store[1]]
+    if ordered!=sorted(ordered):
+        raise GuardError("recover WRITE acquire/reauthorize/store/lock/recover ordering mismatch")
+    forbidden=("wyl_handle_get_policy_store","wyl_daemon_policy_write_clear",
+        "wyl_service_auth_write_lease_release","wyl_service_auth_write_lease_free")
+    if any(symbol in values for symbol in forbidden):
+        raise GuardError("recover WRITE owner bypasses automatic pinned authority")
+
 def strict_json(path):
     def pairs_hook(items):
         obj={}
@@ -451,7 +487,10 @@ def main(argv=None):
     raw_tokens=lex(source,preserve_pp=True); raw_mate=pairs(raw_tokens); raw_defs=definitions(raw_tokens,raw_mate,allow_duplicates=True,full=True)
     missing=[x for x in FUNCTIONS if x not in raw_defs]
     if missing: raise GuardError("missing function definitions: "+", ".join(missing))
+    if not ALLOW_ACQUIRE.issubset(FUNCTIONS):
+        raise GuardError("acquire allowlist must be contained by the frozen function set")
     validate_test_only_tenant_seam(source,raw_defs)
+    validate_recover_write_boundary(raw_defs)
     raw_global_invariants(raw_tokens,raw_defs)
     if not ns.raw_only:
         if not ns.build_root or not ns.compiler_id: raise GuardError("active check requires build-root and compiler-id")
@@ -463,6 +502,7 @@ def main(argv=None):
         defs={name:items[0] for name,items in grouped.items()
             if name in raw_defs and len(items)==1}
         validate_test_only_tenant_seam(source,raw_defs,defs)
+        validate_recover_write_boundary({name:[item] for name,item in defs.items()})
         global_invariants(tokens,defs)
         raw_global_invariants(tokens,{name:[item] for name,item in defs.items()},False)
     actual=candidate(raw_defs,raw_tokens)

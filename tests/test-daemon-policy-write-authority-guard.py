@@ -172,6 +172,17 @@ def main():
             "wyl_daemon_policy_write_acquire (ctx, &write);",
             "wyl_daemon_policy_write_acquire (ctx, &write);\n"
             "  wyl_daemon_policy_write_acquire (ctx, &write);"),
+        "recover-acquire-removed": mutate_function(source,
+            "service_credential_operation_recover_execute",
+            "wyl_daemon_policy_write_acquire", "recover_acquire_removed"),
+        "recover-raw-store-getter": mutate_function(source,
+            "service_credential_operation_recover_execute", "write.store",
+            "wyl_handle_get_policy_store (ctx->handle)"),
+        "recover-manual-clear": mutate_function(source,
+            "service_credential_operation_recover_execute",
+            "management_reauthorize_inside_write (&reauthorization, actor);",
+            "management_reauthorize_inside_write (&reauthorization, actor);\n"
+            "  wyl_daemon_policy_write_clear (&write);"),
         "rotation-key-acquire-removed": mutate_function(source,
             "wyl_daemon_http_context_rotate_access_token_key",
             "wyl_daemon_policy_write_acquire", "rotation_key_acquire_removed"),
