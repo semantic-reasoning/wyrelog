@@ -222,18 +222,20 @@ test_service_principal_create_missing_flags (void)
   assert_exit_and_stderr (missing_display_name_argv, 2,
       "wyctl: missing --display-name");
 
-  gchar *missing_tenant_argv[] = {
+  gchar *nondefault_tenant_argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url", "http://127.0.0.1:1",
     "service-principal", "create",
     "--subject", "svc:__wr_default:worker",
     "--display-name", "Worker",
+    "--tenant", "tenant-a",
     "--guard-timestamp", "123",
     "--guard-loc-class", "public",
     "--guard-risk", "10",
     NULL,
   };
-  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+  assert_exit_and_stderr (nondefault_tenant_argv, 2,
+      "wyctl: service-principal --tenant must be __wr_default");
 }
 
 static void
@@ -258,18 +260,20 @@ test_service_principal_create_help (void)
 }
 
 static void
-test_service_principal_list_missing_tenant (void)
+test_service_principal_list_nondefault_tenant (void)
 {
-  gchar *missing_tenant_argv[] = {
+  gchar *nondefault_tenant_argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url", "http://127.0.0.1:1",
     "service-principal", "list",
+    "--tenant", "tenant-a",
     "--guard-timestamp", "123",
     "--guard-loc-class", "public",
     "--guard-risk", "10",
     NULL,
   };
-  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+  assert_exit_and_stderr (nondefault_tenant_argv, 2,
+      "wyctl: service-principal --tenant must be __wr_default");
 }
 
 static void
@@ -307,6 +311,20 @@ test_service_principal_disable_missing_subject (void)
     NULL,
   };
   assert_exit_and_stderr (missing_subject_argv, 2, "wyctl: missing --subject");
+
+  gchar *nondefault_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-principal", "disable",
+    "--subject", "svc:tenant-a:worker",
+    "--tenant", "tenant-a",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (nondefault_tenant_argv, 2,
+      "wyctl: service-principal --tenant must be __wr_default");
 }
 
 int
@@ -319,8 +337,8 @@ main (int argc, char **argv)
       test_service_principal_create_missing_flags);
   g_test_add_func ("/wyctl/service-principal/create-help",
       test_service_principal_create_help);
-  g_test_add_func ("/wyctl/service-principal/list-missing-tenant",
-      test_service_principal_list_missing_tenant);
+  g_test_add_func ("/wyctl/service-principal/list-nondefault-tenant",
+      test_service_principal_list_nondefault_tenant);
   g_test_add_func ("/wyctl/service-principal/list-help",
       test_service_principal_list_help);
   g_test_add_func ("/wyctl/service-principal/disable-missing-subject",

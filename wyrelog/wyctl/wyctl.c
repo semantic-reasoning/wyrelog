@@ -1657,6 +1657,33 @@ create_fact_client (const gchar *daemon_url, const gchar *timeout_ms_arg,
   return 0;
 }
 
+/* Management bearer sessions are always rooted in the sole resolver tenant;
+ * credential commands carry their independently selected target tenant in the
+ * route-specific request. Keep the target presence check here so existing CLI
+ * diagnostics remain stable without binding authentication to that target. */
+static int
+create_management_client (const gchar *daemon_url,
+    const gchar *timeout_ms_arg, const gchar *target_tenant,
+    const gchar *access_token_file, WylClient **out_client)
+{
+  if (target_tenant == NULL || target_tenant[0] == '\0') {
+    g_printerr ("wyctl: missing --tenant\n");
+    return 2;
+  }
+  return create_fact_client (daemon_url, timeout_ms_arg, WYL_TENANT_DEFAULT,
+      access_token_file, out_client);
+}
+
+static gboolean
+service_principal_tenant_is_supported (const gchar *tenant)
+{
+  if (tenant == NULL || g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0)
+    return TRUE;
+  g_printerr ("wyctl: service-principal --tenant must be %s\n",
+      WYL_TENANT_DEFAULT);
+  return FALSE;
+}
+
 static int
 fact_remote_exit (WylClient *client, const gchar *command,
     wyrelog_error_t rc, const gchar *fallback_code)
@@ -3357,8 +3384,7 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Service subject; must be svc:<tenant>:... with <tenant> equal to "
-          "--tenant", "SUBJECT_ID"},
+        "Service subject id", "SUBJECT_ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"destination", 0, 0, G_OPTION_ARG_STRING, &opts.destination,
         "Escrow publication destination", "NAME"},
@@ -3431,7 +3457,7 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   }
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
       access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
@@ -3534,15 +3560,15 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
   }
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
       access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialHandoffReceipt) receipt = { 0 };
-  wyrelog_error_t rc = wyl_client_service_credential_rotate (client,
+  wyrelog_error_t rc = wyl_client_service_credential_rotate_for_tenant (client,
       opts.credential_id, request_id, opts.destination, expires_at_us,
-      guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
+      tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
   int exit_rc = fact_remote_exit (client, "service-credential rotate", rc,
       "service_credential_rotate_failed");
   if (exit_rc == 0)
@@ -3572,8 +3598,7 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServicePrincipalOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Service subject; must be svc:<tenant>:... with <tenant> equal to "
-          "--tenant", "SUBJECT_ID"},
+        "Service subject id", "SUBJECT_ID"},
     {"display-name", 0, 0, G_OPTION_ARG_STRING, &opts.display_name,
         "Human-readable display name", "NAME"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
@@ -3607,8 +3632,6 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
       global_opts->settings, "default-timeout-ms");
-  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
       global_opts->settings, "access-token-file");
@@ -3621,6 +3644,8 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
     g_printerr ("wyctl: missing --display-name\n");
     return 2;
   }
+  if (!service_principal_tenant_is_supported (opts.tenant))
+    return 2;
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
@@ -3628,8 +3653,8 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
     return 2;
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg,
+      WYL_TENANT_DEFAULT, access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
@@ -3681,12 +3706,12 @@ run_service_principal_list (const WyctlOptions *global_opts, gint argc,
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
       global_opts->settings, "default-timeout-ms");
-  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
       global_opts->settings, "access-token-file");
 
+  if (!service_principal_tenant_is_supported (opts.tenant))
+    return 2;
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
@@ -3694,8 +3719,8 @@ run_service_principal_list (const WyctlOptions *global_opts, gint argc,
     return 2;
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg,
+      WYL_TENANT_DEFAULT, access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
@@ -3750,8 +3775,6 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
       global_opts->settings, "default-timeout-ms");
-  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
       global_opts->settings, "access-token-file");
@@ -3760,6 +3783,8 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
     g_printerr ("wyctl: missing --subject\n");
     return 2;
   }
+  if (!service_principal_tenant_is_supported (opts.tenant))
+    return 2;
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
@@ -3767,8 +3792,8 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
     return 2;
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg,
+      WYL_TENANT_DEFAULT, access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
@@ -3878,14 +3903,15 @@ run_service_credential_list (const WyctlOptions *global_opts, gint argc,
     return 2;
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
       access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialList) list = { 0 };
-  wyrelog_error_t rc = wyl_client_service_credential_list (client,
-      opts.subject, guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+  wyrelog_error_t rc = wyl_client_service_credential_list_for_tenant (client,
+      opts.subject, tenant, guard_timestamp, opts.guard_loc_class, guard_risk,
+      &list);
   int exit_rc = fact_remote_exit (client, "service-credential list", rc,
       "service_credential_list_failed");
   if (exit_rc == 0) {
@@ -3961,15 +3987,15 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
   }
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
       access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredential) credential = { 0 };
-  wyrelog_error_t rc = wyl_client_service_credential_revoke (client,
-      opts.credential_id, request_id, guard_timestamp, opts.guard_loc_class,
-      guard_risk, &credential);
+  wyrelog_error_t rc = wyl_client_service_credential_revoke_for_tenant (client,
+      opts.credential_id, request_id, tenant, guard_timestamp,
+      opts.guard_loc_class, guard_risk, &credential);
   int exit_rc = fact_remote_exit (client, "service-credential revoke", rc,
       "service_credential_revoke_failed");
   if (exit_rc == 0) {
@@ -4089,15 +4115,16 @@ run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
     return 2;
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
       access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialOperationStatusEntry) entry = { 0 };
-  wyrelog_error_t rc = wyl_client_service_credential_operation_recover (client,
-      opts.request_id, guard_timestamp, opts.guard_loc_class, guard_risk,
-      &entry);
+  wyrelog_error_t rc =
+      wyl_client_service_credential_operation_recover_for_tenant (client,
+      tenant, opts.request_id, guard_timestamp, opts.guard_loc_class,
+      guard_risk, &entry);
   int exit_rc = fact_remote_exit (client, "service-credential recover", rc,
       "service_credential_recover_failed");
   if (exit_rc == 0)
@@ -4155,15 +4182,15 @@ run_service_credential_status (const WyctlOptions *global_opts, gint argc,
     return 2;
 
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
       access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialOperationStatusList) list = { 0 };
   wyrelog_error_t rc =
-      wyl_client_service_credential_operation_status_list (client,
-      guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+      wyl_client_service_credential_operation_status_list_for_tenant (client,
+      tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &list);
   int exit_rc = fact_remote_exit (client, "service-credential status", rc,
       "service_credential_status_failed");
   if (exit_rc == 0) {
