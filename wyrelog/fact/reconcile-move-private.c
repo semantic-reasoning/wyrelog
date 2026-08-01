@@ -13,13 +13,129 @@
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/root-writer-lease-private.h"
 
+#include <string.h>
+
+#include <glib/gstdio.h>
+
 #ifndef G_OS_WIN32
 #include <errno.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#else
+#include <windows.h>
+
+#include <io.h>
+#endif
 
 #define WYL_FACT_RECONCILE_MOVE_COPY_CHUNK 65536u
+
+#ifdef G_OS_WIN32
+/* Capture V1 evidence from a native Windows file handle: FileIdInfo identity,
+ * GetFileSizeEx size, and a SHA-256 over the whole file read at explicit
+ * offsets.  A non-regular file, a torn read that overshoots the recorded size,
+ * or a short read fails closed. */
+static wyrelog_error_t
+reconcile_capture_from_handle (HANDLE handle,
+    WylPolicyFactReconcileArtifactEvidence *out_evidence)
+{
+  FILE_ID_INFO id_info = { 0 };
+  BY_HANDLE_FILE_INFORMATION basic = { 0 };
+  if (!GetFileInformationByHandleEx (handle, FileIdInfo, &id_info,
+          sizeof id_info))
+    return WYRELOG_E_IO;
+  if (!GetFileInformationByHandle (handle, &basic))
+    return WYRELOG_E_IO;
+  if ((basic.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY
+              | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
+      || basic.nNumberOfLinks != 1)
+    return WYRELOG_E_POLICY;
+
+  LARGE_INTEGER file_size = { 0 };
+  if (!GetFileSizeEx (handle, &file_size) || file_size.QuadPart < 0)
+    return WYRELOG_E_IO;
+  guint64 expected = (guint64) file_size.QuadPart;
+
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return WYRELOG_E_NOMEM;
+
+  guint8 buffer[WYL_FACT_RECONCILE_MOVE_COPY_CHUNK];
+  guint64 total = 0;
+  guint64 offset = 0;
+  for (;;) {
+    OVERLAPPED overlapped = { 0 };
+    overlapped.Offset = (DWORD) (offset & 0xffffffffu);
+    overlapped.OffsetHigh = (DWORD) (offset >> 32);
+    DWORD got = 0;
+    if (!ReadFile (handle, buffer, (DWORD) sizeof buffer, &got, &overlapped)) {
+      if (GetLastError () == ERROR_HANDLE_EOF)
+        break;
+      return WYRELOG_E_IO;
+    }
+    if (got == 0)
+      break;
+    g_checksum_update (checksum, buffer, (gssize) got);
+    total += (guint64) got;
+    offset += (guint64) got;
+    if (total > expected)
+      return WYRELOG_E_POLICY;
+  }
+  if (total != expected)
+    return WYRELOG_E_POLICY;
+
+  gsize digest_length = sizeof out_evidence->digest;
+  g_checksum_get_digest (checksum, out_evidence->digest, &digest_length);
+  if (digest_length != sizeof out_evidence->digest)
+    return WYRELOG_E_INTERNAL;
+
+  out_evidence->version = WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1;
+  out_evidence->identity_kind =
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS;
+  out_evidence->windows_volume_serial = id_info.VolumeSerialNumber;
+  memcpy (out_evidence->windows_file_id, id_info.FileId.Identifier,
+      sizeof out_evidence->windows_file_id);
+  out_evidence->size_bytes = expected;
+  out_evidence->digest_algorithm =
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256;
+  return WYRELOG_E_OK;
+}
+
+/* Copy exactly |size| bytes from |src| into |dst| at explicit offsets.  Any
+ * read or write fault, or a source shorter than the promised size, is an I/O
+ * failure: the copied artifact would not reproduce the verified digest. */
+static wyrelog_error_t
+reconcile_move_copy_exact_windows (HANDLE src, HANDLE dst, guint64 size)
+{
+  guint8 buffer[WYL_FACT_RECONCILE_MOVE_COPY_CHUNK];
+  guint64 remaining = size;
+  guint64 offset = 0;
+  while (remaining > 0) {
+    DWORD want = remaining < sizeof buffer ? (DWORD) remaining
+        : (DWORD) sizeof buffer;
+    OVERLAPPED read_ov = { 0 };
+    read_ov.Offset = (DWORD) (offset & 0xffffffffu);
+    read_ov.OffsetHigh = (DWORD) (offset >> 32);
+    DWORD got = 0;
+    if (!ReadFile (src, buffer, want, &got, &read_ov) || got == 0)
+      return WYRELOG_E_IO;
+    DWORD written = 0;
+    while (written < got) {
+      guint64 at = offset + written;
+      OVERLAPPED write_ov = { 0 };
+      write_ov.Offset = (DWORD) (at & 0xffffffffu);
+      write_ov.OffsetHigh = (DWORD) (at >> 32);
+      DWORD put = 0;
+      if (!WriteFile (dst, buffer + written, got - written, &put, &write_ov)
+          || put == 0)
+        return WYRELOG_E_IO;
+      written += put;
+    }
+    remaining -= (guint64) got;
+    offset += (guint64) got;
+  }
+  return WYRELOG_E_OK;
+}
+#endif /* G_OS_WIN32 */
 
 wyrelog_error_t
 wyl_fact_reconcile_capture_artifact_evidence (gint fd,
@@ -30,6 +146,12 @@ wyl_fact_reconcile_capture_artifact_evidence (gint fd,
   *out_evidence = (WylPolicyFactReconcileArtifactEvidence) {
   0};
 
+#ifdef G_OS_WIN32
+  HANDLE handle = (HANDLE) _get_osfhandle (fd);
+  if (handle == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_IO;
+  return reconcile_capture_from_handle (handle, out_evidence);
+#else
   struct stat st;
   if (fstat (fd, &st) != 0)
     return WYRELOG_E_IO;
@@ -77,8 +199,10 @@ wyl_fact_reconcile_capture_artifact_evidence (gint fd,
   out_evidence->digest_algorithm =
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256;
   return WYRELOG_E_OK;
+#endif /* G_OS_WIN32 */
 }
 
+#ifndef G_OS_WIN32
 /* Copy exactly |size| bytes from |src_fd| into |dst_fd| starting at offset 0.
  * A source that is shorter than the promised size, or any read/write fault,
  * is an I/O failure: the copied artifact would not reproduce the verified
@@ -114,6 +238,7 @@ reconcile_move_copy_exact (gint src_fd, gint dst_fd, guint64 size)
   }
   return WYRELOG_E_OK;
 }
+#endif /* !G_OS_WIN32 */
 
 /* True when two evidence records name the same native file identity: the same
  * device+inode on POSIX, or the same volume serial and 16-byte file id on
@@ -157,7 +282,11 @@ static wyrelog_error_t
 reconcile_capture_source (const WylFactGraphRegularFile *src,
     WylPolicyFactReconcileArtifactEvidence *out_evidence)
 {
+#ifdef G_OS_WIN32
+  return reconcile_capture_from_handle ((HANDLE) src->handle, out_evidence);
+#else
   return wyl_fact_reconcile_capture_artifact_evidence (src->fd, out_evidence);
+#endif
 }
 
 /* Copy exactly |size| bytes from the opened source into the stage.  Leaf that
@@ -166,7 +295,14 @@ static wyrelog_error_t
 reconcile_copy_source_to_stage (const WylFactGraphRegularFile *src,
     WylFactGraphStage *stage, guint64 size)
 {
+#ifdef G_OS_WIN32
+  HANDLE dst = (HANDLE) _get_osfhandle (stage->fd);
+  if (dst == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_IO;
+  return reconcile_move_copy_exact_windows ((HANDLE) src->handle, dst, size);
+#else
   return reconcile_move_copy_exact (src->fd, stage->fd, size);
+#endif
 }
 
 /* The one canonical published artifact name for every graph. */
@@ -341,7 +477,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
     if (probe == WYRELOG_E_OK) {
       WylPolicyFactReconcileArtifactEvidence target_ev;
       rc = wyl_fact_reconcile_capture_artifact_evidence (target_fd, &target_ev);
-      close (target_fd);
+      g_close (target_fd, NULL);
       if (rc != WYRELOG_E_OK)
         goto out;
 
@@ -510,9 +646,7 @@ out:
   g_clear_pointer (&graph_authority, wyl_policy_graph_authority_record_free);
   g_clear_pointer (&tenant_authority, wyl_policy_tenant_authority_record_free);
   if (published_fd >= 0)
-    close (published_fd);
+    g_close (published_fd, NULL);
   wyl_policy_fact_reconcile_journal_record_free (record);
   return rc;
 }
-
-#endif /* !G_OS_WIN32 */

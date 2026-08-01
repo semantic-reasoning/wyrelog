@@ -8,8 +8,6 @@
 
 G_BEGIN_DECLS;
 
-#ifndef G_OS_WIN32
-
 /*
  * Private, reconciler-only MOVING->MOVED file-move phase.  It securely copies
  * a verified legacy graph artifact into its canonical graph-local
@@ -17,8 +15,10 @@ G_BEGIN_DECLS;
  * source is never removed: this is a copy, not a destructive move.  There is
  * deliberately no public API, HTTP, CLI, daemon or startup surface here.
  *
- * POSIX only: the copy relies on same-directory atomic staging and on the
- * POSIX writer lease, so the unit compiles to nothing on Windows.
+ * Cross-platform: the orchestration is platform-neutral and delegates the
+ * native handle reads to leaf helpers.  The copy relies on same-directory
+ * atomic staging and on the process-wide writer lease, both of which have
+ * POSIX and Windows implementations behind unified symbols.
  */
 
 typedef enum
@@ -57,15 +57,14 @@ wyrelog_error_t wyl_fact_reconcile_move_publish (const
     out_outcome);
 
 /*
- * Canonical producer of source-artifact evidence: fstat identity plus a
- * SHA-256 over the whole file's raw bytes read from the held handle.  This is
- * the single collector used both to seed the journal and to re-verify the
- * source at move time, so a matching digest proves the same bytes across
- * different inodes.
+ * Canonical producer of source-artifact evidence: native file identity plus a
+ * SHA-256 over the whole file's raw bytes read from the held handle.  On POSIX
+ * this is fstat device+inode; on Windows it is the FileIdInfo volume serial
+ * and 16-byte file id.  It is the single collector used both to seed the
+ * journal and to re-verify the source at move time, so a matching digest
+ * proves the same bytes across different inodes.
  */
 wyrelog_error_t wyl_fact_reconcile_capture_artifact_evidence (gint fd,
     WylPolicyFactReconcileArtifactEvidence * out_evidence);
-
-#endif /* !G_OS_WIN32 */
 
 G_END_DECLS;
