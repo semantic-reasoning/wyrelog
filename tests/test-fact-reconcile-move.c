@@ -260,6 +260,42 @@ move_fixture_seed_moving (MoveFixture *fx)
   move_fixture_seed_moving_canonical (fx, fx->canonical_rel);
 }
 
+/* Seed a MOVING record whose expected authority generations are |life_gen|
+ * and |recon_gen|.  The prepare path stores the expected generations verbatim
+ * and does not couple them to the graph's current generation, so a record can
+ * be bound to a generation the graph no longer sits at. */
+static void
+move_fixture_seed_moving_generations (MoveFixture *fx, guint64 life_gen,
+    guint64 recon_gen)
+{
+  WylPolicyFactReconcileJournalInput input = {
+    MOVE_OP, MOVE_TENANT, MOVE_GRAPH, life_gen, recon_gen, 1, 1,
+    MOVE_STORE_UUID, fx->source_rel, fx->canonical_rel, fx->source_ev
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx->store,
+          &input, &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (fx->store,
+          MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
+          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+}
+
+static void
+move_fixture_exec_sql (MoveFixture *fx, const gchar *sql)
+{
+  char *message = NULL;
+  int rc = sqlite3_exec (wyl_policy_store_get_db (fx->store), sql, NULL, NULL,
+      &message);
+  if (rc != SQLITE_OK)
+    g_test_message ("sqlite error: %s", message != NULL ? message : "unknown");
+  sqlite3_free (message);
+  g_assert_cmpint (rc, ==, SQLITE_OK);
+}
+
 static void
 move_fixture_teardown (MoveFixture *fx)
 {
@@ -577,6 +613,56 @@ test_move_publish_source_identity_mismatch (void)
   move_fixture_teardown (&fx);
 }
 
+/*
+ * Authority-generation gate.  The graph authority sits at generation (0,0); a
+ * record bound to a later generation is stale and must be rejected before any
+ * filesystem work, leaving the journal at MOVING for a later legitimate run.
+ */
+static void
+test_move_publish_rejects_generation_drift (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving_generations (&fx, 3, 5);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Tenant existence gate.  The graph generations still agree, but the owning
+ * tenant row is gone: the move must fail closed with E_POLICY and publish
+ * nothing.  Foreign keys are relaxed only to remove the tenant while keeping
+ * the graph row, reproducing the inconsistent state the defense-in-depth gate
+ * guards against.
+ */
+static void
+test_move_publish_rejects_missing_tenant (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  move_fixture_exec_sql (&fx, "PRAGMA foreign_keys=OFF;"
+      "DELETE FROM tenants WHERE tenant_id='" MOVE_TENANT "';"
+      "PRAGMA foreign_keys=ON;");
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
 /* A record that has not reached MOVING must not authorize the move phase. */
 static void
 test_move_publish_rejects_prepared_state (void)
@@ -710,6 +796,10 @@ main (int argc, char **argv)
       test_move_publish_rejects_foreign_basename);
   g_test_add_func ("/fact/reconcile-move/publish/source-identity-mismatch",
       test_move_publish_source_identity_mismatch);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-generation-drift",
+      test_move_publish_rejects_generation_drift);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-missing-tenant",
+      test_move_publish_rejects_missing_tenant);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
       test_move_publish_rejects_prepared_state);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-invalid-arguments",
