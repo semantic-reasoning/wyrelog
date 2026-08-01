@@ -11949,8 +11949,8 @@ fact_reconcile_journal_state_parse (const gchar *value,
   return FALSE;
 }
 
-static gboolean
-    fact_reconcile_artifact_evidence_is_valid
+gboolean
+    wyl_policy_fact_reconcile_artifact_evidence_is_valid
     (const WylPolicyFactReconcileArtifactEvidence * e)
 {
   if (e == NULL || e->version != WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1
@@ -11976,8 +11976,8 @@ static gboolean
   return FALSE;
 }
 
-static gboolean
-    fact_reconcile_artifact_evidence_equal
+gboolean
+    wyl_policy_fact_reconcile_artifact_evidence_equal
     (const WylPolicyFactReconcileArtifactEvidence * a,
     const WylPolicyFactReconcileArtifactEvidence * b)
 {
@@ -12110,7 +12110,8 @@ fact_reconcile_journal_record_from_row (sqlite3_stmt *stmt,
       sqlite3_column_int64 (stmt, 17);
   memcpy (record->source_evidence.digest, sqlite3_column_blob (stmt, 18),
       sizeof record->source_evidence.digest);
-  if (!fact_reconcile_artifact_evidence_is_valid (&record->source_evidence)) {
+  if (!wyl_policy_fact_reconcile_artifact_evidence_is_valid
+      (&record->source_evidence)) {
     wyl_policy_fact_reconcile_journal_record_free (record);
     return WYRELOG_E_POLICY;
   }
@@ -12236,8 +12237,8 @@ static gboolean
       && g_strcmp0 (record->expected_store_uuid, store_uuid) == 0
       && g_strcmp0 (record->source_relative_path, source_path) == 0
       && g_strcmp0 (record->canonical_relative_path, canonical_path) == 0
-      && fact_reconcile_artifact_evidence_equal (&record->source_evidence,
-      source_evidence);
+      && wyl_policy_fact_reconcile_artifact_evidence_equal
+      (&record->source_evidence, source_evidence);
 }
 
 wyrelog_error_t
@@ -12283,7 +12284,8 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
           && !graph_store_uuid_is_canonical (expected_store_uuid))
       || !wyl_fact_graph_relative_path_is_valid (source_relative_path)
       || !wyl_fact_graph_relative_path_is_valid (canonical_relative_path)
-      || !fact_reconcile_artifact_evidence_is_valid (source_evidence))
+      || !wyl_policy_fact_reconcile_artifact_evidence_is_valid
+      (source_evidence))
     return WYRELOG_E_INVALID;
   GraphAuthorityMutationFrame frame;
   wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);

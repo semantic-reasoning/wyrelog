@@ -229,6 +229,16 @@ void wyl_policy_fact_reconcile_journal_record_free
 const gchar *wyl_policy_fact_reconcile_journal_state_name
     (WylPolicyFactReconcileJournalState state);
 
+/* Pure validators for reconciliation source-artifact evidence.  They operate
+ * only on the evidence struct and are shared with the reconciler's private
+ * file-move phase.  |is_valid| enforces the closed V1 contract; |equal|
+ * requires full identity, size and digest equality. */
+gboolean wyl_policy_fact_reconcile_artifact_evidence_is_valid
+    (const WylPolicyFactReconcileArtifactEvidence * evidence);
+gboolean wyl_policy_fact_reconcile_artifact_evidence_equal
+    (const WylPolicyFactReconcileArtifactEvidence * a,
+    const WylPolicyFactReconcileArtifactEvidence * b);
+
 wyrelog_error_t wyl_policy_store_reconcile_journal_prepare
     (wyl_policy_store_t * store,
     const WylPolicyFactReconcileJournalInput * input,
