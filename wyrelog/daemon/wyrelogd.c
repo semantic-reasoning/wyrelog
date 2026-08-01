@@ -243,7 +243,7 @@ maybe_warn_stale_bootstrap_key (const WylDaemonOptions *opts)
 int
 main (int argc, char **argv)
 {
-  WylDaemonOptions opts = {
+  g_auto (WylDaemonOptions) opts = {
     .template_dir = WYL_DEFAULT_TEMPLATE_DIR,
     .listen_port = -1,
   };
