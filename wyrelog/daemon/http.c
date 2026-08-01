@@ -321,6 +321,9 @@ typedef struct _WylDaemonHttpContext
   gint64 refresh_clock_now;
   WylDaemonServiceResolverCheckpoint resolver_checkpoint;
   gpointer resolver_checkpoint_data;
+    WylDaemonManagementReauthorizationCheckpoint
+      management_reauthorization_checkpoint;
+  gpointer management_reauthorization_checkpoint_data;
   gboolean fail_next_resolver_read_release;
   guint resolver_terminal_entries;
   guint refresh_handler_entries;
@@ -4952,6 +4955,7 @@ typedef struct
 
 typedef struct
 {
+  WylDaemonHttpContext *ctx;
   WylHandle *handle;
   WylSession *session;
   const gchar *session_id;
@@ -4981,6 +4985,19 @@ management_session_matches_live (WylSession *session,
       && g_strcmp0 (live_tenant, WYL_TENANT_DEFAULT) == 0;
 }
 
+#ifdef WYL_TEST_DAEMON_HTTP
+void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (SoupServer * server,
+    WylDaemonManagementReauthorizationCheckpoint checkpoint, gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  ctx->management_reauthorization_checkpoint = checkpoint;
+  ctx->management_reauthorization_checkpoint_data = data;
+}
+#endif
+
 static wyrelog_error_t
 management_target_is_active (wyl_policy_store_t *store,
     const gchar *target_tenant)
@@ -5005,6 +5022,25 @@ management_reauthorize_inside_write (gpointer data,
       || !management_session_matches_live (authorization->session,
           authorization->session_id, authorization->actor))
     return WYRELOG_E_AUTH;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (authorization->ctx != NULL
+      && authorization->ctx->management_reauthorization_checkpoint != NULL) {
+    WylDaemonManagementReauthorizationCheckpoint checkpoint =
+        authorization->ctx->management_reauthorization_checkpoint;
+    gpointer checkpoint_data =
+        authorization->ctx->management_reauthorization_checkpoint_data;
+    /* One-shot synchronous checkpoint: mutate authority state after the
+     * front-door ALLOW but immediately before the WRITE-lease decision. */
+    authorization->ctx->management_reauthorization_checkpoint = NULL;
+    authorization->ctx->management_reauthorization_checkpoint_data = NULL;
+    wyrelog_error_t checkpoint_rc = checkpoint (authorization->handle,
+        authorization->actor, authorization->action,
+        authorization->session_id, authorization->target_tenant,
+        checkpoint_data);
+    if (checkpoint_rc != WYRELOG_E_OK)
+      return checkpoint_rc;
+  }
+#endif
   wyrelog_error_t rc = management_target_is_active
       (wyl_handle_get_policy_store (authorization->handle),
       authorization->target_tenant);
@@ -5830,6 +5866,7 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_service_credential_t revoked = { 0 };
   const gchar *decision_request_id = ensure_request_id_header (msg);
   WylManagementReauthorization reauthorization = {
+    .ctx = ctx,
     .handle = ctx->handle,
     .session = session,
     .session_id = auth.session_id,
@@ -5998,6 +6035,7 @@ service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_service_principal_t principal = { 0 };
   const gchar *decision_request_id = ensure_request_id_header (msg);
   WylManagementReauthorization reauthorization = {
+    .ctx = ctx,
     .handle = ctx->handle,
     .session = session,
     .session_id = auth.session_id,
@@ -6144,6 +6182,7 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_service_principal_t principal = { 0 };
   const gchar *decision_request_id = ensure_request_id_header (msg);
   WylManagementReauthorization reauthorization = {
+    .ctx = ctx,
     .handle = ctx->handle,
     .session = session,
     .session_id = auth.session_id,
@@ -8904,6 +8943,7 @@ service_credential_operation_reconcile_execute (SoupServer *server,
   }
 
   WylManagementReauthorization reauthorization = {
+    .ctx = ctx,
     .handle = ctx->handle,
     .session = session,
     .session_id = auth.session_id,
@@ -9420,6 +9460,7 @@ service_credential_operation_recover_execute (SoupServer *server,
   }
 
   WylManagementReauthorization reauthorization = {
+    .ctx = ctx,
     .handle = ctx->handle,
     .session = session,
     .session_id = auth.session_id,
