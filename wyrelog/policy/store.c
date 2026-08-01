@@ -10494,76 +10494,6 @@ wyl_policy_store_set_tenant_sealed (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-    wyl_policy_store_set_tenant_sealed_core
-    (WylServiceAuthorityTransaction * transaction,
-    wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
-    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES], gboolean * out_changed)
-{
-  if (out_tenant != NULL)
-    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
-  if (out_changed != NULL)
-    *out_changed = FALSE;
-  if (store == NULL || tenant_id == NULL || out_tenant == NULL
-      || out_changed == NULL || !wyl_policy_store_tenant_id_is_valid (tenant_id)
-      || strlen (tenant_id) >= WYL_POLICY_TENANT_SELECTOR_BYTES)
-    return WYRELOG_E_INVALID;
-  if (sealed && g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
-    return WYRELOG_E_POLICY;
-
-  wyrelog_error_t rc =
-      wyl_policy_store_service_authority_transaction_enter_participant
-      (transaction, store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  g_autoptr (GRecMutexLocker) authority_locker =
-      g_rec_mutex_locker_new (&store->graph_authority_mutex);
-  sqlite3_stmt *stmt = NULL;
-  rc = prepare_stmt (store->db,
-      "SELECT tenant_id,sealed FROM tenants WHERE tenant_id=?;", &stmt);
-  if (rc == WYRELOG_E_OK)
-    rc = bind_text (stmt, 1, tenant_id);
-  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
-  if (rc == WYRELOG_E_OK && step_rc == SQLITE_DONE)
-    rc = WYRELOG_E_NOT_FOUND;
-  if (rc == WYRELOG_E_OK && step_rc != SQLITE_ROW)
-    rc = WYRELOG_E_IO;
-  const gchar *stored = rc == WYRELOG_E_OK
-      ? (const gchar *) sqlite3_column_text (stmt, 0) : NULL;
-  int was_sealed = rc == WYRELOG_E_OK ? sqlite3_column_int (stmt, 1) : 0;
-  if (rc == WYRELOG_E_OK
-      && (stored == NULL || strlen (stored) >= WYL_POLICY_TENANT_SELECTOR_BYTES
-          || strcmp (stored, tenant_id) != 0))
-    rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK)
-    memcpy (out_tenant, stored, strlen (stored) + 1);
-  sqlite3_finalize (stmt);
-
-  if (rc == WYRELOG_E_OK && was_sealed != (sealed ? 1 : 0)) {
-    stmt = NULL;
-    rc = prepare_stmt (store->db,
-        "UPDATE tenants SET sealed=?,sealed_generation=sealed_generation+1,"
-        "updated_at=unixepoch() WHERE tenant_id=? AND sealed=?"
-        " AND sealed_generation<9223372036854775807;", &stmt);
-    if (rc == WYRELOG_E_OK
-        && (sqlite3_bind_int (stmt, 1, sealed ? 1 : 0) != SQLITE_OK
-            || (rc = bind_text (stmt, 2, out_tenant)) != WYRELOG_E_OK
-            || sqlite3_bind_int (stmt, 3, was_sealed) != SQLITE_OK))
-      rc = WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
-      rc = WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
-      rc = WYRELOG_E_POLICY;
-    sqlite3_finalize (stmt);
-    if (rc == WYRELOG_E_OK)
-      *out_changed = TRUE;
-  }
-  if (rc != WYRELOG_E_OK)
-    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
-  return rc;
-}
-
-wyrelog_error_t
 wyl_policy_store_tenant_exists (wyl_policy_store_t *store,
     const gchar *tenant_id, gboolean *out_exists)
 {
@@ -15006,6 +14936,9 @@ typedef struct
   gint64 created_at_us;
 } ServiceRetirementReceipt;
 
+static wyrelog_error_t service_domain_validate_mutation
+    (wyl_policy_store_t * store);
+
 static const gchar *
 service_retirement_operation_name (WylPolicyServiceRetirementOperation op)
 {
@@ -15365,7 +15298,8 @@ service_retirement_receipt_lookup (wyl_policy_store_t *store,
             && g_strcmp0 (out->resource_id, out->tenant_id) == 0
             && g_strcmp0 (result, "sealed") == 0
             && out->has_tenant_lifecycle_generation
-            && out->has_tenant_sealed_generation && out->event_id == 0));
+            && out->has_tenant_sealed_generation && out->event_id == 0
+            && out->authority_generation == out->tenant_sealed_generation));
   }
   int final_step = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
@@ -15408,6 +15342,131 @@ service_retirement_outcome_from_receipt (const ServiceRetirementReceipt
   out->event_id = receipt->event_id;
   g_strlcpy (out->audit_id, receipt->audit_id, sizeof out->audit_id);
   out->created_at_us = receipt->created_at_us;
+}
+
+typedef struct
+{
+  gchar tenant_id[WYL_POLICY_TENANT_SELECTOR_BYTES];
+  gboolean sealed;
+  WylPolicyTenantLifecycleState lifecycle_state;
+  guint64 lifecycle_generation;
+  guint64 sealed_generation;
+} ServiceRetirementTenantState;
+
+static wyrelog_error_t
+service_retirement_read_tenant_state (wyl_policy_store_t *store,
+    const gchar *tenant_id, ServiceRetirementTenantState *out)
+{
+  memset (out, 0, sizeof *out);
+  static const gchar *sql =
+      "SELECT tenant_id,sealed,lifecycle_state,lifecycle_generation,"
+      "sealed_generation FROM tenants WHERE tenant_id=?;";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step != SQLITE_ROW)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  gint64 lifecycle_generation = 0;
+  gint64 sealed_generation = 0;
+  int sealed = 0;
+  const gchar *stored_id = NULL;
+  const gchar *state_name = NULL;
+  int stored_id_bytes = 0;
+  int state_bytes = 0;
+  if (rc == WYRELOG_E_OK) {
+    gboolean valid = sqlite3_column_type (stmt, 0) == SQLITE_TEXT
+        && sqlite3_column_type (stmt, 1) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 2) == SQLITE_TEXT
+        && sqlite3_column_type (stmt, 3) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 4) == SQLITE_INTEGER;
+    if (valid) {
+      stored_id = (const gchar *) sqlite3_column_text (stmt, 0);
+      state_name = (const gchar *) sqlite3_column_text (stmt, 2);
+      stored_id_bytes = sqlite3_column_bytes (stmt, 0);
+      state_bytes = sqlite3_column_bytes (stmt, 2);
+      sealed = sqlite3_column_int (stmt, 1);
+      lifecycle_generation = sqlite3_column_int64 (stmt, 3);
+      sealed_generation = sqlite3_column_int64 (stmt, 4);
+    }
+    valid = valid && stored_id != NULL && state_name != NULL
+        && stored_id_bytes >= 0
+        && state_bytes >= 0
+        && strlen (stored_id) == (gsize) stored_id_bytes
+        && strlen (state_name) == (gsize) state_bytes
+        && strlen (stored_id) < sizeof out->tenant_id
+        && g_strcmp0 (stored_id, tenant_id) == 0
+        && wyl_policy_store_tenant_id_is_valid (stored_id)
+        && (sealed == 0 || sealed == 1) && lifecycle_generation >= 0
+        && sealed_generation >= 0
+        && tenant_lifecycle_state_parse (state_name, &out->lifecycle_state)
+        && (out->lifecycle_state ==
+        WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED
+        || ((out->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+                || out->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
+            != (sealed != 0)));
+    if (!valid)
+      rc = WYRELOG_E_INTERNAL;
+  }
+  if (rc == WYRELOG_E_OK) {
+    g_strlcpy (out->tenant_id, stored_id, sizeof out->tenant_id);
+    out->sealed = sealed != 0;
+    out->lifecycle_generation = (guint64) lifecycle_generation;
+    out->sealed_generation = (guint64) sealed_generation;
+    int final_step = sqlite3_step (stmt);
+    if (final_step != SQLITE_DONE)
+      rc = final_step == SQLITE_ROW ? WYRELOG_E_INTERNAL : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    memset (out, 0, sizeof *out);
+  return rc;
+}
+
+static void
+service_retirement_tenant_outcome_from_receipt (const ServiceRetirementReceipt
+    *receipt, WylPolicyServiceRetirementDisposition disposition,
+    const ServiceRetirementTenantState *current,
+    WylPolicyServiceRetirementOutcome *out)
+{
+  service_retirement_outcome_from_receipt (receipt, disposition,
+      current->sealed_generation, out);
+  out->current_tenant_lifecycle_generation = current->lifecycle_generation;
+  out->current_tenant_sealed_generation = current->sealed_generation;
+}
+
+static wyrelog_error_t
+service_retirement_validate_tenant_replay (wyl_policy_store_t *store,
+    const ServiceRetirementReceipt *receipt,
+    ServiceRetirementTenantState *current,
+    WylPolicyServiceRetirementOutcome *retirement)
+{
+  wyrelog_error_t rc = service_retirement_read_tenant_state (store,
+      receipt->tenant_id, current);
+  if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID
+      || rc == WYRELOG_E_POLICY)
+    rc = WYRELOG_E_INTERNAL;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (current->sealed
+      && current->lifecycle_generation ==
+      receipt->tenant_lifecycle_generation
+      && current->sealed_generation == receipt->tenant_sealed_generation) {
+    service_retirement_tenant_outcome_from_receipt (receipt,
+        WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY, current, retirement);
+    return WYRELOG_E_OK;
+  }
+  if (current->lifecycle_generation < receipt->tenant_lifecycle_generation
+      || current->sealed_generation < receipt->tenant_sealed_generation
+      || (!current->sealed
+          && current->lifecycle_generation ==
+          receipt->tenant_lifecycle_generation
+          && current->sealed_generation == receipt->tenant_sealed_generation))
+    return WYRELOG_E_INTERNAL;
+  service_retirement_tenant_outcome_from_receipt (receipt,
+      WYL_POLICY_SERVICE_RETIREMENT_SUPERSEDED, current, retirement);
+  return WYRELOG_E_CONFLICT;
 }
 
 static wyrelog_error_t
@@ -15496,6 +15555,33 @@ service_retirement_orphan_evidence (wyl_policy_store_t *store,
     WylPolicyServiceRetirementOperation operation, const gchar *request_id,
     gboolean *out_found)
 {
+  if (operation == WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL) {
+    static const gchar *tenant_sql =
+        "SELECT 1 FROM audit_events WHERE request_id=? AND action=?"
+        " UNION ALL SELECT 1 FROM audit_intentions"
+        " WHERE request_id=? AND action=? LIMIT 1;";
+    sqlite3_stmt *tenant_stmt = NULL;
+    *out_found = FALSE;
+    const gchar *tenant_action = service_retirement_audit_action (operation);
+    wyrelog_error_t tenant_rc = prepare_stmt (store->db, tenant_sql,
+        &tenant_stmt);
+    if (tenant_rc == WYRELOG_E_OK)
+      tenant_rc = bind_text (tenant_stmt, 1, request_id);
+    if (tenant_rc == WYRELOG_E_OK)
+      tenant_rc = bind_text (tenant_stmt, 2, tenant_action);
+    if (tenant_rc == WYRELOG_E_OK)
+      tenant_rc = bind_text (tenant_stmt, 3, request_id);
+    if (tenant_rc == WYRELOG_E_OK)
+      tenant_rc = bind_text (tenant_stmt, 4, tenant_action);
+    int tenant_step = tenant_rc == WYRELOG_E_OK ?
+        sqlite3_step (tenant_stmt) : SQLITE_ERROR;
+    if (tenant_rc == WYRELOG_E_OK && tenant_step == SQLITE_ROW)
+      *out_found = TRUE;
+    else if (tenant_rc == WYRELOG_E_OK && tenant_step != SQLITE_DONE)
+      tenant_rc = WYRELOG_E_IO;
+    sqlite3_finalize (tenant_stmt);
+    return tenant_rc;
+  }
   const gchar *event_table = operation ==
       WYL_POLICY_SERVICE_RETIREMENT_PRINCIPAL_DISABLE ?
       "service_principal_events" : "service_credential_events";
@@ -15597,6 +15683,282 @@ service_retirement_receipt_insert (wyl_policy_store_t *store,
     rc = (step & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_CONFLICT : WYRELOG_E_IO;
   sqlite3_finalize (stmt);
   return rc;
+}
+
+static gboolean
+service_retirement_tenant_request_matches (const ServiceRetirementReceipt
+    *receipt, const gchar *tenant_id, const gchar *actor_subject_id,
+    guint32 receipt_version)
+{
+  return receipt->receipt_version == receipt_version
+      && receipt->operation == WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL
+      && g_strcmp0 (receipt->resource_id, tenant_id) == 0
+      && g_strcmp0 (receipt->tenant_id, tenant_id) == 0
+      && g_strcmp0 (receipt->actor_subject_id, actor_subject_id) == 0;
+}
+
+static wyrelog_error_t
+service_retirement_validate_tenant_fingerprint (const ServiceRetirementReceipt
+    *receipt, const gchar *tenant_id, const gchar *actor_subject_id,
+    guint32 receipt_version)
+{
+  guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
+  wyrelog_error_t rc = service_retirement_fingerprint (receipt_version,
+      WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL, tenant_id, tenant_id,
+      actor_subject_id, fingerprint);
+  if (rc == WYRELOG_E_OK
+      && sodium_memcmp (fingerprint, receipt->input_fingerprint,
+          sizeof fingerprint) != 0)
+    rc = WYRELOG_E_CONFLICT;
+  sodium_memzero (fingerprint, sizeof fingerprint);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_seal_tenant_keyed_precheck_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, gboolean * out_found,
+    WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
+{
+  if (out_found != NULL)
+    *out_found = FALSE;
+  if (retirement != NULL)
+    memset (retirement, 0, sizeof *retirement);
+  if (out_tenant != NULL)
+    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  if (store == NULL || out_found == NULL || retirement == NULL
+      || out_tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || strlen (tenant_id) >= WYL_POLICY_TENANT_SELECTOR_BYTES
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
+      || !wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
+    return WYRELOG_E_POLICY;
+
+  wyrelog_error_t rc = service_authority_transaction_validate_active
+      (transaction, store);
+  g_autoptr (GRecMutexLocker) authority_locker = rc == WYRELOG_E_OK ?
+      g_rec_mutex_locker_new (&store->graph_authority_mutex) : NULL;
+  ServiceRetirementReceipt receipt = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_receipt_lookup (store, request_id, out_found,
+        &receipt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!*out_found) {
+    if (receipt_version != WYL_SERVICE_RETIREMENT_RECEIPT_VERSION)
+      return WYRELOG_E_INVALID;
+    gboolean collision = FALSE;
+    rc = service_retirement_namespace_collision (store, request_id, &collision);
+    if (rc == WYRELOG_E_OK && collision) {
+      retirement->disposition = WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT;
+      retirement->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+      rc = WYRELOG_E_CONFLICT;
+    }
+    gboolean orphan = FALSE;
+    if (rc == WYRELOG_E_OK)
+      rc = service_retirement_orphan_evidence (store,
+          WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL, request_id, &orphan);
+    return rc == WYRELOG_E_OK && orphan ? WYRELOG_E_INTERNAL : rc;
+  }
+  if (!service_retirement_tenant_request_matches (&receipt, tenant_id,
+          actor_subject_id, receipt_version)) {
+    retirement->disposition = WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT;
+    retirement->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+    return WYRELOG_E_CONFLICT;
+  }
+  rc = service_retirement_validate_tenant_fingerprint (&receipt, tenant_id,
+      actor_subject_id, receipt_version);
+  if (rc == WYRELOG_E_CONFLICT) {
+    retirement->disposition = WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT;
+    retirement->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+    return rc;
+  }
+  ServiceRetirementTenantState current = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_validate_tenant_replay (store, &receipt, &current,
+        retirement);
+  if (rc == WYRELOG_E_OK)
+    g_strlcpy (out_tenant, current.tenant_id, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_CONFLICT) {
+    *out_found = FALSE;
+    memset (retirement, 0, sizeof *retirement);
+    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  }
+  return rc;
+}
+
+static wyrelog_error_t
+service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *actor_subject_id,
+    const gchar *request_id, guint32 receipt_version,
+    WylPolicyServiceRetirementOutcome *retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
+{
+  memset (retirement, 0, sizeof *retirement);
+  memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || strlen (tenant_id) >= WYL_POLICY_TENANT_SELECTOR_BYTES
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
+      || !wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  ServiceRetirementReceipt existing = { 0 };
+  gboolean found = FALSE;
+  wyrelog_error_t rc = service_retirement_receipt_lookup (store, request_id,
+      &found, &existing);
+  if (rc == WYRELOG_E_OK && found
+      && !service_retirement_tenant_request_matches (&existing, tenant_id,
+          actor_subject_id, receipt_version)) {
+    retirement->disposition = WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT;
+    retirement->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+    rc = WYRELOG_E_CONFLICT;
+  }
+  if (rc == WYRELOG_E_OK && found) {
+    rc = service_retirement_validate_tenant_fingerprint (&existing, tenant_id,
+        actor_subject_id, receipt_version);
+    if (rc == WYRELOG_E_CONFLICT) {
+      retirement->disposition = WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT;
+      retirement->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+    }
+  }
+  ServiceRetirementTenantState current = { 0 };
+  if (rc == WYRELOG_E_OK && found)
+    rc = service_retirement_validate_tenant_replay (store, &existing, &current,
+        retirement);
+  if (rc == WYRELOG_E_OK && found)
+    g_strlcpy (out_tenant, current.tenant_id, WYL_POLICY_TENANT_SELECTOR_BYTES);
+
+  gboolean collision = FALSE;
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_retirement_namespace_collision (store, request_id, &collision);
+  if (rc == WYRELOG_E_OK && !found && collision) {
+    retirement->disposition = WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT;
+    retirement->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+    rc = WYRELOG_E_CONFLICT;
+  }
+  gboolean orphan = FALSE;
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_retirement_orphan_evidence (store,
+        WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL, request_id, &orphan);
+  if (rc == WYRELOG_E_OK && !found && orphan)
+    rc = WYRELOG_E_INTERNAL;
+
+  guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_retirement_fingerprint (receipt_version,
+        WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL, tenant_id, tenant_id,
+        actor_subject_id, fingerprint);
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+  gboolean transitioned = FALSE;
+  if (rc == WYRELOG_E_OK && !found && !current.sealed) {
+    if (current.sealed_generation >= G_MAXINT64) {
+      rc = WYRELOG_E_POLICY;
+    } else {
+      sqlite3_stmt *stmt = NULL;
+      rc = prepare_stmt (store->db,
+          "UPDATE tenants SET sealed=1,sealed_generation=sealed_generation+1,"
+          "updated_at=unixepoch() WHERE tenant_id=? AND sealed=0"
+          " AND sealed_generation=? AND sealed_generation<9223372036854775807;",
+          &stmt);
+      if (rc == WYRELOG_E_OK)
+        rc = bind_text (stmt, 1, tenant_id);
+      if (rc == WYRELOG_E_OK
+          && sqlite3_bind_int64 (stmt, 2,
+              (sqlite3_int64) current.sealed_generation) != SQLITE_OK)
+        rc = WYRELOG_E_IO;
+      int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+      if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+        rc = (step & 0xff) == SQLITE_CONSTRAINT ?
+            WYRELOG_E_POLICY : WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+        rc = WYRELOG_E_POLICY;
+      sqlite3_finalize (stmt);
+      transitioned = rc == WYRELOG_E_OK;
+      if (rc == WYRELOG_E_OK)
+        rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+    }
+  }
+  if (rc == WYRELOG_E_OK && !found
+      && (!current.sealed || current.sealed_generation == 0))
+    rc = WYRELOG_E_INTERNAL;
+
+  gint64 now_us = 0;
+  gchar audit_id[WYL_ID_STRING_BUF] = { 0 };
+  if (rc == WYRELOG_E_OK && !found) {
+    now_us = g_get_real_time ();
+    rc = service_domain_new_audit_id (audit_id);
+  }
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_domain_append_audit (store, audit_id, now_us,
+        actor_subject_id, "tenant_seal", tenant_id, request_id);
+  ServiceRetirementReceipt receipt = { 0 };
+  if (rc == WYRELOG_E_OK && !found) {
+    g_strlcpy (receipt.request_id, request_id, sizeof receipt.request_id);
+    receipt.receipt_version = receipt_version;
+    receipt.operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+    g_strlcpy (receipt.resource_id, tenant_id, sizeof receipt.resource_id);
+    g_strlcpy (receipt.tenant_id, tenant_id, sizeof receipt.tenant_id);
+    receipt.has_tenant_id = TRUE;
+    g_strlcpy (receipt.actor_subject_id, actor_subject_id,
+        sizeof receipt.actor_subject_id);
+    memcpy (receipt.input_fingerprint, fingerprint, sizeof fingerprint);
+    receipt.transitioned = transitioned;
+    receipt.authority_generation = current.sealed_generation;
+    receipt.tenant_lifecycle_generation = current.lifecycle_generation;
+    receipt.has_tenant_lifecycle_generation = TRUE;
+    receipt.tenant_sealed_generation = current.sealed_generation;
+    receipt.has_tenant_sealed_generation = TRUE;
+    g_strlcpy (receipt.audit_id, audit_id, sizeof receipt.audit_id);
+    receipt.created_at_us = now_us;
+    rc = service_retirement_receipt_insert (store, &receipt);
+  }
+  if (rc == WYRELOG_E_OK && !found) {
+    service_retirement_tenant_outcome_from_receipt (&receipt,
+        transitioned ? WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION :
+        WYL_POLICY_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL, &current,
+        retirement);
+    g_strlcpy (out_tenant, current.tenant_id, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  }
+  sodium_memzero (fingerprint, sizeof fingerprint);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_validate_mutation (store);
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_CONFLICT) {
+    memset (retirement, 0, sizeof *retirement);
+    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_seal_tenant_keyed_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
+{
+  if (retirement != NULL)
+    memset (retirement, 0, sizeof *retirement);
+  if (out_tenant != NULL)
+    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  if (store == NULL || retirement == NULL || out_tenant == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  return rc == WYRELOG_E_OK ? service_tenant_seal_keyed_impl (store,
+      tenant_id, actor_subject_id, request_id, receipt_version, retirement,
+      out_tenant) : rc;
 }
 
 static wyrelog_error_t

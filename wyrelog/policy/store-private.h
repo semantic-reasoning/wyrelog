@@ -2021,13 +2021,24 @@ wyrelog_error_t wyl_policy_store_ensure_default_tenant (wyl_policy_store_t *
     store);
 wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_created);
+/* Compatibility/test setup mutator. Production tenant sealing must use the
+ * keyed authority core below; non-test callers use this only to unseal. */
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean sealed);
 #define WYL_POLICY_TENANT_SELECTOR_BYTES 256u
-wyrelog_error_t wyl_policy_store_set_tenant_sealed_core
+wyrelog_error_t wyl_policy_store_seal_tenant_keyed_core
     (WylServiceAuthorityTransaction * transaction,
-    wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
-    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES], gboolean * out_changed);
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
+wyrelog_error_t wyl_policy_store_seal_tenant_keyed_precheck_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, gboolean * out_found,
+    WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
 wyrelog_error_t wyl_policy_store_tenant_exists (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_tenant_is_active (wyl_policy_store_t * store,
