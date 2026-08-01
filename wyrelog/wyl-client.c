@@ -2684,11 +2684,11 @@ fail:
 }
 
 /* Builds a guarded service-credential-operations request that mirrors the
- * reconcile transport: same tenant source, same bearer/session token
- * fallback, same URI shape.  |suffix| is "" for the collection or "/recover"
- * for the recovery action.  The guarded-session context is validated by the
- * public callers and appended to the query so the daemon's guarded-session
- * authorization accepts the request. */
+ * reconcile transport: same explicit target tenant, same Bearer-only
+ * authorization, same URI shape.  |suffix| is "" for the collection or
+ * "/recover" for the recovery action.  The guarded-session context is
+ * validated by the public callers and appended to the query so the daemon's
+ * guarded-session authorization accepts the request. */
 static wyrelog_error_t
 client_service_credential_operations_message_new (WylClient *client,
     const gchar *target_tenant, const gchar *suffix, const gchar *method,
