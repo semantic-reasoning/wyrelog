@@ -260,6 +260,27 @@ move_fixture_seed_moving (MoveFixture *fx)
   move_fixture_seed_moving_canonical (fx, fx->canonical_rel);
 }
 
+/* Seed a MOVING record with explicit source and canonical relative paths. */
+static void
+move_fixture_seed_moving_paths (MoveFixture *fx, const gchar *source_rel,
+    const gchar *canonical_rel)
+{
+  WylPolicyFactReconcileJournalInput input = {
+    MOVE_OP, MOVE_TENANT, MOVE_GRAPH, 0, 0, 1, 1, MOVE_STORE_UUID,
+    source_rel, canonical_rel, fx->source_ev
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx->store,
+          &input, &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (fx->store,
+          MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
+          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+}
+
 /* Seed a MOVING record whose expected authority generations are |life_gen|
  * and |recon_gen|.  The prepare path stores the expected generations verbatim
  * and does not couple them to the graph's current generation, so a record can
@@ -791,6 +812,84 @@ test_move_publish_reopen_verify_rejects_swap (void)
   move_fixture_teardown (&fx);
 }
 
+/*
+ * Lexical aliasing.  A record whose source and canonical relative paths are
+ * identical names a move of a file onto itself: it must be rejected before any
+ * filesystem work, publishing nothing.
+ */
+static void
+test_move_publish_rejects_lexical_alias (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving_paths (&fx, fx.canonical_rel, fx.canonical_rel);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Identity aliasing on the present branch.  A canonical target hardlinked onto
+ * the source inode is byte- and identity-equal, but it is merely another link
+ * to the source rather than an independent published artifact: the move must
+ * reject it, leaving both links intact and the journal MOVING.
+ */
+static void
+test_move_publish_rejects_identity_alias (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  g_assert_cmpint (link (fx.source_abs, fx.final_abs), ==, 0);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (g_file_test (fx.source_abs, G_FILE_TEST_IS_REGULAR));
+  g_assert_true (g_file_test (fx.final_abs, G_FILE_TEST_IS_REGULAR));
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
+/*
+ * Source-absent present branch.  A durable, distinct-inode copy of our own
+ * artifact converges even when the source is gone: the identity aliasing check
+ * is skipped (the source cannot be opened) and the target-digest match is
+ * independent proof.
+ */
+static void
+test_move_publish_present_converges_without_source (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  g_autoptr (GError) error = NULL;
+  g_assert_true (g_file_set_contents (fx.final_abs, "duckdb-artifact-payload",
+          -1, NULL));
+  g_assert_true (wyl_test_secure_regular_file (fx.final_abs, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_remove (fx.source_abs), ==, 0);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome, ==, WYL_FACT_RECONCILE_MOVE_UNCHANGED_REPLAY);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVED);
+
+  move_fixture_teardown (&fx);
+}
+
 /* A record that has not reached MOVING must not authorize the move phase. */
 static void
 test_move_publish_rejects_prepared_state (void)
@@ -932,6 +1031,12 @@ main (int argc, char **argv)
       test_move_publish_rejects_root_identity_drift);
   g_test_add_func ("/fact/reconcile-move/publish/reopen-verify-rejects-swap",
       test_move_publish_reopen_verify_rejects_swap);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-lexical-alias",
+      test_move_publish_rejects_lexical_alias);
+  g_test_add_func ("/fact/reconcile-move/publish/rejects-identity-alias",
+      test_move_publish_rejects_identity_alias);
+  g_test_add_func ("/fact/reconcile-move/publish/present-converges-no-source",
+      test_move_publish_present_converges_without_source);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-prepared-state",
       test_move_publish_rejects_prepared_state);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-invalid-arguments",
