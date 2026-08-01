@@ -13,6 +13,7 @@
 #include "auth/service-credential-domain-private.h"
 #include "auth/service-credential-private.h"
 #include "daemon/auth-registry-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyl-session-layout-private.h"
 #include "wyl-request-id-private.h"
@@ -467,11 +468,10 @@ handoff_test_target_release (gpointer data,
 static WylSession *
 handoff_human_session_new (const gchar *username, const gchar *tenant)
 {
-  (void) tenant;
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   g_assert_cmpint (wyl_id_new (&session->id), ==, WYRELOG_E_OK);
   session->username = g_strdup (username);
-  session->tenant = g_strdup ("__wr_default");
+  session->tenant = g_strdup (tenant);
   session->state = WYL_SESSION_STATE_ACTIVE;
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
   g_atomic_int_set (&session->mfa_assured, 1);
@@ -813,7 +813,7 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylHandle *handle = fixture.handle;
   prepare_authority (handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+      WYL_TENANT_DEFAULT);
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   wyl_policy_store_t *store = store_of (handle);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store, "admin",
@@ -1584,7 +1584,7 @@ test_handoff_delivery_recovery_matrix (void)
   WylHandle *handle = fixture.handle;
   prepare_authority (handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+      WYL_TENANT_DEFAULT);
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   wyl_policy_store_t *store = store_of (handle);
   sqlite3 *db = db_of (handle);
@@ -1965,7 +1965,7 @@ test_handoff_automatic_maintenance_gate (void)
       WYRELOG_E_OK);
   prepare_authority (handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
-      "tenant-a");
+      WYL_TENANT_DEFAULT);
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   wyl_policy_store_t *store = store_of (handle);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store, "admin",
