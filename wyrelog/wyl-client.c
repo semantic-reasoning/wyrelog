@@ -1961,9 +1961,10 @@ wyrelog_error_t
     const WylClientServiceCredentialOperationReconcileRequest * request,
     WylClientServiceCredentialOperationReconcileResult * out_result)
 {
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
   if (out_result != NULL)
     wyl_client_service_credential_operation_reconcile_result_clear (out_result);
-  (void) client;
   (void) request;
   /* The legacy ABI has no guard context and therefore cannot satisfy the
    * management envelope.  Fail locally instead of sending a weaker request. */

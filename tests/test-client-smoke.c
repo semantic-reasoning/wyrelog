@@ -206,10 +206,24 @@ local_invalid_credential_get (WylClient *client)
 }
 
 static wyrelog_error_t
+local_invalid_credential_get_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_get_for_tenant (client,
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "tenant-a", 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
 local_invalid_credential_list (WylClient *client)
 {
   return wyl_client_service_credential_list (client, "svc:test:worker", 123,
       "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_credential_list_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_list_for_tenant (client,
+      "svc:test:worker", "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
@@ -218,6 +232,14 @@ local_invalid_credential_revoke (WylClient *client)
   return wyl_client_service_credential_revoke (client,
       "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
       123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_credential_revoke_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_revoke_for_tenant (client,
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+      "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
@@ -236,9 +258,24 @@ local_invalid_credential_rotate (WylClient *client)
 }
 
 static wyrelog_error_t
+local_invalid_credential_rotate_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_rotate_for_tenant (client,
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+      "issue.json", 4102444800000000, "tenant-a", 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
 local_invalid_operation_reconcile (WylClient *client)
 {
   return wyl_client_service_credential_operation_reconcile (client, NULL, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_operation_reconcile_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_operation_reconcile_for_tenant
+      (client, "tenant-a", NULL, 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
@@ -249,10 +286,24 @@ local_invalid_operation_status (WylClient *client)
 }
 
 static wyrelog_error_t
+local_invalid_operation_status_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_operation_status_list_for_tenant
+      (client, "tenant-a", 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
 local_invalid_operation_recover (WylClient *client)
 {
   return wyl_client_service_credential_operation_recover (client,
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
+}
+
+static wyrelog_error_t
+local_invalid_operation_recover_for_tenant (WylClient *client)
+{
+  return wyl_client_service_credential_operation_recover_for_tenant (client,
+      "tenant-a", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
 }
 
 static gboolean
@@ -697,24 +748,32 @@ main (void)
     local_invalid_principal_list,
     local_invalid_principal_disable,
     local_invalid_credential_get,
+    local_invalid_credential_get_for_tenant,
     local_invalid_credential_list,
+    local_invalid_credential_list_for_tenant,
     local_invalid_credential_revoke,
+    local_invalid_credential_revoke_for_tenant,
     local_invalid_credential_issue,
     local_invalid_credential_rotate,
+    local_invalid_credential_rotate_for_tenant,
     local_invalid_operation_reconcile,
+    local_invalid_operation_reconcile_for_tenant,
     local_invalid_operation_status,
+    local_invalid_operation_status_for_tenant,
     local_invalid_operation_recover,
+    local_invalid_operation_recover_for_tenant,
   };
   for (gsize i = 0; i < G_N_ELEMENTS (local_invalid_calls); i++) {
     http.status = 400;
     http.body = "{\"error\":\"stale_remote_failure\"}";
-    if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+    if (wyl_client_service_principal_list (management_client, 123, "public", 49,
             &principal_list) != WYRELOG_E_INVALID
-        || !client_last_response_is (local_client, 400, "stale_remote_failure"))
+        || !client_last_response_is (management_client, 400,
+            "stale_remote_failure"))
       return 546;
     guint request_count = http.request_count;
-    if (local_invalid_calls[i] (local_client) != WYRELOG_E_INVALID
-        || !client_last_response_is (local_client, 0, NULL)
+    if (local_invalid_calls[i] (management_client) != WYRELOG_E_INVALID
+        || !client_last_response_is (management_client, 0, NULL)
         || http.request_count != request_count)
       return 547;
   }
@@ -734,23 +793,23 @@ main (void)
       || http.last_session_token != NULL
       || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
     return 232;
-  if (!client_last_response_is (local_client, 200, NULL))
+  if (!client_last_response_is (management_client, 200, NULL))
     return 539;
 
   /* A remote 400 records both pieces of response metadata. Reusing the same
    * client for a local validation failure must clear them without HTTP. */
   http.status = 400;
   http.body = "{\"error\":\"invalid_service_principal\"}";
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 400,
+      || !client_last_response_is (management_client, 400,
           "invalid_service_principal"))
     return 540;
   g_free (http.last_path);
   http.last_path = g_strdup ("__metadata_local_validation__");
-  if (wyl_client_service_principal_create (local_client, "alice", "bad", 123,
-          "public", 49, &principal) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 0, NULL)
+  if (wyl_client_service_principal_create (management_client, "alice", "bad",
+          123, "public", 49, &principal) != WYRELOG_E_INVALID
+      || !client_last_response_is (management_client, 0, NULL)
       || g_strcmp0 (http.last_path, "__metadata_local_validation__") != 0)
     return 541;
 
@@ -768,18 +827,18 @@ main (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_error_bodies); i++) {
     http.body = invalid_error_bodies[i];
-    if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+    if (wyl_client_service_principal_list (management_client, 123, "public", 49,
             &principal_list) != WYRELOG_E_INVALID
-        || !client_last_response_is (local_client, 400, NULL))
+        || !client_last_response_is (management_client, 400, NULL))
       return 542;
   }
 
   static const gchar embedded_nul_error[] = "{\"error\":\"valid\0injected\"}";
   http.body = embedded_nul_error;
   http.body_size = sizeof embedded_nul_error - 1;
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 400, NULL))
+      || !client_last_response_is (management_client, 400, NULL))
     return 548;
   http.body_size = 0;
 
@@ -787,27 +846,27 @@ main (void)
   g_autofree gchar *maximum_error_body = g_strdup_printf
       ("{\"error\":\"%s\"}", maximum_error_value);
   http.body = maximum_error_body;
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 400, maximum_error_value))
+      || !client_last_response_is (management_client, 400, maximum_error_value))
     return 549;
 
   g_autofree gchar *oversized_error_value = g_strnfill (128, 'x');
   g_autofree gchar *oversized_error_body = g_strdup_printf
       ("{\"error\":\"%s\"}", oversized_error_value);
   http.body = oversized_error_body;
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 400, NULL))
+      || !client_last_response_is (management_client, 400, NULL))
     return 542;
 
   g_autofree gchar *oversized_envelope_padding = g_strnfill (4096, ' ');
   g_autofree gchar *oversized_envelope = g_strdup_printf
       ("{\"error\":\"valid\"}%s", oversized_envelope_padding);
   http.body = oversized_envelope;
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           &principal_list) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 400, NULL))
+      || !client_last_response_is (management_client, 400, NULL))
     return 550;
 
   http.status = 0;
@@ -820,12 +879,12 @@ main (void)
           "svc:alice:worker") != 0
       || g_strcmp0 (http.last_method, "GET") != 0
       || g_strcmp0 (http.last_path, "/service-principals") != 0
-      || !client_last_response_is (local_client, 200, NULL))
+      || !client_last_response_is (management_client, 200, NULL))
     return 233;
   guint principal_success_request_count = http.request_count;
-  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+  if (wyl_client_service_principal_list (management_client, 123, "public", 49,
           NULL) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 0, NULL)
+      || !client_last_response_is (management_client, 0, NULL)
       || http.request_count != principal_success_request_count)
     return 553;
   http.body = "{\"ok\":true}";
@@ -858,10 +917,10 @@ main (void)
 
   http.status = 401;
   http.body = "{\"error\":\"service_credential_auth_required\"}";
-  if (wyl_client_service_credential_get (local_client,
+  if (wyl_client_service_credential_get (management_client,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
           &credential) != WYRELOG_E_AUTH
-      || !client_last_response_is (local_client, 401,
+      || !client_last_response_is (management_client, 401,
           "service_credential_auth_required"))
     return 543;
   http.status = 0;
@@ -876,10 +935,10 @@ main (void)
       || !client_last_response_is (management_client, 200, NULL))
     return 237;
   guint credential_success_request_count = http.request_count;
-  if (wyl_client_service_credential_get (local_client,
+  if (wyl_client_service_credential_get (management_client,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
           NULL) != WYRELOG_E_INVALID
-      || !client_last_response_is (local_client, 0, NULL)
+      || !client_last_response_is (management_client, 0, NULL)
       || http.request_count != credential_success_request_count)
     return 554;
   http.body = mock_credential_json;
@@ -1045,8 +1104,9 @@ main (void)
 
   http.status = 403;
   http.body = "{\"error\":\"service_credential_reconcile_denied\"}";
-  if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_POLICY
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+          &reconcile_result) != WYRELOG_E_POLICY
       || !client_last_response_is (local_client, 403,
           "service_credential_reconcile_denied"))
     return 544;
