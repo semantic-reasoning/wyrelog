@@ -1643,6 +1643,38 @@ test_keyed_tenant_seal_receipt_semantics (void)
           "operation='tenant_seal';"), ==, 3);
   probe.deny = FALSE;
 
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-promoted",
+          &created), ==, WYRELOG_E_OK);
+  WylPolicyAuthorityMutationResult promoted_result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
+          "tenant-promoted", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
+          &promoted_result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (promoted_result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+          "tenant-promoted", "operator-a",
+          "00000000000000000000000021E", 1, &runtime, &outcome), ==,
+      WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED);
+  g_assert_cmpuint (outcome.current_tenant_lifecycle_generation, ==, 1);
+  g_assert_cmpuint (outcome.current_tenant_sealed_generation, ==, 0);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT sealed FROM tenants WHERE tenant_id='tenant-promoted';"),
+      ==, 0);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM service_retirement_receipts WHERE "
+          "request_id='00000000000000000000000021E';"), ==, 0);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM audit_events WHERE "
+          "request_id='00000000000000000000000021E';"), ==, 0);
+  WylServiceAuthUnavailableReason available_reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &available_reason), ==, WYRELOG_E_OK);
+  g_assert_cmpint (available_reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+
   WylPolicyAuthorityMutationResult authority_result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
@@ -1655,6 +1687,15 @@ test_keyed_tenant_seal_receipt_semantics (void)
   g_assert_cmpint (outcome.disposition, ==, WYL_SERVICE_RETIREMENT_SUPERSEDED);
   g_assert_cmpuint (outcome.recorded_tenant_lifecycle_generation, ==, 0);
   g_assert_cmpuint (outcome.current_tenant_lifecycle_generation, ==, 1);
+  g_assert_cmpuint (probe.invalidation_calls, ==, 2);
+  g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+          "tenant-receipt", "operator-a",
+          "00000000000000000000000021F", 1, &runtime, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL);
+  g_assert_cmpuint (outcome.recorded_tenant_lifecycle_generation, ==, 1);
+  g_assert_cmpuint (outcome.recorded_tenant_sealed_generation, ==, 3);
   g_assert_cmpuint (probe.invalidation_calls, ==, 2);
 
   exec_ok (db, "DROP TRIGGER trg_service_retirement_no_update;");
@@ -1880,6 +1921,50 @@ test_retirement_postcommit_error_normalization (void)
     g_assert_cmpint (scalar_int64 (handle_db (handle),
             "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
         ==, audit_count);
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  }
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store,
+            "tenant-coordination-cleanup", &created), ==, WYRELOG_E_OK);
+    WylPolicyAuthorityMutationResult promoted =
+        WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+    g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
+            "tenant-coordination-cleanup", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+            0, 0, &promoted), ==, WYRELOG_E_OK);
+    g_assert_cmpint (promoted, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    wyl_service_credential_mutation_authorization_t authorization = {
+      .authorize = tenant_seal_authorize,
+    };
+    wyl_tenant_seal_runtime_t runtime = {
+      .before_write_release = fail_write_release_once,
+      .authorization = &authorization,
+    };
+    WylServiceRetirementOutcome outcome;
+    memset (&outcome, 0xff, sizeof outcome);
+    g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+            "tenant-coordination-cleanup", "operator",
+            "000000000000000000000000220", 1, &runtime, &outcome), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (outcome.disposition, ==, 0);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT sealed FROM tenants WHERE "
+            "tenant_id='tenant-coordination-cleanup';"), ==, 0);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT count(*) FROM service_retirement_receipts WHERE "
+            "request_id='000000000000000000000000220';"), ==, 0);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT count(*) FROM audit_events WHERE "
+            "request_id='000000000000000000000000220';"), ==, 0);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
         (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,

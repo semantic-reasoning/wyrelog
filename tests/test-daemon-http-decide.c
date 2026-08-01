@@ -5979,6 +5979,25 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 202;
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *implicit_tenant_seal_query =
+      g_strdup_printf ("name=tenant-a&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      tenant_session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url, "/tenants/seal",
+      implicit_tenant_seal_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+    return 2021;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/unseal", implicit_tenant_seal_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 2022;
+  g_clear_pointer (&body, g_free);
+
   g_autofree gchar *transition_denied_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
       "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"

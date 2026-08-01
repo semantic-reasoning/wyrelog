@@ -15436,6 +15436,29 @@ service_retirement_tenant_outcome_from_receipt (const ServiceRetirementReceipt
   out->current_tenant_sealed_generation = current->sealed_generation;
 }
 
+static gboolean
+service_retirement_tenant_requires_lifecycle_coordination (const
+    ServiceRetirementTenantState *current)
+{
+  return current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+      || current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+      || current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
+}
+
+static void
+service_retirement_tenant_coordination_outcome (const
+    ServiceRetirementTenantState *current,
+    WylPolicyServiceRetirementOutcome *out)
+{
+  memset (out, 0, sizeof *out);
+  out->disposition =
+      WYL_POLICY_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED;
+  out->operation = WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL;
+  out->current_authority_generation = current->sealed_generation;
+  out->current_tenant_lifecycle_generation = current->lifecycle_generation;
+  out->current_tenant_sealed_generation = current->sealed_generation;
+}
+
 static wyrelog_error_t
 service_retirement_validate_tenant_replay (wyl_policy_store_t *store,
     const ServiceRetirementReceipt *receipt,
@@ -15762,7 +15785,18 @@ wyrelog_error_t
     if (rc == WYRELOG_E_OK)
       rc = service_retirement_orphan_evidence (store,
           WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL, request_id, &orphan);
-    return rc == WYRELOG_E_OK && orphan ? WYRELOG_E_INTERNAL : rc;
+    if (rc == WYRELOG_E_OK && orphan)
+      rc = WYRELOG_E_INTERNAL;
+    ServiceRetirementTenantState current = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+    if (rc == WYRELOG_E_OK
+        && service_retirement_tenant_requires_lifecycle_coordination
+        (&current)) {
+      service_retirement_tenant_coordination_outcome (&current, retirement);
+      rc = WYRELOG_E_BUSY;
+    }
+    return rc;
   }
   if (!service_retirement_tenant_request_matches (&receipt, tenant_id,
           actor_subject_id, receipt_version)) {
@@ -15859,6 +15893,11 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
         actor_subject_id, fingerprint);
   if (rc == WYRELOG_E_OK && !found)
     rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+  if (rc == WYRELOG_E_OK && !found
+      && service_retirement_tenant_requires_lifecycle_coordination (&current)) {
+    service_retirement_tenant_coordination_outcome (&current, retirement);
+    rc = WYRELOG_E_BUSY;
+  }
   gboolean transitioned = FALSE;
   if (rc == WYRELOG_E_OK && !found && !current.sealed) {
     if (current.sealed_generation >= G_MAXINT64) {
@@ -15932,7 +15971,10 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
   sodium_memzero (fingerprint, sizeof fingerprint);
   if (rc == WYRELOG_E_OK)
     rc = service_domain_validate_mutation (store);
-  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_CONFLICT) {
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_CONFLICT
+      && !(rc == WYRELOG_E_BUSY
+          && retirement->disposition ==
+          WYL_POLICY_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED)) {
     memset (retirement, 0, sizeof *retirement);
     memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
   }
