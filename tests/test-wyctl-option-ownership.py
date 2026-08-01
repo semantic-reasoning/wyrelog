@@ -43,6 +43,9 @@ def main() -> int:
          "Missing argument for --tenant"),
         (["service-credential", "issue", "--subject", "svc:test", "--help"],
          0, "Usage:", ""),
+        (["--daemon-url", "http://127.0.0.1:1", "status", "--daemon-url",
+          "http://127.0.0.1:2", "--timeout-ms"], 2, "",
+         "Missing argument for --timeout-ms"),
     )
     for _ in range(3):
         for arguments, expected_exit, stdout_marker, stderr_marker in cases:
