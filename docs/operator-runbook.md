@@ -566,10 +566,28 @@ Service-principal management is global rather than tenant-targeted. Its
 is rejected locally. Credential commands still require `--tenant` because it
 selects the managed target, not the bearer session tenant.
 
+Disable a service principal with an optional stable retry key:
+
+```
+wyctl service-principal disable \
+  --subject <service-subject-id> \
+  [--request-id <canonical-request-id>] \
+  --access-token-file <path>
+```
+
+When `--request-id` is omitted, `wyctl` mints one canonical ID and sends it in
+the strict request body. If the connection drops or the daemon returns 500/503,
+retry with the same explicit ID; using a new ID creates a distinct authorized
+attempt. HTTP 409 means that the key is already bound to a conflicting request
+and must not be reused for different inputs. The response
+`X-Wyrelog-Request-Id` is only per-attempt correlation and is never a substitute
+for `--request-id`.
+
 ### Idempotency
 
 `--request-id` is optional; omit it and `wyctl` mints a fresh canonical
-request id. Reusing the same `--request-id` is a safe retry: the daemon
+request id. Reusing the same `--request-id` with identical inputs is a safe
+retry: the daemon
 returns the same operation, credential, and receipt and never mints a
 second secret. Supply a stable `--request-id` when a previous invocation
 may have succeeded without you observing its reply.

@@ -51,7 +51,8 @@ EXPECTED_FIELDS = {
          "expires_at_us_arg", "request_id", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlServicePrincipalOptions":
-        ("subject", "display_name", "tenant", "access_token_file",
+        ("subject", "display_name", "tenant", "request_id",
+         "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
 }
 
@@ -87,7 +88,7 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 153
+EXPECTED_STRING_DESTINATIONS = 154
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -264,7 +265,8 @@ def main():
             "role_membership_mutation_handler", "if (grant)", "if (TRUE)"),
         "tenant-seal-disabled-selector": mutate_function(source,
             "tenant_mutation_handler",
-            "if (g_strcmp0 (action, \"seal\") == 0)", "if (FALSE)"),
+            "gboolean sealing = g_strcmp0 (action, \"seal\") == 0;",
+            "gboolean sealing = FALSE;"),
         "path-dependent-ctx-lock": mutate_function(source,
             "direct_permission_mutation_handler",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };",
@@ -512,8 +514,9 @@ def main():
         directive_tamper = json.loads(json.dumps(baseline))
         directive_tamper["directives"]["sha256"] = "0" * 64
         manifest_cases["directive-hash"] = json.dumps(directive_tamper)
-        manifest_cases["duplicate"] = manifest.read_text(encoding="utf-8").replace(
-            '"version":1', '"version":1,"version":1', 1)
+        manifest_cases["duplicate"] = re.sub(
+            r'"version"\s*:\s*1', '"version":1,"version":1',
+            manifest.read_text(encoding="utf-8"), count=1)
         original_manifest = manifest.read_text(encoding="utf-8")
         for name, text in manifest_cases.items():
             manifest.write_text(text, encoding="utf-8")

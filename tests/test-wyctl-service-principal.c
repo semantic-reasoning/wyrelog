@@ -25,6 +25,7 @@ typedef struct
   const gchar *body;
   guint status;
   guint request_count;
+  gchar *last_body;
 } TestHttpServer;
 
 static gpointer
@@ -44,6 +45,11 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *message,
   (void) query;
   TestHttpServer *http = user_data;
   http->request_count++;
+  SoupMessageBody *request_body = soup_server_message_get_request_body
+      (message);
+  g_free (http->last_body);
+  http->last_body = request_body != NULL && request_body->data != NULL ?
+      g_strndup (request_body->data, request_body->length) : NULL;
   soup_server_message_set_status (message, http->status, NULL);
   soup_server_message_set_response (message, "application/json",
       SOUP_MEMORY_COPY, http->body, strlen (http->body));
@@ -163,11 +169,63 @@ test_service_principal_local_and_remote_invalid (void)
           "service_principal_create_failed"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "INJECTED_DIAGNOSTIC"));
 
+  http.status = 200;
+  http.body = "{\"service_principal\":{\"subject_id\":"
+      "\"svc:tenant-a:worker\",\"display_name\":\"Worker\","
+      "\"state\":\"disabled\",\"generation\":2,"
+      "\"created_by\":\"admin\",\"created_at_us\":1,"
+      "\"updated_at_us\":2,\"disabled_by\":\"admin\"," "\"disabled_at_us\":2}}";
+  gchar *explicit_request_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", base_url,
+    "service-principal", "disable",
+    "--subject", "svc:tenant-a:worker",
+    "--tenant", "__wr_default",
+    "--request-id", "222222222222222222222222222",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (explicit_request_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_cmpstr (http.last_body, ==,
+      "{\"version\":\"1\",\"request_id\":" "\"222222222222222222222222222\"}");
+
+  gchar *minted_request_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", base_url,
+    "service-principal", "disable",
+    "--subject", "svc:tenant-a:worker",
+    "--tenant", "__wr_default",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (minted_request_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_nonnull (http.last_body);
+  g_assert_true (g_str_has_prefix (http.last_body,
+          "{\"version\":\"1\",\"request_id\":\""));
+  g_assert_cmpuint (strlen (http.last_body), ==,
+      strlen ("{\"version\":\"1\",\"request_id\":\"\"}")
+      + 27);
+
   g_main_loop_quit (http.loop);
   g_thread_join (g_steal_pointer (&thread));
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_clear_pointer (&http.last_body, g_free);
   g_assert_cmpint (g_unlink (token_path), ==, 0);
 }
 
@@ -327,6 +385,26 @@ test_service_principal_disable_missing_subject (void)
       "wyctl: service-principal --tenant must be __wr_default");
 }
 
+static void
+test_service_principal_disable_help (void)
+{
+  gchar *help_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "service-principal", "disable",
+    "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (help_argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--request-id"));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -343,6 +421,8 @@ main (int argc, char **argv)
       test_service_principal_list_help);
   g_test_add_func ("/wyctl/service-principal/disable-missing-subject",
       test_service_principal_disable_missing_subject);
+  g_test_add_func ("/wyctl/service-principal/disable-help",
+      test_service_principal_disable_help);
   g_test_add_func ("/wyctl/service-principal/local-and-remote-invalid",
       test_service_principal_local_and_remote_invalid);
   return g_test_run ();

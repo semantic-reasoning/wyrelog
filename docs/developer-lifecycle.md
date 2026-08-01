@@ -344,6 +344,43 @@ follows:
 An unconfigured deployment (no owner-only operation or publication root) reports
 `503 service_credential_unavailable` and touches no state.
 
+### Authority-retirement replay contract
+
+Principal disable, credential revoke, tenant seal, and credential rotate use a
+caller-owned canonical request ID to recover a committed result after response
+loss. Principal disable and tenant seal accept exactly this JSON object, with a
+maximum body size of 1024 bytes:
+
+```json
+{"version":"1","request_id":"<canonical 27-character KSUID>"}
+```
+
+Missing, empty, duplicate, additional, wrongly typed, unsupported-version, and
+noncanonical fields are rejected with HTTP 400. Credential revoke retains the
+same strict body contract; rotate retains its escrow handoff body and operation
+receipt. The caller request ID is authority identity. It is deliberately
+different from the server-generated `X-Wyrelog-Request-Id` response header,
+which correlates one HTTP attempt and is also used for that attempt's policy
+decision audit.
+
+Every attempt performs current authorization before receipt lookup. An exact
+authorized retry returns the original typed result without another lifecycle
+event, audit/outbox intention, authority mutation, or registry barrier. A new
+key against an already terminal object records a separately authorized and
+audited no-op. Reuse of a key for a different operation, target, actor,
+fingerprint, or version returns HTTP 409. Tenant seal receipts also bind the
+tenant lifecycle and sealed generations: after unseal or another transition,
+an old seal key returns `409 tenant_seal_superseded` with recorded and current
+lifecycle/sealed generations and never reseals the tenant.
+
+Tenant lifecycle states `active`, `sealing`, and `unsealing` require the #549
+drain coordinator and return `503 tenant_lifecycle_coordination_required` from
+the seal route without mutation. Other authority coordination failures return
+503, while receipt, event, audit, or terminal-row structural failures return
+500. A 500 or 503 must not be retried with a new key: preserve the original key,
+restore authority availability as required, and retry so the durable receipt
+can classify the result.
+
 ## Private service credential operation retirement
 
 Terminal handoff journal retirement is private library work. It has no daemon

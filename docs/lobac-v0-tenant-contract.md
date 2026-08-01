@@ -43,6 +43,30 @@ default tenant.
 targets use `name=` so target selection cannot be confused with the
 credential tenant.
 
+`POST /tenants/seal` additionally requires a strict JSON body no larger than
+1024 bytes:
+
+```json
+{"version":"1","request_id":"<canonical 27-character KSUID>"}
+```
+
+The body request ID is the caller's durable idempotency key and is separate
+from the per-attempt `X-Wyrelog-Request-Id` response header. An exact authorized
+retry returns the original `changed` result without another audit, receipt,
+authority transition, or service-session invalidation. A fresh key against an
+already stable sealed tenant is an audited no-op with `changed:false`.
+
+Tenant seal does not perform the graph-drain lifecycle owned by #549.
+`active`, `sealing`, or `unsealing` therefore returns
+`503 tenant_lifecycle_coordination_required` without mutation. If an earlier
+seal receipt is no longer authoritative after unseal/reseal or another
+lifecycle transition, the old key returns `409 tenant_seal_superseded` and the
+body includes `recorded_lifecycle_generation`,
+`recorded_sealed_generation`, `current_lifecycle_generation`, and
+`current_sealed_generation`. Other key collisions return
+`409 tenant_seal_conflict`; authority unavailability returns 503, and durable
+receipt/audit/terminal-row corruption returns 500.
+
 ## Wire-Format Error Codes
 
 The HTTP gate emits stable string codes in the JSON `error` field:

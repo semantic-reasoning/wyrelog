@@ -4522,6 +4522,10 @@ static gint send_raw_policy_mutation_bearer (SoupSession * session,
     const gchar * method, const gchar * base_url, const gchar * path,
     const gchar * query, const gchar * access_token, guint * out_status,
     gchar ** out_body);
+static gint send_raw_service_principal_bearer (SoupSession * session,
+    const gchar * method, const gchar * base_url, const gchar * path,
+    const gchar * query, const gchar * access_token, const gchar * body,
+    guint * out_status, gchar ** out_body);
 static wyrelog_error_t grant_policy_write_authority (WylHandle * handle,
     const gchar * subject, const gchar * scope);
 
@@ -5195,9 +5199,10 @@ build_policy_mutation_uri (const gchar *base_url, const gchar *path,
 }
 
 static gint
-send_raw_policy_mutation_full (SoupSession *session, const gchar *method,
+send_raw_policy_mutation_body_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *path, const gchar *query,
-    guint *out_status, gchar **out_body, gchar **out_request_id)
+    const gchar *request_body, guint *out_status, gchar **out_body,
+    gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 120;
@@ -5210,6 +5215,11 @@ send_raw_policy_mutation_full (SoupSession *session, const gchar *method,
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 121;
+  if (request_body != NULL) {
+    g_autoptr (GBytes) bytes = g_bytes_new_static (request_body,
+        strlen (request_body));
+    soup_message_set_request_body_from_bytes (msg, "application/json", bytes);
+  }
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
@@ -5229,6 +5239,24 @@ send_raw_policy_mutation_full (SoupSession *session, const gchar *method,
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_policy_mutation_full (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    guint *out_status, gchar **out_body, gchar **out_request_id)
+{
+  return send_raw_policy_mutation_body_full (session, method, base_url, path,
+      query, NULL, out_status, out_body, out_request_id);
+}
+
+static gint
+send_raw_policy_mutation_body (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    const gchar *request_body, guint *out_status, gchar **out_body)
+{
+  return send_raw_policy_mutation_body_full (session, method, base_url, path,
+      query, request_body, out_status, out_body, NULL);
 }
 
 static gint
@@ -5325,6 +5353,7 @@ typedef struct
   const gchar *path;
   const gchar *query;
   const gchar *access_token;
+  const gchar *request_body;
   gint rc;
   guint status;
   gchar *body;
@@ -5336,12 +5365,13 @@ actual_route_call_thread (gpointer data)
   ActualRouteCall *call = data;
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   if (call->route == ACTUAL_ROUTE_DISABLE_PRINCIPAL)
-    call->rc = send_raw_policy_mutation_bearer (session, "POST",
+    call->rc = send_raw_service_principal_bearer (session, "POST",
         call->base_url, call->path, call->query, call->access_token,
-        &call->status, &call->body);
+        call->request_body, &call->status, &call->body);
   else
-    call->rc = send_raw_policy_mutation (session, "POST", call->base_url,
-        call->path, call->query, &call->status, &call->body);
+    call->rc = send_raw_policy_mutation_body (session, "POST", call->base_url,
+        call->path, call->query, call->request_body, &call->status,
+        &call->body);
   return NULL;
 }
 
@@ -5364,6 +5394,10 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     .path = path,
     .query = query,
     .access_token = access_token,
+    .request_body = route == ACTUAL_ROUTE_DISABLE_PRINCIPAL ?
+        "{\"version\":\"1\",\"request_id\":"
+        "\"000000000000000000000000224\"}" :
+        "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000221\"}",
     .rc = -1,
   };
   g_autoptr (GThread) mutation = g_thread_new ("actual-http-retirement",
@@ -5398,6 +5432,15 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
       && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
       && token_a_retired && token_b_retired;
+  ActualRouteCall replay = call;
+  replay.rc = -1;
+  replay.status = 0;
+  replay.body = NULL;
+  if (ok) {
+    actual_route_call_thread (&replay);
+    ok = replay.rc == 0 && replay.status == 200 && replay.body != NULL
+        && g_strcmp0 (replay.body, call.body) == 0;
+  }
   if (!ok)
     g_printerr ("WYRELOG_TEST_DIAG retirement route=%d release=%d call_rc=%d "
         "status=%u body=%s later_rc=%d later_sid=%s later_actor=%s "
@@ -5411,6 +5454,7 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
+  g_free (replay.body);
   g_free (call.body);
   return ok;
 }
@@ -5955,12 +5999,58 @@ check_policy_permission_mutation_contract (WylHandle *handle,
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
       "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
       WYL_TENANT_DEFAULT, session_token);
-  rc = send_raw_policy_mutation (session, "POST", base_url, "/tenants/seal",
-      tenant_seal_query, &status, &body);
+  static const gchar *tenant_seal_body =
+      "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000222\"}";
+  static const gchar *invalid_tenant_seal_bodies[] = {
+    NULL,
+    "",
+    "{}",
+    "{\"version\":\"1\",\"request_id\":"
+        "\"000000000000000000000000222\",\"extra\":true}",
+    "{\"version\":\"1\",\"version\":\"1\",\"request_id\":"
+        "\"000000000000000000000000222\"}",
+    "{\"version\":1,\"request_id\":" "\"000000000000000000000000222\"}",
+    "{\"version\":\"2\",\"request_id\":" "\"000000000000000000000000222\"}",
+    "{\"version\":\"1\",\"request_id\":" "\"abcdefghijklmnopqrstuvwxyz0\"}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_tenant_seal_bodies); i++) {
+    rc = send_raw_policy_mutation_body (session, "POST", base_url,
+        "/tenants/seal", tenant_seal_query, invalid_tenant_seal_bodies[i],
+        &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400 || strstr (body, "invalid_tenant_request") == NULL)
+      return 2001;
+    g_clear_pointer (&body, g_free);
+  }
+  g_autofree gchar *oversized_tenant_seal_body = g_strnfill (1025, 'x');
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query, oversized_tenant_seal_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "invalid_tenant_request") == NULL)
+    return 2004;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *tenant_seal_correlation = NULL;
+  rc = send_raw_policy_mutation_body_full (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body,
+      &tenant_seal_correlation);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 200;
+  if (g_strcmp0 (tenant_seal_correlation, "000000000000000000000000222") == 0)
+    return 2002;
+  g_autofree gchar *first_tenant_seal_response = g_strdup (body);
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || g_strcmp0 (body, first_tenant_seal_response) != 0)
+    return 2003;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
@@ -5979,12 +6069,27 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 202;
   g_clear_pointer (&body, g_free);
 
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || body == NULL
+      || strstr (body, "\"error\":\"tenant_seal_superseded\"") == NULL
+      || strstr (body, "\"recorded_lifecycle_generation\":0") == NULL
+      || strstr (body, "\"recorded_sealed_generation\":1") == NULL
+      || strstr (body, "\"current_lifecycle_generation\":0") == NULL
+      || strstr (body, "\"current_sealed_generation\":2") == NULL)
+    return 2023;
+  g_clear_pointer (&body, g_free);
+
   g_autofree gchar *implicit_tenant_seal_query =
       g_strdup_printf ("name=tenant-a&session_token=%s"
       "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
       tenant_session_token);
-  rc = send_raw_policy_mutation (session, "POST", base_url, "/tenants/seal",
-      implicit_tenant_seal_query, &status, &body);
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", implicit_tenant_seal_query,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"000000000000000000000000223\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
@@ -5996,6 +6101,25 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return rc;
   if (status != 200)
     return 2022;
+  g_clear_pointer (&body, g_free);
+
+  WylPolicyAuthorityMutationResult tenant_promoted =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (wyl_policy_store_reconcile_tenant_authority
+      (wyl_handle_get_policy_store (handle), "tenant-a",
+          WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
+          &tenant_promoted) != WYRELOG_E_OK
+      || tenant_promoted != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
+    return 2024;
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", implicit_tenant_seal_query,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"000000000000000000000000227\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 503 || body == NULL
+      || strstr (body, "tenant_lifecycle_coordination_required") == NULL)
+    return 2025;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *transition_denied_query =
@@ -9365,13 +9489,46 @@ check_service_principal_management_contract (void)
     rc = 1994;
     goto cleanup;
   }
+  g_autofree gchar *first_revoke_response = g_strdup (body);
+  if (!policy_count_rows (handle,
+          "SELECT count(*) FROM service_domain_requests;", &requests_before)
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked';", &revoke_events_before)
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_events "
+          "WHERE action='service.credential.revoke';", &revoke_audits_before)
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+          &revoke_outbox_before)) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 2176;
+    goto cleanup;
+  }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "DELETE", base_url,
           credential_path, tenant_query, access_token,
           "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
-          &status, &body) != 0 || status != 409 || body == NULL
-      || strstr (body, "service_credential_conflict") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+          &status, &body) != 0 || status != 200 || body == NULL
+      || g_strcmp0 (body, first_revoke_response) != 0
+      || strstr (body, "credential_secret") != NULL
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_domain_requests;", &requests_after)
+      || requests_after != requests_before
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked';", &revoke_events_after)
+      || revoke_events_after != revoke_events_before
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_events "
+          "WHERE action='service.credential.revoke';", &revoke_audits_after)
+      || revoke_audits_after != revoke_audits_before
+      || !policy_count_rows (handle,
+          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+          &revoke_outbox_after)
+      || revoke_outbox_after != revoke_outbox_before) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1995;
     goto cleanup;
@@ -9414,6 +9571,40 @@ check_service_principal_management_contract (void)
     rc = 2162;
     goto cleanup;
   }
+  static const gchar *invalid_principal_disable_bodies[] = {
+    NULL,
+    "",
+    "{}",
+    "{\"version\":\"1\",\"request_id\":"
+        "\"000000000000000000000000224\",\"extra\":true}",
+    "{\"version\":\"1\",\"request_id\":"
+        "\"000000000000000000000000224\",\"request_id\":"
+        "\"000000000000000000000000224\"}",
+    "{\"version\":1,\"request_id\":" "\"000000000000000000000000224\"}",
+    "{\"version\":\"2\",\"request_id\":" "\"000000000000000000000000224\"}",
+    "{\"version\":\"1\",\"request_id\":" "\"abcdefghijklmnopqrstuvwxyz0\"}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_principal_disable_bodies); i++) {
+    g_clear_pointer (&body, g_free);
+    if (send_raw_service_principal_bearer (session, "POST", base_url,
+            "/service-principals/svc:tenant-a:worker/disable", query,
+            access_token, invalid_principal_disable_bodies[i], &status,
+            &body) != 0 || status != 400 || body == NULL
+        || strstr (body, "invalid_service_principal_request") == NULL) {
+      rc = 2164;
+      goto cleanup;
+    }
+  }
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *oversized_principal_disable_body = g_strnfill (1025, 'x');
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          "/service-principals/svc:tenant-a:worker/disable", query,
+          access_token, oversized_principal_disable_body, &status,
+          &body) != 0 || status != 400 || body == NULL
+      || strstr (body, "invalid_service_principal_request") == NULL) {
+    rc = 2166;
+    goto cleanup;
+  }
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
           ACTUAL_ROUTE_DISABLE_PRINCIPAL, access_token,
@@ -9421,11 +9612,25 @@ check_service_principal_management_contract (void)
     rc = 2163;
     goto cleanup;
   }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (session, "POST", base_url,
+          "/service-principals/svc:tenant-route:worker/disable", query,
+          access_token,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000224\"}", &status, &body) != 0
+      || status != 409 || body == NULL
+      || strstr (body, "service_principal_conflict") == NULL) {
+    rc = 2165;
+    goto cleanup;
+  }
 #else
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
-          access_token, NULL, &status, &body) != 0 || status != 200
+          access_token,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000225\"}", &status, &body) != 0
+      || status != 200
       || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -10408,7 +10613,9 @@ check_service_management_loopback_forwarded_matrix (void)
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
           env.base_url, "/service-principals/svc:forwarded:matrix/disable",
-          env.query, env.access_token, NULL, &status, &body) != 0
+          env.query, env.access_token,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000226\"}", &status, &body) != 0
       || status != 200 || strstr (body, "\"state\":\"disabled\"") == NULL
       || service_management_body_leaks_secret (body, issue_secret,
           rotate_secret)) {

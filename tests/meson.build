@@ -1494,6 +1494,11 @@ test('service-auth-registry-capability-boundary', python3,
     'test-service-auth-registry-capability-boundary.py'],
 )
 
+test('retirement-replay-boundary', python3,
+  args : [meson.current_source_dir() /
+    'test-retirement-replay-boundary.py'],
+)
+
 test_service_auth_coordination = executable('test-service-auth-coordination',
   'test-service-auth-coordination.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
