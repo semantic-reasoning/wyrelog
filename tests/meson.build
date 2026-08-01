@@ -212,6 +212,7 @@ if build_client
     wyrelog_dep,
     wyrelog_client_dep,
     libsoup_dep,
+    sqlite_dep,
     sodium_dep,
     service_session_private_dep,
   ]
