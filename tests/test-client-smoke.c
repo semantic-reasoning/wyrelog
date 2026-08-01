@@ -793,6 +793,12 @@ main (void)
       || g_strcmp0 (http.last_path, "/service-principals") != 0
       || !client_last_response_is (local_client, 200, NULL))
     return 233;
+  guint principal_success_request_count = http.request_count;
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          NULL) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL)
+      || http.request_count != principal_success_request_count)
+    return 553;
   http.body = "{\"ok\":true}";
   if (wyl_client_service_principal_disable (local_client,
           "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
@@ -837,6 +843,13 @@ main (void)
           "/service-principals/svc:alice:worker/credentials") != 0
       || !client_last_response_is (local_client, 200, NULL))
     return 237;
+  guint credential_success_request_count = http.request_count;
+  if (wyl_client_service_credential_get (local_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
+          NULL) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL)
+      || http.request_count != credential_success_request_count)
+    return 554;
   http.body = mock_credential_json;
   if (wyl_client_service_credential_revoke (local_client,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
@@ -1004,20 +1017,6 @@ main (void)
     return 544;
   http.status = 0;
 
-  /* Shape alone is insufficient: this is 27 alphanumeric characters but is
-   * outside the canonical KSUID range. Reconcile must reject it locally and
-   * clear the preceding remote failure metadata. */
-  g_free (http.last_path);
-  http.last_path = g_strdup ("__unset__");
-  reconcile_request.request_id = "abcdefghijklmnopqrstuvwxyz0";
-  if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
-    return 209;
-  if (g_strcmp0 (http.last_path, "__unset__") != 0
-      || !client_last_response_is (local_client, 0, NULL))
-    return 208;
-  reconcile_request.request_id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
-
   const gchar *reconcile_issue_body =
       "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
@@ -1049,6 +1048,19 @@ main (void)
     return 212;
   wyl_client_service_credential_operation_reconcile_result_clear
       (&reconcile_result);
+
+  /* Shape alone is insufficient: this is 27 alphanumeric characters but is
+   * outside the canonical KSUID range. After the remote failure and success,
+   * reconcile must reject it locally, clear metadata, and avoid HTTP. */
+  guint reconcile_success_request_count = http.request_count;
+  reconcile_request.request_id = "abcdefghijklmnopqrstuvwxyz0";
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
+    return 209;
+  if (http.request_count != reconcile_success_request_count
+      || !client_last_response_is (local_client, 0, NULL))
+    return 208;
+  reconcile_request.request_id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
 
   reconcile_request.operation =
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE;
@@ -1237,6 +1249,17 @@ main (void)
           "service_credential_operation_busy"))
     return 545;
   http.status = 0;
+  http.body = "{\"version\":1,\"operations\":[]}";
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, &status_list) != WYRELOG_E_OK
+      || !client_last_response_is (local_client, 200, NULL))
+    return 555;
+  guint status_success_request_count = http.request_count;
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, NULL) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL)
+      || http.request_count != status_success_request_count)
+    return 556;
 
   g_auto (WylClientServiceCredentialOperationStatusEntry) recovered = { 0 };
   if (wyl_client_service_credential_operation_recover (NULL,
@@ -1329,6 +1352,26 @@ main (void)
           "service_credential_operation_recover_not_found"))
     return 271;
   http.status = 0;
+  http.body =
+      "{\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"rotate\",\"state\":\"server_committed\","
+      "\"destination\":\"rotate.json\","
+      "\"successor_credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"expected_generation\":1,\"successor_generation\":2,"
+      "\"created_at_us\":10,\"updated_at_us\":20,\"expires_at_us\":30,"
+      "\"recovery\":\"server_committed\"}";
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+          &recovered) != WYRELOG_E_OK
+      || !client_last_response_is (local_client, 200, NULL))
+    return 557;
+  guint recover_success_request_count = http.request_count;
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+          NULL) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL)
+      || http.request_count != recover_success_request_count)
+    return 558;
 
   http.body = reconcile_issue_response;
   if (wyl_client_set_bearer_credentials (NULL, "access-ctl",
