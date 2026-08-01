@@ -59,15 +59,15 @@ reconcile_capture_from_handle (HANDLE handle,
   if (checksum == NULL)
     return WYRELOG_E_NOMEM;
 
+  /* The handle is opened for synchronous I/O (CRT fd or
+   * FILE_SYNCHRONOUS_IO_NONALERT); read sequentially from the file pointer
+   * with a NULL OVERLAPPED.  An explicit OVERLAPPED offset on a synchronous
+   * handle is unsupported and the trailing at-EOF probe never returns. */
   guint8 buffer[WYL_FACT_RECONCILE_MOVE_COPY_CHUNK];
   guint64 total = 0;
-  guint64 offset = 0;
   for (;;) {
-    OVERLAPPED overlapped = { 0 };
-    overlapped.Offset = (DWORD) (offset & 0xffffffffu);
-    overlapped.OffsetHigh = (DWORD) (offset >> 32);
     DWORD got = 0;
-    if (!ReadFile (handle, buffer, (DWORD) sizeof buffer, &got, &overlapped)) {
+    if (!ReadFile (handle, buffer, (DWORD) sizeof buffer, &got, NULL)) {
       if (GetLastError () == ERROR_HANDLE_EOF)
         break;
       return WYRELOG_E_IO;
@@ -76,7 +76,6 @@ reconcile_capture_from_handle (HANDLE handle,
       break;
     g_checksum_update (checksum, buffer, (gssize) got);
     total += (guint64) got;
-    offset += (guint64) got;
     if (total > expected)
       return WYRELOG_E_POLICY;
   }
@@ -91,7 +90,12 @@ reconcile_capture_from_handle (HANDLE handle,
   out_evidence->version = WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1;
   out_evidence->identity_kind =
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS;
-  out_evidence->windows_volume_serial = id_info.VolumeSerialNumber;
+  /* The FILE_ID_INFO 64-bit VolumeSerialNumber can exceed G_MAXINT64 (it does
+   * on NTFS CI volumes), which the evidence contract rejects because the value
+   * is stored as a signed INTEGER.  Use the 32-bit BY_HANDLE_FILE_INFORMATION
+   * volume serial, which always fits and, paired with the 128-bit file id,
+   * still identifies the artifact uniquely on its volume. */
+  out_evidence->windows_volume_serial = basic.dwVolumeSerialNumber;
   memcpy (out_evidence->windows_file_id, id_info.FileId.Identifier,
       sizeof out_evidence->windows_file_id);
   out_evidence->size_bytes = expected;
@@ -100,38 +104,32 @@ reconcile_capture_from_handle (HANDLE handle,
   return WYRELOG_E_OK;
 }
 
-/* Copy exactly |size| bytes from |src| into |dst| at explicit offsets.  Any
- * read or write fault, or a source shorter than the promised size, is an I/O
- * failure: the copied artifact would not reproduce the verified digest. */
+/* Copy exactly |size| bytes from |src| into |dst|.  Both handles are opened
+ * for synchronous I/O (FILE_SYNCHRONOUS_IO_NONALERT / CRT fd) with their file
+ * pointers at 0, so the copy is sequential with a NULL OVERLAPPED; an explicit
+ * OVERLAPPED offset on a synchronous handle is unsupported.  Any read or write
+ * fault, or a source shorter than the promised size, is an I/O failure: the
+ * copied artifact would not reproduce the verified digest. */
 static wyrelog_error_t
 reconcile_move_copy_exact_windows (HANDLE src, HANDLE dst, guint64 size)
 {
   guint8 buffer[WYL_FACT_RECONCILE_MOVE_COPY_CHUNK];
   guint64 remaining = size;
-  guint64 offset = 0;
   while (remaining > 0) {
     DWORD want = remaining < sizeof buffer ? (DWORD) remaining
         : (DWORD) sizeof buffer;
-    OVERLAPPED read_ov = { 0 };
-    read_ov.Offset = (DWORD) (offset & 0xffffffffu);
-    read_ov.OffsetHigh = (DWORD) (offset >> 32);
     DWORD got = 0;
-    if (!ReadFile (src, buffer, want, &got, &read_ov) || got == 0)
+    if (!ReadFile (src, buffer, want, &got, NULL) || got == 0)
       return WYRELOG_E_IO;
     DWORD written = 0;
     while (written < got) {
-      guint64 at = offset + written;
-      OVERLAPPED write_ov = { 0 };
-      write_ov.Offset = (DWORD) (at & 0xffffffffu);
-      write_ov.OffsetHigh = (DWORD) (at >> 32);
       DWORD put = 0;
-      if (!WriteFile (dst, buffer + written, got - written, &put, &write_ov)
+      if (!WriteFile (dst, buffer + written, got - written, &put, NULL)
           || put == 0)
         return WYRELOG_E_IO;
       written += put;
     }
     remaining -= (guint64) got;
-    offset += (guint64) got;
   }
   return WYRELOG_E_OK;
 }
