@@ -22,6 +22,28 @@ typedef struct
 
 typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
 
+typedef enum
+{
+  WYL_SERVICE_RETIREMENT_FRESH_TRANSITION = 1,
+  WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL = 2,
+  WYL_SERVICE_RETIREMENT_EXACT_REPLAY = 3,
+  WYL_SERVICE_RETIREMENT_KEY_CONFLICT = 4,
+  WYL_SERVICE_RETIREMENT_SUPERSEDED = 5,
+} WylServiceRetirementDisposition;
+
+typedef struct
+{
+  WylServiceRetirementDisposition disposition;
+  gboolean transitioned_now;
+  gboolean replayed;
+  guint64 recorded_authority_generation;
+  guint64 recorded_tenant_lifecycle_generation;
+  guint64 recorded_tenant_sealed_generation;
+  guint64 current_authority_generation;
+  guint64 current_tenant_lifecycle_generation;
+  guint64 current_tenant_sealed_generation;
+} WylServiceRetirementOutcome;
+
 typedef wyrelog_error_t (*wyl_service_credential_mutation_authorize_fn)
   (gpointer data, const gchar * actor_subject_id);
 
@@ -427,6 +449,12 @@ wyrelog_error_t wyl_service_principal_disable_with_runtime
     const gchar * actor_subject_id, const gchar * request_id,
     const wyl_service_principal_disable_runtime_t * runtime,
     wyl_service_principal_t * out);
+wyrelog_error_t wyl_service_principal_disable_keyed_with_runtime
+    (WylHandle * handle, const gchar * subject_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version,
+    const wyl_service_principal_disable_runtime_t * runtime,
+    WylServiceRetirementOutcome * retirement, wyl_service_principal_t * out);
 wyrelog_error_t wyl_tenant_set_sealed_with_runtime
     (WylHandle * handle, const gchar * tenant_id, gboolean sealed,
     const wyl_tenant_seal_runtime_t * runtime, gboolean * out_changed);
@@ -497,6 +525,12 @@ wyrelog_error_t wyl_service_credential_revoke_with_runtime
     const gchar * actor_subject_id, const gchar * request_id,
     const wyl_service_credential_revoke_runtime_t * runtime,
     wyl_service_credential_t * out);
+wyrelog_error_t wyl_service_credential_revoke_keyed_with_runtime
+    (WylHandle * handle, const gchar * credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version,
+    const wyl_service_credential_revoke_runtime_t * runtime,
+    WylServiceRetirementOutcome * retirement, wyl_service_credential_t * out);
 void wyl_service_credential_handoff_disposition_result_clear
     (wyl_service_credential_handoff_disposition_result_t * result);
 G_GNUC_INTERNAL void wyl_service_credential_handoff_cancellation_result_clear
