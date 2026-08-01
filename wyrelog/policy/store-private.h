@@ -839,6 +839,7 @@ typedef struct
   WylPolicyServiceRetirementDisposition disposition;
   WylPolicyServiceRetirementOperation operation;
   gboolean transitioned_now;
+  gboolean recorded_transitioned;
   gboolean replayed;
   guint32 receipt_version;
   guint64 recorded_authority_generation;

@@ -1374,6 +1374,7 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_TRANSITION);
   g_assert_true (outcome.transitioned_now);
+  g_assert_true (outcome.recorded_transitioned);
   g_assert_false (outcome.replayed);
   g_assert_cmpuint (outcome.recorded_authority_generation, ==, 2);
   g_assert_cmpuint (outcome.current_authority_generation, ==, 2);
@@ -1399,6 +1400,7 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
   g_assert_false (outcome.transitioned_now);
+  g_assert_true (outcome.recorded_transitioned);
   g_assert_true (outcome.replayed);
   g_assert_cmpuint (probe.authorization_calls, ==, 2);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
@@ -1441,6 +1443,7 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL);
   g_assert_false (outcome.transitioned_now);
+  g_assert_false (outcome.recorded_transitioned);
   g_assert_false (outcome.replayed);
   g_assert_cmpuint (probe.authorization_calls, ==, 6);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
@@ -1541,6 +1544,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_TRANSITION);
   g_assert_true (outcome.transitioned_now);
+  g_assert_true (outcome.recorded_transitioned);
   g_assert_cmpuint (outcome.recorded_tenant_lifecycle_generation, ==, 0);
   g_assert_cmpuint (outcome.recorded_tenant_sealed_generation, ==, 1);
   g_assert_cmpuint (outcome.recorded_authority_generation, ==, 1);
@@ -1564,6 +1568,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
   g_assert_true (outcome.replayed);
   g_assert_false (outcome.transitioned_now);
+  g_assert_true (outcome.recorded_transitioned);
   g_assert_cmpuint (probe.authorization_calls, ==, 2);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   g_assert_cmpint (scalar_int64 (db,
