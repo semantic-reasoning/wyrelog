@@ -4,7 +4,7 @@
 #include "auth/service-credential-private.h"
 #include "policy/store-private.h"
 #include "wyl-id-private.h"
-#include <chronoid/ksuid.h>
+#include "wyl-request-id-private.h"
 #include <sodium.h>
 #include <string.h>
 
@@ -22,15 +22,7 @@ gboolean
 wyl_service_credential_operation_coordinator_request_id_is_valid (const gchar
     *s)
 {
-  if (!text_ok (s, TRUE) || strlen (s) != 27)
-    return FALSE;
-  chronoid_ksuid_t parsed;
-  char canonical[28];
-  if (chronoid_ksuid_parse (&parsed, s, 27) != CHRONOID_KSUID_OK)
-    return FALSE;
-  chronoid_ksuid_format (&parsed, canonical);
-  canonical[27] = '\0';
-  return memcmp (canonical, s, 27) == 0;
+  return text_ok (s, TRUE) && wyl_request_id_is_canonical (s);
 }
 
 static gboolean

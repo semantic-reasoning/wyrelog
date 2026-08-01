@@ -6968,7 +6968,7 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1929;
 
   g_autofree gchar *noncanonical_request_body = g_strdup
-      ("{\"version\":1,\"request_id\":\"not-a-canonical-id\","
+      ("{\"version\":1,\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
       "\"operation\":\"issue\",\"target\":{\"subject\":"
       "\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}");
   g_clear_pointer (&body, g_free);
@@ -8459,12 +8459,13 @@ check_service_credential_operation_status_recover (SoupServer *server,
           recover_unknown_body, &status, &body) != 0 || status != 404)
     return 2120;
 
-  /* A malformed request id is a 400. */
+  /* A 27-character alphanumeric but noncanonical request id is a 400. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/service-credential-operations/recover", tenant_a_query,
-          "{\"version\":\"1\",\"request_id\":\"not-canonical\"}", &status,
-          &body) != 0 || status != 400)
+          "{\"version\":\"1\",\"request_id\":"
+          "\"abcdefghijklmnopqrstuvwxyz0\"}", &status, &body) != 0
+      || status != 400)
     return 2121;
 
   /* Recovering another tenant's operation must not reveal it, AND must not

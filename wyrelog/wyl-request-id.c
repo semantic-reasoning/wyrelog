@@ -7,6 +7,22 @@
 
 G_STATIC_ASSERT (WYL_REQUEST_ID_STRING_LEN == CHRONOID_KSUID_STRING_LEN);
 
+gboolean
+wyl_request_id_is_canonical (const gchar *request_id)
+{
+  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+
+  chronoid_ksuid_t parsed;
+  gchar canonical[WYL_REQUEST_ID_STRING_BUF];
+  if (chronoid_ksuid_parse (&parsed, request_id, WYL_REQUEST_ID_STRING_LEN)
+      != CHRONOID_KSUID_OK)
+    return FALSE;
+  chronoid_ksuid_format (&parsed, canonical);
+  canonical[WYL_REQUEST_ID_STRING_LEN] = '\0';
+  return memcmp (canonical, request_id, WYL_REQUEST_ID_STRING_LEN) == 0;
+}
+
 wyrelog_error_t
 wyl_request_id_new (gchar *buf, gsize buf_len)
 {

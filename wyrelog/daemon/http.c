@@ -8308,13 +8308,7 @@ static gboolean
     service_credential_operation_reconcile_request_id_is_canonical
     (const gchar * value)
 {
-  if (value == NULL || strlen (value) != WYL_REQUEST_ID_STRING_LEN)
-    return FALSE;
-  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++) {
-    if (!g_ascii_isalnum (value[i]))
-      return FALSE;
-  }
-  return TRUE;
+  return wyl_request_id_is_canonical (value);
 }
 
 static gboolean

@@ -811,12 +811,7 @@ client_service_credential_id_is_valid (const gchar *credential_id)
 static gboolean
 client_service_request_id_is_valid (const gchar *request_id)
 {
-  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
-    return FALSE;
-  for (const guchar * p = (const guchar *)request_id; *p != '\0'; p++)
-    if (!g_ascii_isalnum (*p))
-      return FALSE;
-  return TRUE;
+  return wyl_request_id_is_canonical (request_id);
 }
 
 static gboolean
@@ -2040,23 +2035,10 @@ json_parse_uint64 (JsonCursor *cursor, guint64 *out_value)
 }
 
 static gboolean
-client_reconcile_request_id_is_canonical (const gchar *request_id)
-{
-  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
-    return FALSE;
-  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++) {
-    if (!g_ascii_isalnum (request_id[i]))
-      return FALSE;
-  }
-  return TRUE;
-}
-
-static gboolean
     client_reconcile_request_is_valid
     (const WylClientServiceCredentialOperationReconcileRequest * request)
 {
-  if (request == NULL || !client_reconcile_request_id_is_canonical
-      (request->request_id))
+  if (request == NULL || !wyl_request_id_is_canonical (request->request_id))
     return FALSE;
   switch (request->operation) {
     case WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE:
@@ -2117,7 +2099,7 @@ static gboolean
       have_version = TRUE;
     } else if (g_strcmp0 (key, "request_id") == 0) {
       if (have_request_id || !json_parse_string (&cursor, &request_id) ||
-          !client_reconcile_request_id_is_canonical (request_id) ||
+          !wyl_request_id_is_canonical (request_id) ||
           g_strcmp0 (request_id, request->request_id) != 0)
         goto fail;
       have_request_id = TRUE;
@@ -2663,7 +2645,7 @@ wyl_client_service_credential_operation_recover (WylClient *client,
   if (out_entry != NULL)
     wyl_client_service_credential_operation_status_entry_clear (out_entry);
   if (client == NULL || !WYL_IS_CLIENT (client) || out_entry == NULL ||
-      !client_reconcile_request_id_is_canonical (request_id) ||
+      !wyl_request_id_is_canonical (request_id) ||
       guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
       guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
     return WYRELOG_E_INVALID;

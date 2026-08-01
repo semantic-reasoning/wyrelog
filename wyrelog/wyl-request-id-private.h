@@ -11,5 +11,6 @@ G_BEGIN_DECLS;
 #define WYL_REQUEST_ID_STRING_BUF 28
 
 wyrelog_error_t wyl_request_id_new (gchar * buf, gsize buf_len);
+gboolean wyl_request_id_is_canonical (const gchar * request_id);
 
 G_END_DECLS;
