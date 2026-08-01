@@ -395,8 +395,8 @@ test_rejections_replay_and_cvk_only (void)
           "tenant-a", FALSE), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable (handle,
-          "svc:reject:worker", "admin", "disable-principal", &principal), ==,
-      WYRELOG_E_OK);
+          "svc:reject:worker", "admin", "000000000000000000000000201",
+          &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:reject:worker",
           "tenant-a", "admin", "disabled-principal", 0, &result), ==,
@@ -407,17 +407,18 @@ test_rejections_replay_and_cvk_only (void)
   WylHandle *replay = replay_fixture.handle;
   prepare_authority (replay, "svc:replay:worker");
   g_assert_cmpint (wyl_service_credential_issue (replay, "svc:replay:worker",
-          "tenant-a", "admin", "issue-replay", 0, &result), ==, WYRELOG_E_OK);
+          "tenant-a", "admin", "000000000000000000000000202", 0,
+          &result), ==, WYRELOG_E_OK);
   g_assert_nonnull (result.secret);
   /* Reuse a populated result directly; replay failure must wipe its secret
    * and clear every metadata field before returning. */
   g_assert_cmpint (wyl_service_credential_issue (replay, "svc:replay:worker",
-          "tenant-a", "admin", "issue-replay", 0, &result), ==,
-      WYRELOG_E_POLICY);
+          "tenant-a", "admin", "000000000000000000000000202", 0,
+          &result), ==, WYRELOG_E_POLICY);
   g_assert_null (result.secret);
   g_assert_cmpint (wyl_service_principal_disable (replay,
-          "svc:replay:worker", "admin", "issue-replay", &principal), ==,
-      WYRELOG_E_POLICY);
+          "svc:replay:worker", "admin", "000000000000000000000000202",
+          &principal), ==, WYRELOG_E_CONFLICT);
   g_assert_null (result.credential.credential_id);
 }
 
@@ -1012,6 +1013,7 @@ typedef struct
   gint64 escrows;
   gint64 fences;
   gint64 requests;
+  gint64 retirement_receipts;
   gint64 audits;
   gint64 audit_intentions;
   gint64 handoff_dispositions;
@@ -1033,7 +1035,11 @@ mutation_effects (WylHandle *handle)
         scalar (db,
         "SELECT count(*) FROM service_credential_operation_fences;"),.requests
         =
-        scalar (db, "SELECT count(*) FROM service_domain_requests;"),.audits =
+        scalar (db,
+        "SELECT count(*) FROM service_domain_requests;"),.retirement_receipts
+        =
+        scalar (db,
+        "SELECT count(*) FROM service_retirement_receipts;"),.audits =
         scalar (db, "SELECT count(*) FROM audit_events;"),.audit_intentions =
         scalar (db,
         "SELECT count(*) FROM audit_intentions;"),.handoff_dispositions =
@@ -1056,6 +1062,8 @@ assert_mutation_effects_equal (MutationEffects actual, MutationEffects expected)
   g_assert_cmpint (actual.escrows, ==, expected.escrows);
   g_assert_cmpint (actual.fences, ==, expected.fences);
   g_assert_cmpint (actual.requests, ==, expected.requests);
+  g_assert_cmpint (actual.retirement_receipts, ==,
+      expected.retirement_receipts);
   g_assert_cmpint (actual.audits, ==, expected.audits);
   g_assert_cmpint (actual.audit_intentions, ==, expected.audit_intentions);
   g_assert_cmpint (actual.handoff_dispositions, ==,
@@ -1075,6 +1083,8 @@ assert_disposition_only_delta (MutationEffects actual, MutationEffects expected)
   g_assert_cmpint (actual.escrows, ==, expected.escrows);
   g_assert_cmpint (actual.fences, ==, expected.fences);
   g_assert_cmpint (actual.requests, ==, expected.requests);
+  g_assert_cmpint (actual.retirement_receipts, ==,
+      expected.retirement_receipts);
   g_assert_cmpint (actual.audits, ==, expected.audits + 1);
   g_assert_cmpint (actual.audit_intentions, ==, expected.audit_intentions + 1);
   g_assert_cmpint (actual.handoff_dispositions, ==,
@@ -1191,7 +1201,8 @@ test_mutation_authorization_denial_inside_write_lease (void)
     .authorization = &authorization,
   };
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          "svc:authorize:worker", "admin", "authorize-disable",
+          "svc:authorize:worker", "admin",
+          "000000000000000000000000203",
           &disable_runtime, &denied_principal), ==, WYRELOG_E_POLICY);
   g_assert_null (denied_principal.subject_id);
   g_assert_cmpuint (probe.calls, ==, 1);
@@ -1237,7 +1248,8 @@ test_mutation_authorization_denial_inside_write_lease (void)
   };
   wyl_service_credential_t denied_revoke = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke_with_runtime (handle,
-          seed.credential.credential_id, "admin", "authorize-revoke",
+          seed.credential.credential_id, "admin",
+          "000000000000000000000000204",
           &revoke_runtime, &denied_revoke), ==, WYRELOG_E_POLICY);
   g_assert_null (denied_revoke.credential_id);
   g_assert_cmpuint (probe.calls, ==, 1);
@@ -1823,8 +1835,8 @@ test_verify_fail_closed_read_only (void)
   g_assert_false (authenticated);
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          first.credential.credential_id, "admin", "verify-revoke",
-          &revoked), ==, WYRELOG_E_OK);
+          first.credential.credential_id, "admin",
+          "000000000000000000000000205", &revoked), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
           first.credential.credential_id, first_secret, first_len,
           &authenticated), ==, WYRELOG_E_AUTH);
@@ -1840,8 +1852,8 @@ test_verify_fail_closed_read_only (void)
           "tenant-b", FALSE), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable (handle,
-          "svc:verify:worker", "admin", "verify-disable", &principal), ==,
-      WYRELOG_E_OK);
+          "svc:verify:worker", "admin", "000000000000000000000000206",
+          &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
           second.credential.credential_id, second_secret, second_len,
@@ -1861,15 +1873,16 @@ test_revoke_lifecycle_and_remediation (void)
   prepare_authority (handle, "svc:revoke:worker");
   wyl_service_credential_issue_result_t issued = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:revoke:worker",
-          "tenant-a", "admin", "revoke-issue", 0, &issued), ==, WYRELOG_E_OK);
+          "tenant-a", "admin", "000000000000000000000000207", 0,
+          &issued), ==, WYRELOG_E_OK);
   g_autofree gchar *id = g_strdup (issued.credential.credential_id);
   wyl_service_credential_issue_result_clear (&issued);
   wyl_service_credential_t credential = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
-          "revoke-issue", &credential), ==, WYRELOG_E_POLICY);
+          "000000000000000000000000207", &credential), ==, WYRELOG_E_CONFLICT);
   g_assert_null (credential.credential_id);
   g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
-          "revoke-active", &credential), ==, WYRELOG_E_OK);
+          "000000000000000000000000208", &credential), ==, WYRELOG_E_OK);
   g_assert_cmpstr (credential.state, ==, "revoked");
   g_assert_cmpuint (credential.generation, ==, 2);
   g_assert_cmpstr (credential.revoked_by, ==, "admin");
@@ -1893,24 +1906,26 @@ test_revoke_lifecycle_and_remediation (void)
           &fixture.handle), ==, WYRELOG_E_OK);
   handle = fixture.handle;
   g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
-          "revoke-active", &credential), ==, WYRELOG_E_POLICY);
-  g_assert_null (credential.credential_id);
+          "000000000000000000000000208", &credential), ==, WYRELOG_E_OK);
+  g_assert_nonnull (credential.credential_id);
+  wyl_service_credential_clear (&credential);
 
   g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
-          "revoke-noop", &credential), ==, WYRELOG_E_OK);
+          "000000000000000000000000209", &credential), ==, WYRELOG_E_OK);
   g_assert_cmpuint (credential.generation, ==, 2);
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM service_credential_events "
           "WHERE event='revoked';"), ==, 1);
   g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
-          "revoke-noop", &credential), ==, WYRELOG_E_POLICY);
-  g_assert_null (credential.credential_id);
+          "000000000000000000000000209", &credential), ==, WYRELOG_E_OK);
+  g_assert_nonnull (credential.credential_id);
+  wyl_service_credential_clear (&credential);
   g_assert_cmpint (wyl_service_credential_revoke (handle, SECOND_ID, "admin",
-          "revoke-unknown", &credential), ==, WYRELOG_E_NOT_FOUND);
+          "00000000000000000000000020A", &credential), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (credential.credential_id);
   g_assert_cmpint (scalar (db_of (handle),
-          "SELECT count(*) FROM service_domain_requests "
-          "WHERE request_id='revoke-unknown';"), ==, 0);
+          "SELECT count(*) FROM service_retirement_receipts "
+          "WHERE request_id='00000000000000000000000020A';"), ==, 0);
 
   wyl_service_credential_issue_result_t hooked = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:revoke:worker",
@@ -1924,7 +1939,8 @@ test_revoke_lifecycle_and_remediation (void)
     .registry = registry.registry,
   };
   g_assert_cmpint (wyl_service_credential_revoke_with_runtime (handle,
-          hooked.credential.credential_id, "admin", "revoke-hook",
+          hooked.credential.credential_id, "admin",
+          "00000000000000000000000020B",
           &revoke_runtime, &credential), ==, WYRELOG_E_OK);
   g_assert_true (credential_registry_fixture_is (&registry,
           WYL_SERVICE_AUTH_REVOKED));
@@ -1939,12 +1955,12 @@ test_revoke_lifecycle_and_remediation (void)
           "tenant-b", TRUE), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable (handle,
-          "svc:revoke:worker", "admin", "remediation-disable", &principal),
-      ==, WYRELOG_E_OK);
+          "svc:revoke:worker", "admin", "00000000000000000000000020C",
+          &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          remediation.credential.credential_id, "admin", "remediation-revoke",
-          &credential), ==, WYRELOG_E_OK);
+          remediation.credential.credential_id, "admin",
+          "00000000000000000000000020D", &credential), ==, WYRELOG_E_OK);
   g_assert_cmpstr (credential.state, ==, "revoked");
   wyl_service_credential_clear (&credential);
   wyl_service_credential_issue_result_clear (&remediation);
@@ -1963,7 +1979,8 @@ revoke_thread (gpointer data)
 {
   RevokeThread *thread = data;
   thread->rc = wyl_service_credential_revoke (thread->handle,
-      thread->credential_id, "admin", "concurrent-revoke", &thread->out);
+      thread->credential_id, "admin", "00000000000000000000000020E",
+      &thread->out);
   return NULL;
 }
 
@@ -1984,8 +2001,8 @@ test_revoke_concurrency_overflow_faults (void)
   GThread *tb = g_thread_new ("revoke-b", revoke_thread, &b);
   g_thread_join (ta);
   g_thread_join (tb);
-  g_assert_true ((a.rc == WYRELOG_E_OK && b.rc == WYRELOG_E_POLICY)
-      || (a.rc == WYRELOG_E_POLICY && b.rc == WYRELOG_E_OK));
+  g_assert_cmpint (a.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (b.rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM service_credential_events "
           "WHERE event='revoked';"), ==, 1);
@@ -2008,16 +2025,17 @@ test_revoke_concurrency_overflow_faults (void)
   sqlite3_finalize (stmt);
   wyl_service_credential_t out = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          overflow.credential.credential_id, "admin", "overflow-revoke",
-          &out), ==, WYRELOG_E_POLICY);
+          overflow.credential.credential_id, "admin",
+          "00000000000000000000000020F", &out), ==, WYRELOG_E_POLICY);
   g_assert_null (out.credential_id);
   g_assert_cmpint (scalar (db_of (handle),
-          "SELECT count(*) FROM service_domain_requests "
-          "WHERE request_id='overflow-revoke';"), ==, 0);
+          "SELECT count(*) FROM service_retirement_receipts "
+          "WHERE request_id='00000000000000000000000020F';"), ==, 0);
   wyl_service_credential_issue_result_clear (&overflow);
 
   static const gchar *const targets[] = {
     "service_credential_events", "audit_events", "audit_intentions",
+    "service_retirement_receipts",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (targets); i++) {
     g_auto (Fixture) fault_fixture = { 0 };
@@ -2033,16 +2051,16 @@ test_revoke_concurrency_overflow_faults (void)
         "BEGIN SELECT RAISE(ABORT,'fault'); END;", targets[i]);
     exec_ok (db_of (fault), sql);
     g_assert_cmpint (wyl_service_credential_revoke (fault,
-            target.credential.credential_id, "admin", "fault-revoke", &out),
-        !=, WYRELOG_E_OK);
+            target.credential.credential_id, "admin",
+            "00000000000000000000000020G", &out), !=, WYRELOG_E_OK);
     g_assert_null (out.credential_id);
     exec_ok (db_of (fault), "DROP TRIGGER revoke_fault;");
     g_assert_cmpint (scalar (db_of (fault),
             "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
         ==, 0);
     g_assert_cmpint (scalar (db_of (fault),
-            "SELECT count(*) FROM service_domain_requests "
-            "WHERE request_id='fault-revoke';"), ==, 0);
+            "SELECT count(*) FROM service_retirement_receipts "
+            "WHERE request_id='00000000000000000000000020G';"), ==, 0);
     wyl_service_credential_issue_result_clear (&target);
   }
 
@@ -2056,15 +2074,15 @@ test_revoke_concurrency_overflow_faults (void)
           0, &commit_target), ==, WYRELOG_E_OK);
   wyl_policy_store_service_lifecycle_fail_commit_once (store_of (commit));
   g_assert_cmpint (wyl_service_credential_revoke (commit,
-          commit_target.credential.credential_id, "admin", "commit-revoke",
-          &out), ==, WYRELOG_E_IO);
+          commit_target.credential.credential_id, "admin",
+          "00000000000000000000000020H", &out), ==, WYRELOG_E_IO);
   g_assert_null (out.credential_id);
   g_assert_cmpint (scalar (db_of (commit),
           "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
       ==, 0);
   g_assert_cmpint (scalar (db_of (commit),
-          "SELECT count(*) FROM service_domain_requests "
-          "WHERE request_id='commit-revoke';"), ==, 0);
+          "SELECT count(*) FROM service_retirement_receipts "
+          "WHERE request_id='00000000000000000000000020H';"), ==, 0);
   wyl_service_credential_issue_result_clear (&commit_target);
 
   g_auto (Fixture) validator_fixture = { 0 };
@@ -2080,15 +2098,15 @@ test_revoke_concurrency_overflow_faults (void)
       "service_domain_requests BEGIN SELECT 1; END;");
   g_assert_cmpint (wyl_service_credential_revoke (validator,
           validator_target.credential.credential_id, "admin",
-          "validator-revoke", &out), ==, WYRELOG_E_POLICY);
+          "00000000000000000000000020I", &out), ==, WYRELOG_E_POLICY);
   g_assert_null (out.credential_id);
   exec_ok (db_of (validator), "DROP TRIGGER unknown_revoke_trigger;");
   g_assert_cmpint (scalar (db_of (validator),
           "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
       ==, 0);
   g_assert_cmpint (scalar (db_of (validator),
-          "SELECT count(*) FROM service_domain_requests "
-          "WHERE request_id='validator-revoke';"), ==, 0);
+          "SELECT count(*) FROM service_retirement_receipts "
+          "WHERE request_id='00000000000000000000000020I';"), ==, 0);
   wyl_service_credential_issue_result_clear (&validator_target);
 }
 
@@ -2197,10 +2215,10 @@ test_rotate_happy_linkage_no_grace (void)
   g_assert_null (rotated.secret);
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle, new_id, "admin",
-          "rotate-new-revoke", &revoked), ==, WYRELOG_E_OK);
+          "00000000000000000000000020J", &revoked), ==, WYRELOG_E_OK);
   wyl_service_credential_clear (&revoked);
   g_assert_cmpint (wyl_service_credential_revoke (handle, old_id, "admin",
-          "rotate-old-noop-revoke", &revoked), ==, WYRELOG_E_OK);
+          "00000000000000000000000020K", &revoked), ==, WYRELOG_E_OK);
   g_assert_cmpuint (revoked.generation, ==, 2);
   wyl_service_credential_clear (&revoked);
   wyl_service_credential_issue_result_clear (&old);
@@ -2243,8 +2261,8 @@ test_rotate_policy_rejections (void)
           &revoked), ==, WYRELOG_E_OK);
   wyl_service_credential_t revoked_dto = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          revoked.credential.credential_id, "admin", "rp-revoke",
-          &revoked_dto), ==, WYRELOG_E_OK);
+          revoked.credential.credential_id, "admin",
+          "00000000000000000000000020L", &revoked_dto), ==, WYRELOG_E_OK);
   wyl_service_credential_clear (&revoked_dto);
 
   wyl_service_credential_rotate_runtime_t clock = {
@@ -2265,8 +2283,8 @@ test_rotate_policy_rejections (void)
           "tenant-b", FALSE), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable (handle,
-          "svc:rotate-policy:worker", "admin", "rp-disable", &principal), ==,
-      WYRELOG_E_OK);
+          "svc:rotate-policy:worker", "admin",
+          "00000000000000000000000020M", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   assert_rotate_policy_clear (handle, active.credential.credential_id,
       "rp-disabled-principal", 0, NULL);
@@ -2588,8 +2606,8 @@ test_revoke_registry_compound (void)
   };
   wyl_service_credential_t out = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke_with_runtime (fixture.handle,
-          issued.credential.credential_id, "admin", "hook-revoke", &runtime,
-          &out), ==, WYRELOG_E_OK);
+          issued.credential.credential_id, "admin",
+          "00000000000000000000000020N", &runtime, &out), ==, WYRELOG_E_OK);
   g_assert_nonnull (out.credential_id);
   g_assert_true (credential_registry_fixture_is (&registry,
           WYL_SERVICE_AUTH_REVOKED));
@@ -2644,7 +2662,8 @@ test_revoke_rotate_registry_commit_outcomes (void)
         wyl_service_credential_t out = { 0 };
         g_assert_cmpint (wyl_service_credential_revoke_with_runtime
             (fixture.handle, issued.credential.credential_id, "admin",
-                "outcome-revoke", &runtime, &out), !=, WYRELOG_E_OK);
+                "00000000000000000000000020P", &runtime, &out), !=,
+            WYRELOG_E_OK);
         g_assert_null (out.credential_id);
       } else {
         wyl_service_credential_rotate_runtime_t runtime = {
@@ -2717,8 +2736,8 @@ test_revoke_rotate_registry_rollback_fault (void)
       };
       wyl_service_credential_t out = { 0 };
       g_assert_cmpint (wyl_service_credential_revoke_with_runtime
-          (fixture.handle, SECOND_ID, "admin", "rollback-revoke", &runtime,
-              &out), !=, WYRELOG_E_OK);
+          (fixture.handle, SECOND_ID, "admin",
+              "00000000000000000000000020Q", &runtime, &out), !=, WYRELOG_E_OK);
       g_assert_null (out.credential_id);
     } else {
       wyl_service_credential_rotate_runtime_t runtime = {
@@ -2738,8 +2757,9 @@ test_revoke_rotate_registry_rollback_fault (void)
         WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
         (wyl_handle_get_service_auth_authority (fixture.handle),
-            fixture.handle, &reason), ==, WYRELOG_E_OK);
-    g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+            fixture.handle, &reason), ==, WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
     wyl_service_credential_issue_result_clear (&issued);
   }
 }
@@ -3215,7 +3235,7 @@ test_handoff_maintenance_escrow_clock_and_attention (void)
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (precedence_handle,
           precedence.issued.credential.credential_id, "operator",
-          "maintenance-revoke", &revoked), ==, WYRELOG_E_OK);
+          "00000000000000000000000020R", &revoked), ==, WYRELOG_E_OK);
   precedence_now += G_TIME_SPAN_MINUTE;
   g_assert_cmpint (maintenance_committed_classify (precedence_handle,
           &precedence.proof, &result, TRUE), ==, WYRELOG_E_OK);
@@ -3428,7 +3448,7 @@ test_handoff_exact_successor_classifier (void)
 {
   gchar operation_request_id[WYL_REQUEST_ID_STRING_BUF];
   gchar other_request_id[WYL_REQUEST_ID_STRING_BUF];
-  const gchar *revoke_request_id = "legacy-revoke-request";
+  const gchar *revoke_request_id = "00000000000000000000000020S";
   g_assert_cmpint (wyl_request_id_new (operation_request_id,
           sizeof operation_request_id), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_request_id_new (other_request_id,
@@ -4243,7 +4263,7 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
           issued.credential.credential_id, "operator-2",
-          "cancellation-precedence-revoke", &revoked), ==, WYRELOG_E_OK);
+          "00000000000000000000000020T", &revoked), ==, WYRELOG_E_OK);
   probe.calls = 0;
   before = mutation_effects (handle);
   g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
@@ -5624,8 +5644,8 @@ test_handoff_disposition_attention_and_oar (void)
 
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          issued.credential.credential_id, "operator", "legacy-revoke-oar",
-          &revoked), ==, WYRELOG_E_OK);
+          issued.credential.credential_id, "operator",
+          "00000000000000000000000020V", &revoked), ==, WYRELOG_E_OK);
   gchar revoked_disposition[WYL_ID_STRING_BUF];
   gchar revoked_audit[WYL_ID_STRING_BUF];
   new_uuid_string (revoked_disposition);
@@ -6081,7 +6101,7 @@ test_handoff_revoke_wipe_fault_atomicity (void)
   g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
       (corrupt_registry.registry, &selector));
   g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
-          &input, &runtime, &result), ==, WYRELOG_E_POLICY);
+          &input, &runtime, &result), ==, WYRELOG_E_BUSY);
   g_assert_null (result.audit_id);
   assert_mutation_effects_equal (mutation_effects (handle), completed);
   WylServiceAuthUnavailableReason unavailable_reason =
@@ -6453,8 +6473,8 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
    * revoked normally after delivery but before terminal metadata retirement. */
   wyl_service_credential_t later_revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          issued.credential.credential_id, "admin", "later-revoke",
-          &later_revoked), ==, WYRELOG_E_OK);
+          issued.credential.credential_id, "admin",
+          "00000000000000000000000020W", &later_revoked), ==, WYRELOG_E_OK);
   WylPolicyServiceHandoffRetirementInput input = {
     .journal_version = 6,
     .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
@@ -7088,6 +7108,128 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   g_free (issue_probe.actor_subject_id);
 }
 
+static void
+test_keyed_revoke_receipt_semantics (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:receipt:credential");
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:receipt:credential", "tenant-a", "creator",
+          "receipt-credential-issue", 0, &issued), ==, WYRELOG_E_OK);
+
+  g_auto (CredentialRegistryFixture) registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&registry, handle,
+          issued.credential.credential_id, issued.credential.generation,
+          issued.credential.subject_id, issued.credential.tenant_id, TRUE));
+  AuthorizationProbe probe = {
+    .handle = handle,
+    .rc = WYRELOG_E_OK,
+  };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,
+    .data = &probe,
+  };
+  wyl_service_credential_revoke_runtime_t runtime = {
+    .registry = registry.registry,
+    .authorization = &authorization,
+  };
+  const gchar *transition_request = "000000000000000000000000220";
+  const gchar *terminal_request = "000000000000000000000000221";
+  WylServiceRetirementOutcome outcome = { 0 };
+  wyl_service_credential_t revoked = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-a", transition_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_OK);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_FRESH_TRANSITION);
+  g_assert_true (outcome.transitioned_now);
+  g_assert_false (outcome.replayed);
+  g_assert_cmpuint (outcome.recorded_authority_generation, ==, 2);
+  g_assert_cmpuint (outcome.current_authority_generation, ==, 2);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_true (credential_registry_fixture_is (&registry,
+          WYL_SERVICE_AUTH_REVOKED));
+  wyl_service_credential_clear (&revoked);
+  MutationEffects transitioned = mutation_effects (handle);
+
+  WylServiceAuthSelector selector = { 0 };
+  g_assert_cmpint (wyl_service_auth_selector_init_credential_generation
+      (&selector, issued.credential.credential_id,
+          issued.credential.generation), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
+      (registry.registry, &selector));
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-a", transition_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_OK);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
+  g_assert_false (outcome.transitioned_now);
+  g_assert_true (outcome.replayed);
+  g_assert_cmpuint (probe.calls, ==, 2);
+  wyl_service_credential_clear (&revoked);
+  assert_mutation_effects_equal (mutation_effects (handle), transitioned);
+
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-a", transition_request,
+          2, &runtime, &outcome, &revoked), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
+  g_assert_null (revoked.credential_id);
+  g_assert_cmpuint (probe.calls, ==, 3);
+  assert_mutation_effects_equal (mutation_effects (handle), transitioned);
+
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-b", transition_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
+  g_assert_cmpuint (probe.calls, ==, 4);
+  assert_mutation_effects_equal (mutation_effects (handle), transitioned);
+
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          SECOND_ID, "operator-a", transition_request, 1, &runtime, &outcome,
+          &revoked), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
+  g_assert_null (revoked.credential_id);
+  g_assert_cmpuint (probe.calls, ==, 5);
+  assert_mutation_effects_equal (mutation_effects (handle), transitioned);
+
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-b", terminal_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_OK);
+  g_assert_cmpint (outcome.disposition, ==,
+      WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL);
+  g_assert_false (outcome.transitioned_now);
+  g_assert_false (outcome.replayed);
+  g_assert_cmpuint (probe.calls, ==, 6);
+  wyl_service_credential_clear (&revoked);
+  MutationEffects terminal = mutation_effects (handle);
+  MutationEffects expected_terminal = transitioned;
+  expected_terminal.retirement_receipts++;
+  expected_terminal.audits++;
+  expected_terminal.audit_intentions++;
+  assert_mutation_effects_equal (terminal, expected_terminal);
+
+  exec_ok (db_of (handle),
+      "UPDATE audit_events SET action=action||char(0)||'corrupt' "
+      "WHERE request_id=" "'000000000000000000000000220';");
+  g_assert_cmpint (wyl_service_credential_revoke_keyed_with_runtime (handle,
+          issued.credential.credential_id, "operator-a", transition_request,
+          1, &runtime, &outcome, &revoked), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpint (outcome.disposition, ==, 0);
+  g_assert_null (revoked.credential_id);
+  g_assert_cmpuint (probe.calls, ==, 7);
+  assert_mutation_effects_equal (mutation_effects (handle), terminal);
+
+  g_free (probe.actor_subject_id);
+  wyl_service_credential_issue_result_clear (&issued);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -7189,5 +7331,7 @@ main (int argc, char **argv)
   g_test_add_func
       ("/auth/service-credential/handoff-terminal-retirement-resumed-file-dual-proof",
       test_handoff_terminal_retirement_resumed_file_dual_proof);
+  g_test_add_func ("/auth/service-credential/keyed-receipt-semantics",
+      test_keyed_revoke_receipt_semantics);
   return g_test_run ();
 }

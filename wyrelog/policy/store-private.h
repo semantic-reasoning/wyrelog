@@ -815,6 +815,42 @@ typedef struct
   gchar *rotated_from_id;
 } wyl_policy_service_credential_info_t;
 
+typedef enum
+{
+  WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION = 1,
+  WYL_POLICY_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL = 2,
+  WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY = 3,
+  WYL_POLICY_SERVICE_RETIREMENT_KEY_CONFLICT = 4,
+  WYL_POLICY_SERVICE_RETIREMENT_SUPERSEDED = 5,
+} WylPolicyServiceRetirementDisposition;
+
+typedef enum
+{
+  WYL_POLICY_SERVICE_RETIREMENT_PRINCIPAL_DISABLE = 1,
+  WYL_POLICY_SERVICE_RETIREMENT_CREDENTIAL_REVOKE = 2,
+  WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL = 3,
+} WylPolicyServiceRetirementOperation;
+
+#define WYL_SERVICE_RETIREMENT_RECEIPT_VERSION 1u
+
+typedef struct
+{
+  WylPolicyServiceRetirementDisposition disposition;
+  WylPolicyServiceRetirementOperation operation;
+  gboolean transitioned_now;
+  gboolean replayed;
+  guint32 receipt_version;
+  guint64 recorded_authority_generation;
+  guint64 recorded_tenant_lifecycle_generation;
+  guint64 recorded_tenant_sealed_generation;
+  guint64 current_authority_generation;
+  guint64 current_tenant_lifecycle_generation;
+  guint64 current_tenant_sealed_generation;
+  gint64 event_id;
+  gchar audit_id[WYL_ID_STRING_BUF];
+  gint64 created_at_us;
+} WylPolicyServiceRetirementOutcome;
+
 typedef struct
 {
   gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
@@ -1699,6 +1735,19 @@ wyrelog_error_t wyl_policy_store_disable_service_principal_core
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_principal_info_t * out);
+wyrelog_error_t wyl_policy_store_disable_service_principal_keyed_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
+    wyl_policy_service_principal_info_t * out);
+wyrelog_error_t wyl_policy_store_disable_service_principal_keyed_precheck_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, gboolean * out_found,
+    WylPolicyServiceRetirementOutcome * retirement,
+    wyl_policy_service_principal_info_t * out);
 /* Test seam: fail the next service lifecycle operation after validation but
  * before savepoint release. The operation must roll all local rows back. */
 void wyl_policy_store_service_lifecycle_fail_commit_once
@@ -1857,6 +1906,19 @@ wyrelog_error_t wyl_policy_store_revoke_service_credential_core
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
+    wyl_policy_service_credential_info_t * out);
+wyrelog_error_t wyl_policy_store_revoke_service_credential_keyed_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
+    wyl_policy_service_credential_info_t * out);
+wyrelog_error_t wyl_policy_store_revoke_service_credential_keyed_precheck_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, gboolean * out_found,
+    WylPolicyServiceRetirementOutcome * retirement,
     wyl_policy_service_credential_info_t * out);
 /* now_us and now_data are borrowed and need remain valid only until this call
  * returns. runtime itself is likewise borrowed only for the call. Its callback

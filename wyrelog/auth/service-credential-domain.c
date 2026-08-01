@@ -23,6 +23,7 @@ typedef struct
   WylServiceAuthRegistryWriteParticipant *registry_participant;
   WylServiceAuthSelector invalidation_selector;
   gboolean has_invalidation_selector;
+  gboolean authority_write_attempted;
   void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
   void (*before_write_release) (WylServiceAuthWriteLease * lease,
       gpointer data);
@@ -74,8 +75,12 @@ service_mutation_prepare_registry (ServiceMutation *mutation,
 static wyrelog_error_t
 service_mutation_prepare_commit_evidence (ServiceMutation *mutation)
 {
-  return wyl_policy_store_service_authority_prepare_commit_evidence
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_prepare_commit_evidence
       (mutation->transaction, mutation->store, &mutation->evidence);
+  if (rc == WYRELOG_E_OK)
+    mutation->authority_write_attempted = TRUE;
+  return rc;
 }
 
 static wyrelog_error_t
@@ -187,33 +192,36 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     wyl_policy_store_service_authority_transaction_free (mutation->transaction);
     mutation->transaction = NULL;
   }
-  if (mutation->before_invalidation != NULL)
-    mutation->before_invalidation (mutation->lease, mutation->fault_data);
+  wyrelog_error_t invalidate = WYRELOG_E_OK;
   if ((outcome == SERVICE_MUTATION_COMMITTED
           || outcome == SERVICE_MUTATION_UNCERTAIN)
       && mutation->has_invalidation_selector) {
+    if (mutation->before_invalidation != NULL)
+      mutation->before_invalidation (mutation->lease, mutation->fault_data);
     WylServiceAuthRevokeResult revoke = { 0 };
-    wyrelog_error_t invalidate =
+    invalidate =
         wyl_service_auth_registry_write_participant_revoke_zero_survivors
         (mutation->registry_participant, &mutation->invalidation_selector,
         &revoke);
     if (invalidate != WYRELOG_E_OK && result == WYRELOG_E_OK)
       result = invalidate;
-    if (invalidate != WYRELOG_E_OK || outcome == SERVICE_MUTATION_UNCERTAIN) {
-      wyrelog_error_t latch =
-          wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
-          mutation->handle,
-          invalidate == WYRELOG_E_OK ?
-          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT :
-          WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
-      if (latch != WYRELOG_E_OK) {
-        (void) wyl_service_auth_write_lease_terminalize_cleanup
-            (mutation->lease, mutation->handle);
-        if (result == WYRELOG_E_OK)
-          result = latch;
-      }
-      if (result == WYRELOG_E_OK)
-        result = WYRELOG_E_INTERNAL;
+  }
+  gboolean latch_required = invalidate != WYRELOG_E_OK
+      || (outcome == SERVICE_MUTATION_UNCERTAIN
+      && mutation->authority_write_attempted);
+  if (latch_required) {
+    wyrelog_error_t latch =
+        wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
+        mutation->handle,
+        invalidate == WYRELOG_E_OK ?
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT :
+        WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+    if (latch != WYRELOG_E_OK) {
+      (void) wyl_service_auth_write_lease_terminalize_cleanup
+          (mutation->lease, mutation->handle);
+      result = WYRELOG_E_INTERNAL;
+    } else {
+      result = WYRELOG_E_BUSY;
     }
   }
   if (mutation->evidence != NULL) {
@@ -282,6 +290,26 @@ finish_principal_result (wyrelog_error_t rc,
     copy_principal (stored, out);
   wyl_policy_service_principal_info_clear (stored);
   return rc;
+}
+
+static void
+copy_retirement_outcome (const WylPolicyServiceRetirementOutcome *source,
+    WylServiceRetirementOutcome *target)
+{
+  memset (target, 0, sizeof *target);
+  target->disposition = (WylServiceRetirementDisposition) source->disposition;
+  target->transitioned_now = source->transitioned_now;
+  target->replayed = source->replayed;
+  target->recorded_authority_generation = source->recorded_authority_generation;
+  target->recorded_tenant_lifecycle_generation =
+      source->recorded_tenant_lifecycle_generation;
+  target->recorded_tenant_sealed_generation =
+      source->recorded_tenant_sealed_generation;
+  target->current_authority_generation = source->current_authority_generation;
+  target->current_tenant_lifecycle_generation =
+      source->current_tenant_lifecycle_generation;
+  target->current_tenant_sealed_generation =
+      source->current_tenant_sealed_generation;
 }
 
 wyrelog_error_t
@@ -380,9 +408,24 @@ wyl_service_principal_disable_with_runtime (WylHandle *handle,
     const wyl_service_principal_disable_runtime_t *runtime,
     wyl_service_principal_t *out)
 {
+  WylServiceRetirementOutcome retirement = { 0 };
+  return wyl_service_principal_disable_keyed_with_runtime (handle, subject_id,
+      actor_subject_id, request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION,
+      runtime, &retirement, out);
+}
+
+wyrelog_error_t
+wyl_service_principal_disable_keyed_with_runtime (WylHandle *handle,
+    const gchar *subject_id, const gchar *actor_subject_id,
+    const gchar *request_id, guint32 receipt_version,
+    const wyl_service_principal_disable_runtime_t *runtime,
+    WylServiceRetirementOutcome *retirement, wyl_service_principal_t *out)
+{
   if (out != NULL)
     wyl_service_principal_clear (out);
-  if (handle == NULL || out == NULL)
+  if (retirement != NULL)
+    memset (retirement, 0, sizeof *retirement);
+  if (handle == NULL || retirement == NULL || out == NULL)
     return WYRELOG_E_INVALID;
   if (runtime != NULL && runtime->before_gate != NULL)
     runtime->before_gate (runtime->data);
@@ -404,18 +447,32 @@ wyl_service_principal_disable_with_runtime (WylHandle *handle,
         runtime != NULL ? runtime->authorization : NULL, actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
-    rc = service_mutation_prepare_commit_evidence (&mutation);
+  WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
+  gboolean receipt_found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_disable_service_principal_core
+    rc = wyl_policy_store_disable_service_principal_keyed_precheck_core
         (mutation.transaction, mutation.store, subject_id, actor_subject_id,
-        request_id, &stored);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+        request_id, receipt_version, &receipt_found, &stored_retirement,
+        &stored);
+  if (rc == WYRELOG_E_OK && !receipt_found
+      && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
+  if (rc == WYRELOG_E_OK && !receipt_found) {
+    mutation.authority_write_attempted = TRUE;
+    rc = wyl_policy_store_disable_service_principal_keyed_core
+        (mutation.transaction, mutation.store, subject_id, actor_subject_id,
+        request_id, receipt_version, &stored_retirement, &stored);
+  }
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
+      && stored_retirement.disposition ==
+      WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION) {
     rc = wyl_service_auth_selector_init_principal
         (&mutation.invalidation_selector, stored.subject_id);
     mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK || rc == WYRELOG_E_CONFLICT)
+    copy_retirement_outcome (&stored_retirement, retirement);
   return finish_principal_result (rc, &stored, out);
 }
 
@@ -793,9 +850,24 @@ wyl_service_credential_revoke_with_runtime (WylHandle *handle,
     const wyl_service_credential_revoke_runtime_t *runtime,
     wyl_service_credential_t *out)
 {
+  WylServiceRetirementOutcome retirement = { 0 };
+  return wyl_service_credential_revoke_keyed_with_runtime (handle,
+      credential_id, actor_subject_id, request_id,
+      WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, runtime, &retirement, out);
+}
+
+wyrelog_error_t
+wyl_service_credential_revoke_keyed_with_runtime (WylHandle *handle,
+    const gchar *credential_id, const gchar *actor_subject_id,
+    const gchar *request_id, guint32 receipt_version,
+    const wyl_service_credential_revoke_runtime_t *runtime,
+    WylServiceRetirementOutcome *retirement, wyl_service_credential_t *out)
+{
   if (out != NULL)
     wyl_service_credential_clear (out);
-  if (handle == NULL || out == NULL)
+  if (retirement != NULL)
+    memset (retirement, 0, sizeof *retirement);
+  if (handle == NULL || retirement == NULL || out == NULL)
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
@@ -810,20 +882,34 @@ wyl_service_credential_revoke_with_runtime (WylHandle *handle,
         runtime != NULL ? runtime->authorization : NULL, actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
-  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
-    rc = service_mutation_prepare_commit_evidence (&mutation);
+  WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
+  gboolean receipt_found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_revoke_service_credential_core
+    rc = wyl_policy_store_revoke_service_credential_keyed_precheck_core
         (mutation.transaction, mutation.store, credential_id,
-        actor_subject_id, request_id, &stored);
+        actor_subject_id, request_id, receipt_version, &receipt_found,
+        &stored_retirement, &stored);
+  if (rc == WYRELOG_E_OK && !receipt_found
+      && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
+  if (rc == WYRELOG_E_OK && !receipt_found) {
+    mutation.authority_write_attempted = TRUE;
+    rc = wyl_policy_store_revoke_service_credential_keyed_core
+        (mutation.transaction, mutation.store, credential_id,
+        actor_subject_id, request_id, receipt_version, &stored_retirement,
+        &stored);
+  }
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
-      && stored.generation > 1) {
+      && stored_retirement.disposition ==
+      WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION && stored.generation > 1) {
     rc = wyl_service_auth_selector_init_credential_generation
         (&mutation.invalidation_selector, stored.credential_id,
         stored.generation - 1);
     mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK || rc == WYRELOG_E_CONFLICT)
+    copy_retirement_outcome (&stored_retirement, retirement);
   if (rc == WYRELOG_E_OK)
     copy_credential (&stored, out);
   wyl_policy_service_credential_info_clear (&stored);
