@@ -143,6 +143,25 @@ service_mutation_load_retired_predecessor (ServiceMutation *mutation,
 }
 
 static wyrelog_error_t
+service_mutation_latch_unavailable (ServiceMutation *mutation,
+    WylServiceAuthUnavailableReason reason)
+{
+  wyrelog_error_t latch = wyl_service_auth_write_lease_mark_unavailable
+      (mutation->lease, mutation->handle, reason);
+  if (latch == WYRELOG_E_OK)
+    return WYRELOG_E_BUSY;
+  WylServiceAuthUnavailableReason existing = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (mutation->handle),
+          mutation->handle, &existing) == WYRELOG_E_BUSY
+      && existing != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    return WYRELOG_E_BUSY;
+  (void) wyl_service_auth_write_lease_terminalize_cleanup (mutation->lease,
+      mutation->handle);
+  return WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
 service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
 {
   wyrelog_error_t result = operation;
@@ -208,22 +227,13 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
   }
   gboolean latch_required = invalidate != WYRELOG_E_OK
       || (outcome == SERVICE_MUTATION_UNCERTAIN
-      && mutation->authority_write_attempted);
-  if (latch_required) {
-    wyrelog_error_t latch =
-        wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
-        mutation->handle,
+      && mutation->authority_write_attempted)
+      || (outcome == SERVICE_MUTATION_COMMITTED && result != WYRELOG_E_OK);
+  if (latch_required)
+    result = service_mutation_latch_unavailable (mutation,
         invalidate == WYRELOG_E_OK ?
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT :
         WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
-    if (latch != WYRELOG_E_OK) {
-      (void) wyl_service_auth_write_lease_terminalize_cleanup
-          (mutation->lease, mutation->handle);
-      result = WYRELOG_E_INTERNAL;
-    } else {
-      result = WYRELOG_E_BUSY;
-    }
-  }
   if (mutation->evidence != NULL) {
     wyl_policy_store_service_authority_commit_evidence_unref
         (mutation->evidence);
@@ -235,12 +245,14 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     wyrelog_error_t release_rc =
         wyl_service_auth_write_lease_release (mutation->lease);
     if (release_rc != WYRELOG_E_OK) {
-      (void) wyl_service_auth_write_lease_terminalize_cleanup
-          (mutation->lease, mutation->handle);
-      (void) wyl_service_auth_write_lease_release (mutation->lease);
+      wyrelog_error_t cleanup_rc =
+          wyl_service_auth_write_lease_terminalize_cleanup (mutation->lease,
+          mutation->handle);
+      wyrelog_error_t retry_rc = wyl_service_auth_write_lease_release
+          (mutation->lease);
+      result = cleanup_rc == WYRELOG_E_OK && retry_rc == WYRELOG_E_OK
+          && result != WYRELOG_E_INTERNAL ? WYRELOG_E_BUSY : WYRELOG_E_INTERNAL;
     }
-    if (result == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
-      result = release_rc;
     wyl_service_auth_write_lease_free (mutation->lease);
     mutation->lease = NULL;
   }
@@ -454,8 +466,7 @@ wyl_service_principal_disable_keyed_with_runtime (WylHandle *handle,
         (mutation.transaction, mutation.store, subject_id, actor_subject_id,
         request_id, receipt_version, &receipt_found, &stored_retirement,
         &stored);
-  if (rc == WYRELOG_E_OK && !receipt_found
-      && mutation.registry_participant != NULL)
+  if (rc == WYRELOG_E_OK && !receipt_found)
     rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !receipt_found) {
     mutation.authority_write_attempted = TRUE;
@@ -512,8 +523,7 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
         (mutation.transaction, mutation.store, tenant_id, actor_subject_id,
         request_id, receipt_version, &receipt_found, &stored_retirement,
         stored_tenant);
-  if (rc == WYRELOG_E_OK && !receipt_found
-      && mutation.registry_participant != NULL)
+  if (rc == WYRELOG_E_OK && !receipt_found)
     rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !receipt_found) {
     mutation.authority_write_attempted = TRUE;
@@ -904,8 +914,7 @@ wyl_service_credential_revoke_keyed_with_runtime (WylHandle *handle,
         (mutation.transaction, mutation.store, credential_id,
         actor_subject_id, request_id, receipt_version, &receipt_found,
         &stored_retirement, &stored);
-  if (rc == WYRELOG_E_OK && !receipt_found
-      && mutation.registry_participant != NULL)
+  if (rc == WYRELOG_E_OK && !receipt_found)
     rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !receipt_found) {
     mutation.authority_write_attempted = TRUE;

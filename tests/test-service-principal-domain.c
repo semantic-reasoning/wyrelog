@@ -618,7 +618,7 @@ test_compound_terminalizes_latch_and_release_failures (void)
     g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
             reservation.principal, "admin",
             "000000000000000000000000106", &runtime,
-            &principal), ==, WYRELOG_E_INTERNAL);
+            &principal), ==, fault == 0 ? WYRELOG_E_INTERNAL : WYRELOG_E_BUSY);
     g_assert_null (principal.subject_id);
     g_assert_cmpint (wyl_service_principal_get (handle,
             reservation.principal, &principal), ==, WYRELOG_E_OK);
@@ -1777,6 +1777,118 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
 
+static void
+test_retirement_postcommit_error_normalization (void)
+{
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store,
+            "tenant-no-selector", &created), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
+            "tenant-no-selector", TRUE), ==, WYRELOG_E_OK);
+    wyl_service_credential_mutation_authorization_t authorization = {
+      .authorize = tenant_seal_authorize,
+    };
+    wyl_tenant_seal_runtime_t runtime = {
+      .authorization = &authorization,
+    };
+    wyl_policy_store_service_authority_transaction_fail_once (store,
+        WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+    WylServiceRetirementOutcome outcome = { 0 };
+    g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+            "tenant-no-selector", "operator",
+            "00000000000000000000000021B", 1, &runtime, &outcome), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (outcome.disposition, ==, 0);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT count(*) FROM service_retirement_receipts WHERE "
+            "request_id='00000000000000000000000021B';"), ==, 1);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT count(*) FROM audit_events WHERE "
+            "request_id='00000000000000000000000021B' AND "
+            "action='tenant_seal';"), ==, 1);
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  }
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store,
+            "tenant-uncertain", &created), ==, WYRELOG_E_OK);
+    wyl_service_credential_mutation_authorization_t authorization = {
+      .authorize = tenant_seal_authorize,
+    };
+    wyl_tenant_seal_runtime_t runtime = {
+      .authorization = &authorization,
+    };
+    wyl_policy_store_service_authority_transaction_fail_once (store,
+        WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK);
+    WylServiceRetirementOutcome outcome = { 0 };
+    g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+            "tenant-uncertain", "operator",
+            "00000000000000000000000021C", 1, &runtime, &outcome), ==,
+        WYRELOG_E_BUSY);
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  }
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store,
+            "tenant-replay-cleanup", &created), ==, WYRELOG_E_OK);
+    wyl_service_credential_mutation_authorization_t authorization = {
+      .authorize = tenant_seal_authorize,
+    };
+    wyl_tenant_seal_runtime_t runtime = {
+      .authorization = &authorization,
+    };
+    const gchar *request_id = "00000000000000000000000021D";
+    WylServiceRetirementOutcome outcome = { 0 };
+    g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+            "tenant-replay-cleanup", "operator", request_id, 1, &runtime,
+            &outcome), ==, WYRELOG_E_OK);
+    gint64 receipt_count = scalar_int64 (handle_db (handle),
+        "SELECT count(*) FROM service_retirement_receipts;");
+    gint64 audit_count = scalar_int64 (handle_db (handle),
+        "SELECT count(*) FROM audit_events WHERE action='tenant_seal';");
+    runtime.before_write_release = fail_write_release_once;
+    memset (&outcome, 0xff, sizeof outcome);
+    g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
+            "tenant-replay-cleanup", "operator", request_id, 1, &runtime,
+            &outcome), ==, WYRELOG_E_BUSY);
+    g_assert_cmpint (outcome.disposition, ==, 0);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT count(*) FROM service_retirement_receipts;"), ==,
+        receipt_count);
+    g_assert_cmpint (scalar_int64 (handle_db (handle),
+            "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
+        ==, audit_count);
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1829,5 +1941,7 @@ main (int argc, char **argv)
       test_keyed_tenant_seal_receipt_semantics);
   g_test_add_func ("/auth/tenant/keyed-seal-restart-commit-fault",
       test_keyed_tenant_seal_restart_and_commit_fault);
+  g_test_add_func ("/auth/retirement/postcommit-error-normalization",
+      test_retirement_postcommit_error_normalization);
   return g_test_run ();
 }

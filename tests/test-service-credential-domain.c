@@ -5927,33 +5927,6 @@ test_handoff_revoke_wipe_fault_atomicity (void)
           WYL_SERVICE_AUTH_REVOKED));
   wyl_service_credential_handoff_remediation_result_clear (&result);
 
-  /*
-   * A commit failure reported after SQLite released the savepoint is still a
-   * committed remediation.  A fresh registry replica must therefore converge
-   * to zero survivors before the write lease is released.
-   */
-  g_auto (CredentialRegistryFixture) committed_fault_registry = { 0 };
-  g_assert_true (credential_registry_fixture_init (&committed_fault_registry,
-          handle, issued.credential.credential_id,
-          issued.credential.generation, issued.credential.subject_id,
-          issued.credential.tenant_id, TRUE));
-  runtime.registry = committed_fault_registry.registry;
-  wyl_policy_store_service_authority_transaction_fail_once
-      (store_of (handle), WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
-  g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
-          &input, &runtime, &result), !=, WYRELOG_E_OK);
-  g_assert_null (result.audit_id);
-  g_assert_true (credential_registry_fixture_is (&committed_fault_registry,
-          WYL_SERVICE_AUTH_REVOKED));
-  WylServiceAuthUnavailableReason committed_fault_reason =
-      WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
-  g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-          &committed_fault_reason), ==, WYRELOG_E_OK);
-  g_assert_cmpint (committed_fault_reason, ==,
-      WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
-  runtime.registry = registry.registry;
-
   gchar missing_original[WYL_REQUEST_ID_STRING_BUF];
   gchar missing_remediation[WYL_REQUEST_ID_STRING_BUF];
   gchar missing_decision[WYL_REQUEST_ID_STRING_BUF];
