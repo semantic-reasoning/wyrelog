@@ -29,6 +29,155 @@
 
 #define WYL_DAEMON_DEFAULT_EVENT_QUEUE_LIMIT 1024
 
+typedef enum
+{
+  WYL_DAEMON_STRING_CONFIG_PATH,
+  WYL_DAEMON_STRING_PROFILE_ARG,
+  WYL_DAEMON_STRING_TEMPLATE_DIR,
+  WYL_DAEMON_STRING_POLICY_STORE_PATH,
+  WYL_DAEMON_STRING_POLICY_KEYPROVIDER_PATH,
+  WYL_DAEMON_STRING_AUDIT_STORE_PATH,
+  WYL_DAEMON_STRING_FACT_ROOT,
+  WYL_DAEMON_STRING_FACT_STORE_MODE,
+  WYL_DAEMON_STRING_OPERATION_ROOT,
+  WYL_DAEMON_STRING_CREDENTIAL_PUBLICATION_ROOT,
+  WYL_DAEMON_STRING_EVENT_SPOOL_DIR,
+  WYL_DAEMON_STRING_SYSTEM_URL,
+  WYL_DAEMON_STRING_LISTEN_PORT_ARG,
+  WYL_DAEMON_STRING_EVENT_QUEUE_LIMIT_ARG,
+  WYL_DAEMON_STRING_BOOTSTRAP_ADMIN_SUBJECT,
+} WylDaemonStringField;
+
+#define WYL_DAEMON_STRING_BIT(field) (G_GUINT64_CONSTANT (1) << (field))
+
+static const gchar *
+options_get_string (const WylDaemonOptions *opts, WylDaemonStringField field)
+{
+  switch (field) {
+    case WYL_DAEMON_STRING_CONFIG_PATH:
+      return opts->config_path;
+    case WYL_DAEMON_STRING_PROFILE_ARG:
+      return opts->profile_arg;
+    case WYL_DAEMON_STRING_TEMPLATE_DIR:
+      return opts->template_dir;
+    case WYL_DAEMON_STRING_POLICY_STORE_PATH:
+      return opts->policy_store_path;
+    case WYL_DAEMON_STRING_POLICY_KEYPROVIDER_PATH:
+      return opts->policy_keyprovider_path;
+    case WYL_DAEMON_STRING_AUDIT_STORE_PATH:
+      return opts->audit_store_path;
+    case WYL_DAEMON_STRING_FACT_ROOT:
+      return opts->fact_root;
+    case WYL_DAEMON_STRING_FACT_STORE_MODE:
+      return opts->fact_store_mode;
+    case WYL_DAEMON_STRING_OPERATION_ROOT:
+      return opts->operation_root;
+    case WYL_DAEMON_STRING_CREDENTIAL_PUBLICATION_ROOT:
+      return opts->credential_publication_root;
+    case WYL_DAEMON_STRING_EVENT_SPOOL_DIR:
+      return opts->event_spool_dir;
+    case WYL_DAEMON_STRING_SYSTEM_URL:
+      return opts->system_url;
+    case WYL_DAEMON_STRING_LISTEN_PORT_ARG:
+      return opts->listen_port_arg;
+    case WYL_DAEMON_STRING_EVENT_QUEUE_LIMIT_ARG:
+      return opts->event_queue_limit_arg;
+    case WYL_DAEMON_STRING_BOOTSTRAP_ADMIN_SUBJECT:
+      return opts->bootstrap_admin_subject;
+  }
+  g_assert_not_reached ();
+}
+
+static void
+options_set_string (WylDaemonOptions *opts, WylDaemonStringField field,
+    gchar *value)
+{
+  switch (field) {
+    case WYL_DAEMON_STRING_CONFIG_PATH:
+      opts->config_path = value;
+      return;
+    case WYL_DAEMON_STRING_PROFILE_ARG:
+      opts->profile_arg = value;
+      return;
+    case WYL_DAEMON_STRING_TEMPLATE_DIR:
+      opts->template_dir = value;
+      return;
+    case WYL_DAEMON_STRING_POLICY_STORE_PATH:
+      opts->policy_store_path = value;
+      return;
+    case WYL_DAEMON_STRING_POLICY_KEYPROVIDER_PATH:
+      opts->policy_keyprovider_path = value;
+      return;
+    case WYL_DAEMON_STRING_AUDIT_STORE_PATH:
+      opts->audit_store_path = value;
+      return;
+    case WYL_DAEMON_STRING_FACT_ROOT:
+      opts->fact_root = value;
+      return;
+    case WYL_DAEMON_STRING_FACT_STORE_MODE:
+      opts->fact_store_mode = value;
+      return;
+    case WYL_DAEMON_STRING_OPERATION_ROOT:
+      opts->operation_root = value;
+      return;
+    case WYL_DAEMON_STRING_CREDENTIAL_PUBLICATION_ROOT:
+      opts->credential_publication_root = value;
+      return;
+    case WYL_DAEMON_STRING_EVENT_SPOOL_DIR:
+      opts->event_spool_dir = value;
+      return;
+    case WYL_DAEMON_STRING_SYSTEM_URL:
+      opts->system_url = value;
+      return;
+    case WYL_DAEMON_STRING_LISTEN_PORT_ARG:
+      opts->listen_port_arg = value;
+      return;
+    case WYL_DAEMON_STRING_EVENT_QUEUE_LIMIT_ARG:
+      opts->event_queue_limit_arg = value;
+      return;
+    case WYL_DAEMON_STRING_BOOTSTRAP_ADMIN_SUBJECT:
+      opts->bootstrap_admin_subject = value;
+      return;
+  }
+  g_assert_not_reached ();
+}
+
+static void
+options_replace_owned_string (WylDaemonOptions *opts,
+    WylDaemonStringField field, const gchar *value)
+{
+  gchar *replacement = g_strdup (value);
+  guint64 bit = WYL_DAEMON_STRING_BIT (field);
+  if ((opts->_owned_string_mask & bit) != 0)
+    g_free ((gpointer) options_get_string (opts, field));
+  options_set_string (opts, field, replacement);
+  opts->_owned_string_mask |= bit;
+}
+
+void
+wyl_daemon_options_init (WylDaemonOptions *opts)
+{
+  g_return_if_fail (opts != NULL);
+
+  *opts = (WylDaemonOptions) {
+  .listen_port = -1,};
+}
+
+void
+wyl_daemon_options_clear (WylDaemonOptions *opts)
+{
+  if (opts == NULL)
+    return;
+
+  for (guint field = WYL_DAEMON_STRING_CONFIG_PATH;
+      field <= WYL_DAEMON_STRING_BOOTSTRAP_ADMIN_SUBJECT; field++) {
+    guint64 bit = WYL_DAEMON_STRING_BIT (field);
+    if ((opts->_owned_string_mask & bit) != 0)
+      g_free ((gpointer) options_get_string (opts, field));
+  }
+  wyl_daemon_options_init (opts);
+}
+
 const gchar *
 wyl_daemon_profile_name (WylDaemonProfile profile)
 {
@@ -130,60 +279,52 @@ path_equal_or_contains (const gchar *root, const gchar *path)
   return g_str_has_prefix (canon_path, root_prefix);
 }
 
-/* keyfile_take_string and keyfile_take_owned_string differ only in
- * the type of *target (const gchar ** vs gchar **). Both early-return
- * when *target is already set so a prior CLI value overrides anything
- * supplied via the keyfile -- this asymmetry is load-bearing for the
- * "CLI overrides conf" contract and must not be flattened. */
 static void
-keyfile_take_string (GKeyFile *key_file, const gchar *key, const gchar **target)
+keyfile_take_string (WylDaemonOptions *opts, GKeyFile *key_file,
+    const gchar *key, WylDaemonStringField field)
 {
-  if (*target != NULL)
+  if (options_get_string (opts, field) != NULL)
     return;
   g_autoptr (GError) error = NULL;
-  gchar *value = g_key_file_get_string (key_file, "daemon", key, &error);
+  g_autofree gchar *value =
+      g_key_file_get_string (key_file, "daemon", key, &error);
   if (value == NULL || value[0] == '\0') {
-    g_free (value);
     return;
   }
-  *target = value;
-}
-
-static void
-keyfile_take_owned_string (GKeyFile *key_file, const gchar *key, gchar **target)
-{
-  if (*target != NULL)
-    return;
-  g_autoptr (GError) error = NULL;
-  gchar *value = g_key_file_get_string (key_file, "daemon", key, &error);
-  if (value == NULL || value[0] == '\0') {
-    g_free (value);
-    return;
-  }
-  *target = value;
+  options_replace_owned_string (opts, field, value);
 }
 
 static void
 load_config_defaults (WylDaemonOptions *opts, GKeyFile *key_file)
 {
-  keyfile_take_owned_string (key_file, "profile", &opts->profile_arg);
-  keyfile_take_string (key_file, "template_dir", &opts->template_dir);
-  keyfile_take_string (key_file, "policy_db", &opts->policy_store_path);
-  keyfile_take_string (key_file, "policy_keyprovider",
-      &opts->policy_keyprovider_path);
-  keyfile_take_string (key_file, "audit_db", &opts->audit_store_path);
-  keyfile_take_string (key_file, "fact_root", &opts->fact_root);
-  keyfile_take_string (key_file, "fact_store_mode", &opts->fact_store_mode);
-  keyfile_take_string (key_file, "operation_root", &opts->operation_root);
-  keyfile_take_string (key_file, "credential_publication_root",
-      &opts->credential_publication_root);
-  keyfile_take_string (key_file, "event_spool_dir", &opts->event_spool_dir);
-  keyfile_take_string (key_file, "system_url", &opts->system_url);
-  keyfile_take_owned_string (key_file, "listen_port", &opts->listen_port_arg);
-  keyfile_take_owned_string (key_file, "event_queue_limit",
-      &opts->event_queue_limit_arg);
-  keyfile_take_string (key_file, "bootstrap_admin_subject",
-      &opts->bootstrap_admin_subject);
+  keyfile_take_string (opts, key_file, "profile",
+      WYL_DAEMON_STRING_PROFILE_ARG);
+  keyfile_take_string (opts, key_file, "template_dir",
+      WYL_DAEMON_STRING_TEMPLATE_DIR);
+  keyfile_take_string (opts, key_file, "policy_db",
+      WYL_DAEMON_STRING_POLICY_STORE_PATH);
+  keyfile_take_string (opts, key_file, "policy_keyprovider",
+      WYL_DAEMON_STRING_POLICY_KEYPROVIDER_PATH);
+  keyfile_take_string (opts, key_file, "audit_db",
+      WYL_DAEMON_STRING_AUDIT_STORE_PATH);
+  keyfile_take_string (opts, key_file, "fact_root",
+      WYL_DAEMON_STRING_FACT_ROOT);
+  keyfile_take_string (opts, key_file, "fact_store_mode",
+      WYL_DAEMON_STRING_FACT_STORE_MODE);
+  keyfile_take_string (opts, key_file, "operation_root",
+      WYL_DAEMON_STRING_OPERATION_ROOT);
+  keyfile_take_string (opts, key_file, "credential_publication_root",
+      WYL_DAEMON_STRING_CREDENTIAL_PUBLICATION_ROOT);
+  keyfile_take_string (opts, key_file, "event_spool_dir",
+      WYL_DAEMON_STRING_EVENT_SPOOL_DIR);
+  keyfile_take_string (opts, key_file, "system_url",
+      WYL_DAEMON_STRING_SYSTEM_URL);
+  keyfile_take_string (opts, key_file, "listen_port",
+      WYL_DAEMON_STRING_LISTEN_PORT_ARG);
+  keyfile_take_string (opts, key_file, "event_queue_limit",
+      WYL_DAEMON_STRING_EVENT_QUEUE_LIMIT_ARG);
+  keyfile_take_string (opts, key_file, "bootstrap_admin_subject",
+      WYL_DAEMON_STRING_BOOTSTRAP_ADMIN_SUBJECT);
 
   if (!opts->production_mode && g_key_file_has_key (key_file, "daemon",
           "production", NULL)) {
@@ -418,44 +559,79 @@ default_spool_dir (WylDaemonProfile profile)
       "/var/lib/wyrelog/service/event-spool" : NULL;
 }
 
+static gboolean
+parse_string_option (const gchar *option_name, const gchar *value,
+    gpointer user_data, GError **error)
+{
+  static const struct
+  {
+    const gchar *name;
+    WylDaemonStringField field;
+  } option_fields[] = {
+    {"--config", WYL_DAEMON_STRING_CONFIG_PATH},
+    {"--profile", WYL_DAEMON_STRING_PROFILE_ARG},
+    {"--template-dir", WYL_DAEMON_STRING_TEMPLATE_DIR},
+    {"--policy-db", WYL_DAEMON_STRING_POLICY_STORE_PATH},
+    {"--policy-keyprovider", WYL_DAEMON_STRING_POLICY_KEYPROVIDER_PATH},
+    {"--audit-db", WYL_DAEMON_STRING_AUDIT_STORE_PATH},
+    {"--fact-root", WYL_DAEMON_STRING_FACT_ROOT},
+    {"--fact-store-mode", WYL_DAEMON_STRING_FACT_STORE_MODE},
+    {"--operation-root", WYL_DAEMON_STRING_OPERATION_ROOT},
+    {"--credential-publication-root",
+        WYL_DAEMON_STRING_CREDENTIAL_PUBLICATION_ROOT},
+    {"--system-url", WYL_DAEMON_STRING_SYSTEM_URL},
+    {"--event-spool-dir", WYL_DAEMON_STRING_EVENT_SPOOL_DIR},
+    {"--event-queue-limit", WYL_DAEMON_STRING_EVENT_QUEUE_LIMIT_ARG},
+    {"--listen-port", WYL_DAEMON_STRING_LISTEN_PORT_ARG},
+    {"--bootstrap-admin-subject",
+        WYL_DAEMON_STRING_BOOTSTRAP_ADMIN_SUBJECT},
+  };
+
+  (void) error;
+  for (gsize i = 0; i < G_N_ELEMENTS (option_fields); i++) {
+    if (g_str_equal (option_name, option_fields[i].name)) {
+      options_replace_owned_string (user_data, option_fields[i].field, value);
+      return TRUE;
+    }
+  }
+  g_assert_not_reached ();
+}
+
 gboolean
 wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
     GError **error)
 {
   GOptionEntry entries[] = {
-    {"config", 0, 0, G_OPTION_ARG_STRING, &opts->config_path,
+    {"config", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Daemon config file", "PATH"},
-    {"profile", 0, 0, G_OPTION_ARG_STRING, &opts->profile_arg,
+    {"profile", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Daemon profile: system or service", "PROFILE"},
-    {"template-dir", 0, 0, G_OPTION_ARG_STRING, &opts->template_dir,
+    {"template-dir", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Access policy template directory", "DIR"},
-    {"policy-db", 0, 0, G_OPTION_ARG_STRING, &opts->policy_store_path,
+    {"policy-db", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Policy authority database path", "PATH"},
-    {"policy-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-          &opts->policy_keyprovider_path,
+    {"policy-keyprovider", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
-    {"audit-db", 0, 0, G_OPTION_ARG_STRING, &opts->audit_store_path,
+    {"audit-db", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Runtime audit sink database path", "PATH"},
-    {"fact-root", 0, 0, G_OPTION_ARG_STRING, &opts->fact_root,
+    {"fact-root", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Datalog fact store root directory", "DIR"},
-    {"fact-store-mode", 0, 0, G_OPTION_ARG_STRING,
-          &opts->fact_store_mode,
+    {"fact-store-mode", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Datalog fact store layout mode: per-tenant-graph", "MODE"},
-    {"operation-root", 0, 0, G_OPTION_ARG_STRING, &opts->operation_root,
+    {"operation-root", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Service-credential operation journal root directory", "DIR"},
-    {"credential-publication-root", 0, 0, G_OPTION_ARG_STRING,
-          &opts->credential_publication_root,
+    {"credential-publication-root", 0, 0, G_OPTION_ARG_CALLBACK,
+          parse_string_option,
         "Owner-only credential publication root directory", "DIR"},
-    {"system-url", 0, 0, G_OPTION_ARG_STRING, &opts->system_url,
+    {"system-url", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
           "System-profile daemon URL for service-profile event forwarding",
         "URL"},
-    {"event-spool-dir", 0, 0, G_OPTION_ARG_STRING, &opts->event_spool_dir,
+    {"event-spool-dir", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Service-profile disk spool directory", "DIR"},
-    {"event-queue-limit", 0, 0, G_OPTION_ARG_STRING,
-          &opts->event_queue_limit_arg,
+    {"event-queue-limit", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "Maximum pending service-profile spool files", "N"},
 #ifdef WYL_HAS_DAEMON_HTTP
-    {"listen-port", 0, 0, G_OPTION_ARG_STRING, &opts->listen_port_arg,
+    {"listen-port", 0, 0, G_OPTION_ARG_CALLBACK, parse_string_option,
         "HTTP listen port", "PORT"},
 #endif
     {"check", 0, 0, G_OPTION_ARG_NONE, &opts->check_only,
@@ -471,8 +647,8 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
         "Print access template artifact identity and exit", NULL},
     {"profile-info", 0, 0, G_OPTION_ARG_NONE, &opts->show_profile_info,
         "Print resolved daemon profile configuration and exit", NULL},
-    {"bootstrap-admin-subject", 0, 0, G_OPTION_ARG_STRING,
-          &opts->bootstrap_admin_subject,
+    {"bootstrap-admin-subject", 0, 0, G_OPTION_ARG_CALLBACK,
+          parse_string_option,
           "Grant the wr.system_admin role to SUBJECT on a fresh policy store",
         "SUBJECT"},
     {"bootstrap-admin-allow-skip-mfa", 0, 0, G_OPTION_ARG_NONE,
@@ -485,7 +661,9 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
 
   g_autoptr (GOptionContext) context =
       g_option_context_new ("- wyrelog daemon");
-  g_option_context_add_main_entries (context, entries, NULL);
+  GOptionGroup *group = g_option_group_new ("daemon", NULL, NULL, opts, NULL);
+  g_option_group_add_entries (group, entries);
+  g_option_context_set_main_group (context, group);
 
   return g_option_context_parse (context, argc, argv, error);
 }
@@ -513,7 +691,8 @@ wyl_daemon_options_resolve (WylDaemonOptions *opts, GError **error)
   }
 
   if (opts->profile_arg == NULL)
-    opts->profile_arg = g_strdup ("system");
+    options_replace_owned_string (opts, WYL_DAEMON_STRING_PROFILE_ARG,
+        "system");
   if (!parse_profile (opts->profile_arg, &opts->profile)) {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
         "profile must be system or service");

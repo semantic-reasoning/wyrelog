@@ -11,6 +11,11 @@ typedef enum
 
 typedef struct
 {
+  /* String fields supplied by a designated initializer are borrowed. The
+   * parser and resolver record only the strings that they allocate in this
+   * private mask so wyl_daemon_options_clear() never frees caller-owned or
+   * static storage. */
+  guint64 _owned_string_mask;
   gchar *config_path;
   gchar *profile_arg;
   WylDaemonProfile profile;
@@ -43,7 +48,11 @@ typedef struct
   gboolean bootstrap_admin_allow_skip_mfa;
 } WylDaemonOptions;
 
+void wyl_daemon_options_init (WylDaemonOptions * opts);
+void wyl_daemon_options_clear (WylDaemonOptions * opts);
 gboolean wyl_daemon_parse_options (gint * argc, gchar *** argv,
     WylDaemonOptions * opts, GError ** error);
 gboolean wyl_daemon_options_resolve (WylDaemonOptions * opts, GError ** error);
 const gchar *wyl_daemon_profile_name (WylDaemonProfile profile);
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylDaemonOptions, wyl_daemon_options_clear)
