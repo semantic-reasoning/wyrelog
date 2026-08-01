@@ -2032,6 +2032,8 @@ service_session_boundary_args = [meson.project_source_root(), '--compiler-id',
 if get_option('enable_audit').disabled()
   service_session_boundary_args += [
     '--allow-uncompiled-owner',
+    'wyrelog/auth/service-exchange-private.c',
+    '--allow-uncompiled-owner',
     'tests/test-service-exchange-private.c',
   ]
 endif
