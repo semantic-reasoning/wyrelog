@@ -138,6 +138,37 @@ same_native_identity (const WylPolicyFactReconcileArtifactEvidence *a,
   }
 }
 
+/* True when |ev| reproduces the recorded source content: same size, digest
+ * algorithm and digest.  Native identity is deliberately not compared, so a
+ * distinct-inode copy of the same bytes matches. */
+static gboolean
+content_matches (const WylPolicyFactReconcileArtifactEvidence *ev,
+    const WylPolicyFactReconcileArtifactEvidence *expected)
+{
+  return ev->size_bytes == expected->size_bytes
+      && ev->digest_algorithm == expected->digest_algorithm
+      && memcmp (ev->digest, expected->digest, sizeof ev->digest) == 0;
+}
+
+/* Capture evidence from an opened source regular file.  Leaf that forks on the
+ * platform-specific handle the source struct holds; the orchestration body
+ * never touches that handle directly. */
+static wyrelog_error_t
+reconcile_capture_source (const WylFactGraphRegularFile *src,
+    WylPolicyFactReconcileArtifactEvidence *out_evidence)
+{
+  return wyl_fact_reconcile_capture_artifact_evidence (src->fd, out_evidence);
+}
+
+/* Copy exactly |size| bytes from the opened source into the stage.  Leaf that
+ * forks on the platform-specific source and stage handles. */
+static wyrelog_error_t
+reconcile_copy_source_to_stage (const WylFactGraphRegularFile *src,
+    WylFactGraphStage *stage, guint64 size)
+{
+  return reconcile_move_copy_exact (src->fd, stage->fd, size);
+}
+
 /* The one canonical published artifact name for every graph. */
 #define WYL_FACT_RECONCILE_MOVE_FINAL_BASENAME "facts.duckdb"
 
@@ -325,8 +356,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
             (&resolver, record->source_relative_path, &source);
         if (alias == WYRELOG_E_OK) {
           WylPolicyFactReconcileArtifactEvidence alias_ev;
-          alias = wyl_fact_reconcile_capture_artifact_evidence (source.fd,
-              &alias_ev);
+          alias = reconcile_capture_source (&source, &alias_ev);
           if (alias == WYRELOG_E_OK
               && same_native_identity (&alias_ev, &target_ev))
             rc = WYRELOG_E_POLICY;
@@ -336,11 +366,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
           goto out;
       }
 
-      if (target_ev.size_bytes == record->source_evidence.size_bytes
-          && target_ev.digest_algorithm
-          == record->source_evidence.digest_algorithm
-          && memcmp (target_ev.digest, record->source_evidence.digest,
-              sizeof target_ev.digest) == 0) {
+      if (content_matches (&target_ev, &record->source_evidence)) {
         run_cas = TRUE;
       } else {
         rc = WYRELOG_E_POLICY;
@@ -355,7 +381,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
         goto out;
 
       WylPolicyFactReconcileArtifactEvidence source_ev;
-      rc = wyl_fact_reconcile_capture_artifact_evidence (source.fd, &source_ev);
+      rc = reconcile_capture_source (&source, &source_ev);
       if (rc != WYRELOG_E_OK)
         goto out;
       if (!wyl_policy_fact_reconcile_artifact_evidence_equal (&source_ev,
@@ -379,7 +405,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
       if (rc != WYRELOG_E_OK)
         goto out;
 
-      rc = reconcile_move_copy_exact (source.fd, stage.fd,
+      rc = reconcile_copy_source_to_stage (&source, &stage,
           record->source_evidence.size_bytes);
       if (rc == WYRELOG_E_OK)
         rc = wyl_fact_graph_stage_sync (&stage);
@@ -422,11 +448,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
             &published_ev);
         if (rc != WYRELOG_E_OK)
           goto out;
-        if (published_ev.size_bytes != record->source_evidence.size_bytes
-            || published_ev.digest_algorithm
-            != record->source_evidence.digest_algorithm
-            || memcmp (published_ev.digest, record->source_evidence.digest,
-                sizeof published_ev.digest) != 0) {
+        if (!content_matches (&published_ev, &record->source_evidence)) {
           rc = WYRELOG_E_POLICY;
           goto out;
         }
