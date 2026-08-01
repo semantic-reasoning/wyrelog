@@ -948,13 +948,13 @@ main (void)
           "service_principal_conflict"))
     return 558;
   http.status = 503;
-  http.body = "{\"error\":\"service_principal_unavailable\"}";
+  http.body = "{\"error\":\"service_principal_failed\"}";
   if (wyl_client_service_principal_disable_with_request_id (management_client,
           "svc:alice:worker", "222222222222222222222222225", 123,
           "public", 49, &principal) != WYRELOG_E_IO
       || principal.subject_id != NULL
       || !client_last_response_is (management_client, 503,
-          "service_principal_unavailable"))
+          "service_principal_failed"))
     return 559;
   http.status = 0;
   if (wyl_client_service_principal_create (management_client, "alice", "bad",
