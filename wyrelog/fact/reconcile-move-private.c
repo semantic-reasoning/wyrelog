@@ -256,6 +256,13 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
     }
   }
 
+  /* Reassert that the lease still authorizes this resolver before each
+   * filesystem mutation.  Root-identity or resolver drift between gates fails
+   * closed with the journal left MOVING, never a false MOVED. */
+  rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+
   rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, TRUE,
       &directory);
   if (rc != WYRELOG_E_OK)
@@ -307,6 +314,10 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
           goto out;
       }
 
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+      if (rc != WYRELOG_E_OK)
+        goto out;
+
       rc = wyl_fact_graph_directory_stage_create (&directory,
           WYL_FACT_RECONCILE_MOVE_FINAL_BASENAME, &stage);
       if (rc != WYRELOG_E_OK)
@@ -318,6 +329,13 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
         rc = wyl_fact_graph_stage_sync (&stage);
       if (rc != WYRELOG_E_OK) {
         /* The final is still absent: drop the temp before releasing it. */
+        (void) wyl_fact_graph_stage_abort (&directory, &stage);
+        goto out;
+      }
+
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+      if (rc != WYRELOG_E_OK) {
+        /* Nothing is published yet; drop the synced temp before releasing. */
         (void) wyl_fact_graph_stage_abort (&directory, &stage);
         goto out;
       }
@@ -344,6 +362,26 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
     if (rc != WYRELOG_E_OK)
       goto out;
   }
+
+  /* Final reassert immediately before the CAS: reprove the lease authorizes
+   * this resolver and that the graph still sits at the prepared generations.
+   * Placed after the pre-journal-cas checkpoint so a checkpoint fault still
+   * leaves a recoverable MOVING.  Any drift fails closed with no MOVED. */
+  rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_policy_store_read_graph_authority (ctx->store, record->tenant_id,
+      record->graph_id, &graph_authority);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (graph_authority->lifecycle_generation
+      != record->expected_lifecycle_generation
+      || graph_authority->reconciliation_generation
+      != record->expected_reconciliation_generation) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  g_clear_pointer (&graph_authority, wyl_policy_graph_authority_record_free);
 
   {
     WylPolicyAuthorityMutationResult mutation =
