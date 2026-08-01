@@ -251,10 +251,6 @@ main (void)
   if (port <= 0)
     return 6;
   g_autofree gchar *base_url = g_strdup_printf ("http://127.0.0.1:%d", port);
-  gchar recover_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
-  if (wyl_request_id_new (recover_request_id, sizeof recover_request_id)
-      != WYRELOG_E_OK)
-    return 7;
 
   /* (a) Authorized operator: authenticated + active session + the manage
    * grant. (b) Control operator: authenticated + active session but no
