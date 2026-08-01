@@ -77,8 +77,8 @@ typedef struct
  * success, emit a non-secret JSON receipt describing the durable outcome
  * (state, request_id, credential_id, generation, destination,
  * publication_receipt_id, delivered).  The receipt never carries credential
- * material.  This entry point is NOT routed: it is the reusable core the future
- * HTTP handler and focused tests drive directly.
+ * material.  This entry point is not itself registered as a route: the routed
+ * service-credential issue/rotate handlers and focused tests drive this core.
  *
  * out_json is caller-owned and set only on WYRELOG_E_OK; it is left NULL on any
  * failure.  Returns WYRELOG_E_NOT_FOUND when the handoff roots are unconfigured,
