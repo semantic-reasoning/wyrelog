@@ -4860,11 +4860,14 @@ static gboolean
 tenant_scope_is_allowed (const gchar * tenant, const gchar * scope);
 
 static gboolean
-authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
+authorize_guarded_session_action_extended (SoupServer *server,
+    SoupServerMessage *msg,
     GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
     const gchar *resource, const gchar *auth_required_code,
     const gchar *invalid_code, const gchar *denied_code,
-    const gchar *failed_code, gchar **out_actor)
+    const gchar *failed_code, WylDaemonAuthContext *out_auth,
+    gchar **out_actor, WylSession **out_session, gint64 *out_guard_timestamp,
+    gchar **out_guard_loc_class, gint64 *out_guard_risk)
 {
   const gchar *session_token = NULL;
   const gchar *guard_timestamp = NULL;
@@ -4958,9 +4961,44 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   }
 
+  g_autoptr (WylSession) session = out_session != NULL ?
+      wyl_daemon_http_ref_session (server, auth.session_id) : NULL;
+  if (out_session != NULL && session == NULL) {
+    set_json_error (msg, 403, denied_code);
+    return FALSE;
+  }
+  gchar *actor_copy = g_strdup (auth.actor);
+  if (out_auth != NULL) {
+    out_auth->session_id = g_steal_pointer (&auth.session_id);
+    out_auth->actor = g_steal_pointer (&auth.actor);
+    out_auth->tenant = g_steal_pointer (&auth.tenant);
+    out_auth->bearer = auth.bearer;
+  }
   if (out_actor != NULL)
-    *out_actor = g_strdup (auth.actor);
+    *out_actor = actor_copy;
+  else
+    g_free (actor_copy);
+  if (out_session != NULL)
+    *out_session = g_steal_pointer (&session);
+  if (out_guard_timestamp != NULL)
+    *out_guard_timestamp = timestamp;
+  if (out_guard_loc_class != NULL)
+    *out_guard_loc_class = g_strdup (guard_loc_class);
+  if (out_guard_risk != NULL)
+    *out_guard_risk = risk;
   return TRUE;
+}
+
+static gboolean
+authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
+    const gchar *resource, const gchar *auth_required_code,
+    const gchar *invalid_code, const gchar *denied_code,
+    const gchar *failed_code, gchar **out_actor)
+{
+  return authorize_guarded_session_action_extended (server, msg, query, ctx,
+      action, resource, auth_required_code, invalid_code, denied_code,
+      failed_code, NULL, out_actor, NULL, NULL, NULL, NULL);
 }
 
 typedef struct
@@ -4977,6 +5015,7 @@ typedef struct
   const gchar *session_id;
   const gchar *actor;
   const gchar *action;
+  const gchar *resource_id;
   const gchar *target_tenant;
   const gchar *decision_request_id;
   gint64 guard_timestamp;
@@ -5069,7 +5108,9 @@ management_reauthorize_inside_write (gpointer data,
     return WYRELOG_E_NOMEM;
   wyl_decide_req_set_subject_id (req, authorization->actor);
   wyl_decide_req_set_action (req, authorization->action);
-  wyl_decide_req_set_resource_id (req, authorization->session_id);
+  wyl_decide_req_set_resource_id (req,
+      authorization->resource_id != NULL ? authorization->resource_id :
+      authorization->session_id);
   wyl_decide_req_set_guard_context (req, authorization->guard_timestamp,
       authorization->guard_loc_class, authorization->guard_risk);
   wyl_decide_req_set_request_id (req, authorization->decision_request_id);
@@ -6541,11 +6582,11 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   g_autofree gchar *guard_loc_class = NULL;
   gint64 guard_risk = 0;
   if (sealing) {
-    if (!service_principal_management_authorize_session (server, msg, query,
-            ctx, "wr.tenant.manage", "tenant_auth_required",
+    if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
+            "wr.tenant.manage", WYL_TENANT_DEFAULT, "tenant_auth_required",
             "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed",
             &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
-            &guard_risk, NULL))
+            &guard_risk))
       return;
   } else if (!authorize_tenant_management (server, msg, query, ctx, &actor)) {
     return;
@@ -6559,6 +6600,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   gboolean changed = FALSE;
   wyrelog_error_t rc = WYRELOG_E_INVALID;
+  WylServiceRetirementOutcome retirement = { 0 };
   if (sealing) {
     const gchar *request_id = ensure_request_id_header (msg);
     WylManagementReauthorization reauthorization = {
@@ -6568,6 +6610,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .session_id = auth.session_id,
       .actor = actor,
       .action = "wr.tenant.manage",
+      .resource_id = WYL_TENANT_DEFAULT,
       .target_tenant = NULL,
       .decision_request_id = request_id,
       .guard_timestamp = guard_timestamp,
@@ -6582,10 +6625,10 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .registry = ctx->service_auth_registry,
       .authorization = &authorization,
     };
-    WylServiceRetirementOutcome outcome = { 0 };
     rc = wyl_tenant_seal_keyed_with_runtime (ctx->handle, tenant, actor,
-        request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime, &outcome);
-    changed = outcome.transitioned_now;
+        request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime,
+        &retirement);
+    changed = retirement.transitioned_now;
   } else {
     g_auto (WylDaemonPolicyWrite) write = { 0 };
     rc = wyl_daemon_policy_write_acquire (ctx, &write);
@@ -6610,7 +6653,11 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   if (rc == WYRELOG_E_BUSY) {
-    set_json_error (msg, 503, "tenant_mutation_unavailable");
+    set_json_error (msg, 503,
+        retirement.disposition ==
+        WYL_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED ?
+        "tenant_lifecycle_coordination_required" :
+        "tenant_mutation_unavailable");
     return;
   }
   if (rc != WYRELOG_E_OK) {

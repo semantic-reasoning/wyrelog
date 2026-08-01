@@ -539,7 +539,18 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
     mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
-  if (rc == WYRELOG_E_OK || rc == WYRELOG_E_CONFLICT)
+  gboolean lifecycle_coordination = rc == WYRELOG_E_BUSY
+      && stored_retirement.disposition ==
+      WYL_POLICY_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED;
+  if (lifecycle_coordination) {
+    WylServiceAuthUnavailableReason unavailable_reason =
+        WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    lifecycle_coordination =
+        wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle,
+        &unavailable_reason) == WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_OK || rc == WYRELOG_E_CONFLICT || lifecycle_coordination)
     copy_retirement_outcome (&stored_retirement, retirement);
   return rc;
 }
