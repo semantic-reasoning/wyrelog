@@ -571,6 +571,31 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
+    wyl_service_auth_registry_maintenance_participant_lookup_exact
+    (WylServiceAuthRegistryMaintenanceParticipant * p,
+    const gchar * session_id, const gchar * jti,
+    WylServiceAuthReservation * out_reservation,
+    WylServiceAuthState * out_state, gboolean * out_found)
+{
+  if (p == NULL)
+    return WYRELOG_E_INVALID;
+  /* Snapshot before the caller enters CONTEXT. The claimed maintenance
+   * participant and exclusive WRITE lease keep the returned tuple stable. */
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
+      (p->lease, p->handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_rank_enter (p->handle, WYL_SERVICE_AUTH_RANK_REGISTRY);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_registry_lookup (p->registry, session_id, jti,
+      out_reservation, out_state, out_found);
+  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected (p->handle,
+      WYL_SERVICE_AUTH_RANK_REGISTRY);
+  return rc == WYRELOG_E_OK ? leave_rc : rc;
+}
+
+wyrelog_error_t
     wyl_service_auth_registry_maintenance_participant_remove_exact
     (WylServiceAuthRegistryMaintenanceParticipant * p,
     const WylServiceAuthReservation * reservation, gboolean * out_removed)
