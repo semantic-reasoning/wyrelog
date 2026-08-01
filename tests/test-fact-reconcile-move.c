@@ -698,6 +698,52 @@ test_move_publish_rejects_generation_drift (void)
   move_fixture_teardown (&fx);
 }
 
+/* Bump the live graph authority generation when the pre-journal-cas seam fires,
+ * i.e. after the early authority gate has already passed, so only the tight
+ * pre-CAS re-read can observe the drift.  The authority update-guard trigger
+ * only permits a generation change on a real lifecycle transition, so it is
+ * dropped to construct the mid-flight drift directly - mirroring the
+ * foreign-keys relaxation used to build the missing-tenant state. */
+static wyrelog_error_t
+bump_generation_at_precas (const gchar *point, gpointer user_data)
+{
+  MoveFixture *fx = user_data;
+  if (g_strcmp0 (point, "pre-journal-cas") == 0)
+    move_fixture_exec_sql (fx,
+        "DROP TRIGGER IF EXISTS fact_graph_authority_update_guard;"
+        "UPDATE fact_graphs SET "
+        "reconciliation_generation = reconciliation_generation + 1 "
+        "WHERE tenant_id='" MOVE_TENANT "' AND graph_id='" MOVE_GRAPH "';");
+  return WYRELOG_E_OK;
+}
+
+/*
+ * Pre-CAS generation re-read.  The early authority gate passes, but the graph's
+ * live generation is bumped mid-flight at the pre-journal-cas seam - after the
+ * early gate, immediately before the pre-CAS reassert and generation re-read.
+ * The tight-window re-read must observe the drift and fail closed with
+ * E_POLICY, leaving the journal MOVING with no false MOVED.  This proves the
+ * second re-check rejects mid-flight authority drift, not just the early gate.
+ */
+static void
+test_move_publish_rejects_precas_generation_drift (void)
+{
+  MoveFixture fx;
+  move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
+  move_fixture_seed_moving (&fx);
+
+  WylFactReconcileMoveContext ctx = move_context (&fx);
+  ctx.checkpoint = bump_generation_at_precas;
+  ctx.checkpoint_data = &fx;
+
+  WylFactReconcileMoveOutcome outcome = WYL_FACT_RECONCILE_MOVE_APPLIED;
+  g_assert_cmpint (wyl_fact_reconcile_move_publish (&ctx, &outcome), ==,
+      WYRELOG_E_POLICY);
+  assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
+
+  move_fixture_teardown (&fx);
+}
+
 /*
  * Tenant existence gate.  The graph generations still agree, but the owning
  * tenant row is gone: the move must fail closed with E_POLICY and publish
@@ -890,6 +936,13 @@ test_move_publish_rejects_lexical_alias (void)
  * to the source rather than an independent published artifact: the move must
  * reject it, leaving both links intact and the journal MOVING.  POSIX-only
  * because it constructs the alias with link().
+ *
+ * Note: this currently verifies the nlink-guard rejection path.  The
+ * hardlinked target has nlink==2, so wyl_fact_graph_directory_open_file's
+ * probe fails closed on the nlink==1 invariant and returns E_POLICY before the
+ * present branch's same_native_identity check can run.  The outcome (E_POLICY,
+ * both links intact, journal MOVING) is what matters; the explicit identity
+ * check is defense-in-depth behind that invariant and is not exercised here.
  */
 static void
 test_move_publish_rejects_identity_alias (void)
@@ -1079,6 +1132,9 @@ main (int argc, char **argv)
       test_move_publish_source_identity_mismatch);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-generation-drift",
       test_move_publish_rejects_generation_drift);
+  g_test_add_func
+      ("/fact/reconcile-move/publish/rejects-precas-generation-drift",
+      test_move_publish_rejects_precas_generation_drift);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-missing-tenant",
       test_move_publish_rejects_missing_tenant);
 #ifndef G_OS_WIN32
