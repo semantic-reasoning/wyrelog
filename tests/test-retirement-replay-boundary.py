@@ -111,7 +111,8 @@ def violations(domain: str, http: str) -> list[str]:
 
     if "decision_request_id = ensure_request_id_header" not in principal:
         errors.append("principal response correlation is not separate")
-    if "const gchar *decision_request_id = ensure_request_id_header" not in tenant:
+    if ("const gchar *decision_request_id = NULL" not in tenant
+            or "decision_request_id = ensure_request_id_header" not in tenant):
         errors.append("tenant response correlation is not separate")
     if "changed = retirement.recorded_transitioned" not in tenant:
         errors.append("tenant replay does not return recorded wire result")
