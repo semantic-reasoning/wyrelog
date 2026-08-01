@@ -345,8 +345,8 @@ test_protected_writer_rejects_parent_symlink (void)
   g_autofree gchar *path = g_build_filename (link_dir, "token", NULL);
   g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
       !=, WYCTL_TOKEN_FILE_OK);
-  g_assert_false (g_file_test (g_build_filename (real_dir, "token", NULL),
-          G_FILE_TEST_EXISTS));
+  g_autofree gchar *target_path = g_build_filename (real_dir, "token", NULL);
+  g_assert_false (g_file_test (target_path, G_FILE_TEST_EXISTS));
   g_unlink (link_dir);
   g_rmdir (real_dir);
 }
