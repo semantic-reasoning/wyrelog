@@ -8994,6 +8994,63 @@ static const gchar fact_graph_provisioning_update_guard_sql[] =
     "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
 
+static const gchar tenant_authority_insert_guard_pre_sealed_generation_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_authority_insert_guard "
+    "BEFORE INSERT ON tenants BEGIN "
+    "SELECT CASE WHEN NOT ("
+    "typeof(NEW.lifecycle_generation)='integer' AND "
+    "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.reconciliation_generation)='integer' AND "
+    "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
+    "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
+    "SELECT CASE WHEN NOT ("
+    "NEW.lifecycle_state='legacy_unclassified' AND "
+    "NEW.lifecycle_generation=0 AND NEW.reconciliation_generation=0) "
+    "THEN RAISE(ABORT,'invalid tenant authority') END; END";
+
+static const gchar tenant_authority_update_guard_pre_sealed_generation_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_authority_update_guard "
+    "BEFORE UPDATE ON tenants BEGIN "
+    "SELECT CASE WHEN NOT ("
+    "typeof(NEW.lifecycle_generation)='integer' AND "
+    "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.reconciliation_generation)='integer' AND "
+    "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
+    "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
+    "SELECT CASE WHEN NOT ("
+    "NEW.lifecycle_state='legacy_unclassified' OR "
+    "(NEW.lifecycle_state IN ('active','sealing') AND NEW.sealed=0) OR "
+    "(NEW.lifecycle_state IN ('sealed','unsealing') AND NEW.sealed=1)) "
+    "THEN RAISE(ABORT,'invalid tenant authority') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
+    "NEW.lifecycle_generation!=OLD.lifecycle_generation "
+    "THEN RAISE(ABORT,'invalid tenant lifecycle generation') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND ("
+    "OLD.lifecycle_generation=9223372036854775807 OR "
+    "NEW.lifecycle_generation!=OLD.lifecycle_generation+1 OR NOT ("
+    "(OLD.lifecycle_state='legacy_unclassified' AND "
+    " NEW.lifecycle_state IN ('active','sealed')) OR "
+    "(OLD.lifecycle_state='active' AND NEW.lifecycle_state='sealing') OR "
+    "(OLD.lifecycle_state='sealing' AND "
+    " NEW.lifecycle_state IN ('active','sealed')) OR "
+    "(OLD.lifecycle_state='sealed' AND NEW.lifecycle_state='unsealing') OR "
+    "(OLD.lifecycle_state='unsealing' AND "
+    " NEW.lifecycle_state IN ('active','sealed')))) "
+    "THEN RAISE(ABORT,'illegal tenant lifecycle transition') END; "
+    "SELECT CASE WHEN NEW.reconciliation_generation<"
+    "OLD.reconciliation_generation OR "
+    "NEW.reconciliation_generation>OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'invalid tenant reconciliation generation') END; "
+    "SELECT CASE WHEN OLD.lifecycle_state='legacy_unclassified' AND "
+    "NEW.lifecycle_state IN ('active','sealed') AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'tenant promotion requires reconciliation') END; "
+    "SELECT CASE WHEN NOT (OLD.lifecycle_state='legacy_unclassified' AND "
+    "NEW.lifecycle_state IN ('active','sealed')) AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation "
+    "THEN RAISE(ABORT,'unexpected tenant reconciliation generation') END; "
+    "END";
+
 static const gchar tenant_authority_insert_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS tenant_authority_insert_guard "
     "BEFORE INSERT ON tenants BEGIN "
@@ -9402,6 +9459,60 @@ graph_authority_object_matches (sqlite3 *db, const gchar *type,
   return matches ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+static gchar *
+graph_authority_canonical_sql (const gchar *sql)
+{
+  g_autofree gchar *canonical = g_strdup (sql);
+  if (canonical == NULL)
+    return NULL;
+  gchar *if_not_exists = strstr (canonical, " IF NOT EXISTS");
+  if (if_not_exists != NULL)
+    memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
+        strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
+  return graph_authority_normalize_sql (canonical);
+}
+
+/* sealed_generation extended both tenant guards.  SQLite's CREATE TRIGGER IF
+ * NOT EXISTS cannot replace the already-installed predecessor, so recognize
+ * only the exact former definition and replace it inside the caller's schema
+ * savepoint.  Any other same-name object is unowned and fails closed. */
+static wyrelog_error_t
+migrate_tenant_authority_guard (sqlite3 *db, const gchar *name,
+    const gchar *predecessor_sql, const gchar *current_sql,
+    const gchar *drop_sql)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *lookup =
+      "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?;";
+  if (sqlite3_prepare_v2 (db, lookup, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  wyrelog_error_t rc = bind_text (stmt, 1, name);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  g_autofree gchar *actual = step == SQLITE_ROW ?
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0)) : NULL;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (step == SQLITE_DONE)
+    return exec_sql (db, current_sql);
+  if (step != SQLITE_ROW || actual == NULL)
+    return WYRELOG_E_IO;
+  g_autofree gchar *actual_normalized = graph_authority_normalize_sql (actual);
+  g_autofree gchar *current_normalized =
+      graph_authority_canonical_sql (current_sql);
+  g_autofree gchar *predecessor_normalized =
+      graph_authority_canonical_sql (predecessor_sql);
+  if (actual_normalized == NULL || current_normalized == NULL
+      || predecessor_normalized == NULL)
+    return WYRELOG_E_NOMEM;
+  if (g_strcmp0 (actual_normalized, current_normalized) == 0)
+    return WYRELOG_E_OK;
+  if (g_strcmp0 (actual_normalized, predecessor_normalized) != 0)
+    return WYRELOG_E_POLICY;
+  rc = exec_sql (db, drop_sql);
+  return rc == WYRELOG_E_OK ? exec_sql (db, current_sql) : rc;
+}
+
 static wyrelog_error_t
 validate_graph_authority_rows (sqlite3 *db)
 {
@@ -9657,9 +9768,17 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
               WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_UUID_INDEX)) !=
       WYRELOG_E_OK)
     return rc;
-  if ((rc = exec_sql (db, tenant_authority_insert_guard_sql)) != WYRELOG_E_OK
-      || (rc = exec_sql (db, tenant_authority_update_guard_sql)) !=
-      WYRELOG_E_OK)
+  rc = migrate_tenant_authority_guard (db, "tenant_authority_insert_guard",
+      tenant_authority_insert_guard_pre_sealed_generation_sql,
+      tenant_authority_insert_guard_sql,
+      "DROP TRIGGER tenant_authority_insert_guard;");
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_tenant_authority_guard (db,
+        "tenant_authority_update_guard",
+        tenant_authority_update_guard_pre_sealed_generation_sql,
+        tenant_authority_update_guard_sql,
+        "DROP TRIGGER tenant_authority_update_guard;");
+  if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = graph_authority_migration_checkpoint (store,
               WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_TENANT_TRIGGERS))
