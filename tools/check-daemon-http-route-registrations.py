@@ -123,6 +123,7 @@ ISSUE_720_EXACT_PATHS = {
     "/policy/permissions/transition",
     "/policy/roles/grant",
     "/policy/roles/revoke",
+    "/audit/events",
 }
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES

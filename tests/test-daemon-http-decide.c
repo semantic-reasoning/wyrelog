@@ -606,6 +606,14 @@ check_read_only_method_contract (const gchar *base_url)
     return 558;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
     return 559;
+#ifndef WYL_HAS_AUDIT
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/audit/events", &status,
+          &body) != 0)
+    return 560;
+  if (status != 200 || g_strcmp0 (body, "[]") != 0)
+    return 561;
+#endif
 
   return 0;
 }
@@ -934,18 +942,18 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 31;
+  const guint expected_exact = 32;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
   const guint expected_exact = 30;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 28;
+  const guint expected_exact = 29;
 #else
   const guint expected_total = 32;
   const guint expected_exact = 27;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 1
+  if (total != expected_total || prefixes != 4 || raw_singletons != 0
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -977,6 +985,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/policy/permissions/transition",
     "/policy/roles/grant",
     "/policy/roles/revoke",
+    "/audit/events",
 #ifdef WYL_HAS_FACT_STORE
     "/service-credential-operations",
     "/service-credential-operations/reconcile",
@@ -7601,6 +7610,52 @@ runtime_audit_events_table_exists (WylHandle *handle, gboolean *out_exists)
 }
 
 static gint
+check_valid_audit_aliases (SoupServer *server, WylHandle *handle,
+    SoupSession *session, const gchar *base_url, const gchar *query,
+    const gchar *access_token)
+{
+  static const gchar *const aliases[] = {
+    "/audit/events/x",
+    "/audit/eventsx",
+  };
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  for (gsize i = 0; i < G_N_ELEMENTS (aliases); i++) {
+    g_autofree gchar *path = g_strdup_printf ("%s?%s", aliases[i], query);
+    WylDaemonExactRouteProbeSnapshot probe_before = { 0 }, probe_after = { 0 };
+    WylDaemonExactRouteStateSnapshot state_before = { 0 }, state_after = { 0 };
+    guint64 audit_before = 0, audit_after = 0;
+    gboolean table_before = TRUE, table_after = TRUE;
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (!policy_audit_event_count (handle, &audit_before)
+        || runtime_audit_events_table_exists (handle, &table_before) != 0
+        || table_before
+        || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+            "/audit/events", &probe_before)
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+            &state_before)
+        || send_raw_path_probe (session, "GET", base_url, path, authorization,
+            NULL, &status, &body) != 0
+        || status != 404
+        || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+            "/audit/events", &probe_after)
+        || probe_after.selected != probe_before.selected + 1
+        || probe_after.terminal_entries != probe_before.terminal_entries
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+            &state_after)
+        || memcmp (&state_before, &state_after, sizeof state_before) != 0
+        || !policy_audit_event_count (handle, &audit_after)
+        || audit_after != audit_before
+        || runtime_audit_events_table_exists (handle, &table_after) != 0
+        || table_after)
+      return 2695 + (gint) i;
+  }
+  return 0;
+}
+
+static gint
 check_raw_audit_contract (SoupServer *server, WylHandle *handle,
     WylClient *client, const gchar *base_url, const gchar *session_token,
     const gchar *access_token)
@@ -7631,6 +7686,25 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
       || audit_table_exists)
     return 104;
 
+  g_autofree gchar *bearer_allowed =
+      g_strdup_printf ("guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69");
+  rc = check_valid_audit_aliases (server, handle, session, base_url,
+      bearer_allowed, access_token);
+  if (rc != 0)
+    return rc;
+  g_autofree gchar *bearer_allowed_request_id = NULL;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit_bearer_full (session, base_url, bearer_allowed,
+      access_token, &status, &body, &bearer_allowed_request_id);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "[") == NULL)
+    return 106;
+  if (runtime_audit_events_table_exists (handle, &audit_table_exists) != 0
+      || !audit_table_exists)
+    return 105;
+
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit (session, base_url,
       "session_token=unknown&guard_timestamp=abc&guard_loc_class=public"
@@ -7659,18 +7733,6 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
     return rc;
   if (status != 403 || strstr (body, "\"audit_denied\"") == NULL)
     return 98;
-
-  g_clear_pointer (&body, g_free);
-  g_autofree gchar *bearer_allowed =
-      g_strdup_printf ("guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69");
-  g_autofree gchar *bearer_allowed_request_id = NULL;
-  rc = send_raw_audit_bearer_full (session, base_url, bearer_allowed,
-      access_token, &status, &body, &bearer_allowed_request_id);
-  if (rc != 0)
-    return rc;
-  if (status != 200 || strstr (body, "[") == NULL)
-    return 106;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bearer_unknown_tenant =
