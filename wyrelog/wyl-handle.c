@@ -1543,7 +1543,10 @@ classify_audit_projection (WylHandle *self, const gchar *id,
     WylAuditProjectionState *out_state)
 {
   *out_state = WYL_AUDIT_PROJECTION_ABSENT;
-  if (self->engine_pair_poisoned)
+  /* A committed reconciliation builds an unpublished candidate while the
+   * published pair remains poisoned. Candidate loaders may inspect that pair;
+   * every operation outside that capability must continue to fail closed. */
+  if (self->engine_pair_poisoned && !self->engine_pair_replacement_building)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self)) {
     *out_state = WYL_AUDIT_PROJECTION_EXACT;
@@ -4014,7 +4017,7 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
   g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
-  if (self->engine_pair_poisoned)
+  if (self->engine_pair_poisoned && !self->engine_pair_replacement_building)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
     return WYRELOG_E_OK;
