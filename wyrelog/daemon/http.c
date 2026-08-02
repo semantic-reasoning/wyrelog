@@ -12412,7 +12412,7 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       graph_seal_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/graphs",
       graphs_list_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/decide", decide_handler,
+  wyl_daemon_http_add_exact_handler (server, "/decide", decide_handler,
       ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server,
       "/policy/permissions/grant", policy_permission_grant_handler, ctx, NULL);

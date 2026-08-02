@@ -934,18 +934,18 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 25;
+  const guint expected_exact = 26;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 24;
+  const guint expected_exact = 25;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 22;
+  const guint expected_exact = 23;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 21;
+  const guint expected_exact = 22;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 7
+  if (total != expected_total || prefixes != 4 || raw_singletons != 6
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -971,6 +971,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/graphs/create",
     "/graphs/seal",
     "/graphs",
+    "/decide",
 #ifdef WYL_HAS_FACT_STORE
     "/service-credential-operations",
     "/service-credential-operations/reconcile",
@@ -1216,6 +1217,50 @@ send_raw_decide (SoupSession *session, const gchar *method,
 }
 
 static gint
+check_valid_decide_aliases (SoupServer *server, SoupSession *session,
+    const gchar *base_url, const gchar *user, const gchar *perm,
+    const gchar *scope, const gchar *extra_query, const gchar *access_token,
+    gint error_base)
+{
+  static const gchar *const aliases[] = {
+    "/decide/x",
+    "/decidex",
+  };
+  g_autofree gchar *escaped_user = g_uri_escape_string (user, NULL, TRUE);
+  g_autofree gchar *escaped_perm = g_uri_escape_string (perm, NULL, TRUE);
+  g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  for (gsize i = 0; i < G_N_ELEMENTS (aliases); i++) {
+    g_autofree gchar *path = g_strdup_printf
+        ("%s?user=%s&perm=%s&session_token=%s%s%s", aliases[i], escaped_user,
+        escaped_perm, escaped_scope, extra_query != NULL ? "&" : "",
+        extra_query != NULL ? extra_query : "");
+    WylDaemonExactRouteProbeSnapshot probe_before = { 0 }, probe_after = { 0 };
+    WylDaemonExactRouteStateSnapshot state_before = { 0 }, state_after = { 0 };
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+            "/decide", &probe_before)
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+            &state_before)
+        || send_raw_path_probe (session, "POST", base_url, path,
+            authorization, NULL, &status, &body) != 0
+        || status != 404
+        || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+            "/decide", &probe_after)
+        || probe_after.selected != probe_before.selected + 1
+        || probe_after.terminal_entries != probe_before.terminal_entries
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+            &state_after)
+        || memcmp (&state_before, &state_after, sizeof state_before) != 0)
+      return error_base + (gint) i;
+  }
+  return 0;
+}
+
+static gint
 send_request_id_probe (SoupSession *session, const gchar *method,
     const gchar *uri, const gchar *inbound_request_id, guint *out_status,
     gchar **out_request_id)
@@ -1363,6 +1408,11 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
   if (strstr (body, "\"deny_origin\":\"perm_state\"") == NULL &&
       strstr (body, "\"deny_origin\":null") == NULL)
     return 37;
+  rc = check_valid_decide_aliases (server, session, base_url,
+      "http-deny-user", "http.not_armed", "http-deny-scope", NULL,
+      deny_access_token, 2670);
+  if (rc != 0)
+    return rc;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-deny-user",
@@ -9768,6 +9818,11 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       || protected_body == NULL
       || strstr (protected_body, "\"decision\":") == NULL)
     return 1957;
+  gint decide_alias_rc = check_valid_decide_aliases (server,
+      protected_session, base_url, "svc:exchange:worker", "http.not_armed",
+      "service-scope", "tenant=tenant-a", access_token, 2672);
+  if (decide_alias_rc != 0)
+    return decide_alias_rc;
 
   WylServiceExchangeLimiterSnapshot limiter_snapshot = { 0 };
   wyl_daemon_http_service_exchange_limiter_snapshot_for_test (server,
