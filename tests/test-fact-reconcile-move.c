@@ -13,6 +13,9 @@
 #ifndef G_OS_WIN32
 #include <sys/stat.h>
 #include <unistd.h>
+#else
+#include <io.h>
+#include <windows.h>
 #endif
 
 #ifndef O_BINARY
@@ -69,15 +72,43 @@ write_secure_file (const gchar *root, const gchar *name, const gchar *bytes,
 static gint
 open_regular (const gchar *path)
 {
+#ifdef G_OS_WIN32
+  /* The capture under test resolves this fd with _get_osfhandle, which reads
+   * the fd table of the CRT linked into wyrelog (this test image's UCRT).
+   * g_open runs inside the vcpkg glib-2.0 DLL, whose UCRT owns a separate fd
+   * table, so its fd would be foreign and the lookup would trap in the
+   * invalid-parameter handler.  Mint the fd in this image's own CRT, the way
+   * production's directory_open_file does (_open_osfhandle in wyrelog). */
+  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wpath);
+  HANDLE h = CreateFileW (wpath, GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  g_free (wpath);
+  g_assert_true (h != INVALID_HANDLE_VALUE);
+  gint fd = _open_osfhandle ((intptr_t) h, _O_BINARY | _O_RDONLY);
+  if (fd < 0)
+    CloseHandle (h);
+  g_assert_cmpint (fd, >=, 0);
+  return fd;
+#else
   gint fd = g_open (path, O_RDONLY | O_BINARY | O_CLOEXEC, 0);
   g_assert_cmpint (fd, >=, 0);
   return fd;
+#endif
 }
 
 static void
 close_regular (gint fd)
 {
+#ifdef G_OS_WIN32
+  /* The fd was minted by _open_osfhandle in this image's CRT (open_regular);
+   * close it through the same CRT.  g_close runs inside the glib DLL's CRT,
+   * whose fd table does not know this fd. */
+  g_assert_cmpint (_close (fd), ==, 0);
+#else
   g_assert_true (g_close (fd, NULL));
+#endif
 }
 
 static void
@@ -253,9 +284,11 @@ move_fixture_setup (MoveFixture *fx, const gchar *payload, gssize payload_len)
   g_assert_no_error (error);
 
   fx->final_abs = g_build_filename (fx->graph_dir, MOVE_FINAL_BASENAME, NULL);
-  fx->source_rel = g_build_filename (fx->tenant_component, fx->graph_component,
+  /* Journal relative paths are canonical forward-slash form; g_build_filename
+   * would use a backslash separator on Windows and fail path validation. */
+  fx->source_rel = g_build_path ("/", fx->tenant_component, fx->graph_component,
       MOVE_SOURCE_BASENAME, NULL);
-  fx->canonical_rel = g_build_filename (fx->tenant_component,
+  fx->canonical_rel = g_build_path ("/", fx->tenant_component,
       fx->graph_component, MOVE_FINAL_BASENAME, NULL);
 
   gint fd = open_regular (fx->source_abs);
@@ -607,7 +640,7 @@ test_move_publish_rejects_foreign_basename (void)
 {
   MoveFixture fx;
   move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
-  g_autofree gchar *evil_rel = g_build_filename (fx.tenant_component,
+  g_autofree gchar *evil_rel = g_build_path ("/", fx.tenant_component,
       fx.graph_component, "evil.duckdb", NULL);
   move_fixture_seed_moving_canonical (&fx, evil_rel);
 
