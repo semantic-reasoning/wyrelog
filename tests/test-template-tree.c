@@ -249,13 +249,31 @@ check_decision_template_relation_contract (void)
     ".decl audit_event_deny_reason(id: symbol, reason: symbol)",
     ".decl audit_event_deny_origin(id: symbol, origin: symbol)",
     ".decl audit_event_request_id(id: symbol, request_id: symbol)",
+    ".decl service_principal_state(subject: symbol, state: symbol)",
+    ".decl service_request_auth(context: symbol, subject: symbol, tenant: symbol)",
+    ".decl service_principal_state_observed(subject: symbol, state: symbol)",
+    ".decl service_request_auth_observed(context: symbol, subject: symbol,\n"
+        "    tenant: symbol)",
     ".decl login_skip_mfa_authz_observed(user: symbol)",
     ".decl allow_bool(user: symbol, perm: symbol, scope: symbol)",
+    ".decl service_armed(context: symbol, user: symbol, perm: symbol, scope: symbol)",
+    ".decl service_allow_bool(context: symbol, user: symbol, perm: symbol,\n"
+        "    scope: symbol)",
     ".decl deny_reason(user: symbol, perm: symbol, scope: symbol,\n"
         "    code: symbol, origin: symbol)",
     "audit_event_request_id(ID, RequestID) :-\n"
         "    audit_event_request_id_input(ID, RequestID).",
+    "service_principal_state_observed(Subject, State) :-\n"
+        "    service_principal_state(Subject, State).",
+    "service_request_auth_observed(Context, Subject, Tenant) :-\n"
+        "    service_request_auth(Context, Subject, Tenant).",
     "login_skip_mfa_authz_observed(U) :-\n" "    login_skip_mfa_authz(U).",
+    "service_armed(Context, U, P, S) :-\n"
+        "    service_request_auth(Context, U, S),\n"
+        "    service_principal_state(U, \"active\"),\n"
+        "    approved_data_plane_permission(P).",
+    "service_allow_bool(Context, U, P, S) :-\n"
+        "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
   };
   g_autofree gchar *contents = NULL;
   gsize len = 0;

@@ -13,6 +13,60 @@
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
 #endif
 
+static void
+remove_audit_template_tree (const gchar *path)
+{
+  g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
+  if (dir == NULL) {
+    g_remove (path);
+    return;
+  }
+  const gchar *name = NULL;
+  while ((name = g_dir_read_name (dir)) != NULL) {
+    g_autofree gchar *child = g_build_filename (path, name, NULL);
+    if (g_file_test (child, G_FILE_TEST_IS_DIR))
+      remove_audit_template_tree (child);
+    else
+      g_remove (child);
+  }
+  g_rmdir (path);
+}
+
+static gchar *
+copy_unsigned_audit_templates (void)
+{
+  static const gchar *const files[] = {
+    "bootstrap.dl",
+    "fsm/principal.dl",
+    "fsm/session.dl",
+    "fsm/permission_scope.dl",
+    "lobac/decision.dl",
+  };
+  g_autofree gchar *dir =
+      g_dir_make_tmp ("wyl-audit-replay-template-XXXXXX", NULL);
+  if (dir == NULL)
+    return NULL;
+  g_autofree gchar *fsm = g_build_filename (dir, "fsm", NULL);
+  g_autofree gchar *lobac = g_build_filename (dir, "lobac", NULL);
+  if (g_mkdir (fsm, 0700) != 0 || g_mkdir (lobac, 0700) != 0) {
+    remove_audit_template_tree (dir);
+    return NULL;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (files); i++) {
+    g_autofree gchar *source =
+        g_build_filename (WYL_TEST_TEMPLATE_DIR, files[i], NULL);
+    g_autofree gchar *target = g_build_filename (dir, files[i], NULL);
+    g_autofree gchar *contents = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents (source, &contents, &len, NULL)
+        || !g_file_set_contents (target, contents, (gssize) len, NULL)) {
+      remove_audit_template_tree (dir);
+      return NULL;
+    }
+  }
+  return g_steal_pointer (&dir);
+}
+
 static gboolean policy_get_audit_intention_state (WylHandle * handle,
     const gchar * id, gchar ** out_state, gint64 * out_attempt_count);
 static gboolean runtime_count_audit_rows (WylHandle * handle,
@@ -29,6 +83,245 @@ static wyrelog_error_t intern_symbol (WylHandle * handle,
     const gchar * symbol, gint64 * out_id);
 static wyrelog_error_t insert_symbol_row2 (WylHandle * handle,
     const gchar * relation, const gchar * a, const gchar * b);
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean replay_entered;
+  gboolean allow_replay;
+  gboolean replay_released;
+  gboolean reload_waiting;
+  gboolean reload_acquired;
+  gboolean decision_started;
+  gboolean decision_lock_waiting;
+  gboolean decision_lock_acquired;
+  gboolean decision_acquired;
+  GThread *decision_thread;
+  gboolean ordering_ok;
+  wyrelog_error_t replay_rc;
+  wyrelog_error_t reload_rc;
+  wyrelog_error_t decision_rc;
+  wyl_decision_t decision;
+} AuditReplayConcurrency;
+
+static gboolean
+wait_for_audit_replay_flag (AuditReplayConcurrency *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  return reached;
+}
+
+static void
+blocking_audit_replay_checkpoint (gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  g_mutex_lock (&race->mutex);
+  race->replay_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_replay)
+    g_cond_wait (&race->changed, &race->mutex);
+  race->replay_released = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+audit_replay_reload_checkpoint (WylEngineReplacementCheckpoint phase,
+    gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  g_mutex_lock (&race->mutex);
+  if (phase == WYL_ENGINE_REPLACEMENT_WAITING)
+    race->reload_waiting = TRUE;
+  else {
+    race->reload_acquired = TRUE;
+    race->ordering_ok = race->ordering_ok && race->replay_released;
+  }
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+audit_replay_engine_session_checkpoint (WylEngineSessionCheckpoint phase,
+    gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  g_mutex_lock (&race->mutex);
+  if (g_thread_self () == race->decision_thread) {
+    if (phase == WYL_ENGINE_SESSION_WAITING)
+      race->decision_lock_waiting = TRUE;
+    else {
+      race->decision_lock_acquired = TRUE;
+      race->ordering_ok = race->ordering_ok && race->replay_released;
+    }
+    g_cond_broadcast (&race->changed);
+  }
+  g_mutex_unlock (&race->mutex);
+}
+
+static gboolean
+audit_replay_window_matcher (gint64 timestamp, const gchar *window_name,
+    gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  g_mutex_lock (&race->mutex);
+  race->decision_acquired = TRUE;
+  race->ordering_ok = race->ordering_ok && race->replay_released
+      && timestamp == 4242 && g_strcmp0 (window_name, "off_hours") == 0;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  return TRUE;
+}
+
+static gpointer
+run_audit_replay (gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  race->replay_rc = wyl_handle_load_policy_store_audit_events (race->handle);
+  return NULL;
+}
+
+static gpointer
+run_reload_during_audit_replay (gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  race->reload_rc = wyl_handle_reload_engine_pair (race->handle);
+  return NULL;
+}
+
+static gpointer
+run_decision_during_audit_replay (gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "audit-replay-human");
+  wyl_decide_req_set_action (req, "wr.stream.write_reserved");
+  wyl_decide_req_set_resource_id (req, "audit-replay-scope");
+  wyl_decide_req_set_guard_context (req, 4242, "trusted", 1);
+  wyl_decide_req_set_guard_window_matcher (req, audit_replay_window_matcher,
+      race);
+  g_mutex_lock (&race->mutex);
+  race->decision_thread = g_thread_self ();
+  race->decision_started = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  race->decision_rc = wyl_decide (race->handle, req, resp);
+  race->decision = wyl_decide_resp_get_decision (resp);
+  return NULL;
+}
+
+static gint
+check_audit_replay_serializes_reload_and_decision (void)
+{
+  g_autofree gchar *templates = copy_unsigned_audit_templates ();
+  if (templates == NULL)
+    return 189;
+  WylHandleOpenOptions options = {
+    .template_dir = templates,
+    .require_template_manifest = FALSE,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_handle_open_with_options (&options, &handle) != WYRELOG_E_OK)
+    return 190;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_direct_permission (store, "audit-replay-human",
+          "wr.stream.write_reserved", "audit-replay-scope") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "audit-replay-human",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, "audit-replay-scope",
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "audit-replay-human",
+          "wr.stream.write_reserved", "audit-replay-scope", "armed")
+      != WYRELOG_E_OK || wyl_handle_reload_engine_pair (handle)
+      != WYRELOG_E_OK)
+    return 191;
+
+  wyl_id_t id = WYL_ID_NIL;
+  gchar id_buf[WYL_ID_STRING_BUF];
+  gboolean inserted = FALSE;
+  if (wyl_id_new (&id) != WYRELOG_E_OK
+      || wyl_id_format (&id, id_buf, sizeof id_buf) != WYRELOG_E_OK
+      || wyl_policy_store_record_audit_intention_full (store, id_buf, 725,
+          "audit-replay-subject", "audit.reconcile", "audit-replay-resource",
+          NULL, NULL, "audit-replay-request", WYL_DECISION_DENY, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 192;
+
+  AuditReplayConcurrency race = {
+    .handle = handle,
+    .ordering_ok = TRUE,
+    .replay_rc = WYRELOG_E_INTERNAL,
+    .reload_rc = WYRELOG_E_INTERNAL,
+    .decision_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_handle_set_audit_replay_checkpoint_for_test (handle,
+      blocking_audit_replay_checkpoint, &race);
+  GThread *replay = g_thread_new ("audit-reconcile", run_audit_replay, &race);
+  if (!wait_for_audit_replay_flag (&race, &race.replay_entered)) {
+    g_mutex_lock (&race.mutex);
+    race.allow_replay = TRUE;
+    g_cond_broadcast (&race.changed);
+    g_mutex_unlock (&race.mutex);
+    g_thread_join (replay);
+    g_cond_clear (&race.changed);
+    g_mutex_clear (&race.mutex);
+    return 193;
+  }
+  /* No contender exists yet, so a failed try-lock proves the replay thread
+   * owns the outer engine session before classify/snapshot/helper entry. */
+  gboolean replay_holds_engine_session =
+      wyl_handle_engine_session_locked_for_test (handle);
+
+  wyl_handle_set_reload_decision_checkpoint_for_test (handle,
+      audit_replay_reload_checkpoint, &race);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      audit_replay_engine_session_checkpoint, &race);
+  GThread *reload = g_thread_new ("audit-reconcile-reload",
+      run_reload_during_audit_replay, &race);
+  GThread *decision = g_thread_new ("audit-reconcile-decision",
+      run_decision_during_audit_replay, &race);
+  gboolean ready = wait_for_audit_replay_flag (&race, &race.reload_waiting)
+      && wait_for_audit_replay_flag (&race, &race.decision_started)
+      && wait_for_audit_replay_flag (&race, &race.decision_lock_waiting);
+  gboolean contenders_observe_owned_session =
+      wyl_handle_engine_session_locked_for_test (handle);
+  g_mutex_lock (&race.mutex);
+  race.ordering_ok = race.ordering_ok && !race.reload_acquired
+      && !race.decision_lock_acquired && !race.decision_acquired;
+  race.allow_replay = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  gboolean completed = wait_for_audit_replay_flag (&race,
+      &race.reload_acquired) && wait_for_audit_replay_flag (&race,
+      &race.decision_lock_acquired) && wait_for_audit_replay_flag (&race,
+      &race.decision_acquired);
+  g_thread_join (replay);
+  g_thread_join (reload);
+  g_thread_join (decision);
+  wyl_handle_set_reload_decision_checkpoint_for_test (handle, NULL, NULL);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  wyl_handle_set_audit_replay_checkpoint_for_test (handle, NULL, NULL);
+  gboolean ok = replay_holds_engine_session
+      && contenders_observe_owned_session && ready && completed
+      && race.ordering_ok
+      && race.replay_rc == WYRELOG_E_OK && race.reload_rc == WYRELOG_E_OK
+      && race.decision_rc == WYRELOG_E_OK
+      && race.decision == WYL_DECISION_ALLOW;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  g_clear_object (&handle);
+  remove_audit_template_tree (templates);
+  return ok ? 0 : 194;
+}
 
 static wyrelog_error_t
 insert_audit_base_fact (WylHandle *handle, const gchar *id,
@@ -3474,6 +3767,10 @@ int
 main (void)
 {
   gint rc;
+  if ((rc = check_audit_replay_serializes_reload_and_decision ()) != 0)
+    return rc;
+  if (g_getenv ("WYL_TEST_AUDIT_REPLAY_CONCURRENCY_ONLY") != NULL)
+    return 0;
   if ((rc = check_service_lifecycle_audit_reconciliation ()) != 0)
     return rc;
   if ((rc = check_emit_inserts_a_row ()) != 0)

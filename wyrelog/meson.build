@@ -176,6 +176,44 @@ wyrelog_dep = declare_dependency(
   dependencies : [glib_dep, gio_dep],
 )
 
+# Deterministic engine-session checkpoints are compiled only into this
+# non-installed test variant.  Keeping a separate full-source archive means
+# neither the WylHandle layout nor its hot paths nor its private symbols enter
+# the installed production library.
+wyrelog_handle_test_seams_lib = static_library(
+  'wyrelog-handle-test-seams',
+  wyrelog_sources,
+  include_directories : wyrelog_inc,
+  dependencies : wyrelog_deps,
+  c_args : wyrelog_c_args + ['-DWYL_TEST_HANDLE_SEAMS'],
+  override_options : wyrelog_override_options,
+  link_language : get_option('enable_secure_duckdb_bridge').enabled() ? 'cpp' : 'c',
+  gnu_symbol_visibility : 'hidden',
+  install : false,
+  build_by_default : false,
+)
+
+wyrelog_handle_test_seams_dep = declare_dependency(
+  link_with : wyrelog_handle_test_seams_lib,
+  include_directories : wyrelog_inc,
+  dependencies : [glib_dep, gio_dep, wirelog_dep],
+)
+
+# Full-symbol control for shared-only configurations, especially PE where the
+# export directory cannot prove that a non-exported test definition is absent.
+# It compiles the production handle owner with the exact production feature
+# arguments and without WYL_TEST_HANDLE_SEAMS.
+wyrelog_handle_production_control_lib = static_library(
+  'wyrelog-handle-production-control',
+  'wyl-handle.c',
+  include_directories : wyrelog_inc,
+  dependencies : wyrelog_deps,
+  c_args : wyrelog_c_args,
+  override_options : wyrelog_override_options,
+  install : false,
+  build_by_default : false,
+)
+
 # Host-only private companion: never installed and never linked into
 # libwyrelog. Focused tests and the exact future #358 daemon owner opt in.
 service_session_private_lib = static_library('wyrelog-service-session-private',

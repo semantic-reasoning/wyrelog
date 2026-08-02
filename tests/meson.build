@@ -203,7 +203,7 @@ if build_client
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-    # The four daemon-http-decide variants share one source file with one
+    # The daemon HTTP variants share one source file with one
     # main() per variant; helpers irrelevant to the active variant remain
     # defined to keep the source readable.
     '-Wno-unused-function',
@@ -317,6 +317,29 @@ if build_client
 
   test('daemon-http-decide-service', test_daemon_http_decide_service,
     timeout : 240,
+  )
+
+  # This focused variant copies only the Datalog sources into a temporary
+  # unsigned tree. It validates the pre-signing candidate without weakening
+  # production manifest verification or requiring release-custodian keys.
+  test_daemon_http_service_decision = executable(
+    'test-daemon-http-service-decision',
+    'test-daemon-http-decide.c',
+    '../wyrelog/daemon/auth-registry-private.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    '../wyrelog/daemon/service-credential-handoff-private.c',
+    c_args : test_daemon_http_decide_c_args
+      + '-DWYL_TEST_VARIANT_SERVICE_DECISION',
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_daemon_http_decide_deps,
+    link_with : test_daemon_http_decide_link_with,
+  )
+  test_daemon_http_decide_targets += [test_daemon_http_service_decision]
+
+  test('daemon-http-service-decision', test_daemon_http_service_decision,
+    timeout : 120,
   )
 
   if get_option('enable_audit').allowed()
@@ -1373,6 +1396,68 @@ test_access_decision = executable('test-access-decision',
 )
 
 test('access-decision', test_access_decision)
+
+test_service_decision_authority = executable('test-service-decision-authority',
+  'test-service-decision-authority.c',
+  c_args : [
+    '-DWYL_TEST_HANDLE_SEAMS',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_handle_test_seams_dep],
+)
+
+test('service-decision-authority', test_service_decision_authority,
+  timeout : 60,
+)
+
+check_handle_test_seam_exports = find_program(
+  '../tools/check-handle-test-seam-exports.py')
+test('check-handle-test-seam-exports-self-test',
+  check_handle_test_seam_exports,
+  args : ['--self-test'],
+)
+handle_test_seam_object_format = 'elf'
+if host_machine.system() == 'darwin'
+  handle_test_seam_object_format = 'macho'
+elif host_machine.system() == 'windows'
+  handle_test_seam_object_format = 'pe'
+endif
+handle_test_seam_production_artifacts = []
+if get_option('default_library') == 'shared'
+  handle_test_seam_production_artifacts += [
+    [libwyrelog, 'shared', 'shared'],
+  ]
+elif get_option('default_library') == 'static'
+  handle_test_seam_production_artifacts += [
+    [libwyrelog, 'archive', 'static'],
+  ]
+else
+  handle_test_seam_production_artifacts += [
+    [libwyrelog.get_shared_lib(), 'shared', 'shared'],
+    [libwyrelog.get_static_lib(), 'archive', 'static'],
+  ]
+endif
+foreach artifact_spec : handle_test_seam_production_artifacts
+  test('check-handle-test-seam-exports-' + artifact_spec[2],
+    check_handle_test_seam_exports,
+    args : ['absent', handle_test_seam_object_format, artifact_spec[1],
+      artifact_spec[0].full_path()],
+    depends : artifact_spec[0],
+  )
+endforeach
+test('check-handle-test-seam-companion-symbols',
+  check_handle_test_seam_exports,
+  args : ['present', handle_test_seam_object_format, 'archive',
+    wyrelog_handle_test_seams_lib.full_path()],
+  depends : wyrelog_handle_test_seams_lib,
+)
+test('check-handle-test-seam-production-control-symbols',
+  check_handle_test_seam_exports,
+  args : ['absent', handle_test_seam_object_format, 'archive',
+    wyrelog_handle_production_control_lib.full_path()],
+  depends : wyrelog_handle_production_control_lib,
+)
 
 test_template_tree = executable('test-template-tree',
   'test-template-tree.c',
@@ -2571,9 +2656,10 @@ if get_option('enable_audit').allowed()
     'test-audit-emit.c',
     c_args : [
       '-DWYL_HAS_AUDIT',
+      '-DWYL_TEST_HANDLE_SEAMS',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
   test('audit-emit', test_audit_emit,

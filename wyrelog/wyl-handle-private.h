@@ -114,6 +114,49 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
     (WylHandle * self);
+/* Serializes every handle-owned engine and symbol-map operation. Recursive
+ * ownership lets a decision, audit projection, or loader hold one complete
+ * engine session while calling the ordinary handle helpers. */
+GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef enum
+{
+  WYL_ENGINE_SESSION_WAITING,
+  WYL_ENGINE_SESSION_ACQUIRED,
+} WylEngineSessionCheckpoint;
+/* Test-only checkpoint around every engine-session acquisition. */
+void wyl_handle_set_engine_session_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (WylEngineSessionCheckpoint phase, gpointer data),
+    gpointer data);
+typedef enum
+{
+  WYL_ENGINE_REPLACEMENT_WAITING,
+  WYL_ENGINE_REPLACEMENT_ACQUIRED,
+} WylEngineReplacementCheckpoint;
+/* Test-only checkpoints immediately before and after replacement acquires the
+ * engine-session mutex. The callback is borrowed and must outlive the
+ * configured interval. */
+void wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (WylEngineReplacementCheckpoint phase,
+        gpointer data), gpointer data);
+/* Test-only one-shot checkpoint invoked after an exact relation's insert has
+ * acquired the engine-session mutex and before it touches either engine. */
+void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
+    const gchar * relation, void (*checkpoint) (gpointer data), gpointer data);
+/* Test-only one-shot checkpoint invoked by audit reconciliation after taking
+ * the outer engine-session lock and before touching store or engine state. */
+void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (gpointer data), gpointer data);
+/* Test-only cross-thread ownership probe and pending-delta snapshot. */
+gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
+guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
+#endif
+/* Reloads the policy engines while the caller owns the service-auth WRITE
+ * lease. The lease spans durable service lifecycle commit and projection, so
+ * no service resolver can observe the new lifecycle before its signed-policy
+ * EDB is coherent. */
+wyrelog_error_t wyl_handle_reload_engine_pair_with_service_auth_write
+    (WylHandle * self, WylServiceAuthWriteLease * write_lease);
 
 #ifdef WYL_HAS_FACT_STORE
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
@@ -271,6 +314,7 @@ typedef struct
 
 typedef WylHandleEngineFaultOnce WylHandleEngineInsertFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineRemoveFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineContainsFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaInsertFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaRemoveFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaStepFaultOnce;
@@ -296,6 +340,13 @@ static inline GQuark
 wyl_handle_engine_remove_fault_once_quark (void)
 {
   return g_quark_from_static_string ("wyrelog-handle-engine-remove-fault-once");
+}
+
+static inline GQuark
+wyl_handle_engine_contains_fault_once_quark (void)
+{
+  return
+      g_quark_from_static_string ("wyrelog-handle-engine-contains-fault-once");
 }
 
 static inline GQuark
@@ -368,6 +419,26 @@ wyl_handle_set_engine_remove_fault_once (WylHandle *self,
   g_object_set_qdata_full (G_OBJECT (self),
       wyl_handle_engine_remove_fault_once_quark (), fault,
       wyl_handle_engine_remove_fault_once_free);
+}
+
+/* Test-only fault hook for private query-path coverage. The next exact
+ * relation probe fails before snapshotting and clears the hook. */
+static inline void
+wyl_handle_set_engine_contains_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineContainsFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineContainsFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_contains_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
 }
 
 /*
@@ -498,6 +569,11 @@ wyrelog_error_t wyl_handle_load_policy_store_permission_state_events
 wyrelog_error_t wyl_handle_load_policy_store_principal_states (WylHandle *
     self);
 
+/* Loads service_principals lifecycle rows into the separate
+ * service_principal_state/2 EDB. It never writes human principal_state rows. */
+wyrelog_error_t wyl_handle_load_policy_store_service_principal_states
+    (WylHandle * self);
+
 /*
  * Loads principal_event rows from the handle-owned policy authority store into
  * the attached read/delta engine pair as principal_event/5 facts. Rejected
@@ -548,6 +624,10 @@ wyrelog_error_t wyl_handle_insert_audit_fact (WylHandle * self,
 wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols,
     gboolean * out_contains);
+
+/* Makes an uncertain request-local cleanup fail closed. All later engine
+ * operations reject the poisoned pair until an explicit successful reload. */
+void wyl_handle_poison_engine_pair (WylHandle * self);
 
 /*
  * Reads allow_bool/3 from the handle-owned read engine for @row
