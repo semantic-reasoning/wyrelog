@@ -22,6 +22,49 @@ def function_body(source: str, name: str) -> str:
     raise SystemExit(f"unterminated function: {name}")
 
 
+def without_c_comments(source: str) -> str:
+    output = []
+    index = 0
+    state = "code"
+    while index < len(source):
+        pair = source[index:index + 2]
+        char = source[index]
+        if state == "code" and pair in ("//", "/*"):
+            output.extend("  ")
+            index += 2
+            state = "line-comment" if pair == "//" else "block-comment"
+            continue
+        if state == "line-comment":
+            output.append("\n" if char == "\n" else " ")
+            index += 1
+            if char == "\n":
+                state = "code"
+            continue
+        if state == "block-comment":
+            if pair == "*/":
+                output.extend("  ")
+                index += 2
+                state = "code"
+            else:
+                output.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        output.append(char)
+        index += 1
+        if state in ("string", "char") and char == "\\":
+            if index < len(source):
+                output.append(source[index])
+                index += 1
+        elif state == "code" and char in ('"', "'"):
+            state = "string" if char == '"' else "char"
+        elif ((state == "string" and char == '"')
+              or (state == "char" and char == "'")):
+            state = "code"
+    if state in ("block-comment", "string", "char"):
+        raise SystemExit("unterminated C lexical construct")
+    return "".join(output)
+
+
 def check(source: str) -> None:
     handler = function_body(source, "refresh_handler")
     classifier = function_body(source, "human_refresh_classify_locked")
@@ -105,7 +148,19 @@ def check(source: str) -> None:
                      "*result = wyl_human_refresh_result_ref (state->successor)"):
         if required not in classifier:
             raise SystemExit(f"classifier lost grace replay: {required}")
-    if source.count('soup_server_add_handler (server, "/auth/refresh",') != 1:
+    server_start = function_body(
+        without_c_comments(source),
+        "wyl_daemon_start_http_server_with_runtime")
+    refresh_registrations = re.findall(
+        r"\b(wyl_daemon_http_add_(?:exact|prefix|singleton)_handler|"
+        r"soup_server_add_handler)\s*\(\s*server\s*,\s*"
+        r'"/auth/refresh"\s*,\s*([a-zA-Z_]\w*)\s*,\s*'
+        r"([a-zA-Z_]\w*)\s*,\s*([a-zA-Z_]\w*)\s*\)",
+        server_start,
+    )
+    if refresh_registrations != [
+            ("wyl_daemon_http_add_exact_handler", "refresh_handler", "ctx",
+             "NULL")]:
         raise SystemExit("refresh route must be registered exactly once")
     # The context owns one periodic source for service-auth expiry retirement.
     # It is not part of human refresh: keep the latter's old timeout machinery
@@ -267,6 +322,9 @@ def main() -> int:
     test_source = Path(sys.argv[2]).read_text(encoding="utf-8")
     check(source)
     check_test_lifecycle(test_source)
+    refresh_route = (
+        '  wyl_daemon_http_add_exact_handler (server, "/auth/refresh", '
+        "refresh_handler,\n      ctx, NULL);")
     replacements = (
         ("gboolean dispatch_owned = human_refresh_dispatch_owned (ctx)",
          "gboolean dispatch_owned = TRUE"),
@@ -278,6 +336,13 @@ def main() -> int:
          "g_hash_table_replace (ctx->access_tokens_by_jti, access_key, access_state);"),
         ("state->successor = committed;", ""),
         ("wyl_sensitive_string_free (state->token);", "g_free (state->token);"),
+        ('wyl_daemon_http_add_exact_handler (server, "/auth/refresh",',
+         'wyl_daemon_http_add_prefix_handler (server, "/auth/refresh",'),
+        (refresh_route, refresh_route + "\n" + refresh_route),
+        ('"/auth/refresh", refresh_handler,', '"/auth/refresh", login_handler,'),
+        (refresh_route, ""),
+        (refresh_route, "  /* disabled registration:\n"
+         + refresh_route + "\n  */"),
     )
     for index, (old, new) in enumerate(replacements):
         mutant = source.replace(old, new, 1)
@@ -288,6 +353,16 @@ def main() -> int:
         except SystemExit:
             continue
         raise SystemExit(f"structural guard accepted forbidden mutant {index}")
+    wrong_owner = (
+        source.replace(refresh_route, "", 1)
+        + "\nstatic void misplaced_refresh_route (void)\n{\n"
+        + refresh_route + "\n}\n")
+    try:
+        check(wrong_owner)
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit("structural guard accepted wrong-owner refresh route")
     for index, injection in enumerate((
             "g_main_context_iteration (ctx->dispatch_context, FALSE);",
             "soup_server_message_pause (msg);",
