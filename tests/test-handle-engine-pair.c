@@ -4285,6 +4285,49 @@ check_replacement_faults_preserve_published_pair (void)
   }
   return 0;
 }
+
+static wyrelog_error_t
+mutate_postcommit_not_found_probe (wyl_policy_store_t *store, gpointer data)
+{
+  (void) data;
+  return wyl_policy_store_grant_direct_permission (store,
+      "postcommit-not-found-user", "wr.audit.read",
+      "postcommit-not-found-scope");
+}
+
+static wyrelog_error_t
+verify_postcommit_not_found_probe (WylEngineVerification *verification,
+    gpointer data)
+{
+  (void) verification;
+  (void) data;
+  return WYRELOG_E_NOT_FOUND;
+}
+
+static gint
+check_postcommit_not_found_is_internal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 851;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_engine_session_run_committed_publication (session,
+          mutate_postcommit_not_found_probe, NULL,
+          verify_postcommit_not_found_probe, NULL, NULL, NULL)
+      != WYRELOG_E_INTERNAL)
+    return 852;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists
+      (wyl_handle_get_policy_store (handle), "postcommit-not-found-user",
+          "wr.audit.read", "postcommit-not-found-scope", &exists)
+      != WYRELOG_E_OK || !exists || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 853;
+  return 0;
+}
 #endif
 
 static gint
@@ -6186,6 +6229,8 @@ main (void)
   if ((rc = check_reentrant_callback_delivers_detached_batch_once ()) != 0)
     return rc;
   if ((rc = check_replacement_faults_preserve_published_pair ()) != 0)
+    return rc;
+  if ((rc = check_postcommit_not_found_is_internal ()) != 0)
     return rc;
 #endif
   if ((rc =

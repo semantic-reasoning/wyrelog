@@ -3270,8 +3270,11 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     state = PUBLICATION_PUBLISHED;
 
 out:
-  if (state == PUBLICATION_COMMITTED_UNPUBLISHED)
+  if (state == PUBLICATION_COMMITTED_UNPUBLISHED) {
+    if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_INTERNAL;
     poison_engine_pair_locked (self);
+  }
   if (store != NULL)
     wyl_handle_policy_store_unpin (self, store);
   if (store_rank_active)
