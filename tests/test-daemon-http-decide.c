@@ -934,18 +934,18 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 26;
+  const guint expected_exact = 31;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 25;
+  const guint expected_exact = 30;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 23;
+  const guint expected_exact = 28;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 22;
+  const guint expected_exact = 27;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 6
+  if (total != expected_total || prefixes != 4 || raw_singletons != 1
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -972,6 +972,11 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/graphs/seal",
     "/graphs",
     "/decide",
+    "/policy/permissions/grant",
+    "/policy/permissions/revoke",
+    "/policy/permissions/transition",
+    "/policy/roles/grant",
+    "/policy/roles/revoke",
 #ifdef WYL_HAS_FACT_STORE
     "/service-credential-operations",
     "/service-credential-operations/reconcile",
@@ -6355,6 +6360,72 @@ audit_event_probe_cb (const gchar *id, gint64 created_at_us,
 }
 
 static wyrelog_error_t
+audit_event_count_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) subject_id;
+  (void) action;
+  (void) resource_id;
+  (void) deny_reason;
+  (void) deny_origin;
+  (void) request_id;
+  (void) decision;
+  guint64 *count = user_data;
+  (*count)++;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+policy_audit_event_count (WylHandle *handle, guint64 *out_count)
+{
+  *out_count = 0;
+  return wyl_policy_store_foreach_audit_event
+      (wyl_handle_get_policy_store (handle), audit_event_count_cb, out_count)
+      == WYRELOG_E_OK;
+}
+
+static gint
+check_valid_policy_aliases (SoupServer *server, WylHandle *handle,
+    SoupSession *session, const gchar *base_url, const gchar *canonical_path,
+    const gchar *query, gint error_base)
+{
+  g_autofree gchar *descendant = g_strconcat (canonical_path, "/x", NULL);
+  g_autofree gchar *sibling = g_strconcat (canonical_path, "x", NULL);
+  const gchar *aliases[] = { descendant, sibling };
+  for (gsize i = 0; i < G_N_ELEMENTS (aliases); i++) {
+    WylDaemonExactRouteProbeSnapshot probe_before = { 0 }, probe_after = { 0 };
+    WylDaemonExactRouteStateSnapshot state_before = { 0 }, state_after = { 0 };
+    guint64 audit_before = 0, audit_after = 0;
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (!policy_audit_event_count (handle, &audit_before)
+        || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+            canonical_path, &probe_before)
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+            &state_before)
+        || send_raw_policy_mutation (session, "POST", base_url, aliases[i],
+            query, &status, &body) != 0
+        || status != 404
+        || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+            canonical_path, &probe_after)
+        || probe_after.selected != probe_before.selected + 1
+        || probe_after.terminal_entries != probe_before.terminal_entries
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+            &state_after)
+        || memcmp (&state_before, &state_after, sizeof state_before) != 0
+        || !policy_audit_event_count (handle, &audit_after)
+        || audit_after != audit_before)
+      return error_base + (gint) i;
+  }
+  return 0;
+}
+
+static wyrelog_error_t
 permission_state_probe_cb (const gchar *subject_id, const gchar *perm_id,
     const gchar *scope, const gchar *state, gpointer user_data)
 {
@@ -7014,6 +7085,13 @@ check_policy_permission_mutation_contract (SoupServer *server,
 #endif
   g_clear_pointer (&body, g_free);
 
+  rc = check_valid_policy_aliases (server, handle, session, base_url,
+      "/policy/permissions/transition", transition_denied_query, 2680);
+  if (rc != 0)
+    return rc;
+  if (permission_state_exists (handle, "state-target", "site.policy.read",
+          "tenant-a"))
+    return 2682;
   g_autofree gchar *transition_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
       "/policy/permissions/transition", transition_denied_query, &status,
@@ -7124,6 +7202,13 @@ check_policy_permission_mutation_contract (SoupServer *server,
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=49", session_token);
+  rc = check_valid_policy_aliases (server, handle, session, base_url,
+      "/policy/permissions/grant", grant_query, 2683);
+  if (rc != 0)
+    return rc;
+  if (direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 2685;
   g_autofree gchar *grant_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
       "/policy/permissions/grant", grant_query, &status, &body,
@@ -7207,6 +7292,13 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 159;
   g_clear_pointer (&body, g_free);
 
+  rc = check_valid_policy_aliases (server, handle, session, base_url,
+      "/policy/permissions/revoke", grant_query, 2686);
+  if (rc != 0)
+    return rc;
+  if (!direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 2688;
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/policy/permissions/revoke", grant_query, &status, &body);
   if (rc != 0)
@@ -7300,6 +7392,12 @@ check_policy_permission_mutation_contract (SoupServer *server,
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=29", session_token);
   g_clear_pointer (&body, g_free);
+  rc = check_valid_policy_aliases (server, handle, session, base_url,
+      "/policy/roles/grant", role_grant_query, 2689);
+  if (rc != 0)
+    return rc;
+  if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
+    return 2691;
   g_autofree gchar *role_grant_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
       "/policy/roles/grant", role_grant_query, &status, &body,
@@ -7353,6 +7451,13 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 163;
 
   g_clear_pointer (&body, g_free);
+  rc = check_valid_policy_aliases (server, handle, session, base_url,
+      "/policy/roles/revoke", role_grant_query, 2692);
+  if (rc != 0)
+    return rc;
+  if (!role_membership_exists (handle, "role-target", "site.reader",
+          "tenant-b"))
+    return 2694;
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/policy/roles/revoke", role_grant_query, &status, &body);
   if (rc != 0)

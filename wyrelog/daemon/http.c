@@ -12414,17 +12414,17 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       graphs_list_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/decide", decide_handler,
       ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server,
+  wyl_daemon_http_add_exact_handler (server,
       "/policy/permissions/grant", policy_permission_grant_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server,
+  wyl_daemon_http_add_exact_handler (server,
       "/policy/permissions/revoke",
       policy_permission_revoke_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server,
+  wyl_daemon_http_add_exact_handler (server,
       "/policy/permissions/transition",
       policy_permission_transition_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/policy/roles/grant",
+  wyl_daemon_http_add_exact_handler (server, "/policy/roles/grant",
       policy_role_grant_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/policy/roles/revoke",
+  wyl_daemon_http_add_exact_handler (server, "/policy/roles/revoke",
       policy_role_revoke_handler, ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/audit/events",
       audit_events_handler, ctx, NULL);

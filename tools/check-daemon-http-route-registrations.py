@@ -118,6 +118,11 @@ ISSUE_720_EXACT_PATHS = {
     "/graphs/seal",
     "/graphs",
     "/decide",
+    "/policy/permissions/grant",
+    "/policy/permissions/revoke",
+    "/policy/permissions/transition",
+    "/policy/roles/grant",
+    "/policy/roles/revoke",
 }
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
