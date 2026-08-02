@@ -7607,6 +7607,7 @@ typedef struct
 {
   GMutex mutex;
   GCond changed;
+  gboolean before_write;
   gboolean entered;
   gboolean release;
 } ServiceResponseRetireBarrier;
@@ -7765,16 +7766,20 @@ service_response_delivery_checkpoint (gint phase, const gchar *session_id,
 }
 
 static void
-service_response_retire_checkpoint (const gchar *session_id,
+service_response_retire_checkpoint (gint phase, const gchar *session_id,
     const gchar *jti, gpointer data)
 {
   (void) session_id;
   (void) jti;
   ServiceResponseRetireBarrier *barrier = data;
   g_mutex_lock (&barrier->mutex);
-  barrier->entered = TRUE;
+  if (phase == WYL_DAEMON_SERVICE_RESPONSE_RETIRE_BEFORE_WRITE_ACQUIRE)
+    barrier->before_write = TRUE;
+  else
+    barrier->entered = TRUE;
   g_cond_broadcast (&barrier->changed);
-  while (!barrier->release)
+  while (phase == WYL_DAEMON_SERVICE_RESPONSE_RETIRE_WRITE_ACQUIRED
+      && !barrier->release)
     g_cond_wait (&barrier->changed, &barrier->mutex);
   g_mutex_unlock (&barrier->mutex);
 }
@@ -7954,6 +7959,47 @@ service_response_delivery_wait (ServiceResponseDeliveryBarrier *barrier,
   return *flag;
 }
 
+static gint
+send_service_token_response_and_wait (SoupServer *server,
+    SoupSession *session, const gchar *base_url, const gchar *request_body,
+    guint *out_status, gchar **out_body, gboolean *out_completed)
+{
+  *out_completed = FALSE;
+  ServiceResponseDeliveryBarrier *barrier =
+      g_new0 (ServiceResponseDeliveryBarrier, 1);
+  g_mutex_init (&barrier->mutex);
+  g_cond_init (&barrier->changed);
+  barrier->release_handler = TRUE;
+  wyl_daemon_http_reset_service_response_authority_for_test (server);
+  wyl_daemon_http_set_service_response_checkpoint_for_test (server,
+      service_response_delivery_checkpoint, barrier);
+  gint rc = send_raw_service_principal_full (session, "POST", base_url,
+      "/auth/service-token", NULL, request_body, out_status, out_body);
+  if (rc == 0) {
+    g_mutex_lock (&barrier->mutex);
+    gboolean terminal = service_response_delivery_wait (barrier,
+        &barrier->terminal);
+    gboolean body_wiped = service_response_delivery_wait (barrier,
+        &barrier->body_wiped);
+    gboolean destroyed = service_response_delivery_wait (barrier,
+        &barrier->authority_destroyed);
+    *out_completed = terminal && body_wiped && destroyed
+        && barrier->terminal_phase == WYL_DAEMON_SERVICE_RESPONSE_FINISHED;
+    g_mutex_unlock (&barrier->mutex);
+  }
+  wyl_daemon_http_set_service_response_checkpoint_for_test (server, NULL, NULL);
+  if (*out_completed) {
+    g_free (barrier->session_id);
+    g_free (barrier->jti);
+    g_cond_clear (&barrier->changed);
+    g_mutex_clear (&barrier->mutex);
+    g_free (barrier);
+  }
+  /* On a failing timeout, keep the test-only barrier alive: a callback may
+   * already have copied its data pointer before the server unset above. */
+  return rc;
+}
+
 static gboolean
 service_response_retire_wait (ServiceResponseRetireBarrier *barrier)
 {
@@ -7964,6 +8010,19 @@ service_response_retire_wait (ServiceResponseRetireBarrier *barrier)
   gboolean entered = barrier->entered;
   g_mutex_unlock (&barrier->mutex);
   return entered;
+}
+
+static gboolean
+    service_response_retire_wait_before_write
+    (ServiceResponseRetireBarrier * barrier)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  g_mutex_lock (&barrier->mutex);
+  while (!barrier->before_write
+      && g_cond_wait_until (&barrier->changed, &barrier->mutex, deadline));
+  gboolean before_write = barrier->before_write;
+  g_mutex_unlock (&barrier->mutex);
+  return before_write;
 }
 
 static gboolean
@@ -8104,6 +8163,12 @@ check_service_response_delivery_abort (SoupServer *server,
   wyl_daemon_http_reset_service_response_authority_for_test (server);
   wyl_daemon_http_set_service_response_checkpoint_for_test (server,
       service_response_delivery_checkpoint, &barrier);
+  /* A graceful client close can be classified as FINISHED or ABORTED by
+   * different kernels before Soup observes it.  Keep the real raw close
+   * handshake, then deterministically emit Soup's request-aborted terminal
+   * signal after handoff so this test targets the portable Soup contract. */
+  wyl_daemon_http_set_service_publication_fault_for_test (server,
+      WYL_DAEMON_SERVICE_PUBLICATION_FAULT_EMIT_REQUEST_ABORTED_AFTER_HANDOFF);
   GThread *thread = g_thread_new ("dropped-service-response",
       dropped_service_token_response_thread, &dropped);
 
@@ -8240,7 +8305,8 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   gboolean delivery_initialized = FALSE;
   gboolean retire_initialized = FALSE;
   gboolean mutation_initialized = FALSE;
-  gint result = 19620 + (gint) kind * 10 + invalidator_first;
+  gint result_base = 196200 + (gint) kind * 100 + (invalidator_first ? 20 : 0);
+  gint result = result_base;
 
   if (!service_credential_store_fixture_init (&credential_store))
     return result;
@@ -8324,9 +8390,8 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   wyl_daemon_http_reset_service_response_authority_for_test (http.server);
   wyl_daemon_http_set_service_response_checkpoint_for_test (http.server,
       service_response_delivery_checkpoint, &delivery);
-  if (kind >= SERVICE_ABORT_PARTIAL_MISMATCH)
-    wyl_daemon_http_set_service_publication_fault_for_test (http.server,
-        WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK);
+  wyl_daemon_http_set_service_publication_fault_for_test (http.server,
+      WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK);
   if (kind < SERVICE_ABORT_PARTIAL_MISMATCH)
     wyl_daemon_http_set_service_response_retire_checkpoint_for_test
         (http.server, service_response_retire_checkpoint, &retire);
@@ -8341,12 +8406,16 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   gboolean socket_closed = service_response_delivery_wait (&delivery,
       &delivery.socket_closed);
   g_mutex_unlock (&delivery.mutex);
-  if (!pre_handoff || !socket_closed)
+  if (!pre_handoff || !socket_closed) {
+    result = result_base + 1;
     goto cleanup;
+  }
   g_thread_join (drop_thread);
   drop_thread = NULL;
-  if (dropped.rc != 0)
+  if (dropped.rc != 0) {
+    result = result_base + 2;
     goto cleanup;
+  }
   if (kind >= SERVICE_ABORT_PARTIAL_MISMATCH) {
     gboolean mutated = kind == SERVICE_ABORT_PARTIAL_MISMATCH
         ? wyl_daemon_http_remove_access_token_for_test (http.server,
@@ -8449,22 +8518,28 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   if (invalidator_first) {
     mutation_thread = g_thread_new ("delivery-race-invalidator",
         service_abort_mutation_thread, &mutation);
-    if (!service_abort_mutation_wait (&mutation))
+    if (!service_abort_mutation_wait (&mutation)) {
+      result = result_base + 3;
       goto cleanup;
+    }
     g_mutex_lock (&delivery.mutex);
     delivery.release_handler = TRUE;
     g_cond_broadcast (&delivery.changed);
     g_mutex_unlock (&delivery.mutex);
-    if (!service_abort_wait_writer_queued (http.server))
+    if (!service_response_retire_wait_before_write (&retire)) {
+      result = result_base + 4;
       goto cleanup;
+    }
     g_mutex_lock (&mutation.mutex);
     mutation.release = TRUE;
     g_cond_broadcast (&mutation.changed);
     g_mutex_unlock (&mutation.mutex);
     g_thread_join (mutation_thread);
     mutation_thread = NULL;
-    if (!service_response_retire_wait (&retire))
+    if (!service_response_retire_wait (&retire)) {
+      result = result_base + 5;
       goto cleanup;
+    }
     g_mutex_lock (&retire.mutex);
     retire.release = TRUE;
     g_cond_broadcast (&retire.changed);
@@ -8474,18 +8549,24 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
     delivery.release_handler = TRUE;
     g_cond_broadcast (&delivery.changed);
     g_mutex_unlock (&delivery.mutex);
-    if (!service_response_retire_wait (&retire))
+    if (!service_response_retire_wait (&retire)) {
+      result = result_base + 6;
       goto cleanup;
+    }
     mutation_thread = g_thread_new ("delivery-race-invalidator",
         service_abort_mutation_thread, &mutation);
-    if (!service_abort_wait_writer_queued (http.server))
+    if (!service_abort_wait_writer_queued (http.server)) {
+      result = result_base + 7;
       goto cleanup;
+    }
     g_mutex_lock (&retire.mutex);
     retire.release = TRUE;
     g_cond_broadcast (&retire.changed);
     g_mutex_unlock (&retire.mutex);
-    if (!service_abort_mutation_wait (&mutation))
+    if (!service_abort_mutation_wait (&mutation)) {
+      result = result_base + 8;
       goto cleanup;
+    }
     g_mutex_lock (&mutation.mutex);
     mutation.release = TRUE;
     g_cond_broadcast (&mutation.changed);
@@ -8499,9 +8580,16 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
       &delivery.terminal);
   gboolean body_wiped = service_response_delivery_wait (&delivery,
       &delivery.body_wiped);
+  gboolean fallback = service_response_delivery_wait (&delivery,
+      &delivery.unclaimed_fallback);
   gboolean destroyed = service_response_delivery_wait (&delivery,
       &delivery.authority_destroyed);
   g_mutex_unlock (&delivery.mutex);
+  if (!terminal || !body_wiped || !fallback || !destroyed) {
+    result = result_base + (!terminal ? 9 : !body_wiped ? 10 : !fallback ? 11
+        : 12);
+    goto cleanup;
+  }
   WylDaemonServiceResponseAuthoritySnapshot authority = { 0 };
   wyl_daemon_http_service_response_authority_snapshot_for_test (http.server,
       &authority);
@@ -8512,20 +8600,21 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   token = wyl_daemon_http_dup_last_service_publication_token_for_test
       (http.server);
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
-  if (!terminal || !body_wiped || !destroyed
-      || mutation.rc != WYRELOG_E_OK
+  if (mutation.rc != WYRELOG_E_OK
       || delivery.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_ABORTED
       || authority.aborted != 1 || authority.cleanup_failed != 0
       || authority.finished != 0 || authority.destroyed != 1
-      || authority.unclaimed_fallbacks != 0
+      || authority.unclaimed_fallbacks != 1
       || sessions != 0 || access != 0 || token == NULL
       || wyl_daemon_http_resolve_bearer_for_test (http.server, token, &sid,
           &actor, &tenant) != WYRELOG_E_POLICY
       || wyl_service_auth_authority_validate_available
       (wyl_handle_get_service_auth_authority (handle), handle,
           &reason) != WYRELOG_E_OK
-      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
+    result = result_base + 13;
     goto cleanup;
+  }
   result = 0;
 
 cleanup:
@@ -9150,10 +9239,10 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   guint route_status = 0;
   g_autofree gchar *route_body = NULL;
-  wyl_daemon_http_reset_service_response_authority_for_test (server);
-  if (send_raw_service_principal_full (session, "POST", base_url,
-          "/auth/service-token", NULL, request_body, &route_status,
-          &route_body) != 0)
+  gboolean route_response_completed = FALSE;
+  if (send_service_token_response_and_wait (server, session, base_url,
+          request_body, &route_status, &route_body,
+          &route_response_completed) != 0)
     return 1959;
   if (route_status != 200 || route_body == NULL)
     return 1959;
@@ -9169,7 +9258,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   gboolean route_response_all_zero = FALSE;
   wyl_daemon_http_service_response_wipe_snapshot_for_test (server,
       &route_response_wipes, &route_response_canary, &route_response_all_zero);
-  if (response_authority.created != 1 || response_authority.complete != 1
+  if (!route_response_completed
+      || response_authority.created != 1 || response_authority.complete != 1
       || response_authority.attached != 1
       || response_authority.finished != 1 || response_authority.aborted != 0
       || response_authority.cleanup_failed != 0
