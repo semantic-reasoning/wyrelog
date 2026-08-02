@@ -12406,11 +12406,11 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       tenant_unseal_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/tenants/delete",
       tenant_delete_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/graphs/create",
+  wyl_daemon_http_add_exact_handler (server, "/graphs/create",
       graph_create_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/graphs/seal",
+  wyl_daemon_http_add_exact_handler (server, "/graphs/seal",
       graph_seal_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/graphs",
+  wyl_daemon_http_add_exact_handler (server, "/graphs",
       graphs_list_handler, ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/decide", decide_handler,
       ctx, NULL);
