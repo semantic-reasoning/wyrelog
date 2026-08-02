@@ -3,6 +3,7 @@
 #include <glib/gstdio.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-compound-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -3413,6 +3414,7 @@ typedef struct
   gboolean contains;
   wyrelog_error_t operation_rc;
   wyrelog_error_t replacement_rc;
+  wyrelog_error_t poison_rc;
 } EngineOperationRace;
 
 static gboolean
@@ -3525,7 +3527,7 @@ static gpointer
 run_matrix_poison (gpointer data)
 {
   EngineOperationRace *race = data;
-  wyl_handle_poison_engine_pair (race->handle);
+  race->poison_rc = wyl_handle_poison_engine_pair (race->handle);
   g_mutex_lock (&race->mutex);
   race->poison_completed = TRUE;
   g_cond_broadcast (&race->changed);
@@ -3669,12 +3671,82 @@ check_poison_waits_for_inflight_operation (void)
   wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
   gboolean ok = waiting && blocked && race.poison_completed
       && race.operation_rc == WYRELOG_E_OK
+      && race.poison_rc == WYRELOG_E_OK
       && wyl_handle_engine_pair_is_poisoned (handle)
       && !wyl_handle_engine_pair_is_ready (handle)
       && wyl_handle_reload_engine_pair (handle) == WYRELOG_E_INVALID;
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
   return ok ? 0 : 826;
+}
+
+static gint
+check_engine_pair_status_and_poison_fail_closed_on_rank_failure (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (WylHandle) other = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK
+      || wyl_init (WYL_TEST_TEMPLATE_DIR, &other) != WYRELOG_E_OK)
+    return 841;
+
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+  WylEngine *other_read_engine = wyl_handle_get_read_engine (other);
+  WylEngine *other_delta_engine = wyl_handle_get_delta_engine (other);
+  const WylServiceAuthRank higher_ranks[] = {
+    WYL_SERVICE_AUTH_RANK_STORE,
+    WYL_SERVICE_AUTH_RANK_CONTEXT,
+    WYL_SERVICE_AUTH_RANK_REGISTRY,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (higher_ranks); i++) {
+    if (wyl_service_auth_rank_enter (handle, higher_ranks[i])
+        != WYRELOG_E_OK)
+      return 842;
+    gboolean failed_closed = !wyl_handle_engine_pair_is_ready (handle)
+        && wyl_handle_engine_pair_is_poisoned (handle)
+        && wyl_handle_poison_engine_pair (handle) == WYRELOG_E_BUSY;
+    if (wyl_service_auth_rank_leave (handle, higher_ranks[i])
+        != WYRELOG_E_OK)
+      return 843;
+    if (!failed_closed || !wyl_handle_engine_pair_is_ready (handle)
+        || wyl_handle_engine_pair_is_poisoned (handle)
+        || wyl_handle_get_read_engine (handle) != read_engine
+        || wyl_handle_get_delta_engine (handle) != delta_engine)
+      return 844;
+  }
+
+  if (wyl_service_auth_rank_enter (handle, WYL_SERVICE_AUTH_RANK_STORE)
+      != WYRELOG_E_OK)
+    return 845;
+  gboolean other_failed_closed = !wyl_handle_engine_pair_is_ready (other)
+      && wyl_handle_engine_pair_is_poisoned (other)
+      && wyl_handle_poison_engine_pair (other) == WYRELOG_E_BUSY;
+  if (wyl_service_auth_rank_leave (handle, WYL_SERVICE_AUTH_RANK_STORE)
+      != WYRELOG_E_OK)
+    return 846;
+  if (!other_failed_closed || !wyl_handle_engine_pair_is_ready (other)
+      || wyl_handle_engine_pair_is_poisoned (other)
+      || wyl_handle_get_read_engine (other) != other_read_engine
+      || wyl_handle_get_delta_engine (other) != other_delta_engine)
+    return 847;
+
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_service_auth_rank_enter (handle, WYL_SERVICE_AUTH_RANK_STORE)
+      != WYRELOG_E_OK)
+    return 848;
+  wyrelog_error_t failure =
+      wyl_handle_fail_committed_engine_projection (session, WYRELOG_E_IO);
+  if (wyl_service_auth_rank_leave (handle, WYL_SERVICE_AUTH_RANK_STORE)
+      != WYRELOG_E_OK)
+    return 849;
+  g_clear_pointer (&session, wyl_engine_session_release);
+  if (failure != WYRELOG_E_IO || wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_get_read_engine (handle) != NULL
+      || wyl_handle_get_delta_engine (handle) != NULL)
+    return 850;
+  return 0;
 }
 
 typedef struct _ReloadOrderRace ReloadOrderRace;
@@ -6045,8 +6117,9 @@ check_poisoned_pair_requires_verified_reconciliation (void)
   if (wyl_handle_intern_engine_symbol (handle, "poison-dup-witness",
           &symbol_id) != WYRELOG_E_OK)
     return 806;
-  wyl_handle_poison_engine_pair (handle);
-  wyl_handle_poison_engine_pair (handle);
+  if (wyl_handle_poison_engine_pair (handle) != WYRELOG_E_OK
+      || wyl_handle_poison_engine_pair (handle) != WYRELOG_E_OK)
+    return 807;
   gint64 row[1] = { 1 };
   gboolean contains = TRUE;
   if (wyl_handle_engine_pair_is_ready (handle)
@@ -6289,6 +6362,9 @@ main (void)
   if ((rc = check_engine_operations_serialize_with_replacement ()) != 0)
     return rc;
   if ((rc = check_poison_waits_for_inflight_operation ()) != 0)
+    return rc;
+  if ((rc = check_engine_pair_status_and_poison_fail_closed_on_rank_failure ())
+      != 0)
     return rc;
   if ((rc = check_concurrent_reloads_publish_in_acquisition_order ()) != 0)
     return rc;

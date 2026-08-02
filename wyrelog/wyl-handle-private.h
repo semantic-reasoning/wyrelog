@@ -344,7 +344,9 @@ wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
  */
 wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
 
-/* True only while one complete, non-poisoned engine pair is published. */
+/* True only while one complete, non-poisoned engine pair is published.
+ * Session-acquisition failure is reported fail-closed as not ready/poisoned
+ * without reading the unlocked aggregate. */
 gboolean wyl_handle_engine_pair_is_ready (WylHandle * self);
 gboolean wyl_handle_engine_pair_is_poisoned (WylHandle * self);
 
@@ -352,10 +354,13 @@ gboolean wyl_handle_engine_pair_is_poisoned (WylHandle * self);
  * Fences every evaluator entry point after a durable mutation whose runtime
  * publication outcome is uncertain. Poisoning is idempotent and discards the
  * current pair; only committed reconciliation may publish a ready pair again.
+ * The public helper returns BUSY without mutation when it cannot acquire the
+ * engine session. A post-commit caller must retain its existing session and
+ * use the committed-failure helper so fencing cannot silently be skipped.
  */
-void wyl_handle_poison_engine_pair (WylHandle * self);
-wyrelog_error_t wyl_handle_fail_committed_engine_projection (WylHandle * self,
-    wyrelog_error_t failure);
+wyrelog_error_t wyl_handle_poison_engine_pair (WylHandle * self);
+wyrelog_error_t wyl_handle_fail_committed_engine_projection
+    (WylEngineSession * session, wyrelog_error_t failure);
 
 typedef wyrelog_error_t (*WylEnginePairVerifier) (WylHandle * handle,
     gpointer data);

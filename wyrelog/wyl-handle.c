@@ -3058,6 +3058,8 @@ wyl_handle_engine_pair_is_ready (WylHandle *self)
   g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
+  if (engine_session == NULL)
+    return FALSE;
   return !engine_pair_unavailable (self);
 }
 
@@ -3067,25 +3069,31 @@ wyl_handle_engine_pair_is_poisoned (WylHandle *self)
   g_return_val_if_fail (WYL_IS_HANDLE (self), TRUE);
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
+  if (engine_session == NULL)
+    return TRUE;
   return self->engine_pair_poisoned;
 }
 
-void
+wyrelog_error_t
 wyl_handle_poison_engine_pair (WylHandle *self)
 {
-  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_val_if_fail (WYL_IS_HANDLE (self), WYRELOG_E_INVALID);
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
+  if (engine_session == NULL)
+    return WYRELOG_E_BUSY;
   poison_engine_pair_locked (self);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-wyl_handle_fail_committed_engine_projection (WylHandle *self,
+wyl_handle_fail_committed_engine_projection (WylEngineSession *session,
     wyrelog_error_t failure)
 {
-  g_return_val_if_fail (WYL_IS_HANDLE (self), WYRELOG_E_INVALID);
+  if (!engine_session_is_valid (session))
+    return WYRELOG_E_INVALID;
   g_return_val_if_fail (failure != WYRELOG_E_OK, WYRELOG_E_INVALID);
-  wyl_handle_poison_engine_pair (self);
+  poison_engine_pair_locked (session->handle);
   return failure;
 }
 
