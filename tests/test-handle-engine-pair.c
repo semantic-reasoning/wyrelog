@@ -3215,6 +3215,9 @@ typedef struct
   gboolean readiness_started;
   gboolean readiness_completed;
   gboolean readiness_result;
+  gboolean replacement_waiting;
+  gboolean replacement_acquired;
+  wyrelog_error_t replacement_rc;
   wyrelog_error_t decision_rc;
   wyl_decision_t decision;
 } EngineSessionDecisionRace;
@@ -3239,6 +3242,19 @@ block_guarded_decision (gpointer data)
   g_cond_broadcast (&race->changed);
   while (!race->allow_decision)
     g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+observe_engine_replacement (WylEngineReplacementCheckpoint phase, gpointer data)
+{
+  EngineSessionDecisionRace *race = data;
+  g_mutex_lock (&race->mutex);
+  if (phase == WYL_ENGINE_REPLACEMENT_WAITING)
+    race->replacement_waiting = TRUE;
+  else
+    race->replacement_acquired = TRUE;
+  g_cond_broadcast (&race->changed);
   g_mutex_unlock (&race->mutex);
 }
 
@@ -3275,6 +3291,14 @@ run_engine_readiness_probe (gpointer data)
   return NULL;
 }
 
+static gpointer
+run_engine_replacement (gpointer data)
+{
+  EngineSessionDecisionRace *race = data;
+  race->replacement_rc = wyl_handle_reload_engine_pair (race->handle);
+  return NULL;
+}
+
 static gint
 check_decision_holds_one_recursive_engine_session (void)
 {
@@ -3299,6 +3323,7 @@ check_decision_holds_one_recursive_engine_session (void)
     .handle = handle,
     .decision_rc = WYRELOG_E_INTERNAL,
     .decision = WYL_DECISION_DENY,
+    .replacement_rc = WYRELOG_E_INTERNAL,
   };
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
@@ -3317,6 +3342,17 @@ check_decision_holds_one_recursive_engine_session (void)
     return 802;
   }
 
+  wyl_handle_set_engine_replacement_checkpoint_for_test (handle,
+      observe_engine_replacement, &race);
+  GThread *replacement =
+      g_thread_new ("engine-session-replacement", run_engine_replacement,
+      &race);
+  gboolean replacement_waiting =
+      wait_for_engine_session_flag (&race, &race.replacement_waiting);
+  g_mutex_lock (&race.mutex);
+  gboolean replacement_blocked = !race.replacement_acquired;
+  g_mutex_unlock (&race.mutex);
+
   GThread *readiness =
       g_thread_new ("engine-session-readiness", run_engine_readiness_probe,
       &race);
@@ -3332,11 +3368,15 @@ check_decision_holds_one_recursive_engine_session (void)
   g_cond_broadcast (&race.changed);
   g_mutex_unlock (&race.mutex);
   g_thread_join (decision);
+  g_thread_join (replacement);
   g_thread_join (readiness);
   wyl_handle_set_engine_operation_checkpoint_for_test (handle, NULL, NULL,
       NULL);
+  wyl_handle_set_engine_replacement_checkpoint_for_test (handle, NULL, NULL);
   gboolean released = !wyl_handle_engine_session_locked_for_test (handle);
-  gboolean ok = started && blocked && owned && released
+  gboolean ok = replacement_waiting && replacement_blocked && started
+      && blocked && owned && released && race.replacement_acquired
+      && race.replacement_rc == WYRELOG_E_OK
       && race.readiness_completed && race.readiness_result
       && race.decision_rc == WYRELOG_E_OK
       && race.decision == WYL_DECISION_ALLOW;
@@ -3810,6 +3850,8 @@ check_policy_store_permission_states_reload_failure_preserves_pair (void)
     return 713;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
     return 714;
+  if (wyl_handle_pending_delta_count_for_test (handle) != 0)
+    return 804;
   if (wyl_handle_get_read_engine (handle) != read_engine)
     return 715;
   return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 716;

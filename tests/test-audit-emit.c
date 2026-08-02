@@ -30,6 +30,85 @@ static wyrelog_error_t intern_symbol (WylHandle * handle,
 static wyrelog_error_t insert_symbol_row2 (WylHandle * handle,
     const gchar * relation, const gchar * a, const gchar * b);
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean waiting;
+  gboolean replay_acquired;
+  wyrelog_error_t rc;
+} AuditReplayRace;
+
+static void
+observe_audit_replay_session (WylEngineSessionCheckpoint phase, gpointer data)
+{
+  AuditReplayRace *race = data;
+  g_mutex_lock (&race->mutex);
+  if (phase == WYL_ENGINE_SESSION_WAITING)
+    race->waiting = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+observe_audit_replay_acquired (gpointer data)
+{
+  AuditReplayRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->replay_acquired = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_audit_replay (gpointer data)
+{
+  AuditReplayRace *race = data;
+  race->rc = wyl_handle_load_policy_store_audit_events (race->handle);
+  return NULL;
+}
+
+static gint
+check_audit_replay_uses_engine_session (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 800;
+
+  AuditReplayRace race = {
+    .handle = handle,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (handle);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      observe_audit_replay_session, &race);
+  wyl_handle_set_audit_replay_checkpoint_for_test (handle,
+      observe_audit_replay_acquired, &race);
+  GThread *replay = g_thread_new ("audit-replay", run_audit_replay, &race);
+
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race.mutex);
+  while (!race.waiting
+      && g_cond_wait_until (&race.changed, &race.mutex, deadline));
+  gboolean blocked = race.waiting && !race.replay_acquired;
+  g_mutex_unlock (&race.mutex);
+  g_clear_pointer (&engine_locker, g_rec_mutex_locker_free);
+  g_thread_join (replay);
+
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  wyl_handle_set_audit_replay_checkpoint_for_test (handle, NULL, NULL);
+  gboolean ok = blocked && race.replay_acquired && race.rc == WYRELOG_E_OK;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok ? 0 : 801;
+}
+#endif
+
 static wyrelog_error_t
 insert_audit_base_fact (WylHandle *handle, const gchar *id,
     gint64 created_at_us)
@@ -3474,6 +3553,10 @@ int
 main (void)
 {
   gint rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if ((rc = check_audit_replay_uses_engine_session ()) != 0)
+    return rc;
+#endif
   if ((rc = check_service_lifecycle_audit_reconciliation ()) != 0)
     return rc;
   if ((rc = check_emit_inserts_a_row ()) != 0)
