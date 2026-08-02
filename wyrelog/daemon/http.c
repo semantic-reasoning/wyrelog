@@ -12426,7 +12426,7 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       policy_role_grant_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/policy/roles/revoke",
       policy_role_revoke_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/audit/events",
+  wyl_daemon_http_add_exact_handler (server, "/audit/events",
       audit_events_handler, ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/service-principals",
       service_principal_management_handler, ctx, NULL);
