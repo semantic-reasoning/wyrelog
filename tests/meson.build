@@ -403,7 +403,11 @@ if build_client
   )
   test('daemon-http-route-registrations',
     check_daemon_http_route_registrations,
-    args : [meson.project_source_root()],
+    args : [
+      meson.project_source_root(),
+      '--build-root', meson.project_build_root(),
+      '--compiler-id', meson.get_compiler('c').get_id(),
+    ],
   )
 
   test_daemon_http_mfa_c_args = [

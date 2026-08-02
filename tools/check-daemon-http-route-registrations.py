@@ -2,8 +2,15 @@
 """Fail closed over every production daemon HTTP ownership registration."""
 
 from dataclasses import dataclass
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import argparse
+import bisect
+import json
 from pathlib import Path
 import re
+import shlex
+import subprocess
 import sys
 import tempfile
 
@@ -132,12 +139,41 @@ class Registration:
     line: int
 
 
+@dataclass(frozen=True)
+class OwnershipOccurrence:
+    source: str
+    line: int
+    symbol: str
+    role: str
+
+
 def translation_phase_source(source: str) -> str:
     """Apply C phase-1 newline normalization and phase-2 line splicing."""
     if "\0" in source:
         raise GuardError("NUL byte in preprocessing input")
     normalized = source.replace("\r\n", "\n").replace("\r", "\n")
     return normalized.replace("\\\n", "")
+
+
+def translation_phase_source_with_lines(source: str) -> tuple[str, list[int]]:
+    if "\0" in source:
+        raise GuardError("NUL byte in preprocessing input")
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    output = []
+    physical_line = 1
+    line_map = [physical_line]
+    index = 0
+    while index < len(normalized):
+        if normalized.startswith("\\\n", index):
+            physical_line += 1
+            index += 2
+            continue
+        output.append(normalized[index])
+        if normalized[index] == "\n":
+            physical_line += 1
+            line_map.append(physical_line)
+        index += 1
+    return "".join(output), line_map
 
 
 def lex(source: str) -> list[Token]:
@@ -265,6 +301,31 @@ def functions(tokens: list[Token], pairing: dict[int, int]):
                 result.append((token.value, index, body_start + 1, body_end))
                 index = body_end
         index += 1
+    return result
+
+
+def ownership_occurrences(tokens: list[Token], pairing: dict[int, int],
+                          location_for_line) -> list[OwnershipOccurrence]:
+    definitions = functions(tokens, pairing)
+    definition_names = {name_index: owner
+                        for owner, name_index, _start, _end in definitions}
+    bodies = [(start, end, owner)
+              for owner, _name_index, start, end in definitions]
+    result = []
+    for index, token in enumerate(tokens):
+        if (token.kind != "identifier"
+                or OWNERSHIP_API.fullmatch(token.value) is None):
+            continue
+        if index in definition_names:
+            role = f"definition:{definition_names[index]}"
+        else:
+            owner = next((name for start, end, name in bodies
+                          if start <= index < end), "<global>")
+            role = (f"call:{owner}" if index + 1 < len(tokens)
+                    and tokens[index + 1].value == "("
+                    else f"indirect:{owner}")
+        source, line = location_for_line(token.line)
+        result.append(OwnershipOccurrence(source, line, token.value, role))
     return result
 
 
@@ -518,15 +579,40 @@ def scan_source(path: Path) -> list[Registration]:
     return registrations
 
 
+def project_preprocessing_inputs(root: Path) -> list[Path]:
+    if (root / ".git").exists() or (root / ".git").is_file():
+        completed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", "*.h", "*.inc"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if completed.returncode != 0:
+            raise GuardError("cannot enumerate project preprocessing inputs")
+        paths = []
+        for raw_path in completed.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            try:
+                relative = raw_path.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as error:
+                raise GuardError("non-UTF-8 project preprocessing path") from error
+            path = (root / relative).resolve()
+            if not path.is_file():
+                raise GuardError(f"tracked preprocessing input is missing: "
+                                 f"{relative}")
+            paths.append(path)
+        return sorted(paths)
+    return sorted({
+        path for suffix in ("*.h", "*.inc")
+        for path in root.rglob(suffix)
+        if "subprojects" not in path.relative_to(root).parts
+    })
+
+
 def check_root(root: Path) -> list[Registration]:
     source_root = root / "wyrelog"
     sources = sorted(source_root.rglob("*.c"))
     if not sources:
         raise GuardError("no production C sources discovered")
-    preprocessing_inputs = sorted({
-        path for suffix in ("*.h", "*.inc")
-        for path in source_root.rglob(suffix)
-    })
+    preprocessing_inputs = project_preprocessing_inputs(root)
     for preprocessing_input in preprocessing_inputs:
         hidden_registrations = scan_source(preprocessing_input)
         if hidden_registrations:
@@ -561,6 +647,470 @@ def check_root(root: Path) -> list[Registration]:
             raise GuardError(f"registration feature mismatch: "
                              f"{registration.path}")
     return registrations
+
+
+def scan_generated_inputs(build_root: Path) -> list[Path]:
+    result = []
+    for suffix in ("*.h", "*.inc"):
+        for path in build_root.rglob(suffix):
+            relative = path.relative_to(build_root)
+            if "subprojects" not in relative.parts:
+                result.append(path)
+    return sorted(set(result))
+
+
+def raw_approved_occurrences(root: Path,
+                             build_root: Path) -> Counter[OwnershipOccurrence]:
+    paths = sorted({
+        path for path in (root / "wyrelog").rglob("*.c")
+    } | set(project_preprocessing_inputs(root)))
+    generated = scan_generated_inputs(build_root)
+    for path in generated:
+        hidden_registrations = scan_source(path)
+        if hidden_registrations:
+            raise GuardError(f"registration in generated preprocessing input: "
+                             f"{path}")
+    occurrences = []
+    for path in paths + generated:
+        source, line_map = translation_phase_source_with_lines(
+            path.read_text(encoding="utf-8"))
+        tokens = lex(source)
+        pairing = mates(tokens)
+        if path in generated:
+            label = "@build/" + path.relative_to(build_root).as_posix()
+        else:
+            label = path.relative_to(root).as_posix()
+        occurrences.extend(ownership_occurrences(
+            tokens, pairing,
+            lambda line, label=label, line_map=line_map:
+            (label, line_map[line - 1])))
+    return Counter(occurrences)
+
+
+def raw_feature_optional_occurrences(root: Path) \
+        -> Counter[OwnershipOccurrence]:
+    path = root / "wyrelog" / "daemon" / "http.c"
+    raw = path.read_text(encoding="utf-8")
+    source, line_map = translation_phase_source_with_lines(raw)
+    optional = []
+    for registration in scan_source(path):
+        spec = EXPECTED_BY_PATH[registration.path]
+        if spec.feature is None:
+            continue
+        optional.append(OwnershipOccurrence(
+            registration.source.relative_to(root).as_posix(),
+            line_map[registration.line - 1], registration.api,
+            f"call:{SERVER_OWNER}"))
+    return Counter(optional)
+
+
+def windows_command_line_split(command: str) -> list[str]:
+    arguments = []
+    index = 0
+    while index < len(command):
+        while index < len(command) and command[index].isspace():
+            index += 1
+        if index >= len(command):
+            break
+        value = []
+        quoted = False
+        while index < len(command) and (quoted or not command[index].isspace()):
+            if command[index] == "\\":
+                start = index
+                while index < len(command) and command[index] == "\\":
+                    index += 1
+                count = index - start
+                if index < len(command) and command[index] == '"':
+                    value.extend("\\" * (count // 2))
+                    if count % 2:
+                        value.append('"')
+                    else:
+                        quoted = not quoted
+                    index += 1
+                else:
+                    value.extend("\\" * count)
+                continue
+            if command[index] == '"':
+                quoted = not quoted
+                index += 1
+                continue
+            value.append(command[index])
+            index += 1
+        if quoted:
+            raise GuardError("unterminated Windows compiler command quote")
+        arguments.append("".join(value))
+    return arguments
+
+
+def expand_response_files(arguments: list[str], directory: Path,
+                          windows: bool, stack: tuple[Path, ...] = (),
+                          depth: int = 0) -> list[str]:
+    if depth > 16:
+        raise GuardError("compiler response nesting is too deep")
+    expanded = []
+    for argument in arguments:
+        if not argument.startswith("@") or argument == "@":
+            expanded.append(argument)
+            continue
+        response = Path(argument[1:])
+        response = (response if response.is_absolute()
+                    else directory / response).resolve()
+        if response in stack:
+            raise GuardError("compiler response-file cycle")
+        try:
+            content = response.read_text(encoding="utf-8-sig")
+            nested = (windows_command_line_split(content) if windows
+                      else shlex.split(content, posix=True))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise GuardError(f"cannot expand compiler response: "
+                             f"{response}") from error
+        expanded.extend(expand_response_files(
+            nested, directory, windows, stack + (response,), depth + 1))
+    return expanded
+
+
+def resolve_argument_path(argument: str, directory: Path) -> Path:
+    path = Path(argument)
+    return (path if path.is_absolute() else directory / path).resolve()
+
+
+def semantic_command(arguments: list[str], directory: Path, source: Path,
+                     compiler_id: str) -> list[str]:
+    if compiler_id not in {"gcc", "clang", "clang-cl", "msvc"}:
+        raise GuardError(f"unsupported compiler dialect: {compiler_id}")
+    windows = compiler_id in {"clang-cl", "msvc"}
+    arguments = expand_response_files(arguments, directory, windows)
+    if not arguments:
+        raise GuardError("empty compiler command")
+    result = []
+    source_count = 0
+    index = 0
+    paired = {"-o", "-MF", "-MT", "-MQ", "-MJ"}
+    windows_paired = {"/fo", "/fd", "/fe", "/sourcedependencies",
+                      "/scandependencies"}
+    standalone = {"-c", "-MD", "-MMD", "-MP", "-MG", "-M", "-MM"}
+    while index < len(arguments):
+        argument = arguments[index]
+        lower = argument.lower()
+        if index > 0:
+            try:
+                is_source = resolve_argument_path(argument, directory) == source
+            except (OSError, ValueError):
+                is_source = False
+            if is_source:
+                source_count += 1
+                index += 1
+                continue
+        if argument in paired or lower in windows_paired:
+            if index + 1 >= len(arguments):
+                raise GuardError(f"compiler option lacks operand: {argument}")
+            index += 2
+            continue
+        if (argument in standalone or lower in {"/c", "/showincludes"}
+                or re.match(r"^-(?:o|MF|MT|MQ|MJ).+", argument)
+                or any(lower.startswith(prefix) and lower != prefix
+                       for prefix in windows_paired)):
+            index += 1
+            continue
+        result.append(argument)
+        index += 1
+    if source_count != 1:
+        raise GuardError(f"compile entry contains source {source_count} times")
+    if windows:
+        result.extend(["/nologo", "/E", "/TC", str(source)])
+    else:
+        result.extend(["-E", "-x", "c", str(source)])
+    return result
+
+
+@dataclass(frozen=True)
+class CompileUnit:
+    source: Path
+    directory: Path
+    arguments: tuple[str, ...]
+
+
+def production_compile_units(root: Path, build_root: Path,
+                             compiler_id: str) -> list[CompileUnit]:
+    database_path = build_root / "compile_commands.json"
+    if not database_path.is_file():
+        raise GuardError(f"missing compile database: {database_path}")
+    try:
+        database = json.loads(database_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise GuardError("invalid compile database") from error
+    if not isinstance(database, list):
+        raise GuardError("compile database root must be an array")
+    windows = compiler_id in {"clang-cl", "msvc"}
+    units = []
+    outputs = set()
+    for entry in database:
+        if not isinstance(entry, dict):
+            raise GuardError("invalid compile database entry")
+        try:
+            directory = Path(entry["directory"]).resolve()
+            source = resolve_argument_path(entry["file"], directory)
+        except (KeyError, TypeError, OSError, ValueError) as error:
+            raise GuardError("compile entry lacks canonical directory/file") from error
+        try:
+            relative_source = source.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if not (relative_source.startswith("wyrelog/")
+                and relative_source.endswith(".c")):
+            continue
+        output_value = entry.get("output")
+        if not isinstance(output_value, str) or not output_value:
+            raise GuardError(f"production compile entry lacks output: "
+                             f"{relative_source}")
+        output = resolve_argument_path(output_value, directory)
+        try:
+            relative_output = output.relative_to(build_root).as_posix()
+        except ValueError:
+            continue
+        if not relative_output.startswith("wyrelog/"):
+            continue
+        if output in outputs:
+            raise GuardError(f"ambiguous production compile output: {output}")
+        outputs.add(output)
+        if "arguments" in entry:
+            arguments = entry["arguments"]
+            if (not isinstance(arguments, list)
+                    or not all(isinstance(item, str) for item in arguments)):
+                raise GuardError("invalid compile entry arguments")
+        elif isinstance(entry.get("command"), str):
+            try:
+                arguments = (windows_command_line_split(entry["command"])
+                             if windows else
+                             shlex.split(entry["command"], posix=True))
+            except ValueError as error:
+                raise GuardError("invalid compiler command quoting") from error
+        else:
+            raise GuardError("compile entry lacks arguments/command")
+        unit = CompileUnit(source, directory, tuple(arguments))
+        units.append(unit)
+    daemon_http = (root / "wyrelog" / "daemon" / "http.c").resolve()
+    daemon_units = [unit for unit in units if unit.source == daemon_http]
+    if not daemon_units:
+        raise GuardError("production daemon HTTP translation unit is missing")
+    if len(daemon_units) != 1:
+        raise GuardError("ambiguous production daemon HTTP translation unit")
+    return sorted(units, key=lambda unit: (unit.source.as_posix(),
+                                           unit.arguments))
+
+
+LINE_MARKER = re.compile(
+    r'^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+'
+    r'"([^"\r\n]+)"(?:[ \t]+.*)?$')
+
+
+def canonical_provenance(marked: str, directory: Path, root: Path,
+                         build_root: Path) -> str | None:
+    if marked.startswith("<") and marked.endswith(">"):
+        return None
+    marked = marked.replace("\\\\", "\\")
+    path = Path(marked)
+    path = (path if path.is_absolute() else directory / path).resolve()
+    try:
+        relative = path.relative_to(build_root)
+        if "subprojects" in relative.parts:
+            return None
+        return "@build/" + relative.as_posix()
+    except ValueError:
+        pass
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if relative.parts and relative.parts[0] in {".git", "subprojects"}:
+        return None
+    return relative.as_posix()
+
+
+def preprocessed_ownership_occurrences(
+        output: str, unit: CompileUnit, root: Path, build_root: Path,
+        raw_roles: dict[tuple[str, int, str], str]) \
+        -> Counter[OwnershipOccurrence]:
+    marker_pattern = re.compile(
+        r'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+'
+        r'"([^"\r\n]+)"(?:[ \t]+[^\r\n]*)?\r?$')
+    marker_starts = []
+    markers = []
+    saw_unit = False
+    unit_label = unit.source.relative_to(root).as_posix()
+    for marker in marker_pattern.finditer(output):
+        source = canonical_provenance(
+            marker.group(2), unit.directory, root, build_root)
+        if source == unit_label:
+            saw_unit = True
+        content_start = marker.end()
+        if content_start < len(output) and output[content_start] == "\r":
+            content_start += 1
+        if content_start < len(output) and output[content_start] == "\n":
+            content_start += 1
+        marker_starts.append(content_start)
+        markers.append((source, int(marker.group(1))))
+    if not markers:
+        raise GuardError("preprocessor output contains no line markers")
+    if not saw_unit:
+        raise GuardError("preprocessor output contains no source marker")
+    for candidate in re.finditer(
+            r'(?m)^[ \t]*#[ \t]*(?:line\b|[0-9])[^\r\n]*$', output):
+        if LINE_MARKER.fullmatch(candidate.group(0)) is None:
+            raise GuardError("malformed preprocessor line marker")
+
+    sensitive = re.compile(
+        r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
+        r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)")
+    result: Counter[OwnershipOccurrence] = Counter()
+    visited_lines = set()
+    for match in sensitive.finditer(output):
+        line_start = output.rfind("\n", 0, match.start()) + 1
+        if line_start in visited_lines:
+            continue
+        visited_lines.add(line_start)
+        marker_index = bisect.bisect_right(marker_starts, line_start) - 1
+        if marker_index < 0:
+            continue
+        source, marker_line = markers[marker_index]
+        if source is None:
+            continue
+        line_end = output.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(output)
+        line_text = output[line_start:line_end]
+        tokens = lex(line_text)
+        physical_line = marker_line + output.count(
+            "\n", marker_starts[marker_index], line_start)
+        for index, token in enumerate(tokens):
+            if (token.kind != "identifier"
+                    or OWNERSHIP_API.fullmatch(token.value) is None):
+                continue
+            key = (source, physical_line, token.value)
+            role = raw_roles.get(key, "expanded-or-unapproved")
+            if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
+                role = "expanded-or-unapproved"
+            result[OwnershipOccurrence(source, physical_line, token.value,
+                                       role)] += 1
+    return result
+
+
+def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
+                    compiler_id: str,
+                    raw_roles: dict[tuple[str, int, str], str]) \
+        -> Counter[OwnershipOccurrence]:
+    command = semantic_command(list(unit.arguments), unit.directory,
+                               unit.source, compiler_id)
+    try:
+        completed = subprocess.run(
+            command, cwd=unit.directory, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False)
+    except OSError as error:
+        raise GuardError(f"preprocessor execution failed: {error}") from error
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", errors="replace")
+        raise GuardError(f"preprocessor rejected {unit.source}: {diagnostic}")
+    try:
+        output = completed.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise GuardError(f"preprocessor emitted non-UTF-8 output: "
+                         f"{unit.source}") from error
+    unit_marker = f'"{unit.source}"'
+    if unit_marker not in output:
+        alternates = {
+            unit_marker.replace("\\", "/"),
+            unit_marker.replace("\\", "\\\\"),
+        }
+        if not any(alternate in output for alternate in alternates):
+            raise GuardError("preprocessor output contains no source marker")
+
+    result: Counter[OwnershipOccurrence] = Counter()
+    visited_lines = set()
+    for needle in ("soup_server_add_", "add_exact_handler",
+                   "add_prefix_handler", "add_singleton_handler"):
+        cursor = 0
+        while True:
+            position = output.find(needle, cursor)
+            if position < 0:
+                break
+            cursor = position + len(needle)
+            line_start = output.rfind("\n", 0, position) + 1
+            if line_start in visited_lines:
+                continue
+            visited_lines.add(line_start)
+            marker_start = line_start
+            marker = None
+            while marker_start > 0:
+                marker_end = marker_start - 1
+                marker_start = output.rfind("\n", 0, marker_end) + 1
+                candidate = output[marker_start:marker_end].rstrip("\r")
+                if candidate.lstrip().startswith("#"):
+                    marker = LINE_MARKER.fullmatch(candidate)
+                    if marker is None and re.match(
+                            r'^[ \t]*#[ \t]*(?:line\b|[0-9])', candidate):
+                        raise GuardError("malformed preprocessor line marker")
+                    if marker is not None:
+                        break
+                if marker_start == 0:
+                    break
+            if marker is None:
+                raise GuardError("ownership output lacks a line marker")
+            source = canonical_provenance(
+                marker.group(2), unit.directory, root, build_root)
+            if source is None:
+                continue
+            physical_line = int(marker.group(1)) + output.count(
+                "\n", marker_end + 1, line_start)
+            line_end = output.find("\n", line_start)
+            if line_end < 0:
+                line_end = len(output)
+            tokens = lex(output[line_start:line_end])
+            for index, token in enumerate(tokens):
+                if (token.kind != "identifier"
+                        or OWNERSHIP_API.fullmatch(token.value) is None):
+                    continue
+                key = (source, physical_line, token.value)
+                role = raw_roles.get(key, "expanded-or-unapproved")
+                if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
+                    role = "expanded-or-unapproved"
+                result[OwnershipOccurrence(source, physical_line,
+                                           token.value, role)] += 1
+    return result
+
+
+def semantic_occurrences(root: Path, build_root: Path,
+                         compiler_id: str,
+                         raw: Counter[OwnershipOccurrence]) \
+        -> Counter[OwnershipOccurrence]:
+    units = production_compile_units(root, build_root, compiler_id)
+    raw_roles = {}
+    for occurrence in raw:
+        key = (occurrence.source, occurrence.line, occurrence.symbol)
+        if key in raw_roles and raw_roles[key] != occurrence.role:
+            raise GuardError(f"ambiguous raw ownership role: {key!r}")
+        raw_roles[key] = occurrence.role
+    workers = min(8, max(1, len(units)))
+    result: Counter[OwnershipOccurrence] = Counter()
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(preprocess_unit, unit, root, build_root,
+                                   compiler_id, raw_roles) for unit in units]
+        for future in futures:
+            result.update(future.result())
+    return result
+
+
+def check_semantic_boundary(root: Path, build_root: Path,
+                            compiler_id: str) -> None:
+    raw = raw_approved_occurrences(root, build_root)
+    expanded = semantic_occurrences(root, build_root, compiler_id, raw)
+    missing_counter = raw - expanded
+    unexpected_counter = expanded - raw
+    unapproved_missing = missing_counter - raw_feature_optional_occurrences(root)
+    if unapproved_missing or unexpected_counter:
+        missing = list(unapproved_missing.elements())[:8]
+        unexpected = list(unexpected_counter.elements())[:8]
+        raise GuardError("preprocessed ownership map differs from raw approval; "
+                         f"missing={missing!r}; unexpected={unexpected!r}")
 
 
 def fixture_source() -> str:
@@ -619,6 +1169,32 @@ def expect_failure(root: Path, message: str) -> None:
     except GuardError:
         return
     raise GuardError(f"negative fixture accepted: {message}")
+
+
+def expect_guard_error(callback, message: str) -> None:
+    try:
+        callback()
+    except GuardError:
+        return
+    raise GuardError(f"negative fixture accepted: {message}")
+
+
+def semantic_fixture_result(root: Path, build_root: Path, source: Path,
+                            marked: Path, symbol: str,
+                            marker_style: str = "gcc") \
+        -> Counter[OwnershipOccurrence]:
+    unit = CompileUnit(source.resolve(), root.resolve(), ("cc", str(source)))
+    source_directive = (f'#line 1 "{source.resolve()}"'
+                        if marker_style == "clang-cl"
+                        else f'# 1 "{source.resolve()}"')
+    directive = (f'#line 17 "{marked.resolve()}"'
+                 if marker_style == "clang-cl"
+                 else f'# 17 "{marked.resolve()}"')
+    output = source_directive + "\n" + directive \
+        + f"\n{symbol}(server, \"/hidden\", callback, " \
+        "data, NULL);\n"
+    return preprocessed_ownership_occurrences(
+        output, unit, root.resolve(), build_root.resolve(), {})
 
 
 def self_test() -> None:
@@ -728,6 +1304,142 @@ def self_test() -> None:
             hidden_header.unlink()
 
         source_path.write_text(baseline, encoding="utf-8")
+        semantic_macros = {
+            "one-level generic paste": (
+                "#define CAT_RAW(a,b) a ## b\n"
+                "#define HIDDEN_ADD CAT_RAW(soup_server_, add_handler)\n",
+                SOUP_API),
+            "two-level paste": (
+                "#define A soup_server_\n#define B add_handler\n"
+                "#define CAT_RAW(a,b) a ## b\n"
+                "#define CAT(a,b) CAT_RAW(a,b)\n"
+                "#define HIDDEN_ADD CAT(A,B)\n", SOUP_API),
+            "three-token paste": (
+                "#define CAT3_RAW(a,b,c) a ## b ## c\n"
+                "#define CAT3(a,b,c) CAT3_RAW(a,b,c)\n"
+                "#define HIDDEN_ADD CAT3(soup_,server_add_,handler)\n",
+                SOUP_API),
+            "argument-fragment exact wrapper": (
+                "#define CAT_RAW(a,b) a ## b\n"
+                "#define CAT(a,b) CAT_RAW(a,b)\n"
+                "#define HIDDEN_ADD CAT(wyl_daemon_http_add_,exact_handler)\n",
+                EXACT_API),
+            "argument-fragment prefix wrapper": (
+                "#define CAT_RAW(a,b) a ## b\n"
+                "#define CAT(a,b) CAT_RAW(a,b)\n"
+                "#define HIDDEN_ADD CAT(wyl_daemon_http_add_,prefix_handler)\n",
+                PREFIX_API),
+            "argument-fragment singleton wrapper": (
+                "#define CAT_RAW(a,b) a ## b\n"
+                "#define CAT(a,b) CAT_RAW(a,b)\n"
+                "#define HIDDEN_ADD CAT(wyl_daemon_http_add_,singleton_handler)\n",
+                RAW_SINGLETON_API),
+        }
+        server_anchor = (
+            "static void wyl_daemon_start_http_server_with_runtime(void) {")
+        hidden_call = (
+            server_anchor + "\n  HIDDEN_ADD(server, \"/hidden\", callback, "
+            "data, NULL);")
+        for name, (macros, symbol) in semantic_macros.items():
+            semantic_source = macros + baseline.replace(
+                server_anchor, hidden_call, 1)
+            source_path.write_text(semantic_source, encoding="utf-8")
+            check_root(root)
+            result = semantic_fixture_result(
+                root, root / "build", source_path, source_path, symbol)
+            if not any(item.symbol == symbol
+                       and item.role == "expanded-or-unapproved"
+                       for item in result):
+                raise GuardError(f"semantic fixture accepted: {name}")
+
+        nested = daemon / "nested-route.h"
+        inner = daemon / "inner-route.h"
+        inner.write_text(semantic_macros["two-level paste"][0],
+                         encoding="utf-8")
+        nested.write_text('#include "inner-route.h"\n', encoding="utf-8")
+        source_path.write_text(
+            '#include <nested-route.h>\n' + baseline.replace(
+                server_anchor, hidden_call, 1), encoding="utf-8")
+        check_root(root)
+        result = semantic_fixture_result(
+            root, root / "build", source_path, inner, SOUP_API, "clang-cl")
+        if not result:
+            raise GuardError("nested angle-header semantic alias accepted")
+        nested.unlink()
+        inner.unlink()
+
+        forced = daemon / "forced-route.h"
+        forced.write_text(semantic_macros["two-level paste"][0],
+                          encoding="utf-8")
+        generated_root = root / "build" / "generated"
+        generated_root.mkdir(parents=True)
+        generated = generated_root / "route-config.h"
+        generated.write_text(semantic_macros["three-token paste"][0],
+                             encoding="utf-8")
+        source_path.write_text(baseline.replace(
+            server_anchor, hidden_call, 1), encoding="utf-8")
+        check_root(root)
+        if not semantic_fixture_result(
+                root, root / "build", source_path, forced, SOUP_API):
+            raise GuardError("forced-header semantic alias accepted")
+        generated_result = semantic_fixture_result(
+            root, root / "build", source_path, generated, SOUP_API)
+        if not any(item.source.startswith("@build/")
+                   for item in generated_result):
+            raise GuardError("generated-header semantic alias accepted")
+        forced.unlink()
+
+        gcc_command = semantic_command(
+            ["cc", "-I", "include", "-include", "forced-route.h", "-MD",
+             "-MF", "dep.d", "-o", "out.o", "-c", str(source_path)],
+            root, source_path.resolve(), "gcc")
+        if gcc_command[-4:] != ["-E", "-x", "c", str(source_path.resolve())]:
+            raise GuardError("GCC-like semantic command fixture failed")
+        if "-include" not in gcc_command or "forced-route.h" not in gcc_command:
+            raise GuardError("GCC forced include was not retained")
+        clang_cl_command = semantic_command(
+            ["clang-cl", "/Iinclude", "/FIforced-route.h", "/Foout.obj",
+             "/c", str(source_path)], root, source_path.resolve(), "clang-cl")
+        if clang_cl_command[-4:] != [
+                "/nologo", "/E", "/TC", str(source_path.resolve())]:
+            raise GuardError("clang-cl semantic command fixture failed")
+        if ("/Iinclude" not in clang_cl_command
+                or "/FIforced-route.h" not in clang_cl_command):
+            raise GuardError("clang-cl include option was not retained")
+        response = root / "compiler.rsp"
+        response.write_text("-DROUTE_SEMANTIC=1\n", encoding="utf-8")
+        response_command = semantic_command(
+            ["cc", f"@{response}", str(source_path)], root,
+            source_path.resolve(), "gcc")
+        if "-DROUTE_SEMANTIC=1" not in response_command:
+            raise GuardError("GCC response-file fixture failed")
+        response.write_text('/DROUTE_SEMANTIC=1\n', encoding="utf-8")
+        response_command = semantic_command(
+            ["clang-cl", f"@{response}", str(source_path)], root,
+            source_path.resolve(), "clang-cl")
+        if "/DROUTE_SEMANTIC=1" not in response_command:
+            raise GuardError("clang-cl response-file fixture failed")
+        response.unlink()
+        expect_guard_error(
+            lambda: semantic_command(["cc", str(source_path)], root,
+                                     source_path.resolve(), "unknown"),
+            "unknown compiler dialect")
+        expect_guard_error(
+            lambda: semantic_command(["cc", "@missing.rsp", str(source_path)],
+                                     root, source_path.resolve(), "gcc"),
+            "missing response file")
+        expect_guard_error(
+            lambda: preprocessed_ownership_occurrences(
+                f"{SOUP_API}(server);\n",
+                CompileUnit(source_path.resolve(), root, ()), root,
+                root / "build", {}),
+            "missing preprocessor marker")
+        expect_guard_error(
+            lambda: production_compile_units(root, root / "missing-build",
+                                             "gcc"),
+            "missing compile database")
+
+        source_path.write_text(baseline, encoding="utf-8")
         alternate = root / "wyrelog" / "alternate.c"
         alternate.write_text(
             "static void alternate(void) {\n"
@@ -742,10 +1454,15 @@ def main() -> int:
             self_test()
             print("OK: daemon HTTP registration guard rejects negative fixtures")
             return 0
-        if len(sys.argv) != 2:
-            raise GuardError("usage: check-daemon-http-route-registrations.py "
-                             "ROOT|--self-test")
-        registrations = check_root(Path(sys.argv[1]))
+        parser = argparse.ArgumentParser()
+        parser.add_argument("root", type=Path)
+        parser.add_argument("--build-root", required=True, type=Path)
+        parser.add_argument("--compiler-id", required=True)
+        arguments = parser.parse_args()
+        root = arguments.root.resolve()
+        build_root = arguments.build_root.resolve()
+        registrations = check_root(root)
+        check_semantic_boundary(root, build_root, arguments.compiler_id)
         print("OK: daemon HTTP registrations "
               f"{len(registrations)} = {len(PREFIX_PATHS)} prefix + "
               f"{len(registrations) - len(PREFIX_PATHS)} singleton "
