@@ -149,6 +149,36 @@ if re.search(
 ):
     fail("daemon HTTP variants must not use link_whole")
 
+audit_selection_contract = re.search(
+    r"test_daemon_http_decide_audit_enabled\s*=\s*"
+    r"get_option\('enable_audit'\)\.allowed\(\)\s*"
+    r"test_daemon_http_decide_audit_mode\s*=\s*\(\s*"
+    r"test_daemon_http_decide_audit_enabled\s*\?\s*'enabled'\s*:\s*"
+    r"'disabled'\s*\)",
+    source,
+)
+if audit_selection_contract is None:
+    fail("daemon HTTP audit targets and checker must share one feature state")
+if source.count("if test_daemon_http_decide_audit_enabled") != 2:
+    fail("daemon HTTP audit feature state must guard dependencies and target")
+audit_target_contract = re.search(
+    r"if test_daemon_http_decide_audit_enabled\s+"
+    r"test_daemon_http_decide_audit\s*=\s*executable\("
+    r"'test-daemon-http-decide-audit',.*?\n\s*\)\s*"
+    r"test_daemon_http_decide_targets\s*\+=\s*"
+    r"\[test_daemon_http_decide_audit\]\s*"
+    r"test\('daemon-http-decide-audit',\s*"
+    r"test_daemon_http_decide_audit,\s*timeout\s*:\s*240,\s*\)\s*"
+    r"endif",
+    source,
+    re.DOTALL,
+)
+if audit_target_contract is None:
+    fail(
+        "daemon HTTP audit feature state must guard target construction, "
+        "target-list append, and test registration"
+    )
+
 symbol_test_guard = re.search(
     r"if host_machine\.system\(\) != 'windows'\s+"
     r"check_daemon_http_decide_private_symbols\s*=\s*find_program\(.*?"
@@ -164,6 +194,42 @@ if symbol_test_guard is None:
         "artifact symbol test must require POSIX and fact-store while its "
         "self-test remains POSIX-only"
     )
+if re.search(
+        r"test\('daemon-http-decide-private-symbols-self-test',\s*"
+        r"check_daemon_http_decide_private_symbols,\s*"
+        r"args\s*:\s*\['--self-test'\],\s*\)",
+        source,
+) is None:
+    fail("artifact checker self-test must use the sole --self-test form")
+if re.search(
+        r"test\('daemon-http-decide-private-symbols',\s*"
+        r"check_daemon_http_decide_private_symbols,\s*args\s*:\s*\[\s*"
+        r"'--audit-mode',\s*test_daemon_http_decide_audit_mode,\s*"
+        r"meson\.project_build_root\(\)\s*/\s*'meson-info'\s*/\s*"
+        r"'intro-installed\.json'",
+        source,
+) is None:
+    fail("artifact checker must receive the shared explicit audit mode first")
+target_path_contract = re.search(
+    r"test_daemon_http_decide_target_paths\s*=\s*\[\]\s*"
+    r"foreach target\s*:\s*test_daemon_http_decide_targets\s*"
+    r"test_daemon_http_decide_target_paths\s*\+=\s*"
+    r"\[target\.full_path\(\)\]\s*endforeach\s*"
+    r"test\('daemon-http-decide-private-symbols',\s*"
+    r"check_daemon_http_decide_private_symbols,.*?"
+    r"\]\s*\+\s*test_daemon_http_decide_target_paths,\s*"
+    r"depends\s*:\s*\[\s*test_daemon_http_decide_seed_helper,\s*"
+    r"libwyrelog,\s*\]\s*\+\s*test_daemon_http_decide_targets,",
+    source,
+    re.DOTALL,
+)
+if target_path_contract is None:
+    fail(
+        "artifact checker must project and depend on the generic constructed "
+        "daemon HTTP target list"
+    )
+if "test_daemon_http_decide_audit.full_path()" in source:
+    fail("artifact checker must not reference an audit target directly")
 
 if wrapper_source.count("G_MODULE_EXPORT") != 1:
     fail("seed helper wrapper must mark exactly one definition default-visible")

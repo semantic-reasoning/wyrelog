@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Prove the daemon HTTP seed helper is an isolated runtime DSO boundary."""
 
+import argparse
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 from pathlib import Path
 import re
@@ -34,13 +37,48 @@ COMMON_EXECUTABLE_IMPORTS = {
     LOCK_ACQUIRE_SYMBOL,
     LOCK_RELEASE_SYMBOL,
 }
-EXPECTED_EXECUTABLE_NAMES = {
+MANDATORY_EXECUTABLE_NAMES = {
     "test-daemon-http-decide",
     "test-daemon-http-decide-refresh",
     "test-daemon-http-decide-service",
-    "test-daemon-http-decide-audit",
+}
+AUDIT_EXECUTABLE_NAME = "test-daemon-http-decide-audit"
+ALL_EXECUTABLE_NAMES = MANDATORY_EXECUTABLE_NAMES | {
+    AUDIT_EXECUTABLE_NAME,
 }
 SERVICE_EXECUTABLE_NAME = "test-daemon-http-decide-service"
+
+
+class StoreOnce(argparse.Action):
+    """Store a required option while rejecting repeated occurrences."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            raise argparse.ArgumentError(
+                self,
+                f"{option_string} must be specified exactly once",
+            )
+        setattr(namespace, self.dest, values)
+
+
+def argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument(
+        "--audit-mode",
+        choices=("enabled", "disabled"),
+        required=True,
+        action=StoreOnce,
+    )
+    parser.add_argument("install_manifest", type=Path)
+    parser.add_argument("helper", type=Path)
+    parser.add_argument("header", type=Path)
+    parser.add_argument("library", type=Path)
+    parser.add_argument("executables", type=Path, nargs="+")
+    return parser
+
+
+def parse_artifact_arguments(argv: list[str]) -> argparse.Namespace:
+    return argument_parser().parse_args(argv)
 
 
 def run(command: list[str]) -> str:
@@ -102,11 +140,21 @@ def missing_executable_imports(name: str, imports: set[str]) -> set[str]:
     return required - imports
 
 
-def executable_names_are_exact(executables: list[Path]) -> bool:
+def expected_executable_names(audit_mode: str) -> set[str]:
+    expected = set(MANDATORY_EXECUTABLE_NAMES)
+    if audit_mode == "enabled":
+        expected.add(AUDIT_EXECUTABLE_NAME)
+    return expected
+
+
+def executable_names_are_exact(
+        executables: list[Path],
+        audit_mode: str) -> bool:
     names = [executable.name for executable in executables]
+    expected = expected_executable_names(audit_mode)
     return (
-        len(names) == len(EXPECTED_EXECUTABLE_NAMES)
-        and set(names) == EXPECTED_EXECUTABLE_NAMES
+        len(names) == len(expected)
+        and set(names) == expected
     )
 
 
@@ -272,16 +320,99 @@ def self_test() -> int:
         return 1
     if missing_executable_imports(SERVICE_EXECUTABLE_NAME, service_imports):
         return 1
-    expected_executables = [
-        Path("/tmp") / name for name in sorted(EXPECTED_EXECUTABLE_NAMES)
-    ]
-    if not executable_names_are_exact(expected_executables):
-        return 1
-    if executable_names_are_exact(expected_executables[:-1]):
+    executable_matrix = {}
+    for audit_mode in ("disabled", "enabled"):
+        expected = expected_executable_names(audit_mode)
+        executables = [Path("/tmp") / name for name in sorted(expected)]
+        executable_matrix[audit_mode] = executables
+        if not executable_names_are_exact(executables, audit_mode):
+            return 1
+        for index in range(len(executables)):
+            if executable_names_are_exact(
+                    executables[:index] + executables[index + 1:],
+                    audit_mode):
+                return 1
+            duplicate_replacement = list(executables)
+            duplicate_replacement[index] = executables[
+                (index + 1) % len(executables)
+            ]
+            if executable_names_are_exact(duplicate_replacement, audit_mode):
+                return 1
+            unknown_replacement = list(executables)
+            unknown_replacement[index] = Path(
+                "/tmp/test-daemon-http-decide-unknown"
+            )
+            if executable_names_are_exact(unknown_replacement, audit_mode):
+                return 1
+        for duplicate in executables:
+            if executable_names_are_exact(
+                    executables + [duplicate], audit_mode):
+                return 1
+        if executable_names_are_exact(
+                executables + [Path("/tmp/test-daemon-http-decide-unknown")],
+                audit_mode):
+            return 1
+    if executable_names_are_exact(
+            executable_matrix["disabled"]
+            + [Path("/tmp") / AUDIT_EXECUTABLE_NAME],
+            "disabled"):
         return 1
     if executable_names_are_exact(
-            expected_executables + [expected_executables[0]]):
+            [
+                path for path in executable_matrix["enabled"]
+                if path.name != AUDIT_EXECUTABLE_NAME
+            ],
+            "enabled"):
         return 1
+
+    def artifact_argv(audit_mode: str) -> list[str]:
+        return [
+            "--audit-mode",
+            audit_mode,
+            "/tmp/intro-installed.json",
+            "/tmp/libseed-helper.so",
+            "/tmp/seed-helper.h",
+            "/tmp/libwyrelog.so.0",
+            *[str(path) for path in executable_matrix[audit_mode]],
+        ]
+
+    for audit_mode in ("disabled", "enabled"):
+        parsed = parse_artifact_arguments(artifact_argv(audit_mode))
+        if parsed.audit_mode != audit_mode:
+            return 1
+        if parsed.executables != executable_matrix[audit_mode]:
+            return 1
+
+    invalid_argument_sets = [
+        artifact_argv("disabled")[2:],
+        ["--audit-mode"],
+        ["--audit-mode", "invalid", *artifact_argv("disabled")[2:]],
+        ["--audit", "disabled", *artifact_argv("disabled")[2:]],
+        [
+            "--audit-mode",
+            "disabled",
+            "--audit-mode",
+            "disabled",
+            *artifact_argv("disabled")[2:],
+        ],
+        [
+            "--audit-mode",
+            "enabled",
+            "--audit-mode",
+            "disabled",
+            *artifact_argv("disabled")[2:],
+        ],
+        ["--self-test", *artifact_argv("disabled")],
+    ]
+    for argv in invalid_argument_sets:
+        with redirect_stderr(StringIO()):
+            try:
+                parse_artifact_arguments(argv)
+            except SystemExit as error:
+                if error.code != 2:
+                    return 1
+            else:
+                return 1
     artifact = Path("/tmp/test-daemon-http-decide")
     if defined_command("nm", artifact, False) != [
             "nm", "--defined-only", str(artifact)]:
@@ -322,7 +453,7 @@ def self_test() -> int:
             helper,
             library):
         return 1
-    for name in EXPECTED_EXECUTABLE_NAMES:
+    for name in ALL_EXECUTABLE_NAMES:
         if missing_runtime_dependencies(
                 name,
                 helper.name,
@@ -341,20 +472,13 @@ def self_test() -> int:
 def main() -> int:
     if sys.argv[1:] == ["--self-test"]:
         return self_test()
-    if len(sys.argv) < 6:
-        print(
-            "usage: check-daemon-http-decide-private-symbols.py "
-            "INSTALL_MANIFEST HELPER HEADER LIBWYRELOG EXECUTABLE...",
-            file=sys.stderr,
-        )
-        return 2
-
-    manifest = Path(sys.argv[1])
-    helper = Path(sys.argv[2])
-    header = Path(sys.argv[3])
-    library = Path(sys.argv[4])
-    executables = [Path(argument) for argument in sys.argv[5:]]
-    if not executable_names_are_exact(executables):
+    arguments = parse_artifact_arguments(sys.argv[1:])
+    manifest = arguments.install_manifest
+    helper = arguments.helper
+    header = arguments.header
+    library = arguments.library
+    executables = arguments.executables
+    if not executable_names_are_exact(executables, arguments.audit_mode):
         print(
             "daemon HTTP executable basename set mismatch:",
             *sorted(executable.name for executable in executables),
