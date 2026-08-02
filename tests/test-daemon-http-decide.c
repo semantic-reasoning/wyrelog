@@ -934,18 +934,18 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 17;
+  const guint expected_exact = 22;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 16;
+  const guint expected_exact = 21;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 14;
+  const guint expected_exact = 19;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 13;
+  const guint expected_exact = 18;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 15
+  if (total != expected_total || prefixes != 4 || raw_singletons != 10
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -963,6 +963,11 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/auth/mfa/enroll/confirm",
     "/auth/refresh",
     "/auth/logout",
+    "/tenants",
+    "/tenants/create",
+    "/tenants/seal",
+    "/tenants/unseal",
+    "/tenants/delete",
 #ifdef WYL_HAS_FACT_STORE
     "/service-credential-operations",
     "/service-credential-operations/reconcile",
@@ -6247,6 +6252,21 @@ direct_permission_exists (WylHandle *handle, const gchar *subject,
 }
 
 static gboolean
+tenant_state_matches (wyl_policy_store_t *store, const gchar *tenant,
+    gboolean expected_exists, gboolean expected_active)
+{
+  gboolean exists = FALSE;
+  if (wyl_policy_store_tenant_exists (store, tenant, &exists) != WYRELOG_E_OK
+      || exists != expected_exists)
+    return FALSE;
+  if (!exists)
+    return TRUE;
+  gboolean active = FALSE;
+  return wyl_policy_store_tenant_is_active (store, tenant, &active)
+      == WYRELOG_E_OK && active == expected_active;
+}
+
+static gboolean
 permission_state_exists (WylHandle *handle, const gchar *subject,
     const gchar *perm, const gchar *scope)
 {
@@ -6549,6 +6569,24 @@ check_policy_permission_mutation_contract (SoupServer *server,
   }
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *tenant_create_query =
+      g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      WYL_TENANT_DEFAULT, session_token);
+  static const gchar *const tenant_delete_aliases[] = {
+    "/tenants/delete/x",
+    "/tenants/deletex",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_delete_aliases); i++) {
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+        tenant_delete_aliases[i], tenant_create_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !tenant_state_matches (store, "tenant-a", FALSE, FALSE))
+      return 205 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/tenants/delete", "name=tenant-a", &status, &body);
   if (rc != 0)
@@ -6557,10 +6595,20 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 204;
   g_clear_pointer (&body, g_free);
 
-  g_autofree gchar *tenant_create_query =
-      g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+  static const gchar *const tenant_create_aliases[] = {
+    "/tenants/create/x",
+    "/tenants/createx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_create_aliases); i++) {
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+        tenant_create_aliases[i], tenant_create_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !tenant_state_matches (store, "tenant-a", FALSE, FALSE))
+      return 207 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/tenants/create", tenant_create_query, &status, &body);
   if (rc != 0)
@@ -6578,6 +6626,20 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 191;
   g_clear_pointer (&body, g_free);
 
+  static const gchar *const tenant_list_aliases[] = {
+    "/tenants/x",
+    "/tenantsx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_list_aliases); i++) {
+    rc = send_raw_policy_mutation (session, "GET", base_url,
+        tenant_list_aliases[i], tenant_create_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !tenant_state_matches (store, "tenant-a", TRUE, TRUE))
+      return 209 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw_policy_mutation (session, "GET", base_url, "/tenants",
       tenant_create_query, &status, &body);
   if (rc != 0)
@@ -6641,6 +6703,21 @@ check_policy_permission_mutation_contract (SoupServer *server,
       WYL_TENANT_DEFAULT, session_token);
   static const gchar *tenant_seal_body =
       "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000222\"}";
+  static const gchar *const tenant_seal_aliases[] = {
+    "/tenants/seal/x",
+    "/tenants/sealx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_seal_aliases); i++) {
+    rc = send_raw_policy_mutation_body (session, "POST", base_url,
+        tenant_seal_aliases[i], tenant_seal_query, tenant_seal_body,
+        &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !tenant_state_matches (store, "tenant-a", TRUE, TRUE))
+      return 211 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   static const gchar *invalid_tenant_seal_bodies[] = {
     NULL,
     "",
@@ -6693,6 +6770,20 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2003;
   g_clear_pointer (&body, g_free);
 
+  static const gchar *const tenant_unseal_aliases[] = {
+    "/tenants/unseal/x",
+    "/tenants/unsealx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_unseal_aliases); i++) {
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+        tenant_unseal_aliases[i], tenant_seal_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !tenant_state_matches (store, "tenant-a", TRUE, FALSE))
+      return 213 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw_login (session, "POST", base_url,
       "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
   if (rc != 0)
