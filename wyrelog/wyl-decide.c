@@ -639,9 +639,9 @@ wyl_decide_with_service_authority (WylHandle *handle,
       wyl_service_auth_read_lease_validate (authority->lease, handle);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_autoptr (GMutexLocker) decision_locker =
-      wyl_handle_lock_decision_engine (handle);
-  if (decision_locker == NULL)
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (handle);
+  if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 
   g_mutex_lock (&authority->mutex);
@@ -804,9 +804,9 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     return WYRELOG_E_INVALID;
   if (!guard_context_is_valid (req))
     return WYRELOG_E_INVALID;
-  g_autoptr (GMutexLocker) decision_locker =
-      wyl_handle_lock_decision_engine (handle);
-  if (decision_locker == NULL)
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (handle);
+  if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 
   const gchar *deny_reason = NULL;

@@ -282,6 +282,148 @@ test_service_lifecycle_projection_failure_latches (void)
   remove_tree (templates);
 }
 
+typedef enum
+{
+  SERVICE_PROJECTION_CREATE,
+  SERVICE_PROJECTION_DISABLE,
+} ServiceProjectionOperation;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  const gchar *subject;
+  ServiceProjectionOperation operation;
+  gboolean completed;
+  wyrelog_error_t rc;
+} ServiceProjectionFaultWorker;
+
+static gpointer
+service_projection_fault_worker (gpointer data)
+{
+  ServiceProjectionFaultWorker *worker = data;
+  wyl_service_principal_t principal = { 0 };
+  if (worker->operation == SERVICE_PROJECTION_CREATE)
+    worker->rc = wyl_service_principal_create (worker->handle,
+        worker->subject, "projection-fault-worker", "admin",
+        "projection-fault-create", &principal);
+  else
+    worker->rc = wyl_service_principal_disable (worker->handle,
+        worker->subject, "admin", "00000000000000000000000725C", &principal);
+  wyl_service_principal_clear (&principal);
+  g_mutex_lock (&worker->mutex);
+  worker->completed = TRUE;
+  g_cond_broadcast (&worker->changed);
+  g_mutex_unlock (&worker->mutex);
+  return NULL;
+}
+
+static void
+assert_service_projection_loader_fault (ServiceProjectionOperation operation,
+    gboolean step_fault)
+{
+  g_autofree gchar *templates = copy_unsigned_template_tree ();
+  g_autofree gchar *dir =
+      g_dir_make_tmp ("wyl-service-projection-fault-XXXXXX", NULL);
+  g_assert_nonnull (templates);
+  g_assert_nonnull (dir);
+  g_autofree gchar *store_path = g_build_filename (dir, "policy.db", NULL);
+  WylHandleOpenOptions options = {
+    .template_dir = templates,
+    .policy_store_path = store_path,
+    .require_template_manifest = FALSE,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  const gchar *subject = operation == SERVICE_PROJECTION_CREATE
+      ? "svc:projection:fault:create" : "svc:projection:fault:disable";
+  if (operation == SERVICE_PROJECTION_DISABLE) {
+    wyl_service_principal_t principal = { 0 };
+    g_assert_cmpint (wyl_service_principal_create (handle, subject,
+            "projection-fault-worker", "admin", "projection-disable-setup",
+            &principal), ==, WYRELOG_E_OK);
+    wyl_service_principal_clear (&principal);
+  }
+
+  if (step_fault)
+    wyl_handle_set_engine_delta_step_fault_once (handle,
+        "service_principal_state", WYRELOG_E_IO);
+  else
+    wyl_handle_set_engine_delta_insert_fault_once (handle,
+        "service_principal_state", WYRELOG_E_IO);
+
+  ServiceProjectionFaultWorker worker = {
+    .handle = handle,
+    .subject = subject,
+    .operation = operation,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&worker.mutex);
+  g_cond_init (&worker.changed);
+  GThread *thread = g_thread_new ("service-projection-fault",
+      service_projection_fault_worker, &worker);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&worker.mutex);
+  while (!worker.completed
+      && g_cond_wait_until (&worker.changed, &worker.mutex, deadline));
+  gboolean completed = worker.completed;
+  g_mutex_unlock (&worker.mutex);
+  g_assert_true (completed);
+  g_thread_join (thread);
+  g_assert_cmpint (worker.rc, ==, WYRELOG_E_BUSY);
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+      WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  WylServiceAuthReadLease *read_lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &read_lease), ==, WYRELOG_E_BUSY);
+  g_assert_null (read_lease);
+
+  wyl_service_principal_t durable = { 0 };
+  g_assert_cmpint (wyl_service_principal_get (handle, subject, &durable), ==,
+      WYRELOG_E_OK);
+  const gchar *expected_state = operation == SERVICE_PROJECTION_CREATE
+      ? "active" : "disabled";
+  g_assert_cmpstr (durable.state, ==, expected_state);
+  wyl_service_principal_clear (&durable);
+
+  g_clear_object (&handle);
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_true (contains_state (handle, "service_principal_state", subject,
+          expected_state));
+  g_assert_false (contains_state (handle, "service_principal_state", subject,
+          operation == SERVICE_PROJECTION_CREATE ? "disabled" : "active"));
+  reason = WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+
+  g_cond_clear (&worker.changed);
+  g_mutex_clear (&worker.mutex);
+  g_clear_object (&handle);
+  remove_store_files (store_path);
+  g_rmdir (dir);
+  remove_tree (templates);
+}
+
+static void
+test_service_lifecycle_projection_loader_faults (void)
+{
+  assert_service_projection_loader_fault (SERVICE_PROJECTION_CREATE, FALSE);
+  assert_service_projection_loader_fault (SERVICE_PROJECTION_CREATE, TRUE);
+  assert_service_projection_loader_fault (SERVICE_PROJECTION_DISABLE, FALSE);
+  assert_service_projection_loader_fault (SERVICE_PROJECTION_DISABLE, TRUE);
+}
+
 static void
 test_service_authority_allow_deny_and_binding (void)
 {
@@ -315,6 +457,11 @@ test_service_authority_allow_deny_and_binding (void)
   g_assert_cmpint (service_decide (handle, "svc:authority:allow",
           WYL_TENANT_DEFAULT, "wr.stream.read", "tenant-b",
           WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+  g_assert_cmpint (service_decide (handle, "svc:authority:allow", "tenant-b",
+          "wr.stream.read", "tenant-b", WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+  g_assert_cmpint (service_decide (handle, "svc:authority:allow", "tenant-b",
+          "wr.stream.read", WYL_TENANT_DEFAULT, WYRELOG_E_OK), ==,
+      WYL_DECISION_DENY);
   g_assert_cmpint (service_decide (handle, "svc:authority:allow",
           WYL_TENANT_DEFAULT, "wr.policy.write", WYL_TENANT_DEFAULT,
           WYRELOG_E_OK), ==, WYL_DECISION_DENY);
@@ -432,12 +579,14 @@ typedef struct
   GMutex mutex;
   GCond changed;
   guint ready;
+  guint target;
 } DecisionBarrier;
 
 typedef struct
 {
   WylHandle *handle;
   DecisionBarrier *barrier;
+  const gchar *authority_tenant;
   const gchar *scope;
   wyrelog_error_t rc;
   wyl_decision_t decision;
@@ -449,7 +598,7 @@ concurrent_service_decide (gpointer data)
   ConcurrentDecision *decision = data;
   g_autoptr (WylServiceDecisionAuthority) authority =
       new_service_authority (decision->handle, "svc:authority:concurrent",
-      WYL_TENANT_DEFAULT);
+      decision->authority_tenant);
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   wyl_decide_req_set_subject_id (req, "svc:authority:concurrent");
@@ -459,7 +608,7 @@ concurrent_service_decide (gpointer data)
   g_mutex_lock (&decision->barrier->mutex);
   decision->barrier->ready++;
   g_cond_broadcast (&decision->barrier->changed);
-  while (decision->barrier->ready < 2)
+  while (decision->barrier->ready < decision->barrier->target)
     g_cond_wait (&decision->barrier->changed, &decision->barrier->mutex);
   g_mutex_unlock (&decision->barrier->mutex);
 
@@ -485,29 +634,51 @@ test_service_authority_concurrent_context_isolation (void)
           "svc:authority:concurrent", "wr.stream.read", "tenant-b"), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
-  DecisionBarrier barrier = { 0 };
+  DecisionBarrier barrier = {.target = 4 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
-  ConcurrentDecision allowed = {
+  ConcurrentDecision a_own = {
     .handle = handle,
     .barrier = &barrier,
+    .authority_tenant = WYL_TENANT_DEFAULT,
     .scope = WYL_TENANT_DEFAULT,
   };
-  ConcurrentDecision foreign = {
+  ConcurrentDecision a_cross_b = {
     .handle = handle,
     .barrier = &barrier,
+    .authority_tenant = WYL_TENANT_DEFAULT,
     .scope = "tenant-b",
   };
-  GThread *allowed_thread = g_thread_new ("service-allow",
-      concurrent_service_decide, &allowed);
-  GThread *foreign_thread = g_thread_new ("service-foreign",
-      concurrent_service_decide, &foreign);
-  g_thread_join (allowed_thread);
-  g_thread_join (foreign_thread);
-  g_assert_cmpint (allowed.rc, ==, WYRELOG_E_OK);
-  g_assert_cmpint (allowed.decision, ==, WYL_DECISION_ALLOW);
-  g_assert_cmpint (foreign.rc, ==, WYRELOG_E_OK);
-  g_assert_cmpint (foreign.decision, ==, WYL_DECISION_DENY);
+  ConcurrentDecision b_own = {
+    .handle = handle,
+    .barrier = &barrier,
+    .authority_tenant = "tenant-b",
+    .scope = "tenant-b",
+  };
+  ConcurrentDecision b_cross_a = {
+    .handle = handle,
+    .barrier = &barrier,
+    .authority_tenant = "tenant-b",
+    .scope = WYL_TENANT_DEFAULT,
+  };
+  GThread *threads[] = {
+    g_thread_new ("service-a-own", concurrent_service_decide, &a_own),
+    g_thread_new ("service-a-cross-b", concurrent_service_decide,
+        &a_cross_b),
+    g_thread_new ("service-b-own", concurrent_service_decide, &b_own),
+    g_thread_new ("service-b-cross-a", concurrent_service_decide,
+        &b_cross_a),
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (threads); i++)
+    g_thread_join (threads[i]);
+  g_assert_cmpint (a_own.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (a_own.decision, ==, WYL_DECISION_ALLOW);
+  g_assert_cmpint (a_cross_b.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (a_cross_b.decision, ==, WYL_DECISION_DENY);
+  g_assert_cmpint (b_own.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (b_own.decision, ==, WYL_DECISION_ALLOW);
+  g_assert_cmpint (b_cross_a.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (b_cross_a.decision, ==, WYL_DECISION_DENY);
   g_assert_cmpint (request_context_count (handle), ==, 0);
 
   g_cond_clear (&barrier.changed);
@@ -523,7 +694,9 @@ typedef struct
   WylHandle *handle;
   gboolean decision_active;
   gboolean allow_decision;
-  gboolean reload_checkpoint;
+  gboolean decision_released;
+  gboolean reload_waiting;
+  gboolean reload_acquired;
   gboolean reload_completed;
   wyrelog_error_t decision_rc;
   wyrelog_error_t mutation_rc;
@@ -544,6 +717,8 @@ blocking_window_matcher (gint64 timestamp, const gchar *window_name,
   g_cond_broadcast (&race->changed);
   while (!race->allow_decision)
     g_cond_wait (&race->changed, &race->mutex);
+  race->decision_released = TRUE;
+  g_cond_broadcast (&race->changed);
   g_mutex_unlock (&race->mutex);
   return TRUE;
 }
@@ -565,11 +740,17 @@ blocking_human_decide (gpointer data)
 }
 
 static void
-nested_reload_checkpoint (gpointer data)
+nested_reload_checkpoint (WylEngineReplacementCheckpoint phase, gpointer data)
 {
   ReloadDecisionRace *race = data;
   g_mutex_lock (&race->mutex);
-  race->reload_checkpoint = TRUE;
+  if (phase == WYL_ENGINE_REPLACEMENT_WAITING)
+    race->reload_waiting = TRUE;
+  else {
+    g_assert_cmpint (phase, ==, WYL_ENGINE_REPLACEMENT_ACQUIRED);
+    g_assert_true (race->decision_released);
+    race->reload_acquired = TRUE;
+  }
   g_cond_broadcast (&race->changed);
   g_mutex_unlock (&race->mutex);
 }
@@ -657,17 +838,13 @@ test_nested_write_reload_serializes_with_human_decide (void)
       nested_reload_checkpoint, &race);
   GThread *reload = g_thread_new ("nested-write-reload",
       nested_write_reload, &race);
-  wait_for_race_flag (&race, &race.reload_checkpoint);
-
-  gint64 blocked_deadline =
-      g_get_monotonic_time () + 250 * G_TIME_SPAN_MILLISECOND;
+  wait_for_race_flag (&race, &race.reload_waiting);
   g_mutex_lock (&race.mutex);
-  while (!race.reload_completed
-      && g_cond_wait_until (&race.changed, &race.mutex, blocked_deadline));
-  g_assert_false (race.reload_completed);
+  g_assert_false (race.reload_acquired);
   race.allow_decision = TRUE;
   g_cond_broadcast (&race.changed);
   g_mutex_unlock (&race.mutex);
+  wait_for_race_flag (&race, &race.reload_acquired);
 
   g_thread_join (decision);
   g_thread_join (reload);
@@ -694,6 +871,156 @@ test_nested_write_reload_serializes_with_human_decide (void)
   remove_tree (templates);
 }
 
+typedef enum
+{
+  ENGINE_OPERATION_AUDIT,
+  ENGINE_OPERATION_DELTA,
+} EngineOperationKind;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  EngineOperationKind kind;
+  gint64 delta_row[3];
+  gboolean operation_entered;
+  gboolean allow_operation;
+  gboolean operation_released;
+  gboolean reload_waiting;
+  gboolean reload_acquired;
+  wyrelog_error_t operation_rc;
+  wyrelog_error_t reload_rc;
+} EngineOperationReloadRace;
+
+static void
+blocking_engine_operation_checkpoint (gpointer data)
+{
+  EngineOperationReloadRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->operation_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_operation)
+    g_cond_wait (&race->changed, &race->mutex);
+  race->operation_released = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+engine_operation_reload_checkpoint (WylEngineReplacementCheckpoint phase,
+    gpointer data)
+{
+  EngineOperationReloadRace *race = data;
+  g_mutex_lock (&race->mutex);
+  if (phase == WYL_ENGINE_REPLACEMENT_WAITING)
+    race->reload_waiting = TRUE;
+  else {
+    g_assert_cmpint (phase, ==, WYL_ENGINE_REPLACEMENT_ACQUIRED);
+    g_assert_true (race->operation_released);
+    race->reload_acquired = TRUE;
+  }
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_engine_operation (gpointer data)
+{
+  EngineOperationReloadRace *race = data;
+  if (race->kind == ENGINE_OPERATION_AUDIT)
+    race->operation_rc = wyl_handle_insert_audit_fact (race->handle,
+        "engine-session-audit", 725, "audit-subject", "audit-action",
+        "audit-resource", NULL, NULL, "audit-request", WYL_DECISION_DENY);
+  else
+    race->operation_rc = wyl_handle_engine_insert (race->handle, "member_of",
+        race->delta_row, G_N_ELEMENTS (race->delta_row));
+  return NULL;
+}
+
+static gpointer
+reload_after_engine_operation (gpointer data)
+{
+  EngineOperationReloadRace *race = data;
+  race->reload_rc = wyl_handle_reload_engine_pair (race->handle);
+  return NULL;
+}
+
+static void
+wait_for_engine_operation_flag (EngineOperationReloadRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  g_assert_true (reached);
+}
+
+static void
+assert_engine_operation_serializes_reload (EngineOperationKind kind)
+{
+  g_autofree gchar *templates = copy_unsigned_template_tree ();
+  g_assert_nonnull (templates);
+  g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
+      kind == ENGINE_OPERATION_AUDIT ? "svc:engine:audit" :
+      "svc:engine:delta", FALSE);
+  EngineOperationReloadRace race = {
+    .handle = handle,
+    .kind = kind,
+    .operation_rc = WYRELOG_E_INTERNAL,
+    .reload_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  const gchar *relation = "audit_event_input";
+  if (kind == ENGINE_OPERATION_DELTA) {
+    relation = "member_of";
+    g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
+            "engine-delta-subject", &race.delta_row[0]), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
+            "engine-delta-role", &race.delta_row[1]), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
+            "engine-delta-scope", &race.delta_row[2]), ==, WYRELOG_E_OK);
+  }
+  wyl_handle_set_engine_operation_checkpoint_for_test (handle, relation,
+      blocking_engine_operation_checkpoint, &race);
+  GThread *operation = g_thread_new ("engine-operation",
+      run_engine_operation, &race);
+  wait_for_engine_operation_flag (&race, &race.operation_entered);
+
+  wyl_handle_set_reload_decision_checkpoint_for_test (handle,
+      engine_operation_reload_checkpoint, &race);
+  GThread *reload = g_thread_new ("engine-operation-reload",
+      reload_after_engine_operation, &race);
+  wait_for_engine_operation_flag (&race, &race.reload_waiting);
+  g_mutex_lock (&race.mutex);
+  g_assert_false (race.reload_acquired);
+  race.allow_operation = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  wait_for_engine_operation_flag (&race, &race.reload_acquired);
+
+  g_thread_join (operation);
+  g_thread_join (reload);
+  wyl_handle_set_reload_decision_checkpoint_for_test (handle, NULL, NULL);
+  wyl_handle_set_engine_operation_checkpoint_for_test (handle, NULL, NULL,
+      NULL);
+  g_assert_cmpint (race.operation_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (race.reload_rc, ==, WYRELOG_E_OK);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  g_clear_object (&handle);
+  remove_tree (templates);
+}
+
+static void
+test_engine_operations_serialize_with_reload (void)
+{
+  assert_engine_operation_serializes_reload (ENGINE_OPERATION_AUDIT);
+  assert_engine_operation_serializes_reload (ENGINE_OPERATION_DELTA);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -704,6 +1031,8 @@ main (int argc, char **argv)
       test_service_lifecycle_restart_projection);
   g_test_add_func ("/service-decision/lifecycle/projection-failure",
       test_service_lifecycle_projection_failure_latches);
+  g_test_add_func ("/service-decision/lifecycle/projection-loader-faults",
+      test_service_lifecycle_projection_loader_faults);
   g_test_add_func ("/service-decision/authority/allow-deny-binding",
       test_service_authority_allow_deny_and_binding);
   g_test_add_func ("/service-decision/authority/zero-role-forged-subject",
@@ -714,5 +1043,7 @@ main (int argc, char **argv)
       test_service_authority_concurrent_context_isolation);
   g_test_add_func ("/service-decision/reload/nested-write-human-serialization",
       test_nested_write_reload_serializes_with_human_decide);
+  g_test_add_func ("/service-decision/reload/engine-operation-serialization",
+      test_engine_operations_serialize_with_reload);
   return g_test_run ();
 }

@@ -114,13 +114,25 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
     (WylHandle * self);
-/* Serializes every decision's request-local engine mutation/query/cleanup
- * interval. The evaluator session is not safe for parallel mutations. */
-GMutexLocker *wyl_handle_lock_decision_engine (WylHandle * self);
-/* Test-only checkpoint immediately before a reload waits on the decision
- * mutex. The callback is borrowed and must outlive the configured interval. */
+/* Serializes every handle-owned engine and symbol-map operation. Recursive
+ * ownership lets a decision, audit projection, or loader hold one complete
+ * engine session while calling the ordinary handle helpers. */
+GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
+typedef enum
+{
+  WYL_ENGINE_REPLACEMENT_WAITING,
+  WYL_ENGINE_REPLACEMENT_ACQUIRED,
+} WylEngineReplacementCheckpoint;
+/* Test-only checkpoints immediately before and after replacement acquires the
+ * engine-session mutex. The callback is borrowed and must outlive the
+ * configured interval. */
 void wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle * self,
-    void (*checkpoint) (gpointer data), gpointer data);
+    void (*checkpoint) (WylEngineReplacementCheckpoint phase,
+        gpointer data), gpointer data);
+/* Test-only one-shot checkpoint invoked after an exact relation's insert has
+ * acquired the engine-session mutex and before it touches either engine. */
+void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
+    const gchar * relation, void (*checkpoint) (gpointer data), gpointer data);
 /* Reloads the policy engines while the caller owns the service-auth WRITE
  * lease. The lease spans durable service lifecycle commit and projection, so
  * no service resolver can observe the new lifecycle before its signed-policy
