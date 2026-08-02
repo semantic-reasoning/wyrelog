@@ -232,7 +232,11 @@ if build_client
       ]
     endif
   endif
-  if get_option('enable_audit').allowed()
+  test_daemon_http_decide_audit_enabled = get_option('enable_audit').allowed()
+  test_daemon_http_decide_audit_mode = (
+    test_daemon_http_decide_audit_enabled ? 'enabled' : 'disabled'
+  )
+  if test_daemon_http_decide_audit_enabled
     test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
     test_daemon_http_decide_deps += duckdb_dep
     test_daemon_http_decide_deps += service_exchange_private_dep
@@ -319,7 +323,7 @@ if build_client
     timeout : 240,
   )
 
-  if get_option('enable_audit').allowed()
+  if test_daemon_http_decide_audit_enabled
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
       'test-daemon-http-decide.c',
       '../wyrelog/daemon/auth-registry-private.c',
@@ -368,6 +372,8 @@ if build_client
       test('daemon-http-decide-private-symbols',
         check_daemon_http_decide_private_symbols,
         args : [
+          '--audit-mode',
+          test_daemon_http_decide_audit_mode,
           meson.project_build_root() / 'meson-info' / 'intro-installed.json',
           test_daemon_http_decide_seed_helper.full_path(),
           meson.current_source_dir() / 'test-daemon-http-decide-seed-helper.h',
