@@ -172,6 +172,70 @@ remove_scratch_file (gchar *path)
   g_free (path);
 }
 
+/* Opens the volume that g_dir_make_tmp draws scratch directories from, so an
+ * object on it stays addressable by file id once its last name is gone. */
+static HANDLE
+open_scratch_volume (void)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (g_get_tmp_dir (), -1, NULL,
+      NULL, NULL);
+  HANDLE handle = CreateFileW (wide, FILE_READ_ATTRIBUTES, FILE_SHARE_READ
+      | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS, NULL);
+
+  g_assert_cmpint (handle != INVALID_HANDLE_VALUE, !=, FALSE);
+  return handle;
+}
+
+/* Whether the object |identity| names is still alive.  An object whose last
+ * link is gone outlives that link for exactly as long as some handle to it
+ * does, so opening it by id asks whether a handle to the one object under
+ * test is still open.  Nothing else the process holds can change the answer,
+ * which is what a handle count cannot say. */
+static gboolean
+unlinked_object_is_open (HANDLE volume,
+    const WylFactGraphWinIdentity * identity)
+{
+  FILE_ID_DESCRIPTOR descriptor = { 0 };
+  WylFactGraphWinIdentity observed;
+  HANDLE handle;
+
+  descriptor.dwSize = sizeof descriptor;
+  descriptor.Type = ExtendedFileIdType;
+  memcpy (&descriptor.ExtendedFileId, identity->file_id,
+      sizeof identity->file_id);
+  SetLastError (ERROR_SUCCESS);
+  handle = OpenFileById (volume, &descriptor, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      FILE_FLAG_BACKUP_SEMANTICS);
+  if (handle == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError ();
+
+    /* Only these three say the object is gone.  Every other refusal -- a
+     * share violation, an access denial, a volume that serves no id at all
+     * -- leaves the question unanswered, and FALSE is the passing answer at
+     * every observation site, so guessing it there would read a live
+     * guardian as a clean close.  Say the code and stop instead. */
+    if (error != ERROR_INVALID_PARAMETER && error != ERROR_FILE_NOT_FOUND
+        && error != ERROR_NOT_FOUND)
+      g_error ("lookup of an unlinked object by file id was inconclusive: "
+          "error=%lu", (unsigned long) error);
+    return FALSE;
+  }
+  /* This compares the id the object was just found by against itself, so the
+   * only disagreement it can report is an answer from another volume.  It
+   * cannot see an id this volume has recycled onto a different object, and
+   * no comparison at this level could: what rules recycling out is the
+   * sequence number NTFS packs into the file reference inside the
+   * FILE_ID_128, which makes a reused index come back as a different id.
+   * The premise the cases below rest on is narrower, and each one enforces
+   * it rather than assuming it -- this same lookup must succeed while a
+   * handle is knowingly held, immediately before the observation. */
+  observed = identity_for (handle);
+  g_assert_true (CloseHandle (handle));
+  return identity_matches (identity, &observed);
+}
+
 /* The session, rather than a numeric HANDLE, is the externally visible I/O
  * capability.  Releasing the binding-side state first must not invalidate the
  * live private duplicate, and a second session must not bypass the lifecycle
@@ -1496,19 +1560,42 @@ test_working_handle_free_never_closes_reused_handle (void)
   remove_scratch_file (path);
 }
 
+typedef enum
+{
+  /* The destructor closed the guardian; the nameless object went with it. */
+  UNLINKED_RELEASE_CLOSED,
+  /* Some handle to the nameless object outlived the destructor. */
+  UNLINKED_RELEASE_SURVIVED,
+  /* The filesystem keeps the name until the last handle goes, so the unlink
+   * never produced a nameless object to ask about. */
+  UNLINKED_RELEASE_NAME_KEPT,
+  /* The volume serves no lookup by file id, not even for an object this
+   * function knows to be open, so the observation is unavailable here. */
+  UNLINKED_RELEASE_NO_ID_LOOKUP
+} UnlinkedReleaseResult;
+
 /* Adopts a working handle, unlinks its only name so the guardian addresses a
- * live object with no remaining link, then releases the binding.  The
- * observed link count is returned so the caller can prove the state under
- * test was really produced rather than passing vacuously. */
-static DWORD
+ * live object with no remaining link, then releases the binding and reports
+ * whether that now-nameless object was still alive once the destructor
+ * returned, which is so exactly when the guardian duplicate outlived it.
+ *
+ * Both unavailable results are decided before anything about reachability is
+ * asserted, because on the filesystems they stand for the assertion cannot
+ * hold: a name that survives its last unlink leaves the object delete-pending
+ * and refusing every open until the last handle goes, and a volume with no id
+ * namespace refuses the lookup outright.  Asserting first would abort the
+ * whole binary in place of the caller's skip. */
+static UnlinkedReleaseResult
 release_unlinked_working_handle (void)
 {
   gchar *path = NULL;
   HANDLE issued = open_scratch_file (&path);
   WylFactGraphWinIdentity identity = identity_for (issued);
   HANDLE witness = open_existing_scratch_file (path);
+  HANDLE volume = open_scratch_volume ();
   WylFactArtifactWinWorkingHandle *binding = NULL;
   BY_HANDLE_FILE_INFORMATION info = { 0 };
+  gboolean survived;
   g_autofree gchar *directory = g_path_get_dirname (path);
   g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
   g_autofree wchar_t *wide_directory = g_utf8_to_utf16 (directory, -1, NULL,
@@ -1519,34 +1606,76 @@ release_unlinked_working_handle (void)
   g_assert_true (DeleteFileW (wide));
   g_assert_true (GetFileInformationByHandle (witness, &info));
   g_assert_true (CloseHandle (witness));
+  if (info.nNumberOfLinks != 0) {
+    wyl_fact_artifact_win_working_handle_free (binding);
+    g_assert_true (CloseHandle (volume));
+    /* Deliberately best-effort: the marked name is only retired once the
+     * last handle to it goes, which may be later than this call. */
+    RemoveDirectoryW (wide_directory);
+    g_free (path);
+    return UNLINKED_RELEASE_NAME_KEPT;
+  }
+  /* The control for the observation below, and the very same call: with the
+   * guardian known to be open the object must be reachable here, or its
+   * later unreachability would prove nothing about who closed it.  A volume
+   * that cannot answer even now is not reporting a leak -- the object is
+   * certainly alive -- so that reading is unavailable rather than failed. */
+  if (!unlinked_object_is_open (volume, &identity)) {
+    wyl_fact_artifact_win_working_handle_free (binding);
+    g_assert_true (CloseHandle (volume));
+    g_assert_true (RemoveDirectoryW (wide_directory));
+    g_free (path);
+    return UNLINKED_RELEASE_NO_ID_LOOKUP;
+  }
   wyl_fact_artifact_win_working_handle_free (binding);
-  /* Only removable once the destructor has closed the guardian: a leaked
-   * duplicate keeps the unlinked object, and its name, alive. */
+  survived = unlinked_object_is_open (volume, &identity);
+  g_assert_true (CloseHandle (volume));
+  /* The unlink already took the name away, so the directory is empty whether
+   * or not a handle to the object remains. */
   g_assert_true (RemoveDirectoryW (wide_directory));
   g_free (path);
-  return info.nNumberOfLinks;
+  return survived ? UNLINKED_RELEASE_SURVIVED : UNLINKED_RELEASE_CLOSED;
 }
 
 /* Retirement leaves a guardian on an object whose last link is gone.  The
- * destructor still owns that duplicate and must close it exactly once. */
+ * destructor still owns that duplicate and must close it.
+ *
+ * This deliberately does not budget a GetProcessHandleCount delta across the
+ * releases, as it once did.  That budget was an estimate of ambient noise,
+ * and a wrong one: creating and removing one scratch directory per cycle
+ * moves the process handle count by roughly as much per iteration as a leaked
+ * guardian would, so no budget over the loop can separate the two, and
+ * sampling either side of a single release only trades that for other
+ * threads' churn, which is the same size again.
+ *
+ * Ask the object rather than the process.  The assumption is that an unlinked
+ * object stays addressable by file id for as long as any handle to it is
+ * open, and the case enforces that on every iteration instead of trusting it:
+ * the identical lookup must succeed while the guardian is still held.  A
+ * lookup that then fails is the destructor's close and nothing else.
+ *
+ * The two ways a machine can fail to offer that assumption -- a filesystem
+ * that keeps the name past its last unlink, and a volume that serves no id
+ * lookup at all -- are settled by the first release, before any assertion
+ * depends on them, and reported here as a skip. */
 static void
 test_working_handle_free_closes_unlinked_object (void)
 {
-  DWORD before = 0;
-  DWORD after = 0;
+  UnlinkedReleaseResult first = release_unlinked_working_handle ();
   guint i;
 
-  if (release_unlinked_working_handle () != 0) {
+  if (first == UNLINKED_RELEASE_NAME_KEPT) {
     g_test_skip ("unlinking a held name kept the link count here");
     return;
   }
-  g_assert_true (GetProcessHandleCount (GetCurrentProcess (), &before));
+  if (first == UNLINKED_RELEASE_NO_ID_LOOKUP) {
+    g_test_skip ("the scratch volume serves no lookup by file id");
+    return;
+  }
+  g_assert_cmpint (first, ==, UNLINKED_RELEASE_CLOSED);
   for (i = 0; i < 50; i++)
-    g_assert_cmpuint (release_unlinked_working_handle (), ==, 0);
-  g_assert_true (GetProcessHandleCount (GetCurrentProcess (), &after));
-  /* One leaked guardian per release would be +50.  Unrelated loader, GLib
-   * and scanner activity moves this by only a handful. */
-  g_assert_cmpuint (after, <, before + 25);
+    g_assert_cmpint (release_unlinked_working_handle (), ==,
+        UNLINKED_RELEASE_CLOSED);
 }
 
 static void
