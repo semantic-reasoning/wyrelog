@@ -318,11 +318,13 @@ WylMfaValidator wyl_handle_get_mfa_validator (WylHandle * self,
     gpointer * out_user_data);
 
 /*
- * Applies a permission-state transition to the handle-owned policy store, then
- * reloads the engine pair so perm_state/4 and perm_state_fired/7 reflect the
- * durable state. The policy store commit is the source of truth: if reload
- * fails, the previous engine pair remains installed and the returned error is
- * the reload failure.
+ * Applies a permission-state transition and publishes perm_state/4 and
+ * perm_state_fired/7 while retaining one engine session. A pre-commit mutation
+ * or validation failure rolls back, preserves the previous engine pair, and
+ * leaves |out_event_id| at -1. Once the commit is confirmed, |out_event_id|
+ * receives the durable event ID. A subsequent projection or read-back failure
+ * preserves that output, poisons and discards the engine pair, and returns the
+ * publication error.
  */
 wyrelog_error_t wyl_handle_apply_permission_state_transition (WylHandle * self,
     const gchar * subject_id, const gchar * perm_id, const gchar * scope,
