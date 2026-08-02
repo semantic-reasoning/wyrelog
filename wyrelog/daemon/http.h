@@ -193,7 +193,8 @@ gboolean wyl_daemon_http_exact_route_probe_snapshot_for_test
     (SoupServer * server, const gchar * canonical_path,
     WylDaemonExactRouteProbeSnapshot * out_snapshot);
 void wyl_daemon_http_route_registration_counts_for_test
-    (SoupServer * server, guint * out_prefixes, guint * out_exact_singletons);
+    (SoupServer * server, guint * out_total, guint * out_prefixes,
+    guint * out_raw_singletons, guint * out_exact_singletons);
 void wyl_daemon_http_set_retirement_response_checkpoint_for_test
     (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
     gpointer data);

@@ -861,32 +861,41 @@ check_service_route_shape_matrix (const gchar *base_url)
 static gint
 check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
 {
+  guint total = 0;
   guint prefixes = 0;
+  guint raw_singletons = 0;
   guint exact_singletons = 0;
-  wyl_daemon_http_route_registration_counts_for_test (server, &prefixes,
-      &exact_singletons);
+  wyl_daemon_http_route_registration_counts_for_test (server, &total,
+      &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
-  const guint expected_exact = 4;
+  const guint expected_total = 36;
+  const guint expected_exact = 5;
   const gchar *canonical_path = "/auth/service-token";
   const gchar *descendant_path = "/auth/service-token/x";
   const gchar *sibling_path = "/auth/service-tokenx";
 #elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_exact = 3;
+  const guint expected_total = 35;
+  const guint expected_exact = 4;
   const gchar *canonical_path = "/service-credential-operations";
   const gchar *descendant_path = "/service-credential-operations/x";
   const gchar *sibling_path = "/service-credential-operationsx";
 #elif defined(WYL_HAS_AUDIT)
-  const guint expected_exact = 1;
+  const guint expected_total = 33;
+  const guint expected_exact = 2;
   const gchar *canonical_path = "/auth/service-token";
   const gchar *descendant_path = "/auth/service-token/x";
   const gchar *sibling_path = "/auth/service-tokenx";
 #else
-  const guint expected_exact = 0;
-  (void) base_url;
+  const guint expected_total = 32;
+  const guint expected_exact = 1;
+  const gchar *canonical_path = "/service-management-authority/arm";
+  const gchar *descendant_path = "/service-management-authority/arm/x";
+  const gchar *sibling_path = "/service-management-authority/armx";
 #endif
-  if (prefixes != 4 || exact_singletons != expected_exact)
+  if (total != expected_total || prefixes != 4 || raw_singletons != 27
+      || exact_singletons != expected_exact
+      || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
-#if defined(WYL_HAS_AUDIT) || defined(WYL_HAS_FACT_STORE)
   WylDaemonExactRouteProbeSnapshot before = { 0 };
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
           canonical_path, &before))
@@ -924,7 +933,6 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries)
     return 2287;
-#endif
   return 0;
 }
 
