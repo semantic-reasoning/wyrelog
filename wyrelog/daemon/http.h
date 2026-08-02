@@ -182,6 +182,22 @@ typedef struct
   guint64 selected;
   guint64 terminal_entries;
 } WylDaemonExactRouteProbeSnapshot;
+typedef struct
+{
+  guint sessions;
+  guint access_tokens;
+  guint refresh_tokens;
+  guint mfa_enroll_challenges;
+  guint revoked_sessions;
+  guint login_entries;
+  guint mfa_verify_entries;
+  guint mfa_enroll_start_entries;
+  guint mfa_enroll_confirm_entries;
+  guint refresh_entries;
+  guint logout_entries;
+  guint profile_events_entries;
+  guint profile_events_ingestions;
+} WylDaemonExactRouteStateSnapshot;
 typedef wyrelog_error_t
     (*WylDaemonManagementReauthorizationCheckpoint) (WylHandle * handle,
     const gchar * actor, const gchar * action, const gchar * session_id,
@@ -192,6 +208,8 @@ void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
 gboolean wyl_daemon_http_exact_route_probe_snapshot_for_test
     (SoupServer * server, const gchar * canonical_path,
     WylDaemonExactRouteProbeSnapshot * out_snapshot);
+gboolean wyl_daemon_http_exact_route_state_snapshot_for_test
+    (SoupServer * server, WylDaemonExactRouteStateSnapshot * out_snapshot);
 void wyl_daemon_http_route_registration_counts_for_test
     (SoupServer * server, guint * out_total, guint * out_prefixes,
     guint * out_raw_singletons, guint * out_exact_singletons);

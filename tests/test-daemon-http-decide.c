@@ -883,29 +883,43 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
 
   g_autofree gchar *descendant = g_strconcat (canonical_path, "/x", NULL);
   before = after;
+  WylDaemonExactRouteStateSnapshot state_before = { 0 };
+  WylDaemonExactRouteStateSnapshot state_after = { 0 };
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+          &state_before))
+    return error_base + 3;
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "PATCH", base_url, descendant,
           "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
-    return error_base + 3;
+    return error_base + 4;
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
           canonical_path, &after)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries)
-    return error_base + 4;
+    return error_base + 5;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+          &state_after)
+      || memcmp (&state_before, &state_after, sizeof state_before) != 0)
+    return error_base + 6;
 
   g_autofree gchar *sibling = g_strconcat (canonical_path, "x", NULL);
   before = after;
+  state_before = state_after;
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "PATCH", base_url, sibling,
           "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
-    return error_base + 5;
+    return error_base + 7;
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
           canonical_path, &after)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries)
-    return error_base + 6;
+    return error_base + 8;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+          &state_after)
+      || memcmp (&state_before, &state_after, sizeof state_before) != 0)
+    return error_base + 9;
   return 0;
 }
 
@@ -958,7 +972,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (exact_paths); i++) {
     gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
-        2281 + (gint) i * 7);
+        2281 + (gint) i * 10);
     if (rc != 0)
       return rc;
   }
@@ -5989,6 +6003,152 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_reload_engine_pair (handle);
+}
+
+static gboolean
+exact_route_state_unchanged (SoupServer *server,
+    const WylDaemonExactRouteStateSnapshot *before)
+{
+  WylDaemonExactRouteStateSnapshot after = { 0 };
+  return wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
+      && memcmp (before, &after, sizeof after) == 0;
+}
+
+static gint
+check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  WylDaemonExactRouteStateSnapshot before = { 0 };
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw_path_probe (session, "POST", base_url,
+          "/auth/login/x?username=exact-alias-login", NULL, NULL,
+          &status, &body) != 0)
+    return 2290;
+  if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+      || !exact_route_state_unchanged (server, &before))
+    return 2291;
+
+  wyl_id_t admin_id = WYL_ID_NIL;
+  gchar admin_session[WYL_ID_STRING_BUF] = { 0 };
+  g_autofree gchar *admin_access = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_id_new (&admin_id) != WYRELOG_E_OK
+      || wyl_id_format (&admin_id, admin_session,
+          sizeof admin_session) != WYRELOG_E_OK
+      || !seed_management_human_access_token (server, admin_session,
+          "exact-route-admin", &admin_access)
+      || wyl_policy_store_set_principal_state (store, "exact-route-admin",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "exact-enroll-target",
+          "authenticated") != WYRELOG_E_OK
+      || grant_policy_write_authority (handle, "exact-route-admin",
+          WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
+    return 2292;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", admin_access);
+  const gchar *guard = "?tenant=__wr_default&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=0";
+  g_autofree gchar *start_path = g_strconcat
+      ("/auth/mfa/enroll/start", guard, NULL);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "GET", base_url, start_path,
+          authorization, "{\"subject\":\"exact-enroll-target\"}",
+          &status, &body) != 0
+      || status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 2293;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "POST", base_url, start_path,
+          authorization, "{\"subject\":\"exact-enroll-target\"}",
+          &status, &body) != 0 || status != 200)
+    return 2294;
+  g_autofree gchar *challenge = extract_json_string (body, "challenge");
+  if (challenge == NULL)
+    return 2295;
+
+  g_autofree gchar *start_alias = g_strconcat
+      ("/auth/mfa/enroll/start/x", guard, NULL);
+  before = (WylDaemonExactRouteStateSnapshot) {
+  0};
+  g_clear_pointer (&body, g_free);
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw_path_probe (session, "POST", base_url, start_alias,
+          authorization, "{\"subject\":\"exact-enroll-target\"}",
+          &status, &body) != 0
+      || status != 404 || !exact_route_state_unchanged (server, &before))
+    return 2296;
+
+  g_autofree gchar *confirm_body = g_strdup_printf
+      ("{\"challenge\":\"%s\",\"code\":\"000000\"}", challenge);
+  g_autofree gchar *confirm_alias = g_strconcat
+      ("/auth/mfa/enroll/confirmx", guard, NULL);
+  before = (WylDaemonExactRouteStateSnapshot) {
+  0};
+  g_clear_pointer (&body, g_free);
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw_path_probe (session, "POST", base_url, confirm_alias,
+          authorization, confirm_body, &status, &body) != 0
+      || status != 404 || !exact_route_state_unchanged (server, &before))
+    return 2297;
+  g_autofree gchar *confirm_path = g_strconcat
+      ("/auth/mfa/enroll/confirm", guard, NULL);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "POST", base_url, confirm_path,
+          authorization,
+          "{\"challenge\":\"missing\",\"code\":\"000000\"}",
+          &status, &body) != 0 || status != 401
+      || strstr (body, "\"invalid_mfa_enroll_challenge\"") == NULL)
+    return 2298;
+
+  g_autofree gchar *human_session = NULL;
+  g_autofree gchar *access = NULL;
+  g_autofree gchar *refresh = NULL;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_clear_pointer (&body, g_free);
+  gint login_rc = send_raw_path_probe (session, "POST", base_url,
+      "/auth/login?username=exact-refresh-user&skip_mfa=true", NULL, NULL,
+      &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != 0 || status != 200
+      || (human_session = extract_json_string (body, "session_token")) == NULL
+      || (access = extract_json_string (body, "access_token")) == NULL
+      || (refresh = extract_json_string (body, "refresh_token")) == NULL)
+    return 2299;
+  g_autofree gchar *escaped_refresh = g_uri_escape_string (refresh, NULL, TRUE);
+  g_autofree gchar *refresh_alias = g_strdup_printf
+      ("/auth/refresh/x?refresh_token=%s", escaped_refresh);
+  before = (WylDaemonExactRouteStateSnapshot) {
+  0};
+  g_clear_pointer (&body, g_free);
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw_path_probe (session, "POST", base_url, refresh_alias,
+          NULL, NULL, &status, &body) != 0
+      || status != 404 || !exact_route_state_unchanged (server, &before))
+    return 2300;
+  g_autofree gchar *human_authorization = g_strdup_printf ("Bearer %s", access);
+  before = (WylDaemonExactRouteStateSnapshot) {
+  0};
+  g_clear_pointer (&body, g_free);
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw_path_probe (session, "POST", base_url, "/auth/logoutx",
+          human_authorization, NULL, &status, &body) != 0
+      || status != 404 || !exact_route_state_unchanged (server, &before))
+    return 2301;
+  g_autofree gchar *refresh_path = g_strdup_printf
+      ("/auth/refresh?refresh_token=%s", escaped_refresh);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "POST", base_url, refresh_path,
+          NULL, NULL, &status, &body) != 0 || status != 200)
+    return 2302;
+  g_autofree gchar *logout_path = g_strdup_printf
+      ("/auth/logout?session_token=%s", human_session);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "POST", base_url, logout_path,
+          NULL, NULL, &status, &body) != 0 || status != 200
+      || strstr (body, "\"ok\":true") == NULL)
+    return 2303;
+  return 0;
 }
 
 static wyrelog_error_t
@@ -14879,6 +15039,10 @@ main (void)
       base_url);
   if (exact_probe_rc != 0)
     return exact_probe_rc;
+  gint exact_alias_rc = check_valid_exact_auth_alias_canaries
+      (http.server, handle, base_url);
+  if (exact_alias_rc != 0)
+    return exact_alias_rc;
 
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)

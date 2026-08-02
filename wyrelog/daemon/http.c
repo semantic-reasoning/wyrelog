@@ -377,6 +377,13 @@ typedef struct _WylDaemonHttpContext
   guint prefix_route_registrations;
   guint raw_singleton_route_registrations;
   guint exact_route_registrations;
+  guint login_handler_entries;
+  guint mfa_verify_handler_entries;
+  guint mfa_enroll_start_handler_entries;
+  guint mfa_enroll_confirm_handler_entries;
+  guint logout_handler_entries;
+  guint profile_events_handler_entries;
+  guint profile_events_ingestions;
   WylHumanRefreshTestLatch refresh_latch;
   /* Test-only escrow publication backend injection. When set, the service
    * credential issue/rotate handlers pass these into the handoff module context
@@ -5104,6 +5111,38 @@ wyl_daemon_http_exact_route_probe_snapshot_for_test (SoupServer *server,
   return probe != NULL;
 }
 
+gboolean
+wyl_daemon_http_exact_route_state_snapshot_for_test (SoupServer *server,
+    WylDaemonExactRouteStateSnapshot *out_snapshot)
+{
+  if (out_snapshot != NULL)
+    memset (out_snapshot, 0, sizeof *out_snapshot);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || out_snapshot == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  out_snapshot->sessions = g_hash_table_size (ctx->sessions_by_token);
+  out_snapshot->access_tokens = g_hash_table_size (ctx->access_tokens_by_jti);
+  out_snapshot->refresh_tokens =
+      g_hash_table_size (ctx->refresh_tokens_by_token);
+  out_snapshot->mfa_enroll_challenges =
+      g_hash_table_size (ctx->mfa_enroll_challenges);
+  out_snapshot->revoked_sessions =
+      g_hash_table_size (ctx->revoked_session_tokens);
+  out_snapshot->login_entries = ctx->login_handler_entries;
+  out_snapshot->mfa_verify_entries = ctx->mfa_verify_handler_entries;
+  out_snapshot->mfa_enroll_start_entries =
+      ctx->mfa_enroll_start_handler_entries;
+  out_snapshot->mfa_enroll_confirm_entries =
+      ctx->mfa_enroll_confirm_handler_entries;
+  out_snapshot->refresh_entries = ctx->refresh_handler_entries;
+  out_snapshot->logout_entries = ctx->logout_handler_entries;
+  out_snapshot->profile_events_entries = ctx->profile_events_handler_entries;
+  out_snapshot->profile_events_ingestions = ctx->profile_events_ingestions;
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+}
+
 void
 wyl_daemon_http_route_registration_counts_for_test (SoupServer *server,
     guint *out_total, guint *out_prefixes, guint *out_raw_singletons,
@@ -5592,6 +5631,11 @@ profile_events_handler (SoupServer *server, SoupServerMessage *msg,
   (void) query;
 
   WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  ctx->profile_events_handler_entries++;
+  g_mutex_unlock (&ctx->lock);
+#endif
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
@@ -5630,6 +5674,11 @@ profile_events_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   if (status == 200) {
+#ifdef WYL_TEST_DAEMON_HTTP
+    g_mutex_lock (&ctx->lock);
+    ctx->profile_events_ingestions++;
+    g_mutex_unlock (&ctx->lock);
+#endif
     WYL_LOG_INFO (WYL_LOG_SECTION_GENERAL,
         "profile event ingested profile=%s event=%s timestamp_us=%"
         G_GINT64_FORMAT, out_profile, out_event, out_ts);
@@ -10798,6 +10847,11 @@ mfa_enroll_start_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) path;
   WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  ctx->mfa_enroll_start_handler_entries++;
+  g_mutex_unlock (&ctx->lock);
+#endif
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
@@ -10882,6 +10936,11 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) path;
   WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  ctx->mfa_enroll_confirm_handler_entries++;
+  g_mutex_unlock (&ctx->lock);
+#endif
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
@@ -10994,6 +11053,13 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) server;
   (void) path;
 
+  WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  ctx->login_handler_entries++;
+  g_mutex_unlock (&ctx->lock);
+#endif
+
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
@@ -11003,7 +11069,6 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *tenant = WYL_TENANT_DEFAULT;
   const gchar *skip_mfa = NULL;
   const gchar *password = NULL;
-  WylDaemonHttpContext *ctx = user_data;
   if (query != NULL) {
     username = g_hash_table_lookup (query, "username");
     if (g_hash_table_contains (query, "tenant"))
@@ -11160,13 +11225,18 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   (void) path;
+  WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  ctx->mfa_verify_handler_entries++;
+  g_mutex_unlock (&ctx->lock);
+#endif
 
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
   }
 
-  WylDaemonHttpContext *ctx = user_data;
   const gchar *session_token = NULL;
   const gchar *code = NULL;
   if (query != NULL) {
@@ -11661,6 +11731,7 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
 {
   (void) path;
+
   WylDaemonHttpContext *ctx = user_data;
   gboolean dispatch_owned = human_refresh_dispatch_owned (ctx);
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -11926,6 +11997,13 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 {
   (void) path;
 
+  WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  ctx->logout_handler_entries++;
+  g_mutex_unlock (&ctx->lock);
+#endif
+
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
@@ -11951,7 +12029,6 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  WylDaemonHttpContext *ctx = user_data;
   g_auto (WylDaemonAuthContext) bearer_auth = { 0 };
   if (has_bearer_token) {
     const gchar *auth_tenant_error = NULL;
