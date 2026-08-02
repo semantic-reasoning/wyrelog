@@ -29,6 +29,10 @@
 
 principal_transition("unverified",    "login_ok",       "mfa_required").
 principal_transition("unverified",    "login_skip_mfa", "authenticated").
+// Narrow legacy re-login compatibility; issue #752 owns subject-global
+// cross-session precedence and invalidation beyond these two edges.
+principal_transition("authenticated", "login_ok",       "mfa_required").
+principal_transition("authenticated", "login_skip_mfa", "authenticated").
 principal_transition("mfa_required",  "mfa_ok",         "authenticated").
 principal_transition("mfa_required",  "failed_attempt", "mfa_required").
 principal_transition("mfa_required",  "lock",           "locked").

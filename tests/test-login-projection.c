@@ -734,6 +734,305 @@ check_skip_mfa_login_projects_authority_state (void)
           "allow"))
     return 86;
 
+  g_autoptr (WylSession) repeated_session = NULL;
+  if (wyl_session_login (handle, login, &repeated_session) != WYRELOG_E_OK
+      || repeated_session == NULL)
+    return 170;
+  g_autofree gchar *repeated_session_id =
+      wyl_session_dup_id_string (repeated_session);
+  if (repeated_session_id == NULL
+      || g_str_equal (session_id, repeated_session_id))
+    return 171;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM principal_events "
+          "WHERE subject_id = 'projection-skip-mfa-user' "
+          "AND event = 'login_skip_mfa';", &count)
+      || count != 2)
+    return 172;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM principal_events "
+          "WHERE subject_id = 'projection-skip-mfa-user' "
+          "AND event = 'login_skip_mfa' "
+          "AND from_state = 'authenticated' "
+          "AND to_state = 'authenticated';", &count)
+      || count != 1)
+    return 173;
+  gint64 repeated_principal_event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM principal_events "
+          "WHERE subject_id = 'projection-skip-mfa-user' "
+          "AND event = 'login_skip_mfa' "
+          "AND from_state = 'authenticated' "
+          "AND to_state = 'authenticated';", NULL, 0,
+          &repeated_principal_event_id)
+      || repeated_principal_event_id <= 0)
+    return 174;
+  if (!engine_contains_event_row5 (handle, "principal_fired",
+          repeated_principal_event_id, username, "authenticated",
+          "login_skip_mfa", "authenticated"))
+    return 175;
+  const gchar *repeated_session_param[] = { repeated_session_id };
+  gint64 repeated_session_event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM session_events "
+          "WHERE session_id = ? AND event = 'request' "
+          "AND from_state = 'idle' AND to_state = 'active';",
+          repeated_session_param, G_N_ELEMENTS (repeated_session_param),
+          &repeated_session_event_id)
+      || repeated_session_event_id <= 0)
+    return 176;
+  if (!engine_contains_event_row5 (handle, "session_fired",
+          repeated_session_event_id, repeated_session_id, "idle", "request",
+          "active"))
+    return 177;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE subject_id = 'projection-skip-mfa-user' "
+          "AND action = 'login_skip_mfa' "
+          "AND resource_id = 'principal_state' "
+          "AND deny_reason IS NULL "
+          "AND deny_origin IS NULL AND decision = 1;", &count)
+      || count != 2)
+    return 178;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "principal_event",
+      WYRELOG_E_INTERNAL);
+  g_autoptr (WylSession) failed_session = NULL;
+  if (wyl_session_login (handle, login, &failed_session) != WYRELOG_E_INTERNAL
+      || failed_session != NULL)
+    return 179;
+  if (!poisoned_engine_access_is_closed (handle))
+    return 180;
+  gint64 failed_principal_event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT MAX(event_id) FROM principal_events "
+          "WHERE subject_id = 'projection-skip-mfa-user' "
+          "AND event = 'login_skip_mfa' "
+          "AND from_state = 'authenticated' "
+          "AND to_state = 'authenticated';", NULL, 0,
+          &failed_principal_event_id)
+      || failed_principal_event_id <= repeated_principal_event_id)
+    return 181;
+  g_autofree gchar *failed_session_id = NULL;
+  if (!policy_select_text_params (store,
+          "SELECT session_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active' ORDER BY event_id DESC LIMIT 1;", NULL, 0,
+          &failed_session_id))
+    return 182;
+  gint64 failed_session_event_id = -1;
+  const gchar *failed_session_param[] = { failed_session_id };
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM session_events WHERE session_id = ?;",
+          failed_session_param, G_N_ELEMENTS (failed_session_param),
+          &failed_session_event_id))
+    return 183;
+  LoginProjectionVerify repeated_verify = {
+    .principal_state_subject = username,
+    .principal_state = "authenticated",
+    .principal_event_id = failed_principal_event_id,
+    .principal_event_subject = username,
+    .principal_event_from_state = "authenticated",
+    .principal_event = "login_skip_mfa",
+    .principal_event_to_state = "authenticated",
+    .session_event_id = failed_session_event_id,
+    .session_id = failed_session_id,
+    .session_from_state = "idle",
+    .session_event = "request",
+    .session_to_state = "active",
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_login_projection, &repeated_verify) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || !wyl_handle_engine_pair_is_ready (handle))
+    return 184;
+
+  return 0;
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  GThread *first_thread;
+  gboolean first_acquired;
+  gboolean second_waiting;
+  gboolean release_first;
+} LoginRaceFixture;
+
+typedef struct
+{
+  LoginRaceFixture *race;
+  WylHandle *handle;
+  gboolean first;
+  wyrelog_error_t rc;
+  gchar *session_id;
+} LoginRaceWorker;
+
+static void observe_login_race (WylEngineSessionCheckpoint phase,
+    gpointer data);
+static gpointer run_login_worker (gpointer data);
+
+static gint
+check_concurrent_skip_mfa_logins_form_exact_event_chain (void)
+{
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 193;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+
+  LoginRaceFixture race = { 0 };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  LoginRaceWorker first = { &race, handle, TRUE, WYRELOG_E_INTERNAL, NULL };
+  LoginRaceWorker second = { &race, handle, FALSE, WYRELOG_E_INTERNAL, NULL };
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      observe_login_race, &race);
+  GThread *first_thread = g_thread_new ("login-chain-first",
+      run_login_worker, &first);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race.mutex);
+  while (!race.first_acquired
+      && g_cond_wait_until (&race.changed, &race.mutex, deadline));
+  gboolean first_acquired = race.first_acquired;
+  g_mutex_unlock (&race.mutex);
+  GThread *second_thread = g_thread_new ("login-chain-second",
+      run_login_worker, &second);
+  deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race.mutex);
+  while (!race.second_waiting
+      && g_cond_wait_until (&race.changed, &race.mutex, deadline));
+  gboolean second_waiting = race.second_waiting;
+  race.release_first = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (first_thread);
+  g_thread_join (second_thread);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+
+  gint result = 0;
+  if (!first_acquired || !second_waiting || first.rc != WYRELOG_E_OK
+      || second.rc != WYRELOG_E_OK || first.session_id == NULL
+      || second.session_id == NULL
+      || g_str_equal (first.session_id, second.session_id))
+    result = 194;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 count = -1;
+  if (result == 0 && (!policy_count_rows (store,
+              "SELECT COUNT(*) FROM principal_events "
+              "WHERE subject_id = 'projection-concurrent-login-user' "
+              "AND event = 'login_skip_mfa' "
+              "AND from_state = 'unverified' "
+              "AND to_state = 'authenticated';", &count)
+          || count != 1))
+    result = 195;
+  if (result == 0 && (!policy_count_rows (store,
+              "SELECT COUNT(*) FROM principal_events "
+              "WHERE subject_id = 'projection-concurrent-login-user' "
+              "AND event = 'login_skip_mfa' "
+              "AND from_state = 'authenticated' "
+              "AND to_state = 'authenticated';", &count)
+          || count != 1))
+    result = 196;
+  if (result == 0 && (!policy_count_rows (store,
+              "SELECT COUNT(*) FROM audit_events "
+              "WHERE subject_id = 'projection-concurrent-login-user' "
+              "AND action = 'login_skip_mfa' AND decision = 1;", &count)
+          || count != 2))
+    result = 197;
+  g_free (first.session_id);
+  g_free (second.session_id);
+  return result;
+}
+
+static void
+observe_login_race (WylEngineSessionCheckpoint phase, gpointer data)
+{
+  LoginRaceFixture *race = data;
+  g_mutex_lock (&race->mutex);
+  gboolean first = g_thread_self () == race->first_thread;
+  if (phase == WYL_ENGINE_SESSION_WAITING && !first)
+    race->second_waiting = TRUE;
+  if (phase == WYL_ENGINE_SESSION_ACQUIRED && first && !race->first_acquired) {
+    race->first_acquired = TRUE;
+    g_cond_broadcast (&race->changed);
+    while (!race->release_first)
+      g_cond_wait (&race->changed, &race->mutex);
+  }
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_login_worker (gpointer data)
+{
+  LoginRaceWorker *worker = data;
+  if (worker->first) {
+    g_mutex_lock (&worker->race->mutex);
+    worker->race->first_thread = g_thread_self ();
+    g_cond_broadcast (&worker->race->changed);
+    g_mutex_unlock (&worker->race->mutex);
+  }
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "projection-concurrent-login-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  worker->rc = wyl_session_login (worker->handle, login, &session);
+  if (worker->rc == WYRELOG_E_OK)
+    worker->session_id = wyl_session_dup_id_string (session);
+  return NULL;
+}
+
+static gint
+check_login_rejects_terminal_principal_states_without_side_effects (void)
+{
+  static const gchar *states[] = { "locked", "revoked" };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (states); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 185;
+    wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    if (wyl_policy_store_set_principal_state (store,
+            "projection-terminal-user", states[i]) != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 186;
+
+    g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+    wyl_login_req_set_username (login, "projection-terminal-user");
+    wyl_login_req_set_skip_mfa (login, TRUE);
+    g_autoptr (WylSession) session = NULL;
+    if (wyl_session_login (handle, login, &session) != WYRELOG_E_CONFLICT
+        || session != NULL)
+      return 187;
+
+    gint64 count = -1;
+    const gchar *state_param[] = { states[i] };
+    if (!policy_count_rows_params (store,
+            "SELECT COUNT(*) FROM principal_states "
+            "WHERE subject_id = 'projection-terminal-user' AND state = ?;",
+            state_param, G_N_ELEMENTS (state_param), &count)
+        || count != 1)
+      return 188;
+    if (!policy_count_rows (store,
+            "SELECT COUNT(*) FROM principal_events;", &count)
+        || count != 0)
+      return 189;
+    if (!policy_count_rows (store,
+            "SELECT COUNT(*) FROM session_events;", &count)
+        || count != 0)
+      return 190;
+    if (!policy_count_rows (store, "SELECT COUNT(*) FROM audit_events;", &count)
+        || count != 0)
+      return 191;
+    if (wyl_handle_engine_pair_is_poisoned (handle)
+        || !wyl_handle_engine_pair_is_ready (handle))
+      return 192;
+  }
   return 0;
 }
 
@@ -882,6 +1181,12 @@ main (void)
           check_anonymous_session_event_projection_failure_is_reported ()) != 0)
     return rc;
   if ((rc = check_skip_mfa_login_projects_authority_state ()) != 0)
+    return rc;
+  if ((rc = check_concurrent_skip_mfa_logins_form_exact_event_chain ()) != 0)
+    return rc;
+  if ((rc =
+          check_login_rejects_terminal_principal_states_without_side_effects ())
+      != 0)
     return rc;
   if ((rc = check_handle_reopens_persistent_policy_and_audit_paths ()) != 0)
     return rc;

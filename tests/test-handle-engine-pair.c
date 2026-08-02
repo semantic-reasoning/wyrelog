@@ -4345,6 +4345,11 @@ check_replacement_faults_preserve_published_pair (void)
     if (wyl_handle_buffer_delta_for_test (handle, "old_pending", pending, 1,
             WYL_DELTA_INSERT) != WYRELOG_E_OK)
       return 848;
+    guint deltas = 0;
+    if (faults[i] == WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK
+        && wyl_handle_engine_set_delta_callback (handle, delta_count_cb,
+            &deltas) != WYRELOG_E_OK)
+      return 848;
     wyl_handle_set_engine_replacement_fault_once_for_test (handle, faults[i]);
     if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_IO)
       return 849;

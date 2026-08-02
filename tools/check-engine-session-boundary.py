@@ -123,6 +123,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_handle_seed_perm_arm_rules",
     "wyl_handle_shutdown_ordered",
 }
+COMMON_COMMITTED_PUBLICATION_RUNNER = "run_committed_publication"
 CONTROL_WORDS = {"if", "for", "while", "switch"}
 
 
@@ -258,12 +259,13 @@ def mask_comments_and_literals(source: str) -> str:
                                           for c in m.group()), source)
 
 
-def top_level_functions(source: str) -> list[tuple[str, str]]:
-    """Return top-level C function names and bodies from already-masked text."""
+def top_level_functions(source: str) -> list[tuple[str, str, str]]:
+    """Return top-level C names, declarations, and masked function bodies."""
     functions = []
     depth = 0
     start = 0
     name = None
+    declaration = None
     for index, char in enumerate(source):
         if char == "{":
             if depth == 0:
@@ -272,14 +274,40 @@ def top_level_functions(source: str) -> list[tuple[str, str]]:
                                   r"\([^;{}]*\)\s*$", prefix, re.DOTALL)
                 if match and match.group(1) not in CONTROL_WORDS:
                     name = match.group(1)
+                    declaration = match.group(0)
                     start = index
             depth += 1
         elif char == "}" and depth > 0:
             depth -= 1
             if depth == 0 and name is not None:
-                functions.append((name, source[start:index + 1]))
+                assert declaration is not None
+                functions.append((name, declaration, source[start:index + 1]))
                 name = None
+                declaration = None
     return functions
+
+
+def common_runner_contract_error(declaration: str, body: str) -> str | None:
+    """Validate the one typed common runner admitted to owner internals."""
+    first_parameter = re.compile(
+        r"^run_committed_publication\s*\(\s*"
+        r"WylEngineSession\s*\*\s*session\s*,", re.DOTALL)
+    required = (
+        r"\bengine_session_is_valid\s*\(\s*session\s*\)",
+        r"\bWylHandle\s*\*\s*self\s*=\s*session\s*->\s*handle\b",
+        r"\bwyl_policy_store_publication_transaction_begin\s*\(",
+        r"\bwyl_policy_store_publication_transaction_commit\s*\(",
+        r"\breconcile_guarded_engine_pair_in_session\s*\(\s*session\s*,",
+        r"\bpoison_engine_pair_locked\s*\(\s*self\s*\)",
+    )
+    if first_parameter.search(declaration) is None:
+        return "first parameter is not typed WylEngineSession *session"
+    for pattern in required:
+        if re.search(pattern, body, re.DOTALL) is None:
+            return f"missing required operation {pattern!r}"
+    if re.search(r"\bwyl_engine_session_acquire\s*\(", body):
+        return "must consume the supplied session instead of acquiring one"
+    return None
 
 
 def check(sources: dict[RepoPath, str]) -> list[str]:
@@ -319,9 +347,19 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
             errors.append(
                 f"untyped engine lock outside owner: {path.spelling!r}")
         if path == OWNER:
-            for name, body in top_level_functions(source):
-                if (owner_fields.search(body) or owned.search(body)
-                        or raw_lock.search(body)) and name not in OWNER_FUNCTION_ALLOWLIST:
+            for name, declaration, body in top_level_functions(source):
+                sensitive = (owner_fields.search(body) or owned.search(body)
+                             or raw_lock.search(body))
+                if not sensitive:
+                    continue
+                if name == COMMON_COMMITTED_PUBLICATION_RUNNER:
+                    contract_error = common_runner_contract_error(
+                        declaration, body)
+                    if contract_error is not None:
+                        errors.append(
+                            "common committed publication runner violates "
+                            f"structural contract: {contract_error}")
+                elif name not in OWNER_FUNCTION_ALLOWLIST:
                     errors.append(
                         f"owner aggregate access outside function allowlist: {name}")
     return sorted(set(errors))
@@ -568,6 +606,59 @@ def self_test() -> int:
         if not check({OWNER: mutant}):
             print(f"self-test accepted owner mutant: {mutant}", file=sys.stderr)
             return 1
+    common_runner = (
+        "static int run_committed_publication("
+        "WylEngineSession *session, void *data) { "
+        "if (!engine_session_is_valid(session)) return 1; "
+        "WylHandle *self = session->handle; "
+        "(void) self->engine_pair_poisoned; "
+        "wyl_policy_store_publication_transaction_begin(data); "
+        "wyl_policy_store_publication_transaction_commit(data); "
+        "reconcile_guarded_engine_pair_in_session(session, 0, 0, 0, 0); "
+        "poison_engine_pair_locked(self); return 0; }"
+    )
+    if check({OWNER: common_runner}):
+        print("self-test rejected typed common publication runner",
+              file=sys.stderr)
+        return 1
+    wrong_common_runner_parameter = common_runner.replace(
+        "WylEngineSession *session,", "WylHandle *session,", 1)
+    if check({OWNER: wrong_common_runner_parameter}) != [
+            "common committed publication runner violates structural "
+            "contract: first parameter is not typed "
+            "WylEngineSession *session"]:
+        print("self-test accepted untyped common publication runner",
+              file=sys.stderr)
+        return 1
+    incomplete_common_runner = common_runner.replace(
+        "wyl_policy_store_publication_transaction_commit(data); ", "", 1)
+    incomplete_errors = check({OWNER: incomplete_common_runner})
+    if (len(incomplete_errors) != 1
+            or not incomplete_errors[0].startswith(
+                "common committed publication runner violates structural "
+                "contract: missing required operation")):
+        print("self-test accepted incomplete common publication runner",
+              file=sys.stderr)
+        return 1
+    reacquiring_common_runner = common_runner.replace(
+        "WylHandle *self = session->handle; ",
+        "WylHandle *self = session->handle; "
+        "wyl_engine_session_acquire(self); ", 1)
+    if check({OWNER: reacquiring_common_runner}) != [
+            "common committed publication runner violates structural "
+            "contract: must consume the supplied session instead of "
+            "acquiring one"]:
+        print("self-test accepted session-reacquiring common runner",
+              file=sys.stderr)
+        return 1
+    renamed_common_runner = common_runner.replace(
+        "run_committed_publication", "run_committed_publication_bypass", 1)
+    if check({OWNER: renamed_common_runner}) != [
+            "owner aggregate access outside function allowlist: "
+            "run_committed_publication_bypass"]:
+        print("self-test accepted renamed common publication runner",
+              file=sys.stderr)
+        return 1
     allowed_owner = (
         "static void wyl_handle_init(WylHandle *h) { "
         "(*h).read_engine = 0; h[0].engine_pair_poisoned = 0; "

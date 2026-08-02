@@ -313,6 +313,65 @@ check_no_enrollment_returns_enrollment_required (SoupServer *server,
 }
 
 static gint
+check_authority_lookup_faults_are_not_missing (SoupServer *server,
+    WylHandle *handle, const gchar *base_url)
+{
+  (void) server;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  g_autofree gchar *missing_token = NULL;
+  if (do_login (session, base_url, "mfa.principal-missing", &missing_token)
+      != 0)
+    return 320;
+  sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
+  if (sqlite3_exec (db,
+          "DELETE FROM principal_states "
+          "WHERE subject_id='mfa.principal-missing';", NULL, NULL, NULL)
+      != SQLITE_OK)
+    return 321;
+  g_autofree gchar *missing_path = g_strdup_printf
+      ("/auth/mfa/verify?session_token=%s&code=000000", missing_token);
+  if (send_raw (session, "POST", base_url, missing_path, &status, &body) != 0
+      || status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
+    return 322;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *fault_token = NULL;
+  if (do_login (session, base_url, "mfa.principal-read-fault", &fault_token)
+      != 0)
+    return 323;
+  wyl_policy_store_principal_state_lookup_fail_on_call_for_test
+      (wyl_handle_get_policy_store (handle), 1);
+  g_autofree gchar *fault_path = g_strdup_printf
+      ("/auth/mfa/verify?session_token=%s&code=000000", fault_token);
+  if (send_raw (session, "POST", base_url, fault_path, &status, &body) != 0
+      || status != 500 || strstr (body, "\"mfa_verify_failed\"") == NULL)
+    return 324;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *enrollment_token = NULL;
+  const gchar *subject = "mfa.enrollment-read-fault";
+  if (do_login (session, base_url, subject, &enrollment_token) != 0
+      || seed_enrollment (handle, subject) != 0)
+    return 325;
+  gchar correct[8];
+  if (compute_current_code (correct) != 0)
+    return 326;
+  guint code = (guint) g_ascii_strtoull (correct, NULL, 10);
+  wyl_policy_store_totp_enrollment_lookup_fail_on_call_for_test
+      (wyl_handle_get_policy_store (handle), 2);
+  g_autofree gchar *enrollment_path = g_strdup_printf
+      ("/auth/mfa/verify?session_token=%s&code=%06u", enrollment_token,
+      (code + 1) % 1000000);
+  if (send_raw (session, "POST", base_url, enrollment_path, &status, &body)
+      != 0 || status != 500 || strstr (body, "\"mfa_verify_failed\"") == NULL)
+    return 327;
+  return 0;
+}
+
+static gint
 check_missing_session_token (SoupServer *server, const gchar *base_url)
 {
   (void) server;
@@ -610,6 +669,223 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
   return 0;
 }
 
+static gint
+check_elapsed_lock_returns_auth_required (WylHandle *handle,
+    const gchar *base_url)
+{
+  const gchar *subject = "mfa.elapsed-lock";
+  g_autoptr (SoupSession) session = soup_session_new ();
+  g_autofree gchar *session_token = NULL;
+  if (do_login (session, base_url, subject, &session_token) != 0
+      || seed_enrollment (handle, subject) != 0)
+    return 1250;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 ago = (gint64) time (NULL) - (16 * 60);
+  for (gint i = 0; i < 5; i++) {
+    g_autofree gchar *state = NULL;
+    gint64 count = 0, locked_at = 0;
+    if (wyl_policy_store_apply_principal_failure (store, subject, 5, ago,
+            &state, &count, &locked_at) != WYRELOG_E_OK)
+      return 1251;
+  }
+  gchar proof[8];
+  if (compute_current_code (proof) != 0)
+    return 1252;
+  g_autofree gchar *path = g_strdup_printf
+      ("/auth/mfa/verify?session_token=%s&code=%s", session_token, proof);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw (session, "POST", base_url, path, &status, &body) != 0
+      || status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
+    return 1253;
+  return 0;
+}
+
+static gint
+check_elapsed_unlock_publication_fault_returns_500 (WylHandle *handle,
+    const gchar *base_url)
+{
+  const gchar *subject = "mfa.elapsed-unlock-fault";
+  g_autoptr (SoupSession) session = soup_session_new ();
+  g_autofree gchar *session_token = NULL;
+  if (do_login (session, base_url, subject, &session_token) != 0
+      || seed_enrollment (handle, subject) != 0)
+    return 1260;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 ago = (gint64) time (NULL) - (16 * 60);
+  for (gint failure = 0; failure < 5; failure++) {
+    g_autofree gchar *state = NULL;
+    gint64 count = 0, locked_at = 0;
+    if (wyl_policy_store_apply_principal_failure (store, subject, 5, ago,
+            &state, &count, &locked_at) != WYRELOG_E_OK)
+      return 1261;
+  }
+  gchar proof[8];
+  if (compute_current_code (proof) != 0)
+    return 1262;
+  wyl_handle_set_engine_replacement_fault_once_for_test (handle,
+      WYL_ENGINE_REPLACEMENT_FAULT_PUBLICATION_VERIFY_POLICY);
+  g_autofree gchar *path = g_strdup_printf
+      ("/auth/mfa/verify?session_token=%s&code=%s", session_token, proof);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw (session, "POST", base_url, path, &status, &body) != 0
+      || status != 500 || strstr (body, "\"mfa_verify_failed\"") == NULL
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 1263;
+  g_autofree gchar *state = NULL;
+  gint64 count = -1, locked_at = 0;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, subject, &state,
+          &count, &locked_at, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (state, "unverified") != 0 || count != 0
+      || locked_at != G_MININT64)
+    return 1264;
+  return 0;
+}
+
+static gint
+check_failed_attempt_lock_publication (SoupServer *server, WylHandle *handle,
+    const gchar *base_url, const gchar *username, gboolean inject_fault,
+    gint error_base)
+{
+  (void) server;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  g_autofree gchar *session_token = NULL;
+  if (do_login (session, base_url, username, &session_token) != 0
+      || seed_enrollment (handle, username) != 0)
+    return error_base;
+  gchar correct[8];
+  if (compute_current_code (correct) != 0)
+    return error_base + 1;
+  guint code = (guint) g_ascii_strtoull (correct, NULL, 10);
+  g_autofree gchar *path = g_strdup_printf
+      ("/auth/mfa/verify?session_token=%s&code=%06u", session_token,
+      (code + 1) % 1000000);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  for (guint attempt = 1; attempt <= 4; attempt++) {
+    if (send_raw (session, "POST", base_url, path, &status, &body) != 0
+        || status != 401 || strstr (body, "\"mfa_invalid\"") == NULL)
+      return error_base + 1 + (gint) attempt;
+    g_clear_pointer (&body, g_free);
+  }
+  if (inject_fault)
+    wyl_handle_set_engine_replacement_fault_once_for_test (handle,
+        WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_STATES);
+  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+    return error_base + 6;
+  if (status != (inject_fault ? 500 : 401)
+      || strstr (body, inject_fault ? "\"mfa_verify_failed\"" :
+          "\"mfa_invalid\"") == NULL)
+    return error_base + 7;
+
+  g_autofree gchar *state = NULL;
+  gint64 count = 0;
+  gint64 locked_at = G_MININT64;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info
+      (wyl_handle_get_policy_store (handle), username, &state, &count,
+          &locked_at, &found) != WYRELOG_E_OK || !found || count != 5
+      || g_strcmp0 (state, "locked") != 0 || locked_at == G_MININT64)
+    return error_base + 8;
+  if (!inject_fault) {
+    g_clear_pointer (&body, g_free);
+    if (send_raw (session, "POST", base_url, path, &status, &body) != 0
+        || status != 429 || strstr (body, "\"mfa_locked\"") == NULL)
+      return error_base + 9;
+  }
+  return 0;
+}
+
+typedef struct
+{
+  const gchar *subject_id;
+  gint64 event_id;
+  gboolean force_failure;
+} LockoutReconcileVerify;
+
+static wyrelog_error_t
+capture_lockout_event_id (gint64 event_id, const gchar *subject_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer data)
+{
+  (void) from_state;
+  (void) to_state;
+  LockoutReconcileVerify *verify = data;
+  if (g_strcmp0 (subject_id, verify->subject_id) == 0
+      && g_strcmp0 (event, "lock") == 0)
+    verify->event_id = event_id;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+verify_lockout_reconciliation (WylHandle *handle, gpointer data)
+{
+  LockoutReconcileVerify *verify = data;
+  if (verify->force_failure)
+    return WYRELOG_E_POLICY;
+  const gchar *symbols[] = {
+    verify->subject_id,
+    "locked",
+    "mfa_required",
+    "lock",
+  };
+  gint64 ids[G_N_ELEMENTS (symbols)] = { 0 };
+  for (gsize i = 0; i < G_N_ELEMENTS (symbols); i++) {
+    if (wyl_handle_intern_engine_symbol (handle, symbols[i], &ids[i])
+        != WYRELOG_E_OK)
+      return WYRELOG_E_POLICY;
+  }
+  const gint64 state_row[] = { ids[0], ids[1] };
+  const gint64 event_row[] = {
+    verify->event_id, ids[0], ids[2], ids[3], ids[1]
+  };
+  gboolean has_state = FALSE;
+  gboolean has_event = FALSE;
+  if (wyl_handle_engine_contains (handle, "principal_state", state_row,
+          G_N_ELEMENTS (state_row), &has_state) != WYRELOG_E_OK
+      || wyl_handle_engine_contains (handle, "principal_fired", event_row,
+          G_N_ELEMENTS (event_row), &has_event) != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  return has_state && has_event ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static gint
+check_lock_publication_fault_repairs (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  gint rc = check_failed_attempt_lock_publication (server, handle, base_url,
+      "mfa.lock-fault", TRUE, 1500);
+  if (rc != 0)
+    return rc;
+  if (!wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 1510;
+  LockoutReconcileVerify verify = {
+    .subject_id = "mfa.lock-fault",
+    .event_id = -1,
+    .force_failure = TRUE,
+  };
+  if (wyl_policy_store_foreach_principal_event
+      (wyl_handle_get_policy_store (handle), capture_lockout_event_id,
+          &verify) != WYRELOG_E_OK || verify.event_id <= 0)
+    return 1511;
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_lockout_reconciliation, &verify) != WYRELOG_E_POLICY
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 1512;
+  verify.force_failure = FALSE;
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_lockout_reconciliation, &verify) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || !wyl_handle_engine_pair_is_ready (handle))
+    return 1513;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -664,6 +940,9 @@ main (void)
   if ((rc = check_no_enrollment_returns_enrollment_required (http.server,
               handle, base_url)) != 0)
     goto out;
+  if ((rc = check_authority_lookup_faults_are_not_missing (http.server,
+              handle, base_url)) != 0)
+    goto out;
   if ((rc = check_wrong_code_rejected (http.server, handle, base_url)) != 0)
     goto out;
   if ((rc = check_wrong_state_session (http.server, handle, base_url)) != 0)
@@ -676,6 +955,17 @@ main (void)
               base_url)) != 0)
     goto out;
   if ((rc = check_locked_principal_returns_locked (http.server, handle,
+              base_url)) != 0)
+    goto out;
+  if ((rc = check_elapsed_lock_returns_auth_required (handle, base_url)) != 0)
+    goto out;
+  if ((rc = check_failed_attempt_lock_publication (http.server, handle,
+              base_url, "mfa.fifth-lock", FALSE, 1400)) != 0)
+    goto out;
+  if ((rc = check_lock_publication_fault_repairs (http.server, handle,
+              base_url)) != 0)
+    goto out;
+  if ((rc = check_elapsed_unlock_publication_fault_returns_500 (handle,
               base_url)) != 0)
     goto out;
 

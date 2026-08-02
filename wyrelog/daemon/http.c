@@ -19,6 +19,7 @@
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/auth/mfa-enrollment-private.h"
+#include "wyrelog/auth/mfa-validator.h"
 #include "wyrelog/auth/service-exchange-limiter-private.h"
 #include "wyrelog/auth/service-exchange-private.h"
 #include "wyrelog/auth/service-credential-private.h"
@@ -11304,33 +11305,25 @@ mfa_code_is_well_formed (const gchar *code)
  * step lookup (which iterated the entire principal_states table) onto
  * the single-row accessor wyl_policy_store_get_principal_state.  The
  * accessor distinguishes "no row" (out_found=FALSE, returns OK) from
- * "iteration error" (returns non-OK) via the explicit |out_found|
- * boolean, so we surface the same NULL-on-miss-or-fault semantics to
- * the caller without ambiguity.
+ * a durable read error (returns non-OK).  Preserve that distinction so
+ * authority faults fail closed as 500 instead of masquerading as a normal
+ * unauthenticated state.
  */
-static gchar *
-mfa_lookup_principal_state (WylHandle *handle, const gchar *subject_id)
+static wyrelog_error_t
+mfa_lookup_principal_state (WylHandle *handle, const gchar *subject_id,
+    gchar **out_state, gboolean *out_found)
 {
+  if (out_state == NULL || out_found == NULL)
+    return WYRELOG_E_INVALID;
+  *out_state = NULL;
+  *out_found = FALSE;
   if (handle == NULL || subject_id == NULL || subject_id[0] == '\0')
-    return NULL;
+    return WYRELOG_E_INVALID;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
-    return NULL;
-  gchar *state = NULL;
-  gboolean found = FALSE;
-  if (wyl_policy_store_get_principal_state (store, subject_id, &state,
-          &found) != WYRELOG_E_OK) {
-    g_clear_pointer (&state, g_free);
-    return NULL;
-  }
-  if (!found) {
-    /* Defensive: get_principal_state already wrote NULL on miss, but
-     * the contract is "NULL on no-row" and we want a single belt-and-
-     * braces clear here too. */
-    g_clear_pointer (&state, g_free);
-    return NULL;
-  }
-  return state;
+    return WYRELOG_E_INTERNAL;
+  return wyl_policy_store_get_principal_state (store, subject_id, out_state,
+      out_found);
 }
 
 static void
@@ -11415,13 +11408,16 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
    * influence behaviour via the session_token, and the leak surface is
    * already bounded by the live-session gate above.
    */
-  g_autofree gchar *principal_state =
-      mfa_lookup_principal_state (ctx->handle, username);
-  if (g_strcmp0 (principal_state, "locked") == 0) {
-    set_json_error (msg, 429, "mfa_locked");
+  g_autofree gchar *principal_state = NULL;
+  gboolean principal_found = FALSE;
+  wyrelog_error_t principal_rc = mfa_lookup_principal_state (ctx->handle,
+      username, &principal_state, &principal_found);
+  if (principal_rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "mfa_verify_failed");
     return;
   }
-  if (g_strcmp0 (principal_state, "mfa_required") != 0) {
+  if (!principal_found || (g_strcmp0 (principal_state, "locked") != 0
+          && g_strcmp0 (principal_state, "mfa_required") != 0)) {
     set_json_error (msg, 401, "mfa_auth_required");
     return;
   }
@@ -11447,13 +11443,35 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
    * On success, the FSM is advanced to AUTHENTICATED before we
    * return, mirroring login_handler's order.
    */
-  wyrelog_error_t rc = wyl_session_mfa_verify_with_proof (ctx->handle, session,
+  WylMfaValidationOutcome outcome = WYL_MFA_VALIDATION_ERROR;
+  gboolean has_typed_outcome = validator == wyl_mfa_validator_totp;
+  wyrelog_error_t rc = has_typed_outcome ?
+      wyl_mfa_verify_totp_with_outcome (ctx->handle, session, code,
+      &outcome) : wyl_session_mfa_verify_with_proof (ctx->handle, session,
       code, validator, validator_user_data);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_mfa_request");
     return;
   }
   if (rc == WYRELOG_E_POLICY) {
+    /* The built-in validator carries the durable transition outcome through
+     * this call.  Do not infer it with a fallible post-read: the threshold
+     * attempt remains an ordinary invalid proof, subsequent locked requests
+     * become 429, auto-unlock requires authentication, and publication/read
+     * faults surface as 500. */
+    if (has_typed_outcome && outcome == WYL_MFA_VALIDATION_LOCKED) {
+      set_json_error (msg, 429, "mfa_locked");
+      return;
+    }
+    if (has_typed_outcome && outcome == WYL_MFA_VALIDATION_AUTH_REQUIRED) {
+      set_json_error (msg, 401, "mfa_auth_required");
+      return;
+    }
+    if (has_typed_outcome && outcome != WYL_MFA_VALIDATION_REJECTED
+        && outcome != WYL_MFA_VALIDATION_REJECTED_LOCKED) {
+      set_json_error (msg, 500, "mfa_verify_failed");
+      return;
+    }
     /*
      * The validator funnels enrollment-missing, wrong-code, and
      * replay through the same WYRELOG_E_POLICY (commit 3 contract).
