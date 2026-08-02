@@ -235,12 +235,14 @@ meson compile -C build-daemon-http-shared \\
   test-daemon-http-decide \\
   test-daemon-http-decide-refresh \\
   test-daemon-http-decide-service \\
+  test-daemon-http-service-decision \\
   test-daemon-http-decide-audit"""
 expected_test = """\
 meson test -C build-daemon-http-shared --no-rebuild \\
   daemon-http-decide \\
   daemon-http-decide-refresh \\
   daemon-http-decide-service \\
+  daemon-http-service-decision \\
   daemon-http-decide-audit \\
   daemon-http-decide-private-symbols \\
   --print-errorlogs"""
@@ -270,16 +272,17 @@ for workflow_path in map(Path, sys.argv[5:]):
     if "windows" in job.lower():
         fail(f"{workflow_path} daemon HTTP job must stay POSIX-only")
     if step_run(job, "Compile daemon HTTP variants") != expected_compile:
-        fail(f"{workflow_path} must compile exactly four daemon HTTP variants")
+        fail(f"{workflow_path} must compile exactly five daemon HTTP variants")
     if step_run(job, "Test daemon HTTP variants") != expected_test:
         fail(
-            f"{workflow_path} must test exactly four daemon HTTP variants "
+            f"{workflow_path} must test exactly five daemon HTTP variants "
             "and their artifact symbols"
         )
     for target in (
         "daemon-http-decide",
         "daemon-http-decide-refresh",
         "daemon-http-decide-service",
+        "daemon-http-service-decision",
         "daemon-http-decide-audit",
     ):
         occurrences = re.findall(
