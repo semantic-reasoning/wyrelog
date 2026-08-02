@@ -12372,9 +12372,9 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       NULL, NULL);
   wyl_daemon_http_add_exact_handler (server, "/readyz", readyz_handler, ctx,
       NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/facts/status",
+  wyl_daemon_http_add_exact_handler (server, "/facts/status",
       facts_status_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/facts/schema/register",
+  wyl_daemon_http_add_exact_handler (server, "/facts/schema/register",
       schema_register_handler, ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/facts", facts_route_handler,
       ctx, NULL);
