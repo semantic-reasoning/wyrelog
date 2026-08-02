@@ -369,6 +369,60 @@ jobs:
           path: build-daemon-http-shared/meson-logs/
           if-no-files-found: ignore
 
+  daemon-http-shared-fact-audit-disabled:
+    name: daemon-http-shared-fact-audit-disabled-ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
+
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@v5
+        with:
+          path: subprojects/packagecache
+          key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            Linux-packagecache-
+
+      - name: Configure shared fact-store daemon HTTP tests without audit
+        run: |
+          meson setup build-daemon-http-shared-audit-disabled \
+            -Ddefault_library=shared \
+            -Denable_tpm=disabled \
+            -Denable_client=enabled \
+            -Denable_fact_store=enabled \
+            -Denable_audit=disabled \
+            -Dduckdb_source=prebuilt
+
+      - name: Compile daemon HTTP variants without audit
+        run: |
+          meson compile -C build-daemon-http-shared-audit-disabled \
+            test-daemon-http-decide \
+            test-daemon-http-decide-refresh \
+            test-daemon-http-decide-service
+
+      - name: Test daemon HTTP private symbols without audit
+        run: |
+          meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \
+            daemon-http-decide-private-symbols \
+            --print-errorlogs
+
+      - name: Upload audit-disabled daemon HTTP meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: daemon-http-shared-fact-audit-disabled-logs-ubuntu
+          path: build-daemon-http-shared-audit-disabled/meson-logs/
+          if-no-files-found: ignore
+
   build-windows:
     name: build-windows${{ matrix.job_suffix }}
     runs-on: windows-latest

@@ -293,6 +293,27 @@ def step_run(job: str, name: str) -> str:
     )
 
 
+def step_body(job: str, name: str) -> str:
+    match = re.search(
+        rf"^      - name: {re.escape(name)}\n"
+        r"(.*?)(?=^      - name: |\Z)",
+        job,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        fail(f"daemon HTTP shared fact job is missing step: {name}")
+    return "\n".join(
+        line.removeprefix("        ") for line in
+        match.group(1).rstrip().splitlines()
+    )
+
+
+def run_step_body(command: str) -> str:
+    return "run: |\n" + "\n".join(
+        f"  {line}" for line in command.splitlines()
+    )
+
+
 expected_compile = """\
 meson compile -C build-daemon-http-shared \\
   test-daemon-http-decide \\
@@ -307,14 +328,56 @@ meson test -C build-daemon-http-shared --no-rebuild \\
   daemon-http-decide-audit \\
   daemon-http-decide-private-symbols \\
   --print-errorlogs"""
+expected_audit_disabled_configure = """\
+meson setup build-daemon-http-shared-audit-disabled \\
+  -Ddefault_library=shared \\
+  -Denable_tpm=disabled \\
+  -Denable_client=enabled \\
+  -Denable_fact_store=enabled \\
+  -Denable_audit=disabled \\
+  -Dduckdb_source=prebuilt"""
+expected_audit_disabled_compile = """\
+meson compile -C build-daemon-http-shared-audit-disabled \\
+  test-daemon-http-decide \\
+  test-daemon-http-decide-refresh \\
+  test-daemon-http-decide-service"""
+expected_audit_disabled_test = """\
+meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \\
+  daemon-http-decide-private-symbols \\
+  --print-errorlogs"""
+expected_audit_disabled_steps = [
+    "Check out source",
+    "Install build dependencies",
+    "Restore meson packagecache",
+    "Configure shared fact-store daemon HTTP tests without audit",
+    "Compile daemon HTTP variants without audit",
+    "Test daemon HTTP private symbols without audit",
+    "Upload audit-disabled daemon HTTP meson logs on failure",
+]
+expected_audit_disabled_checkout = "uses: actions/checkout@v5"
+expected_audit_disabled_cache = """\
+uses: actions/cache/restore@v5
+with:
+  path: subprojects/packagecache
+  key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+  restore-keys: |
+    Linux-packagecache-"""
+expected_audit_disabled_upload = """\
+if: failure()
+uses: actions/upload-artifact@v6
+with:
+  name: daemon-http-shared-fact-audit-disabled-logs-ubuntu
+  path: build-daemon-http-shared-audit-disabled/meson-logs/
+  if-no-files-found: ignore"""
 
-ci_jobs = []
+ci_audit_enabled_jobs = []
+ci_audit_disabled_jobs = []
 for workflow_path in map(Path, sys.argv[5:]):
     workflow = workflow_path.read_text(encoding="utf-8")
     if workflow.count("\n  daemon-http-shared-fact:\n") != 1:
         fail(f"{workflow_path} must define one daemon HTTP shared fact job")
     job = job_body(workflow, "daemon-http-shared-fact")
-    ci_jobs.append(job)
+    ci_audit_enabled_jobs.append(job)
     for required in (
         "os: [ubuntu-latest, macos-latest]",
         "timeout-minutes: 30",
@@ -356,5 +419,92 @@ for workflow_path in map(Path, sys.argv[5:]):
                 "and test steps"
             )
 
-if ci_jobs[0] != ci_jobs[1]:
+    audit_disabled_job_name = "daemon-http-shared-fact-audit-disabled"
+    if workflow.count(f"\n  {audit_disabled_job_name}:\n") != 1:
+        fail(
+            f"{workflow_path} must define one audit-disabled daemon HTTP job"
+        )
+    audit_disabled_job = job_body(workflow, audit_disabled_job_name)
+    ci_audit_disabled_jobs.append(audit_disabled_job)
+    actual_steps = re.findall(
+        r"^      - name: (.+)$",
+        audit_disabled_job,
+        re.MULTILINE,
+    )
+    if actual_steps != expected_audit_disabled_steps:
+        fail(
+            f"{workflow_path} audit-disabled job step sequence mismatch: "
+            f"{actual_steps}"
+        )
+    for required in (
+        "name: daemon-http-shared-fact-audit-disabled-ubuntu",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 30",
+    ):
+        if audit_disabled_job.count(required) != 1:
+            fail(
+                f"{workflow_path} audit-disabled job must contain exactly "
+                f"one: {required}"
+            )
+    for forbidden in (
+        "matrix:",
+        "macos",
+        "windows",
+        "-Denable_audit=enabled",
+        "test-daemon-http-decide-audit",
+        "daemon-http-decide-audit \\",
+    ):
+        if forbidden.lower() in audit_disabled_job.lower():
+            fail(
+                f"{workflow_path} audit-disabled job contains forbidden "
+                f"content: {forbidden}"
+            )
+    if step_body(
+        audit_disabled_job,
+        "Check out source",
+    ) != expected_audit_disabled_checkout:
+        fail(f"{workflow_path} audit-disabled checkout step changed")
+    if step_body(
+        audit_disabled_job,
+        "Restore meson packagecache",
+    ) != expected_audit_disabled_cache:
+        fail(f"{workflow_path} audit-disabled cache step changed")
+    if step_body(
+        audit_disabled_job,
+        "Upload audit-disabled daemon HTTP meson logs on failure",
+    ) != expected_audit_disabled_upload:
+        fail(f"{workflow_path} audit-disabled log upload step changed")
+    install_step = """\
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \\
+  meson ninja-build pkg-config \\
+  libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev"""
+    if step_body(
+        audit_disabled_job,
+        "Install build dependencies",
+    ) != run_step_body(install_step):
+        fail(f"{workflow_path} audit-disabled dependencies changed")
+    if step_body(
+        audit_disabled_job,
+        "Configure shared fact-store daemon HTTP tests without audit",
+    ) != run_step_body(expected_audit_disabled_configure):
+        fail(f"{workflow_path} audit-disabled configure command changed")
+    if step_body(
+        audit_disabled_job,
+        "Compile daemon HTTP variants without audit",
+    ) != run_step_body(expected_audit_disabled_compile):
+        fail(f"{workflow_path} must compile exactly three non-audit variants")
+    if step_body(
+        audit_disabled_job,
+        "Test daemon HTTP private symbols without audit",
+    ) != run_step_body(expected_audit_disabled_test):
+        fail(f"{workflow_path} must run only the private-symbol checker")
+    if audit_disabled_job.count("-Denable_audit=disabled") != 1:
+        fail(f"{workflow_path} must explicitly disable audit exactly once")
+
+if ci_audit_enabled_jobs[0] != ci_audit_enabled_jobs[1]:
     fail("PR and main daemon HTTP shared fact jobs must remain identical")
+if ci_audit_disabled_jobs[0] != ci_audit_disabled_jobs[1]:
+    fail(
+        "PR and main audit-disabled daemon HTTP jobs must remain identical"
+    )
