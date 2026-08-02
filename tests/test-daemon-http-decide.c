@@ -860,7 +860,7 @@ check_service_route_shape_matrix (const gchar *base_url)
 
 static gint
 check_exact_route_shape (SoupServer *server, const gchar *base_url,
-    const gchar *canonical_path, gint error_base)
+    const gchar *canonical_path, guint canonical_method_status, gint error_base)
 {
   WylDaemonExactRouteProbeSnapshot before = { 0 };
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
@@ -872,7 +872,7 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
   g_autofree gchar *body = NULL;
   if (send_raw_path_probe (session, "PATCH", base_url, canonical_path,
           "Bearer exact-route-poison", poison, &status, &body) != 0
-      || status != 405)
+      || status != canonical_method_status)
     return error_base + 1;
   WylDaemonExactRouteProbeSnapshot after = { 0 };
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
@@ -934,24 +934,26 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 15;
+  const guint expected_exact = 17;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 14;
+  const guint expected_exact = 16;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 12;
+  const guint expected_exact = 14;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 11;
+  const guint expected_exact = 13;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 17
+  if (total != expected_total || prefixes != 4 || raw_singletons != 15
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
   static const gchar *exact_paths[] = {
     "/healthz",
     "/readyz",
+    "/facts/status",
+    "/facts/schema/register",
     "/profile/status",
     "/profile/events",
     "/service-management-authority/arm",
@@ -971,11 +973,74 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
 #endif
   };
   for (gsize i = 0; i < G_N_ELEMENTS (exact_paths); i++) {
+    guint canonical_method_status = 405;
+#ifndef WYL_HAS_FACT_STORE
+    if (g_strcmp0 (exact_paths[i], "/facts/schema/register") == 0)
+      canonical_method_status = 503;
+#endif
     gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
-        2281 + (gint) i * 10);
+        canonical_method_status, 2281 + (gint) i * 10);
     if (rc != 0)
       return rc;
   }
+  return 0;
+}
+
+static gint
+check_exact_facts_alias_canaries (SoupServer *server, const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  static const gchar *const status_aliases[] = {
+    "/facts/status/x",
+    "/facts/statusx",
+  };
+  static const gchar *const schema_aliases[] = {
+    "/facts/schema/register/x?tenant=__wr_default&graph=orders&namespace=shop"
+        "&relation=alias_probe&schema_version=1",
+    "/facts/schema/registerx?tenant=__wr_default&graph=orders&namespace=shop"
+        "&relation=alias_probe&schema_version=1",
+  };
+  const gchar *schema_body = "column_name\tcolumn_type\tnullable\tvisible\n"
+      "order_id\tsymbol\tfalse\ttrue\n";
+  for (gsize i = 0; i < G_N_ELEMENTS (status_aliases); i++) {
+    WylDaemonExactRouteStateSnapshot before = { 0 }, after = { 0 };
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+        || send_raw_path_probe (session, "GET", base_url, status_aliases[i],
+            NULL, NULL, &status, &body) != 0
+        || status != 404
+        || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
+        || memcmp (&before, &after, sizeof before) != 0)
+      return 2381 + (gint) i;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (schema_aliases); i++) {
+    WylDaemonExactRouteStateSnapshot before = { 0 }, after = { 0 };
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+        || send_raw_path_probe (session, "POST", base_url, schema_aliases[i],
+            "Bearer exact-facts-valid-shape", schema_body, &status,
+            &body) != 0 || status != 404
+        || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
+        || memcmp (&before, &after, sizeof before) != 0)
+      return 2383 + (gint) i;
+  }
+
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_path_probe (session, "GET", base_url,
+          "/facts/schema/register", NULL, NULL, &status, &body) != 0)
+    return 2385;
+#ifdef WYL_HAS_FACT_STORE
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 2386;
+#else
+  if (status != 503 || strstr (body, "\"fact_store_disabled\"") == NULL)
+    return 2387;
+#endif
   return 0;
 }
 
@@ -15039,6 +15104,10 @@ main (void)
       base_url);
   if (exact_probe_rc != 0)
     return exact_probe_rc;
+  gint exact_facts_rc = check_exact_facts_alias_canaries (http.server,
+      base_url);
+  if (exact_facts_rc != 0)
+    return exact_facts_rc;
   gint exact_alias_rc = check_valid_exact_auth_alias_canaries
       (http.server, handle, base_url);
   if (exact_alias_rc != 0)

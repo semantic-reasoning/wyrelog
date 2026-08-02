@@ -308,6 +308,29 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   g_autofree gchar *schema_query = g_strdup_printf
       ("tenant=%s&graph=orders&namespace=shop&relation=orders&"
       "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  static const gchar *const schema_aliases[] = {
+    "/facts/schema/register/x",
+    "/facts/schema/registerx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (schema_aliases); i++) {
+    rc = send_raw (session, "POST", base_url, schema_aliases[i], schema_query,
+        admin_token, schema_body, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+      return 222 + (gint) i;
+    gboolean visible = FALSE;
+    wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
+    gsize n_columns = 0;
+    if (wyl_policy_store_load_fact_relation_schema_columns
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+            "shop", "orders", 1, &visible, &columns, &n_columns)
+        != WYRELOG_E_NOT_FOUND) {
+      wyl_policy_fact_relation_schema_columns_free (columns, n_columns);
+      return 224 + (gint) i;
+    }
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
       schema_query, admin_token, schema_body, &status, &body);
   if (rc != 0)

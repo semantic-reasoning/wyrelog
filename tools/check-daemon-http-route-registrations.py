@@ -99,6 +99,8 @@ PREEXISTING_EXACT_PATHS = {
 ISSUE_720_EXACT_PATHS = {
     "/healthz",
     "/readyz",
+    "/facts/status",
+    "/facts/schema/register",
     "/profile/status",
     "/profile/events",
     "/auth/login",
