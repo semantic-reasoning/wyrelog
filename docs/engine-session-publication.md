@@ -40,10 +40,18 @@ Failure discards the candidate, its symbol map, and its pending deltas, then
 restores the complete old pair. Success replaces the old pair atomically.
 
 After a durable commit, uncertainty about publication or read-back is a
-different failure class. Call `wyl_handle_poison_engine_pair()` before
-returning the failure. Poisoning is idempotent, discards every usable engine
-reference and buffered delta, and makes evaluator operations and readiness
-fail closed. An ordinary reload cannot clear poison.
+different failure class. `wyl_handle_poison_engine_pair()` is only an ordinary,
+fallible request to fence the pair: callers must check its result, and
+`WYRELOG_E_BUSY` means that it acquired no engine session and made no mutation.
+A committed mutation instead acquires and retains a `WylEngineSession` before
+entering higher-ranked store, context, or registry work, keeps it through commit
+and projection or read-back, and calls
+`wyl_handle_fail_committed_engine_projection()` on uncertainty before releasing
+the session. Never commit while holding a higher-ranked owner and then try to
+acquire the engine session to fence the result; that rank inversion can leave a
+durable mutation unfenced. Committed-failure poisoning is idempotent, discards
+every usable engine reference and buffered delta, and makes evaluator
+operations and readiness fail closed. An ordinary reload cannot clear poison.
 
 Recovery from committed uncertainty uses
 `wyl_handle_reconcile_committed_engine_pair()`. The caller first owns any
