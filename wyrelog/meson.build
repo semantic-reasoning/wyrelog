@@ -199,6 +199,21 @@ wyrelog_handle_test_seams_dep = declare_dependency(
   dependencies : [glib_dep, gio_dep],
 )
 
+# Full-symbol control for shared-only configurations, especially PE where the
+# export directory cannot prove that a non-exported test definition is absent.
+# It compiles the production handle owner with the exact production feature
+# arguments and without WYL_TEST_HANDLE_SEAMS.
+wyrelog_handle_production_control_lib = static_library(
+  'wyrelog-handle-production-control',
+  'wyl-handle.c',
+  include_directories : wyrelog_inc,
+  dependencies : wyrelog_deps,
+  c_args : wyrelog_c_args,
+  override_options : wyrelog_override_options,
+  install : false,
+  build_by_default : false,
+)
+
 # Host-only private companion: never installed and never linked into
 # libwyrelog. Focused tests and the exact future #358 daemon owner opt in.
 service_session_private_lib = static_library('wyrelog-service-session-private',

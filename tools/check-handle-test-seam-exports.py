@@ -16,6 +16,7 @@ PROTECTED = {
     "wyl_handle_engine_session_locked_for_test",
     "wyl_handle_pending_delta_count_for_test",
 }
+SENTINEL = "wyl_init"
 
 
 def run(command):
@@ -68,10 +69,39 @@ def protected_symbols(output):
                          + r"(?:@\d+)?(?![A-Za-z0-9_])", output)}
 
 
+def contains_symbol(output, symbol):
+    return re.search(r"(?<![A-Za-z0-9_])_?" + re.escape(symbol)
+                     + r"(?:@\d+)?(?![A-Za-z0-9_])", output) is not None
+
+
+def verify_output(expectation, output):
+    if not contains_symbol(output, SENTINEL):
+        raise RuntimeError("symbol inspector output lacks production sentinel: "
+                           + SENTINEL)
+    found = protected_symbols(output)
+    if expectation == "absent" and found:
+        raise RuntimeError("handle test seams present in production library "
+                           "symbols:\n  " + "\n  ".join(sorted(found)))
+    if expectation == "present" and found != PROTECTED:
+        raise RuntimeError("handle test companion is missing protected "
+                           "symbols:\n  "
+                           + "\n  ".join(sorted(PROTECTED - found)))
+
+
+def inspect(expectation, object_format, artifact_kind, artifact,
+            which=shutil.which, runner=run):
+    output = symbols(object_format, artifact_kind, artifact, which, runner)
+    verify_output(expectation, output)
+
+
 def self_test():
     all_symbols = "\n".join(f"000 T _{symbol}@12" for symbol in PROTECTED)
     if protected_symbols(all_symbols) != PROTECTED:
         raise AssertionError("protected export parser missed a test seam")
+    if not contains_symbol("000 T _wyl_init@8\n", SENTINEL):
+        raise AssertionError("production sentinel decoration was not parsed")
+    verify_output("absent", "000 T wyl_init\n")
+    verify_output("present", "000 T wyl_init\n" + all_symbols)
     allowed = "000 T wyl_handle_engine_session_locked_for_testing\n"
     if protected_symbols(allowed):
         raise AssertionError("protected export parser accepted a substring")
@@ -81,22 +111,34 @@ def self_test():
     pe_archive = command_candidates("pe", "archive", Path("library.lib"))
     if pe_archive[0][0] != "llvm-nm":
         raise AssertionError("PE archive inspection must prefer defined symbols")
-    calls = []
-
     def fake_which(tool):
         return "/fake/" + tool
 
-    def empty_export_runner(command):
-        calls.append(command)
-        return ""
+    for object_format in ("elf", "macho", "pe"):
+        for artifact_kind in ("shared", "archive"):
+            for expectation in ("absent", "present"):
+                for bad_output in ("", "successful but unparsed output"):
+                    calls = []
 
-    output = symbols("pe", "shared", Path("library.dll"), fake_which,
-                     empty_export_runner)
-    if output or len(calls) != 1 or calls[0][0] != "/fake/llvm-readobj":
-        raise AssertionError("successful empty PE export inspection fell through")
+                    def bad_runner(command, result=bad_output):
+                        calls.append(command)
+                        return result
+
+                    try:
+                        inspect(expectation, object_format, artifact_kind,
+                                Path("library.bin"), fake_which, bad_runner)
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError(
+                            "empty or malformed inspector output did not fail "
+                            "closed")
+                    if len(calls) != 1:
+                        raise AssertionError(
+                            "invalid inspector output fell through")
     try:
-        symbols("pe", "shared", Path("library.dll"), lambda unused: None,
-                empty_export_runner)
+        inspect("absent", "pe", "shared", Path("library.dll"),
+                lambda unused: None, lambda command: "")
     except RuntimeError:
         pass
     else:
@@ -123,18 +165,9 @@ def main():
         print(f"library artifact missing: {artifact}", file=sys.stderr)
         return 1
     try:
-        output = symbols(object_format, artifact_kind, artifact)
+        inspect(expectation, object_format, artifact_kind, artifact)
     except RuntimeError as error:
         print(error, file=sys.stderr)
-        return 1
-    found = protected_symbols(output)
-    if expectation == "absent" and found:
-        print("handle test seams present in production library symbols:",
-              *sorted(found), sep="\n  ", file=sys.stderr)
-        return 1
-    if expectation == "present" and found != PROTECTED:
-        print("handle test companion is missing protected symbols:",
-              *sorted(PROTECTED - found), sep="\n  ", file=sys.stderr)
         return 1
     return 0
 

@@ -1452,6 +1452,12 @@ test('check-handle-test-seam-companion-symbols',
     wyrelog_handle_test_seams_lib.full_path()],
   depends : wyrelog_handle_test_seams_lib,
 )
+test('check-handle-test-seam-production-control-symbols',
+  check_handle_test_seam_exports,
+  args : ['absent', handle_test_seam_object_format, 'archive',
+    wyrelog_handle_production_control_lib.full_path()],
+  depends : wyrelog_handle_production_control_lib,
+)
 
 test_template_tree = executable('test-template-tree',
   'test-template-tree.c',
