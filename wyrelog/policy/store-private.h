@@ -2212,6 +2212,12 @@ wyrelog_error_t wyl_policy_store_apply_permission_state_transition
     (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     gint64 * out_event_id);
+/* Transaction-body variant for committed-publication runners.  The caller
+ * owns the surrounding transaction and snapshot validation. */
+wyrelog_error_t wyl_policy_store_apply_permission_state_transition_body
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, const gchar * event,
+    gint64 * out_event_id);
 wyrelog_error_t
     wyl_policy_store_apply_permission_state_transition_with_audit
     (wyl_policy_store_t * store, const gchar * subject_id,
@@ -2359,6 +2365,10 @@ wyrelog_error_t wyl_policy_store_bootstrap_admin_eligible (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *
     store, const gchar * subject_id, gboolean allow_login_skip_mfa,
     gboolean * out_applied, gchar ** out_existing_subject);
+wyrelog_error_t wyl_policy_store_apply_bootstrap_admin_body
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    gboolean allow_login_skip_mfa, gboolean * out_applied,
+    gchar ** out_existing_subject);
 
 /*
  * TOTP enrollment fact schema (issue #331).

@@ -25277,8 +25277,8 @@ wyl_policy_store_append_permission_state_event (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-    wyl_policy_store_apply_permission_state_transition_with_audit
+static wyrelog_error_t
+    apply_permission_state_transition_body_with_audit
     (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     gint64 * out_event_id, const gchar * audit_id,
@@ -25299,13 +25299,9 @@ wyrelog_error_t
   if (ev == WYL_PERM_EVENT_LAST_)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
   g_autofree gchar *from_state_name = NULL;
-  rc = wyl_policy_store_get_permission_state_for_publication (store,
-      subject_id, perm_id, scope, &from_state_name);
+  wyrelog_error_t rc = wyl_policy_store_get_permission_state_for_publication
+      (store, subject_id, perm_id, scope, &from_state_name);
   if (rc == WYRELOG_E_OK && from_state_name == NULL)
     from_state_name = g_strdup (wyl_perm_state_name (WYL_PERM_STATE_DORMANT));
 
@@ -25341,21 +25337,46 @@ wyrelog_error_t
         audit_resource_id, audit_deny_reason, audit_deny_origin,
         audit_request_id, audit_decision, &inserted);
   }
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_validate_snapshot (store);
-  if (rc != WYRELOG_E_OK) {
-    wyl_policy_store_rollback_mutation (store);
-    return rc;
-  }
-
-  rc = wyl_policy_store_commit_mutation (store);
-  if (rc != WYRELOG_E_OK) {
-    wyl_policy_store_rollback_mutation (store);
-    return rc;
-  }
   if (out_event_id != NULL)
     *out_event_id = event_id;
-  return WYRELOG_E_OK;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_apply_permission_state_transition_body
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, const gchar * event,
+    gint64 * out_event_id)
+{
+  return apply_permission_state_transition_body_with_audit (store,
+      subject_id, perm_id, scope, event, out_event_id, NULL, 0, NULL, NULL,
+      NULL, NULL, NULL, NULL, WYL_DECISION_DENY);
+}
+
+wyrelog_error_t
+    wyl_policy_store_apply_permission_state_transition_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, const gchar * event,
+    gint64 * out_event_id, const gchar * audit_id,
+    gint64 audit_created_at_us, const gchar * audit_subject_id,
+    const gchar * audit_action, const gchar * audit_resource_id,
+    const gchar * audit_deny_reason, const gchar * audit_deny_origin,
+    const gchar * audit_request_id, wyl_decision_t audit_decision)
+{
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = apply_permission_state_transition_body_with_audit (store, subject_id,
+      perm_id, scope, event, out_event_id, audit_id, audit_created_at_us,
+      audit_subject_id, audit_action, audit_resource_id, audit_deny_reason,
+      audit_deny_origin, audit_request_id, audit_decision);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
 }
 
 wyrelog_error_t
@@ -27065,10 +27086,19 @@ wyl_policy_store_bootstrap_admin_eligible (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
+static void
+bootstrap_admin_rollback (wyl_policy_store_t *store,
+    gboolean manage_transaction)
+{
+  if (manage_transaction)
+    (void) exec_sql (store->db, "ROLLBACK;");
+}
+
+static wyrelog_error_t
+apply_bootstrap_admin_internal (wyl_policy_store_t *store,
     const gchar *subject_id, gboolean allow_login_skip_mfa,
-    gboolean *out_applied, gchar **out_existing_subject)
+    gboolean *out_applied, gchar **out_existing_subject,
+    gboolean manage_transaction)
 {
   if (store == NULL || store->db == NULL || out_applied == NULL
       || out_existing_subject == NULL)
@@ -27081,9 +27111,12 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
   if (!bootstrap_admin_subject_is_valid (subject_id))
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (manage_transaction) {
+    rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   /* Race-safe second read: any concurrent daemon that took the
    * IMMEDIATE lock first will have already written the marker by the
@@ -27091,7 +27124,7 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
   g_autofree gchar *existing = NULL;
   rc = read_config_row (store, "bootstrap_admin_subject", &existing);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
 
@@ -27099,16 +27132,16 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
     /* 'legacy-skip' sentinel: refuse any subject. */
     if (g_strcmp0 (existing, "legacy-skip") == 0) {
       *out_existing_subject = g_steal_pointer (&existing);
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return WYRELOG_E_POLICY;
     }
     if (g_strcmp0 (existing, subject_id) == 0) {
       /* Idempotent same-subject reapply: no writes. */
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return WYRELOG_E_OK;
     }
     *out_existing_subject = g_steal_pointer (&existing);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return WYRELOG_E_POLICY;
   }
 
@@ -27117,7 +27150,7 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
       "SELECT COUNT(*) FROM role_memberships "
       "WHERE role_id = 'wr.system_admin';", &admin_member_count);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if (admin_member_count > 0) {
@@ -27125,7 +27158,7 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
      * a second one. This is the same shape as the create_schema
      * legacy-skip migration but caught here for callers that bypass
      * create_schema between operations. */
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return WYRELOG_E_POLICY;
   }
 
@@ -27141,17 +27174,17 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
       "  WHERE config_key = 'bootstrap_admin_subject');";
   rc = prepare_stmt (store->db, insert_subject_sql, &stmt);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if (sqlite3_step (stmt) != SQLITE_DONE) {
     sqlite3_finalize (stmt);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return WYRELOG_E_IO;
   }
   int subject_changes = sqlite3_changes (store->db);
@@ -27163,10 +27196,10 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
     g_autofree gchar *winner = NULL;
     rc = read_config_row (store, "bootstrap_admin_subject", &winner);
     if (rc != WYRELOG_E_OK) {
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return rc;
     }
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     if (winner == NULL)
       return WYRELOG_E_INTERNAL;
     if (g_strcmp0 (winner, subject_id) == 0)
@@ -27183,17 +27216,17 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
       "VALUES ('bootstrap_admin_sealed_at_us', ?, unixepoch());";
   rc = prepare_stmt (store->db, insert_sealed_at_sql, &stmt);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if ((rc = bind_text (stmt, 1, sealed_at_us_text)) != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if (sqlite3_step (stmt) != SQLITE_DONE) {
     sqlite3_finalize (stmt);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return WYRELOG_E_IO;
   }
   sqlite3_finalize (stmt);
@@ -27203,18 +27236,18 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
       "VALUES ('bootstrap_admin_allow_skip_mfa', ?, unixepoch());";
   rc = prepare_stmt (store->db, insert_allow_sql, &stmt);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if ((rc = bind_text (stmt, 1, allow_login_skip_mfa ? "1" : "0"))
       != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   if (sqlite3_step (stmt) != SQLITE_DONE) {
     sqlite3_finalize (stmt);
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return WYRELOG_E_IO;
   }
   sqlite3_finalize (stmt);
@@ -27222,24 +27255,24 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
   rc = wyl_policy_store_grant_role_membership (store, subject_id,
       "wr.system_admin", WYL_TENANT_DEFAULT);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   rc = wyl_policy_store_append_role_membership_event (store, subject_id,
       "wr.system_admin", WYL_TENANT_DEFAULT, "grant");
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   rc = wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT, "active");
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
   rc = wyl_policy_store_append_session_event (store, WYL_TENANT_DEFAULT,
       "request", "idle", "active", NULL);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
 
@@ -27247,26 +27280,26 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
     rc = wyl_policy_store_grant_direct_permission (store, subject_id,
         "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE);
     if (rc != WYRELOG_E_OK) {
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return rc;
     }
     rc = wyl_policy_store_append_direct_permission_event (store, subject_id,
         "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "grant");
     if (rc != WYRELOG_E_OK) {
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return rc;
     }
     rc = wyl_policy_store_set_permission_state (store, subject_id,
         "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "armed");
     if (rc != WYRELOG_E_OK) {
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return rc;
     }
     rc = wyl_policy_store_append_permission_state_event (store, subject_id,
         "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "grant",
         "dormant", "armed", NULL);
     if (rc != WYRELOG_E_OK) {
-      (void) exec_sql (store->db, "ROLLBACK;");
+      bootstrap_admin_rollback (store, manage_transaction);
       return rc;
     }
   }
@@ -27280,17 +27313,37 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
    * apply_direct_permission_mutation_with_audit. */
   rc = wyl_policy_store_validate_snapshot (store);
   if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
+    bootstrap_admin_rollback (store, manage_transaction);
     return rc;
   }
 
-  rc = exec_sql (store->db, "COMMIT;");
-  if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->db, "ROLLBACK;");
-    return rc;
+  if (manage_transaction) {
+    rc = exec_sql (store->db, "COMMIT;");
+    if (rc != WYRELOG_E_OK) {
+      bootstrap_admin_rollback (store, manage_transaction);
+      return rc;
+    }
   }
   *out_applied = TRUE;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean allow_login_skip_mfa,
+    gboolean *out_applied, gchar **out_existing_subject)
+{
+  return apply_bootstrap_admin_internal (store, subject_id,
+      allow_login_skip_mfa, out_applied, out_existing_subject, TRUE);
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_bootstrap_admin_body (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean allow_login_skip_mfa,
+    gboolean *out_applied, gchar **out_existing_subject)
+{
+  return apply_bootstrap_admin_internal (store, subject_id,
+      allow_login_skip_mfa, out_applied, out_existing_subject, FALSE);
 }
 
 /* ----------------------------------------------------------------------

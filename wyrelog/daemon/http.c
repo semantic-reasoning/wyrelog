@@ -9719,6 +9719,113 @@ mfa_enroll_subject_exists (wyl_policy_store_t *store, const gchar *subject)
       mfa_enroll_find_subject, &lookup) == WYRELOG_E_OK && lookup.found;
 }
 
+static wyrelog_error_t
+verify_mfa_symbol_row (WylEngineVerification *verification,
+    const gchar *relation, const gchar *const *symbols, gsize ncols,
+    gboolean expected)
+{
+  g_autofree gint64 *row = g_new0 (gint64, ncols);
+  for (gsize i = 0; i < ncols; i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_contains (verification,
+      relation, row, ncols, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found == expected ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+verify_mfa_audit_event (WylEngineVerification *verification,
+    const gchar *id, gint64 created_at_us, const gchar *subject,
+    const gchar *action, const gchar *resource, const gchar *origin,
+    const gchar *request_id)
+{
+  if (id == NULL || created_at_us <= 0)
+    return WYRELOG_E_INTERNAL;
+  gint64 event[3] = { 0, created_at_us, 0 };
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      id, &event[0]);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, "allow",
+        &event[2]);
+  gboolean found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_contains (verification, "audit_event",
+        event, G_N_ELEMENTS (event), &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+
+  const gchar *relations[] = {
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_deny_origin",
+    "audit_event_request_id",
+  };
+  const gchar *values[] = { subject, action, resource, origin, request_id };
+  for (gsize i = 0; i < G_N_ELEMENTS (relations); i++) {
+    if (values[i] == NULL)
+      continue;
+    const gchar *row[] = { id, values[i] };
+    rc = verify_mfa_symbol_row (verification, relations[i], row,
+        G_N_ELEMENTS (row), TRUE);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+verify_mfa_enrollment_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  WylMfaEnrollmentMutation *mutation = data;
+  wyrelog_error_t rc = verify_mfa_audit_event (verification,
+      mutation->enrollment_audit_id,
+      mutation->enrollment_audit_created_at_us, mutation->actor,
+      mutation->reset_mode ? "mfa_reset" : "mfa_enrolled",
+      mutation->enrollment->id_uuidv7, mutation->audit_origin,
+      mutation->request_id);
+  if (rc != WYRELOG_E_OK || !mutation->skip_mfa_revoked)
+    return rc;
+
+  rc = verify_mfa_audit_event (verification, mutation->revocation_audit_id,
+      mutation->revocation_audit_created_at_us, mutation->actor,
+      "mfa_skip_mfa_revoked", mutation->enrollment->subject_id,
+      mutation->audit_origin, mutation->request_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const gchar *permission[] = {
+    mutation->enrollment->subject_id,
+    "wr.login.skip_mfa",
+    "login",
+  };
+  rc = verify_mfa_symbol_row (verification, "direct_permission", permission,
+      G_N_ELEMENTS (permission), FALSE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const gchar *skip_mfa[] = { mutation->enrollment->subject_id };
+  rc = verify_mfa_symbol_row (verification, "login_skip_mfa_authz", skip_mfa,
+      G_N_ELEMENTS (skip_mfa), FALSE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const gchar *state[] = {
+    mutation->enrollment->subject_id,
+    "wr.login.skip_mfa",
+    "login",
+    "revoked",
+  };
+  return verify_mfa_symbol_row (verification, "perm_state", state,
+      G_N_ELEMENTS (state), TRUE);
+}
+
 static gboolean
 mfa_enroll_request_body_dup (SoupServerMessage *msg, gsize max_len,
     gchar **out_body)
@@ -11001,27 +11108,13 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  g_auto (WylDaemonPolicyWrite) write = { 0 };
-  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  WylServiceAuthWriteLease *write_lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
+      &write_lease);
   if (rc != WYRELOG_E_OK) {
     wyl_mfa_enroll_challenge_free (challenge);
     set_json_error (msg, 500, "mfa_enroll_failed");
-    return;
-  }
-  if (!mfa_enroll_subject_exists (write.store, challenge->subject)) {
-    wyl_mfa_enroll_challenge_free (challenge);
-    set_json_error (msg, 404, "mfa_enroll_subject_not_found");
-    return;
-  }
-  WylTotpEnrollment existing = { 0 };
-  gboolean already_enrolled = FALSE;
-  rc = wyl_policy_store_totp_enrollment_lookup
-      (write.store, challenge->subject, &existing, &already_enrolled);
-  wyl_totp_enrollment_clear (&existing);
-  if (rc != WYRELOG_E_OK || already_enrolled) {
-    wyl_mfa_enroll_challenge_free (challenge);
-    set_json_error (msg, already_enrolled ? 409 : 500,
-        already_enrolled ? "mfa_already_enrolled" : "mfa_enroll_failed");
     return;
   }
   WylTotpEnrollment enrollment = { 0 };
@@ -11029,25 +11122,45 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
   memcpy (enrollment.secret, challenge->secret, sizeof enrollment.secret);
   enrollment.last_verified_step = (gint64) matched_step;
   enrollment.enrolled_at = now;
-  rc = wyl_mfa_enrollment_commit
-      (write.store, &enrollment, auth.actor,
-      ensure_request_id_header (msg), "wyrelogd", FALSE);
-  gboolean enrollment_committed = rc == WYRELOG_E_OK;
-  if (enrollment_committed) {
-    rc = wyl_handle_reload_engine_pair (ctx->handle);
-    if (rc != WYRELOG_E_OK)
-      rc = wyl_handle_fail_committed_engine_projection (ctx->handle, rc);
-  }
-#ifdef WYL_HAS_AUDIT
+  WylMfaEnrollmentMutation mutation = {
+    .enrollment = &enrollment,
+    .actor = auth.actor,
+    .request_id = ensure_request_id_header (msg),
+    .audit_origin = "wyrelogd",
+    .require_existing_subject = TRUE,
+    .reject_existing_enrollment = TRUE,
+  };
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (ctx->handle);
+  if (engine_session == NULL)
+    rc = WYRELOG_E_BUSY;
+  else
+    rc = wyl_engine_session_run_committed_publication (engine_session,
+        wyl_mfa_enrollment_mutate, &mutation,
+        verify_mfa_enrollment_publication, &mutation, NULL, NULL);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+  wyrelog_error_t release_rc =
+      wyl_service_auth_write_lease_release (write_lease);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_handle_load_policy_store_audit_events (ctx->handle);
+    rc = release_rc;
+  wyl_service_auth_write_lease_free (write_lease);
+#ifdef WYL_HAS_AUDIT
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t mirror_rc =
+        wyl_handle_load_policy_store_audit_events (ctx->handle);
+    mark_runtime_audit_degraded (ctx->runtime, mirror_rc);
+  }
 #endif
+  wyl_mfa_enrollment_mutation_clear (&mutation);
   wyl_totp_enrollment_clear (&enrollment);
   wyl_mfa_enroll_challenge_free (challenge);
   if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, rc == WYRELOG_E_POLICY ? 404 : 500,
-        rc == WYRELOG_E_POLICY ? "mfa_enroll_subject_not_found" :
-        "mfa_enroll_failed");
+    guint status = rc == WYRELOG_E_NOT_FOUND ? 404 :
+        rc == WYRELOG_E_CONFLICT ? 409 : 500;
+    const gchar *error = rc == WYRELOG_E_NOT_FOUND ?
+        "mfa_enroll_subject_not_found" : rc == WYRELOG_E_CONFLICT ?
+        "mfa_already_enrolled" : "mfa_enroll_failed";
+    set_json_error (msg, status, error);
     return;
   }
   set_json_ok (msg);

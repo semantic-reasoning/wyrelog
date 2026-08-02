@@ -80,23 +80,9 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
   if (audit_id == NULL)
     return WYRELOG_E_INTERNAL;
 
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  gboolean inserted = FALSE;
-  wyrelog_error_t rc = wyl_policy_store_append_audit_event_full (store,
-      audit_id,
-      wyl_audit_event_get_created_at_us (ev),
-      wyl_audit_event_get_subject_id (ev), wyl_audit_event_get_action (ev),
-      wyl_audit_event_get_resource_id (ev),
-      wyl_audit_event_get_deny_reason (ev),
-      wyl_audit_event_get_deny_origin (ev),
-      wyl_audit_event_get_request_id (ev),
-      wyl_audit_event_get_decision (ev), &inserted);
+  wyrelog_error_t rc = wyl_audit_emit (handle, ev);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  rc = wyl_handle_reload_engine_pair (handle);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (handle, rc);
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
 
   gint64 event_row[3];
@@ -452,6 +438,51 @@ insert_symbol_row (WylHandle *handle, const gchar *relation,
   return wyl_engine_session_insert (session, relation, row, ncols);
 }
 
+static wyrelog_error_t
+mutate_role_permission_snapshot (wyl_policy_store_t *store, gpointer data)
+{
+  (void) data;
+  wyrelog_error_t rc = wyl_policy_store_upsert_role (store,
+      "site.snapshot-child", "snapshot child");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_upsert_role (store, "site.snapshot-parent",
+        "snapshot parent");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_upsert_permission (store, "wyrelogd.role.read",
+        "role read", "basic");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_role_permission (store,
+        "site.snapshot-parent", "wyrelogd.role.read");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_role_inheritance (store,
+        "site.snapshot-child", "site.snapshot-parent");
+  return rc;
+}
+
+static wyrelog_error_t
+verify_role_permission_snapshot (WylEngineVerification *verification,
+    gpointer data)
+{
+  (void) data;
+  const gchar *symbols[] = {
+    "site.snapshot-child",
+    "wyrelogd.role.read",
+  };
+  gint64 row[2] = { 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (symbols); i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_contains (verification,
+      "effective_permission", row, G_N_ELEMENTS (row), &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
 {
@@ -465,28 +496,14 @@ wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
   if (session_id == NULL)
     return WYRELOG_E_INTERNAL;
 
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  rc = wyl_policy_store_upsert_role (store, "site.snapshot-child",
-      "snapshot child");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_upsert_role (store, "site.snapshot-parent",
-      "snapshot parent");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_upsert_permission (store, "wyrelogd.role.read",
-      "role read", "basic");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_grant_role_permission (store, "site.snapshot-parent",
-      "wyrelogd.role.read");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_grant_role_inheritance (store, "site.snapshot-child",
-      "site.snapshot-parent");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_reload_engine_pair (handle);
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
+  if (engine_session == NULL)
+    return WYRELOG_E_BUSY;
+  rc = wyl_engine_session_run_committed_publication (engine_session,
+      mutate_role_permission_snapshot, NULL, verify_role_permission_snapshot,
+      NULL, NULL, NULL);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
   if (rc != WYRELOG_E_OK)
     return rc;
 
