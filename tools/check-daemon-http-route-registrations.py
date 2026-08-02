@@ -14,6 +14,11 @@ SERVER_OWNER = "wyl_daemon_start_http_server_with_runtime"
 EXACT_OWNER = "wyl_daemon_http_add_exact_handler"
 FACT = "WYL_HAS_FACT_STORE"
 AUDIT = "WYL_HAS_AUDIT"
+OWNERSHIP_API = re.compile(
+    r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
+    r"[A-Za-z_][A-Za-z0-9_]*add_exact_handler)\Z")
+OWNERSHIP_DIRECTIVE = re.compile(
+    r"(?:soup_server_add_|[A-Za-z_][A-Za-z0-9_]*add_exact_handler)")
 
 
 @dataclass(frozen=True)
@@ -199,6 +204,20 @@ def mates(tokens: list[Token]) -> dict[int, int]:
     return result
 
 
+def function_body_start(tokens: list[Token], pairing: dict[int, int],
+                        signature_end: int) -> int | None:
+    """Accept a definition's optional post-declarator attribute sequence."""
+    index = signature_end + 1
+    while index < len(tokens) and tokens[index].kind == "identifier":
+        index += 1
+        if index < len(tokens) and tokens[index].value == "(":
+            closing = pairing.get(index)
+            if closing is None:
+                raise GuardError("unbalanced post-declarator attribute")
+            index = closing + 1
+    return index if index < len(tokens) and tokens[index].value == "{" else None
+
+
 def functions(tokens: list[Token], pairing: dict[int, int]):
     result = []
     depth = 0
@@ -212,9 +231,10 @@ def functions(tokens: list[Token], pairing: dict[int, int]):
         elif (depth == 0 and token.kind == "identifier"
               and index + 1 < len(tokens) and tokens[index + 1].value == "("):
             close = pairing[index + 1]
-            if close + 1 < len(tokens) and tokens[close + 1].value == "{":
-                body_end = pairing[close + 1]
-                result.append((token.value, close + 2, body_end))
+            body_start = function_body_start(tokens, pairing, close)
+            if body_start is not None:
+                body_end = pairing[body_start]
+                result.append((token.value, index, body_start + 1, body_end))
                 index = body_end
         index += 1
     return result
@@ -284,20 +304,46 @@ def feature_contexts(source: str) -> dict[int, str | None]:
     return result
 
 
+def reject_ownership_preprocessor_references(source: str, path: Path) -> None:
+    in_directive = False
+    directive_start = 0
+    for number, line in enumerate(source.splitlines(), 1):
+        starts_directive = line.lstrip().startswith("#")
+        if starts_directive:
+            in_directive = True
+            directive_start = number
+        if in_directive and OWNERSHIP_DIRECTIVE.search(line):
+            raise GuardError(f"ownership API in preprocessor directive at "
+                             f"{path}:{directive_start}")
+        if in_directive and not line.rstrip().endswith("\\"):
+            in_directive = False
+
+
 def scan_source(path: Path) -> list[Registration]:
     source = path.read_text(encoding="utf-8")
+    reject_ownership_preprocessor_references(source, path)
     tokens = lex(source)
     pairing = mates(tokens)
     contexts = feature_contexts(source)
     registrations = []
     seen_calls = set()
-    marker = re.compile(r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
-                        r"[A-Za-z_][A-Za-z0-9_]*add_exact_handler)\Z")
-    for owner, start, end in functions(tokens, pairing):
+    definitions = functions(tokens, pairing)
+    exact_definitions = {
+        name_index for owner, name_index, _start, _end in definitions
+        if owner == EXACT_OWNER
+    }
+    if exact_definitions and (len(exact_definitions) != 1
+                              or path.parts[-3:] !=
+                              ("wyrelog", "daemon", "http.c")):
+        raise GuardError(f"exact adapter definition outside its owner: {path}")
+    allowed_definitions = exact_definitions
+    exact_adapter_internal_calls = 0
+    for owner, _name_index, start, end in definitions:
         index = start
         while index < end:
             token = tokens[index]
-            if (token.kind != "identifier" or marker.fullmatch(token.value)
+            if (token.kind != "identifier"
+                    or OWNERSHIP_API.fullmatch(token.value)
                     is None or index + 1 >= end
                     or tokens[index + 1].value != "("):
                 index += 1
@@ -313,6 +359,7 @@ def scan_source(path: Path) -> list[Registration]:
                             "wyl_daemon_http_exact_handler_free"]
                 if [render(argument) for argument in arguments] != expected:
                     raise GuardError("exact adapter internal Soup signature changed")
+                exact_adapter_internal_calls += 1
                 index = closing + 1
                 continue
             if token.value not in {RAW_API, EXACT_API}:
@@ -326,15 +373,17 @@ def scan_source(path: Path) -> list[Registration]:
                 render(arguments[3]), render(arguments[4]),
                 contexts.get(token.line), path, token.line))
             index = closing + 1
-    for index, token in enumerate(tokens[:-1]):
-        if (token.kind != "identifier" or marker.fullmatch(token.value) is None
-                or tokens[index + 1].value != "(" or index in seen_calls):
+    for index, token in enumerate(tokens):
+        if (token.kind != "identifier"
+                or OWNERSHIP_API.fullmatch(token.value) is None
+                or index in seen_calls):
             continue
-        closing = pairing.get(index + 1)
-        if (closing is not None and closing + 1 < len(tokens)
-                and tokens[closing + 1].value in {"{", ";"}):
+        if index in allowed_definitions:
             continue
-        raise GuardError(f"registration call outside parsed function in {path}")
+        raise GuardError(f"unparsed or indirect ownership API reference at "
+                         f"{path}:{token.line}")
+    if exact_definitions and exact_adapter_internal_calls != 1:
+        raise GuardError("exact adapter must own one internal Soup registration")
     return registrations
 
 
@@ -420,6 +469,21 @@ def self_test() -> None:
         check_root(root)
 
         mutants = {
+            "macro alias": (
+                "#define HIDDEN_ADD soup_server_add_handler\n" + baseline),
+            "continued macro alias": (
+                "#define HIDDEN_ADD \\\n"
+                "  soup_server_add_handler\n" + baseline),
+            "function-pointer alias": baseline + (
+                "static void hidden_alias(void) {\n"
+                "  void (*hidden_add)(void) = soup_server_add_handler;\n"
+                "  hidden_add();\n"
+                "}\n"),
+            "post-declarator attribute owner": baseline + (
+                "static void hidden_owner(void) G_GNUC_NO_INLINE {\n"
+                "  soup_server_add_handler(server, \"/hidden\", callback, "
+                "data, NULL);\n"
+                "}\n"),
             "nonliteral": baseline.replace('"/healthz"', "health_path", 1),
             "concatenated": baseline.replace('"/healthz"',
                                                '"/health" "z"', 1),
