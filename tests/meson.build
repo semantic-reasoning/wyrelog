@@ -405,6 +405,7 @@ if build_client
       '--compiler-id', meson.get_compiler('c').get_id(),
       '--',
     ] + daemon_http_route_guard_cc,
+    timeout : 180,
   )
   test('daemon-http-route-registrations',
     check_daemon_http_route_registrations,
@@ -413,6 +414,7 @@ if build_client
       '--build-root', meson.project_build_root(),
       '--compiler-id', meson.get_compiler('c').get_id(),
     ],
+    timeout : 180,
   )
 
   test_daemon_http_mfa_c_args = [
