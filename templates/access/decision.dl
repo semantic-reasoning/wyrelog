@@ -49,6 +49,8 @@
 // the build.
 
 .decl principal_state(user: symbol, state: symbol)
+.decl service_principal_state(subject: symbol, state: symbol)
+.decl service_request_auth(context: symbol, subject: symbol, tenant: symbol)
 .decl session_state(scope: symbol, state: symbol)
 .decl session_active(state: symbol)
 .decl frozen(scope: symbol)
@@ -70,6 +72,9 @@
 .decl audit_event_deny_origin(id: symbol, origin: symbol)
 .decl audit_event_request_id(id: symbol, request_id: symbol)
 .decl principal_state_observed(user: symbol, state: symbol)
+.decl service_principal_state_observed(subject: symbol, state: symbol)
+.decl service_request_auth_observed(context: symbol, subject: symbol,
+    tenant: symbol)
 .decl login_skip_mfa_authz(user: symbol)
 .decl login_skip_mfa_authz_observed(user: symbol)
 
@@ -77,6 +82,9 @@
 .decl allow_guard_base(user: symbol, perm: symbol, scope: symbol)
 .decl guarded_perm(perm: symbol)
 .decl allow_bool(user: symbol, perm: symbol, scope: symbol)
+.decl service_armed(context: symbol, user: symbol, perm: symbol, scope: symbol)
+.decl service_allow_bool(context: symbol, user: symbol, perm: symbol,
+    scope: symbol)
 .decl deny_reason(user: symbol, perm: symbol, scope: symbol,
     code: symbol, origin: symbol)
 
@@ -106,6 +114,12 @@ audit_event_request_id(ID, RequestID) :-
 principal_state_observed(U, State) :-
     principal_state(U, State).
 
+service_principal_state_observed(Subject, State) :-
+    service_principal_state(Subject, State).
+
+service_request_auth_observed(Context, Subject, Tenant) :-
+    service_request_auth(Context, Subject, Tenant).
+
 login_skip_mfa_authz_observed(U) :-
     login_skip_mfa_authz(U).
 
@@ -127,6 +141,19 @@ allow(U, P, S) :-
     armed(U, P, S).
 
 allow_bool(U, P, S) :- allow(U, P, S).
+
+// Service authority is deliberately separate from the human principal and
+// permission-state FSMs. Context is a resolver-created, request-unique key;
+// using S in both relations makes the authenticated credential tenant, rather
+// than a caller field, the signed authority for the decision scope.
+service_armed(Context, U, P, S) :-
+    service_request_auth(Context, U, S),
+    service_principal_state(U, "active"),
+    approved_data_plane_permission(P).
+
+service_allow_bool(Context, U, P, S) :-
+    service_armed(Context, U, P, S),
+    has_permission(U, P, S).
 
 // --- deny_reason ----------------------------------------------------
 
