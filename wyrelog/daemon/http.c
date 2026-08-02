@@ -3071,6 +3071,12 @@ service_auth_retire_exact (WylDaemonHttpContext *ctx,
   WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
   gboolean found = FALSE;
   gboolean absent = FALSE;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (retire_checkpoint != NULL)
+    retire_checkpoint
+        (WYL_DAEMON_SERVICE_RESPONSE_RETIRE_BEFORE_WRITE_ACQUIRE,
+        reservation->session_id, reservation->jti, retire_checkpoint_data);
+#endif
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
       (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
       &lease);
@@ -3078,8 +3084,8 @@ service_auth_retire_exact (WylDaemonHttpContext *ctx,
     return rc;
 #ifdef WYL_TEST_DAEMON_HTTP
   if (retire_checkpoint != NULL)
-    retire_checkpoint (reservation->session_id, reservation->jti,
-        retire_checkpoint_data);
+    retire_checkpoint (WYL_DAEMON_SERVICE_RESPONSE_RETIRE_WRITE_ACQUIRED,
+        reservation->session_id, reservation->jti, retire_checkpoint_data);
 #endif
   rc = wyl_service_auth_registry_maintenance_participant_new_for_write
       (ctx->service_auth_registry, ctx->handle, lease, &maintenance);
@@ -3789,9 +3795,10 @@ service_token_exchange_core (WylDaemonHttpContext *ctx,
 }
 
 static void
-service_token_exchange_handle (SoupServerMessage *msg,
+service_token_exchange_handle (SoupServer *server, SoupServerMessage *msg,
     WylDaemonHttpContext *ctx, const WylDaemonServiceTokenRequest *request)
 {
+  (void) server;
   guint status = 0;
   guint retry_after = 0;
   g_autofree gchar *body = NULL;
@@ -3824,15 +3831,24 @@ service_token_exchange_handle (SoupServerMessage *msg,
         (GDestroyNotify) service_response_authority_free);
 #ifdef WYL_TEST_DAEMON_HTTP
     gboolean force_unclaimed_fallback = FALSE;
+    gboolean emit_request_aborted = FALSE;
     if (service_publication_context_lock (ctx) == WYRELOG_E_OK) {
       force_unclaimed_fallback = service_publication_fault_is_locked (ctx,
           WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK,
+          TRUE);
+      emit_request_aborted = service_publication_fault_is_locked (ctx,
+          WYL_DAEMON_SERVICE_PUBLICATION_FAULT_EMIT_REQUEST_ABORTED_AFTER_HANDOFF,
           TRUE);
       (void) service_publication_context_unlock (ctx, WYRELOG_E_OK);
     }
     if (force_unclaimed_fallback) {
       g_object_set_data (G_OBJECT (msg),
           WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DATA, NULL);
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
+      return;
+    }
+    if (emit_request_aborted) {
+      g_signal_emit_by_name (server, "request-aborted", msg);
       set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
       return;
     }
@@ -3862,7 +3878,6 @@ service_token_exchange_http_handler (SoupServer *server,
     SoupServerMessage *msg, const char *path, GHashTable *query,
     gpointer user_data)
 {
-  (void) server;
   (void) path;
   (void) query;
   WylDaemonHttpContext *ctx = user_data;
@@ -3877,7 +3892,7 @@ service_token_exchange_http_handler (SoupServer *server,
     .body_json = body != NULL && body->data != NULL ? body->data : "",
     .body_len = body != NULL ? (gsize) body->length : 0,
   };
-  service_token_exchange_handle (msg, ctx, &request);
+  service_token_exchange_handle (server, msg, ctx, &request);
 }
 
 wyrelog_error_t

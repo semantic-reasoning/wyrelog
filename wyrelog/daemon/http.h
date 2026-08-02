@@ -114,8 +114,13 @@ typedef enum
 } WylDaemonServiceResponsePhase;
 typedef void (*WylDaemonServiceResponseCheckpoint) (gint phase,
     const gchar * session_id, const gchar * jti, gpointer data);
-typedef void (*WylDaemonServiceResponseRetireCheckpoint) (const gchar *
-    session_id, const gchar * jti, gpointer data);
+typedef enum
+{
+  WYL_DAEMON_SERVICE_RESPONSE_RETIRE_BEFORE_WRITE_ACQUIRE = 1,
+  WYL_DAEMON_SERVICE_RESPONSE_RETIRE_WRITE_ACQUIRED,
+} WylDaemonServiceResponseRetirePhase;
+typedef void (*WylDaemonServiceResponseRetireCheckpoint) (gint phase,
+    const gchar * session_id, const gchar * jti, gpointer data);
 typedef enum
 {
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_NONE = 0,
@@ -130,6 +135,7 @@ typedef enum
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_EMIT_REQUEST_ABORTED_AFTER_HANDOFF,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE,
 } WylDaemonServicePublicationFault;
 typedef enum
