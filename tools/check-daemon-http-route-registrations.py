@@ -117,6 +117,7 @@ ISSUE_720_EXACT_PATHS = {
     "/graphs/create",
     "/graphs/seal",
     "/graphs",
+    "/decide",
 }
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
