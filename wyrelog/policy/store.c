@@ -26698,6 +26698,66 @@ wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_validate_audit_publication (wyl_policy_store_t *store,
+    const gchar *id, gint64 created_at_us, const gchar *subject_id,
+    const gchar *action, const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, const gchar *request_id, wyl_decision_t decision)
+{
+  if (store == NULL || store->db == NULL || id == NULL || created_at_us < 0
+      || (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW))
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT"
+      " (SELECT count(*) FROM audit_events WHERE id=? AND created_at_us=?"
+      "  AND subject_id IS ? AND action IS ? AND resource_id IS ?"
+      "  AND deny_reason IS ? AND deny_origin IS ? AND request_id IS ?"
+      "  AND decision=?),"
+      " (SELECT count(*) FROM audit_intentions WHERE audit_id=?"
+      "  AND created_at_us=? AND subject_id IS ? AND action IS ?"
+      "  AND resource_id IS ? AND deny_reason IS ? AND deny_origin IS ?"
+      "  AND request_id IS ? AND decision=?);";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const gchar *values[] = {
+    id,
+    subject_id,
+    action,
+    resource_id,
+    deny_reason,
+    deny_origin,
+    request_id,
+  };
+  for (guint pair = 0; pair < 2 && rc == WYRELOG_E_OK; pair++) {
+    gint base = (gint) pair * 9;
+    rc = bind_text (stmt, base + 1, values[0]);
+    if (rc == WYRELOG_E_OK
+        && sqlite3_bind_int64 (stmt, base + 2, created_at_us) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    for (guint i = 1; i < G_N_ELEMENTS (values)
+        && rc == WYRELOG_E_OK; i++)
+      rc = bind_nullable_text (stmt, base + 2 + (gint) i, values[i]);
+    if (rc == WYRELOG_E_OK
+        && sqlite3_bind_int (stmt, base + 9, (int) decision) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+  }
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    gboolean exact = sqlite3_column_int64 (stmt, 0) == 1
+        && sqlite3_column_int64 (stmt, 1) == 1;
+    step_rc = sqlite3_step (stmt);
+    rc = step_rc == SQLITE_DONE ?
+        (exact ? WYRELOG_E_OK : WYRELOG_E_POLICY) : WYRELOG_E_IO;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_policy_store_record_audit_intention_full (wyl_policy_store_t *store,
     const gchar *id, gint64 created_at_us, const gchar *subject_id,
     const gchar *action, const gchar *resource_id, const gchar *deny_reason,
