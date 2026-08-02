@@ -31,13 +31,26 @@
 
 #ifdef G_OS_WIN32
 /* Capture V1 evidence from a native Windows file handle: FileIdInfo identity,
- * GetFileSizeEx size, and a SHA-256 over the whole file read at explicit
- * offsets.  A non-regular file, a torn read that overshoots the recorded size,
- * or a short read fails closed. */
+ * GetFileSizeEx size, and a SHA-256 over the whole file.  A non-regular file,
+ * a torn read that overshoots the recorded size, or a short read fails closed.
+ *
+ * |out_evidence| is zeroed before anything else, so every return path -
+ * including each failure above - leaves a fully defined struct.  This leaf is
+ * the only initialiser its Windows callers get: reconcile_capture_source
+ * reaches it straight from the opened source's handle, bypassing the fd entry
+ * point that zeroes there.
+ *
+ * The read establishes offset 0 itself and does not inherit the handle's
+ * position, but it is not position-preserving: it leaves the handle at EOF,
+ * where the POSIX pread capture leaves the caller's offset untouched.  Callers
+ * must not depend on the file position after this call. */
 static wyrelog_error_t
 reconcile_capture_from_handle (HANDLE handle,
     WylPolicyFactReconcileArtifactEvidence *out_evidence)
 {
+  *out_evidence = (WylPolicyFactReconcileArtifactEvidence) {
+  0};
+
   FILE_ID_INFO id_info = { 0 };
   BY_HANDLE_FILE_INFORMATION basic = { 0 };
   if (!GetFileInformationByHandleEx (handle, FileIdInfo, &id_info,
@@ -59,10 +72,27 @@ reconcile_capture_from_handle (HANDLE handle,
   if (checksum == NULL)
     return WYRELOG_E_NOMEM;
 
-  /* The handle is opened for synchronous I/O (CRT fd or
-   * FILE_SYNCHRONOUS_IO_NONALERT); read sequentially from the file pointer
-   * with a NULL OVERLAPPED.  An explicit OVERLAPPED offset on a synchronous
-   * handle is unsupported and the trailing at-EOF probe never returns. */
+  /* Seek to 0, then read sequentially with a NULL OVERLAPPED.  The handle is
+   * opened for synchronous I/O (CRT fd or FILE_SYNCHRONOUS_IO_NONALERT), so it
+   * carries exactly one file position and every read advances it.  The
+   * position on entry therefore belongs to whoever used the handle last - a
+   * previous capture on the same handle leaves it at EOF - so the digest
+   * contract ("over the whole file") is only honoured if this loop establishes
+   * the offset instead of inheriting it.
+   *
+   * Commit 7fdd738 replaced explicit OVERLAPPED offsets with this sequential
+   * read on two grounds.  The API ground - that an explicit OVERLAPPED offset
+   * on a synchronous handle is "unsupported" - is WITHDRAWN as inaccurate:
+   * Microsoft documents that for a handle not opened FILE_FLAG_OVERLAPPED a
+   * non-NULL lpOverlapped starts the read at the given offset and ReadFile
+   * blocks to completion.  The empirical ground stands unresolved: Windows CI
+   * was observed to hang on the trailing at-EOF probe, and no session since
+   * has reproduced or refuted that observation.  Do not re-introduce
+   * OVERLAPPED offsets without re-establishing it. */
+  LARGE_INTEGER origin = { 0 };
+  if (!SetFilePointerEx (handle, origin, NULL, FILE_BEGIN))
+    return WYRELOG_E_IO;
+
   guint8 buffer[WYL_FACT_RECONCILE_MOVE_COPY_CHUNK];
   guint64 total = 0;
   for (;;) {
@@ -104,15 +134,46 @@ reconcile_capture_from_handle (HANDLE handle,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_reconcile_capture_evidence_from_handle_for_test (gpointer handle,
+    WylPolicyFactReconcileArtifactEvidence *out_evidence)
+{
+  return reconcile_capture_from_handle ((HANDLE) handle, out_evidence);
+}
+
 /* Copy exactly |size| bytes from |src| into |dst|.  Both handles are opened
- * for synchronous I/O (FILE_SYNCHRONOUS_IO_NONALERT / CRT fd) with their file
- * pointers at 0, so the copy is sequential with a NULL OVERLAPPED; an explicit
- * OVERLAPPED offset on a synchronous handle is unsupported.  Any read or write
- * fault, or a source shorter than the promised size, is an I/O failure: the
- * copied artifact would not reproduce the verified digest. */
+ * for synchronous I/O (FILE_SYNCHRONOUS_IO_NONALERT / CRT fd), so the copy is
+ * sequential with a NULL OVERLAPPED and each handle carries one shared file
+ * position.
+ *
+ * |src| is seeked to 0 here.  It is the caller's source handle and the
+ * evidence capture that necessarily runs before this copy reads it to EOF, so
+ * an inherited position means a first ReadFile of zero bytes and a spurious
+ * I/O failure.
+ *
+ * |dst| is not seeked; its position is ASSERTED to be 0 instead.  It is the
+ * stage handle from wyl_fact_graph_directory_stage_create (FILE_CREATE),
+ * freshly created and exclusively held, hence at 0 by construction.  Seeking
+ * it to 0 unconditionally would silently overwrite from the start if that ever
+ * stopped being true, but merely assuming the position would be worse still -
+ * a non-zero position would silently APPEND, producing a stage whose bytes do
+ * not reproduce the verified digest.  Reading the position back and failing
+ * closed on anything but 0 is the only variant that cannot publish garbage.
+ *
+ * Any read or write fault, or a source shorter than the promised size, is an
+ * I/O failure: the copied artifact would not reproduce the verified digest. */
 static wyrelog_error_t
 reconcile_move_copy_exact_windows (HANDLE src, HANDLE dst, guint64 size)
 {
+  LARGE_INTEGER origin = { 0 };
+  if (!SetFilePointerEx (src, origin, NULL, FILE_BEGIN))
+    return WYRELOG_E_IO;
+
+  LARGE_INTEGER zero = { 0 };
+  LARGE_INTEGER cur = { 0 };
+  if (!SetFilePointerEx (dst, zero, &cur, FILE_CURRENT) || cur.QuadPart != 0)
+    return WYRELOG_E_IO;
+
   guint8 buffer[WYL_FACT_RECONCILE_MOVE_COPY_CHUNK];
   guint64 remaining = size;
   while (remaining > 0) {
@@ -478,6 +539,31 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
       g_close (target_fd, NULL);
       if (rc != WYRELOG_E_OK)
         goto out;
+      /* A freshly captured struct is gated only where an unvalidated field
+       * could change a decision.  This gate is the load-bearing one:
+       * |target_ev| feeds same_native_identity below, which reads
+       * identity_kind and the native identity fields, so poisoned identity
+       * could fabricate an alias verdict that rejects a legitimate replay.
+       *
+       * The collector reported success, so evidence that does not satisfy the
+       * closed V1 contract can only mean the collector itself is defective - no
+       * caller input and no authority state explains it.  That is
+       * WYRELOG_E_INTERNAL, not POLICY: a POLICY return here would be
+       * indistinguishable from a legitimate authority rejection, which is
+       * exactly how a partly-initialised Windows capture masqueraded as one.
+       * Not INVALID either - that code is for the persisted journal record
+       * validated above, whose contents this process did not produce.
+       *
+       * Both INTERNAL gates that survive in this function - this one and the
+       * source gate on the copy path - precede every mutation of published
+       * artifact bytes: nothing is staged, copied or published, and the return
+       * leaves the journal MOVING.  They do not precede every filesystem
+       * mutation; the resolver above opens the graph directory with create,
+       * which may mkdir the tenant and graph components first. */
+      if (!wyl_policy_fact_reconcile_artifact_evidence_is_valid (&target_ev)) {
+        rc = WYRELOG_E_INTERNAL;
+        goto out;
+      }
 
       /* Identity aliasing (best-effort): if the source still opens and shares
        * the present target's native identity, the canonical name is merely
@@ -498,8 +584,18 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
         if (alias == WYRELOG_E_OK) {
           WylPolicyFactReconcileArtifactEvidence alias_ev;
           alias = reconcile_capture_source (&source, &alias_ev);
+          /* Unusable evidence simply fails the probe rather than raising an
+           * error, because this whole block is best-effort: comparing a struct
+           * that does not satisfy the V1 contract can only yield an unfounded
+           * verdict, and the unfounded verdict here would REJECT and wedge a
+           * legitimate replay.  Skipping matches what the surrounding code
+           * already does when the source cannot be opened at all; the
+           * target-digest match below remains independent proof.  The validity
+           * test is therefore a conjunct of the alias verdict, not an error
+           * assignment that could be mistaken for a returned code. */
           if (alias == WYRELOG_E_OK
-              && same_native_identity (&alias_ev, &target_ev))
+              && wyl_policy_fact_reconcile_artifact_evidence_is_valid
+              (&alias_ev) && same_native_identity (&alias_ev, &target_ev))
             rc = WYRELOG_E_POLICY;
         }
         wyl_fact_graph_regular_file_clear (&source);
@@ -525,6 +621,20 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
       rc = reconcile_capture_source (&source, &source_ev);
       if (rc != WYRELOG_E_OK)
         goto out;
+      /* Cheap defence in depth, not load-bearing: this gate cannot change
+       * any accept into a reject.  The evidence_equal call below compares
+       * every field is_valid inspects, and
+       * record->source_evidence was itself validated on entry, so a |source_ev|
+       * that fails is_valid can never reach equal() == TRUE.  The branch is
+       * still reachable - a successful capture yielding contract-invalid
+       * evidence enters it - and its only observable effect is to report that
+       * as INTERNAL rather than as the POLICY equal() would return two lines
+       * later.  It is kept so the capture contract stays enforced here if
+       * either of those two properties is ever relaxed. */
+      if (!wyl_policy_fact_reconcile_artifact_evidence_is_valid (&source_ev)) {
+        rc = WYRELOG_E_INTERNAL;
+        goto out;
+      }
       if (!wyl_policy_fact_reconcile_artifact_evidence_equal (&source_ev,
               &record->source_evidence)) {
         rc = WYRELOG_E_POLICY;
@@ -589,6 +699,18 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
             &published_ev);
         if (rc != WYRELOG_E_OK)
           goto out;
+        /* Deliberately NOT gated on
+         * wyl_policy_fact_reconcile_artifact_evidence_is_valid.  The only
+         * decision made with |published_ev| is content_matches, which reads
+         * size_bytes, digest_algorithm and digest - every additional field
+         * is_valid inspects is irrelevant to it, so the gate would buy no
+         * decision power.  It would buy a replay-liveness hazard: this site
+         * sits AFTER wyl_fact_graph_stage_publish, so the artifact is already
+         * durable at the canonical name.  A collector defect that got the
+         * digest right but, say, |version| wrong would return INTERNAL here
+         * with the journal MOVING, and the replay would then meet the SAME
+         * defective collector at the target gate above and return INTERNAL
+         * again - deterministically, forever, until an operator intervenes. */
         if (!content_matches (&published_ev, &record->source_evidence)) {
           rc = WYRELOG_E_POLICY;
           goto out;

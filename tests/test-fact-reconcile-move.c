@@ -69,6 +69,24 @@ write_secure_file (const gchar *root, const gchar *name, const gchar *bytes,
   return path;
 }
 
+#ifdef G_OS_WIN32
+/* The one CreateFileW site in this file.  Tests that drive a native-handle
+ * seam keep this raw HANDLE rather than recovering one with _get_osfhandle,
+ * which would re-open the CRT fd-table hazard described in open_regular. */
+static HANDLE
+open_native_handle (const gchar *path)
+{
+  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wpath);
+  HANDLE h = CreateFileW (wpath, GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  g_free (wpath);
+  g_assert_true (h != INVALID_HANDLE_VALUE);
+  return h;
+}
+#endif
+
 static gint
 open_regular (const gchar *path)
 {
@@ -79,13 +97,7 @@ open_regular (const gchar *path)
    * table, so its fd would be foreign and the lookup would trap in the
    * invalid-parameter handler.  Mint the fd in this image's own CRT, the way
    * production's directory_open_file does (_open_osfhandle in wyrelog). */
-  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
-  g_assert_nonnull (wpath);
-  HANDLE h = CreateFileW (wpath, GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  g_free (wpath);
-  g_assert_true (h != INVALID_HANDLE_VALUE);
+  HANDLE h = open_native_handle (path);
   gint fd = _open_osfhandle ((intptr_t) h, _O_BINARY | _O_RDONLY);
   if (fd < 0)
     CloseHandle (h);
@@ -207,6 +219,131 @@ test_capture_rejects_bad_input (void)
   g_assert_cmpint (close (dir_fd), ==, 0);
   g_assert_true (wyl_test_remove_empty_directory (root, NULL));
 #endif
+}
+
+#ifdef G_OS_WIN32
+/* The Windows leaf is reached in production straight from the opened source's
+ * native handle, bypassing the fd entry point that zeroes the out-parameter,
+ * so the leaf must initialise every field itself.  Poison the struct first:
+ * pre-fix, leftover stack bytes landed in posix_device/posix_inode and made
+ * the move phase reject a byte-identical source at evidence_equal.
+ *
+ * Assert field by field.  Never a struct-wide memcmp against a zeroed
+ * template: the struct carries four bytes of trailing padding and C11
+ * 6.2.6.1p6 leaves padding unspecified after `= {0}`, so a whole-struct
+ * compare could fail even with the fix in place. */
+static void
+test_capture_from_handle_initialises_evidence (void)
+{
+  g_autofree gchar *root = make_root ();
+  g_autofree gchar *path = write_secure_file (root, "abc.bin", "abc", 3);
+  HANDLE handle = open_native_handle (path);
+
+  FILE_ID_INFO id_info = { 0 };
+  g_assert_true (GetFileInformationByHandleEx (handle, FileIdInfo, &id_info,
+          sizeof id_info));
+  BY_HANDLE_FILE_INFORMATION basic = { 0 };
+  g_assert_true (GetFileInformationByHandle (handle, &basic));
+
+  WylPolicyFactReconcileArtifactEvidence evidence;
+  memset (&evidence, 0xA5, sizeof evidence);
+  g_assert_cmpint (wyl_fact_reconcile_capture_evidence_from_handle_for_test
+      (handle, &evidence), ==, WYRELOG_E_OK);
+
+  g_assert_cmpuint (evidence.version, ==,
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1);
+  g_assert_cmpint (evidence.identity_kind, ==,
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS);
+  /* The fields the leaf never writes: unwritten must mean zero, not poison. */
+  g_assert_cmpuint (evidence.posix_device, ==, 0);
+  g_assert_cmpuint (evidence.posix_inode, ==, 0);
+  g_assert_cmpuint (evidence.windows_volume_serial, ==,
+      (guint64) basic.dwVolumeSerialNumber);
+  g_assert_cmpmem (evidence.windows_file_id, sizeof evidence.windows_file_id,
+      id_info.FileId.Identifier, sizeof evidence.windows_file_id);
+  g_assert_cmpuint (evidence.size_bytes, ==, 3);
+  g_assert_cmpint (evidence.digest_algorithm, ==,
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256);
+  g_assert_cmpmem (evidence.digest, sizeof evidence.digest, sha256_abc,
+      sizeof sha256_abc);
+  /* The same invariant the move phase now gates on after every capture. */
+  g_assert_true (wyl_policy_fact_reconcile_artifact_evidence_is_valid
+      (&evidence));
+
+  g_assert_true (CloseHandle (handle));
+  (void) g_remove (path);
+  g_assert_true (wyl_test_remove_empty_directory (root, NULL));
+}
+#endif /* G_OS_WIN32 */
+
+/* The capture reads the whole file, so on Windows it necessarily moves the one
+ * file position the handle carries; it must therefore establish offset 0
+ * itself rather than inherit whatever the previous reader left.  Pre-fix the
+ * second capture here read at EOF, saw total 0 != size and failed closed with
+ * POLICY - the same inherited-position bug that broke the copy.  On POSIX
+ * pread never moves the position, so this doubles as a cross-platform pin of
+ * the "does not depend on the caller's offset" contract.
+ *
+ * The perturbation is explicit, not incidental.  The first capture does leave
+ * the Windows handle at EOF, but the header tells callers not to depend on the
+ * position after the call, so this test may not depend on it either - and on
+ * POSIX nothing moves the position at all, which would leave two identical
+ * captures from offset 0 pinning nothing.  Seek deliberately between the two.
+ *
+ * The second capture is then checked against the absolute known vector, not
+ * only against the first: equality alone would still pass if a regression made
+ * both captures return the same wrong-but-OK evidence.
+ *
+ * This is the one place _get_osfhandle is acceptable: the test is perturbing
+ * its own fd, not standing in for the seam call path, which still takes the
+ * raw HANDLE that open_native_handle got from CreateFileW. */
+static void
+test_capture_is_position_independent (void)
+{
+  g_autofree gchar *root = make_root ();
+  g_autofree gchar *path = write_secure_file (root, "abc.bin", "abc", 3);
+  gint fd = open_regular (path);
+
+  WylPolicyFactReconcileArtifactEvidence first;
+  WylPolicyFactReconcileArtifactEvidence second;
+  g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd, &first),
+      ==, WYRELOG_E_OK);
+
+#ifdef G_OS_WIN32
+  {
+    HANDLE handle = (HANDLE) _get_osfhandle (fd);
+    g_assert_true (handle != INVALID_HANDLE_VALUE);
+    LARGE_INTEGER origin = { 0 };
+    g_assert_true (SetFilePointerEx (handle, origin, NULL, FILE_END));
+  }
+#else
+  g_assert_cmpint (lseek (fd, 1, SEEK_SET), ==, 1);
+#endif
+
+  g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd, &second),
+      ==, WYRELOG_E_OK);
+
+  /* Absolute assertions on the capture taken from the perturbed position. */
+  g_assert_cmpuint (second.size_bytes, ==, 3);
+  g_assert_cmpmem (second.digest, sizeof second.digest, sha256_abc,
+      sizeof sha256_abc);
+
+  g_assert_cmpuint (first.version, ==, second.version);
+  g_assert_cmpint (first.identity_kind, ==, second.identity_kind);
+  g_assert_cmpuint (first.posix_device, ==, second.posix_device);
+  g_assert_cmpuint (first.posix_inode, ==, second.posix_inode);
+  g_assert_cmpuint (first.windows_volume_serial, ==,
+      second.windows_volume_serial);
+  g_assert_cmpmem (first.windows_file_id, sizeof first.windows_file_id,
+      second.windows_file_id, sizeof second.windows_file_id);
+  g_assert_cmpuint (first.size_bytes, ==, second.size_bytes);
+  g_assert_cmpint (first.digest_algorithm, ==, second.digest_algorithm);
+  g_assert_cmpmem (first.digest, sizeof first.digest, second.digest,
+      sizeof second.digest);
+
+  close_regular (fd);
+  (void) g_remove (path);
+  g_assert_true (wyl_test_remove_empty_directory (root, NULL));
 }
 
 typedef struct
@@ -1144,6 +1281,13 @@ main (int argc, char **argv)
       test_capture_reproduces_across_inodes);
   g_test_add_func ("/fact/reconcile-move/capture/rejects-bad-input",
       test_capture_rejects_bad_input);
+#ifdef G_OS_WIN32
+  g_test_add_func
+      ("/fact/reconcile-move/capture/from-handle-initialises-evidence",
+      test_capture_from_handle_initialises_evidence);
+#endif
+  g_test_add_func ("/fact/reconcile-move/capture/is-position-independent",
+      test_capture_is_position_independent);
   g_test_add_func ("/fact/reconcile-move/publish/happy-path",
       test_move_publish_happy_path);
   g_test_add_func ("/fact/reconcile-move/publish/idempotent-replay",
