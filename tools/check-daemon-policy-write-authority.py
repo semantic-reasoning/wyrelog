@@ -43,6 +43,7 @@ PROTECTED_HANDLERS = {
     "schema_register_handler", "facts_route_handler",
     "direct_permission_mutation_handler", "policy_permission_transition_handler",
     "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
+    "service_management_authority_arm_handler",
     "wyl_daemon_http_policy_write_for_test", "tenant_create_handler",
     "tenant_seal_handler", "tenant_unseal_handler", "tenant_delete_handler",
     "policy_permission_grant_handler", "policy_permission_revoke_handler",
@@ -375,25 +376,29 @@ def raw_global_invariants(tokens, defs, check_directives=True):
             "policy_role_grant_handler": "server msg path query user_data TRUE",
             "policy_role_revoke_handler": "server msg path query user_data FALSE"},
     }
-    route_paths={
-        "tenant_create_handler": '"/tenants/create"',
-        "tenant_seal_handler": '"/tenants/seal"',
-        "tenant_unseal_handler": '"/tenants/unseal"',
-        "tenant_delete_handler": '"/tenants/delete"',
-        "graph_create_handler": '"/graphs/create"',
-        "graph_seal_handler": '"/graphs/seal"',
-        "schema_register_handler": '"/facts/schema/register"',
-        "facts_route_handler": '"/facts"',
-        "policy_permission_grant_handler": '"/policy/permissions/grant"',
-        "policy_permission_revoke_handler": '"/policy/permissions/revoke"',
-        "policy_permission_transition_handler": '"/policy/permissions/transition"',
-        "policy_role_grant_handler": '"/policy/roles/grant"',
-        "policy_role_revoke_handler": '"/policy/roles/revoke"',
-        "mfa_enroll_confirm_handler": '"/auth/mfa/enroll/confirm"',
+    exact="wyl_daemon_http_add_exact_handler"
+    prefix="wyl_daemon_http_add_prefix_handler"
+    route_registrations={
+        "tenant_create_handler": (exact,'"/tenants/create"'),
+        "tenant_seal_handler": (exact,'"/tenants/seal"'),
+        "tenant_unseal_handler": (exact,'"/tenants/unseal"'),
+        "tenant_delete_handler": (exact,'"/tenants/delete"'),
+        "graph_create_handler": (exact,'"/graphs/create"'),
+        "graph_seal_handler": (exact,'"/graphs/seal"'),
+        "schema_register_handler": (exact,'"/facts/schema/register"'),
+        "facts_route_handler": (prefix,'"/facts"'),
+        "policy_permission_grant_handler": (exact,'"/policy/permissions/grant"'),
+        "policy_permission_revoke_handler": (exact,'"/policy/permissions/revoke"'),
+        "policy_permission_transition_handler": (exact,'"/policy/permissions/transition"'),
+        "policy_role_grant_handler": (exact,'"/policy/roles/grant"'),
+        "policy_role_revoke_handler": (exact,'"/policy/roles/revoke"'),
+        "mfa_enroll_confirm_handler": (exact,'"/auth/mfa/enroll/confirm"'),
+        "service_management_authority_arm_handler":
+            (exact,'"/service-management-authority/arm"'),
     }
     edge_counts={(inner,outer):0 for inner,outers in wrapper_calls.items()
         for outer in outers}
-    route_counts={name:0 for name in route_paths}
+    route_counts={name:0 for name in route_registrations}
     for i,v in enumerate(values):
         if v not in protected or i in starts: continue
         own=owner.get(i)
@@ -407,10 +412,11 @@ def raw_global_invariants(tokens, defs, check_directives=True):
             if args==allowed:
                 edge_counts[(v,own)]+=1
                 continue
-        path=route_paths.get(v)
-        if path and own=="wyl_daemon_start_http_server_with_runtime":
+        route=route_registrations.get(v)
+        if route and own=="wyl_daemon_start_http_server_with_runtime":
+            api,path=route
             call=next((j for j in range(i-1,max(-1,i-12),-1)
-                if values[j]=="soup_server_add_handler" and
+                if values[j]==api and
                 j+1<len(values) and values[j+1]=="("),None)
             if call is not None:
                 close=mate[call+1]
