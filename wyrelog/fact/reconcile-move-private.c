@@ -348,6 +348,29 @@ reconcile_capture_source (const WylFactGraphRegularFile *src,
 #endif
 }
 
+/* Close a descriptor this unit obtained from
+ * wyl_fact_graph_directory_open_file.  Leaf that forks on which C runtime owns
+ * the descriptor.
+ *
+ * On Windows that descriptor is minted by _open_osfhandle inside wyrelog, so it
+ * lives in the fd table of the CRT linked into this image.  g_close would run
+ * inside the glib DLL, whose CRT owns a different table and would therefore see
+ * the descriptor as invalid: MSVC's invalid-parameter handler answers that with
+ * __fastfail, terminating the process with 0xc0000409 and no diagnostic at all.
+ * The Windows locator already pairs every _open_osfhandle with _close for this
+ * reason; do the same here. */
+static void
+reconcile_close_fd (gint fd)
+{
+  if (fd < 0)
+    return;
+#ifdef G_OS_WIN32
+  _close (fd);
+#else
+  g_close (fd, NULL);
+#endif
+}
+
 /* Copy exactly |size| bytes from the opened source into the stage.  Leaf that
  * forks on the platform-specific source and stage handles. */
 static wyrelog_error_t
@@ -536,7 +559,7 @@ wyl_fact_reconcile_move_publish (const WylFactReconcileMoveContext *ctx,
     if (probe == WYRELOG_E_OK) {
       WylPolicyFactReconcileArtifactEvidence target_ev;
       rc = wyl_fact_reconcile_capture_artifact_evidence (target_fd, &target_ev);
-      g_close (target_fd, NULL);
+      reconcile_close_fd (target_fd);
       if (rc != WYRELOG_E_OK)
         goto out;
       /* A freshly captured struct is gated only where an unvalidated field
@@ -772,8 +795,7 @@ out:
   wyl_fact_graph_resolver_clear (&resolver);
   g_clear_pointer (&graph_authority, wyl_policy_graph_authority_record_free);
   g_clear_pointer (&tenant_authority, wyl_policy_tenant_authority_record_free);
-  if (published_fd >= 0)
-    g_close (published_fd, NULL);
+  reconcile_close_fd (published_fd);
   wyl_policy_fact_reconcile_journal_record_free (record);
   return rc;
 }
