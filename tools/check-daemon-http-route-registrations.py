@@ -1035,6 +1035,9 @@ def canonical_provenance(marked: str, directory: Path, root: Path,
     if marked.startswith("<") and marked.endswith(">"):
         return None
     marked = marked.replace("\\\\", "\\")
+    directory = directory.resolve()
+    root = root.resolve()
+    build_root = build_root.resolve()
     path = Path(marked)
     path = (path if path.is_absolute() else directory / path).resolve()
     try:
@@ -1051,6 +1054,20 @@ def canonical_provenance(marked: str, directory: Path, root: Path,
     if relative.parts and relative.parts[0] in {".git", "subprojects"}:
         return None
     return relative.as_posix()
+
+
+def canonical_preprocessing_context(
+        unit: CompileUnit, root: Path,
+        build_root: Path) -> tuple[CompileUnit, Path, Path, str]:
+    root = root.resolve()
+    build_root = build_root.resolve()
+    unit = CompileUnit(unit.source.resolve(), unit.directory.resolve(),
+                       unit.arguments)
+    label = canonical_provenance(
+        str(unit.source), unit.directory, root, build_root)
+    if label is None or label.startswith("@build/"):
+        raise GuardError("preprocessing unit is outside the project root")
+    return unit, root, build_root, label
 
 
 def expanded_call_arguments(output: str, position: int,
@@ -1161,6 +1178,8 @@ def expanded_occurrence(source: str, physical_line: int, symbol: str,
 def preprocessed_project_occurrences(
         output: str, unit: CompileUnit, root: Path,
         build_root: Path) -> Counter[OwnershipOccurrence]:
+    unit, root, build_root, unit_label = canonical_preprocessing_context(
+        unit, root, build_root)
     marker_pattern = re.compile(
         r'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+'
         r'"([^"\r\n]+)"(?:[ \t]+[^\r\n]*)?\r?$')
@@ -1174,7 +1193,6 @@ def preprocessed_project_occurrences(
 
     marker_starts = []
     markers = []
-    unit_label = unit.source.relative_to(root).as_posix()
     saw_unit = False
     for match in marker_matches:
         content_start = match.end()
@@ -1233,13 +1251,14 @@ def preprocessed_ownership_occurrences(
         output: str, unit: CompileUnit, root: Path, build_root: Path,
         raw_roles: dict[tuple[str, int, str], str]) \
         -> Counter[OwnershipOccurrence]:
+    unit, root, build_root, unit_label = canonical_preprocessing_context(
+        unit, root, build_root)
     marker_pattern = re.compile(
         r'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+'
         r'"([^"\r\n]+)"(?:[ \t]+[^\r\n]*)?\r?$')
     marker_starts = []
     markers = []
     saw_unit = False
-    unit_label = unit.source.relative_to(root).as_posix()
     for marker in marker_pattern.finditer(output):
         source = canonical_provenance(
             marker.group(2), unit.directory, root, build_root)
@@ -1901,6 +1920,39 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
                 CompileUnit(source_path.resolve(), root, ()), root,
                 root / "build", {}),
             "missing preprocessor marker")
+        expect_guard_error(
+            lambda: preprocessed_ownership_occurrences(
+                f"{SOUP_API}(server);\n",
+                CompileUnit(alias_source, alias_root, ()), alias_root,
+                alias_root / "build", {}),
+            "missing preprocessor marker through canonical root alias")
+        aliased_project = preprocessed_project_occurrences(
+            f'# 1 "{alias_source.resolve()}"\n'
+            "static void wyl_daemon_start_http_server_with_runtime(void) {\n"
+            f'  {EXACT_API}(server, "/healthz", healthz_handler, NULL, NULL);\n'
+            "}\n",
+            CompileUnit(alias_source, alias_root, ()), alias_root,
+            alias_root / "build")
+        if not any(item.source == "wyrelog/daemon/http.c"
+                   and item.symbol == EXACT_API
+                   for item in aliased_project):
+            raise GuardError(
+                "direct project occurrence lost canonical root alias")
+        expect_guard_error(
+            lambda: preprocessed_ownership_occurrences(
+                f'# 1 "{outside}"\n{SOUP_API}(server);\n',
+                CompileUnit(outside, alias_root, ()), alias_root,
+                alias_root / "build", {}),
+            "outside preprocessing unit")
+        expect_guard_error(
+            lambda: preprocessed_project_occurrences(
+                f'# 1 "{outside}"\n'
+                "static void wyl_daemon_start_http_server_with_runtime(void) {\n"
+                f'  {EXACT_API}(server, "/healthz", healthz_handler, '
+                "NULL, NULL);\n}\n",
+                CompileUnit(outside, alias_root, ()), alias_root,
+                alias_root / "build"),
+            "outside project occurrence unit")
         expect_guard_error(
             lambda: production_compile_units(root, root / "missing-build",
                                              "gcc"),
