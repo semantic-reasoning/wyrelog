@@ -114,6 +114,12 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
     (WylHandle * self);
+/* Reloads the policy engines while the caller owns the service-auth WRITE
+ * lease. The lease spans durable service lifecycle commit and projection, so
+ * no service resolver can observe the new lifecycle before its signed-policy
+ * EDB is coherent. */
+wyrelog_error_t wyl_handle_reload_engine_pair_with_service_auth_write
+    (WylHandle * self, WylServiceAuthWriteLease * write_lease);
 
 #ifdef WYL_HAS_FACT_STORE
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
@@ -497,6 +503,11 @@ wyrelog_error_t wyl_handle_load_policy_store_permission_state_events
  */
 wyrelog_error_t wyl_handle_load_policy_store_principal_states (WylHandle *
     self);
+
+/* Loads service_principals lifecycle rows into the separate
+ * service_principal_state/2 EDB. It never writes human principal_state rows. */
+wyrelog_error_t wyl_handle_load_policy_store_service_principal_states
+    (WylHandle * self);
 
 /*
  * Loads principal_event rows from the handle-owned policy authority store into

@@ -24,6 +24,7 @@ typedef struct
   WylServiceAuthSelector invalidation_selector;
   gboolean has_invalidation_selector;
   gboolean authority_write_attempted;
+  gboolean refresh_service_principal_projection;
   void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
   void (*before_write_release) (WylServiceAuthWriteLease * lease,
       gpointer data);
@@ -212,6 +213,15 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     mutation->transaction = NULL;
   }
   wyrelog_error_t invalidate = WYRELOG_E_OK;
+  if (outcome == SERVICE_MUTATION_COMMITTED
+      && mutation->refresh_service_principal_projection
+      && wyl_handle_get_read_engine (mutation->handle) != NULL) {
+    wyrelog_error_t projection =
+        wyl_handle_reload_engine_pair_with_service_auth_write
+        (mutation->handle, mutation->lease);
+    if (projection != WYRELOG_E_OK && result == WYRELOG_E_OK)
+      result = projection;
+  }
   if ((outcome == SERVICE_MUTATION_COMMITTED
           || outcome == SERVICE_MUTATION_UNCERTAIN)
       && mutation->has_invalidation_selector) {
@@ -357,6 +367,8 @@ wyl_service_principal_create_with_runtime (WylHandle *handle,
     rc = wyl_policy_store_create_service_principal_core
         (mutation.transaction, mutation.store, subject_id, display_name,
         actor_subject_id, request_id, &stored);
+  if (rc == WYRELOG_E_OK)
+    mutation.refresh_service_principal_projection = TRUE;
   rc = service_mutation_finish (&mutation, rc);
   return finish_principal_result (rc, &stored, out);
 }
@@ -482,6 +494,9 @@ wyl_service_principal_disable_keyed_with_runtime (WylHandle *handle,
         (&mutation.invalidation_selector, stored.subject_id);
     mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
+  if (rc == WYRELOG_E_OK && stored_retirement.disposition ==
+      WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION)
+    mutation.refresh_service_principal_projection = TRUE;
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK || rc == WYRELOG_E_CONFLICT)
     copy_retirement_outcome (&stored_retirement, retirement);

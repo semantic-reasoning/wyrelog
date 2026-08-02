@@ -1925,6 +1925,20 @@ preintern_policy_store_principal_state_symbols (const gchar *subject_id,
 }
 
 static wyrelog_error_t
+preintern_policy_store_service_principal_symbols (const
+    wyl_policy_service_principal_info_t *info, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  if (info == NULL || info->subject_id == NULL || info->state == NULL)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, info->subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, info->state);
+}
+
+static wyrelog_error_t
 preintern_policy_store_principal_event_symbols (gint64 event_id,
     const gchar *subject_id, const gchar *event, const gchar *from_state,
     const gchar *to_state, gpointer user_data)
@@ -2026,6 +2040,10 @@ preintern_policy_store_symbols (WylHandle *self)
       preintern_policy_store_principal_state_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_policy_store_foreach_service_principal (self->policy_store,
+      preintern_policy_store_service_principal_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_policy_store_foreach_principal_event (self->policy_store,
       preintern_policy_store_principal_event_symbols, self);
   if (rc != WYRELOG_E_OK)
@@ -2069,6 +2087,9 @@ load_current_engine_pair (WylHandle *self)
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_load_policy_store_principal_states (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_service_principal_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_load_policy_store_principal_events (self);
@@ -2219,7 +2240,7 @@ wyl_handle_validate_service_permission_closure (WylHandle *self,
  * an unsafe closure only latches service auth (see the validator above) and
  * still returns WYRELOG_E_OK.
  */
-static wyrelog_error_t
+wyrelog_error_t
 wyl_handle_reload_engine_pair_with_service_auth_write (WylHandle *self,
     WylServiceAuthWriteLease *write_lease)
 {
@@ -2447,6 +2468,7 @@ static gboolean
 relation_fans_out_to_delta (const gchar *relation)
 {
   return g_strcmp0 (relation, "member_of") == 0
+      || g_strcmp0 (relation, "service_principal_state") == 0
       || g_strcmp0 (relation, "principal_transition") == 0
       || g_strcmp0 (relation, "session_transition") == 0
       || g_strcmp0 (relation, "perm_state_transition") == 0
@@ -2915,6 +2937,41 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
 }
 
 static wyrelog_error_t
+insert_policy_store_service_principal_state (const
+    wyl_policy_service_principal_info_t *info, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[2];
+
+  if (info == NULL || info->subject_id == NULL || info->state == NULL)
+    return WYRELOG_E_POLICY;
+  if (!g_str_equal (info->state, "active")
+      && !g_str_equal (info->state, "disabled"))
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, info->subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, info->state, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "service_principal_state", row, 2);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_service_principal_states (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_service_principal (self->policy_store,
+      insert_policy_store_service_principal_state, self);
+}
+
+static wyrelog_error_t
 insert_policy_store_principal_event (gint64 event_id, const gchar *subject_id,
     const gchar *event, const gchar *from_state, const gchar *to_state,
     gpointer user_data)
@@ -3222,6 +3279,8 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
    * the template mirror while preserving the handle-level relation name. */
   if (g_strcmp0 (relation, "principal_state") == 0)
     snapshot_relation = "principal_state_observed";
+  else if (g_strcmp0 (relation, "service_principal_state") == 0)
+    snapshot_relation = "service_principal_state_observed";
   /* perm_state probes are the public durable replay-observation path. */
   else if (g_strcmp0 (relation, "perm_state") == 0)
     snapshot_relation = "perm_state_observed";

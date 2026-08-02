@@ -1374,6 +1374,19 @@ test_access_decision = executable('test-access-decision',
 
 test('access-decision', test_access_decision)
 
+test_service_decision_authority = executable('test-service-decision-authority',
+  'test-service-decision-authority.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep],
+)
+
+test('service-decision-authority', test_service_decision_authority,
+  timeout : 60,
+)
+
 test_template_tree = executable('test-template-tree',
   'test-template-tree.c',
   c_args : [
