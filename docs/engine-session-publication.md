@@ -61,6 +61,66 @@ run under one exclusive recursive engine session. Any load or verification
 failure leaves the handle poisoned; only successful full reconstruction and
 verification publishes READY.
 
+## Conditional MFA lockout publication
+
+MFA failed-attempt counters do not affect evaluator relations until the
+threshold transition. The committed-publication mutation therefore returns an
+explicit mode: attempts one through four commit with `NONE`, retain the exact
+published engine pair, and do not invoke replacement callbacks. The threshold
+attempt atomically changes `mfa_required` to `locked`, appends the `lock`
+principal event, and commits with `FULL`. Auto-unlock reads `locked_at`, checks
+the elapsed window, changes `locked` to `unverified`, and appends `unlock`
+inside the same write transaction before using `FULL`.
+
+The HTTP boundary carries the transaction result forward instead of inferring
+it with a second store read. The threshold request is still the invalid proof
+that caused the transition and returns 401; later requests that begin locked
+return 429. An elapsed auto-unlock returns 401 authentication-required. Store,
+commit, reconstruction, callback, or exact-readback faults return 500 and, once
+the projected commit is confirmed, poison the pair. A `NONE` commit ambiguity
+returns its error but retains the pair because either durable outcome has the
+same evaluator projection.
+
+Repair must use committed reconciliation with an exact verifier. For lockout,
+that verifier requires the durable transition's exact `principal_fired` event
+ID and one recognized current principal state from the reconstructed snapshot;
+the current state may be a serialized successor. Failed reconstruction or
+verification leaves poison set. Only a successful exact verification publishes
+READY, which is also how restart reconstruction re-establishes the projection.
+
+## Authenticated relogin compatibility
+
+The legacy login boundary has two deliberately narrow authenticated-principal
+edges. A normal relogin changes `authenticated` to `mfa_required`; an explicit
+skip-MFA relogin publishes an `authenticated` to `authenticated` self-loop.
+The mutation reads the durable current principal state inside its transaction,
+validates that exact edge, compare-and-sets from the observed state, and appends
+the matching positive principal event. The self-loop is still a publication:
+it receives its own event ID and exact verification instead of being treated as
+a no-op. Missing principals retain the existing canonical `unverified` login
+edges. Locked, revoked, and every other unsupported predecessor fail with a
+conflict and no session, event, audit, or projection side effect.
+
+This compatibility rule governs one login publication only. It does not define
+cross-session precedence, invalidate older sessions, or make a later login
+retroactively supersede an earlier one; those global session semantics remain
+tracked by #752.
+
+## Signed-template custody
+
+The principal FSM Datalog change updates the canonical template digest, but its
+production Ed25519 signature is owned by the external release custodian. Issue
+#755 tracks signing this exact frozen candidate and returning a signature-only
+incorporation change. Until then, production manifest verification must fail
+closed. Do not rotate the public key, weaken signature verification, or use a
+repository/CI key as a substitute.
+
+Manifest-omitted archives with `require_template_manifest=false` are permitted
+only as disposable diagnostic builds for semantic and sanitizer verification.
+They are not release candidates and must not modify the tracked manifest. Any
+code, test, template, manifest digest, or documentation change after candidate
+freeze invalidates the custody evidence and requires a new #755 signing round.
+
 The audit publication lane is the one deliberate reentrant exception. An
 audit emitted by a detached delta callback commits its durable row, classifies
 that one audit projection against the current pair without interning symbols,
