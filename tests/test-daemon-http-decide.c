@@ -4874,6 +4874,105 @@ check_service_bearer_resolver_contract (SoupServer *server)
   return 0;
 }
 
+/*
+ * #740 WALL 1 end-to-end: a genuine, FULLY validated live service (svc:)
+ * bearer authorises through the real HTTP /decide route only because the
+ * daemon injects a transient principal_state fact for it. This mints a
+ * real service bearer (live detached session + ACTIVE registry
+ * reservation + stored access token + signed JWT, all asserted by
+ * service_resolver_expect), seeds a role grant, an ACTIVE session scope,
+ * and an armed permission for the service subject -- but NO
+ * principal_state row (that fact is written only for human sessions).
+ * Before the fix the decide returned decision 0 not_authenticated;
+ * after the fix it returns decision 1. Validation is never faked: the
+ * signal that gates the injection is set only by resolve_bearer_session's
+ * fully validated service branch.
+ *
+ * SCOPE: the session scope is seeded active directly, so Wall 2
+ * (fresh-tenant session_state seeding, #382) is deliberately not in play;
+ * this asserts ONLY that the principal_state blocker (Wall 1) is cleared.
+ */
+static gint
+check_service_bearer_decide_injects_principal_state (SoupServer *server,
+    const gchar *base_url)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  if (handle == NULL)
+    return 2400;
+
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (!service_resolver_fixture_init (server, &fixture, WYL_SERVICE_AUTH_ACTIVE,
+          0)
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+    return 2401;
+
+  const gchar *subject = "svc:resolver:test";
+  const gchar *perm = "svc.decide.allow";
+  /* Everything allow_guard_base needs EXCEPT principal_state. */
+  if (insert_symbol_row2 (handle, "role_permission", "wr.svc-decide-role", perm)
+      != WYRELOG_E_OK)
+    return 2402;
+  if (insert_symbol_row3 (handle, "member_of", subject, "wr.svc-decide-role",
+          fixture.sid) != WYRELOG_E_OK)
+    return 2403;
+  if (insert_symbol_row2 (handle, "session_state", fixture.sid, "active")
+      != WYRELOG_E_OK)
+    return 2404;
+  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 2405;
+  if (insert_symbol_row4 (handle, "perm_state", subject, perm, fixture.sid,
+          "armed") != WYRELOG_E_OK)
+    return 2406;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /* Established scope: after the fix, decision 1 (before the fix it was
+   * decision 0 not_authenticated). */
+  gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
+      fixture.sid, NULL, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 2407;
+  if (strstr (body, "\"decision\":1") == NULL)
+    return 2408;
+
+  /* Freeze the scope -> still denied, on the freeze gate: the transient
+   * fact clears only the authentication blocker, it never forces ALLOW. */
+  if (insert_symbol_row1 (handle, "frozen", fixture.sid) != WYRELOG_E_OK)
+    return 2409;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
+      fixture.sid, NULL, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 2410;
+  if (strstr (body, "\"decision\":0") == NULL)
+    return 2411;
+  if (strstr (body, "\"deny_reason\":\"frozen\"") == NULL)
+    return 2412;
+
+  /* A revoked service token is rejected at resolve (401) and never reaches
+   * decide, so no principal_state is ever asserted for it. */
+  g_auto (ServiceResolverFixture) revoked = { 0 };
+  if (!service_resolver_fixture_init (server, &revoked,
+          WYL_SERVICE_AUTH_REVOKED, 0)
+      || !service_resolver_expect (server, &revoked, revoked.token, FALSE))
+    return 2413;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
+      fixture.sid, NULL, revoked.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401)
+    return 2414;
+
+  return 0;
+}
+
 static gchar *
 extract_json_string (const gchar *body, const gchar *name)
 {
@@ -18372,6 +18471,13 @@ main (void)
         maintenance_ticks_pre_suspend, maintenance_ticks_drained,
         maintenance_ticks_final);
     result = 2666;
+    goto cleanup;
+  }
+  gint service_decide_rc =
+      check_service_bearer_decide_injects_principal_state (http.server,
+      base_url);
+  if (service_decide_rc != 0) {
+    result = service_decide_rc;
     goto cleanup;
   }
 #ifdef WYL_HAS_AUDIT
