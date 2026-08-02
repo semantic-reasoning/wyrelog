@@ -40,6 +40,7 @@
 #include "wyrelog/auth/service-credential-operation-storage-private.h"
 #endif
 #include "wyrelog/wyl-common-private.h"
+#include "wyrelog/wyl-decide-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-session-private.h"
 #include "wyrelog/wyl-id-private.h"
@@ -199,6 +200,7 @@ typedef struct
   gchar *session_id;
   gchar *actor;
   gchar *tenant;
+  WylServiceDecisionAuthority *service_decision_authority;
   gboolean bearer;
 } WylDaemonAuthContext;
 
@@ -533,6 +535,7 @@ wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
   g_free (auth->session_id);
   g_free (auth->actor);
   g_free (auth->tenant);
+  wyl_service_decision_authority_free (auth->service_decision_authority);
   memset (auth, 0, sizeof *auth);
 }
 
@@ -4541,7 +4544,8 @@ lookup_bearer_token (SoupServerMessage *msg)
 static wyrelog_error_t
 resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     const gchar *token, WylDaemonAuthContext *out_auth,
-    const gchar **out_auth_error_code)
+    const gchar **out_auth_error_code,
+    gboolean retain_service_decision_authority)
 {
   if (out_auth_error_code != NULL)
     *out_auth_error_code = NULL;
@@ -4693,6 +4697,12 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
         wyl_service_auth_read_lease_test_fail_terminal_prevalidation (lease);
       }
 #endif
+      if (retain_service_decision_authority && rc == WYRELOG_E_OK)
+        rc = wyl_service_decision_authority_new_resolved (ctx->handle,
+            &lease, claims.subject, claims.tenant,
+            &out_auth->service_decision_authority);
+    }
+    if (lease != NULL) {
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK)
@@ -4772,7 +4782,7 @@ wyl_daemon_http_resolve_bearer_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   WylDaemonAuthContext auth = { 0 };
   wyrelog_error_t rc = resolve_bearer_session (server, ctx, token, &auth,
-      NULL);
+      NULL, FALSE);
   if (rc == WYRELOG_E_OK) {
     *out_session_id = g_steal_pointer (&auth.session_id);
     *out_actor = g_steal_pointer (&auth.actor);
@@ -5575,7 +5585,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
     }
   } else {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-        bearer_token, &auth, &auth_tenant_error);
+        bearer_token, &auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401,
           auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
@@ -5908,7 +5918,7 @@ service_principal_management_authorize_session (SoupServer *server,
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-      bearer_token, &auth, &auth_tenant_error);
+      bearer_token, &auth, &auth_tenant_error, FALSE);
   if (auth_rc != WYRELOG_E_OK) {
     set_json_error (msg, 401,
         auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
@@ -9441,7 +9451,7 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   const gchar *tenant_error = NULL;
   if (resolve_bearer_session (server, ctx, bearer, out_auth,
-          &tenant_error) != WYRELOG_E_OK ||
+          &tenant_error, FALSE) != WYRELOG_E_OK ||
       g_strcmp0 (actor, out_auth->actor) != 0) {
     set_json_error (msg, 401, "mfa_enroll_auth_required");
     return FALSE;
@@ -11755,7 +11765,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   if (has_bearer_token) {
     const gchar *auth_tenant_error = NULL;
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-        bearer_token, &bearer_auth, &auth_tenant_error);
+        bearer_token, &bearer_auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401, auth_tenant_error != NULL
           ? auth_tenant_error : "logout_auth_required");
@@ -11872,7 +11882,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-      bearer_token, &auth, &auth_tenant_error);
+      bearer_token, &auth, &auth_tenant_error, TRUE);
   if (auth_rc != WYRELOG_E_OK) {
     set_json_error (msg, 401, auth_tenant_error != NULL
         ? auth_tenant_error : "decide_auth_required");
@@ -11905,7 +11915,10 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
   }
 
-  wyrelog_error_t rc = wyl_decide (handle, req, resp);
+  wyrelog_error_t rc = auth.service_decision_authority != NULL
+      ? wyl_decide_with_service_authority (handle, req,
+      auth.service_decision_authority, resp)
+      : wyl_decide (handle, req, resp);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_decide_request");
     return;

@@ -38,6 +38,63 @@
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
 #endif
 
+#ifdef WYL_TEST_VARIANT_SERVICE_DECISION
+static void
+service_decision_remove_tree (const gchar *path)
+{
+  g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
+
+  if (dir == NULL) {
+    g_remove (path);
+    return;
+  }
+  const gchar *name = NULL;
+  while ((name = g_dir_read_name (dir)) != NULL) {
+    g_autofree gchar *child = g_build_filename (path, name, NULL);
+    if (g_file_test (child, G_FILE_TEST_IS_DIR))
+      service_decision_remove_tree (child);
+    else
+      g_remove (child);
+  }
+  g_rmdir (path);
+}
+
+static gchar *
+copy_unsigned_service_decision_templates (void)
+{
+  static const gchar *const files[] = {
+    "bootstrap.dl",
+    "fsm/principal.dl",
+    "fsm/session.dl",
+    "fsm/permission_scope.dl",
+    "lobac/decision.dl",
+  };
+  g_autofree gchar *dir =
+      g_dir_make_tmp ("wyl-daemon-service-decision-XXXXXX", NULL);
+  if (dir == NULL)
+    return NULL;
+  g_autofree gchar *fsm = g_build_filename (dir, "fsm", NULL);
+  g_autofree gchar *lobac = g_build_filename (dir, "lobac", NULL);
+  if (g_mkdir (fsm, 0700) != 0 || g_mkdir (lobac, 0700) != 0) {
+    service_decision_remove_tree (dir);
+    return NULL;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (files); i++) {
+    g_autofree gchar *source =
+        g_build_filename (WYL_TEST_TEMPLATE_DIR, files[i], NULL);
+    g_autofree gchar *target = g_build_filename (dir, files[i], NULL);
+    g_autofree gchar *contents = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents (source, &contents, &len, NULL)
+        || !g_file_set_contents (target, contents, (gssize) len, NULL)) {
+      service_decision_remove_tree (dir);
+      return NULL;
+    }
+  }
+  return g_steal_pointer (&dir);
+}
+#endif
+
 /* Far-future (year 2100) credential expiry for contract seeds.  The numeric
  * form types the guint64 expires_at_us argument; the string form seeds the
  * same value inside JSON request bodies. */
@@ -14318,7 +14375,139 @@ check_tenant_gate_codes_contract (void)
  * the timeout. Variant-irrelevant static helpers stay defined in this file;
  * the build silences the resulting -Wunused-function warnings.
  */
-#if defined(WYL_TEST_VARIANT_REFRESH)
+#if defined(WYL_TEST_VARIANT_SERVICE_DECISION)
+int
+main (void)
+{
+  gint result = 0;
+  g_autofree gchar *templates = copy_unsigned_service_decision_templates ();
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (SoupSession) session = NULL;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *body = NULL;
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  TestHttpServer http = { 0 };
+  GThread *thread = NULL;
+  guint status = 0;
+
+  if (templates == NULL || wyl_init (templates, &handle) != WYRELOG_E_OK) {
+    result = 2700;
+    goto cleanup;
+  }
+  wyl_service_principal_t principal = { 0 };
+  if (wyl_service_principal_create (handle, "svc:resolver:test", "worker",
+          "admin", "service-decision-create", &principal) != WYRELOG_E_OK) {
+    result = 2701;
+    goto cleanup;
+  }
+  wyl_service_principal_clear (&principal);
+
+  WylDaemonOptions opts = {
+    .template_dir = templates,
+    .listen_port = 0,
+  };
+  http.loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GError) error = NULL;
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  if (http.server == NULL) {
+    result = 2702;
+    goto cleanup;
+  }
+  thread = g_thread_new ("daemon-http-service-decision",
+      test_http_server_thread, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    result = 2703;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  session = soup_session_new ();
+  if (base_url == NULL || session == NULL
+      || !service_resolver_fixture_init (http.server, &fixture,
+          WYL_SERVICE_AUTH_ACTIVE, 0)) {
+    result = 2704;
+    goto cleanup;
+  }
+
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "__wr_default",
+          "tenant=__wr_default", "invalid-service-bearer", &status, &body)
+      != 0 || status != 401 || body == NULL
+      || strstr (body, "\"decide_auth_required\"") == NULL) {
+    result = 2705;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "__wr_default",
+          "tenant=__wr_default", fixture.token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":0") == NULL) {
+    result = 2706;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "tenant-foreign",
+          "tenant=__wr_default", fixture.token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":0") == NULL) {
+    result = 2707;
+    goto cleanup;
+  }
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_role_membership (store, "svc:resolver:test",
+          "wr.viewer", "__wr_default") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    result = 2708;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "__wr_default",
+          "tenant=__wr_default", fixture.token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":1") == NULL) {
+    result = 2709;
+    goto cleanup;
+  }
+  if (wyl_policy_store_revoke_role_membership (store, "svc:resolver:test",
+          "wr.viewer", "__wr_default") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    result = 2710;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "__wr_default",
+          "tenant=__wr_default", fixture.token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":0") == NULL) {
+    result = 2711;
+    goto cleanup;
+  }
+
+cleanup:
+  if (http.loop != NULL)
+    g_main_loop_quit (http.loop);
+  if (thread != NULL)
+    g_thread_join (thread);
+  if (http.server != NULL) {
+    soup_server_disconnect (http.server);
+    g_clear_object (&http.server);
+  }
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_clear_object (&handle);
+  if (templates != NULL)
+    service_decision_remove_tree (templates);
+  if (result != 0)
+    g_printerr ("WYRELOG_TEST_DIAG service_decision result=%d status=%u "
+        "body=%s\n", result, status, body != NULL ? body : "(null)");
+  return result;
+}
+#elif defined(WYL_TEST_VARIANT_REFRESH)
 int
 main (void)
 {

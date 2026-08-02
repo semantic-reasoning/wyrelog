@@ -319,6 +319,29 @@ if build_client
     timeout : 240,
   )
 
+  # This focused variant copies only the Datalog sources into a temporary
+  # unsigned tree. It validates the pre-signing candidate without weakening
+  # production manifest verification or requiring release-custodian keys.
+  test_daemon_http_service_decision = executable(
+    'test-daemon-http-service-decision',
+    'test-daemon-http-decide.c',
+    '../wyrelog/daemon/auth-registry-private.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    '../wyrelog/daemon/service-credential-handoff-private.c',
+    c_args : test_daemon_http_decide_c_args
+      + '-DWYL_TEST_VARIANT_SERVICE_DECISION',
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_daemon_http_decide_deps,
+    link_with : test_daemon_http_decide_link_with,
+  )
+  test_daemon_http_decide_targets += [test_daemon_http_service_decision]
+
+  test('daemon-http-service-decision', test_daemon_http_service_decision,
+    timeout : 120,
+  )
+
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
       'test-daemon-http-decide.c',
