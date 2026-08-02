@@ -156,6 +156,9 @@ def main():
     if invoke(ns.guard, ns.root, ns.compiler_id, compiler, ns.define,
               build_root=ns.build_root).returncode:
         raise SystemExit("production fixture rejected")
+    graph_route = (
+        '  wyl_daemon_http_add_exact_handler (server, "/graphs/create",\n'
+        "      graph_create_handler, ctx, NULL);")
     with tempfile.TemporaryDirectory(prefix="wyrelog-empty-compile-db-") as empty:
         raw = subprocess.run([sys.executable, ns.guard, ns.root, "--raw-only"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -344,22 +347,54 @@ def main():
             "\nvoid *handler_alias = graph_create_handler;\n",
         "wrapper-function-pointer-alias": source +
             "\nvoid *wrapper_alias = policy_role_grant_handler;\n",
-        "graph-route-deleted": source.replace(
-            '  soup_server_add_handler (server, "/graphs/create", '
-            'graph_create_handler, ctx,\n      NULL);\n', "", 1),
+        "graph-route-deleted": source.replace(graph_route, "", 1),
         "graph-route-duplicated": source.replace(
-            '  soup_server_add_handler (server, "/graphs/create", '
-            'graph_create_handler, ctx,\n      NULL);',
-            '  soup_server_add_handler (server, "/graphs/create", '
-            'graph_create_handler, ctx,\n      NULL);\n'
-            '  soup_server_add_handler (server, "/graphs/create", '
-            'graph_create_handler, ctx,\n      NULL);', 1),
+            graph_route, graph_route + "\n" + graph_route, 1),
+        "graph-route-raw-soup": source.replace(
+            "wyl_daemon_http_add_exact_handler (server, \"/graphs/create\"",
+            "soup_server_add_handler (server, \"/graphs/create\"", 1),
+        "graph-route-raw-singleton": source.replace(
+            "wyl_daemon_http_add_exact_handler (server, \"/graphs/create\"",
+            "wyl_daemon_http_add_singleton_handler "
+            "(server, \"/graphs/create\"", 1),
+        "graph-route-prefix": source.replace(
+            "wyl_daemon_http_add_exact_handler (server, \"/graphs/create\"",
+            "wyl_daemon_http_add_prefix_handler (server, \"/graphs/create\"",
+            1),
+        "self-arm-route-prefix": source.replace(
+            "wyl_daemon_http_add_exact_handler (server,\n"
+            "      \"/service-management-authority/arm\"",
+            "wyl_daemon_http_add_prefix_handler (server,\n"
+            "      \"/service-management-authority/arm\"", 1),
+        "self-arm-route-wrong-callback": source.replace(
+            '"/service-management-authority/arm",\n'
+            "      service_management_authority_arm_handler, ctx, NULL",
+            '"/service-management-authority/arm",\n'
+            "      graph_create_handler, ctx, NULL", 1),
+        "facts-route-exact": source.replace(
+            "wyl_daemon_http_add_prefix_handler (server, \"/facts\"",
+            "wyl_daemon_http_add_exact_handler (server, \"/facts\"", 1),
+        "graph-route-api-alias": (
+            "#define LOCKED_ROUTE wyl_daemon_http_add_exact_handler\n"
+            + source.replace(
+                "wyl_daemon_http_add_exact_handler "
+                "(server, \"/graphs/create\"",
+                "LOCKED_ROUTE (server, \"/graphs/create\"", 1)),
+        "graph-route-wrong-owner": (
+            source.replace(graph_route, "", 1)
+            + "\nvoid bad_route_owner(void) {\n" + graph_route + "\n}\n"),
+        "graph-route-wrong-data": source.replace(
+            "graph_create_handler, ctx, NULL",
+            "graph_create_handler, NULL, NULL", 1),
+        "graph-route-wrong-destroy": source.replace(
+            "graph_create_handler, ctx, NULL",
+            "graph_create_handler, ctx, g_free", 1),
         "tenant-route-path-change": source.replace(
-            '"/tenants/create", tenant_create_handler',
-            '"/tenants/other", tenant_create_handler', 1),
+            '"/tenants/create",\n      tenant_create_handler',
+            '"/tenants/other",\n      tenant_create_handler', 1),
         "tenant-route-wrapper-swap": source.replace(
-            '"/tenants/create", tenant_create_handler',
-            '"/tenants/create", tenant_seal_handler', 1),
+            '"/tenants/create",\n      tenant_create_handler',
+            '"/tenants/create",\n      tenant_seal_handler', 1),
         "inactive-audit-legacy-mutex": source +
             "\n#ifndef WYL_HAS_AUDIT\npolicy_mutation_lock\n#endif\n",
         "inactive-acquire-alias": source +
@@ -430,6 +465,9 @@ def main():
             "directive-acquire-alias", "true-redefine",
         }
         for name, text in fixtures.items():
+            if text == source:
+                raise SystemExit(
+                    f"negative fixture anchor missing: {name}")
             target.write_text(text, encoding="utf-8")
             if invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
                       ns.define, raw_only=name not in preprocessed_fixtures).returncode == 0:
