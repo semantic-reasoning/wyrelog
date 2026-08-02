@@ -3912,6 +3912,112 @@ check_store_sets_session_state (void)
   return 0;
 }
 
+/* #744: the seed helper anchors a freshly-created tenant so a workload role
+ * granted at <tenant> can be decided ALLOW there. It writes session_state
+ * active + wr.system_admin membership (and their ledger events) at <tenant>
+ * scope ONLY, never at __wr_default, and is idempotent for the state rows. */
+static gint
+check_store_seed_created_tenant_authority (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  gboolean exists = FALSE;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 3960;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 3961;
+  if (wyl_policy_store_create_tenant (store, "seed-tenant", &created)
+      != WYRELOG_E_OK || !created)
+    return 3962;
+
+  /* The handler owns the transaction; the seed helper owns none. */
+  if (wyl_policy_store_begin_mutation (store) != WYRELOG_E_OK)
+    return 3963;
+  if (wyl_policy_store_seed_created_tenant_authority (store, "seed-tenant",
+          "seed-admin") != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return 3964;
+  }
+  if (wyl_policy_store_commit_mutation (store) != WYRELOG_E_OK)
+    return 3965;
+
+  /* system_admin membership is present at <tenant>, absent at __wr_default. */
+  if (wyl_policy_store_role_membership_exists (store, "seed-admin",
+          "wr.system_admin", "seed-tenant", &exists) != WYRELOG_E_OK || !exists)
+    return 3966;
+  exists = TRUE;
+  if (wyl_policy_store_role_membership_exists (store, "seed-admin",
+          "wr.system_admin", "__wr_default", &exists) != WYRELOG_E_OK || exists)
+    return 3967;
+
+  /* session_state(active) is present at <tenant>, absent at __wr_default. */
+  SessionStateExpect tenant_state = {
+    .session_id = "seed-tenant",
+    .state = "active",
+  };
+  SessionStateExpect default_state = {
+    .session_id = "__wr_default",
+    .state = "active",
+  };
+  if (wyl_policy_store_foreach_session_state (store, session_state_expect_cb,
+          &tenant_state) != WYRELOG_E_OK)
+    return 3968;
+  if (tenant_state.matches != 1)
+    return 3969;
+  if (wyl_policy_store_foreach_session_state (store, session_state_expect_cb,
+          &default_state) != WYRELOG_E_OK)
+    return 3970;
+  if (default_state.matches != 0)
+    return 3971;
+
+  /* The grant ledger event landed at <tenant>. */
+  RoleMembershipEventExpect grant_event = {
+    .subject_id = "seed-admin",
+    .role_id = "wr.system_admin",
+    .scope = "seed-tenant",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_role_membership_event (store,
+          role_membership_event_expect_cb, &grant_event) != WYRELOG_E_OK)
+    return 3972;
+  if (grant_event.matches != 1)
+    return 3973;
+
+  /* Idempotency: a second seed does not duplicate the state rows
+   * (ON CONFLICT on role_memberships/session_states). */
+  if (wyl_policy_store_begin_mutation (store) != WYRELOG_E_OK)
+    return 3974;
+  if (wyl_policy_store_seed_created_tenant_authority (store, "seed-tenant",
+          "seed-admin") != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return 3975;
+  }
+  if (wyl_policy_store_commit_mutation (store) != WYRELOG_E_OK)
+    return 3976;
+
+  RoleMembershipExpect membership = {
+    .subject_id = "seed-admin",
+    .role_id = "wr.system_admin",
+    .scope = "seed-tenant",
+  };
+  if (wyl_policy_store_foreach_role_membership (store,
+          role_membership_expect_cb, &membership) != WYRELOG_E_OK)
+    return 3977;
+  if (membership.matches != 1)
+    return 3978;
+  SessionStateExpect tenant_state_again = {
+    .session_id = "seed-tenant",
+    .state = "active",
+  };
+  if (wyl_policy_store_foreach_session_state (store, session_state_expect_cb,
+          &tenant_state_again) != WYRELOG_E_OK)
+    return 3979;
+  if (tenant_state_again.matches != 1)
+    return 3980;
+  return 0;
+}
+
 static gint
 check_store_appends_principal_event (void)
 {
@@ -5262,6 +5368,8 @@ main (void)
   if ((rc = check_store_principal_states_legacy_schema_migration ()) != 0)
     return rc;
   if ((rc = check_store_sets_session_state ()) != 0)
+    return rc;
+  if ((rc = check_store_seed_created_tenant_authority ()) != 0)
     return rc;
   if ((rc = check_store_appends_principal_event ()) != 0)
     return rc;
