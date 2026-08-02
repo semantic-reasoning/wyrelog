@@ -227,6 +227,13 @@ set. The management routes are `/service-principals` and
 actions. A build without an owning feature does not register that feature's
 route or a compatibility stub.
 
+The exact method/template matrix contains eight base routes. Audit alone adds
+one (nine total), fact store alone adds three (eleven total), and enabling both
+produces twelve. `/service-principals` and `/service-credentials` are the only
+intentional prefix registrations. The operation collection, its two actions,
+and `/auth/service-token` are singleton registrations protected by the shared
+exact-registration adapter.
+
 The exact management paths are `POST` and `GET /service-principals`,
 `POST /service-principals/{subject}/disable`, `POST` and `GET
 /service-principals/{subject}/credentials`, `GET /service-credentials/{id}`,
@@ -237,6 +244,16 @@ The exact management paths are `POST` and `GET /service-principals`,
 /service-credential-operations/recover`. No alias, legacy, hidden, or alternate
 route is supported. Reconciliation and recovery return sanitized, non-secret
 operation evidence; they never return a credential secret.
+
+Path ownership is decided before method selection, authentication, body or
+query parsing, logging, limiter consumption, storage access, locks, or
+mutation. A trailing slash, deeper or doubled segment, suffix collision, or
+other unknown shape therefore returns the generic `404 {"error":"not_found"}`
+for every method and credential/body combination. Once a canonical template
+matches, an unsupported method returns `405 method_not_allowed`; identifier,
+query, and body validation then retain their route-specific semantic errors.
+In-tree client and CLI callers construct only the canonical paths above and do
+not rely on prefix aliases or trailing-slash normalization.
 
 All eleven management routes share one authorization envelope. They are
 SYSTEM-profile, actual-listener-and-peer loopback endpoints that accept only an
