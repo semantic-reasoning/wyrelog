@@ -934,18 +934,18 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 22;
+  const guint expected_exact = 25;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 21;
+  const guint expected_exact = 24;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 19;
+  const guint expected_exact = 22;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 18;
+  const guint expected_exact = 21;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 10
+  if (total != expected_total || prefixes != 4 || raw_singletons != 7
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -968,6 +968,9 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/tenants/seal",
     "/tenants/unseal",
     "/tenants/delete",
+    "/graphs/create",
+    "/graphs/seal",
+    "/graphs",
 #ifdef WYL_HAS_FACT_STORE
     "/service-credential-operations",
     "/service-credential-operations/reconcile",

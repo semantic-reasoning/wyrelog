@@ -114,6 +114,9 @@ ISSUE_720_EXACT_PATHS = {
     "/tenants/seal",
     "/tenants/unseal",
     "/tenants/delete",
+    "/graphs/create",
+    "/graphs/seal",
+    "/graphs",
 }
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES

@@ -171,6 +171,38 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
   return wyl_handle_reload_engine_pair (handle);
 }
 
+typedef struct
+{
+  const gchar *graph_id;
+  gboolean found;
+} GraphExistenceProbe;
+
+static wyrelog_error_t
+find_graph (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
+{
+  GraphExistenceProbe *probe = user_data;
+  if (g_strcmp0 (info->graph_id, probe->graph_id) == 0)
+    probe->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+graph_state_matches (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *graph, gboolean expected_exists, gboolean expected_active)
+{
+  GraphExistenceProbe probe = {
+    .graph_id = graph,
+  };
+  if (wyl_policy_store_foreach_fact_graph (store, tenant, find_graph, &probe)
+      != WYRELOG_E_OK || probe.found != expected_exists)
+    return FALSE;
+  if (!probe.found)
+    return TRUE;
+  gboolean active = FALSE;
+  return wyl_policy_store_fact_graph_is_active (store, tenant, graph, &active)
+      == WYRELOG_E_OK && active == expected_active;
+}
+
 static gboolean
 count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
 {
@@ -253,6 +285,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   g_autofree gchar *deny_token = wyl_client_dup_access_token (deny_client);
   if (admin_token == NULL || deny_token == NULL)
     return 13;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
   guint status = 0;
   g_autofree gchar *body = NULL;
@@ -276,6 +309,21 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *create_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
       WYL_TENANT_DEFAULT, FACT_GUARD);
+  static const gchar *const graph_create_aliases[] = {
+    "/graphs/create/x",
+    "/graphs/createx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_create_aliases); i++) {
+    rc = send_raw (session, "POST", base_url, graph_create_aliases[i],
+        create_query, admin_token, NULL, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !graph_state_matches (store, WYL_TENANT_DEFAULT, "orders", FALSE,
+            FALSE))
+      return 520 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw (session, "POST", base_url, "/graphs/create", create_query,
       admin_token, NULL, &status, &body);
   if (rc != 0)
@@ -291,6 +339,21 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
           NULL, NULL, NULL) != SQLITE_OK)
     return 221;
 
+  static const gchar *const graph_list_aliases[] = {
+    "/graphs/x",
+    "/graphsx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_list_aliases); i++) {
+    g_clear_pointer (&body, g_free);
+    rc = send_raw (session, "GET", base_url, graph_list_aliases[i],
+        graphs_query, admin_token, NULL, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !graph_state_matches (store, WYL_TENANT_DEFAULT, "orders", TRUE,
+            TRUE))
+      return 522 + (gint) i;
+  }
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
       admin_token, NULL, &status, &body);
@@ -817,6 +880,21 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
       WYL_TENANT_DEFAULT, FACT_GUARD);
+  static const gchar *const graph_seal_aliases[] = {
+    "/graphs/seal/x",
+    "/graphs/sealx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_seal_aliases); i++) {
+    rc = send_raw (session, "POST", base_url, graph_seal_aliases[i],
+        seal_query, admin_token, NULL, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+        || !graph_state_matches (store, WYL_TENANT_DEFAULT, "orders", TRUE,
+            TRUE))
+      return 524 + (gint) i;
+    g_clear_pointer (&body, g_free);
+  }
   rc = send_raw (session, "POST", base_url, "/graphs/seal", seal_query,
       admin_token, NULL, &status, &body);
   if (rc != 0)
