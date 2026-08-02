@@ -530,6 +530,38 @@ and require a live, MFA-assured human bearer session that holds
 management resolver tenant `__wr_default`; `--tenant` independently selects
 the credential target.
 
+### Arming the service-management authority (prerequisite)
+
+Before `service-principal create`, `service-credential issue`, or any other
+service-management verb will authorize, the acting admin must first arm the two
+management permissions (`wr.service_principal.manage`,
+`wr.service_credential.manage`) for its own session. Arm them with a single
+loopback call using the same live, MFA-assured human bearer and guard context:
+
+```
+POST /service-management-authority/arm
+  Authorization: Bearer <access-token>
+  ?guard-timestamp=<ts>&guard-loc-class=<class>&guard-risk=<risk>
+```
+
+Semantics:
+
+- **Session-bound.** The authority is armed at the caller's own `session_id`
+  and is inert once that session is revoked or logs out. Re-arming is required
+  after a new login.
+- **Self-scoped.** The armed subject is always the bearer's own actor and the
+  scope is always the bearer's own `session_id`. No query, body, or header
+  parameter can redirect the grant to another subject or scope.
+- **MFA-gated, human-only.** The call requires the SYSTEM profile, an actual
+  loopback transport, a bearer (never a session token) authenticated in
+  `__wr_default`, and a live human MFA-assured session. Service tokens can
+  never arm this authority.
+- **Eligibility.** Only holders of the `wr.system_admin` role may self-arm; the
+  role carries the `wr.service.self_authorize` permission that gates the call
+  (a separation-of-duties boundary). The guard context is required and validated
+  but is not the primary control — the profile, loopback, MFA-session, and role
+  checks above are.
+
 ```
 wyctl service-credential issue \
   --tenant <tenant> \
