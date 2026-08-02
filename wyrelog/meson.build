@@ -196,7 +196,7 @@ wyrelog_handle_test_seams_lib = static_library(
 wyrelog_handle_test_seams_dep = declare_dependency(
   link_with : wyrelog_handle_test_seams_lib,
   include_directories : wyrelog_inc,
-  dependencies : [glib_dep, gio_dep],
+  dependencies : [glib_dep, gio_dep, wirelog_dep],
 )
 
 # Full-symbol control for shared-only configurations, especially PE where the
