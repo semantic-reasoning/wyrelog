@@ -127,7 +127,7 @@ test_locator_round_trip (void)
   WylFactGraphLocator locator = { 0 };
   g_autofree gchar *relative = NULL;
   g_autofree gchar *path = NULL;
-  g_autofree gchar *expected_relative = NULL;
+  const gchar *expected_relative = "v1-ehimsobeegnuj6ta/v1-5on2urrichin4so";
   g_autofree gchar *expected_path = NULL;
 
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant/雪",
@@ -138,11 +138,10 @@ test_locator_round_trip (void)
 
   relative = wyl_fact_graph_locator_relative_dir (&locator);
   path = wyl_fact_graph_locator_descriptive_path ("/facts", &locator);
-  expected_relative = g_build_filename ("v1-ehimsobeegnuj6ta",
-      "v1-5on2urrichin4so", NULL);
   expected_path = g_build_filename ("/facts", "v1-ehimsobeegnuj6ta",
       "v1-5on2urrichin4so", NULL);
   g_assert_cmpstr (relative, ==, expected_relative);
+  g_assert_true (wyl_fact_graph_relative_path_is_valid (relative));
   g_assert_cmpstr (path, ==, expected_path);
 
   wyl_fact_graph_locator_clear (&locator);
