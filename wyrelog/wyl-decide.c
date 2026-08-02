@@ -618,10 +618,14 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     return WYRELOG_E_INVALID;
   if (!guard_context_is_valid (req))
     return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (handle);
+  if (engine_locker == NULL)
+    return WYRELOG_E_INVALID;
 
   const gchar *deny_reason = NULL;
   const gchar *deny_origin = NULL;
-  if (wyl_handle_get_read_engine (handle) != NULL) {
+  if (wyl_handle_engine_pair_is_ready (handle)) {
     gint64 row[3];
     wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle,
         wyl_decide_req_get_subject_id (req), &row[0]);

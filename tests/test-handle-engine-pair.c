@@ -3204,6 +3204,148 @@ check_policy_store_guarded_direct_permissions_do_not_auto_arm (void)
   return 0;
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean decision_entered;
+  gboolean allow_decision;
+  gboolean readiness_started;
+  gboolean readiness_completed;
+  gboolean readiness_result;
+  wyrelog_error_t decision_rc;
+  wyl_decision_t decision;
+} EngineSessionDecisionRace;
+
+static gboolean
+wait_for_engine_session_flag (EngineSessionDecisionRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  return reached;
+}
+
+static void
+block_guarded_decision (gpointer data)
+{
+  EngineSessionDecisionRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->decision_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_decision)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_guarded_decision (gpointer data)
+{
+  EngineSessionDecisionRace *race = data;
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "engine-session-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "engine-session-scope");
+  wyl_decide_req_set_guard_context (req, 123, "public", 69);
+  race->decision_rc = wyl_decide (race->handle, req, resp);
+  race->decision = wyl_decide_resp_get_decision (resp);
+  return NULL;
+}
+
+static gpointer
+run_engine_readiness_probe (gpointer data)
+{
+  EngineSessionDecisionRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->readiness_started = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+
+  gboolean ready = wyl_handle_engine_pair_is_ready (race->handle);
+  g_mutex_lock (&race->mutex);
+  race->readiness_result = ready;
+  race->readiness_completed = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  return NULL;
+}
+
+static gint
+check_decision_holds_one_recursive_engine_session (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 800;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+          "engine-session-user", "wr.audit.read", "engine-session-scope")
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "engine-session-user",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, "engine-session-scope",
+          "active") != WYRELOG_E_OK
+      || wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 801;
+
+  EngineSessionDecisionRace race = {
+    .handle = handle,
+    .decision_rc = WYRELOG_E_INTERNAL,
+    .decision = WYL_DECISION_DENY,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_handle_set_engine_operation_checkpoint_for_test (handle,
+      "guard_context", block_guarded_decision, &race);
+  GThread *decision =
+      g_thread_new ("engine-session-decision", run_guarded_decision, &race);
+  if (!wait_for_engine_session_flag (&race, &race.decision_entered)) {
+    g_mutex_lock (&race.mutex);
+    race.allow_decision = TRUE;
+    g_cond_broadcast (&race.changed);
+    g_mutex_unlock (&race.mutex);
+    g_thread_join (decision);
+    g_cond_clear (&race.changed);
+    g_mutex_clear (&race.mutex);
+    return 802;
+  }
+
+  GThread *readiness =
+      g_thread_new ("engine-session-readiness", run_engine_readiness_probe,
+      &race);
+  gboolean started =
+      wait_for_engine_session_flag (&race, &race.readiness_started);
+  g_mutex_lock (&race.mutex);
+  gboolean blocked = !race.readiness_completed;
+  g_mutex_unlock (&race.mutex);
+  gboolean owned = wyl_handle_engine_session_locked_for_test (handle);
+
+  g_mutex_lock (&race.mutex);
+  race.allow_decision = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (decision);
+  g_thread_join (readiness);
+  wyl_handle_set_engine_operation_checkpoint_for_test (handle, NULL, NULL,
+      NULL);
+  gboolean released = !wyl_handle_engine_session_locked_for_test (handle);
+  gboolean ok = started && blocked && owned && released
+      && race.readiness_completed && race.readiness_result
+      && race.decision_rc == WYRELOG_E_OK
+      && race.decision == WYL_DECISION_ALLOW;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok ? 0 : 803;
+}
+#endif
+
 static gint
 check_policy_store_guarded_direct_permission_decides_with_context (void)
 {
@@ -4954,6 +5096,10 @@ main (void)
   if ((rc = check_policy_store_guarded_direct_permissions_do_not_auto_arm ())
       != 0)
     return rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if ((rc = check_decision_holds_one_recursive_engine_session ()) != 0)
+    return rc;
+#endif
   if ((rc =
           check_policy_store_guarded_direct_permission_decides_with_context ())
       != 0)

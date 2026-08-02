@@ -52,7 +52,7 @@ session_is_service (const WylSession *session)
 static wyrelog_error_t
 reload_session_snapshot (WylHandle *handle)
 {
-  if (wyl_handle_get_read_engine (handle) == NULL)
+  if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   return wyl_handle_reload_engine_pair (handle);
 }
@@ -80,8 +80,7 @@ login_skip_mfa_allowed (WylHandle *handle, const wyl_login_req_t *req,
   if (username == NULL || username[0] == '\0')
     return WYRELOG_E_OK;
 
-  if (wyl_handle_get_read_engine (handle) == NULL
-      || wyl_handle_get_delta_engine (handle) == NULL)
+  if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
 
   wyrelog_error_t rc = reload_session_snapshot (handle);
@@ -181,8 +180,7 @@ insert_principal_event_fact (WylHandle *handle, gint64 event_id,
     const gchar *username, wyl_principal_state_t old_state,
     wyl_principal_event_t event, wyl_principal_state_t new_state)
 {
-  if (wyl_handle_get_read_engine (handle) == NULL
-      || wyl_handle_get_delta_engine (handle) == NULL)
+  if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   if (event_id <= 0)
     return WYRELOG_E_OK;
@@ -337,8 +335,7 @@ insert_session_event_fact (WylHandle *handle, gint64 event_id,
     const gchar *session_id, wyl_session_state_t old_state,
     wyl_session_event_t event, wyl_session_state_t new_state)
 {
-  if (wyl_handle_get_read_engine (handle) == NULL
-      || wyl_handle_get_delta_engine (handle) == NULL)
+  if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   if (event_id <= 0)
     return WYRELOG_E_OK;

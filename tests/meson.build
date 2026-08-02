@@ -1934,9 +1934,10 @@ test('handle-id', test_handle_id)
 test_handle_engine_pair = executable('test-handle-engine-pair',
   'test-handle-engine-pair.c',
   c_args : [
+    '-DWYL_TEST_HANDLE_SEAMS',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
-  dependencies : [wyrelog_dep, wirelog_dep, sqlite_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, sqlite_dep],
 )
 
 test('handle-engine-pair', test_handle_engine_pair,

@@ -115,6 +115,29 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
     (WylHandle * self);
 
+/*
+ * Serializes the complete handle-owned engine aggregate. Recursive ownership
+ * lets one decision or loader retain a single linearization interval while it
+ * calls ordinary handle helpers. Callers must acquire any service-auth lease
+ * before entering this session and release the session on the same thread.
+ */
+GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef enum
+{
+  WYL_ENGINE_SESSION_WAITING,
+  WYL_ENGINE_SESSION_ACQUIRED,
+} WylEngineSessionCheckpoint;
+
+void wyl_handle_set_engine_session_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (WylEngineSessionCheckpoint phase, gpointer data),
+    gpointer data);
+void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
+    const gchar * relation, void (*checkpoint) (gpointer data), gpointer data);
+gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
+#endif
+
 #ifdef WYL_HAS_FACT_STORE
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
     wyl_fact_replay_summary_t * out_summary);
@@ -243,6 +266,9 @@ wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
  * On failure, the existing pair remains installed.
  */
 wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
+
+/* True only while one complete, non-poisoned engine pair is published. */
+gboolean wyl_handle_engine_pair_is_ready (WylHandle * self);
 
 /*
  * Interns @symbol into both handle-owned policy engines and returns the shared
@@ -557,10 +583,9 @@ wyrelog_error_t wyl_handle_engine_decide (WylHandle * self,
     const gint64 row[3], gboolean * out_allowed);
 
 /*
- * Borrowed policy engine sessions owned by |self|. These are NULL when
- * no policy engine pair has been opened. The read engine is reserved for
- * snapshot-style reads; the delta engine is reserved for step/delta
- * processing.
+ * Borrowed policy engines owned by |self|. Production callers must already
+ * own the outer engine session for the complete borrowed-pointer lifetime;
+ * readiness-only callers must use wyl_handle_engine_pair_is_ready().
  */
 WylEngine *wyl_handle_get_read_engine (WylHandle * self);
 WylEngine *wyl_handle_get_delta_engine (WylHandle * self);
