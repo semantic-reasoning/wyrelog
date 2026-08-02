@@ -1394,6 +1394,12 @@ void wyl_policy_store_graph_authority_mutation_fail_once
 wyrelog_error_t wyl_policy_store_validate_service_schema
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_validate_audit_publication
+    (wyl_policy_store_t * store, const gchar * id, gint64 created_at_us,
+    const gchar * subject_id, const gchar * action,
+    const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, const gchar * request_id,
+    wyl_decision_t decision);
 wyrelog_error_t wyl_policy_store_read_snapshot_begin
     (wyl_policy_store_t * store, WylPolicyStoreReadSnapshot * snapshot);
 wyrelog_error_t wyl_policy_store_read_snapshot_finish

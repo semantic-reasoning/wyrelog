@@ -3329,7 +3329,10 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
     poison_engine_pair_locked (self);
   }
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_validate_snapshot (store);
+    rc = wyl_policy_store_validate_audit_publication (store, projection->id,
+        projection->created_at_us, projection->subject_id,
+        projection->action, projection->resource_id, projection->deny_reason,
+        projection->deny_origin, projection->request_id, projection->decision);
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t rollback_rc = begun ?
         wyl_policy_store_publication_transaction_rollback_checked (store) :
