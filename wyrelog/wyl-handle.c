@@ -82,6 +82,8 @@ struct _WylHandle
   gchar *engine_operation_checkpoint_relation;
   void (*engine_operation_checkpoint) (gpointer data);
   gpointer engine_operation_checkpoint_data;
+  void (*engine_snapshot_checkpoint) (gpointer data);
+  gpointer engine_snapshot_checkpoint_data;
   void (*audit_replay_checkpoint) (gpointer data);
   gpointer audit_replay_checkpoint_data;
 #endif
@@ -489,6 +491,28 @@ wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle *self,
   self->engine_operation_checkpoint_relation = g_strdup (relation);
   self->engine_operation_checkpoint = checkpoint;
   self->engine_operation_checkpoint_data = data;
+}
+
+static void
+run_engine_operation_checkpoint_for_test (WylHandle *self,
+    const gchar *operation)
+{
+  if (self->engine_operation_checkpoint == NULL
+      || g_strcmp0 (self->engine_operation_checkpoint_relation, operation) != 0)
+    return;
+  void (*checkpoint) (gpointer data) = self->engine_operation_checkpoint;
+  gpointer checkpoint_data = self->engine_operation_checkpoint_data;
+  self->engine_operation_checkpoint = NULL;
+  checkpoint (checkpoint_data);
+}
+
+void
+wyl_handle_set_engine_snapshot_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->engine_snapshot_checkpoint = checkpoint;
+  self->engine_snapshot_checkpoint_data = data;
 }
 
 void
@@ -2496,6 +2520,14 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_role_permissions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (self->engine_snapshot_checkpoint != NULL) {
+    void (*checkpoint) (gpointer data) = self->engine_snapshot_checkpoint;
+    gpointer checkpoint_data = self->engine_snapshot_checkpoint_data;
+    self->engine_snapshot_checkpoint = NULL;
+    checkpoint (checkpoint_data);
+  }
+#endif
   rc = wyl_handle_load_policy_store_role_memberships (self);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -2739,10 +2771,20 @@ replace_live_engine_pair_serialized (WylHandle *self,
   gboolean was_poisoned = self->engine_pair_poisoned;
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
   wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK && self->engine_replacement_checkpoint != NULL)
+    self->engine_replacement_checkpoint (WYL_ENGINE_REPLACEMENT_CANDIDATE_READY,
+        self->engine_replacement_checkpoint_data);
+#endif
   if (rc == WYRELOG_E_OK)
     self->engine_pair_poisoned = was_poisoned;
   else if (repair_projection)
     poison_engine_pair_locked (self);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK && self->engine_replacement_checkpoint != NULL)
+    self->engine_replacement_checkpoint (WYL_ENGINE_REPLACEMENT_PUBLISHED,
+        self->engine_replacement_checkpoint_data);
+#endif
   return rc;
 }
 
@@ -3081,14 +3123,7 @@ wyl_handle_engine_insert_locked (WylHandle *self, const gchar *relation,
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS
-  if (self->engine_operation_checkpoint != NULL
-      && g_strcmp0 (self->engine_operation_checkpoint_relation,
-          relation) == 0) {
-    void (*checkpoint) (gpointer data) = self->engine_operation_checkpoint;
-    gpointer checkpoint_data = self->engine_operation_checkpoint_data;
-    self->engine_operation_checkpoint = NULL;
-    checkpoint (checkpoint_data);
-  }
+  run_engine_operation_checkpoint_for_test (self, relation);
 #endif
   if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
@@ -3152,6 +3187,9 @@ wyl_handle_engine_remove_locked (WylHandle *self, const gchar *relation,
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  run_engine_operation_checkpoint_for_test (self, relation);
+#endif
   if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
@@ -3214,6 +3252,9 @@ wyl_handle_engine_step_delta_locked (WylHandle *self)
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  run_engine_operation_checkpoint_for_test (self, "@step");
+#endif
   if (self->engine_pair_poisoned || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
@@ -3230,6 +3271,9 @@ wyl_handle_engine_set_delta_callback_locked (WylHandle *self,
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  run_engine_operation_checkpoint_for_test (self, "@callback");
+#endif
   if (self->engine_pair_poisoned || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
@@ -3869,6 +3913,9 @@ wyl_handle_engine_contains_locked (WylHandle *self, const gchar *relation,
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  run_engine_operation_checkpoint_for_test (self, relation);
+#endif
   if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
@@ -3948,6 +3995,9 @@ wyl_handle_replay_delta_insert_locked (WylHandle *self, const gchar *relation,
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  run_engine_operation_checkpoint_for_test (self, relation);
+#endif
   if (self->engine_pair_poisoned || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
