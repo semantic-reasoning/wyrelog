@@ -89,10 +89,16 @@ ISSUE_719_EXACT_PATHS = {
 PREEXISTING_EXACT_PATHS = {
     "/service-management-authority/arm",
 }
+ISSUE_720_EXACT_PATHS = {
+    "/healthz",
+    "/readyz",
+    "/profile/status",
+    "/profile/events",
+}
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
     if spec.path not in PREFIX_PATHS | ISSUE_719_EXACT_PATHS
-    | PREEXISTING_EXACT_PATHS
+    | PREEXISTING_EXACT_PATHS | ISSUE_720_EXACT_PATHS
 }
 EXPECTED_BY_PATH = {spec.path: spec for spec in ROUTES}
 
@@ -623,9 +629,9 @@ def self_test() -> None:
                 'healthz_handler, NULL, NULL',
                 'healthz_handler, other_data, destroy_data', 1),
             "duplicate": baseline.replace(
-                f"  {RAW_SINGLETON_API} /* registration */ ( server, "
+                f"  {EXACT_API} /* registration */ ( server, "
                 '"/readyz"',
-                f"  {RAW_SINGLETON_API} /* registration */ ( server, "
+                f"  {EXACT_API} /* registration */ ( server, "
                 '"/healthz"', 1),
             "raw singleton": baseline.replace(
                 f'{EXACT_API} /* registration */ ( server, '
