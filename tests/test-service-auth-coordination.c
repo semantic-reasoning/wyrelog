@@ -684,6 +684,34 @@ test_rank_inversion_and_write_serial (void)
 }
 
 static void
+test_engine_session_rank_inversions (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  const WylServiceAuthRank reverse_ranks[] = {
+    WYL_SERVICE_AUTH_RANK_STORE,
+    WYL_SERVICE_AUTH_RANK_CONTEXT,
+    WYL_SERVICE_AUTH_RANK_REGISTRY,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (reverse_ranks); i++) {
+    g_assert_cmpint (wyl_service_auth_rank_enter (handle, reverse_ranks[i]),
+        ==, WYRELOG_E_OK);
+    g_autoptr (WylEngineSession) rejected = wyl_engine_session_acquire (handle);
+    g_assert_null (rejected);
+    g_assert_cmpint (wyl_service_auth_rank_leave (handle, reverse_ranks[i]),
+        ==, WYRELOG_E_OK);
+  }
+
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  g_assert_nonnull (session);
+  WylServiceAuthReadLease *read = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &read),
+      ==, WYRELOG_E_BUSY);
+  g_assert_null (read);
+}
+
+static void
 test_waiting_writer_blocks_later_reader (void)
 {
   g_autoptr (WylHandle) handle = new_handle ();
@@ -3211,6 +3239,8 @@ main (int argc, char **argv)
       test_write_terminal_release_wrong_thread);
   g_test_add_func ("/service-auth/lease/rank-inversion-write-serial",
       test_rank_inversion_and_write_serial);
+  g_test_add_func ("/service-auth/lease/engine-session-rank-inversions",
+      test_engine_session_rank_inversions);
   g_test_add_func ("/service-auth/authority/writer-preference",
       test_waiting_writer_blocks_later_reader);
   g_test_add_func ("/service-auth/authority/writer-cancellation",
