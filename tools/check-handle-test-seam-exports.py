@@ -12,9 +12,16 @@ TEST_SEAMS = {
     "wyl_handle_set_engine_session_checkpoint_for_test",
     "wyl_handle_set_engine_replacement_checkpoint_for_test",
     "wyl_handle_set_engine_operation_checkpoint_for_test",
+    "wyl_handle_set_engine_snapshot_checkpoint_for_test",
     "wyl_handle_set_audit_replay_checkpoint_for_test",
+    "wyl_handle_set_engine_partial_fault_once_for_test",
+    "wyl_handle_set_engine_replacement_fault_once_for_test",
     "wyl_handle_engine_session_locked_for_test",
     "wyl_handle_pending_delta_count_for_test",
+    "wyl_handle_buffer_delta_for_test",
+    "wyl_handle_flush_pending_deltas_for_test",
+    "wyl_policy_store_read_snapshot_finish_fail_once_for_test",
+    "wyl_handle_lock_engine_session",
 }
 
 

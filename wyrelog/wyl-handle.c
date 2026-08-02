@@ -174,7 +174,7 @@ struct _WylEngineSession
   GRecMutexLocker *locker;
 };
 
-static GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
+static GRecMutexLocker *engine_session_lock_owner (WylHandle * self);
 
 static wyrelog_error_t wyl_handle_intern_engine_symbol_locked
     (WylHandle * self, const gchar * symbol, gint64 * out_id);
@@ -224,7 +224,7 @@ wyl_handle_get_service_auth_authority (WylHandle *self)
 }
 
 static GRecMutexLocker *
-wyl_handle_lock_engine_session (WylHandle *self)
+engine_session_lock_owner (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -253,7 +253,7 @@ wyl_engine_session_acquire (WylHandle *self)
     return NULL;
   WylEngineSession *session = g_new0 (WylEngineSession, 1);
   session->rank_active = TRUE;
-  session->locker = wyl_handle_lock_engine_session (self);
+  session->locker = engine_session_lock_owner (self);
   if (session->locker == NULL) {
     (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_ENGINE);
     g_free (session);
@@ -528,8 +528,7 @@ wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle *self,
     const gchar *relation, void (*checkpoint) (gpointer data), gpointer data)
 {
   g_return_if_fail (WYL_IS_HANDLE (self));
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   g_free (self->engine_operation_checkpoint_relation);
   self->engine_operation_checkpoint_relation = g_strdup (relation);
   self->engine_operation_checkpoint = checkpoint;
@@ -581,8 +580,7 @@ guint
 wyl_handle_pending_delta_count_for_test (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), 0);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   return self->pending_deltas != NULL ? self->pending_deltas->len : 0;
 }
 
@@ -1348,7 +1346,7 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
 
   /* Service-auth closes before the engine session by lock-order contract. */
   g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (handle);
+      engine_session_lock_owner (handle);
   if (engine_locker == NULL) {
     g_mutex_lock (&handle->policy_store_lifecycle_mutex);
     handle->policy_store_shutdown_pending = FALSE;
@@ -1702,8 +1700,7 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->engine_pair_poisoned)
@@ -2844,8 +2841,7 @@ gboolean
 wyl_handle_engine_pair_is_ready (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   return !engine_pair_unavailable (self);
 }
 
@@ -2853,8 +2849,7 @@ gboolean
 wyl_handle_engine_pair_is_poisoned (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), TRUE);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   return self->engine_pair_poisoned;
 }
 
@@ -2862,8 +2857,7 @@ void
 wyl_handle_poison_engine_pair (WylHandle *self)
 {
   g_return_if_fail (WYL_IS_HANDLE (self));
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   poison_engine_pair_locked (self);
 }
 
@@ -2884,8 +2878,7 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
     return WYRELOG_E_INVALID;
   if (template_dir == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->engine_pair_poisoned)
@@ -2939,8 +2932,7 @@ replace_live_engine_pair_serialized (WylHandle *self,
     self->engine_replacement_checkpoint (WYL_ENGINE_REPLACEMENT_WAITING,
         self->engine_replacement_checkpoint_data);
 #endif
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->template_dir == NULL)
@@ -2982,8 +2974,7 @@ wyl_handle_reconcile_committed_engine_pair (WylHandle *self,
     return WYRELOG_E_INVALID;
   if (wyl_service_auth_rank_is_held (self, WYL_SERVICE_AUTH_RANK_ENGINE))
     return WYRELOG_E_BUSY;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL || self->template_dir == NULL)
     return WYRELOG_E_INVALID;
 
@@ -3064,8 +3055,7 @@ wyl_handle_intern_engine_symbol_locked (WylHandle *self, const gchar *symbol,
     return WYRELOG_E_INVALID;
   if (symbol == NULL || out_id == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
@@ -3111,8 +3101,7 @@ wyl_handle_dup_engine_symbol_locked (WylHandle *self, gint64 id)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return NULL;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return NULL;
   if (engine_pair_unavailable (self) || self->engine_symbols_by_id == NULL)
@@ -3137,8 +3126,7 @@ wyl_handle_make_engine_compound_locked (WylHandle *self, const gchar *functor,
     return WYRELOG_E_INVALID;
   if (nargs == 0 || nargs > G_MAXUINT32)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
@@ -3189,8 +3177,7 @@ wyl_handle_make_read_engine_compound_locked (WylHandle *self,
     return WYRELOG_E_INVALID;
   if (nargs == 0 || nargs > G_MAXUINT32)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
@@ -3229,8 +3216,7 @@ wyl_handle_make_guard_context_compound_locked (WylHandle *self,
 
   if (self == NULL || !WYL_IS_HANDLE (self) || out_id == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
@@ -3346,8 +3332,7 @@ wyl_handle_engine_insert_locked (WylHandle *self, const gchar *relation,
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -3411,8 +3396,7 @@ wyl_handle_engine_remove_locked (WylHandle *self, const gchar *relation,
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -3476,8 +3460,7 @@ wyl_handle_engine_step_delta_locked (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -3497,8 +3480,7 @@ wyl_handle_engine_set_delta_callback_locked (WylHandle *self,
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -3572,8 +3554,7 @@ wyl_handle_load_policy_store_role_permissions (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3612,8 +3593,7 @@ wyl_handle_load_policy_store_role_memberships (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3657,8 +3637,7 @@ wyl_handle_load_policy_store_direct_permissions (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3704,8 +3683,7 @@ wyl_handle_load_policy_store_permission_states (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3767,8 +3745,7 @@ wyl_handle_load_policy_store_permission_state_events (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3801,8 +3778,7 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3855,8 +3831,7 @@ wyl_handle_load_policy_store_principal_events (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3889,8 +3864,7 @@ wyl_handle_load_policy_store_session_states (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -3943,8 +3917,7 @@ wyl_handle_load_policy_store_session_events (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -4036,8 +4009,7 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
     return WYRELOG_E_INVALID;
   if (id == NULL || created_at_us < 0)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->engine_pair_poisoned)
@@ -4100,8 +4072,7 @@ wyl_handle_load_policy_store_audit_facts (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || engine_pair_unavailable (self))
@@ -4145,8 +4116,7 @@ wyl_handle_engine_contains_locked (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
   if (relation == NULL || row == NULL || ncols == 0 || out_contains == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -4184,8 +4154,7 @@ wyl_handle_engine_decide_locked (WylHandle *self, const gint64 row[3],
     return WYRELOG_E_INVALID;
   if (row == NULL || out_allowed == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
@@ -4200,8 +4169,7 @@ WylEngine *
 wyl_handle_get_read_engine (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (self->engine_pair_poisoned)
     return NULL;
   return self->read_engine;
@@ -4211,8 +4179,7 @@ WylEngine *
 wyl_handle_get_delta_engine (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (self->engine_pair_poisoned)
     return NULL;
   return self->delta_engine;
@@ -4227,8 +4194,7 @@ wyl_handle_replay_delta_insert_locked (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
   if (relation == NULL || row == NULL || ncols == 0)
     return WYRELOG_E_INVALID;
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (self);
+  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
 #ifdef WYL_TEST_HANDLE_SEAMS

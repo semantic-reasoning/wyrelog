@@ -37,6 +37,7 @@ AGGREGATE_FIELDS = (
     "engine_pair_poisoned",
     "engine_pair_replacement_building",
 )
+OWNER_ONLY_FIELDS = ("template_dir", "engine_session_mutex")
 OWNER = "wyrelog/wyl-handle.c"
 OWNED_ENGINE_ALLOWLIST = {
     OWNER,
@@ -46,6 +47,66 @@ OWNED_ENGINE_ALLOWLIST = {
     "wyrelog/fact/query.c",
     "wyrelog/fact/replay.c",
 }
+OWNER_FUNCTION_ALLOWLIST = {
+    "classify_audit_projection",
+    "clear_pending_deltas",
+    "engine_pair_unavailable",
+    "fail_partial_engine_pair_mutation_locked",
+    "flush_pending_deltas",
+    "poison_engine_pair_locked",
+    "probe_audit_projection_relation",
+    "repair_engine_pair_after_projection_failure",
+    "replace_engine_pair",
+    "replace_live_engine_pair_serialized",
+    "step_delta_engine_and_flush",
+    "wyl_engine_session_acquire",
+    "wyl_handle_buffer_delta_cb",
+    "wyl_handle_complete_shutdown",
+    "wyl_handle_dup_engine_symbol_locked",
+    "wyl_handle_engine_contains_locked",
+    "wyl_handle_engine_decide_locked",
+    "wyl_handle_engine_insert_locked",
+    "wyl_handle_engine_pair_is_poisoned",
+    "wyl_handle_engine_pair_is_ready",
+    "wyl_handle_engine_remove_locked",
+    "wyl_handle_engine_set_delta_callback_locked",
+    "wyl_handle_engine_step_delta_locked",
+    "wyl_handle_finalize",
+    "wyl_handle_init",
+    "wyl_handle_insert_audit_fact",
+    "wyl_handle_intern_engine_symbol_locked",
+    "wyl_handle_intern_guard_symbol",
+    "wyl_handle_intern_symbol_on_engine",
+    "wyl_handle_load_policy_store_audit_events",
+    "wyl_handle_load_policy_store_audit_facts",
+    "wyl_handle_load_policy_store_direct_permissions",
+    "wyl_handle_load_policy_store_permission_state_events",
+    "wyl_handle_load_policy_store_permission_states",
+    "wyl_handle_load_policy_store_principal_events",
+    "wyl_handle_load_policy_store_principal_states",
+    "wyl_handle_load_policy_store_role_memberships",
+    "wyl_handle_load_policy_store_role_permissions",
+    "wyl_handle_load_policy_store_session_events",
+    "wyl_handle_load_policy_store_session_states",
+    "engine_session_lock_owner",
+    "wyl_handle_make_engine_compound_locked",
+    "wyl_handle_make_guard_binary_compound",
+    "wyl_handle_make_guard_cmp_compound",
+    "wyl_handle_make_guard_context_compound_locked",
+    "wyl_handle_make_guard_expr_compound",
+    "wyl_handle_make_guard_tag_compound",
+    "wyl_handle_make_guard_unary_compound",
+    "wyl_handle_make_read_engine_compound_locked",
+    "wyl_handle_open_engine_pair",
+    "wyl_handle_open_with_options",
+    "wyl_handle_poison_engine_pair",
+    "wyl_handle_reconcile_committed_engine_pair",
+    "wyl_handle_replay_delta_insert_locked",
+    "wyl_handle_seed_perm_arm_rule_on_engine",
+    "wyl_handle_seed_perm_arm_rules",
+    "wyl_handle_shutdown_ordered",
+}
+CONTROL_WORDS = {"if", "for", "while", "switch"}
 
 
 def without_test_seams(source: str) -> str:
@@ -97,12 +158,38 @@ def mask_comments_and_literals(source: str) -> str:
                                           for c in m.group()), source)
 
 
+def top_level_functions(source: str) -> list[tuple[str, str]]:
+    """Return top-level C function names and bodies from already-masked text."""
+    functions = []
+    depth = 0
+    start = 0
+    name = None
+    for index, char in enumerate(source):
+        if char == "{":
+            if depth == 0:
+                prefix = source[max(0, index - 2000):index]
+                match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*"
+                                  r"\([^;{}]*\)\s*$", prefix, re.DOTALL)
+                if match and match.group(1) not in CONTROL_WORDS:
+                    name = match.group(1)
+                    start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and name is not None:
+                functions.append((name, source[start:index + 1]))
+                name = None
+    return functions
+
+
 def check(sources: dict[str, str]) -> list[str]:
     errors = []
     legacy = re.compile(r"\b(?:" + "|".join(map(re.escape,
                         LEGACY_HANDLE_OPERATIONS)) + r")\s*\(")
     fields = re.compile(r"->(?:" + "|".join(map(re.escape,
                         AGGREGATE_FIELDS)) + r")\b")
+    owner_fields = re.compile(r"->(?:" + "|".join(map(re.escape,
+                              AGGREGATE_FIELDS + OWNER_ONLY_FIELDS)) + r")\b")
     owned = re.compile(r"\bwyl_engine_owned_[A-Za-z0-9_]*\s*\(")
     raw_lock = re.compile(r"\bwyl_handle_lock_engine_session\s*\(")
 
@@ -114,14 +201,20 @@ def check(sources: dict[str, str]) -> list[str]:
             errors.append(f"handle-owned engine aggregate accessed outside owner: {path}")
         if path not in OWNED_ENGINE_ALLOWLIST and owned.search(source):
             errors.append(f"owned engine primitive outside allowlist: {path}")
-        if path not in {OWNER, "wyrelog/wyl-handle-private.h"} and raw_lock.search(source):
+        if path != OWNER and raw_lock.search(source):
             errors.append(f"untyped engine lock outside owner: {path}")
+        if path == OWNER:
+            for name, body in top_level_functions(source):
+                if (owner_fields.search(body) or owned.search(body)
+                        or raw_lock.search(body)) and name not in OWNER_FUNCTION_ALLOWLIST:
+                    errors.append(
+                        f"owner aggregate access outside function allowlist: {name}")
     return sorted(set(errors))
 
 
 def self_test() -> int:
     accepted = {
-        OWNER: "static void owner(WylHandle *h) { h->read_engine = 0; }",
+        OWNER: "static void allowed_owner(WylHandle *h) { (void) h; }",
         "wyrelog/good.c": (
             "void good(WylEngineSession *s) { "
             "wyl_engine_session_insert(s, \"r\", 0, 0); }\n"
@@ -143,6 +236,16 @@ def self_test() -> int:
     for mutant in mutants:
         if not check({OWNER: "", "wyrelog/bad.c": mutant}):
             print(f"self-test accepted mutant: {mutant}", file=sys.stderr)
+            return 1
+    owner_mutants = (
+        "static void bad_read(WylHandle *h) { h->read_engine = 0; }",
+        "static void bad_template(WylHandle *h) { h->template_dir = 0; }",
+        "static void bad_mutex(WylHandle *h) { g_rec_mutex_lock(&h->engine_session_mutex); }",
+        "static void bad_owned(WylEngine *e) { wyl_engine_owned_step(e); }",
+    )
+    for mutant in owner_mutants:
+        if not check({OWNER: mutant}):
+            print(f"self-test accepted owner mutant: {mutant}", file=sys.stderr)
             return 1
     literal = 'const char *s = "wyl_handle_get_read_engine(h)"; /* h->read_engine */'
     if check({OWNER: "", "wyrelog/literal.c": literal}):
