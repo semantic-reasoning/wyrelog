@@ -320,11 +320,14 @@ def self_test() -> int:
         return 1
     if missing_executable_imports(SERVICE_EXECUTABLE_NAME, service_imports):
         return 1
-    executable_matrix = {}
-    for audit_mode in ("disabled", "enabled"):
-        expected = expected_executable_names(audit_mode)
-        executables = [Path("/tmp") / name for name in sorted(expected)]
-        executable_matrix[audit_mode] = executables
+    executable_matrix = {
+        audit_mode: [
+            Path("/tmp") / name
+            for name in sorted(expected_executable_names(audit_mode))
+        ]
+        for audit_mode in ("disabled", "enabled")
+    }
+    for audit_mode, executables in executable_matrix.items():
         if not executable_names_are_exact(executables, audit_mode):
             return 1
         for index in range(len(executables)):
@@ -332,15 +335,17 @@ def self_test() -> int:
                     executables[:index] + executables[index + 1:],
                     audit_mode):
                 return 1
-            duplicate_replacement = list(executables)
-            duplicate_replacement[index] = executables[
-                (index + 1) % len(executables)
-            ]
+            duplicate_replacement = (
+                executables[:index]
+                + [executables[(index + 1) % len(executables)]]
+                + executables[index + 1:]
+            )
             if executable_names_are_exact(duplicate_replacement, audit_mode):
                 return 1
-            unknown_replacement = list(executables)
-            unknown_replacement[index] = Path(
-                "/tmp/test-daemon-http-decide-unknown"
+            unknown_replacement = (
+                executables[:index]
+                + [Path("/tmp/test-daemon-http-decide-unknown")]
+                + executables[index + 1:]
             )
             if executable_names_are_exact(unknown_replacement, audit_mode):
                 return 1
