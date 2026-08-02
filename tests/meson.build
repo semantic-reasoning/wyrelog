@@ -874,6 +874,17 @@ if host_machine.system() != 'windows' and build_client
       dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
     )
 
+    # Opens the STOPPED encrypted policy store under its file KeyProvider to
+    # print one credential's authoritative NON-SECRET fields (state, generation,
+    # verifier, salt) for the packaged service-credential lifecycle e2e harness,
+    # which cannot read encrypted store rows with sqlite3 directly.
+    check_service_credential_store_inspect = executable(
+      'check-service-credential-store-inspect',
+      'check-service-credential-store-inspect.c',
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+    )
+
     test('service-permission-closure', sh,
       args : [
         meson.current_source_dir() / 'check-service-permission-closure.sh',
