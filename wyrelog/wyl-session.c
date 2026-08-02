@@ -283,7 +283,7 @@ finish_session_mutation (WylHandle *handle, const WylAuditEvent *audit_event)
 {
   wyrelog_error_t rc = reload_session_snapshot (handle);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
 
 #ifdef WYL_HAS_AUDIT
   if (audit_event != NULL)
@@ -322,7 +322,7 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   rc = insert_principal_event_fact (handle, event_id, username, old_state,
       WYL_PRINCIPAL_EVENT_MFA_OK, new_state);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   return finish_session_mutation (handle, ev);
 }
 
@@ -568,7 +568,7 @@ transition_session_state (WylHandle *handle, WylSession *session,
   rc = insert_session_event_fact (handle, event_id, session_id, old_state,
       event, new_state);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   rc = finish_session_mutation (handle, ev);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -672,19 +672,19 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
         WYL_PRINCIPAL_STATE_UNVERIFIED, event, state);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
-      return rc;
+      return wyl_handle_fail_committed_engine_projection (handle, rc);
     }
     rc = insert_session_event_fact (handle, session_event_id, session_id,
         WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
         WYL_SESSION_STATE_ACTIVE);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
-      return rc;
+      return wyl_handle_fail_committed_engine_projection (handle, rc);
     }
     rc = reload_session_snapshot (handle);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
-      return rc;
+      return wyl_handle_fail_committed_engine_projection (handle, rc);
     }
 #ifdef WYL_HAS_AUDIT
     /* Policy-store audit is durable; the live audit sink is best effort. */
@@ -720,7 +720,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       WYL_SESSION_STATE_ACTIVE);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (session);
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   }
   rc = finish_session_mutation (handle, ev);
   if (rc != WYRELOG_E_OK) {

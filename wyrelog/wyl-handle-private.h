@@ -116,14 +116,6 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
     (WylHandle * self);
 
-/*
- * Serializes the complete handle-owned engine aggregate. Recursive ownership
- * lets one decision or loader retain a single linearization interval while it
- * calls ordinary handle helpers. Callers must acquire any service-auth lease
- * before entering this session and release the session on the same thread.
- */
-GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
-
 /* Private typed capability proving that the caller owns one recursive engine
  * session. Production consumers must use these operations instead of carrying
  * raw symbol ids across independently locked handle calls. */
@@ -167,6 +159,44 @@ typedef enum
   WYL_ENGINE_REPLACEMENT_CANDIDATE_READY,
   WYL_ENGINE_REPLACEMENT_PUBLISHED,
 } WylEngineReplacementCheckpoint;
+
+typedef enum
+{
+  WYL_ENGINE_PARTIAL_FAULT_NONE,
+  WYL_ENGINE_PARTIAL_FAULT_DELTA_INTERN,
+  WYL_ENGINE_PARTIAL_FAULT_INTERN_ID_MISMATCH,
+  WYL_ENGINE_PARTIAL_FAULT_DELTA_COMPOUND,
+  WYL_ENGINE_PARTIAL_FAULT_COMPOUND_ID_MISMATCH,
+} WylEnginePartialFault;
+
+typedef enum
+{
+  WYL_ENGINE_REPLACEMENT_FAULT_NONE,
+  WYL_ENGINE_REPLACEMENT_FAULT_VALIDATE,
+  WYL_ENGINE_REPLACEMENT_FAULT_OPEN_READ,
+  WYL_ENGINE_REPLACEMENT_FAULT_OPEN_DELTA,
+  WYL_ENGINE_REPLACEMENT_FAULT_INTERN,
+  WYL_ENGINE_REPLACEMENT_FAULT_AUDIT_FACTS,
+  WYL_ENGINE_REPLACEMENT_FAULT_ARM_RULES,
+  WYL_ENGINE_REPLACEMENT_FAULT_SESSION_ACTIVE,
+  WYL_ENGINE_REPLACEMENT_FAULT_ROLE_PERMISSIONS,
+  WYL_ENGINE_REPLACEMENT_FAULT_ROLE_MEMBERSHIPS,
+  WYL_ENGINE_REPLACEMENT_FAULT_DIRECT_PERMISSIONS,
+  WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_STATES,
+  WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_EVENTS,
+  WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_STATES,
+  WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_EVENTS,
+  WYL_ENGINE_REPLACEMENT_FAULT_SESSION_STATES,
+  WYL_ENGINE_REPLACEMENT_FAULT_SESSION_EVENTS,
+  WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK,
+  WYL_ENGINE_REPLACEMENT_FAULT_READBACK,
+  WYL_ENGINE_REPLACEMENT_FAULT_SWAP,
+} WylEngineReplacementFault;
+
+void wyl_handle_set_engine_partial_fault_once_for_test (WylHandle * self,
+    WylEnginePartialFault fault);
+void wyl_handle_set_engine_replacement_fault_once_for_test (WylHandle * self,
+    WylEngineReplacementFault fault);
 void wyl_handle_set_engine_replacement_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (WylEngineReplacementCheckpoint phase, gpointer data),
     gpointer data);
@@ -178,6 +208,9 @@ void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
 guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
+wyrelog_error_t wyl_handle_buffer_delta_for_test (WylHandle * self,
+    const gchar * relation, const gint64 * row, guint ncols, WylDeltaKind kind);
+wyrelog_error_t wyl_handle_flush_pending_deltas_for_test (WylHandle * self);
 #endif
 
 #ifdef WYL_HAS_FACT_STORE
@@ -319,6 +352,8 @@ gboolean wyl_handle_engine_pair_is_poisoned (WylHandle * self);
  * current pair; only committed reconciliation may publish a ready pair again.
  */
 void wyl_handle_poison_engine_pair (WylHandle * self);
+wyrelog_error_t wyl_handle_fail_committed_engine_projection (WylHandle * self,
+    wyrelog_error_t failure);
 
 typedef wyrelog_error_t (*WylEnginePairVerifier) (WylHandle * handle,
     gpointer data);

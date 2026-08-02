@@ -34,6 +34,19 @@ typedef struct
   gboolean locked;
 } WylPolicyStoreReadSnapshot;
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef enum
+{
+  WYL_POLICY_SNAPSHOT_FINISH_FAIL_NONE,
+  WYL_POLICY_SNAPSHOT_FINISH_FAIL_ROLLBACK,
+  WYL_POLICY_SNAPSHOT_FINISH_FAIL_TRANSACTION_STATE,
+  WYL_POLICY_SNAPSHOT_FINISH_FAIL_AUTOCOMMIT,
+} WylPolicySnapshotFinishFailStage;
+
+void wyl_policy_store_read_snapshot_finish_fail_once_for_test
+    (wyl_policy_store_t * store, WylPolicySnapshotFinishFailStage stage);
+#endif
+
 typedef enum
 {
   WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT,

@@ -312,12 +312,12 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
           wyl_policy_store_delete_audit_event (wyl_handle_get_policy_store
           (handle), id_buf);
       if (cleanup_rc != WYRELOG_E_OK)
-        return cleanup_rc;
+        return wyl_handle_fail_committed_engine_projection (handle, cleanup_rc);
     }
     (void) wyl_policy_store_mark_audit_intention_failed
         (wyl_handle_get_policy_store (handle), id_buf,
         "wirelog fact projection failed");
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   }
 
   wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);

@@ -2097,12 +2097,11 @@ check_insert_fanout_repair_failure_poisons_pair (void)
 }
 
 static gint
-check_durable_session_event_fanout_failure_reloads_committed_event (void)
+check_durable_session_event_fanout_failure_poisons_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   g_autoptr (wyl_login_req_t) login = NULL;
   WylSession *session = NULL;
-  guint seen = 0;
 
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 179;
@@ -2118,10 +2117,13 @@ check_durable_session_event_fanout_failure_reloads_committed_event (void)
     return 181;
   if (session != NULL)
     return 182;
-  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "session_fired", snapshot_count_cb, &seen) != WYRELOG_E_OK)
+  if (wyl_handle_get_read_engine (handle) != NULL
+      || wyl_handle_get_delta_engine (handle) != NULL)
     return 183;
-  return seen > 0 ? 0 : 184;
+  if (wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 184;
+  return wyl_handle_reload_engine_pair (handle) == WYRELOG_E_INVALID ? 0 : 185;
 }
 
 static gint
@@ -4023,8 +4025,10 @@ check_shutdown_waits_for_engine_session (void)
   };
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (handle);
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
+  if (engine_session == NULL)
+    return 814;
   wyl_handle_set_engine_session_checkpoint_for_test (handle,
       observe_shutdown_engine_session, &race);
   GThread *shutdown =
@@ -4037,7 +4041,7 @@ check_shutdown_waits_for_engine_session (void)
   gboolean blocked = race.shutdown_waiting;
   g_mutex_unlock (&race.mutex);
   wyrelog_error_t recursive_shutdown_rc = wyl_handle_shutdown_ordered (handle);
-  g_clear_pointer (&engine_locker, g_rec_mutex_locker_free);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
   g_thread_join (shutdown);
   wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
   gboolean ok = blocked && recursive_shutdown_rc == WYRELOG_E_BUSY
@@ -4046,6 +4050,240 @@ check_shutdown_waits_for_engine_session (void)
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
   return ok ? 0 : 814;
+}
+
+static gpointer
+release_engine_session_from_foreign_thread (gpointer data)
+{
+  wyl_engine_session_release (data);
+  return NULL;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  guint calls;
+  gboolean rows_valid;
+  wyrelog_error_t clear_rc;
+  wyrelog_error_t reload_rc;
+  wyrelog_error_t reconcile_rc;
+} ReentrantDeltaCallback;
+
+static wyrelog_error_t
+accept_reconciled_pair (WylHandle *handle, gpointer data)
+{
+  (void) handle;
+  (void) data;
+  return WYRELOG_E_OK;
+}
+
+static void
+clear_callback_during_delivery (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  ReentrantDeltaCallback *state = user_data;
+  state->rows_valid = state->rows_valid
+      && g_strcmp0 (relation, "test_delta") == 0 && ncols == 1
+      && kind == WYL_DELTA_INSERT && row[0] == (gint64) state->calls + 1;
+  state->calls++;
+  if (state->calls == 1) {
+    state->clear_rc = wyl_handle_engine_set_delta_callback (state->handle,
+        NULL, NULL);
+    state->reload_rc = wyl_handle_reload_engine_pair (state->handle);
+    state->reconcile_rc = wyl_handle_reconcile_committed_engine_pair
+        (state->handle, accept_reconciled_pair, NULL);
+  }
+}
+
+static gint
+check_typed_engine_session_nesting_and_foreign_release (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 829;
+
+  WylEngineSession *outer = wyl_engine_session_acquire (handle);
+  WylEngineSession *inner = wyl_engine_session_acquire (handle);
+  if (outer == NULL || inner == NULL)
+    return 830;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_BUSY)
+    return 831;
+
+  gint64 symbol_id = -1;
+  if (wyl_engine_session_intern_symbol (inner, "nested-session-symbol",
+          &symbol_id) != WYRELOG_E_OK)
+    return 832;
+  wyl_engine_session_release (inner);
+
+  GThread *foreign = g_thread_new ("foreign-session-release",
+      release_engine_session_from_foreign_thread, outer);
+  g_thread_join (foreign);
+  if (wyl_engine_session_intern_symbol (outer, "owner-still-active",
+          &symbol_id) != WYRELOG_E_OK)
+    return 833;
+  wyl_engine_session_release (outer);
+
+  return wyl_handle_reload_engine_pair (handle) == WYRELOG_E_OK ? 0 : 834;
+}
+
+static gint
+check_snapshot_finish_failure_poisons_pair (void)
+{
+  const WylPolicySnapshotFinishFailStage stages[] = {
+    WYL_POLICY_SNAPSHOT_FINISH_FAIL_ROLLBACK,
+    WYL_POLICY_SNAPSHOT_FINISH_FAIL_TRANSACTION_STATE,
+    WYL_POLICY_SNAPSHOT_FINISH_FAIL_AUTOCOMMIT,
+  };
+  const wyrelog_error_t expected[] = {
+    WYRELOG_E_IO,
+    WYRELOG_E_INTERNAL,
+    WYRELOG_E_INTERNAL,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (stages); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 835;
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    wyl_policy_store_read_snapshot_finish_fail_once_for_test (store, stages[i]);
+    if (wyl_handle_reload_engine_pair (handle) != expected[i])
+      return 836;
+    if (wyl_handle_engine_pair_is_ready (handle)
+        || !wyl_handle_engine_pair_is_poisoned (handle)
+        || wyl_handle_get_read_engine (handle) != NULL
+        || wyl_handle_get_delta_engine (handle) != NULL)
+      return 837;
+
+    WylPolicyStoreReadSnapshot snapshot = { 0 };
+    if (wyl_policy_store_read_snapshot_begin (store, &snapshot)
+        != WYRELOG_E_OK
+        || wyl_policy_store_validate_snapshot (store) != WYRELOG_E_OK
+        || wyl_policy_store_read_snapshot_finish (&snapshot)
+        != WYRELOG_E_OK)
+      return 838;
+  }
+  return 0;
+}
+
+static gint
+check_partial_arena_failure_poisons_pair (void)
+{
+  const WylEnginePartialFault faults[] = {
+    WYL_ENGINE_PARTIAL_FAULT_DELTA_INTERN,
+    WYL_ENGINE_PARTIAL_FAULT_INTERN_ID_MISMATCH,
+    WYL_ENGINE_PARTIAL_FAULT_DELTA_COMPOUND,
+    WYL_ENGINE_PARTIAL_FAULT_COMPOUND_ID_MISMATCH,
+  };
+  const wyrelog_error_t expected[] = {
+    WYRELOG_E_IO,
+    WYRELOG_E_INTERNAL,
+    WYRELOG_E_IO,
+    WYRELOG_E_INTERNAL,
+  };
+  wirelog_compound_arg_t arg = { WIRELOG_TYPE_INT64, 7 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 839;
+    wyl_handle_set_engine_partial_fault_once_for_test (handle, faults[i]);
+    gint64 id = -1;
+    wyrelog_error_t rc = i < 2 ?
+        wyl_handle_intern_engine_symbol (handle, "partial-symbol", &id) :
+        wyl_handle_make_engine_compound (handle, "partial-compound", &arg, 1,
+        &id);
+    if (rc != expected[i])
+      return 840;
+    if (wyl_handle_engine_pair_is_ready (handle)
+        || !wyl_handle_engine_pair_is_poisoned (handle)
+        || wyl_handle_get_read_engine (handle) != NULL
+        || wyl_handle_get_delta_engine (handle) != NULL)
+      return 841;
+  }
+  return 0;
+}
+
+static gint
+check_reentrant_callback_delivers_detached_batch_once (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 842;
+  ReentrantDeltaCallback state = {
+    .handle = handle,
+    .rows_valid = TRUE,
+    .clear_rc = WYRELOG_E_INTERNAL,
+    .reload_rc = WYRELOG_E_INTERNAL,
+    .reconcile_rc = WYRELOG_E_INTERNAL,
+  };
+  if (wyl_handle_engine_set_delta_callback (handle,
+          clear_callback_during_delivery, &state) != WYRELOG_E_OK)
+    return 843;
+  const gint64 first[] = { 1 };
+  const gint64 second[] = { 2 };
+  if (wyl_handle_buffer_delta_for_test (handle, "test_delta", first, 1,
+          WYL_DELTA_INSERT) != WYRELOG_E_OK
+      || wyl_handle_buffer_delta_for_test (handle, "test_delta", second, 1,
+          WYL_DELTA_INSERT) != WYRELOG_E_OK
+      || wyl_handle_flush_pending_deltas_for_test (handle) != WYRELOG_E_OK)
+    return 844;
+  if (state.calls != 2 || !state.rows_valid || state.clear_rc != WYRELOG_E_OK
+      || state.reload_rc != WYRELOG_E_BUSY
+      || state.reconcile_rc != WYRELOG_E_BUSY
+      || wyl_handle_pending_delta_count_for_test (handle) != 0)
+    return 845;
+  if (wyl_handle_flush_pending_deltas_for_test (handle) != WYRELOG_E_OK
+      || state.calls != 2)
+    return 846;
+  return 0;
+}
+
+static gint
+check_replacement_faults_preserve_published_pair (void)
+{
+  const WylEngineReplacementFault faults[] = {
+    WYL_ENGINE_REPLACEMENT_FAULT_VALIDATE,
+    WYL_ENGINE_REPLACEMENT_FAULT_OPEN_READ,
+    WYL_ENGINE_REPLACEMENT_FAULT_OPEN_DELTA,
+    WYL_ENGINE_REPLACEMENT_FAULT_INTERN,
+    WYL_ENGINE_REPLACEMENT_FAULT_AUDIT_FACTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_ARM_RULES,
+    WYL_ENGINE_REPLACEMENT_FAULT_SESSION_ACTIVE,
+    WYL_ENGINE_REPLACEMENT_FAULT_ROLE_PERMISSIONS,
+    WYL_ENGINE_REPLACEMENT_FAULT_ROLE_MEMBERSHIPS,
+    WYL_ENGINE_REPLACEMENT_FAULT_DIRECT_PERMISSIONS,
+    WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_STATES,
+    WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_EVENTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_STATES,
+    WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_EVENTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_SESSION_STATES,
+    WYL_ENGINE_REPLACEMENT_FAULT_SESSION_EVENTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK,
+    WYL_ENGINE_REPLACEMENT_FAULT_READBACK,
+    WYL_ENGINE_REPLACEMENT_FAULT_SWAP,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 847;
+    WylEngine *old_read = wyl_handle_get_read_engine (handle);
+    WylEngine *old_delta = wyl_handle_get_delta_engine (handle);
+    const gint64 pending[] = { 99 };
+    if (wyl_handle_buffer_delta_for_test (handle, "old_pending", pending, 1,
+            WYL_DELTA_INSERT) != WYRELOG_E_OK)
+      return 848;
+    wyl_handle_set_engine_replacement_fault_once_for_test (handle, faults[i]);
+    if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_IO)
+      return 849;
+    if (!wyl_handle_engine_pair_is_ready (handle)
+        || wyl_handle_engine_pair_is_poisoned (handle)
+        || wyl_handle_get_read_engine (handle) != old_read
+        || wyl_handle_get_delta_engine (handle) != old_delta
+        || wyl_handle_pending_delta_count_for_test (handle) != 1)
+      return 850;
+  }
+  return 0;
 }
 #endif
 
@@ -4763,7 +5001,7 @@ check_handle_permission_state_transition_projects_audit_fact (void)
 }
 
 static gint
-check_handle_permission_state_transition_reload_failure_preserves_pair (void)
+check_handle_permission_state_transition_reload_failure_poisons_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
@@ -4772,9 +5010,6 @@ check_handle_permission_state_transition_reload_failure_preserves_pair (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 820;
-  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
-  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
-
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.perm.transition.fail",
           "failing transition permission", "basic") != WYRELOG_E_OK)
@@ -4790,10 +5025,14 @@ check_handle_permission_state_transition_reload_failure_preserves_pair (void)
     return 821;
   if (event_id <= 0)
     return 822;
-  if (wyl_handle_get_read_engine (handle) != read_engine)
+  if (wyl_handle_get_read_engine (handle) != NULL)
     return 823;
-  if (wyl_handle_get_delta_engine (handle) != delta_engine)
+  if (wyl_handle_get_delta_engine (handle) != NULL)
     return 824;
+  if (wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_INVALID)
+    return 828;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_permission_state_exists (store,
@@ -5861,8 +6100,7 @@ main (void)
     return rc;
   if ((rc = check_insert_fanout_repair_failure_poisons_pair ()) != 0)
     return rc;
-  if ((rc =
-          check_durable_session_event_fanout_failure_reloads_committed_event ())
+  if ((rc = check_durable_session_event_fanout_failure_poisons_pair ())
       != 0)
     return rc;
   if ((rc = check_delta_callback_survives_reload ()) != 0)
@@ -5939,6 +6177,16 @@ main (void)
     return rc;
   if ((rc = check_shutdown_waits_for_engine_session ()) != 0)
     return rc;
+  if ((rc = check_typed_engine_session_nesting_and_foreign_release ()) != 0)
+    return rc;
+  if ((rc = check_snapshot_finish_failure_poisons_pair ()) != 0)
+    return rc;
+  if ((rc = check_partial_arena_failure_poisons_pair ()) != 0)
+    return rc;
+  if ((rc = check_reentrant_callback_delivers_detached_batch_once ()) != 0)
+    return rc;
+  if ((rc = check_replacement_faults_preserve_published_pair ()) != 0)
+    return rc;
 #endif
   if ((rc =
           check_policy_store_guarded_direct_permission_decides_with_context ())
@@ -5996,7 +6244,7 @@ main (void)
           check_handle_permission_state_transition_projects_audit_fact ()) != 0)
     return rc;
   if ((rc =
-          check_handle_permission_state_transition_reload_failure_preserves_pair
+          check_handle_permission_state_transition_reload_failure_poisons_pair
           ()) != 0)
     return rc;
   if ((rc = check_policy_store_permission_state_events_require_engine_pair ())
