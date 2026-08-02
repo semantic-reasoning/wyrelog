@@ -81,9 +81,11 @@ static WylFactGraphWinIdentity
 identity_for_path (const gchar *path)
 {
   g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  /* Backup semantics only so that a directory can be named here too; the
+   * identity of one is read exactly like the identity of a file. */
   HANDLE handle = CreateFileW (wide, FILE_READ_ATTRIBUTES, FILE_SHARE_READ
       | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL, NULL);
+      FILE_FLAG_BACKUP_SEMANTICS, NULL);
   WylFactGraphWinIdentity identity;
 
   g_assert_true (handle != INVALID_HANDLE_VALUE);
@@ -193,8 +195,7 @@ open_scratch_volume (void)
  * test is still open.  Nothing else the process holds can change the answer,
  * which is what a handle count cannot say. */
 static gboolean
-unlinked_object_is_open (HANDLE volume,
-    const WylFactGraphWinIdentity * identity)
+unlinked_object_is_open (HANDLE volume, const WylFactGraphWinIdentity *identity)
 {
   FILE_ID_DESCRIPTOR descriptor = { 0 };
   WylFactGraphWinIdentity observed;
@@ -211,16 +212,26 @@ unlinked_object_is_open (HANDLE volume,
   if (handle == INVALID_HANDLE_VALUE) {
     DWORD error = GetLastError ();
 
-    /* Only these three say the object is gone.  Every other refusal -- a
-     * share violation, an access denial, a volume that serves no id at all
-     * -- leaves the question unanswered, and FALSE is the passing answer at
-     * every observation site, so guessing it there would read a live
-     * guardian as a clean close.  Say the code and stop instead. */
-    if (error != ERROR_INVALID_PARAMETER && error != ERROR_FILE_NOT_FOUND
-        && error != ERROR_NOT_FOUND)
-      g_error ("lookup of an unlinked object by file id was inconclusive: "
-          "error=%lu", (unsigned long) error);
-    return FALSE;
+    /* These three answer that the object is gone.  ERROR_INVALID_PARAMETER
+     * is deliberately among them even though a volume with no file-id
+     * namespace reports the same code: the callers establish which world
+     * they are in by running this identical lookup while a handle is
+     * knowingly held, so a volume that cannot answer is caught there and
+     * skips rather than reaching an observation. */
+    if (error == ERROR_INVALID_PARAMETER || error == ERROR_FILE_NOT_FOUND
+        || error == ERROR_NOT_FOUND)
+      return FALSE;
+
+    /* A refusal that means the object is still there.  TRUE is the failing
+     * answer at every observation site, so reporting it here costs a false
+     * abort at worst, where FALSE would read a live guardian as a clean
+     * close.  The transport case retries, so a transient one settles. */
+    if (error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION
+        || error == ERROR_DELETE_PENDING)
+      return TRUE;
+
+    g_error ("lookup of an unlinked object by file id was inconclusive: "
+        "error=%lu", (unsigned long) error);
   }
   /* This compares the id the object was just found by against itself, so the
    * only disagreement it can report is an answer from another volume.  It
@@ -234,6 +245,58 @@ unlinked_object_is_open (HANDLE volume,
   observed = identity_for (handle);
   g_assert_true (CloseHandle (handle));
   return identity_matches (identity, &observed);
+}
+
+/* Whether the object behind a just-deleted name is still open.  Windows ends
+ * a name by one of two routes and each answers the question on its own terms:
+ * a delete that only marks the name refuses every open of it until the last
+ * handle goes, and a delete that takes the name away at once leaves the
+ * object reachable by id for exactly as long as one is held.  Either way the
+ * answer is about the one object under test and not about the process. */
+static gboolean
+deleted_object_is_open (HANDLE volume, const wchar_t *wide,
+    const WylFactGraphWinIdentity *identity)
+{
+  DWORD error;
+
+  SetLastError (ERROR_SUCCESS);
+  if (GetFileAttributesW (wide) != INVALID_FILE_ATTRIBUTES)
+    return TRUE;
+  error = GetLastError ();
+  /* A name that refuses to answer is a name whose object is still held: the
+   * marked-name route keeps every open out until the last handle goes.
+   * await_deleted_artifact_name reads these same three states as "not
+   * finished yet", so none of them may read as "closed" here. */
+  if (error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION
+      || error == ERROR_DELETE_PENDING)
+    return TRUE;
+  return unlinked_object_is_open (volume, identity);
+}
+
+/* The same question, waited on to the bounded deadline
+ * await_deleted_artifact_name uses.  The close a destructor performs is not
+ * always visible in the instant it returns -- the name can still be marked,
+ * or the object still winding down -- and a single sample taken in that
+ * window reads a finished destructor as a leak.  Waiting costs no leak
+ * coverage: a guardian that is really leaked holds the object open for the
+ * whole window, so this runs out and returns TRUE, which is the caller's
+ * failure. */
+static gboolean
+deleted_object_is_open_after_wait (HANDLE volume, const wchar_t *wide,
+    const WylFactGraphWinIdentity *identity)
+{
+  const gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+
+  while (TRUE) {
+    gint64 remaining;
+
+    if (!deleted_object_is_open (volume, wide, identity))
+      return FALSE;
+    remaining = deadline - g_get_monotonic_time ();
+    if (remaining <= 1)
+      return TRUE;
+    g_usleep ((gulong) MIN (remaining - 1, 10 * G_TIME_SPAN_MILLISECOND));
+  }
 }
 
 /* The session, rather than a numeric HANDLE, is the externally visible I/O
@@ -1017,6 +1080,9 @@ test_locator_nested_directory_transport (void)
   WylFactArtifactWinDirectory *root = NULL;
   WylFactArtifactWinDirectory *stale_root = NULL;
   WylFactArtifactWinEntry *child = NULL;
+  WylFactGraphWinIdentity root_identity = { 0 };
+  WylFactGraphWinIdentity child_identity = { 0 };
+  HANDLE volume = open_scratch_volume ();
   HANDLE issued = INVALID_HANDLE_VALUE;
   WylFactArtifactWinMutationEffect effect =
       WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
@@ -1042,6 +1108,7 @@ test_locator_nested_directory_transport (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_create_directory (locator,
           "duckdb-root", &root), ==, WYRELOG_E_OK);
+  root_identity = identity_for_path (root_path);
   HANDLE root_handle = CreateFileW (root_wide, READ_CONTROL,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -1084,33 +1151,31 @@ test_locator_nested_directory_transport (void)
           "duckdb_temp_storage_DEFAULT-1.tmp",
           GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child), ==,
       WYRELOG_E_OK);
+  child_identity = identity_for_path (child_path);
   g_assert_cmpint (wyl_fact_artifact_win_directory_entry_delete_exact (locator,
           root, child, &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
-  DWORD handles_before_child_free = 0;
-  DWORD handles_after_child_free = 0;
-  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
-          &handles_before_child_free));
+  /* The entry now holds the only handle to a nameless object, so the object
+   * itself reports whether the destructor released it.  A process handle
+   * count cannot: the scratch churn around it moves that count by as much as
+   * one retained handle would.  Each pair below enforces its own premise --
+   * the object must still be reachable while the owner is alive -- so an
+   * unreachable result afterwards can only be the destructor's close. */
+  g_assert_true (deleted_object_is_open (volume, child_wide, &child_identity));
   wyl_fact_artifact_win_entry_free (child);
   child = NULL;
-  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
-          &handles_after_child_free));
-  g_assert_cmpuint (handles_after_child_free + 1, ==,
-      handles_before_child_free);
-  DWORD handles_before_root_free = 0;
-  DWORD handles_after_root_free = 0;
-  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
-          &handles_before_root_free));
+  g_assert_false (deleted_object_is_open_after_wait (volume, child_wide,
+          &child_identity));
   g_assert_cmpint (wyl_fact_artifact_win_directory_delete_empty (locator, root,
           &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
-  wyl_fact_artifact_win_directory_free (root);
-  root = NULL;
-  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
-          &handles_after_root_free));
   /* DeletePending must not turn the owned directory handle into a destructor
    * leak: terminal cleanup closes exactly that retained handle. */
-  g_assert_cmpuint (handles_after_root_free + 1, ==, handles_before_root_free);
+  g_assert_true (deleted_object_is_open (volume, root_wide, &root_identity));
+  wyl_fact_artifact_win_directory_free (root);
+  root = NULL;
+  g_assert_false (deleted_object_is_open_after_wait (volume, root_wide,
+          &root_identity));
 
   /* The root itself is also name-bound.  A raw name substitution revokes the
    * opaque directory capability, and free must leave the replacement alone. */
@@ -1127,6 +1192,7 @@ test_locator_nested_directory_transport (void)
   g_assert_true (RemoveDirectoryW (stale_old_wide));
 
   wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (volume));
   g_assert_true (CloseHandle (graph));
   g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL,
       NULL);
