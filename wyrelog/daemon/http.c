@@ -12396,15 +12396,15 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/auth/logout", logout_handler,
       ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/tenants",
+  wyl_daemon_http_add_exact_handler (server, "/tenants",
       tenant_list_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/tenants/create",
+  wyl_daemon_http_add_exact_handler (server, "/tenants/create",
       tenant_create_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/tenants/seal",
+  wyl_daemon_http_add_exact_handler (server, "/tenants/seal",
       tenant_seal_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/tenants/unseal",
+  wyl_daemon_http_add_exact_handler (server, "/tenants/unseal",
       tenant_unseal_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/tenants/delete",
+  wyl_daemon_http_add_exact_handler (server, "/tenants/delete",
       tenant_delete_handler, ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/graphs/create",
       graph_create_handler, ctx, NULL);

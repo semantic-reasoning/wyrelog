@@ -109,6 +109,11 @@ ISSUE_720_EXACT_PATHS = {
     "/auth/mfa/enroll/confirm",
     "/auth/refresh",
     "/auth/logout",
+    "/tenants",
+    "/tenants/create",
+    "/tenants/seal",
+    "/tenants/unseal",
+    "/tenants/delete",
 }
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
