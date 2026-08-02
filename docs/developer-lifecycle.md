@@ -289,6 +289,35 @@ responses. A successful response contains only the short-lived access token;
 session metadata, tenant data, credential secrets, and raw request material are
 never echoed.
 
+### Service bearer decision authority
+
+The sole bearer resolver may retain its service-authentication READ lease only
+for `POST /decide`. After the signed token, live service session, access-token
+record, ACTIVE registry tuple, and tenant have matched exactly, it transfers
+that lease into a request-unique, one-shot decision authority. The private
+service decision path holds the lease through request-context insertion,
+policy query, context removal, and terminal release. Every other bearer caller
+releases its READ lease inside the resolver as before, and human decisions keep
+using the public `wyl_decide()` path.
+
+Service lifecycle state is projected from the durable `service_principals`
+records into `service_principal_state`; it is never borrowed from the human
+`principal_states` table. The resolver authority contributes an ephemeral
+`service_request_auth(context, subject, tenant)` row. Signed policy permits a
+service decision only when that exact subject is active, the requested
+permission is in `approved_data_plane_permission`, the subject has the
+permission, and the credential tenant is the requested scope. Cleanup failure
+poisons the engine pair, and terminal-release uncertainty leaves the response
+DENY.
+
+On the HTTP wire, `session_token` remains the legacy `/decide` name for the
+policy scope; a service request must set it to the credential tenant. An
+invalid bearer returns 401. A valid service bearer with no matching role, a
+foreign scope, or a control-plane permission returns 200 with DENY. Granting a
+matching role can change the same token to ALLOW; revoking that role changes it
+back to DENY. A service subject passed directly to public `wyl_decide()` has no
+resolver-created authority and therefore cannot use this service-only rule.
+
 Each successful exchange carries an owned copy of its exact service authority
 identity (`session_id`, `jti`, credential ID and generation, principal, tenant,
 and expiry) from activation through the Soup response lifecycle. A failure
