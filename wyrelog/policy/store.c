@@ -179,6 +179,9 @@ struct wyl_policy_store_t
   gint service_authority_coordination_terminal;
   WylPolicyGraphAuthorityMigrationFailStage graph_authority_migration_fail_once;
   WylPolicyGraphAuthorityMutationFailStage mutation_fail_once;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  WylPolicySnapshotFinishFailStage snapshot_finish_fail_once;
+#endif
   guint64 next_service_authority_transaction_id;
     WylPolicyAuthorityTransactionFailStage
       service_authority_transaction_fail_once;
@@ -24401,9 +24404,24 @@ wyl_policy_store_read_snapshot_finish (WylPolicyStoreReadSnapshot *snapshot)
     return WYRELOG_E_INVALID;
 
   sqlite3 *db = snapshot->store->db;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  WylPolicySnapshotFinishFailStage fail_stage =
+      snapshot->store->snapshot_finish_fail_once;
+  snapshot->store->snapshot_finish_fail_once =
+      WYL_POLICY_SNAPSHOT_FINISH_FAIL_NONE;
+#endif
   int txn_state = sqlite3_txn_state (db, "main");
   int sqlite_rc = sqlite3_exec (db, "ROLLBACK;", NULL, NULL, NULL);
   gboolean autocommit_restored = sqlite3_get_autocommit (db) != 0;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  /* Execute the real cleanup first so every injected failure is recoverable. */
+  if (fail_stage == WYL_POLICY_SNAPSHOT_FINISH_FAIL_ROLLBACK)
+    sqlite_rc = SQLITE_IOERR;
+  else if (fail_stage == WYL_POLICY_SNAPSHOT_FINISH_FAIL_TRANSACTION_STATE)
+    txn_state = SQLITE_TXN_WRITE;
+  else if (fail_stage == WYL_POLICY_SNAPSHOT_FINISH_FAIL_AUTOCOMMIT)
+    autocommit_restored = FALSE;
+#endif
   sqlite3_mutex *mutex = sqlite3_db_mutex (db);
   g_assert_nonnull (mutex);
   sqlite3_mutex_leave (mutex);
@@ -24414,6 +24432,17 @@ wyl_policy_store_read_snapshot_finish (WylPolicyStoreReadSnapshot *snapshot)
   return txn_state == SQLITE_TXN_READ && autocommit_restored ?
       WYRELOG_E_OK : WYRELOG_E_INTERNAL;
 }
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+void wyl_policy_store_read_snapshot_finish_fail_once_for_test
+    (wyl_policy_store_t * store, WylPolicySnapshotFinishFailStage stage)
+{
+  g_return_if_fail (store != NULL);
+  g_return_if_fail (stage > WYL_POLICY_SNAPSHOT_FINISH_FAIL_NONE);
+  g_return_if_fail (stage <= WYL_POLICY_SNAPSHOT_FINISH_FAIL_AUTOCOMMIT);
+  store->snapshot_finish_fail_once = stage;
+}
+#endif
 
 wyrelog_error_t
 wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)

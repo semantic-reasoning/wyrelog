@@ -624,6 +624,9 @@ finish_policy_mutation (WylHandle *handle, const WylAuditEvent *audit_event)
 {
   wyrelog_error_t rc = reload_policy_snapshot (handle);
 
+  if (rc != WYRELOG_E_OK)
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
+
 #ifdef WYL_HAS_AUDIT
   if (audit_event != NULL)
     (void) wyl_audit_mirror_event (handle, audit_event);

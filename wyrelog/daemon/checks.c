@@ -96,52 +96,56 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
 
   rc = wyl_handle_reload_engine_pair (handle);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
 
   gint64 event_row[3];
   gboolean found = FALSE;
   rc = wyl_engine_session_intern_symbol (session, audit_id, &event_row[0]);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   event_row[1] = wyl_audit_event_get_created_at_us (ev);
   rc = wyl_engine_session_intern_symbol (session, "allow", &event_row[2]);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   rc = wyl_engine_session_contains (session, "audit_event", event_row, 3,
       &found);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   if (!found)
-    return WYRELOG_E_POLICY;
+    return wyl_handle_fail_committed_engine_projection (handle,
+        WYRELOG_E_POLICY);
 
   rc = contains_symbol_row2 (handle, "audit_event_action", audit_id,
       "policy_audit_reload_check", &found);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   if (!found)
-    return WYRELOG_E_POLICY;
+    return wyl_handle_fail_committed_engine_projection (handle,
+        WYRELOG_E_POLICY);
 
   rc = contains_symbol_row2 (handle, "audit_event_request_id", audit_id,
       "wyrelogd-readiness-request", &found);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   if (!found)
-    return WYRELOG_E_POLICY;
+    return wyl_handle_fail_committed_engine_projection (handle,
+        WYRELOG_E_POLICY);
 
 #ifdef WYL_HAS_AUDIT
   rc = wyl_handle_load_policy_store_audit_events (handle);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
 
   g_autofree gchar *json = NULL;
   rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
       "request_id(\"wyrelogd-readiness-request\")", &json);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    return wyl_handle_fail_committed_engine_projection (handle, rc);
   if (json == NULL || strstr (json, "policy_audit_reload_check") == NULL
       || strstr (json, "wyrelogd-readiness-request") == NULL)
-    return WYRELOG_E_POLICY;
+    return wyl_handle_fail_committed_engine_projection (handle,
+        WYRELOG_E_POLICY);
 #endif
 
   return WYRELOG_E_OK;

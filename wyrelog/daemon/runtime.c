@@ -588,6 +588,8 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 
     wyrelog_error_t reload_rc = wyl_handle_reload_engine_pair (handle);
     if (reload_rc != WYRELOG_E_OK) {
+      reload_rc = wyl_handle_fail_committed_engine_projection (handle,
+          reload_rc);
       g_printerr ("wyrelogd: bootstrap_admin: reload failed: %s\n",
           wyrelog_error_string (reload_rc));
       return 1;

@@ -24,9 +24,10 @@ typedef enum
 typedef enum
 {
   WYL_SERVICE_AUTH_RANK_COORDINATION = 1,
-  WYL_SERVICE_AUTH_RANK_STORE = 2,
-  WYL_SERVICE_AUTH_RANK_CONTEXT = 3,
-  WYL_SERVICE_AUTH_RANK_REGISTRY = 4,
+  WYL_SERVICE_AUTH_RANK_ENGINE = 2,
+  WYL_SERVICE_AUTH_RANK_STORE = 3,
+  WYL_SERVICE_AUTH_RANK_CONTEXT = 4,
+  WYL_SERVICE_AUTH_RANK_REGISTRY = 5,
 } WylServiceAuthRank;
 
 typedef struct
@@ -62,6 +63,8 @@ wyrelog_error_t wyl_service_auth_authority_acquire_write
 wyrelog_error_t wyl_service_auth_rank_enter (WylHandle * handle,
     WylServiceAuthRank rank);
 wyrelog_error_t wyl_service_auth_rank_leave (WylHandle * handle,
+    WylServiceAuthRank rank);
+gboolean wyl_service_auth_rank_is_held (WylHandle * handle,
     WylServiceAuthRank rank);
 
 wyrelog_error_t wyl_service_auth_read_lease_validate

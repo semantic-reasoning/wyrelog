@@ -42,8 +42,8 @@ struct _WylServiceAuthAuthority
 
 typedef struct
 {
-  WylHandle *handles[4];
-  WylServiceAuthRank ranks[4];
+  WylHandle *handles[32];
+  WylServiceAuthRank ranks[32];
   guint depth;
 } WylServiceAuthRankState;
 
@@ -66,9 +66,11 @@ rank_can_enter (WylHandle *handle, WylServiceAuthRank rank)
   WylServiceAuthRankState *state = rank_state_get (FALSE);
   if (state == NULL || state->depth == 0)
     return TRUE;
-  return state->depth < G_N_ELEMENTS (state->ranks)
-      && state->handles[state->depth - 1] == handle
-      && state->ranks[state->depth - 1] < rank;
+  if (state->depth >= G_N_ELEMENTS (state->ranks)
+      || state->handles[state->depth - 1] != handle)
+    return FALSE;
+  WylServiceAuthRank top = state->ranks[state->depth - 1];
+  return top < rank || (rank == WYL_SERVICE_AUTH_RANK_ENGINE && top == rank);
 }
 
 static gboolean
@@ -113,6 +115,19 @@ wyl_service_auth_rank_leave_expected (WylHandle *handle,
     WylServiceAuthRank rank)
 {
   return wyl_service_auth_rank_leave (handle, rank);
+}
+
+gboolean
+wyl_service_auth_rank_is_held (WylHandle *handle, WylServiceAuthRank rank)
+{
+  WylServiceAuthRankState *state = rank_state_get (FALSE);
+  if (!WYL_IS_HANDLE (handle) || state == NULL)
+    return FALSE;
+  for (guint i = 0; i < state->depth; i++) {
+    if (state->handles[i] == handle && state->ranks[i] == rank)
+      return TRUE;
+  }
+  return FALSE;
 }
 
 struct _WylServiceAuthReadLease

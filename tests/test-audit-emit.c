@@ -83,8 +83,10 @@ check_audit_replay_uses_engine_session (void)
   };
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
-  g_autoptr (GRecMutexLocker) engine_locker =
-      wyl_handle_lock_engine_session (handle);
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
+  if (engine_session == NULL)
+    return 801;
   wyl_handle_set_engine_session_checkpoint_for_test (handle,
       observe_audit_replay_session, &race);
   wyl_handle_set_audit_replay_checkpoint_for_test (handle,
@@ -97,7 +99,7 @@ check_audit_replay_uses_engine_session (void)
       && g_cond_wait_until (&race.changed, &race.mutex, deadline));
   gboolean blocked = race.waiting && !race.replay_acquired;
   g_mutex_unlock (&race.mutex);
-  g_clear_pointer (&engine_locker, g_rec_mutex_locker_free);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
   g_thread_join (replay);
 
   wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);

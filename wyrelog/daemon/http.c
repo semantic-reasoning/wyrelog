@@ -11032,8 +11032,12 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
   rc = wyl_mfa_enrollment_commit
       (write.store, &enrollment, auth.actor,
       ensure_request_id_header (msg), "wyrelogd", FALSE);
-  if (rc == WYRELOG_E_OK)
+  gboolean enrollment_committed = rc == WYRELOG_E_OK;
+  if (enrollment_committed) {
     rc = wyl_handle_reload_engine_pair (ctx->handle);
+    if (rc != WYRELOG_E_OK)
+      rc = wyl_handle_fail_committed_engine_projection (ctx->handle, rc);
+  }
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_load_policy_store_audit_events (ctx->handle);
