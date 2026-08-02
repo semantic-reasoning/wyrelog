@@ -859,6 +859,57 @@ check_service_route_shape_matrix (const gchar *base_url)
 }
 
 static gint
+check_exact_route_shape (SoupServer *server, const gchar *base_url,
+    const gchar *canonical_path, gint error_base)
+{
+  WylDaemonExactRouteProbeSnapshot before = { 0 };
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &before))
+    return error_base;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  const gchar *poison = "{\"mutation\":\"must-not-run\"}";
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_path_probe (session, "PATCH", base_url, canonical_path,
+          "Bearer exact-route-poison", poison, &status, &body) != 0
+      || status != 405)
+    return error_base + 1;
+  WylDaemonExactRouteProbeSnapshot after = { 0 };
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries + 1)
+    return error_base + 2;
+
+  g_autofree gchar *descendant = g_strconcat (canonical_path, "/x", NULL);
+  before = after;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "PATCH", base_url, descendant,
+          "Bearer exact-route-poison", poison, &status, &body) != 0
+      || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+    return error_base + 3;
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries)
+    return error_base + 4;
+
+  g_autofree gchar *sibling = g_strconcat (canonical_path, "x", NULL);
+  before = after;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "PATCH", base_url, sibling,
+          "Bearer exact-route-poison", poison, &status, &body) != 0
+      || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+    return error_base + 5;
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries)
+    return error_base + 6;
+  return 0;
+}
+
+static gint
 check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
 {
   guint total = 0;
@@ -869,70 +920,42 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 5;
-  const gchar *canonical_path = "/auth/service-token";
-  const gchar *descendant_path = "/auth/service-token/x";
-  const gchar *sibling_path = "/auth/service-tokenx";
+  const guint expected_exact = 9;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 4;
-  const gchar *canonical_path = "/service-credential-operations";
-  const gchar *descendant_path = "/service-credential-operations/x";
-  const gchar *sibling_path = "/service-credential-operationsx";
+  const guint expected_exact = 8;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 2;
-  const gchar *canonical_path = "/auth/service-token";
-  const gchar *descendant_path = "/auth/service-token/x";
-  const gchar *sibling_path = "/auth/service-tokenx";
+  const guint expected_exact = 6;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 1;
-  const gchar *canonical_path = "/service-management-authority/arm";
-  const gchar *descendant_path = "/service-management-authority/arm/x";
-  const gchar *sibling_path = "/service-management-authority/armx";
+  const guint expected_exact = 5;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 27
+  if (total != expected_total || prefixes != 4 || raw_singletons != 23
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
-  WylDaemonExactRouteProbeSnapshot before = { 0 };
-  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &before))
-    return 2281;
-  g_autoptr (SoupSession) session = soup_session_new ();
-  guint status = 0;
-  g_autofree gchar *body = NULL;
-  if (send_raw_path (session, "PATCH", base_url, canonical_path, &status,
-          &body) != 0 || status != 405)
-    return 2282;
-  WylDaemonExactRouteProbeSnapshot after = { 0 };
-  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
-      || after.selected != before.selected + 1
-      || after.terminal_entries != before.terminal_entries + 1)
-    return 2283;
-  before = after;
-  g_clear_pointer (&body, g_free);
-  if (send_raw_path (session, "PATCH", base_url, descendant_path, &status,
-          &body) != 0 || status != 404
-      || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
-    return 2284;
-  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
-      || after.selected != before.selected + 1
-      || after.terminal_entries != before.terminal_entries)
-    return 2285;
-  before = after;
-  g_clear_pointer (&body, g_free);
-  if (send_raw_path (session, "PATCH", base_url, sibling_path, &status,
-          &body) != 0 || status != 404)
-    return 2286;
-  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
-      || after.selected != before.selected + 1
-      || after.terminal_entries != before.terminal_entries)
-    return 2287;
+  static const gchar *exact_paths[] = {
+    "/healthz",
+    "/readyz",
+    "/profile/status",
+    "/profile/events",
+    "/service-management-authority/arm",
+#ifdef WYL_HAS_FACT_STORE
+    "/service-credential-operations",
+    "/service-credential-operations/reconcile",
+    "/service-credential-operations/recover",
+#endif
+#ifdef WYL_HAS_AUDIT
+    "/auth/service-token",
+#endif
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (exact_paths); i++) {
+    gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
+        2281 + (gint) i * 7);
+    if (rc != 0)
+      return rc;
+  }
   return 0;
 }
 

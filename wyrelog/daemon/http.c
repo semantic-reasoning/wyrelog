@@ -12291,10 +12291,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   g_signal_connect (server, "request-aborted",
       G_CALLBACK (service_response_aborted), NULL);
 #endif
-  wyl_daemon_http_add_singleton_handler (server, "/healthz", healthz_handler,
+  wyl_daemon_http_add_exact_handler (server, "/healthz", healthz_handler,
       NULL, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/readyz", readyz_handler,
-      ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/readyz", readyz_handler, ctx,
+      NULL);
   wyl_daemon_http_add_singleton_handler (server, "/facts/status",
       facts_status_handler, ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/facts/schema/register",
@@ -12303,9 +12303,9 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/datalog",
       datalog_query_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/profile/status",
+  wyl_daemon_http_add_exact_handler (server, "/profile/status",
       profile_status_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/profile/events",
+  wyl_daemon_http_add_exact_handler (server, "/profile/events",
       profile_events_handler, ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/auth/login", login_handler,
       ctx, NULL);
