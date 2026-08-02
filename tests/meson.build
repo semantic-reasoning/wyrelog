@@ -397,9 +397,14 @@ if build_client
   check_daemon_http_route_registrations = find_program(
     '../tools/check-daemon-http-route-registrations.py',
   )
+  daemon_http_route_guard_cc = meson.get_compiler('c').cmd_array()
   test('daemon-http-route-registrations-self-test',
     check_daemon_http_route_registrations,
-    args : ['--self-test'],
+    args : [
+      '--self-test',
+      '--compiler-id', meson.get_compiler('c').get_id(),
+      '--',
+    ] + daemon_http_route_guard_cc,
   )
   test('daemon-http-route-registrations',
     check_daemon_http_route_registrations,
