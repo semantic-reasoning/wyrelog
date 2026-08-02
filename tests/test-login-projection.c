@@ -201,6 +201,73 @@ decide_allows (WylHandle *handle, const gchar *subject, const gchar *action,
   return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW;
 }
 
+typedef struct
+{
+  const gchar *principal_state_subject;
+  const gchar *principal_state;
+  gint64 principal_event_id;
+  const gchar *principal_event_subject;
+  const gchar *principal_event_from_state;
+  const gchar *principal_event;
+  const gchar *principal_event_to_state;
+  gint64 session_event_id;
+  const gchar *session_id;
+  const gchar *session_from_state;
+  const gchar *session_event;
+  const gchar *session_to_state;
+} LoginProjectionVerify;
+
+static wyrelog_error_t
+verify_login_projection (WylHandle *handle, gpointer data)
+{
+  LoginProjectionVerify *verify = data;
+
+  if (verify->principal_state_subject != NULL
+      && !engine_contains_symbol_row2 (handle, "principal_state",
+          verify->principal_state_subject, verify->principal_state))
+    return WYRELOG_E_POLICY;
+  if (verify->principal_event_id >= 0
+      && !engine_contains_event_row5 (handle, "principal_fired",
+          verify->principal_event_id, verify->principal_event_subject,
+          verify->principal_event_from_state, verify->principal_event,
+          verify->principal_event_to_state))
+    return WYRELOG_E_POLICY;
+  if (verify->session_event_id >= 0
+      && !engine_contains_event_row5 (handle, "session_fired",
+          verify->session_event_id, verify->session_id,
+          verify->session_from_state, verify->session_event,
+          verify->session_to_state))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+poisoned_engine_access_is_closed (WylHandle *handle)
+{
+  gint64 symbol_id = 0;
+  gint64 row[1] = { 1 };
+  gboolean contains = TRUE;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+
+  if (!wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle)
+      || wyl_handle_get_read_engine (handle) != NULL
+      || wyl_handle_get_delta_engine (handle) != NULL || session == NULL)
+    return FALSE;
+  if (wyl_engine_session_intern_symbol (session, "session-poison-probe",
+          &symbol_id) != WYRELOG_E_INVALID
+      || wyl_engine_session_contains (session, "session_active", row, 1,
+          &contains) != WYRELOG_E_INVALID)
+    return FALSE;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  return wyl_handle_intern_engine_symbol (handle, "poison-probe", &symbol_id)
+      == WYRELOG_E_INVALID
+      && wyl_handle_engine_contains (handle, "session_active", row, 1,
+      &contains) == WYRELOG_E_INVALID
+      && wyl_handle_reload_engine_pair (handle) == WYRELOG_E_INVALID;
+}
+
 static gint
 check_login_projects_mfa_required_principal_state (void)
 {
@@ -275,21 +342,18 @@ check_login_reload_failure_keeps_durable_state_repairable (void)
   if (count != 2)
     return 18;
 
-  gboolean contains = FALSE;
-  gint64 mfa_required[2];
-  if (wyl_handle_intern_engine_symbol (handle, "projection-reload-fail-user",
-          &mfa_required[0]) != WYRELOG_E_OK)
+  if (!poisoned_engine_access_is_closed (handle))
     return 19;
-  if (wyl_handle_intern_engine_symbol (handle, "mfa_required",
-          &mfa_required[1]) != WYRELOG_E_OK)
-    return 20;
-  if (wyl_handle_engine_contains (handle, "principal_state", mfa_required, 2,
-          &contains) != WYRELOG_E_OK)
-    return 21;
-  if (contains)
-    return 22;
-
-  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+  LoginProjectionVerify verify = {
+    .principal_state_subject = "projection-reload-fail-user",
+    .principal_state = "mfa_required",
+    .principal_event_id = -1,
+    .session_event_id = -1,
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_login_projection, &verify) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || !wyl_handle_engine_pair_is_ready (handle))
     return 23;
   return 0;
 }
@@ -337,6 +401,33 @@ check_anonymous_login_reload_failure_keeps_session_state (void)
     return 39;
   if (count != 1)
     return 40;
+
+  if (!poisoned_engine_access_is_closed (handle))
+    return 41;
+
+  gint64 event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", NULL, 0, &event_id))
+    return 42;
+  g_autofree gchar *session_id = NULL;
+  if (!policy_select_text_params (store,
+          "SELECT session_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", NULL, 0, &session_id))
+    return 43;
+  LoginProjectionVerify verify = {
+    .principal_event_id = -1,
+    .session_event_id = event_id,
+    .session_id = session_id,
+    .session_from_state = "idle",
+    .session_event = "request",
+    .session_to_state = "active",
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_login_projection, &verify) != WYRELOG_E_OK)
+    return 44;
 
   return 0;
 }
@@ -398,14 +489,25 @@ check_login_event_projection_failure_is_reported (void)
           "WHERE event = 'request' AND from_state = 'idle' "
           "AND to_state = 'active';", NULL, 0, &session_id))
     return 149;
-  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+  if (!poisoned_engine_access_is_closed (handle))
     return 155;
-  if (!engine_contains_event_row5 (handle, "principal_fired",
-          principal_event_id, "projection-event-fail-user", "unverified",
-          "login_ok", "mfa_required"))
+  LoginProjectionVerify verify = {
+    .principal_event_id = principal_event_id,
+    .principal_event_subject = "projection-event-fail-user",
+    .principal_event_from_state = "unverified",
+    .principal_event = "login_ok",
+    .principal_event_to_state = "mfa_required",
+    .session_event_id = session_event_id,
+    .session_id = session_id,
+    .session_from_state = "idle",
+    .session_event = "request",
+    .session_to_state = "active",
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_login_projection, &verify) != WYRELOG_E_OK)
     return 156;
-  if (!engine_contains_event_row5 (handle, "session_fired", session_event_id,
-          session_id, "idle", "request", "active"))
+  if (wyl_handle_engine_pair_is_poisoned (handle)
+      || !wyl_handle_engine_pair_is_ready (handle))
     return 157;
   return 0;
 }
@@ -448,10 +550,18 @@ check_anonymous_session_event_projection_failure_is_reported (void)
           "WHERE event = 'request' AND from_state = 'idle' "
           "AND to_state = 'active';", NULL, 0, &session_id))
     return 159;
-  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+  if (!poisoned_engine_access_is_closed (handle))
     return 160;
-  if (!engine_contains_event_row5 (handle, "session_fired", event_id,
-          session_id, "idle", "request", "active"))
+  LoginProjectionVerify verify = {
+    .principal_event_id = -1,
+    .session_event_id = event_id,
+    .session_id = session_id,
+    .session_from_state = "idle",
+    .session_event = "request",
+    .session_to_state = "active",
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_login_projection, &verify) != WYRELOG_E_OK)
     return 161;
   return 0;
 }
