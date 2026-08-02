@@ -167,6 +167,7 @@ MUTATORS = {
     "wyl_handle_apply_permission_state_transition", "wyl_mfa_enrollment_commit",
     "wyl_engine_session_run_committed_publication",
     "wyl_engine_session_repair_committed_publication",
+    "wyl_policy_store_seed_created_tenant_authority",
 }
 DAEMON_HTTP_OUTPUT = {
     "posix": "wyrelog/wyrelogd.p/daemon_http.c.o",
