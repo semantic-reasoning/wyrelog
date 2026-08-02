@@ -837,6 +837,7 @@ check_service_route_shape_matrix (const gchar *base_url)
    * deeper, and suffix-collision shapes through the real URI parser. Ordinary
    * percent normalization of unreserved bytes is intentionally out of scope. */
   static const gchar *encoded_separator_aliases[] = {
+    "/service-management-authority/arm%2Fx",
     "/service-principals%2F",
     "/service-principals%2F%2Fdisable",
     "/service-principals/svc:shape%2Fworker/disable",
@@ -963,13 +964,13 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   const guint expected_exact = 32;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 30;
+  const guint expected_exact = 31;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
   const guint expected_exact = 29;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 27;
+  const guint expected_exact = 28;
 #endif
   if (total != expected_total || prefixes != 4 || raw_singletons != 0
       || exact_singletons != expected_exact
