@@ -57,6 +57,7 @@ MUTATORS = {
     "wyl_fact_store_append_batch", "wyl_fact_store_retract_batch",
     "wyl_perm_grant", "wyl_perm_revoke", "wyl_role_grant", "wyl_role_revoke",
     "wyl_handle_apply_permission_state_transition", "wyl_mfa_enrollment_commit",
+    "wyl_engine_session_run_committed_publication",
 }
 DAEMON_HTTP_OUTPUT = {
     "posix": "wyrelog/wyrelogd.p/daemon_http.c.o",
