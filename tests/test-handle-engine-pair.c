@@ -4314,7 +4314,7 @@ check_postcommit_not_found_is_internal (void)
   if (session == NULL
       || wyl_engine_session_run_committed_publication (session,
           mutate_postcommit_not_found_probe, NULL,
-          verify_postcommit_not_found_probe, NULL, NULL, NULL)
+          verify_postcommit_not_found_probe, NULL, NULL, NULL, NULL)
       != WYRELOG_E_INTERNAL)
     return 852;
   g_clear_pointer (&session, wyl_engine_session_release);
@@ -5083,6 +5083,82 @@ check_handle_permission_state_transition_reload_failure_poisons_pair (void)
           "perm-transition-fail-scope", &exists) != WYRELOG_E_OK)
     return 825;
   return exists ? 0 : 826;
+}
+
+static wyrelog_error_t
+count_permission_state_event (gint64 event_id, const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  guint *count = user_data;
+  (void) event_id;
+  (void) subject_id;
+  (void) perm_id;
+  (void) scope;
+  (void) event;
+  (void) from_state;
+  (void) to_state;
+  (*count)++;
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_handle_permission_state_transition_rollback_hides_event_id (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 829;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 830;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.perm.rollback",
+          "rollback transition permission", "basic") != WYRELOG_E_OK)
+    return 831;
+  if (wyl_policy_store_upsert_role (store, "site.rollback-cycle-a",
+          "rollback cycle a") != WYRELOG_E_OK
+      || wyl_policy_store_upsert_role (store, "site.rollback-cycle-b",
+          "rollback cycle b") != WYRELOG_E_OK)
+    return 832;
+  if (wyl_policy_store_grant_role_inheritance (store,
+          "site.rollback-cycle-a", "site.rollback-cycle-b") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_inheritance (store,
+          "site.rollback-cycle-b", "site.rollback-cycle-a") != WYRELOG_E_OK)
+    return 833;
+
+  gint64 event_id = 42;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "perm-transition-rollback-user", "site.perm.rollback",
+          "perm-transition-rollback-scope", "grant", NULL, &event_id)
+      != WYRELOG_E_POLICY)
+    return 834;
+  if (event_id != -1)
+    return 835;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_permission_state_exists (store,
+          "perm-transition-rollback-user", "site.perm.rollback",
+          "perm-transition-rollback-scope", &exists) != WYRELOG_E_OK)
+    return 836;
+  if (exists)
+    return 837;
+
+  guint event_count = 0;
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          count_permission_state_event, &event_count) != WYRELOG_E_OK)
+    return 838;
+  if (event_count != 0)
+    return 839;
+  if (!wyl_handle_engine_pair_is_ready (handle)
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_get_read_engine (handle) != read_engine
+      || wyl_handle_get_delta_engine (handle) != delta_engine)
+    return 840;
+  return 0;
 }
 
 static gint
@@ -6291,6 +6367,9 @@ main (void)
   if ((rc =
           check_handle_permission_state_transition_reload_failure_poisons_pair
           ()) != 0)
+    return rc;
+  if ((rc = check_handle_permission_state_transition_rollback_hides_event_id ())
+      != 0)
     return rc;
   if ((rc = check_policy_store_permission_state_events_require_engine_pair ())
       != 0)

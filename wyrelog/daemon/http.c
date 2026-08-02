@@ -11133,7 +11133,7 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
       else
         rc = wyl_engine_session_run_committed_publication (engine_session,
             wyl_mfa_enrollment_mutate, &mutation,
-            verify_mfa_enrollment_publication, &mutation, NULL, NULL);
+            verify_mfa_enrollment_publication, &mutation, NULL, NULL, NULL);
       g_clear_pointer (&engine_session, wyl_engine_session_release);
     }
   }

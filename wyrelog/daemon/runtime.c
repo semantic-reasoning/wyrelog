@@ -554,7 +554,7 @@ run_bootstrap_publication (WylHandle *handle, WylBootstrapPublication *ctx)
   else
     rc = wyl_engine_session_run_committed_publication (session,
         mutate_bootstrap_publication, ctx, verify_bootstrap_publication, ctx,
-        NULL, NULL);
+        NULL, NULL, NULL);
   g_clear_pointer (&session, wyl_engine_session_release);
   wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
   if (rc == WYRELOG_E_OK)
