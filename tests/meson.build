@@ -1417,24 +1417,41 @@ test('check-handle-test-seam-exports-self-test',
   check_handle_test_seam_exports,
   args : ['--self-test'],
 )
-if get_option('default_library') != 'static'
-  handle_test_seam_export_artifact = libwyrelog
-  if get_option('default_library') == 'both'
-    handle_test_seam_export_artifact = libwyrelog.get_shared_lib()
-  endif
-  handle_test_seam_object_format = 'elf'
-  if host_machine.system() == 'darwin'
-    handle_test_seam_object_format = 'macho'
-  elif host_machine.system() == 'windows'
-    handle_test_seam_object_format = 'pe'
-  endif
-  test('check-handle-test-seam-exports',
-    check_handle_test_seam_exports,
-    args : [handle_test_seam_object_format,
-      handle_test_seam_export_artifact.full_path()],
-    depends : handle_test_seam_export_artifact,
-  )
+handle_test_seam_object_format = 'elf'
+if host_machine.system() == 'darwin'
+  handle_test_seam_object_format = 'macho'
+elif host_machine.system() == 'windows'
+  handle_test_seam_object_format = 'pe'
 endif
+handle_test_seam_production_artifacts = []
+if get_option('default_library') == 'shared'
+  handle_test_seam_production_artifacts += [
+    [libwyrelog, 'shared', 'shared'],
+  ]
+elif get_option('default_library') == 'static'
+  handle_test_seam_production_artifacts += [
+    [libwyrelog, 'archive', 'static'],
+  ]
+else
+  handle_test_seam_production_artifacts += [
+    [libwyrelog.get_shared_lib(), 'shared', 'shared'],
+    [libwyrelog.get_static_lib(), 'archive', 'static'],
+  ]
+endif
+foreach artifact_spec : handle_test_seam_production_artifacts
+  test('check-handle-test-seam-exports-' + artifact_spec[2],
+    check_handle_test_seam_exports,
+    args : ['absent', handle_test_seam_object_format, artifact_spec[1],
+      artifact_spec[0].full_path()],
+    depends : artifact_spec[0],
+  )
+endforeach
+test('check-handle-test-seam-companion-symbols',
+  check_handle_test_seam_exports,
+  args : ['present', handle_test_seam_object_format, 'archive',
+    wyrelog_handle_test_seams_lib.full_path()],
+  depends : wyrelog_handle_test_seams_lib,
+)
 
 test_template_tree = executable('test-template-tree',
   'test-template-tree.c',
