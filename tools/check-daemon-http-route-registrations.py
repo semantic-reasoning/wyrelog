@@ -94,6 +94,12 @@ ISSUE_720_EXACT_PATHS = {
     "/readyz",
     "/profile/status",
     "/profile/events",
+    "/auth/login",
+    "/auth/mfa/verify",
+    "/auth/mfa/enroll/start",
+    "/auth/mfa/enroll/confirm",
+    "/auth/refresh",
+    "/auth/logout",
 }
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES

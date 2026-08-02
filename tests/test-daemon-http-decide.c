@@ -920,18 +920,18 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
-  const guint expected_exact = 9;
+  const guint expected_exact = 15;
 #elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 35;
-  const guint expected_exact = 8;
+  const guint expected_exact = 14;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 33;
-  const guint expected_exact = 6;
+  const guint expected_exact = 12;
 #else
   const guint expected_total = 32;
-  const guint expected_exact = 5;
+  const guint expected_exact = 11;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 23
+  if (total != expected_total || prefixes != 4 || raw_singletons != 17
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -941,6 +941,12 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/profile/status",
     "/profile/events",
     "/service-management-authority/arm",
+    "/auth/login",
+    "/auth/mfa/verify",
+    "/auth/mfa/enroll/start",
+    "/auth/mfa/enroll/confirm",
+    "/auth/refresh",
+    "/auth/logout",
 #ifdef WYL_HAS_FACT_STORE
     "/service-credential-operations",
     "/service-credential-operations/reconcile",

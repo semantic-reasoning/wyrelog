@@ -12307,18 +12307,18 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       profile_status_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/profile/events",
       profile_events_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/auth/login", login_handler,
-      ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/auth/mfa/verify",
+  wyl_daemon_http_add_exact_handler (server, "/auth/login", login_handler, ctx,
+      NULL);
+  wyl_daemon_http_add_exact_handler (server, "/auth/mfa/verify",
       mfa_verify_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/auth/mfa/enroll/start",
+  wyl_daemon_http_add_exact_handler (server, "/auth/mfa/enroll/start",
       mfa_enroll_start_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/auth/mfa/enroll/confirm",
+  wyl_daemon_http_add_exact_handler (server, "/auth/mfa/enroll/confirm",
       mfa_enroll_confirm_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/auth/refresh",
-      refresh_handler, ctx, NULL);
-  wyl_daemon_http_add_singleton_handler (server, "/auth/logout",
-      logout_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/auth/refresh", refresh_handler,
+      ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/auth/logout", logout_handler,
+      ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/tenants",
       tenant_list_handler, ctx, NULL);
   wyl_daemon_http_add_singleton_handler (server, "/tenants/create",
