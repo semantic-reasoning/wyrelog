@@ -307,13 +307,33 @@ def functions(tokens: list[Token], pairing: dict[int, int]):
     return result
 
 
+def containing_function(definitions, index: int):
+    return next(((owner, start, end)
+                 for owner, _name_index, start, end in definitions
+                 if start <= index < end), None)
+
+
+def ownership_call_is_direct_statement(tokens: list[Token],
+                                       body_start: int, index: int,
+                                       closing: int) -> bool:
+    if (index == 0 or closing + 1 >= len(tokens)
+            or tokens[index - 1].value not in {"{", ";"}
+            or tokens[closing + 1].value != ";"):
+        return False
+    depth = 0
+    for token in tokens[body_start:index]:
+        if token.value == "{":
+            depth += 1
+        elif token.value == "}":
+            depth -= 1
+    return depth == 0
+
+
 def ownership_occurrences(tokens: list[Token], pairing: dict[int, int],
                           location_for_line) -> list[OwnershipOccurrence]:
     definitions = functions(tokens, pairing)
     definition_names = {name_index: owner
                         for owner, name_index, _start, _end in definitions}
-    bodies = [(start, end, owner)
-              for owner, _name_index, start, end in definitions]
     result = []
     for index, token in enumerate(tokens):
         if (token.kind != "identifier"
@@ -322,8 +342,8 @@ def ownership_occurrences(tokens: list[Token], pairing: dict[int, int],
         if index in definition_names:
             role = f"definition:{definition_names[index]}"
         else:
-            owner = next((name for start, end, name in bodies
-                          if start <= index < end), "<global>")
+            owner_body = containing_function(definitions, index)
+            owner = owner_body[0] if owner_body is not None else "<global>"
             role = (f"call:{owner}" if index + 1 < len(tokens)
                     and tokens[index + 1].value == "("
                     else f"indirect:{owner}")
@@ -333,6 +353,10 @@ def ownership_occurrences(tokens: list[Token], pairing: dict[int, int],
             closing = pairing.get(index + 1)
             if closing is None:
                 raise GuardError("unparsed ownership call signature")
+            if (owner_body is None or not ownership_call_is_direct_statement(
+                    tokens, owner_body[1], index, closing)):
+                raise GuardError("ownership call is not a direct owner-body "
+                                 "expression statement")
             arguments = canonical_arguments(
                 split_arguments(tokens, index + 1, closing))
         result.append(OwnershipOccurrence(
@@ -574,6 +598,11 @@ def scan_source(path: Path) -> list[Registration]:
             closing = pairing.get(index + 1)
             if closing is None or closing >= end:
                 raise GuardError(f"unparsed registration call in {path}")
+            if not ownership_call_is_direct_statement(
+                    tokens, start, index, closing):
+                raise GuardError("ownership call is not a direct owner-body "
+                                 f"expression statement at {path}:"
+                                 f"{token.line}")
             seen_calls.add(index)
             arguments = split_arguments(tokens, index + 1, closing)
             if token.value == SOUP_API and owner in ownership_owners:
@@ -1112,6 +1141,77 @@ def expanded_occurrence(source: str, physical_line: int, symbol: str,
     return OwnershipOccurrence(source, physical_line, symbol, role, arguments)
 
 
+def preprocessed_project_occurrences(
+        output: str, unit: CompileUnit, root: Path,
+        build_root: Path) -> Counter[OwnershipOccurrence]:
+    marker_pattern = re.compile(
+        r'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+'
+        r'"([^"\r\n]+)"(?:[ \t]+[^\r\n]*)?\r?$')
+    marker_matches = list(marker_pattern.finditer(output))
+    if not marker_matches:
+        raise GuardError("preprocessor output contains no line markers")
+    for candidate in re.finditer(
+            r'(?m)^[ \t]*#[ \t]*(?:line\b|[0-9])[^\r\n]*$', output):
+        if LINE_MARKER.fullmatch(candidate.group(0)) is None:
+            raise GuardError("malformed preprocessor line marker")
+
+    marker_starts = []
+    markers = []
+    unit_label = unit.source.relative_to(root).as_posix()
+    saw_unit = False
+    for match in marker_matches:
+        content_start = match.end()
+        if content_start < len(output) and output[content_start] == "\r":
+            content_start += 1
+        if content_start < len(output) and output[content_start] == "\n":
+            content_start += 1
+        source = canonical_provenance(
+            match.group(2), unit.directory, root, build_root)
+        saw_unit = saw_unit or source == unit_label
+        marker_starts.append(content_start)
+        markers.append((source, int(match.group(1)), match.start()))
+    if not saw_unit:
+        raise GuardError("preprocessor output contains no source marker")
+
+    sensitive_sources = set()
+    sensitive = re.compile(
+        r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
+        r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)")
+    for match in sensitive.finditer(output):
+        marker_index = bisect.bisect_right(marker_starts, match.start()) - 1
+        if marker_index >= 0 and markers[marker_index][0] is not None:
+            sensitive_sources.add(markers[marker_index][0])
+
+    streams: dict[str, list[str]] = {}
+    line_maps: dict[str, list[int]] = {}
+    for index, (source, physical_line, _marker_start) in enumerate(markers):
+        if source not in sensitive_sources:
+            continue
+        content_end = (markers[index + 1][2]
+                       if index + 1 < len(markers) else len(output))
+        fragment = output[marker_starts[index]:content_end]
+        lines = fragment.splitlines()
+        streams.setdefault(source, []).extend(line + "\n" for line in lines)
+        line_maps.setdefault(source, []).extend(
+            physical_line + offset for offset in range(len(lines)))
+
+    result: Counter[OwnershipOccurrence] = Counter()
+    for source, fragments in streams.items():
+        source_text = "".join(fragments)
+        if not any(needle in source_text for needle in (
+                "soup_server_add_", "add_exact_handler",
+                "add_prefix_handler", "add_singleton_handler")):
+            continue
+        tokens = lex(source_text)
+        pairing = mates(tokens)
+        line_map = line_maps[source]
+        result.update(ownership_occurrences(
+            tokens, pairing,
+            lambda line, source=source, line_map=line_map:
+            (source, line_map[line - 1])))
+    return result
+
+
 def preprocessed_ownership_occurrences(
         output: str, unit: CompileUnit, root: Path, build_root: Path,
         raw_roles: dict[tuple[str, int, str], str]) \
@@ -1182,8 +1282,7 @@ def preprocessed_ownership_occurrences(
 
 
 def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
-                    compiler_id: str,
-                    raw_roles: dict[tuple[str, int, str], str]) \
+                    compiler_id: str) \
         -> Counter[OwnershipOccurrence]:
     command = semantic_command(list(unit.arguments), unit.directory,
                                unit.source, compiler_id)
@@ -1210,78 +1309,22 @@ def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
         if not any(alternate in output for alternate in alternates):
             raise GuardError("preprocessor output contains no source marker")
 
-    result: Counter[OwnershipOccurrence] = Counter()
-    visited_lines = set()
-    for needle in ("soup_server_add_", "add_exact_handler",
-                   "add_prefix_handler", "add_singleton_handler"):
-        cursor = 0
-        while True:
-            position = output.find(needle, cursor)
-            if position < 0:
-                break
-            cursor = position + len(needle)
-            line_start = output.rfind("\n", 0, position) + 1
-            if line_start in visited_lines:
-                continue
-            visited_lines.add(line_start)
-            marker_start = line_start
-            marker = None
-            while marker_start > 0:
-                marker_end = marker_start - 1
-                marker_start = output.rfind("\n", 0, marker_end) + 1
-                candidate = output[marker_start:marker_end].rstrip("\r")
-                if candidate.lstrip().startswith("#"):
-                    marker = LINE_MARKER.fullmatch(candidate)
-                    if marker is None and re.match(
-                            r'^[ \t]*#[ \t]*(?:line\b|[0-9])', candidate):
-                        raise GuardError("malformed preprocessor line marker")
-                    if marker is not None:
-                        break
-                if marker_start == 0:
-                    break
-            if marker is None:
-                raise GuardError("ownership output lacks a line marker")
-            source = canonical_provenance(
-                marker.group(2), unit.directory, root, build_root)
-            if source is None:
-                continue
-            physical_line = int(marker.group(1)) + output.count(
-                "\n", marker_end + 1, line_start)
-            line_end = output.find("\n", line_start)
-            if line_end < 0:
-                line_end = len(output)
-            line_text = output[line_start:line_end]
-            tokens = lex(line_text)
-            for index, token in enumerate(tokens):
-                if (token.kind != "identifier"
-                        or OWNERSHIP_API.fullmatch(token.value) is None):
-                    continue
-                key = (source, physical_line, token.value)
-                role = raw_roles.get(key, "expanded-or-unapproved")
-                if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
-                    role = "expanded-or-unapproved"
-                token_position = line_start + token.offset
-                result[expanded_occurrence(
-                    source, physical_line, token.value, role, output,
-                    token_position)] += 1
-    return result
+    if not any(needle in output for needle in (
+            "soup_server_add_", "add_exact_handler",
+            "add_prefix_handler", "add_singleton_handler")):
+        return Counter()
+
+    return preprocessed_project_occurrences(output, unit, root, build_root)
 
 
 def semantic_occurrences(root: Path, build_root: Path,
-                         compiler_id: str, units: list[CompileUnit],
-                         raw: Counter[OwnershipOccurrence]) \
+                         compiler_id: str, units: list[CompileUnit]) \
         -> Counter[OwnershipOccurrence]:
-    raw_roles = {}
-    for occurrence in raw:
-        key = (occurrence.source, occurrence.line, occurrence.symbol)
-        if key in raw_roles and raw_roles[key] != occurrence.role:
-            raise GuardError(f"ambiguous raw ownership role: {key!r}")
-        raw_roles[key] = occurrence.role
     workers = min(8, max(1, len(units)))
     result: Counter[OwnershipOccurrence] = Counter()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(preprocess_unit, unit, root, build_root,
-                                   compiler_id, raw_roles) for unit in units]
+                                   compiler_id) for unit in units]
         for future in futures:
             result.update(future.result())
     return result
@@ -1310,7 +1353,7 @@ def check_semantic_boundary(root: Path, build_root: Path,
     enabled = compile_unit_enabled_features(daemon_unit, compiler_id)
     raw = raw_approved_occurrences(root, build_root)
     expanded = semantic_occurrences(
-        root, build_root, compiler_id, units, raw)
+        root, build_root, compiler_id, units)
     allowed_missing = raw_disabled_feature_occurrences(root, enabled)
     verify_semantic_counters(raw, expanded, allowed_missing)
 
@@ -1399,7 +1442,28 @@ def semantic_fixture_result(root: Path, build_root: Path, source: Path,
         output, unit, root.resolve(), build_root.resolve(), {})
 
 
-def self_test() -> None:
+def self_test_compile_unit(source: Path, root: Path, build_root: Path,
+                           compiler_id: str, compiler: tuple[str, ...],
+                           extra: tuple[str, ...] = ()) -> CompileUnit:
+    output = build_root / "wyrelog" / "daemon" / "http.c.o"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if compiler_id in {"clang-cl", "msvc"}:
+        arguments = (*compiler, *extra, f"/Fo{output}", "/c", str(source))
+    else:
+        arguments = (*compiler, *extra, "-o", str(output), "-c", str(source))
+    return CompileUnit(source.resolve(), root.resolve(), arguments)
+
+
+def self_test_preprocess(source: Path, root: Path, build_root: Path,
+                         compiler_id: str, compiler: tuple[str, ...],
+                         extra: tuple[str, ...] = ()) \
+        -> Counter[OwnershipOccurrence]:
+    unit = self_test_compile_unit(
+        source, root, build_root, compiler_id, compiler, extra)
+    return preprocess_unit(unit, root, build_root, compiler_id)
+
+
+def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
     with tempfile.TemporaryDirectory(prefix="wyl-route-guard-") as temporary:
         root = Path(temporary)
         daemon = root / "wyrelog" / "daemon"
@@ -1563,6 +1627,7 @@ def self_test() -> None:
         approved_health = (
             f'  {EXACT_API} /* registration */ ( server, "/healthz",'
             ' healthz_handler, NULL, NULL );')
+        approved_health_call = approved_health.strip()[:-1]
         paste_macros = (
             "#define CAT_RAW(a,b) a ## b\n"
             "#define CAT(a,b) CAT_RAW(a,b)\n")
@@ -1602,27 +1667,60 @@ def self_test() -> None:
                 paste_macros
                 + f"#define REPLACE(ignored) {macro_expansion}\n")
             mutant = replacement + baseline.replace(
-                approved_health, f"  REPLACE({approved_health.strip()})", 1)
+                approved_health, f"  REPLACE({approved_health_call});", 1)
             source_path.write_text(mutant, encoding="utf-8")
-            check_root(root)
-            raw = raw_approved_occurrences(root, root / "build")
-            target = next(
-                item for item in raw
-                if item.role == f"call:{SERVER_OWNER}"
-                and item.arguments is not None
-                and item.arguments[1] == '"/healthz"')
-            raw_roles = {
-                (item.source, item.line, item.symbol): item.role for item in raw
-            }
-            unit = CompileUnit(source_path.resolve(), root.resolve(), ())
-            output = (f'# 1 "{source_path.resolve()}"\n'
-                      f'# {target.line} "{source_path.resolve()}"\n'
-                      f'{expansion};\n')
-            expanded = preprocessed_ownership_occurrences(
-                output, unit, root, root / "build", raw_roles)
+            expect_failure(root, f"{name} raw macro argument")
+            expanded = self_test_preprocess(
+                source_path, root, root / "build", compiler_id, compiler)
+            expected_health_arguments = (
+                "server", '"/healthz"', "healthz_handler", "NULL", "NULL")
+            if not any(item.symbol == symbol
+                       and item.arguments is not None
+                       and (item.symbol != EXACT_API
+                            or item.arguments != expected_health_arguments)
+                       for item in expanded):
+                raise GuardError(f"real compiler fixture did not expand: {name}")
+
+        control_expansions = {
+            "if false": "if (0) {call}",
+            "if true": "if (1) {call}",
+            "while false": "while (0) {call}",
+            "for false": "for (; 0 ;) {call}",
+            "short circuit": "0 && ({call}, 0)",
+            "sizeof": "sizeof (({call}, 0))",
+            "ternary": "0 ? ({call}, 0) : 0",
+            "comma expression": "(0, {call})",
+            "do wrapper": "do {{ {call}; }} while (0)",
+            "nested consuming macro": "if (1) do {{ {call}; }} while (0)",
+        }
+        emitted = (
+            "CAT(wyl_daemon_http_add_,exact_handler)"
+            "(server,\"/healthz\",healthz_handler,NULL,NULL)")
+        for name, template in control_expansions.items():
+            macro_body = template.format(call=emitted)
+            mutant = (paste_macros
+                      + f"#define REPLACE(ignored) {macro_body}\n"
+                      + baseline.replace(
+                          approved_health,
+                          f"  REPLACE({approved_health_call});", 1))
+            source_path.write_text(mutant, encoding="utf-8")
+            expect_failure(root, f"{name} raw context")
             expect_guard_error(
-                lambda raw=Counter({target: 1}), expanded=expanded:
-                verify_semantic_counters(raw, expanded, Counter()), name)
+                lambda: self_test_preprocess(
+                    source_path, root, root / "build", compiler_id,
+                    compiler), f"{name} expanded context")
+
+        enveloped = ("#define BEFORE if (0) {\n#define AFTER }\n"
+                     + baseline.replace(
+                         server_anchor, server_anchor + "\n  BEFORE;", 1)
+                     .replace(approved_health,
+                              approved_health + "\n  AFTER;", 1))
+        source_path.write_text(enveloped, encoding="utf-8")
+        check_root(root)
+        expect_guard_error(
+            lambda: self_test_preprocess(
+                source_path, root, root / "build", compiler_id, compiler),
+            "expanded control envelope around raw-direct call")
 
         source_path.write_text(baseline, encoding="utf-8")
         raw = raw_approved_occurrences(root, root / "build")
@@ -1662,6 +1760,14 @@ def self_test() -> None:
             root, root / "build", source_path, inner, SOUP_API, "clang-cl")
         if not result:
             raise GuardError("nested angle-header semantic alias accepted")
+        include_args = ((f"/I{daemon}",)
+                        if compiler_id in {"clang-cl", "msvc"}
+                        else ("-I", str(daemon)))
+        real_nested = self_test_preprocess(
+            source_path, root, root / "build", compiler_id, compiler,
+            include_args)
+        if not any(item.symbol == SOUP_API for item in real_nested):
+            raise GuardError("real compiler nested-header alias missed")
         nested.unlink()
         inner.unlink()
 
@@ -1684,6 +1790,23 @@ def self_test() -> None:
         if not any(item.source.startswith("@build/")
                    for item in generated_result):
             raise GuardError("generated-header semantic alias accepted")
+        forced_args = ((f"/FI{forced}",)
+                       if compiler_id in {"clang-cl", "msvc"}
+                       else ("-include", str(forced)))
+        real_forced = self_test_preprocess(
+            source_path, root, root / "build", compiler_id, compiler,
+            forced_args)
+        if not any(item.symbol == SOUP_API for item in real_forced):
+            raise GuardError("real compiler forced-header alias missed")
+        generated_args = ((f"/FI{generated}",)
+                          if compiler_id in {"clang-cl", "msvc"}
+                          else ("-include", str(generated)))
+        real_generated = self_test_preprocess(
+            source_path, root, root / "build", compiler_id, compiler,
+            generated_args)
+        if not any(item.source.startswith("wyrelog/")
+                   and item.symbol == SOUP_API for item in real_generated):
+            raise GuardError("real compiler generated-header alias missed")
         forced.unlink()
 
         gcc_command = semantic_command(
@@ -1758,8 +1881,17 @@ def self_test() -> None:
 
 def main() -> int:
     try:
-        if sys.argv[1:] == ["--self-test"]:
-            self_test()
+        if sys.argv[1:2] == ["--self-test"]:
+            if "--" not in sys.argv[2:]:
+                raise GuardError("self-test requires a real compiler command")
+            separator = sys.argv.index("--", 2)
+            self_parser = argparse.ArgumentParser()
+            self_parser.add_argument("--compiler-id", required=True)
+            self_arguments = self_parser.parse_args(sys.argv[2:separator])
+            compiler = tuple(sys.argv[separator + 1:])
+            if not compiler:
+                raise GuardError("self-test compiler command is empty")
+            self_test(self_arguments.compiler_id, compiler)
             print("OK: daemon HTTP registration guard rejects negative fixtures")
             return 0
         parser = argparse.ArgumentParser()
