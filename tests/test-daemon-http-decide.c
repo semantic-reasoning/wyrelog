@@ -4973,6 +4973,170 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
   return 0;
 }
 
+/*
+ * #744 Wall 2: a tenant created through the real public POST /tenants/create
+ * path is now seeded with session_state(active) + wr.system_admin membership
+ * for the creating admin at <tenant> scope, so the admin can grant a workload
+ * role at <tenant> and a service bearer can then /decide ALLOW there -- the
+ * deny->allow that #382 could not reach on the public path.  Asserts, on ONE
+ * real server/handle:
+ *   1. create fresh tenant (admin bearer) fires the seed;
+ *   2. grant the service its workload role at <tenant> (200) -- exercises the
+ *      seeded authority anchor (without the seed this decide DENIES 403);
+ *   3. service bearer /decide at <tenant> -> decision:1 (deny->allow);
+ *   4. cross-scope: same bearer, datalog scope __wr_default -> decision:0
+ *      (the grant at <tenant> confers nothing at another scope);
+ *   5. seal <tenant> -> same decide -> 400 tenant_sealed (the upstream
+ *      tenant-active gate beats the seeded session_state).
+ */
+static gboolean seed_management_human_access_token (SoupServer * server,
+    const gchar * session_id, const gchar * subject, gchar ** out_access_token);
+static gint send_raw_service_principal_bearer (SoupSession * session,
+    const gchar * method, const gchar * base_url, const gchar * path,
+    const gchar * query, const gchar * access_token, const gchar * body,
+    guint * out_status, gchar ** out_body);
+
+static gint
+check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
+    const gchar *base_url)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  if (handle == NULL)
+    return 4620;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return 4621;
+
+  const gchar *fresh = "wl744-fresh";
+  const gchar *admin = "fresh-tenant-admin";
+  const gchar *svc = "svc:resolver:test";
+  /* A non-"wr." role id: the reserved catalog namespace rejects upserts. */
+  const gchar *role = "wl744-agent";
+  /* Service-eligible: its only permission is an approved data-plane read. */
+  const gchar *perm = "wr.svc.read_decision";
+
+  /* An MFA human admin bearer at __wr_default. */
+  wyl_id_t admin_sid_value = WYL_ID_NIL;
+  gchar admin_session[WYL_ID_STRING_BUF] = { 0 };
+  g_autofree gchar *admin_token = NULL;
+  if (wyl_id_new (&admin_sid_value) != WYRELOG_E_OK
+      || wyl_id_format (&admin_sid_value, admin_session, sizeof admin_session)
+      != WYRELOG_E_OK
+      || !seed_management_human_access_token (server, admin_session, admin,
+          &admin_token))
+    return 4622;
+
+  /* Give the admin authority to CREATE a tenant: wr.system_admin carries
+   * wr.tenant.manage; wr.tenant.manage is unguarded so it arms via perm_state,
+   * and __wr_default needs the session anchor + authenticated principal. */
+  if (wyl_policy_store_grant_role_membership (store, admin, "wr.system_admin",
+          WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, admin, "authenticated")
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, admin,
+          "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK)
+    return 4623;
+  /* A service-eligible workload role that maps to the approved read perm. */
+  if (wyl_policy_store_upsert_permission (store, perm, "service decision read",
+          "basic") != WYRELOG_E_OK
+      || wyl_policy_store_upsert_role (store, role, "wl744 agent")
+      != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, role, perm)
+      != WYRELOG_E_OK || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 4624;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /* (1) Create the fresh tenant through the real public path so the seed
+   * fires. */
+  g_autofree gchar *create_query = g_strdup_printf ("name=%s&guard_timestamp=1"
+      "&guard_loc_class=trusted&guard_risk=0", fresh);
+  gint rc = send_raw_service_principal_bearer (session, "POST", base_url,
+      "/tenants/create", create_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+    return 4626;
+  g_clear_pointer (&body, g_free);
+
+  /* The validated service bearer for <tenant> (injects principal_state). The
+   * tenant must already exist/be active for the resolver to bind it. */
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (!service_resolver_fixture_init_tenant (server, &fixture,
+          WYL_SERVICE_AUTH_ACTIVE, 0, fresh)
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+    return 4625;
+
+  /* (2) Grant the service its workload role at <tenant> using the creating
+   * admin's session.  This authorizes ONLY because the create seeded
+   * wr.system_admin + session_state(active) for the admin at <tenant>; without
+   * the seed the wr.policy.grant_role decide at <tenant> DENIES (403). */
+  g_autofree gchar *grant_query = g_strdup_printf ("subject=%s&role=%s&scope=%s"
+      "&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", svc, role,
+      fresh);
+  rc = send_raw_service_principal_bearer (session, "POST", base_url,
+      "/policy/roles/grant", grant_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 4628;
+  g_clear_pointer (&body, g_free);
+
+  /* Make the store-durable role membership + role_permission visible to the
+   * read engine. */
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 4629;
+
+  /* Arm the service's workload perm at <tenant>.  A service subject cannot
+   * hold a durable perm_state row (the store rejects svc:), so inject the
+   * armed fact straight into the read engine -- it persists until the next
+   * reload, which spans the allow-decide window below. */
+  if (insert_symbol_row4 (handle, "perm_state", svc, perm, fresh, "armed")
+      != WYRELOG_E_OK)
+    return 4627;
+
+  /* (3) The service bearer now decides ALLOW at <tenant>: the seeded
+   * session_state(active) is what makes <tenant> a valid decision scope. */
+  g_autofree gchar *fresh_tenant_query = g_strdup_printf ("tenant=%s", fresh);
+  rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,
+      fresh_tenant_query, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"decision\":1") == NULL)
+    return 4630;
+  g_clear_pointer (&body, g_free);
+
+  /* (4) Cross-scope isolation: the SAME bearer at datalog scope __wr_default
+   * has no membership there, so the grant at <tenant> confers nothing.  Keep
+   * the request tenant at <tenant> so the request-tenant gate still passes. */
+  rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm,
+      WYL_TENANT_DEFAULT, fresh_tenant_query, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"decision\":0") == NULL)
+    return 4631;
+  g_clear_pointer (&body, g_free);
+
+  /* (5) Seal <tenant>: the upstream tenant-active gate returns 400 before any
+   * datalog runs, even though session_state(active) is still seeded. */
+  if (wyl_policy_store_set_tenant_sealed (store, fresh, TRUE) != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 4632;
+  rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,
+      fresh_tenant_query, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "tenant_sealed") == NULL)
+    return 4633;
+  g_clear_pointer (&body, g_free);
+
+  return 0;
+}
+
 static gchar *
 extract_json_string (const gchar *body, const gchar *name)
 {
@@ -18478,6 +18642,12 @@ main (void)
       base_url);
   if (service_decide_rc != 0) {
     result = service_decide_rc;
+    goto cleanup;
+  }
+  gint fresh_tenant_rc =
+      check_fresh_tenant_activation_grants_and_decides (http.server, base_url);
+  if (fresh_tenant_rc != 0) {
+    result = fresh_tenant_rc;
     goto cleanup;
   }
 #ifdef WYL_HAS_AUDIT
