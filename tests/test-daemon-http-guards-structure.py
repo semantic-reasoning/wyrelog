@@ -21,6 +21,8 @@ FACT = "fact"
 
 # (method, public path pattern, owning feature, terminal handler)
 CANONICAL_ROUTES = (
+    ("POST", "/service-management-authority/arm", BASE,
+     "service_management_authority_arm_handler"),
     ("POST", "/service-principals", BASE, "service_principal_create_handler"),
     ("GET", "/service-principals", BASE, "service_principal_list_handler"),
     ("POST", "/service-principals/{subject}/disable", BASE,
@@ -86,10 +88,10 @@ if len(route_keys) != len(set(route_keys)):
     fail("duplicate method/path in canonical public route manifest")
 
 expected_matrix = {
-    frozenset(): 8,
-    frozenset((AUDIT,)): 9,
-    frozenset((FACT,)): 11,
-    frozenset((AUDIT, FACT)): 12,
+    frozenset(): 9,
+    frozenset((AUDIT,)): 10,
+    frozenset((FACT,)): 12,
+    frozenset((AUDIT, FACT)): 13,
 }
 for enabled, expected_count in expected_matrix.items():
     actual = [route for route in CANONICAL_ROUTES
@@ -119,6 +121,9 @@ expected_registrations = [
      "service_principal_management_handler"),
     ("soup_server_add_handler", "/service-credentials",
      "service_credential_management_handler"),
+    ("wyl_daemon_http_add_exact_handler",
+     "/service-management-authority/arm",
+     "service_management_authority_arm_handler"),
     ("wyl_daemon_http_add_exact_handler", "/service-credential-operations",
      "service_credential_operation_status_handler"),
     ("wyl_daemon_http_add_exact_handler",
@@ -239,6 +244,7 @@ assert_contains(credential_classifier,
                 "WYL_SERVICE_CREDENTIAL_ROUTE_UNKNOWN")
 
 terminal_methods = {
+    "service_management_authority_arm_handler": "POST",
     "service_principal_create_handler": "POST",
     "service_principal_list_handler": "GET",
     "service_principal_disable_handler": "POST",

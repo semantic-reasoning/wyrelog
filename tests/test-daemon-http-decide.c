@@ -12436,6 +12436,288 @@ replay_retirement_response (ServiceDenialEnv *env, const gchar *method,
   return TRUE;
 }
 
+/* #729: the self-arm route (POST /service-management-authority/arm) lets a
+ * live MFA SYSTEM admin arm the two service-management permissions at ITS OWN
+ * session, with no store-seam pre-arming. Covers the happy path (self-arm ->
+ * management verbs authorize), the un-armed regression, durable arming, and
+ * post-logout inertness. */
+static gint
+check_service_management_self_arm_end_to_end (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  /* Eligibility is carried by the wr.system_admin role (SoD), never a direct
+   * grant of the manage permissions. The session_state("__wr_default","active")
+   * anchor is what a real daemon's bootstrap-admin provisioning
+   * (wyl_policy_store_apply_bootstrap_admin) seeds; mirror that here so the
+   * eligibility decide at __wr_default can be satisfied. */
+  if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
+          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2700;
+  }
+
+  const gchar *create_body =
+      "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"Worker\"}";
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /* (b) Without self-arm the management verb is denied. */
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-principals", env.query, env.access_token, create_body,
+          &status, &body) != 0 || status != 403) {
+    service_denial_env_clear (&env);
+    return 2701;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* (a) Self-arm at the caller's own session. */
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          "{}", &status, &body) != 0 || status != 200) {
+    service_denial_env_clear (&env);
+    return 2702;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* Both management permissions are durably armed at the caller's session. */
+  gboolean armed_p = FALSE;
+  gboolean armed_c = FALSE;
+  if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
+          "wr.service_principal.manage", env.session_token, "armed", &armed_p)
+      != WYRELOG_E_OK || !armed_p
+      || wyl_policy_store_permission_state_is (store, "human-principal-admin",
+          "wr.service_credential.manage", env.session_token, "armed", &armed_c)
+      != WYRELOG_E_OK || !armed_c) {
+    service_denial_env_clear (&env);
+    return 2703;
+  }
+
+  /* create (wr.service_principal.manage) now authorizes. */
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-principals", env.query, env.access_token, create_body,
+          &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL) {
+    service_denial_env_clear (&env);
+    return 2704;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* issue (wr.service_credential.manage) now authorizes and delivers. */
+  const gchar *issue_body =
+      "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"111111111111111111111111111\","
+      "\"destination\":\"issue.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-principals/svc:tenant-a:worker/credentials",
+          env.tenant_query, env.access_token, issue_body, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"delivered\":true") == NULL) {
+    service_denial_env_clear (&env);
+    return 2705;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* (e) Post-logout inertness: revoke the human session; the management verb
+   * no longer authorizes though the perm_state rows persist. */
+  wyl_daemon_http_revoke_human_session_for_test (env.http.server,
+      env.session_token);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-principals", env.query, env.access_token,
+          "{\"subject_id\":\"svc:tenant-a:worker2\",\"display_name\":\"W2\"}",
+          &status, &body) != 0 || (status != 403 && status != 401)) {
+    service_denial_env_clear (&env);
+    return 2706;
+  }
+  g_clear_pointer (&body, g_free);
+
+  gboolean still_armed = FALSE;
+  if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
+          "wr.service_principal.manage", env.session_token, "armed",
+          &still_armed) != WYRELOG_E_OK || !still_armed) {
+    service_denial_env_clear (&env);
+    return 2707;
+  }
+
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+/* #729: front-door and eligibility rejections for the self-arm route. */
+static gint
+check_service_management_self_arm_rejections (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /* Seed the __wr_default session anchor so the SoD denial below is
+   * attributable to the missing wr.system_admin role, not a missing anchor. */
+  if (wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT, "active")
+      != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2709;
+  }
+
+  /* (f) SoD: before promotion the admin lacks wr.service.self_authorize, so
+   * the eligibility decide denies the self-arm. */
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          "{}", &status, &body) != 0 || status != 403) {
+    service_denial_env_clear (&env);
+    return 2710;
+  }
+  g_clear_pointer (&body, g_free);
+
+  if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
+          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2711;
+  }
+
+  /* (d) Non-POST -> 405. */
+  if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          NULL, &status, &body) != 0 || status != 405) {
+    service_denial_env_clear (&env);
+    return 2712;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* (d) Missing guard triple -> 400. */
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", "foo=bar", env.access_token,
+          "{}", &status, &body) != 0 || status != 400) {
+    service_denial_env_clear (&env);
+    return 2713;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* (d) Invalid guard (risk out of range) -> 400. */
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm",
+          "guard_timestamp=1&guard_loc_class=trusted&guard_risk=200",
+          env.access_token, "{}", &status, &body) != 0 || status != 400) {
+    service_denial_env_clear (&env);
+    return 2714;
+  }
+  g_clear_pointer (&body, g_free);
+
+  /* (d) A live but NON-MFA session for the same eligible admin cannot
+   * self-arm: the human+MFA gate denies. */
+  {
+    wyl_id_t nonmfa_id = WYL_ID_NIL;
+    gchar nonmfa_session[WYL_ID_STRING_BUF] = { 0 };
+    g_autofree gchar *nonmfa_access = NULL;
+    g_autofree gchar *nonmfa_refresh = NULL;
+    if (wyl_id_new (&nonmfa_id) != WYRELOG_E_OK
+        || wyl_id_format (&nonmfa_id, nonmfa_session, sizeof nonmfa_session)
+        != WYRELOG_E_OK
+        || !seed_human_tokens_with_assurance (env.http.server, nonmfa_session,
+            "human-principal-admin", WYL_TENANT_DEFAULT, FALSE, &nonmfa_access,
+            &nonmfa_refresh)) {
+      service_denial_env_clear (&env);
+      return 2715;
+    }
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+            "/service-management-authority/arm", env.query, nonmfa_access,
+            "{}", &status, &body) != 0 || status != 403) {
+      service_denial_env_clear (&env);
+      return 2716;
+    }
+    g_clear_pointer (&body, g_free);
+  }
+
+  /* Every failed attempt left the authority un-armed. */
+  gboolean armed = TRUE;
+  if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
+          "wr.service_principal.manage", env.session_token, "armed", &armed)
+      != WYRELOG_E_OK || armed) {
+    service_denial_env_clear (&env);
+    return 2717;
+  }
+
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+/* #729: the route arms auth.session_id for auth.actor ONLY -- attacker-supplied
+ * scope/subject query params are ignored. */
+static gint
+check_service_management_self_arm_scopes_to_session (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
+          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2720;
+  }
+
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  const gchar *steer_query =
+      "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0"
+      "&scope=attacker-scope&subject=svc:tenant-a:evil";
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", steer_query, env.access_token,
+          "{}", &status, &body) != 0 || status != 200) {
+    service_denial_env_clear (&env);
+    return 2721;
+  }
+  g_clear_pointer (&body, g_free);
+
+  gboolean armed_self = FALSE;
+  gboolean armed_injected_scope = TRUE;
+  if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
+          "wr.service_principal.manage", env.session_token, "armed",
+          &armed_self) != WYRELOG_E_OK || !armed_self
+      || wyl_policy_store_permission_state_is (store, "human-principal-admin",
+          "wr.service_principal.manage", "attacker-scope", "armed",
+          &armed_injected_scope) != WYRELOG_E_OK || armed_injected_scope) {
+    service_denial_env_clear (&env);
+    return 2722;
+  }
+  /* The injected service-prefix subject holds no authority: the store rejects
+   * or has no armed row for it. */
+  gboolean armed_injected_subject = TRUE;
+  wyrelog_error_t subj_rc = wyl_policy_store_permission_state_is (store,
+      "svc:tenant-a:evil", "wr.service_principal.manage", "attacker-scope",
+      "armed", &armed_injected_subject);
+  if (subj_rc == WYRELOG_E_OK && armed_injected_subject) {
+    service_denial_env_clear (&env);
+    return 2723;
+  }
+
+  service_denial_env_clear (&env);
+  return 0;
+}
+
 static gint
 check_retirement_response_loss_restart_contract (void)
 {
@@ -14768,6 +15050,22 @@ main (void)
   gint inactive_denied_rc = check_service_management_inactive_session_denied ();
   if (inactive_denied_rc != 0) {
     result = inactive_denied_rc;
+    goto cleanup;
+  }
+  gint self_arm_e2e_rc = check_service_management_self_arm_end_to_end ();
+  if (self_arm_e2e_rc != 0) {
+    result = self_arm_e2e_rc;
+    goto cleanup;
+  }
+  gint self_arm_reject_rc = check_service_management_self_arm_rejections ();
+  if (self_arm_reject_rc != 0) {
+    result = self_arm_reject_rc;
+    goto cleanup;
+  }
+  gint self_arm_scope_rc =
+      check_service_management_self_arm_scopes_to_session ();
+  if (self_arm_scope_rc != 0) {
+    result = self_arm_scope_rc;
     goto cleanup;
   }
   gint caller_matrix_rc = check_service_management_caller_and_refresh_matrix ();
