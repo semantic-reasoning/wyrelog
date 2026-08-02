@@ -4973,6 +4973,64 @@ set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+/* soup_server_add_handler() owns a path prefix, even when callers intend to
+ * register a singleton resource.  Keep the exact-path check in one reusable
+ * adapter so terminal handlers can never observe a trailing or deeper alias.
+ * The adapter owns only its registration record; user_data ownership follows
+ * the same destroy-notify contract as soup_server_add_handler(). */
+typedef struct
+{
+  gchar *canonical_path;
+  SoupServerCallback callback;
+  gpointer user_data;
+  GDestroyNotify user_data_destroy;
+} WylDaemonHttpExactHandler;
+
+static void
+wyl_daemon_http_exact_handler_free (gpointer data)
+{
+  WylDaemonHttpExactHandler *exact = data;
+  if (exact == NULL)
+    return;
+  if (exact->user_data_destroy != NULL)
+    exact->user_data_destroy (exact->user_data);
+  g_free (exact->canonical_path);
+  g_free (exact);
+}
+
+static void
+wyl_daemon_http_exact_handler_dispatch (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  WylDaemonHttpExactHandler *exact = user_data;
+  if (exact == NULL || g_strcmp0 (path, exact->canonical_path) != 0) {
+    set_json_error (msg, 404, "not_found");
+    return;
+  }
+  exact->callback (server, msg, path, query, exact->user_data);
+}
+
+static void
+wyl_daemon_http_add_exact_handler (SoupServer *server,
+    const gchar *canonical_path, SoupServerCallback callback,
+    gpointer user_data, GDestroyNotify user_data_destroy)
+{
+  g_return_if_fail (SOUP_IS_SERVER (server));
+  g_return_if_fail (canonical_path != NULL);
+  g_return_if_fail (canonical_path[0] == '/');
+  g_return_if_fail (callback != NULL);
+
+  WylDaemonHttpExactHandler *exact = g_new0 (WylDaemonHttpExactHandler, 1);
+  exact->canonical_path = g_strdup (canonical_path);
+  exact->callback = callback;
+  exact->user_data = user_data;
+  exact->user_data_destroy = user_data_destroy;
+  soup_server_add_handler (server, canonical_path,
+      wyl_daemon_http_exact_handler_dispatch, exact,
+      wyl_daemon_http_exact_handler_free);
+}
+
 static gboolean
 wants_json_format (GHashTable *query)
 {
@@ -6667,6 +6725,53 @@ wyl_daemon_http_strip_route_prefix (const char *path, const char *prefix)
   return rest;
 }
 
+typedef enum
+{
+  WYL_SERVICE_PRINCIPAL_ROUTE_UNKNOWN = 0,
+  WYL_SERVICE_PRINCIPAL_ROUTE_COLLECTION,
+  WYL_SERVICE_PRINCIPAL_ROUTE_DISABLE,
+  WYL_SERVICE_PRINCIPAL_ROUTE_CREDENTIALS,
+} WylServicePrincipalRoute;
+
+static WylServicePrincipalRoute
+service_principal_route_classify (const gchar *path)
+{
+  if (g_strcmp0 (path, "") == 0)
+    return WYL_SERVICE_PRINCIPAL_ROUTE_COLLECTION;
+  if (path == NULL || path[0] != '/' || path[1] == '\0')
+    return WYL_SERVICE_PRINCIPAL_ROUTE_UNKNOWN;
+
+  const gchar *tail = strchr (path + 1, '/');
+  if (tail == NULL || tail == path + 1)
+    return WYL_SERVICE_PRINCIPAL_ROUTE_UNKNOWN;
+  if (g_strcmp0 (tail, "/disable") == 0)
+    return WYL_SERVICE_PRINCIPAL_ROUTE_DISABLE;
+  if (g_strcmp0 (tail, "/credentials") == 0)
+    return WYL_SERVICE_PRINCIPAL_ROUTE_CREDENTIALS;
+  return WYL_SERVICE_PRINCIPAL_ROUTE_UNKNOWN;
+}
+
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_ROUTE_UNKNOWN = 0,
+  WYL_SERVICE_CREDENTIAL_ROUTE_ITEM,
+  WYL_SERVICE_CREDENTIAL_ROUTE_ROTATE,
+} WylServiceCredentialRoute;
+
+static WylServiceCredentialRoute
+service_credential_route_classify (const gchar *path)
+{
+  if (path == NULL || path[0] != '/' || path[1] == '\0')
+    return WYL_SERVICE_CREDENTIAL_ROUTE_UNKNOWN;
+
+  const gchar *tail = strchr (path + 1, '/');
+  if (tail == NULL)
+    return WYL_SERVICE_CREDENTIAL_ROUTE_ITEM;
+  if (tail != path + 1 && g_strcmp0 (tail, "/rotate") == 0)
+    return WYL_SERVICE_CREDENTIAL_ROUTE_ROTATE;
+  return WYL_SERVICE_CREDENTIAL_ROUTE_UNKNOWN;
+}
+
 static void
 service_credential_management_handler (SoupServer *server,
     SoupServerMessage *msg, const char *path, GHashTable *query,
@@ -6681,21 +6786,29 @@ service_credential_management_handler (SoupServer *server,
     set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
-  /* path is provably non-NULL past the guard above. */
-  if (path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
-    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+  WylServiceCredentialRoute route = service_credential_route_classify (path);
+  if (route == WYL_SERVICE_CREDENTIAL_ROUTE_UNKNOWN) {
+    set_json_error (msg, 404, "not_found");
     return;
   }
-  if (g_strcmp0 (soup_server_message_get_method (msg), "DELETE") == 0) {
+
+  const gchar *method = soup_server_message_get_method (msg);
+  if (route == WYL_SERVICE_CREDENTIAL_ROUTE_ITEM
+      && g_strcmp0 (method, "GET") == 0) {
+    service_credential_get_handler (server, msg, path, query, user_data);
+    return;
+  }
+  if (route == WYL_SERVICE_CREDENTIAL_ROUTE_ITEM
+      && g_strcmp0 (method, "DELETE") == 0) {
     service_credential_revoke_handler (server, msg, path, query, user_data);
     return;
   }
-  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0
-      && g_str_has_suffix (path, "/rotate")) {
+  if (route == WYL_SERVICE_CREDENTIAL_ROUTE_ROTATE
+      && g_strcmp0 (method, "POST") == 0) {
     service_credential_rotate_handler (server, msg, path, query, user_data);
     return;
   }
-  service_credential_get_handler (server, msg, path, query, user_data);
+  set_json_error (msg, 405, "method_not_allowed");
 }
 
 static void
@@ -7007,13 +7120,19 @@ service_principal_management_handler (SoupServer *server,
     set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
     return;
   }
-  /* path is provably non-NULL past the guard above. */
-  if (path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
-    if (g_strcmp0 (soup_server_message_get_method (msg), "GET") == 0) {
+  WylServicePrincipalRoute route = service_principal_route_classify (path);
+  if (route == WYL_SERVICE_PRINCIPAL_ROUTE_UNKNOWN) {
+    set_json_error (msg, 404, "not_found");
+    return;
+  }
+
+  const gchar *method = soup_server_message_get_method (msg);
+  if (route == WYL_SERVICE_PRINCIPAL_ROUTE_COLLECTION) {
+    if (g_strcmp0 (method, "GET") == 0) {
       service_principal_list_handler (server, msg, path, query, user_data);
       return;
     }
-    if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0) {
+    if (g_strcmp0 (method, "POST") == 0) {
       service_principal_create_handler (server, msg, path, query, user_data);
       return;
     }
@@ -7021,25 +7140,25 @@ service_principal_management_handler (SoupServer *server,
     return;
   }
 
-  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0
-      && g_str_has_suffix (path, "/disable")) {
+  if (route == WYL_SERVICE_PRINCIPAL_ROUTE_DISABLE
+      && g_strcmp0 (method, "POST") == 0) {
     service_principal_disable_handler (server, msg, path, query, user_data);
     return;
   }
 
-  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") == 0
-      && g_str_has_suffix (path, "/credentials")) {
+  if (route == WYL_SERVICE_PRINCIPAL_ROUTE_CREDENTIALS
+      && g_strcmp0 (method, "GET") == 0) {
     service_credential_list_handler (server, msg, path, query, user_data);
     return;
   }
 
-  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0
-      && g_str_has_suffix (path, "/credentials")) {
+  if (route == WYL_SERVICE_PRINCIPAL_ROUTE_CREDENTIALS
+      && g_strcmp0 (method, "POST") == 0) {
     service_credential_issue_handler (server, msg, path, query, user_data);
     return;
   }
 
-  set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+  set_json_error (msg, 405, "method_not_allowed");
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -11885,15 +12004,18 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/service-credentials",
       service_credential_management_handler, ctx, NULL);
 #ifdef WYL_HAS_FACT_STORE
-  soup_server_add_handler (server, "/service-credential-operations",
+  wyl_daemon_http_add_exact_handler (server,
+      "/service-credential-operations",
       service_credential_operation_status_handler, ctx, NULL);
-  soup_server_add_handler (server, "/service-credential-operations/reconcile",
+  wyl_daemon_http_add_exact_handler (server,
+      "/service-credential-operations/reconcile",
       service_credential_operation_reconcile_handler, ctx, NULL);
-  soup_server_add_handler (server, "/service-credential-operations/recover",
+  wyl_daemon_http_add_exact_handler (server,
+      "/service-credential-operations/recover",
       service_credential_operation_recover_handler, ctx, NULL);
 #endif
 #ifdef WYL_HAS_AUDIT
-  soup_server_add_handler (server, "/auth/service-token",
+  wyl_daemon_http_add_exact_handler (server, "/auth/service-token",
       service_token_exchange_http_handler, ctx, NULL);
 #endif
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {

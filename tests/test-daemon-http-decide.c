@@ -514,9 +514,9 @@ build_decide_uri (const gchar *base_url, const gchar *user, const gchar *perm,
 }
 
 static gint
-send_raw_path (SoupSession *session, const gchar *method,
-    const gchar *base_url, const gchar *path, guint *out_status,
-    gchar **out_body)
+send_raw_path_probe (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *authorization,
+    const gchar *request_body, guint *out_status, gchar **out_body)
 {
   if (out_status == NULL || out_body == NULL)
     return 1900;
@@ -530,6 +530,16 @@ send_raw_path (SoupSession *session, const gchar *method,
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 1901;
+  if (authorization != NULL) {
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+        "Authorization", authorization);
+  }
+  if (request_body != NULL) {
+    g_autoptr (GBytes) request_bytes = g_bytes_new_static (request_body,
+        strlen (request_body));
+    soup_message_set_request_body_from_bytes (msg, "application/json",
+        request_bytes);
+  }
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
@@ -545,6 +555,15 @@ send_raw_path (SoupSession *session, const gchar *method,
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (body_data, body_size);
   return 0;
+}
+
+static gint
+send_raw_path (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, guint *out_status,
+    gchar **out_body)
+{
+  return send_raw_path_probe (session, method, base_url, path, NULL, NULL,
+      out_status, out_body);
 }
 
 static gint
@@ -625,16 +644,14 @@ check_service_management_route_prefix_contract (const gchar *base_url)
   g_clear_pointer (&body, g_free);
 
   /*
-   * A bare POST /service-credentials must be rejected by the dispatcher base
-   * check with 400 invalid_service_credential_request. The pre-strip bug
-   * misrouted it to the single-credential get handler, which answered 405
-   * method_not_allowed because the method was not GET.
+   * A bare POST /service-credentials has no canonical template and must be
+   * rejected by the path classifier with the generic 404 before method or
+   * terminal-handler selection.
    */
   if (send_raw_path (session, "POST", base_url, "/service-credentials",
           &status, &body) != 0)
     return 2202;
-  if (status != 400
-      || strstr (body, "\"invalid_service_credential_request\"") == NULL)
+  if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 2203;
   g_clear_pointer (&body, g_free);
 
@@ -645,16 +662,13 @@ check_service_management_route_prefix_contract (const gchar *base_url)
    * sub-handler. This exercises the strip's rest[0] == '/' branch, distinct
    * from the bare-prefix (rest[0] == '\0') cases proven above.
    *
-   * GET /service-credentials/ must hit the dispatcher base check and return
-   * 400 invalid_service_credential_request. Pre-strip the full path was not
-   * "/" so it fell through to the single-credential get handler, which
-   * authenticates first and answered 401 service_credential_auth_required.
+   * GET /service-credentials/ is a trailing alias, not a credential item, and
+   * must return the generic path-shape 404 before authentication.
    */
   if (send_raw_path (session, "GET", base_url, "/service-credentials/",
           &status, &body) != 0)
     return 2204;
-  if (status != 400
-      || strstr (body, "\"invalid_service_credential_request\"") == NULL)
+  if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 2205;
   g_clear_pointer (&body, g_free);
 
@@ -678,19 +692,169 @@ check_service_management_route_prefix_contract (const gchar *base_url)
   g_clear_pointer (&body, g_free);
 
   /*
-   * GET /service-principals/ must strip to "/" and reach the base list
-   * handler, which rejects the unauthenticated request with 401
-   * service_principal_auth_required. Pre-strip the full path matched no
-   * dispatcher branch and fell through to the 404
-   * invalid_service_principal_request tail.
+   * GET /service-principals/ is not the canonical collection path. It must be
+   * classified as a trailing alias and return generic 404 before auth.
    */
   if (send_raw_path (session, "GET", base_url, "/service-principals/",
           &status, &body) != 0)
     return 2208;
-  if (status != 401
-      || strstr (body, "\"service_principal_auth_required\"") == NULL)
+  if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 2209;
 
+  return 0;
+}
+
+typedef struct
+{
+  const gchar *method;
+  const gchar *canonical_path;
+  guint canonical_status;
+  const gchar *canonical_error;
+  const gchar *alias_path;
+} ServiceRouteShapeCase;
+
+/* Drive every enabled Service Credential method/template through the real
+ * Soup listener.  Canonical wrong methods must stop at 405; canonical allowed
+ * methods must reach their existing semantic/authentication contract; and a
+ * malformed shape must remain the same generic 404 despite changing method,
+ * Authorization, query, and body inputs. */
+static gint
+check_service_route_shape_matrix (const gchar *base_url)
+{
+  static const ServiceRouteShapeCase cases[] = {
+    {"POST", "/service-principals", 401,
+        "service_principal_auth_required", "/service-principals/"},
+    {"GET", "/service-principals", 401,
+        "service_principal_auth_required", "/service-principals//"},
+    {"POST", "/service-principals/svc:shape:worker/disable", 401,
+          "service_principal_auth_required",
+        "/service-principals//disable?tenant=invalid"},
+    {"POST", "/service-principals/svc:shape:worker/credentials", 401,
+          "service_credential_auth_required",
+        "/service-principals/svc:shape:worker/credentials/x"},
+    {"GET", "/service-principals/svc:shape:worker/credentials", 401,
+          "service_credential_auth_required",
+        "/service-principals/svc:shape/worker/credentials"},
+    {"GET", "/service-credentials/wlc_000000000000000000000000000", 401,
+        "service_credential_auth_required", "/service-credentials/item/"},
+    {"POST", "/service-credentials/wlc_000000000000000000000000000/rotate",
+          401, "service_credential_auth_required",
+        "/service-credentials/item/part/rotate"},
+    {"DELETE", "/service-credentials/wlc_000000000000000000000000000",
+          401, "service_credential_auth_required",
+        "/service-credentials/item/rotate/x"},
+#ifdef WYL_HAS_AUDIT
+    {"POST", "/auth/service-token", 400, "invalid_service_token_request",
+        "/auth/service-token/x?tenant=invalid"},
+#endif
+#ifdef WYL_HAS_FACT_STORE
+    {"GET", "/service-credential-operations", 401,
+          "service_credential_operation_status_auth_required",
+        "/service-credential-operations/"},
+    {"POST", "/service-credential-operations/reconcile", 401,
+          "service_credential_operation_reconcile_auth_required",
+        "/service-credential-operations/reconcile/x"},
+    {"POST", "/service-credential-operations/recover", 401,
+          "service_credential_operation_recover_auth_required",
+        "/service-credential-operations/recover/"},
+#endif
+  };
+#if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const gsize expected_count = 12;
+#elif defined(WYL_HAS_FACT_STORE)
+  const gsize expected_count = 11;
+#elif defined(WYL_HAS_AUDIT)
+  const gsize expected_count = 9;
+#else
+  const gsize expected_count = 8;
+#endif
+  if (G_N_ELEMENTS (cases) != expected_count)
+    return 2210;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  const gchar *generic_not_found = "{\"error\":\"not_found\"}";
+  const gchar *poison_body =
+      "{\"credential_secret\":\"must-not-be-parsed\",\"version\":false}";
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    const ServiceRouteShapeCase *test = &cases[i];
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+
+    if (send_raw_path_probe (session, "PATCH", base_url,
+            test->canonical_path, "Bearer malformed-control", poison_body,
+            &status, &body) != 0
+        || status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+      return 2211 + (gint) i *4;
+
+    g_clear_pointer (&body, g_free);
+    if (send_raw_path (session, test->method, base_url, test->canonical_path,
+            &status, &body) != 0
+        || status != test->canonical_status
+        || strstr (body, test->canonical_error) == NULL)
+      return 2212 + (gint) i *4;
+
+    g_clear_pointer (&body, g_free);
+    if (send_raw_path_probe (session, test->method, base_url,
+            test->alias_path, "Bearer malformed-alias", poison_body,
+            &status, &body) != 0
+        || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
+      return 2213 + (gint) i *4;
+
+    g_clear_pointer (&body, g_free);
+    if (send_raw_path_probe (session, "PATCH", base_url, test->alias_path,
+            NULL, NULL, &status, &body) != 0
+        || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
+      return 2214 + (gint) i *4;
+  }
+
+  /* Explicit suffix collisions complement the per-template trailing, deeper,
+   * and doubled-separator cases above. */
+  static const gchar *suffix_collisions[] = {
+    "/service-principals/svc:shape:worker/credentialsx",
+    "/service-principals/svc:shape:worker/disablex",
+    "/service-credentials/item/rotatex",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (suffix_collisions); i++) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_path_probe (session, "POST", base_url,
+            suffix_collisions[i], "Bearer malformed-suffix", poison_body,
+            &status, &body) != 0
+        || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
+      return 2260 + (gint) i;
+  }
+
+  /* libsoup must not turn an encoded separator into authority for a path the
+   * caller did not spell canonically. Cover encoded trailing, doubled,
+   * deeper, and suffix-collision shapes through the real URI parser. Ordinary
+   * percent normalization of unreserved bytes is intentionally out of scope. */
+  static const gchar *encoded_separator_aliases[] = {
+    "/service-principals%2F",
+    "/service-principals%2F%2Fdisable",
+    "/service-principals/svc:shape%2Fworker/disable",
+    "/service-principals/svc:shape:worker/credentials%2Fx",
+    "/service-principals/svc:shape:worker%2Fcredentialsx",
+    "/service-credentials/item%2Fpart%2Frotate",
+    "/service-credentials/item%2Frotate%2Fx",
+    "/service-credentials/item%2Frotatex",
+#ifdef WYL_HAS_AUDIT
+    "/auth/service-token%2Fx",
+#endif
+#ifdef WYL_HAS_FACT_STORE
+    "/service-credential-operations%2F",
+    "/service-credential-operations/reconcile%2Fx",
+    "/service-credential-operations/recover%2F",
+#endif
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (encoded_separator_aliases); i++) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_path_probe (session, "POST", base_url,
+            encoded_separator_aliases[i], "Bearer encoded-separator",
+            poison_body, &status, &body) != 0
+        || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
+      return 2263 + (gint) i;
+  }
   return 0;
 }
 
@@ -12983,6 +13147,233 @@ management_checkpoint_mutate_authority (WylHandle *handle,
   return wyl_policy_store_set_tenant_sealed (store, target_tenant, TRUE);
 }
 
+/* Pair the table-driven response matrix with observable no-effect canaries.
+ * These requests carry valid human authority and mutation-shaped bodies, so
+ * any accidental delegation would be able to consume limiter capacity,
+ * publish escrow material, advance an operation, or change service state. */
+static gint
+check_service_route_alias_no_effects (void)
+{
+  ServiceDenialEnv env = { 0 };
+  wyl_service_principal_t principal = { 0 };
+  wyl_service_credential_issue_result_t issued = { 0 };
+  wyl_service_credential_t after = { 0 };
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *issue_body = NULL;
+  g_autofree gchar *rotate_body = NULL;
+  g_autofree gchar *revoke_body = NULL;
+  g_autofree gchar *token_body = NULL;
+  g_autofree gchar *credential_id = NULL;
+  g_autofree gchar *rotate_alias = NULL;
+  g_autofree gchar *rotate_encoded_alias = NULL;
+  g_autofree gchar *revoke_alias = NULL;
+  g_autofree gchar *revoke_encoded_alias = NULL;
+#ifdef WYL_HAS_FACT_STORE
+  g_autofree gchar *reconcile_body = NULL;
+#endif
+  gchar principal_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar alias_issue_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar rotate_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  gchar revoke_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  guint principal_before = 0;
+  guint principal_after = 0;
+  guint credential_before = 0;
+  guint credential_after = 0;
+  guint status = 0;
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+
+  if (wyl_request_id_new (principal_request_id, sizeof principal_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (alias_issue_request_id,
+          sizeof alias_issue_request_id) != WYRELOG_E_OK
+      || wyl_request_id_new (rotate_request_id, sizeof rotate_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (revoke_request_id, sizeof revoke_request_id)
+      != WYRELOG_E_OK
+      || wyl_service_principal_create (env.handle, "svc:tenant-a:alias",
+          "Alias canary", "human-principal-admin", principal_request_id,
+          &principal) != WYRELOG_E_OK
+      || wyl_service_credential_issue (env.handle, "svc:tenant-a:alias",
+          "tenant-a", "human-principal-admin", issue_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
+      || issued.credential.credential_id == NULL || issued.secret == NULL) {
+    rc = 2270;
+    goto out;
+  }
+  credential_id = g_strdup (issued.credential.credential_id);
+  rotate_alias = g_strdup_printf ("/service-credentials/%s/rotate/x",
+      credential_id);
+  rotate_encoded_alias = g_strdup_printf
+      ("/service-credentials/%s/rotate%%2Fx", credential_id);
+  revoke_alias = g_strdup_printf ("/service-credentials/%s/x", credential_id);
+  revoke_encoded_alias = g_strdup_printf ("/service-credentials/%s%%2Fx",
+      credential_id);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  if (secret == NULL || secret_len == 0) {
+    rc = 2271;
+    goto out;
+  }
+  token_body = g_strdup_printf
+      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
+      credential_id, (gint) secret_len, secret);
+  issue_body = g_strdup_printf
+      ("{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"%s\",\"destination\":\"alias-issue.json\","
+      "\"expires_at_us\":\"%s\"}", alias_issue_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+  rotate_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\","
+      "\"destination\":\"alias-rotate.json\",\"expires_at_us\":\"%s\"}",
+      rotate_request_id, CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+  revoke_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_before) != WYRELOG_E_OK
+      || wyl_policy_store_foreach_service_credential (store,
+          "svc:tenant-a:alias", "tenant-a", count_service_credentials_cb,
+          &credential_before) != WYRELOG_E_OK) {
+    rc = 2272;
+    goto out;
+  }
+  const struct
+  {
+    const gchar *method;
+    const gchar *path;
+    const gchar *query;
+    const gchar *body;
+  } mutation_aliases[] = {
+    {"POST", "/service-principals/", env.query,
+        "{\"subject_id\":\"svc:tenant-a:unexpected\","
+          "\"display_name\":\"Unexpected\"}"},
+    {"POST", "/service-principals/svc:tenant-a:alias/credentials/x",
+        env.tenant_query, issue_body},
+    {"POST", "/service-principals/svc:tenant-a:alias/disable/x", env.query,
+        revoke_body},
+    {"POST", rotate_alias, env.tenant_query, rotate_body},
+    {"DELETE", revoke_alias, env.tenant_query, revoke_body},
+    {"POST", "/service-principals%2F", env.query,
+        "{\"subject_id\":\"svc:tenant-a:unexpected-encoded\","
+          "\"display_name\":\"Unexpected encoded\"}"},
+    {"POST", "/service-principals/svc:tenant-a:alias/credentials%2Fx",
+        env.tenant_query, issue_body},
+    {"POST", "/service-principals/svc:tenant-a:alias/disable%2Fx", env.query,
+        revoke_body},
+    {"POST", rotate_encoded_alias, env.tenant_query, rotate_body},
+    {"DELETE", revoke_encoded_alias, env.tenant_query, revoke_body},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (mutation_aliases); i++) {
+    g_clear_pointer (&body, g_free);
+    if (send_raw_service_principal_bearer (env.session,
+            mutation_aliases[i].method, env.base_url, mutation_aliases[i].path,
+            mutation_aliases[i].query, env.access_token,
+            mutation_aliases[i].body, &status, &body) != 0
+        || status != 404
+        || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0) {
+      rc = 2273 + (gint) i;
+      goto out;
+    }
+  }
+
+#ifdef WYL_HAS_AUDIT
+  WylServiceExchangeLimiterSnapshot limiter_before = { 0 };
+  WylServiceExchangeLimiterSnapshot limiter_after = { 0 };
+  wyl_daemon_http_service_exchange_limiter_snapshot_for_test
+      (env.http.server, &limiter_before);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/auth/service-token%2Fx", NULL, env.access_token, token_body,
+          &status, &body) != 0 || status != 404
+      || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0) {
+    rc = 2280;
+    goto out;
+  }
+  wyl_daemon_http_service_exchange_limiter_snapshot_for_test
+      (env.http.server, &limiter_after);
+  if (limiter_after.credential_bucket_count
+      != limiter_before.credential_bucket_count
+      || limiter_after.full_credential_bucket_count
+      != limiter_before.full_credential_bucket_count
+      || limiter_after.global_tokens != limiter_before.global_tokens
+      || limiter_after.anonymous_tokens != limiter_before.anonymous_tokens) {
+    rc = 2281;
+    goto out;
+  }
+#endif
+
+#ifdef WYL_HAS_FACT_STORE
+  gchar operation_request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+  WylServiceCredentialOperationState state_before = 0;
+  WylServiceCredentialOperationState state_after = 0;
+  gint64 updated_before = 0;
+  gint64 updated_after = 0;
+  guint32 attempts_before = 0;
+  guint32 attempts_after = 0;
+  if (wyl_request_id_new (operation_request_id, sizeof operation_request_id)
+      != WYRELOG_E_OK
+      || seed_prepared_operation (env.operation_root, operation_request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:alias",
+          "tenant-a", NULL) != 0
+      || capture_operation_signature (env.operation_root,
+          operation_request_id, &state_before, &updated_before,
+          &attempts_before) != 0) {
+    rc = 2282;
+    goto out;
+  }
+  reconcile_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\","
+      "\"operation\":\"issue\",\"target\":{"
+      "\"subject\":\"svc:tenant-a:alias\",\"tenant\":\"tenant-a\"}}",
+      operation_request_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-credential-operations/reconcile%2Fx", env.tenant_query,
+          env.access_token, reconcile_body, &status, &body) != 0
+      || status != 404
+      || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+      || capture_operation_signature (env.operation_root,
+          operation_request_id, &state_after, &updated_after,
+          &attempts_after) != 0
+      || state_after != state_before || updated_after != updated_before
+      || attempts_after != attempts_before) {
+    rc = 2283;
+    goto out;
+  }
+#endif
+
+  if (wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      || wyl_policy_store_foreach_service_credential (store,
+          "svc:tenant-a:alias", "tenant-a", count_service_credentials_cb,
+          &credential_after) != WYRELOG_E_OK
+      || principal_after != principal_before
+      || credential_after != credential_before
+      || env.publication.plan_calls != 0 || env.publication.stage_calls != 0
+      || env.publication.commit_calls != 0
+      || wyl_service_credential_get (env.handle, credential_id, &after)
+      != WYRELOG_E_OK
+      || g_strcmp0 (after.state, "active") != 0
+      || after.revoked_at_us != 0 || after.revoked_by != NULL) {
+    rc = 2284;
+    goto out;
+  }
+  rc = 0;
+out:
+  wyl_service_credential_clear (&after);
+  wyl_service_credential_issue_result_clear (&issued);
+  wyl_service_principal_clear (&principal);
+  service_denial_env_clear (&env);
+  return rc;
+}
+
 /* Prove the WRITE-lease callback is not ceremonial: authority changes after
  * the front-door ALLOW are observed synchronously before domain mutation. */
 static gint
@@ -14244,6 +14635,11 @@ main (void)
     result = route_prefix_rc;
     goto cleanup;
   }
+  gint route_shape_rc = check_service_route_shape_matrix (base_url);
+  if (route_shape_rc != 0) {
+    result = route_shape_rc;
+    goto cleanup;
+  }
   gint service_state_rc = check_service_access_token_state_contract
       (http.server, &service_token_snapshot);
   if (service_state_rc != 0) {
@@ -14388,6 +14784,11 @@ main (void)
       check_service_management_write_reauthorization_matrix ();
   if (write_reauthorization_rc != 0) {
     result = write_reauthorization_rc;
+    goto cleanup;
+  }
+  gint route_alias_effect_rc = check_service_route_alias_no_effects ();
+  if (route_alias_effect_rc != 0) {
+    result = route_alias_effect_rc;
     goto cleanup;
   }
   gint loopback_forwarded_rc =
