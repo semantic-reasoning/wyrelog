@@ -889,7 +889,7 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
       || after.terminal_entries != before.terminal_entries + 1)
     return error_base + 2;
 
-  g_autofree gchar *descendant = g_strconcat (canonical_path, "/x", NULL);
+  g_autofree gchar *trailing = g_strconcat (canonical_path, "/", NULL);
   before = after;
   WylDaemonExactRouteStateSnapshot state_before = { 0 };
   WylDaemonExactRouteStateSnapshot state_after = { 0 };
@@ -897,7 +897,7 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
           &state_before))
     return error_base + 3;
   g_clear_pointer (&body, g_free);
-  if (send_raw_path_probe (session, "PATCH", base_url, descendant,
+  if (send_raw_path_probe (session, "PATCH", base_url, trailing,
           "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return error_base + 4;
@@ -911,11 +911,11 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
       || memcmp (&state_before, &state_after, sizeof state_before) != 0)
     return error_base + 6;
 
-  g_autofree gchar *sibling = g_strconcat (canonical_path, "x", NULL);
+  g_autofree gchar *descendant = g_strconcat (canonical_path, "/x", NULL);
   before = after;
   state_before = state_after;
   g_clear_pointer (&body, g_free);
-  if (send_raw_path_probe (session, "PATCH", base_url, sibling,
+  if (send_raw_path_probe (session, "PATCH", base_url, descendant,
           "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return error_base + 7;
@@ -928,6 +928,24 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
           &state_after)
       || memcmp (&state_before, &state_after, sizeof state_before) != 0)
     return error_base + 9;
+
+  g_autofree gchar *sibling = g_strconcat (canonical_path, "x", NULL);
+  before = after;
+  state_before = state_after;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "PATCH", base_url, sibling,
+          "Bearer exact-route-poison", poison, &status, &body) != 0
+      || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+    return error_base + 10;
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries)
+    return error_base + 11;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+          &state_after)
+      || memcmp (&state_before, &state_after, sizeof state_before) != 0)
+    return error_base + 12;
   return 0;
 }
 
@@ -1002,10 +1020,32 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       canonical_method_status = 503;
 #endif
     gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
-        canonical_method_status, 2281 + (gint) i * 10);
+        canonical_method_status, 2281 + (gint) i * 13);
     if (rc != 0)
       return rc;
   }
+  g_autoptr (SoupSession) session = soup_session_new ();
+  WylDaemonExactRouteProbeSnapshot probe_before = { 0 }, probe_after = { 0 };
+  WylDaemonExactRouteStateSnapshot state_before = { 0 }, state_after = { 0 };
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          "/healthz", &probe_before)
+      || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+          &state_before)
+      || send_raw_path_probe (session, "PATCH", base_url, "/healthz//x",
+          "Bearer exact-route-poison", "{\"mutation\":\"must-not-run\"}",
+          &status, &body) != 0
+      || status != 404
+      || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
+      || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          "/healthz", &probe_after)
+      || probe_after.selected != probe_before.selected + 1
+      || probe_after.terminal_entries != probe_before.terminal_entries
+      || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
+          &state_after)
+      || memcmp (&state_before, &state_after, sizeof state_before) != 0)
+    return 2750;
   return 0;
 }
 
