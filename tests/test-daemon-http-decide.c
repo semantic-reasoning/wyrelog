@@ -14251,28 +14251,92 @@ main (void)
     goto cleanup;
   }
   wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
-#ifdef WYL_HAS_FACT_STORE
-  /* The fact-store resolver matrix deliberately constructs a PENDING
-   * registry tuple to prove that it cannot authenticate.  Production
-   * maintenance treats every observed PENDING tuple as an escaped
-   * publication and permanently latches the authority.  Suspend only its
-   * asynchronous source before that synthetic fixture exists; suspension
-   * waits for an in-flight tick without terminalizing this server, so the
-   * later fact reconciliation contract remains live.  The audit variant
-   * exercises scheduler lifecycle with its dedicated exchange-server
-   * contract. */
-  wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
-  guint maintenance_ticks = 0;
-  if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
-          &maintenance_ticks)) {
-    result = 2156;
+  /* The resolver matrix deliberately constructs PENDING registry tuples to
+   * prove that they cannot authenticate.  Production maintenance correctly
+   * treats an observed PENDING tuple as an escaped publication and permanently
+   * latches the authority, so isolate those synthetic fixtures from its
+   * asynchronous source in every service-test feature combination.  Suspension
+   * waits for an in-flight tick without terminalizing this server; dedicated
+   * exchange-server tests continue to own the scheduler lifecycle contract. */
+  guint maintenance_ticks_pre_suspend = 0;
+  if (!wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
+          &maintenance_ticks_pre_suspend)) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=pre_suspend source_active=0 ticks_pre=%u\n",
+        maintenance_ticks_pre_suspend);
+    result = 2660;
     goto cleanup;
   }
-#endif
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
+  guint maintenance_ticks_drained = 0;
+  if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
+          &maintenance_ticks_drained)) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=post_drain source_active=1 ticks_pre=%u ticks_drained=%u\n",
+        maintenance_ticks_pre_suspend, maintenance_ticks_drained);
+    result = 2661;
+    goto cleanup;
+  }
+  if (maintenance_ticks_drained < maintenance_ticks_pre_suspend) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=post_drain_tick_regression ticks_pre=%u ticks_drained=%u\n",
+        maintenance_ticks_pre_suspend, maintenance_ticks_drained);
+    result = 2662;
+    goto cleanup;
+  }
+  WylServiceAuthUnavailableReason resolver_authority_reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  wyrelog_error_t resolver_authority_rc =
+      wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+      &resolver_authority_reason);
+  if (resolver_authority_rc != WYRELOG_E_OK
+      || resolver_authority_reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=pre_resolver_authority validation_rc=%d reason=%d "
+        "ticks_pre=%u ticks_drained=%u\n", resolver_authority_rc,
+        resolver_authority_reason, maintenance_ticks_pre_suspend,
+        maintenance_ticks_drained);
+    result = 2663;
+    goto cleanup;
+  }
   gint service_resolver_rc = check_service_bearer_resolver_contract
       (http.server);
   if (service_resolver_rc != 0) {
     result = service_resolver_rc;
+    goto cleanup;
+  }
+  guint maintenance_ticks_final = 0;
+  if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
+          &maintenance_ticks_final)) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=post_resolver source_active=1 ticks_pre=%u ticks_drained=%u "
+        "ticks_final=%u\n", maintenance_ticks_pre_suspend,
+        maintenance_ticks_drained, maintenance_ticks_final);
+    result = 2664;
+    goto cleanup;
+  }
+  if (maintenance_ticks_final != maintenance_ticks_drained) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=post_resolver_tick_changed ticks_pre=%u ticks_drained=%u "
+        "ticks_final=%u\n", maintenance_ticks_pre_suspend,
+        maintenance_ticks_drained, maintenance_ticks_final);
+    result = 2665;
+    goto cleanup;
+  }
+  resolver_authority_reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  resolver_authority_rc = wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+      &resolver_authority_reason);
+  if (resolver_authority_rc != WYRELOG_E_OK
+      || resolver_authority_reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
+    g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
+        "stage=post_resolver_authority validation_rc=%d reason=%d "
+        "ticks_pre=%u ticks_drained=%u ticks_final=%u\n",
+        resolver_authority_rc, resolver_authority_reason,
+        maintenance_ticks_pre_suspend, maintenance_ticks_drained,
+        maintenance_ticks_final);
+    result = 2666;
     goto cleanup;
   }
 #ifdef WYL_HAS_AUDIT
