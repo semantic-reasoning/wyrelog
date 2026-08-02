@@ -394,6 +394,18 @@ if build_client
     ],
   )
 
+  check_daemon_http_route_registrations = find_program(
+    '../tools/check-daemon-http-route-registrations.py',
+  )
+  test('daemon-http-route-registrations-self-test',
+    check_daemon_http_route_registrations,
+    args : ['--self-test'],
+  )
+  test('daemon-http-route-registrations',
+    check_daemon_http_route_registrations,
+    args : [meson.project_source_root()],
+  )
+
   test_daemon_http_mfa_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
