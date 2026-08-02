@@ -54,6 +54,20 @@ build_svc_unfreeze (void)
           "trusted"));
 }
 
+/* Eligibility guard for self-arming the service-management authority. This
+ * guard is NOT the primary security control: guard params are client-asserted
+ * (same semantics as wr.policy.write). The real controls live at the self-arm
+ * route (SYSTEM profile + loopback + live human-MFA session + system_admin
+ * role). A strict non-window guard keeps perm_window_guard empty so rule-3
+ * arming applies. */
+static wyl_guard_expr_t *
+build_service_self_authorize (void)
+{
+  return wyl_guard_and (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
+          "30"), wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS, WYL_GUARD_OP_EQ,
+          "trusted"));
+}
+
 static wyl_guard_expr_t *
 build_svc_grant_role (void)
 {
@@ -96,6 +110,7 @@ static const catalogue_entry_t catalogue[] = {
   {"wr.svc.freeze", build_svc_freeze},
   {"wr.svc.unfreeze", build_svc_unfreeze},
   {"wr.svc.grant_role", build_svc_grant_role},
+  {"wr.service.self_authorize", build_service_self_authorize},
   {"wr.audit.read", build_audit_read},
   {"wr.audit.explain", build_audit_explain},
   {"wr.stream.write_reserved", build_stream_write_reserved},
