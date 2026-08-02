@@ -157,6 +157,14 @@
   "service_credential_not_found"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_UNAVAILABLE \
   "service_credential_unavailable"
+#define WYL_DAEMON_ERR_SERVICE_AUTHORITY_AUTH_REQUIRED \
+  "service_authority_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_AUTHORITY_INVALID \
+  "invalid_service_authority_request"
+#define WYL_DAEMON_ERR_SERVICE_AUTHORITY_DENIED \
+  "service_authority_denied"
+#define WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED \
+  "service_authority_failed"
 #define WYL_DAEMON_SERVICE_RESPONSE_AUTHORITY_DATA \
   "wyl-daemon-service-response-authority"
 
@@ -5848,16 +5856,33 @@ append_service_principal_json (const wyl_service_principal_t *info,
  * denial the message error is already set and every out-parameter is left
  * untouched. The escrow handoff surface consumes the session and guard
  * context; existing callers use the thin authorize() wrapper below. */
+/* Shared front-door for privileged, loopback-only service-management routes.
+ *
+ * Enforces the security gates every such route requires and hands the caller
+ * the resolved auth context plus the parsed guard triple:
+ *   1. SYSTEM daemon profile
+ *   2. actual loopback transport
+ *   3. a bearer token, and never a session_token alongside it
+ *   4. a well-formed guard triple (timestamp, loc_class, risk)
+ *   5. a resolved bearer whose session tenant is the default tenant
+ * The human + MFA gate is applied by the caller via
+ * management_session_matches_live() on the session it refs from
+ * auth.session_id; that predicate is itself shared, so both the management
+ * authorize path and the self-arm route enforce an identical five-gate front
+ * door and cannot drift apart.
+ *
+ * On success the resolved auth context is moved into *out_auth and an owned
+ * copy of the guard loc_class into *out_guard_loc_class (caller frees both);
+ * on any denial the message error is set and every out-parameter is left
+ * untouched. The guard triple is client-asserted and is NOT the primary
+ * control (same semantics as wr.policy.write) -- the gates above are. */
 static gboolean
-service_principal_management_authorize_session (SoupServer *server,
-    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
-    const gchar *action,
+service_management_front_door (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
     const gchar *auth_required_code, const gchar *invalid_code,
-    const gchar *denied_code, const gchar *failed_code,
-    WylDaemonAuthContext *out_auth, gchar **out_actor,
-    WylSession **out_session, gint64 *out_guard_timestamp,
-    gchar **out_guard_loc_class, gint64 *out_guard_risk,
-    WylServiceAuthReadLease **out_read_lease)
+    const gchar *denied_code, WylDaemonAuthContext *out_auth,
+    gint64 *out_guard_timestamp, gchar **out_guard_loc_class,
+    gint64 *out_guard_risk)
 {
   if (ctx == NULL || ctx->profile != WYL_DAEMON_PROFILE_SYSTEM
       || action == NULL || action[0] == '\0') {
@@ -5918,6 +5943,36 @@ service_principal_management_authorize_session (SoupServer *server,
     set_json_error (msg, 403, denied_code);
     return FALSE;
   }
+
+  out_auth->session_id = g_steal_pointer (&auth.session_id);
+  out_auth->actor = g_steal_pointer (&auth.actor);
+  out_auth->tenant = g_steal_pointer (&auth.tenant);
+  out_auth->bearer = auth.bearer;
+  *out_guard_timestamp = timestamp;
+  *out_guard_loc_class = g_strdup (guard_loc_class);
+  *out_guard_risk = risk;
+  return TRUE;
+}
+
+static gboolean
+service_principal_management_authorize_session (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
+    const gchar *action,
+    const gchar *auth_required_code, const gchar *invalid_code,
+    const gchar *denied_code, const gchar *failed_code,
+    WylDaemonAuthContext *out_auth, gchar **out_actor,
+    WylSession **out_session, gint64 *out_guard_timestamp,
+    gchar **out_guard_loc_class, gint64 *out_guard_risk,
+    WylServiceAuthReadLease **out_read_lease)
+{
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  gint64 timestamp = 0;
+  gint64 risk = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  if (!service_management_front_door (server, msg, query, ctx, action,
+          auth_required_code, invalid_code, denied_code, &auth, &timestamp,
+          &guard_loc_class, &risk))
+    return FALSE;
 
   gboolean principal_management =
       g_strcmp0 (action, "wr.service_principal.manage") == 0;
@@ -11922,6 +11977,146 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
+/* POST /service-management-authority/arm
+ *
+ * Lets an already-verified, live-MFA SYSTEM admin self-arm the
+ * service-credential management authority at ITS OWN session_id, closing the
+ * gap where that authority was previously reachable only through internal
+ * test-seams.
+ *
+ * Security controls (the guard triple is NOT one of them -- it is
+ * client-asserted, same semantics as wr.policy.write): SYSTEM profile +
+ * loopback + bearer(tenant=default) + a live human MFA-assured session (shared
+ * front door) + the wr.system_admin-only wr.service.self_authorize eligibility
+ * decide. Service tokens can never reach this path: the human-only session
+ * gate rejects them and the mutation layer independently rejects
+ * service-prefix subjects. The armed scope is auth.session_id ONLY and the
+ * subject is auth.actor ONLY -- no query/body/header can steer either. */
+static void
+service_management_authority_arm_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) path;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  if (!service_management_front_door (server, msg, query, ctx,
+          "wr.service.self_authorize",
+          WYL_DAEMON_ERR_SERVICE_AUTHORITY_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_AUTHORITY_INVALID,
+          WYL_DAEMON_ERR_SERVICE_AUTHORITY_DENIED, &auth, &guard_timestamp,
+          &guard_loc_class, &guard_risk))
+    return;
+
+  /* Human + MFA gate: the same shared predicate the management authorize path
+   * enforces. Service sessions are rejected here. */
+  g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
+      auth.session_id);
+  if (!management_session_matches_live (session, auth.session_id, auth.actor,
+          WYL_TENANT_DEFAULT, TRUE)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_AUTHORITY_DENIED);
+    return;
+  }
+
+  /* Eligibility: allow(actor, wr.service.self_authorize, __wr_default). Only
+   * wr.system_admin carries this permission (SoD). The global
+   * session_state("__wr_default","active") bootstrap anchor makes __wr_default
+   * a valid decision scope for any system_admin holder. */
+  {
+    g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+    g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+    if (req == NULL || resp == NULL) {
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+    wyl_decide_req_set_subject_id (req, auth.actor);
+    wyl_decide_req_set_action (req, "wr.service.self_authorize");
+    wyl_decide_req_set_resource_id (req, WYL_TENANT_DEFAULT);
+    wyl_decide_req_set_guard_context (req, guard_timestamp, guard_loc_class,
+        guard_risk);
+    wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+    wyrelog_error_t decide_rc = wyl_decide (ctx->handle, req, resp);
+    if (decide_rc == WYRELOG_E_INVALID) {
+      set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_AUTHORITY_INVALID);
+      return;
+    }
+    if (decide_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+    if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
+      set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_AUTHORITY_DENIED);
+      return;
+    }
+  }
+
+  /* One WRITE lease held across BOTH perms' grant + transition + reload. */
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
+  }
+
+  static const gchar *const managed_perms[] = {
+    "wr.service_principal.manage",
+    "wr.service_credential.manage",
+  };
+  const gchar *const scope = auth.session_id;
+  const gchar *const request_id = ensure_request_id_header (msg);
+  for (gsize i = 0; i < G_N_ELEMENTS (managed_perms); i++) {
+    const gchar *perm = managed_perms[i];
+    gboolean already_armed = FALSE;
+    rc = wyl_policy_store_permission_state_is (write.store, auth.actor, perm,
+        scope, "armed", &already_armed);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+    if (already_armed)
+      continue;
+
+    rc = wyl_policy_store_grant_direct_permission (write.store, auth.actor,
+        perm, scope);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_append_direct_permission_event (write.store,
+          auth.actor, perm, scope, "grant");
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+
+    /* Durable audit per perm (never NULL): modelled on the permission-state
+     * transition handler. */
+    g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
+    wyl_audit_event_set_subject_id (audit_event, auth.actor);
+    wyl_audit_event_set_action (audit_event, "permission_state.grant");
+    wyl_audit_event_set_resource_id (audit_event, perm);
+    wyl_audit_event_set_deny_reason (audit_event, "grant");
+    wyl_audit_event_set_deny_origin (audit_event, scope);
+    wyl_audit_event_set_request_id (audit_event, request_id);
+    wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
+
+    rc = wyl_handle_apply_permission_state_transition (ctx->handle, auth.actor,
+        perm, scope, "grant", audit_event, NULL);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+  }
+
+  set_json_ok (msg);
+}
+
 SoupServer *
 wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
     WylHandle *handle, WylDaemonRuntime *runtime, GError **error)
@@ -12003,6 +12198,9 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       service_principal_management_handler, ctx, NULL);
   soup_server_add_handler (server, "/service-credentials",
       service_credential_management_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server,
+      "/service-management-authority/arm",
+      service_management_authority_arm_handler, ctx, NULL);
 #ifdef WYL_HAS_FACT_STORE
   wyl_daemon_http_add_exact_handler (server,
       "/service-credential-operations",

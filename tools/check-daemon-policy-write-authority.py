@@ -22,6 +22,7 @@ FUNCTIONS = (
     "policy_role_grant_handler", "policy_role_revoke_handler",
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
+    "service_management_authority_arm_handler",
     "wyl_daemon_http_configure_tenant_for_test",
 )
 ALLOW_ACQUIRE = {
@@ -35,6 +36,7 @@ ALLOW_ACQUIRE = {
     "wyl_daemon_http_configure_tenant_for_test",
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
+    "service_management_authority_arm_handler",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
