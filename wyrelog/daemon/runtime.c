@@ -11,6 +11,7 @@
 #endif
 
 #include "auth/mfa-validator.h"
+#include "auth/service-auth-coordination-private.h"
 #include "daemon/checks.h"
 #include "daemon/delta.h"
 #include "daemon/http.h"
@@ -18,6 +19,7 @@
 #include "daemon/startup-recovery-private.h"
 #include "policy/store-private.h"
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 static gboolean
@@ -478,6 +480,87 @@ bootstrap_admin_requested (const WylDaemonOptions *opts)
       opts->bootstrap_admin_subject[0] != '\0';
 }
 
+typedef struct
+{
+  const gchar *subject;
+  gboolean allow_skip_mfa;
+  gboolean applied;
+  gchar *existing_subject;
+} WylBootstrapPublication;
+
+static wyrelog_error_t
+mutate_bootstrap_publication (wyl_policy_store_t *store, gpointer data)
+{
+  WylBootstrapPublication *ctx = data;
+  g_clear_pointer (&ctx->existing_subject, g_free);
+  ctx->applied = FALSE;
+  return wyl_policy_store_apply_bootstrap_admin_body (store, ctx->subject,
+      ctx->allow_skip_mfa, &ctx->applied, &ctx->existing_subject);
+}
+
+static wyrelog_error_t
+verify_bootstrap_row (WylEngineVerification *verification,
+    const gchar *relation, const gchar *const *symbols, guint ncols)
+{
+  gint64 row[3] = { 0 };
+  if (ncols == 0 || ncols > G_N_ELEMENTS (row))
+    return WYRELOG_E_INVALID;
+  for (guint i = 0; i < ncols; i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_contains (verification,
+      relation, row, ncols, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+verify_bootstrap_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  WylBootstrapPublication *ctx = data;
+  const gchar *membership[] = {
+    ctx->subject,
+    "wr.system_admin",
+    WYL_TENANT_DEFAULT,
+  };
+  wyrelog_error_t rc = verify_bootstrap_row (verification,
+      "effective_member", membership, G_N_ELEMENTS (membership));
+  if (rc != WYRELOG_E_OK || !ctx->allow_skip_mfa)
+    return rc;
+  const gchar *skip_mfa[] = { ctx->subject };
+  return verify_bootstrap_row (verification, "login_skip_mfa_authz", skip_mfa,
+      G_N_ELEMENTS (skip_mfa));
+}
+
+static wyrelog_error_t
+run_bootstrap_publication (WylHandle *handle, WylBootstrapPublication *ctx)
+{
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    rc = WYRELOG_E_BUSY;
+  else
+    rc = wyl_engine_session_run_committed_publication (session,
+        mutate_bootstrap_publication, ctx, verify_bootstrap_publication, ctx,
+        NULL, NULL);
+  g_clear_pointer (&session, wyl_engine_session_release);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = release_rc;
+  wyl_service_auth_write_lease_free (lease);
+  return rc;
+}
+
 static gboolean
 audit_subsystem_enabled (const WylDaemonOptions *opts)
 {
@@ -568,35 +651,29 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
    * store) and before the daemon advertises start, so the sealed marker
    * exists before any HTTP traffic. */
   if (bootstrap_admin_requested (opts)) {
-    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-    gboolean applied = FALSE;
-    g_autofree gchar *existing_subject = NULL;
-    wyrelog_error_t bootstrap_rc =
-        wyl_policy_store_apply_bootstrap_admin (store,
-        opts->bootstrap_admin_subject,
-        opts->bootstrap_admin_allow_skip_mfa, &applied, &existing_subject);
+    WylBootstrapPublication publication = {
+      .subject = opts->bootstrap_admin_subject,
+      .allow_skip_mfa = opts->bootstrap_admin_allow_skip_mfa,
+    };
+    wyrelog_error_t bootstrap_rc = run_bootstrap_publication (handle,
+        &publication);
     if (bootstrap_rc == WYRELOG_E_POLICY) {
       g_printerr ("wyrelogd: bootstrap_admin: store already sealed for %s\n",
-          existing_subject != NULL ? existing_subject : "(unknown)");
+          publication.existing_subject != NULL ?
+          publication.existing_subject : "(unknown)");
+      g_free (publication.existing_subject);
       return 1;
     }
     if (bootstrap_rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: bootstrap_admin: %s\n",
           wyrelog_error_string (bootstrap_rc));
+      g_free (publication.existing_subject);
       return 1;
     }
-
-    wyrelog_error_t reload_rc = wyl_handle_reload_engine_pair (handle);
-    if (reload_rc != WYRELOG_E_OK) {
-      reload_rc = wyl_handle_fail_committed_engine_projection (handle,
-          reload_rc);
-      g_printerr ("wyrelogd: bootstrap_admin: reload failed: %s\n",
-          wyrelog_error_string (reload_rc));
-      return 1;
-    }
+    g_free (publication.existing_subject);
 
     wyrelog_error_t audit_rc = wyl_daemon_emit_bootstrap_admin_audit (handle,
-        opts->bootstrap_admin_subject, applied);
+        opts->bootstrap_admin_subject, publication.applied);
     if (audit_rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: bootstrap_admin: audit emit failed: %s\n",
           wyrelog_error_string (audit_rc));
@@ -617,7 +694,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
      * audit emit the in-store role_memberships_events row still
      * preserves the grant. */
     g_message ("wyrelogd: bootstrap_admin: %s for %s",
-        applied ? "applied" : "reapplied (idempotent no-op)",
+        publication.applied ? "applied" : "reapplied (idempotent no-op)",
         opts->bootstrap_admin_subject);
   }
 

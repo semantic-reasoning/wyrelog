@@ -264,12 +264,105 @@ wyl_audit_mirror_event (WylHandle *handle, const WylAuditEvent *event)
 #endif
 }
 
+#ifdef WYL_HAS_AUDIT
+typedef struct
+{
+  const WylAuditEvent *event;
+  const gchar *id;
+} WylAuditPublication;
+
+static wyrelog_error_t
+mutate_audit_publication (wyl_policy_store_t *store, gpointer data)
+{
+  WylAuditPublication *ctx = data;
+  const WylAuditEvent *event = ctx->event;
+  gboolean inserted = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_record_audit_intention_full (store,
+      ctx->id, event->created_at_us, event->subject_id, event->action,
+      event->resource_id, event->deny_reason, event->deny_origin,
+      event->request_id, event->decision, &inserted);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_audit_event_full (store, ctx->id,
+        event->created_at_us, event->subject_id, event->action,
+        event->resource_id, event->deny_reason, event->deny_origin,
+        event->request_id, event->decision, &inserted);
+  return rc;
+}
+
+static wyrelog_error_t
+verify_audit_symbol_pair (WylEngineVerification *verification,
+    const gchar *relation, const gchar *id, const gchar *value)
+{
+  if (value == NULL)
+    return WYRELOG_E_OK;
+  gint64 row[2] = { 0 };
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      id, &row[0]);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, value, &row[1]);
+  gboolean found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_contains (verification, relation, row,
+        G_N_ELEMENTS (row), &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+verify_audit_publication (WylEngineVerification *verification, gpointer data)
+{
+  WylAuditPublication *ctx = data;
+  const WylAuditEvent *event = ctx->event;
+  const gchar *decision = event->decision == WYL_DECISION_ALLOW ?
+      "allow" : event->decision == WYL_DECISION_DENY ? "deny" : NULL;
+  if (decision == NULL)
+    return WYRELOG_E_INVALID;
+  gint64 row[3] = { 0, event->created_at_us, 0 };
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      ctx->id, &row[0]);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, decision,
+        &row[2]);
+  gboolean found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_contains (verification, "audit_event", row,
+        G_N_ELEMENTS (row), &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+  const gchar *relations[] = {
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+    "audit_event_request_id",
+  };
+  const gchar *values[] = {
+    event->subject_id,
+    event->action,
+    event->resource_id,
+    event->deny_reason,
+    event->deny_origin,
+    event->request_id,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
+    rc = verify_audit_symbol_pair (verification, relations[i], ctx->id,
+        values[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+#endif
+
 wyrelog_error_t
 wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
 {
 #ifdef WYL_HAS_AUDIT
   gchar id_buf[WYL_ID_STRING_BUF];
-  gboolean store_inserted = FALSE;
 
   if (handle == NULL || event == NULL)
     return WYRELOG_E_INVALID;
@@ -277,48 +370,16 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   if (wyl_id_format (&event->id, id_buf, sizeof id_buf) != WYRELOG_E_OK)
     return WYRELOG_E_INTERNAL;
 
-  wyrelog_error_t store_rc =
-      wyl_policy_store_record_audit_intention_full (wyl_handle_get_policy_store
-      (handle), id_buf, event->created_at_us,
-      event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->request_id,
-      event->decision,
-      &store_inserted);
-  if (store_rc != WYRELOG_E_OK)
-    return store_rc;
-
-  store_inserted = FALSE;
-  store_rc =
-      wyl_policy_store_append_audit_event_full (wyl_handle_get_policy_store
-      (handle), id_buf, event->created_at_us,
-      event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->request_id,
-      event->decision, &store_inserted);
-  if (store_rc != WYRELOG_E_OK) {
-    (void) wyl_policy_store_mark_audit_intention_failed
-        (wyl_handle_get_policy_store (handle), id_buf,
-        "sqlite audit append failed");
-    return store_rc;
-  }
-
-  wyrelog_error_t rc = wyl_handle_insert_audit_fact (handle, id_buf,
-      event->created_at_us,
-      event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->request_id,
-      event->decision);
-  if (rc != WYRELOG_E_OK) {
-    if (store_inserted) {
-      wyrelog_error_t cleanup_rc =
-          wyl_policy_store_delete_audit_event (wyl_handle_get_policy_store
-          (handle), id_buf);
-      if (cleanup_rc != WYRELOG_E_OK)
-        return wyl_handle_fail_committed_engine_projection (handle, cleanup_rc);
-    }
-    (void) wyl_policy_store_mark_audit_intention_failed
-        (wyl_handle_get_policy_store (handle), id_buf,
-        "wirelog fact projection failed");
-    return wyl_handle_fail_committed_engine_projection (handle, rc);
-  }
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_BUSY;
+  WylAuditPublication publication = { event, id_buf };
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
+      mutate_audit_publication, &publication, verify_audit_publication,
+      &publication, NULL, NULL);
+  g_clear_pointer (&session, wyl_engine_session_release);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);
   if (audit_conn == NULL) {
