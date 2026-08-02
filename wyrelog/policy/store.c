@@ -25363,11 +25363,16 @@ wyrelog_error_t
     const gchar * audit_deny_reason, const gchar * audit_deny_origin,
     const gchar * audit_request_id, wyl_decision_t audit_decision)
 {
+  if (out_event_id != NULL)
+    *out_event_id = -1;
   wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
+  gint64 committed_event_id = -1;
   rc = apply_permission_state_transition_body_with_audit (store, subject_id,
-      perm_id, scope, event, out_event_id, audit_id, audit_created_at_us,
+      perm_id, scope, event,
+      out_event_id != NULL ? &committed_event_id : NULL, audit_id,
+      audit_created_at_us,
       audit_subject_id, audit_action, audit_resource_id, audit_deny_reason,
       audit_deny_origin, audit_request_id, audit_decision);
   if (rc == WYRELOG_E_OK)
@@ -25376,6 +25381,8 @@ wyrelog_error_t
     rc = wyl_policy_store_commit_mutation (store);
   if (rc != WYRELOG_E_OK)
     wyl_policy_store_rollback_mutation (store);
+  else if (out_event_id != NULL)
+    *out_event_id = committed_event_id;
   return rc;
 }
 
