@@ -115,19 +115,17 @@ persist_daemon_audit_event (WylDaemonRuntime *runtime, const WylAuditEvent *ev)
   return rc;
 }
 
+/* WYL_ENGINE_SESSION_REQUIRES: synchronous engine-delta callback chain. */
 static void
-emit_wirelog_effective_member_audit (WylDaemonRuntime *runtime,
-    const gint64 row[3], WylDeltaKind kind)
+emit_wirelog_effective_member_audit (WylEngineSession *session,
+    WylDaemonRuntime *runtime, const gint64 row[3], WylDeltaKind kind)
 {
   if (runtime == NULL || runtime->handle == NULL)
     return;
 
-  g_autofree gchar *user =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[0]);
-  g_autofree gchar *role =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[1]);
-  g_autofree gchar *scope =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[2]);
+  g_autofree gchar *user = wyl_engine_session_dup_symbol (session, row[0]);
+  g_autofree gchar *role = wyl_engine_session_dup_symbol (session, row[1]);
+  g_autofree gchar *scope = wyl_engine_session_dup_symbol (session, row[2]);
   if (user == NULL || role == NULL || scope == NULL)
     return;
 
@@ -143,21 +141,20 @@ emit_wirelog_effective_member_audit (WylDaemonRuntime *runtime,
           ev));
 }
 
+/* WYL_ENGINE_SESSION_REQUIRES: synchronous engine-delta callback chain. */
 static void
-emit_wirelog_fsm_fired_audit (WylDaemonRuntime *runtime, const gchar *relation,
-    const gint64 row[5], WylDeltaKind kind)
+emit_wirelog_fsm_fired_audit (WylEngineSession *session,
+    WylDaemonRuntime *runtime, const gchar *relation, const gint64 row[5],
+    WylDeltaKind kind)
 {
   if (runtime == NULL || runtime->handle == NULL)
     return;
 
-  g_autofree gchar *entity =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[1]);
+  g_autofree gchar *entity = wyl_engine_session_dup_symbol (session, row[1]);
   g_autofree gchar *from_state =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[2]);
-  g_autofree gchar *event =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[3]);
-  g_autofree gchar *to_state =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[4]);
+      wyl_engine_session_dup_symbol (session, row[2]);
+  g_autofree gchar *event = wyl_engine_session_dup_symbol (session, row[3]);
+  g_autofree gchar *to_state = wyl_engine_session_dup_symbol (session, row[4]);
   if (entity == NULL || from_state == NULL || event == NULL || to_state == NULL)
     return;
 
@@ -174,25 +171,21 @@ emit_wirelog_fsm_fired_audit (WylDaemonRuntime *runtime, const gchar *relation,
           ev));
 }
 
+/* WYL_ENGINE_SESSION_REQUIRES: synchronous engine-delta callback chain. */
 static void
-emit_wirelog_perm_state_fired_audit (WylDaemonRuntime *runtime,
-    const gint64 row[7], WylDeltaKind kind)
+emit_wirelog_perm_state_fired_audit (WylEngineSession *session,
+    WylDaemonRuntime *runtime, const gint64 row[7], WylDeltaKind kind)
 {
   if (runtime == NULL || runtime->handle == NULL)
     return;
 
-  g_autofree gchar *subject =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[1]);
-  g_autofree gchar *perm =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[2]);
-  g_autofree gchar *scope =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[3]);
+  g_autofree gchar *subject = wyl_engine_session_dup_symbol (session, row[1]);
+  g_autofree gchar *perm = wyl_engine_session_dup_symbol (session, row[2]);
+  g_autofree gchar *scope = wyl_engine_session_dup_symbol (session, row[3]);
   g_autofree gchar *from_state =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[4]);
-  g_autofree gchar *event =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[5]);
-  g_autofree gchar *to_state =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[6]);
+      wyl_engine_session_dup_symbol (session, row[4]);
+  g_autofree gchar *event = wyl_engine_session_dup_symbol (session, row[5]);
+  g_autofree gchar *to_state = wyl_engine_session_dup_symbol (session, row[6]);
   if (subject == NULL || perm == NULL || scope == NULL || from_state == NULL
       || event == NULL || to_state == NULL)
     return;
@@ -306,6 +299,7 @@ check_wirelog_fsm_audit_rows (WylHandle *handle)
 }
 #endif
 
+/* WYL_ENGINE_SESSION_REQUIRES: synchronously invoked while engine is locked. */
 static void
 daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     WylDeltaKind kind, gpointer user_data)
@@ -314,6 +308,8 @@ daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
 
   if (runtime == NULL)
     return;
+  g_autoptr (WylEngineSession) session =
+      wyl_engine_session_acquire (runtime->handle);
 
   runtime->delta_events_seen++;
   runtime->last_delta_event_us = g_get_real_time ();
@@ -330,7 +326,7 @@ daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     return;
 
 #ifdef WYL_HAS_AUDIT
-  emit_wirelog_effective_member_audit (runtime, row, kind);
+  emit_wirelog_effective_member_audit (session, runtime, row, kind);
 #endif
 
   if (!runtime->expect_effective_member)
@@ -352,7 +348,7 @@ fsm_relations:
     goto perm_state_fired_relation;
 
 #ifdef WYL_HAS_AUDIT
-  emit_wirelog_fsm_fired_audit (runtime, relation, row, kind);
+  emit_wirelog_fsm_fired_audit (session, runtime, relation, row, kind);
 #endif
 
   if (runtime->expect_principal_fired
@@ -387,7 +383,7 @@ perm_state_fired_relation:
     return;
 
 #ifdef WYL_HAS_AUDIT
-  emit_wirelog_perm_state_fired_audit (runtime, row, kind);
+  emit_wirelog_perm_state_fired_audit (session, runtime, row, kind);
 #endif
 
   if (!runtime->expect_perm_state_fired)
@@ -411,9 +407,10 @@ wyl_daemon_start_delta_callbacks (WylHandle *handle, WylDaemonRuntime *runtime)
 {
   if (runtime == NULL)
     return WYRELOG_E_INVALID;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
 
   wyrelog_error_t rc =
-      wyl_handle_engine_set_delta_callback (handle, daemon_delta_cb, runtime);
+      wyl_engine_session_set_delta_callback (session, daemon_delta_cb, runtime);
   runtime->last_delta_error = rc;
   g_atomic_int_set (&runtime->delta_session_live, rc == WYRELOG_E_OK);
   return rc;
@@ -422,6 +419,8 @@ wyl_daemon_start_delta_callbacks (WylHandle *handle, WylDaemonRuntime *runtime)
 wyrelog_error_t
 wyl_daemon_check_delta_ready (WylHandle *handle)
 {
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
   WylDaemonRuntime runtime = {
     .handle = handle,
     .expect_effective_member = TRUE,
@@ -431,74 +430,74 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
   };
 
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-user",
+      wyl_engine_session_intern_symbol (engine_session, "wyrelogd-check-user",
       &runtime.expected_row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wr.viewer",
+  rc = wyl_engine_session_intern_symbol (engine_session, "wr.viewer",
       &runtime.expected_row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-scope",
-      &runtime.expected_row[2]);
+  rc = wyl_engine_session_intern_symbol (engine_session,
+      "wyrelogd-check-scope", &runtime.expected_row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
   runtime.expected_principal_fired[0] = 1;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-principal-user",
-      &runtime.expected_principal_fired[1]);
+  rc = wyl_engine_session_intern_symbol (engine_session,
+      "wyrelogd-principal-user", &runtime.expected_principal_fired[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "unverified",
+  rc = wyl_engine_session_intern_symbol (engine_session, "unverified",
       &runtime.expected_principal_fired[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "login_ok",
+  rc = wyl_engine_session_intern_symbol (engine_session, "login_ok",
       &runtime.expected_principal_fired[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "mfa_required",
+  rc = wyl_engine_session_intern_symbol (engine_session, "mfa_required",
       &runtime.expected_principal_fired[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
   runtime.expected_session_fired[0] = 2;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-session",
+  rc = wyl_engine_session_intern_symbol (engine_session, "wyrelogd-session",
       &runtime.expected_session_fired[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "active",
+  rc = wyl_engine_session_intern_symbol (engine_session, "active",
       &runtime.expected_session_fired[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "elevate_grant",
+  rc = wyl_engine_session_intern_symbol (engine_session, "elevate_grant",
       &runtime.expected_session_fired[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "elevated",
+  rc = wyl_engine_session_intern_symbol (engine_session, "elevated",
       &runtime.expected_session_fired[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
   runtime.expected_perm_state_fired[0] = 3;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-perm-state-user",
-      &runtime.expected_perm_state_fired[1]);
+  rc = wyl_engine_session_intern_symbol (engine_session,
+      "wyrelogd-perm-state-user", &runtime.expected_perm_state_fired[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd.perm_state.read",
-      &runtime.expected_perm_state_fired[2]);
+  rc = wyl_engine_session_intern_symbol (engine_session,
+      "wyrelogd.perm_state.read", &runtime.expected_perm_state_fired[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-perm-state-scope",
-      &runtime.expected_perm_state_fired[3]);
+  rc = wyl_engine_session_intern_symbol (engine_session,
+      "wyrelogd-perm-state-scope", &runtime.expected_perm_state_fired[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "dormant",
+  rc = wyl_engine_session_intern_symbol (engine_session, "dormant",
       &runtime.expected_perm_state_fired[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "grant",
+  rc = wyl_engine_session_intern_symbol (engine_session, "grant",
       &runtime.expected_perm_state_fired[5]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "armed",
+  rc = wyl_engine_session_intern_symbol (engine_session, "armed",
       &runtime.expected_perm_state_fired[6]);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -531,7 +530,8 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     runtime.expected_perm_state_fired[6],
   };
 
-  rc = wyl_handle_engine_insert (handle, "member_of", runtime.expected_row, 3);
+  rc = wyl_engine_session_insert (engine_session, "member_of",
+      runtime.expected_row, 3);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (runtime.inserted == 0 || !runtime.matched_expected_insert) {
@@ -539,7 +539,8 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_insert (handle, "principal_event", principal_event, 5);
+  rc = wyl_engine_session_insert (engine_session, "principal_event",
+      principal_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_principal_fired_insert) {
@@ -547,7 +548,8 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_insert (handle, "session_event", session_event, 5);
+  rc = wyl_engine_session_insert (engine_session, "session_event",
+      session_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_session_fired_insert) {
@@ -555,7 +557,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_insert (handle, "perm_state_event",
+  rc = wyl_engine_session_insert (engine_session, "perm_state_event",
       perm_state_event, 7);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
@@ -564,7 +566,8 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_remove (handle, "principal_event", principal_event, 5);
+  rc = wyl_engine_session_remove (engine_session, "principal_event",
+      principal_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_principal_fired_remove) {
@@ -572,7 +575,8 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_remove (handle, "session_event", session_event, 5);
+  rc = wyl_engine_session_remove (engine_session, "session_event",
+      session_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_session_fired_remove) {
@@ -580,7 +584,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_remove (handle, "perm_state_event",
+  rc = wyl_engine_session_remove (engine_session, "perm_state_event",
       perm_state_event, 7);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
@@ -589,7 +593,8 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_remove (handle, "member_of", runtime.expected_row, 3);
+  rc = wyl_engine_session_remove (engine_session, "member_of",
+      runtime.expected_row, 3);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (runtime.removed == 0 || !runtime.matched_expected_remove) {
@@ -615,7 +620,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
 
 cleanup:
   wyrelog_error_t cleanup_rc =
-      wyl_handle_engine_set_delta_callback (handle, NULL, NULL);
+      wyl_engine_session_set_delta_callback (engine_session, NULL, NULL);
   if (rc == WYRELOG_E_OK)
     rc = cleanup_rc;
   return rc;

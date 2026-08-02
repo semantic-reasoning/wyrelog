@@ -1455,6 +1455,38 @@ check_policy_store_audit_intention_reconciles_runtime_query (void)
 }
 
 static gint
+check_poisoned_engine_rejects_audit_replay (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 519;
+
+  static const gchar *id = "01890c10-2e3f-7000-8000-000000000745";
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_record_audit_intention_full
+      (wyl_handle_get_policy_store (handle), id, 745, "poison-replay-user",
+          "audit.poison.replay", "poison-replay-resource", NULL, NULL,
+          "req-poison-replay", WYL_DECISION_ALLOW,
+          &inserted) != WYRELOG_E_OK || !inserted)
+    return 520;
+
+  wyl_handle_poison_engine_pair (handle);
+  if (wyl_handle_load_policy_store_audit_events (handle)
+      != WYRELOG_E_INVALID)
+    return 521;
+
+  g_autofree gchar *state = NULL;
+  gint64 attempts = -1;
+  gint64 count = -1;
+  if (!policy_get_audit_intention_state (handle, id, &state, &attempts)
+      || g_strcmp0 (state, "pending") != 0 || attempts != 0
+      || !policy_count_audit_rows (handle, id, &count) || count != 0
+      || !runtime_count_audit_rows (handle, id, &count) || count != 0)
+    return 522;
+  return 0;
+}
+
+static gint
 check_emit_replays_runtime_query_after_table_loss (void)
 {
   WylHandle *handle = NULL;
@@ -3571,6 +3603,8 @@ main (void)
     return rc;
   if ((rc = check_policy_store_audit_intention_reconciles_runtime_query ())
       != 0)
+    return rc;
+  if ((rc = check_poisoned_engine_rejects_audit_replay ()) != 0)
     return rc;
   if ((rc = check_emit_replays_runtime_query_after_table_loss ()) != 0)
     return rc;

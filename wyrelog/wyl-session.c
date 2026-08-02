@@ -91,13 +91,16 @@ login_skip_mfa_allowed (WylHandle *handle, const wyl_login_req_t *req,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  gint64 row[1];
-  rc = wyl_handle_intern_engine_symbol (handle, username, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return WYRELOG_E_OK;
+  {
+    g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+    gint64 row[1];
+    rc = wyl_engine_session_intern_symbol (session, username, &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return WYRELOG_E_OK;
 
-  rc = wyl_handle_engine_contains (handle, "login_skip_mfa_authz", row, 1,
-      out_allowed);
+    rc = wyl_engine_session_contains (session, "login_skip_mfa_authz", row, 1,
+        out_allowed);
+  }
   wyrelog_error_t reload_rc = reload_session_snapshot (handle);
   if (reload_rc != WYRELOG_E_OK)
     return reload_rc;
@@ -184,6 +187,7 @@ insert_principal_event_fact (WylHandle *handle, gint64 event_id,
     const gchar *username, wyl_principal_state_t old_state,
     wyl_principal_event_t event, wyl_principal_state_t new_state)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
   if (!wyl_handle_engine_pair_is_ready (handle))
@@ -200,19 +204,19 @@ insert_principal_event_fact (WylHandle *handle, gint64 event_id,
   gint64 row[5];
   row[0] = event_id;
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, username, &row[1]);
+      wyl_engine_session_intern_symbol (session, username, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[2]);
+  rc = wyl_engine_session_intern_symbol (session, event_name, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[3]);
+  rc = wyl_engine_session_intern_symbol (session, old_state_name, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[4]);
+  rc = wyl_engine_session_intern_symbol (session, new_state_name, &row[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, "principal_event", row, 5);
+  return wyl_engine_session_insert (session, "principal_event", row, 5);
 }
 
 static wyrelog_error_t
@@ -343,6 +347,7 @@ insert_session_event_fact (WylHandle *handle, gint64 event_id,
     const gchar *session_id, wyl_session_state_t old_state,
     wyl_session_event_t event, wyl_session_state_t new_state)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
   if (!wyl_handle_engine_pair_is_ready (handle))
@@ -359,19 +364,19 @@ insert_session_event_fact (WylHandle *handle, gint64 event_id,
   gint64 row[5];
   row[0] = event_id;
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, session_id, &row[1]);
+      wyl_engine_session_intern_symbol (session, session_id, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[2]);
+  rc = wyl_engine_session_intern_symbol (session, event_name, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[3]);
+  rc = wyl_engine_session_intern_symbol (session, old_state_name, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[4]);
+  rc = wyl_engine_session_intern_symbol (session, new_state_name, &row[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, "session_event", row, 5);
+  return wyl_engine_session_insert (session, "session_event", row, 5);
 }
 
 static wyrelog_error_t

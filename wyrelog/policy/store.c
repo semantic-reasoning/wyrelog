@@ -24357,6 +24357,65 @@ wyl_policy_store_foreach_service_credential_event (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_read_snapshot_begin (wyl_policy_store_t *store,
+    WylPolicyStoreReadSnapshot *snapshot)
+{
+  if (store == NULL || store->db == NULL || snapshot == NULL)
+    return WYRELOG_E_INVALID;
+  *snapshot = (WylPolicyStoreReadSnapshot) {
+  0};
+
+  sqlite3_mutex *mutex = sqlite3_db_mutex (store->db);
+  if (mutex == NULL)
+    return WYRELOG_E_INTERNAL;
+  sqlite3_mutex_enter (mutex);
+  snapshot->store = store;
+  snapshot->owner = g_thread_self ();
+  snapshot->locked = TRUE;
+
+  /* Never join a transaction opened by another store operation. The held
+   * connection mutex closes the autocommit-check/BEGIN race. */
+  if (!sqlite3_get_autocommit (store->db)) {
+    sqlite3_mutex_leave (mutex);
+    *snapshot = (WylPolicyStoreReadSnapshot) {
+    0};
+    return WYRELOG_E_BUSY;
+  }
+  int sqlite_rc = sqlite3_exec (store->db, "BEGIN DEFERRED;", NULL, NULL,
+      NULL);
+  if (sqlite_rc != SQLITE_OK) {
+    sqlite3_mutex_leave (mutex);
+    *snapshot = (WylPolicyStoreReadSnapshot) {
+    0};
+    return graph_authority_sqlite_error (sqlite_rc);
+  }
+  snapshot->active = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_read_snapshot_finish (WylPolicyStoreReadSnapshot *snapshot)
+{
+  if (snapshot == NULL || snapshot->store == NULL || !snapshot->active
+      || !snapshot->locked || snapshot->owner != g_thread_self ())
+    return WYRELOG_E_INVALID;
+
+  sqlite3 *db = snapshot->store->db;
+  int txn_state = sqlite3_txn_state (db, "main");
+  int sqlite_rc = sqlite3_exec (db, "ROLLBACK;", NULL, NULL, NULL);
+  gboolean autocommit_restored = sqlite3_get_autocommit (db) != 0;
+  sqlite3_mutex *mutex = sqlite3_db_mutex (db);
+  g_assert_nonnull (mutex);
+  sqlite3_mutex_leave (mutex);
+  *snapshot = (WylPolicyStoreReadSnapshot) {
+  0};
+  if (sqlite_rc != SQLITE_OK)
+    return graph_authority_sqlite_error (sqlite_rc);
+  return txn_state == SQLITE_TXN_READ && autocommit_restored ?
+      WYRELOG_E_OK : WYRELOG_E_INTERNAL;
+}
+
+wyrelog_error_t
 wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)

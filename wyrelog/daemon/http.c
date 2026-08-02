@@ -5339,6 +5339,7 @@ mark_runtime_audit_degraded (WylDaemonRuntime *runtime, wyrelog_error_t rc)
 static wyrelog_error_t
 check_runtime_ready (WylHandle *handle, const gchar **out_error)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (out_error != NULL)
     *out_error = "not_ready";
   if (!wyl_handle_engine_pair_is_ready (handle))
@@ -5346,12 +5347,12 @@ check_runtime_ready (WylHandle *handle, const gchar **out_error)
 
   gint64 row[1];
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, "wr.audit.read", &row[0]);
+      wyl_engine_session_intern_symbol (session, "wr.audit.read", &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gboolean ready = FALSE;
-  rc = wyl_handle_engine_contains (handle, "guarded_perm", row, 1, &ready);
+  rc = wyl_engine_session_contains (session, "guarded_perm", row, 1, &ready);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!ready)

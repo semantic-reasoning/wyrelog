@@ -13,14 +13,15 @@
 wyrelog_error_t
 wyl_daemon_check_wirelog_policy_ready (WylHandle *handle)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   gint64 row[1];
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, "wr.audit.read", &row[0]);
+      wyl_engine_session_intern_symbol (session, "wr.audit.read", &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gboolean found = FALSE;
-  rc = wyl_handle_engine_contains (handle, "guarded_perm", row, 1, &found);
+  rc = wyl_engine_session_contains (session, "guarded_perm", row, 1, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!found)
@@ -50,15 +51,16 @@ static wyrelog_error_t
 contains_symbol_row2 (WylHandle *handle, const gchar *relation,
     const gchar *a, const gchar *b, gboolean *out_found)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   gint64 row[2];
 
-  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  wyrelog_error_t rc = wyl_engine_session_intern_symbol (session, a, &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  rc = wyl_engine_session_intern_symbol (session, b, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_contains (handle, relation, row, 2, out_found);
+  return wyl_engine_session_contains (session, relation, row, 2, out_found);
 }
 
 wyrelog_error_t
@@ -95,17 +97,19 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
   rc = wyl_handle_reload_engine_pair (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
 
   gint64 event_row[3];
   gboolean found = FALSE;
-  rc = wyl_handle_intern_engine_symbol (handle, audit_id, &event_row[0]);
+  rc = wyl_engine_session_intern_symbol (session, audit_id, &event_row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
   event_row[1] = wyl_audit_event_get_created_at_us (ev);
-  rc = wyl_handle_intern_engine_symbol (handle, "allow", &event_row[2]);
+  rc = wyl_engine_session_intern_symbol (session, "allow", &event_row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_engine_contains (handle, "audit_event", event_row, 3, &found);
+  rc = wyl_engine_session_contains (session, "audit_event", event_row, 3,
+      &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!found)
@@ -428,6 +432,7 @@ static wyrelog_error_t
 insert_symbol_row (WylHandle *handle, const gchar *relation,
     const gchar *const *symbols, gsize ncols)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   gint64 row[4];
 
   if (ncols == 0 || ncols > G_N_ELEMENTS (row))
@@ -435,12 +440,12 @@ insert_symbol_row (WylHandle *handle, const gchar *relation,
 
   for (gsize i = 0; i < ncols; i++) {
     wyrelog_error_t rc =
-        wyl_handle_intern_engine_symbol (handle, symbols[i], &row[i]);
+        wyl_engine_session_intern_symbol (session, symbols[i], &row[i]);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
 
-  return wyl_handle_engine_insert (handle, relation, row, ncols);
+  return wyl_engine_session_insert (session, relation, row, ncols);
 }
 
 wyrelog_error_t

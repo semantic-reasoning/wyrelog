@@ -124,6 +124,32 @@ WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
  */
 GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
 
+/* Private typed capability proving that the caller owns one recursive engine
+ * session. Production consumers must use these operations instead of carrying
+ * raw symbol ids across independently locked handle calls. */
+typedef struct _WylEngineSession WylEngineSession;
+WylEngineSession *wyl_engine_session_acquire (WylHandle * self);
+void wyl_engine_session_release (WylEngineSession * session);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylEngineSession, wyl_engine_session_release);
+wyrelog_error_t wyl_engine_session_intern_symbol (WylEngineSession * session,
+    const gchar * symbol, gint64 * out_id);
+gchar *wyl_engine_session_dup_symbol (WylEngineSession * session, gint64 id);
+wyrelog_error_t wyl_engine_session_insert (WylEngineSession * session,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_engine_session_remove (WylEngineSession * session,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_engine_session_contains (WylEngineSession * session,
+    const gchar * relation, const gint64 * row, gsize ncols,
+    gboolean * out_contains);
+wyrelog_error_t wyl_engine_session_decide (WylEngineSession * session,
+    const gint64 row[3], gboolean * out_allowed);
+wyrelog_error_t wyl_engine_session_step_delta (WylEngineSession * session);
+wyrelog_error_t wyl_engine_session_set_delta_callback
+    (WylEngineSession * session, WylDeltaCallback cb, gpointer user_data);
+wyrelog_error_t wyl_engine_session_replay_delta_insert
+    (WylEngineSession * session, const gchar * relation, const gint64 * row,
+    gsize ncols);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
 {
@@ -306,6 +332,7 @@ wyrelog_error_t wyl_handle_reconcile_committed_engine_pair (WylHandle * self,
  * Interns @symbol into both handle-owned policy engines and returns the shared
  * integer id. Rejected unless the engine pair is already open.
  */
+#ifdef WYL_TEST_HANDLE_SEAMS
 wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
     const gchar * symbol, gint64 * out_id);
 gchar *wyl_handle_dup_engine_symbol (WylHandle * self, gint64 id);
@@ -320,6 +347,7 @@ wyrelog_error_t wyl_handle_engine_insert (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
+#endif
 
 typedef struct
 {
@@ -499,6 +527,7 @@ wyl_handle_set_engine_delta_step_fault_once (WylHandle *self,
  * the engine pair is already open. The read engine is untouched so snapshot
  * decision probes remain available.
  */
+#ifdef WYL_TEST_HANDLE_SEAMS
 wyrelog_error_t wyl_handle_engine_step_delta (WylHandle * self);
 
 /*
@@ -507,6 +536,7 @@ wyrelog_error_t wyl_handle_engine_step_delta (WylHandle * self);
  */
 wyrelog_error_t wyl_handle_engine_set_delta_callback (WylHandle * self,
     WylDeltaCallback cb, gpointer user_data);
+#endif
 
 /*
  * Loads effective role_permission rows from the handle-owned policy authority
@@ -603,6 +633,7 @@ wyrelog_error_t wyl_handle_insert_audit_fact (WylHandle * self,
  * verified through the policy store, and LoBAC visibility should be verified
  * through decision relations.
  */
+#ifdef WYL_TEST_HANDLE_SEAMS
 wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols,
     gboolean * out_contains);
@@ -614,14 +645,11 @@ wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
 wyrelog_error_t wyl_handle_engine_decide (WylHandle * self,
     const gint64 row[3], gboolean * out_allowed);
 
-/*
- * Borrowed policy engines owned by |self|. Production callers must already
- * own the outer engine session for the complete borrowed-pointer lifetime;
- * readiness-only callers must use wyl_handle_engine_pair_is_ready().
- */
+/* Test-only borrowed pointers; absent from shipped artifacts. */
 WylEngine *wyl_handle_get_read_engine (WylHandle * self);
 WylEngine *wyl_handle_get_delta_engine (WylHandle * self);
 wyrelog_error_t wyl_handle_replay_delta_insert (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
+#endif
 
 G_END_DECLS;

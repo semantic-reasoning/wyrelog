@@ -45,6 +45,13 @@ test('engine-session-boundary', python3,
   ],
   env : python_strict_encoding_env,
 )
+test('engine-session-boundary-self-test', python3,
+  args : [
+    files('../tools/check-engine-session-boundary.py'),
+    '--self-test',
+  ],
+  env : python_strict_encoding_env,
+)
 
 test('handle-test-seams-not-shipped', python3,
   args : [
@@ -226,7 +233,7 @@ if build_client
     '-Wno-unused-function',
   ]
   test_daemon_http_decide_deps = [
-    wyrelog_dep,
+    wyrelog_handle_test_seams_dep,
     wyrelog_client_dep,
     libsoup_dep,
     sqlite_dep,
@@ -1388,7 +1395,7 @@ test_fsm_permission_scope = executable('test-fsm-permission-scope',
     '-DWYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH="' + fsm_permission_scope_dl_path + '"',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
-  dependencies : [wyrelog_dep, wirelog_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep],
 )
 
 test('fsm-permission-scope', test_fsm_permission_scope)
@@ -1966,7 +1973,7 @@ test_lobac_partial_delta = executable('test-lobac-partial-delta',
   c_args : [
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
-  dependencies : [wyrelog_dep, wirelog_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep],
 )
 
 test('lobac-partial-delta', test_lobac_partial_delta)
@@ -2214,7 +2221,8 @@ test_session_username_c_args = [
 test_session_username = executable('test-session-username',
   'test-session-username.c',
   c_args : test_session_username_c_args,
-  dependencies : [wyrelog_dep, wirelog_dep, service_session_private_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep,
+    service_session_private_dep],
 )
 
 test('session-username', test_session_username,
@@ -2224,7 +2232,8 @@ test('session-username', test_session_username,
 test_session_username_lifecycle = executable('test-session-username-lifecycle',
   'test-session-username.c',
   c_args : test_session_username_c_args + '-DWYL_TEST_VARIANT_LIFECYCLE',
-  dependencies : [wyrelog_dep, wirelog_dep, service_session_private_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep,
+    service_session_private_dep],
 )
 
 test('session-username-lifecycle', test_session_username_lifecycle)
@@ -2267,7 +2276,7 @@ endif
 test_decide = executable('test-decide',
   'test-decide.c',
   c_args : test_decide_c_args,
-  dependencies : [wyrelog_dep, wirelog_dep] + (get_option('enable_audit').allowed()
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep] + (get_option('enable_audit').allowed()
       ? [duckdb_dep]
       : []),
 )
@@ -2279,7 +2288,7 @@ test_perm = executable('test-perm',
   c_args : [
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
-  dependencies : [wyrelog_dep, wirelog_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep],
 )
 
 test('perm', test_perm)
@@ -2336,7 +2345,7 @@ if get_option('enable_break_glass') and get_option('enable_audit').allowed()
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, duckdb_dep],
   )
 
   test('break-glass-decide', test_break_glass_decide)
@@ -2631,7 +2640,7 @@ if get_option('enable_audit').allowed()
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
   test('daemon-checks', test_daemon_checks, env : audit_conn_test_env)
@@ -2642,7 +2651,7 @@ if get_option('enable_audit').allowed()
       '-DWYL_HAS_AUDIT',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
   test('login-projection', test_login_projection, env : audit_conn_test_env)
@@ -2655,7 +2664,7 @@ if get_option('enable_audit').allowed()
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : [wyrelog_dep, duckdb_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep],
   )
 
   test('daemon-delta', test_daemon_delta, env : audit_conn_test_env)
