@@ -174,6 +174,19 @@ struct _WylEngineSession
   GRecMutexLocker *locker;
 };
 
+struct _WylEngineVerification
+{
+  WylEngineSession *session;
+  WylEngine *read_engine;
+  WylEngine *delta_engine;
+  GHashTable *symbols;
+  gboolean active;
+  gboolean producing_deltas;
+};
+
+typedef wyrelog_error_t (*WylEngineSessionVerifier)
+  (WylEngineSession * session, gpointer data);
+
 static GRecMutexLocker *engine_session_lock_owner (WylHandle * self);
 
 static wyrelog_error_t wyl_handle_intern_engine_symbol_locked
@@ -208,7 +221,27 @@ static wyrelog_error_t fail_partial_engine_pair_mutation_locked
 static gboolean engine_pair_unavailable (WylHandle * self);
 static void wyl_handle_buffer_delta_cb (const gchar * relation,
     const gint64 * row, guint ncols, WylDeltaKind kind, gpointer user_data);
-static void flush_pending_deltas (WylHandle * self);
+static wyrelog_error_t flush_pending_deltas (WylHandle * self);
+static wyrelog_error_t reconcile_committed_engine_pair_in_session
+    (WylEngineSession * session, WylEngineSessionVerifier verify,
+    gpointer data);
+static wyrelog_error_t reconcile_guarded_engine_pair_in_session
+    (WylEngineSession * session, WylEnginePublicationVerifier verify,
+    gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
+    gpointer delta_data);
+
+typedef struct
+{
+  WylEnginePairVerifier verify;
+  gpointer data;
+} WylPublicEnginePairVerify;
+
+static wyrelog_error_t
+verify_public_engine_pair (WylEngineSession *session, gpointer data)
+{
+  WylPublicEnginePairVerify *ctx = data;
+  return ctx->verify (session->handle, ctx->data);
+}
 
 static gboolean
 engine_session_is_valid (WylEngineSession *session)
@@ -296,6 +329,68 @@ wyl_engine_session_intern_symbol (WylEngineSession *session,
   return engine_session_is_valid (session) ?
       wyl_handle_intern_engine_symbol_locked (session->handle, symbol, out_id) :
       WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_engine_session_lookup_symbol (WylEngineSession *session,
+    const gchar *symbol, gint64 *out_id)
+{
+  if (out_id != NULL)
+    *out_id = 0;
+  if (!engine_session_is_valid (session) || symbol == NULL || out_id == NULL
+      || engine_pair_unavailable (session->handle)
+      || session->handle->engine_symbols_by_id == NULL)
+    return WYRELOG_E_INVALID;
+  GHashTableIter iter;
+  gpointer key = NULL, value = NULL;
+  g_hash_table_iter_init (&iter, session->handle->engine_symbols_by_id);
+  while (g_hash_table_iter_next (&iter, &key, &value)) {
+    if (g_strcmp0 (value, symbol) == 0) {
+      *out_id = *(const gint64 *) key;
+      return WYRELOG_E_OK;
+    }
+  }
+  return WYRELOG_E_NOT_FOUND;
+}
+
+wyrelog_error_t
+wyl_engine_verification_lookup_symbol (WylEngineVerification *verification,
+    const gchar *symbol, gint64 *out_id)
+{
+  if (verification == NULL || !verification->active)
+    return WYRELOG_E_INVALID;
+  return wyl_engine_session_lookup_symbol (verification->session, symbol,
+      out_id);
+}
+
+wyrelog_error_t
+wyl_engine_verification_contains (WylEngineVerification *verification,
+    const gchar *relation, const gint64 *row, gsize ncols,
+    gboolean *out_contains)
+{
+  if (verification == NULL || !verification->active)
+    return WYRELOG_E_INVALID;
+  return wyl_engine_session_contains (verification->session, relation, row,
+      ncols, out_contains);
+}
+
+wyrelog_error_t
+wyl_engine_verification_enqueue_delta (WylEngineVerification *verification,
+    const gchar *relation, const gint64 *row, gsize ncols, WylDeltaKind kind)
+{
+  if (verification == NULL || !verification->active
+      || !verification->producing_deltas || relation == NULL || row == NULL
+      || ncols == 0 || ncols > G_MAXUINT
+      || (kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE))
+    return WYRELOG_E_INVALID;
+  WylHandle *self = verification->session->handle;
+  if (self->engine_pair_poisoned
+      || self->read_engine != verification->read_engine
+      || self->delta_engine != verification->delta_engine
+      || self->engine_symbols_by_id != verification->symbols)
+    return WYRELOG_E_INVALID;
+  wyl_handle_buffer_delta_cb (relation, row, (guint) ncols, kind, self);
+  return WYRELOG_E_OK;
 }
 
 gchar *
@@ -607,8 +702,7 @@ wyl_handle_flush_pending_deltas_for_test (WylHandle *self)
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (self);
   if (session == NULL || engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
-  flush_pending_deltas (self);
-  return WYRELOG_E_OK;
+  return flush_pending_deltas (self);
 }
 #endif
 
@@ -673,7 +767,7 @@ wyl_handle_buffer_delta_cb (const gchar *relation, const gint64 *row,
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: engine callback/session owns the lock. */
-static void
+static wyrelog_error_t
 flush_pending_deltas (WylHandle *self)
 {
   WylDeltaCallback cb = self->delta_callback;
@@ -683,16 +777,31 @@ flush_pending_deltas (WylHandle *self)
 
   if (cb == NULL) {
     g_ptr_array_unref (batch);
-    return;
+    return WYRELOG_E_OK;
   }
 
+  wyrelog_error_t rc = WYRELOG_E_OK;
   self->engine_delta_callback_depth++;
   for (guint i = 0; i < batch->len; i++) {
+    /* Poisoning linearizes fail-closed publication. A detached callback may
+     * poison reentrantly; rows after that point belong to an invalidated
+     * projection and must never be observed. */
+    if (self->engine_pair_poisoned) {
+      rc = WYRELOG_E_INVALID;
+      break;
+    }
     WylPendingDelta *delta = g_ptr_array_index (batch, i);
     cb (delta->relation, delta->row, delta->ncols, delta->kind, user_data);
+    /* Check after every callback, including the last row: callback-driven
+     * poisoning is a failed publication, never a successful short flush. */
+    if (self->engine_pair_poisoned) {
+      rc = WYRELOG_E_INVALID;
+      break;
+    }
   }
   self->engine_delta_callback_depth--;
   g_ptr_array_unref (batch);
+  return rc;
 }
 
 static void wyl_handle_complete_shutdown (WylHandle * self,
@@ -2665,6 +2774,39 @@ load_current_engine_pair (WylHandle *self)
   return WYRELOG_E_OK;
 }
 
+static gint
+compare_engine_symbol_ids (gconstpointer a, gconstpointer b)
+{
+  const gint64 lhs = *(const gint64 *) a;
+  const gint64 rhs = *(const gint64 *) b;
+  return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
+}
+
+/* Preserve every previously published symbol id before newly committed
+ * symbols are interned. Delta callback rows and caller-held ids therefore
+ * remain meaningful across an atomic candidate replacement. */
+static wyrelog_error_t
+preintern_published_engine_symbols (WylHandle *self,
+    GHashTable *published_symbols)
+{
+  if (published_symbols == NULL)
+    return WYRELOG_E_OK;
+  GList *ids = g_hash_table_get_keys (published_symbols);
+  ids = g_list_sort (ids, compare_engine_symbol_ids);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (GList * item = ids; item != NULL && rc == WYRELOG_E_OK;
+      item = item->next) {
+    const gint64 expected_id = *(const gint64 *) item->data;
+    const gchar *symbol = g_hash_table_lookup (published_symbols, item->data);
+    gint64 actual_id = -1;
+    rc = wyl_handle_intern_engine_symbol_locked (self, symbol, &actual_id);
+    if (rc == WYRELOG_E_OK && actual_id != expected_id)
+      rc = WYRELOG_E_INTERNAL;
+  }
+  g_list_free (ids);
+  return rc;
+}
+
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
 static wyrelog_error_t
 replace_engine_pair (WylHandle *self, const gchar *template_dir)
@@ -2728,7 +2870,9 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
 
   g_assert_false (self->engine_pair_replacement_building);
   self->engine_pair_replacement_building = TRUE;
-  rc = load_current_engine_pair (self);
+  rc = preintern_published_engine_symbols (self, old_symbols);
+  if (rc == WYRELOG_E_OK)
+    rc = load_current_engine_pair (self);
   self->engine_pair_replacement_building = FALSE;
   if (rc != WYRELOG_E_OK)
     goto fail_after_install;
@@ -2876,6 +3020,192 @@ wyl_handle_fail_committed_engine_projection (WylHandle *self,
   return failure;
 }
 
+static wyrelog_error_t
+reconcile_committed_engine_pair_in_session (WylEngineSession *session,
+    WylEngineSessionVerifier verify, gpointer data)
+{
+  if (!engine_session_is_valid (session) || verify == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylHandle *self = session->handle;
+  if (self->template_dir == NULL) {
+    /* Handles opened without a policy template have no live projection. */
+    if (self->read_engine == NULL && self->delta_engine == NULL
+        && !self->engine_pair_poisoned)
+      return WYRELOG_E_OK;
+    poison_engine_pair_locked (self);
+    return WYRELOG_E_INVALID;
+  }
+
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc != WYRELOG_E_OK) {
+    poison_engine_pair_locked (self);
+    return rc;
+  }
+
+  /* The recursive session is still exclusive: the candidate is not visible
+   * to another evaluator while the exact verifier runs. */
+  self->engine_pair_poisoned = FALSE;
+  rc = verify (session, data);
+  if (rc != WYRELOG_E_OK)
+    poison_engine_pair_locked (self);
+  return rc;
+}
+
+static wyrelog_error_t
+reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
+    WylEnginePublicationVerifier verify, gpointer verify_data,
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data)
+{
+  if (!engine_session_is_valid (session) || verify == NULL)
+    return WYRELOG_E_INVALID;
+  WylHandle *self = session->handle;
+  if (self->template_dir == NULL) {
+    if (self->read_engine == NULL && self->delta_engine == NULL
+        && !self->engine_pair_poisoned)
+      return WYRELOG_E_OK;
+    poison_engine_pair_locked (self);
+    return WYRELOG_E_INVALID;
+  }
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc != WYRELOG_E_OK) {
+    poison_engine_pair_locked (self);
+    return rc;
+  }
+  self->engine_pair_poisoned = FALSE;
+  WylEngineVerification verification = {
+    .session = session,
+    .read_engine = self->read_engine,
+    .delta_engine = self->delta_engine,
+    .symbols = self->engine_symbols_by_id,
+    .active = TRUE,
+  };
+  rc = verify (&verification, verify_data);
+  if (rc == WYRELOG_E_OK && (self->engine_pair_poisoned
+          || self->read_engine == NULL || self->delta_engine == NULL
+          || self->read_engine != verification.read_engine
+          || self->delta_engine != verification.delta_engine
+          || self->engine_symbols_by_id != verification.symbols))
+    rc = WYRELOG_E_INTERNAL;
+  if (rc == WYRELOG_E_OK && produce_deltas != NULL) {
+    verification.producing_deltas = TRUE;
+    rc = produce_deltas (&verification, delta_data);
+    verification.producing_deltas = FALSE;
+  }
+  verification.active = FALSE;
+  if (rc != WYRELOG_E_OK)
+    poison_engine_pair_locked (self);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_engine_session_run_committed_publication (WylEngineSession *session,
+    WylCommittedEngineMutationBody mutate, gpointer mutate_data,
+    WylEnginePublicationVerifier verify, gpointer verify_data,
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data)
+{
+  if (!engine_session_is_valid (session) || mutate == NULL || verify == NULL)
+    return WYRELOG_E_INVALID;
+  if (session->handle->engine_pair_poisoned)
+    return WYRELOG_E_INVALID;
+
+  typedef enum
+  {
+    PUBLICATION_PRECOMMIT,
+    PUBLICATION_COMMITTED_UNPUBLISHED,
+    PUBLICATION_PUBLISHED,
+  } PublicationState;
+  PublicationState state = PUBLICATION_PRECOMMIT;
+  gboolean begun = FALSE;
+  WylHandle *self = session->handle;
+  wyl_policy_store_t *store = NULL;
+  guint64 generation = 0;
+  wyrelog_error_t rc = wyl_service_auth_rank_enter (self,
+      WYL_SERVICE_AUTH_RANK_STORE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean store_rank_active = TRUE;
+  rc = wyl_handle_policy_store_pin_current (self, &store);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_handle_policy_store_capture_generation (self, store, &generation);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!wyl_policy_store_is_autocommit (store)) {
+    rc = WYRELOG_E_BUSY;
+    goto out;
+  }
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc == WYRELOG_E_OK) {
+    begun = TRUE;
+    rc = mutate (store, mutate_data);
+  } else if (!wyl_policy_store_is_autocommit (store)) {
+    poison_engine_pair_locked (self);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (store);
+  if (rc != WYRELOG_E_OK) {
+    wyrelog_error_t rollback_rc = begun ?
+        wyl_policy_store_publication_transaction_rollback_checked (store) :
+        wyl_policy_store_is_autocommit (store) ? WYRELOG_E_OK :
+        WYRELOG_E_INTERNAL;
+    if (rollback_rc != WYRELOG_E_OK) {
+      poison_engine_pair_locked (self);
+      rc = rollback_rc;
+    }
+    if (store_rank_active) {
+      (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
+      store_rank_active = FALSE;
+    }
+    goto out;
+  }
+
+  rc = wyl_policy_store_publication_transaction_commit (store);
+  if (rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store)) {
+    /* RELEASE ambiguity is committed-state uncertainty even if a recovery
+     * rollback succeeds. */
+    if (!wyl_policy_store_is_autocommit (store))
+      (void) wyl_policy_store_publication_transaction_rollback_checked (store);
+    poison_engine_pair_locked (self);
+    if (store_rank_active) {
+      (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
+      store_rank_active = FALSE;
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_INTERNAL;
+    goto out;
+  }
+  state = PUBLICATION_COMMITTED_UNPUBLISHED;
+  rc = wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
+  store_rank_active = FALSE;
+  if (rc != WYRELOG_E_OK) {
+    poison_engine_pair_locked (self);
+    goto out;
+  }
+  rc = wyl_handle_policy_store_validate_generation (self, store, generation);
+  if (rc != WYRELOG_E_OK) {
+    poison_engine_pair_locked (self);
+    goto out;
+  }
+  rc = reconcile_guarded_engine_pair_in_session (session, verify,
+      verify_data, produce_deltas, delta_data);
+  if (rc == WYRELOG_E_OK)
+    rc = flush_pending_deltas (self);
+  if (rc == WYRELOG_E_OK)
+    state = PUBLICATION_PUBLISHED;
+
+out:
+  if (state == PUBLICATION_COMMITTED_UNPUBLISHED)
+    poison_engine_pair_locked (self);
+  if (store != NULL)
+    wyl_handle_policy_store_unpin (self, store);
+  if (store_rank_active)
+    (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
 {
@@ -2979,25 +3309,13 @@ wyl_handle_reconcile_committed_engine_pair (WylHandle *self,
     return WYRELOG_E_INVALID;
   if (wyl_service_auth_rank_is_held (self, WYL_SERVICE_AUTH_RANK_ENGINE))
     return WYRELOG_E_BUSY;
-  g_autoptr (GRecMutexLocker) engine_locker = engine_session_lock_owner (self);
-  if (engine_locker == NULL || self->template_dir == NULL)
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (self);
+  if (session == NULL || self->template_dir == NULL)
     return WYRELOG_E_INVALID;
 
-  g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
-  if (rc != WYRELOG_E_OK) {
-    poison_engine_pair_locked (self);
-    return rc;
-  }
-
-  /* The exclusive session prevents publication until verification returns. */
-  self->engine_pair_poisoned = FALSE;
-  rc = verify (self, data);
-  if (rc != WYRELOG_E_OK) {
-    poison_engine_pair_locked (self);
-    return rc;
-  }
-  return WYRELOG_E_OK;
+  WylPublicEnginePairVerify public_verify = { verify, data };
+  return reconcile_committed_engine_pair_in_session (session,
+      verify_public_engine_pair, &public_verify);
 }
 
 /*
@@ -3327,8 +3645,7 @@ step_delta_engine_and_flush (WylHandle *self)
     return rc;
   }
 
-  flush_pending_deltas (self);
-  return WYRELOG_E_OK;
+  return flush_pending_deltas (self);
 }
 
 static wyrelog_error_t
