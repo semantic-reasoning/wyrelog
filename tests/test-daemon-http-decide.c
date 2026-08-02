@@ -859,6 +859,76 @@ check_service_route_shape_matrix (const gchar *base_url)
 }
 
 static gint
+check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
+{
+  guint prefixes = 0;
+  guint exact_singletons = 0;
+  wyl_daemon_http_route_registration_counts_for_test (server, &prefixes,
+      &exact_singletons);
+#if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_exact = 4;
+  const gchar *canonical_path = "/auth/service-token";
+  const gchar *descendant_path = "/auth/service-token/x";
+  const gchar *sibling_path = "/auth/service-tokenx";
+#elif defined(WYL_HAS_FACT_STORE)
+  const guint expected_exact = 3;
+  const gchar *canonical_path = "/service-credential-operations";
+  const gchar *descendant_path = "/service-credential-operations/x";
+  const gchar *sibling_path = "/service-credential-operationsx";
+#elif defined(WYL_HAS_AUDIT)
+  const guint expected_exact = 1;
+  const gchar *canonical_path = "/auth/service-token";
+  const gchar *descendant_path = "/auth/service-token/x";
+  const gchar *sibling_path = "/auth/service-tokenx";
+#else
+  const guint expected_exact = 0;
+  (void) base_url;
+#endif
+  if (prefixes != 4 || exact_singletons != expected_exact)
+    return 2280;
+#if defined(WYL_HAS_AUDIT) || defined(WYL_HAS_FACT_STORE)
+  WylDaemonExactRouteProbeSnapshot before = { 0 };
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &before))
+    return 2281;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_path (session, "PATCH", base_url, canonical_path, &status,
+          &body) != 0 || status != 405)
+    return 2282;
+  WylDaemonExactRouteProbeSnapshot after = { 0 };
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries + 1)
+    return 2283;
+  before = after;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "PATCH", base_url, descendant_path, &status,
+          &body) != 0 || status != 404
+      || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+    return 2284;
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries)
+    return 2285;
+  before = after;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "PATCH", base_url, sibling_path, &status,
+          &body) != 0 || status != 404)
+    return 2286;
+  if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
+          canonical_path, &after)
+      || after.selected != before.selected + 1
+      || after.terminal_entries != before.terminal_entries)
+    return 2287;
+#endif
+  return 0;
+}
+
+static gint
 check_readyz_runtime_liveness_contract (const gchar *base_url,
     WylDaemonRuntime *runtime)
 {
@@ -14767,6 +14837,11 @@ main (void)
     return 4;
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  gint exact_probe_rc = check_exact_route_probe_framework (http.server,
+      base_url);
+  if (exact_probe_rc != 0)
+    return exact_probe_rc;
 
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)

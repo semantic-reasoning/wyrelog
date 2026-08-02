@@ -177,6 +177,11 @@ typedef struct
   guint refresh_id_successes;
   guint publications;
 } WylDaemonRefreshCounters;
+typedef struct
+{
+  guint64 selected;
+  guint64 terminal_entries;
+} WylDaemonExactRouteProbeSnapshot;
 typedef wyrelog_error_t
     (*WylDaemonManagementReauthorizationCheckpoint) (WylHandle * handle,
     const gchar * actor, const gchar * action, const gchar * session_id,
@@ -184,6 +189,11 @@ typedef wyrelog_error_t
 void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
     (SoupServer * server,
     WylDaemonManagementReauthorizationCheckpoint checkpoint, gpointer data);
+gboolean wyl_daemon_http_exact_route_probe_snapshot_for_test
+    (SoupServer * server, const gchar * canonical_path,
+    WylDaemonExactRouteProbeSnapshot * out_snapshot);
+void wyl_daemon_http_route_registration_counts_for_test
+    (SoupServer * server, guint * out_prefixes, guint * out_exact_singletons);
 void wyl_daemon_http_set_retirement_response_checkpoint_for_test
     (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
     gpointer data);
