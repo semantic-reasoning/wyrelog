@@ -5341,6 +5341,8 @@ check_runtime_ready (WylHandle *handle, const gchar **out_error)
 {
   if (out_error != NULL)
     *out_error = "not_ready";
+  if (!wyl_handle_engine_pair_is_ready (handle))
+    return WYRELOG_E_INVALID;
 
   gint64 row[1];
   wyrelog_error_t rc =

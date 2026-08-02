@@ -90,7 +90,8 @@ void wyl_handle_service_auth_set_unavailable_reason_locked (WylHandle * self,
 /*
  * Ordered private shutdown used by the public void wrapper and finalization.
  * Returns BUSY without changing lifecycle state when called by a thread that
- * owns a policy-store pin or service-auth lease.
+ * owns a policy-store pin/service-auth lease, or when waiting behind another
+ * shutdown could invert against an engine session owned by the caller.
  */
 wyrelog_error_t wyl_handle_shutdown_ordered (WylHandle * self);
 wyrelog_error_t wyl_handle_policy_store_pin_current (WylHandle * self,
@@ -280,6 +281,26 @@ wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
 
 /* True only while one complete, non-poisoned engine pair is published. */
 gboolean wyl_handle_engine_pair_is_ready (WylHandle * self);
+gboolean wyl_handle_engine_pair_is_poisoned (WylHandle * self);
+
+/*
+ * Fences every evaluator entry point after a durable mutation whose runtime
+ * publication outcome is uncertain. Poisoning is idempotent and discards the
+ * current pair; only committed reconciliation may publish a ready pair again.
+ */
+void wyl_handle_poison_engine_pair (WylHandle * self);
+
+typedef wyrelog_error_t (*WylEnginePairVerifier) (WylHandle * handle,
+    gpointer data);
+
+/*
+ * Exclusively rebuilds the complete pair from durable state, then invokes
+ * @verify while retaining the recursive engine session. Any rebuild or
+ * verification failure leaves the handle poisoned. The caller must already
+ * own any service-auth lease required by its enclosing committed operation.
+ */
+wyrelog_error_t wyl_handle_reconcile_committed_engine_pair (WylHandle * self,
+    WylEnginePairVerifier verify, gpointer data);
 
 /*
  * Interns @symbol into both handle-owned policy engines and returns the shared

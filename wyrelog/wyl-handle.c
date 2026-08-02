@@ -931,6 +931,13 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
   }
   if (handle->policy_store_shutdown_pending
       || handle->policy_store_shutdown_completing) {
+    /* Never wait behind a shutdown that may itself be waiting for an engine
+     * session recursively owned by this thread. A retry observes completion. */
+    if (g_rec_mutex_trylock (&handle->engine_session_mutex)) {
+      g_rec_mutex_unlock (&handle->engine_session_mutex);
+      g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+      return WYRELOG_E_BUSY;
+    }
     while (!handle->policy_store_shutdown_completed
         && (handle->policy_store_shutdown_pending
             || handle->policy_store_shutdown_completing))
@@ -2285,7 +2292,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
 }
 
 static void
-poison_engine_pair (WylHandle *self)
+poison_engine_pair_locked (WylHandle *self)
 {
   clear_pending_deltas (self);
   g_clear_object (&self->read_engine);
@@ -2297,7 +2304,8 @@ poison_engine_pair (WylHandle *self)
 static gboolean
 engine_pair_unavailable (WylHandle *self)
 {
-  return self->engine_pair_poisoned || self->read_engine == NULL
+  return (self->engine_pair_poisoned
+      && !self->engine_pair_replacement_building) || self->read_engine == NULL
       || self->delta_engine == NULL;
 }
 
@@ -2310,6 +2318,24 @@ wyl_handle_engine_pair_is_ready (WylHandle *self)
   return !engine_pair_unavailable (self);
 }
 
+gboolean
+wyl_handle_engine_pair_is_poisoned (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), TRUE);
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (self);
+  return self->engine_pair_poisoned;
+}
+
+void
+wyl_handle_poison_engine_pair (WylHandle *self)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (self);
+  poison_engine_pair_locked (self);
+}
+
 wyrelog_error_t
 wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
 {
@@ -2320,6 +2346,8 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   g_autoptr (GRecMutexLocker) engine_locker =
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->engine_pair_poisoned)
     return WYRELOG_E_INVALID;
   if (self->read_engine != NULL || self->delta_engine != NULL)
     return WYRELOG_E_INVALID;
@@ -2383,13 +2411,42 @@ replace_live_engine_pair_serialized (WylHandle *self,
 #endif
   if (repair_projection)
     clear_pending_deltas (self);
+  gboolean was_poisoned = self->engine_pair_poisoned;
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
   wyrelog_error_t rc = replace_engine_pair (self, template_dir);
   if (rc == WYRELOG_E_OK)
-    self->engine_pair_poisoned = FALSE;
+    self->engine_pair_poisoned = was_poisoned;
   else if (repair_projection)
-    poison_engine_pair (self);
+    poison_engine_pair_locked (self);
   return rc;
+}
+
+wyrelog_error_t
+wyl_handle_reconcile_committed_engine_pair (WylHandle *self,
+    WylEnginePairVerifier verify, gpointer data)
+{
+  if (!WYL_IS_HANDLE (self) || verify == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (self);
+  if (engine_locker == NULL || self->template_dir == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc != WYRELOG_E_OK) {
+    poison_engine_pair_locked (self);
+    return rc;
+  }
+
+  /* The exclusive session prevents publication until verification returns. */
+  self->engine_pair_poisoned = FALSE;
+  rc = verify (self, data);
+  if (rc != WYRELOG_E_OK) {
+    poison_engine_pair_locked (self);
+    return rc;
+  }
+  return WYRELOG_E_OK;
 }
 
 /*
@@ -3367,6 +3424,8 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
   g_autoptr (GRecMutexLocker) engine_locker =
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->engine_pair_poisoned)
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
     return WYRELOG_E_OK;
