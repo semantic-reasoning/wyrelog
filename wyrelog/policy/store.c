@@ -7609,6 +7609,42 @@ wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
 }
 
+gboolean
+wyl_policy_store_is_autocommit (wyl_policy_store_t *store)
+{
+  return store != NULL && store->db != NULL
+      && sqlite3_get_autocommit (store->db);
+}
+
+wyrelog_error_t
+wyl_policy_store_publication_transaction_begin (wyl_policy_store_t *store)
+{
+  if (!wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+  return exec_sql (store->db, "BEGIN IMMEDIATE;");
+}
+
+wyrelog_error_t
+wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL || sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_INVALID;
+  return exec_sql (store->db, "COMMIT;");
+}
+
+wyrelog_error_t
+    wyl_policy_store_publication_transaction_rollback_checked
+    (wyl_policy_store_t * store) {
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+  if (sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_OK;
+  wyrelog_error_t rc = exec_sql (store->db, "ROLLBACK;");
+  if (rc != WYRELOG_E_OK || !sqlite3_get_autocommit (store->db))
+    return rc == WYRELOG_E_OK ? WYRELOG_E_INTERNAL : rc;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 service_authority_transaction_exec (WylServiceAuthorityTransaction *txn,
     const gchar *operation)
@@ -25119,9 +25155,9 @@ wyl_policy_store_permission_state_is (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
-static wyrelog_error_t
-wyl_policy_store_get_permission_state (wyl_policy_store_t *store,
-    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+wyrelog_error_t
+wyl_policy_store_get_permission_state_for_publication (wyl_policy_store_t
+    *store, const gchar *subject_id, const gchar *perm_id, const gchar *scope,
     gchar **out_state)
 {
   sqlite3_stmt *stmt = NULL;
@@ -25268,8 +25304,8 @@ wyrelog_error_t
     return rc;
 
   g_autofree gchar *from_state_name = NULL;
-  rc = wyl_policy_store_get_permission_state (store, subject_id, perm_id,
-      scope, &from_state_name);
+  rc = wyl_policy_store_get_permission_state_for_publication (store,
+      subject_id, perm_id, scope, &from_state_name);
   if (rc == WYRELOG_E_OK && from_state_name == NULL)
     from_state_name = g_strdup (wyl_perm_state_name (WYL_PERM_STATE_DORMANT));
 

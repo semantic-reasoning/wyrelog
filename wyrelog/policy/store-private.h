@@ -1376,6 +1376,13 @@ sqlite3 *wyl_policy_store_get_db (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_begin_mutation (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_commit_mutation (wyl_policy_store_t * store);
 void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);
+gboolean wyl_policy_store_is_autocommit (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_publication_transaction_begin
+    (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_publication_transaction_commit
+    (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_publication_transaction_rollback_checked
+    (wyl_policy_store_t * store);
 
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 void wyl_policy_store_graph_authority_migration_fail_once
@@ -2192,6 +2199,9 @@ wyrelog_error_t wyl_policy_store_permission_state_exists (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_permission_state_is (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     const gchar * state, gboolean * out_matches);
+wyrelog_error_t wyl_policy_store_get_permission_state_for_publication
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, gchar ** out_state);
 wyrelog_error_t wyl_policy_store_foreach_permission_state (wyl_policy_store_t *
     store, wyl_policy_permission_state_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_permission_state_event

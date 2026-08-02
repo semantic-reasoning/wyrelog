@@ -183,117 +183,160 @@ append_policy_audit_event (wyl_policy_store_t *store, const gchar *audit_id,
 }
 
 static wyrelog_error_t
-insert_principal_event_fact (WylHandle *handle, gint64 event_id,
-    const gchar *username, wyl_principal_state_t old_state,
-    wyl_principal_event_t event, wyl_principal_state_t new_state)
+verify_session_symbol_row (WylEngineVerification *verification,
+    const gchar *relation, const gchar *const *symbols, guint ncols)
 {
-  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
-  if (wyl_handle_engine_pair_is_poisoned (handle))
+  gint64 row[5] = { 0 };
+  if (ncols == 0 || ncols > G_N_ELEMENTS (row))
     return WYRELOG_E_INVALID;
-  if (!wyl_handle_engine_pair_is_ready (handle))
-    return WYRELOG_E_OK;
-  if (event_id <= 0)
-    return WYRELOG_E_OK;
-
-  const gchar *old_state_name = wyl_principal_state_name (old_state);
-  const gchar *event_name = wyl_principal_event_name (event);
-  const gchar *new_state_name = wyl_principal_state_name (new_state);
-  if (old_state_name == NULL || event_name == NULL || new_state_name == NULL)
-    return WYRELOG_E_INTERNAL;
-
-  gint64 row[5];
-  row[0] = event_id;
-  wyrelog_error_t rc =
-      wyl_engine_session_intern_symbol (session, username, &row[1]);
+  for (guint i = 0; i < ncols; i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_contains (verification,
+      relation, row, ncols, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_engine_session_intern_symbol (session, event_name, &row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_session_intern_symbol (session, old_state_name, &row[3]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_session_intern_symbol (session, new_state_name, &row[4]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_engine_session_insert (session, "principal_event", row, 5);
+  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t
-apply_principal_state_mutation (WylHandle *handle, const gchar *username,
-    wyl_principal_state_t old_state, wyl_principal_event_t event,
-    wyl_principal_state_t new_state, const WylAuditEvent *audit_event,
-    gint64 *out_event_id)
+build_session_event_row (WylEngineVerification *verification,
+    gint64 event_id, const gchar *entity, const gchar *event,
+    const gchar *old_state, const gchar *new_state, gint64 row[5])
 {
-  if (wyl_handle_engine_pair_is_poisoned (handle))
-    return WYRELOG_E_INVALID;
-  if (username == NULL)
-    return WYRELOG_E_OK;
-
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (store == NULL)
-    return WYRELOG_E_OK;
-
-  const gchar *old_state_name = wyl_principal_state_name (old_state);
-  const gchar *event_name = wyl_principal_event_name (event);
-  const gchar *new_state_name = wyl_principal_state_name (new_state);
-  if (old_state_name == NULL || event_name == NULL || new_state_name == NULL)
-    return WYRELOG_E_INTERNAL;
-
-  wyl_principal_state_t validated = WYL_PRINCIPAL_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_principal_step (old_state, event, &validated);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (validated != new_state)
+  if (event_id <= 0)
     return WYRELOG_E_POLICY;
-
-  g_autofree gchar *audit_id = NULL;
-  if (audit_event != NULL) {
-    audit_id = wyl_audit_event_dup_id_string (audit_event);
-    if (audit_id == NULL)
-      return WYRELOG_E_INTERNAL;
+  row[0] = event_id;
+  /* The durable EDB event rows are projected through the FSM's *_fired
+   * relations, whose canonical order is entity, from, event, to. */
+  const gchar *symbols[] = { entity, old_state, event, new_state };
+  for (guint i = 0; i < G_N_ELEMENTS (symbols); i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i + 1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
   }
-
-  gint64 event_id = -1;
-  rc = wyl_policy_store_begin_mutation (store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_policy_store_set_principal_state (store, username, new_state_name);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_policy_store_append_principal_event (store, username,
-        event_name, old_state_name, new_state_name, &event_id);
-  }
-  if (rc == WYRELOG_E_OK && audit_event != NULL) {
-    rc = append_policy_audit_event (store, audit_id, audit_event);
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_commit_mutation (store);
-  if (rc != WYRELOG_E_OK) {
-    wyl_policy_store_rollback_mutation (store);
-    return rc;
-  }
-  if (out_event_id != NULL)
-    *out_event_id = event_id;
   return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
-finish_session_mutation (WylHandle *handle, const WylAuditEvent *audit_event)
+verify_session_event_row (WylEngineVerification *verification,
+    const gchar *relation, gint64 event_id, const gchar *entity,
+    const gchar *event, const gchar *old_state, const gchar *new_state)
 {
-  wyrelog_error_t rc = reload_session_snapshot (handle);
+  gint64 row[5] = { 0 };
+  wyrelog_error_t rc = build_session_event_row (verification, event_id,
+      entity, event, old_state, new_state, row);
   if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (handle, rc);
+    return rc;
+  gboolean found = FALSE;
+  rc = wyl_engine_verification_contains (verification,
+      relation, row, G_N_ELEMENTS (row), &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
 
+static wyrelog_error_t
+enqueue_session_event_delta (WylEngineVerification *verification,
+    const gchar *relation, gint64 event_id, const gchar *entity,
+    const gchar *event, const gchar *old_state, const gchar *new_state)
+{
+  gint64 row[5] = { 0 };
+  wyrelog_error_t rc = build_session_event_row (verification, event_id,
+      entity, event, old_state, new_state, row);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_engine_verification_enqueue_delta (verification, relation, row,
+      G_N_ELEMENTS (row), WYL_DELTA_INSERT);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *username;
+  wyl_principal_state_t old_state;
+  wyl_principal_event_t event;
+  wyl_principal_state_t new_state;
+  const WylAuditEvent *audit_event;
+  gint64 event_id;
+} WylPrincipalPublication;
+
+static wyrelog_error_t
+mutate_principal_publication (wyl_policy_store_t *store, gpointer data)
+{
+  WylPrincipalPublication *ctx = data;
+  const gchar *old_state = wyl_principal_state_name (ctx->old_state);
+  const gchar *event = wyl_principal_event_name (ctx->event);
+  const gchar *new_state = wyl_principal_state_name (ctx->new_state);
+  if (old_state == NULL || event == NULL || new_state == NULL)
+    return WYRELOG_E_INTERNAL;
+  wyrelog_error_t rc = wyl_policy_store_set_principal_state (store,
+      ctx->username, new_state);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_principal_event (store, ctx->username,
+        event, old_state, new_state, &ctx->event_id);
+  if (rc == WYRELOG_E_OK && ctx->audit_event != NULL) {
+    g_autofree gchar *audit_id =
+        wyl_audit_event_dup_id_string (ctx->audit_event);
+    if (audit_id == NULL)
+      rc = WYRELOG_E_INTERNAL;
+    else
+      rc = append_policy_audit_event (store, audit_id, ctx->audit_event);
+  }
+  return rc;
+}
+
+static wyrelog_error_t
+verify_principal_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  WylPrincipalPublication *ctx = data;
+  const gchar *old_state = wyl_principal_state_name (ctx->old_state);
+  const gchar *event = wyl_principal_event_name (ctx->event);
+  const gchar *new_state = wyl_principal_state_name (ctx->new_state);
+  if (old_state == NULL || event == NULL || new_state == NULL)
+    return WYRELOG_E_INTERNAL;
+  const gchar *state_row[] = { ctx->username, new_state };
+  wyrelog_error_t rc = verify_session_symbol_row (verification,
+      "principal_state", state_row, G_N_ELEMENTS (state_row));
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return verify_session_event_row (verification, "principal_fired",
+      ctx->event_id, ctx->username, event, old_state, new_state);
+}
+
+static wyrelog_error_t
+produce_principal_publication_delta (WylEngineVerification *verification,
+    gpointer data)
+{
+  WylPrincipalPublication *ctx = data;
+  return enqueue_session_event_delta (verification, "principal_fired",
+      ctx->event_id, ctx->username, wyl_principal_event_name (ctx->event),
+      wyl_principal_state_name (ctx->old_state),
+      wyl_principal_state_name (ctx->new_state));
+}
+
+static wyrelog_error_t
+publish_principal_mutation (WylPrincipalPublication *ctx)
+{
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (ctx->handle);
+  if (engine_session == NULL)
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication
+      (engine_session, mutate_principal_publication, ctx,
+      verify_principal_publication, ctx, produce_principal_publication_delta,
+      ctx);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
-  if (audit_event != NULL)
-    /* Policy-store audit is durable; the live audit sink is best effort. */
-    (void) wyl_audit_mirror_event (handle, audit_event);
-#else
-  (void) handle;
-  (void) audit_event;
+  if (rc == WYRELOG_E_OK && ctx->audit_event != NULL)
+    (void) wyl_audit_mirror_event (ctx->handle, ctx->audit_event);
 #endif
-
   return rc;
 }
 
@@ -314,16 +357,10 @@ transition_principal_state (WylHandle *handle, const gchar *username,
 #else
   WylAuditEvent *ev = NULL;
 #endif
-  gint64 event_id = -1;
-  wyrelog_error_t rc = apply_principal_state_mutation (handle, username,
-      old_state, WYL_PRINCIPAL_EVENT_MFA_OK, new_state, ev, &event_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = insert_principal_event_fact (handle, event_id, username, old_state,
-      WYL_PRINCIPAL_EVENT_MFA_OK, new_state);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (handle, rc);
-  return finish_session_mutation (handle, ev);
+  WylPrincipalPublication publication = { handle, username, old_state,
+    WYL_PRINCIPAL_EVENT_MFA_OK, new_state, ev, -1
+  };
+  return publish_principal_mutation (&publication);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -342,205 +379,220 @@ new_session_state_audit (const gchar *session_id,
 }
 #endif
 
-static wyrelog_error_t
-insert_session_event_fact (WylHandle *handle, gint64 event_id,
-    const gchar *session_id, wyl_session_state_t old_state,
-    wyl_session_event_t event, wyl_session_state_t new_state)
+typedef struct
 {
-  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
-  if (wyl_handle_engine_pair_is_poisoned (handle))
-    return WYRELOG_E_INVALID;
-  if (!wyl_handle_engine_pair_is_ready (handle))
-    return WYRELOG_E_OK;
-  if (event_id <= 0)
-    return WYRELOG_E_OK;
-
-  const gchar *old_state_name = wyl_session_state_name (old_state);
-  const gchar *event_name = wyl_session_event_name (event);
-  const gchar *new_state_name = wyl_session_state_name (new_state);
-  if (old_state_name == NULL || event_name == NULL || new_state_name == NULL)
-    return WYRELOG_E_INTERNAL;
-
-  gint64 row[5];
-  row[0] = event_id;
-  wyrelog_error_t rc =
-      wyl_engine_session_intern_symbol (session, session_id, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_session_intern_symbol (session, event_name, &row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_session_intern_symbol (session, old_state_name, &row[3]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_session_intern_symbol (session, new_state_name, &row[4]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_engine_session_insert (session, "session_event", row, 5);
-}
+  WylHandle *handle;
+  const gchar *session_id;
+  wyl_session_state_t old_state;
+  wyl_session_event_t event;
+  wyl_session_state_t new_state;
+  const WylAuditEvent *audit_event;
+  gint64 event_id;
+} WylSessionPublication;
 
 static wyrelog_error_t
-apply_session_state_mutation (WylHandle *handle, const gchar *session_id,
-    wyl_session_state_t old_state, wyl_session_event_t event,
-    wyl_session_state_t new_state, const WylAuditEvent *audit_event,
-    gint64 *out_event_id)
+mutate_session_publication (wyl_policy_store_t *store, gpointer data)
 {
-  if (wyl_handle_engine_pair_is_poisoned (handle))
-    return WYRELOG_E_INVALID;
-  if (session_id == NULL)
-    return WYRELOG_E_OK;
-
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (store == NULL)
-    return WYRELOG_E_OK;
-
-  const gchar *old_state_name = wyl_session_state_name (old_state);
-  const gchar *event_name = wyl_session_event_name (event);
-  const gchar *new_state_name = wyl_session_state_name (new_state);
-  if (old_state_name == NULL || event_name == NULL || new_state_name == NULL)
+  WylSessionPublication *ctx = data;
+  const gchar *old_state = wyl_session_state_name (ctx->old_state);
+  const gchar *event = wyl_session_event_name (ctx->event);
+  const gchar *new_state = wyl_session_state_name (ctx->new_state);
+  if (old_state == NULL || event == NULL || new_state == NULL)
     return WYRELOG_E_INTERNAL;
-
-  wyl_session_state_t validated = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (old_state, event, &validated);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (validated != new_state)
-    return WYRELOG_E_POLICY;
-
-  g_autofree gchar *audit_id = NULL;
-  if (audit_event != NULL) {
-    audit_id = wyl_audit_event_dup_id_string (audit_event);
+  wyrelog_error_t rc = wyl_policy_store_set_session_state (store,
+      ctx->session_id, new_state);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_session_event (store, ctx->session_id,
+        event, old_state, new_state, &ctx->event_id);
+  if (rc == WYRELOG_E_OK && ctx->audit_event != NULL) {
+    g_autofree gchar *audit_id =
+        wyl_audit_event_dup_id_string (ctx->audit_event);
     if (audit_id == NULL)
-      return WYRELOG_E_INTERNAL;
+      rc = WYRELOG_E_INTERNAL;
+    else
+      rc = append_policy_audit_event (store, audit_id, ctx->audit_event);
   }
-
-  gint64 event_id = -1;
-  rc = wyl_policy_store_begin_mutation (store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_policy_store_set_session_state (store, session_id, new_state_name);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_policy_store_append_session_event (store, session_id,
-        event_name, old_state_name, new_state_name, &event_id);
-  }
-  if (rc == WYRELOG_E_OK && audit_event != NULL) {
-    rc = append_policy_audit_event (store, audit_id, audit_event);
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_commit_mutation (store);
-  if (rc != WYRELOG_E_OK) {
-    wyl_policy_store_rollback_mutation (store);
-    return rc;
-  }
-  if (out_event_id != NULL)
-    *out_event_id = event_id;
-  return WYRELOG_E_OK;
+  return rc;
 }
 
 static wyrelog_error_t
-apply_login_state_mutation (WylHandle *handle, const gchar *username,
-    wyl_principal_event_t principal_event,
-    wyl_principal_state_t principal_new_state, const gchar *session_id,
-    wyl_session_state_t session_old_state, wyl_session_event_t session_event,
-    wyl_session_state_t session_new_state,
-    const WylAuditEvent *principal_audit_event,
-    const WylAuditEvent *session_audit_event, gint64 *out_principal_event_id,
-    gint64 *out_session_event_id)
+verify_session_publication (WylEngineVerification *verification, gpointer data)
 {
-  if (wyl_handle_engine_pair_is_poisoned (handle))
-    return WYRELOG_E_INVALID;
-  if (username == NULL || session_id == NULL)
-    return WYRELOG_E_INVALID;
+  WylSessionPublication *ctx = data;
+  const gchar *old_state = wyl_session_state_name (ctx->old_state);
+  const gchar *event = wyl_session_event_name (ctx->event);
+  const gchar *new_state = wyl_session_state_name (ctx->new_state);
+  if (old_state == NULL || event == NULL || new_state == NULL)
+    return WYRELOG_E_INTERNAL;
+  return verify_session_event_row (verification, "session_fired",
+      ctx->event_id, ctx->session_id, event, old_state, new_state);
+}
 
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (store == NULL)
-    return WYRELOG_E_OK;
+static wyrelog_error_t
+produce_session_publication_delta (WylEngineVerification *verification,
+    gpointer data)
+{
+  WylSessionPublication *ctx = data;
+  return enqueue_session_event_delta (verification, "session_fired",
+      ctx->event_id, ctx->session_id, wyl_session_event_name (ctx->event),
+      wyl_session_state_name (ctx->old_state),
+      wyl_session_state_name (ctx->new_state));
+}
 
-  wyl_principal_state_t validated_principal = WYL_PRINCIPAL_STATE_LAST_;
-  wyrelog_error_t rc =
-      wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_UNVERIFIED, principal_event,
-      &validated_principal);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (validated_principal != principal_new_state)
-    return WYRELOG_E_POLICY;
+static wyrelog_error_t
+publish_session_mutation (WylSessionPublication *ctx)
+{
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (ctx->handle);
+  if (engine_session == NULL)
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication
+      (engine_session, mutate_session_publication, ctx,
+      verify_session_publication, ctx, produce_session_publication_delta,
+      ctx);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+#ifdef WYL_HAS_AUDIT
+  if (rc == WYRELOG_E_OK && ctx->audit_event != NULL)
+    (void) wyl_audit_mirror_event (ctx->handle, ctx->audit_event);
+#endif
+  return rc;
+}
 
-  wyl_session_state_t validated_session = WYL_SESSION_STATE_LAST_;
-  rc = wyl_fsm_session_step (session_old_state, session_event,
-      &validated_session);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (validated_session != session_new_state)
-    return WYRELOG_E_POLICY;
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *username;
+  wyl_principal_event_t principal_event;
+  wyl_principal_state_t principal_new_state;
+  const gchar *session_id;
+  wyl_session_state_t session_old_state;
+  wyl_session_event_t session_event;
+  wyl_session_state_t session_new_state;
+  const WylAuditEvent *principal_audit_event;
+  const WylAuditEvent *session_audit_event;
+  gint64 principal_event_id;
+  gint64 session_event_id;
+} WylLoginPublication;
 
-  const gchar *principal_event_name =
-      wyl_principal_event_name (principal_event);
-  const gchar *principal_from_state =
-      wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED);
-  const gchar *principal_to_state =
-      wyl_principal_state_name (principal_new_state);
-  const gchar *session_event_name = wyl_session_event_name (session_event);
-  const gchar *session_from_state = wyl_session_state_name (session_old_state);
-  const gchar *session_to_state = wyl_session_state_name (session_new_state);
-  if (principal_event_name == NULL || principal_from_state == NULL
-      || principal_to_state == NULL || session_event_name == NULL
-      || session_from_state == NULL || session_to_state == NULL)
+static wyrelog_error_t
+mutate_login_publication (wyl_policy_store_t *store, gpointer data)
+{
+  WylLoginPublication *ctx = data;
+  const gchar *principal_event = wyl_principal_event_name
+      (ctx->principal_event);
+  const gchar *principal_from = wyl_principal_state_name
+      (WYL_PRINCIPAL_STATE_UNVERIFIED);
+  const gchar *principal_to = wyl_principal_state_name
+      (ctx->principal_new_state);
+  const gchar *session_event = wyl_session_event_name (ctx->session_event);
+  const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
+  const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
+  if (principal_event == NULL || principal_from == NULL
+      || principal_to == NULL || session_event == NULL
+      || session_from == NULL || session_to == NULL)
     return WYRELOG_E_INTERNAL;
 
-  g_autofree gchar *principal_audit_id = NULL;
-  if (principal_audit_event != NULL) {
-    principal_audit_id = wyl_audit_event_dup_id_string (principal_audit_event);
-    if (principal_audit_id == NULL)
-      return WYRELOG_E_INTERNAL;
+  wyrelog_error_t rc = wyl_policy_store_set_principal_state (store,
+      ctx->username, principal_to);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_principal_event (store, ctx->username,
+        principal_event, principal_from, principal_to,
+        &ctx->principal_event_id);
+  if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL) {
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
+        (ctx->principal_audit_event);
+    if (audit_id == NULL)
+      rc = WYRELOG_E_INTERNAL;
+    else
+      rc = append_policy_audit_event (store, audit_id,
+          ctx->principal_audit_event);
   }
-  g_autofree gchar *session_audit_id = NULL;
-  if (session_audit_event != NULL) {
-    session_audit_id = wyl_audit_event_dup_id_string (session_audit_event);
-    if (session_audit_id == NULL)
-      return WYRELOG_E_INTERNAL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_set_session_state (store, ctx->session_id,
+        session_to);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_session_event (store, ctx->session_id,
+        session_event, session_from, session_to, &ctx->session_event_id);
+  if (rc == WYRELOG_E_OK && ctx->session_audit_event != NULL) {
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
+        (ctx->session_audit_event);
+    if (audit_id == NULL)
+      rc = WYRELOG_E_INTERNAL;
+    else
+      rc = append_policy_audit_event (store, audit_id,
+          ctx->session_audit_event);
   }
+  return rc;
+}
 
-  gint64 principal_event_id = -1;
-  gint64 session_event_id = -1;
-  rc = wyl_policy_store_begin_mutation (store);
+static wyrelog_error_t
+verify_login_publication (WylEngineVerification *verification, gpointer data)
+{
+  WylLoginPublication *ctx = data;
+  const gchar *principal_event = wyl_principal_event_name
+      (ctx->principal_event);
+  const gchar *principal_from = wyl_principal_state_name
+      (WYL_PRINCIPAL_STATE_UNVERIFIED);
+  const gchar *principal_to = wyl_principal_state_name
+      (ctx->principal_new_state);
+  const gchar *session_event = wyl_session_event_name (ctx->session_event);
+  const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
+  const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
+  if (principal_event == NULL || principal_from == NULL
+      || principal_to == NULL || session_event == NULL
+      || session_from == NULL || session_to == NULL)
+    return WYRELOG_E_INTERNAL;
+  const gchar *principal_state[] = { ctx->username, principal_to };
+  wyrelog_error_t rc = verify_session_symbol_row (verification,
+      "principal_state", principal_state, G_N_ELEMENTS (principal_state));
+  if (rc == WYRELOG_E_OK)
+    rc = verify_session_event_row (verification, "principal_fired",
+        ctx->principal_event_id, ctx->username, principal_event,
+        principal_from, principal_to);
+  if (rc == WYRELOG_E_OK)
+    rc = verify_session_event_row (verification, "session_fired",
+        ctx->session_event_id, ctx->session_id, session_event, session_from,
+        session_to);
+  return rc;
+}
+
+static wyrelog_error_t
+produce_login_publication_deltas (WylEngineVerification *verification,
+    gpointer data)
+{
+  WylLoginPublication *ctx = data;
+  wyrelog_error_t rc = enqueue_session_event_delta (verification,
+      "principal_fired", ctx->principal_event_id, ctx->username,
+      wyl_principal_event_name (ctx->principal_event),
+      wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
+      wyl_principal_state_name (ctx->principal_new_state));
   if (rc != WYRELOG_E_OK)
     return rc;
+  return enqueue_session_event_delta (verification, "session_fired",
+      ctx->session_event_id, ctx->session_id,
+      wyl_session_event_name (ctx->session_event),
+      wyl_session_state_name (ctx->session_old_state),
+      wyl_session_state_name (ctx->session_new_state));
+}
 
-  rc = wyl_policy_store_set_principal_state (store, username,
-      principal_to_state);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_policy_store_append_principal_event (store, username,
-        principal_event_name, principal_from_state, principal_to_state,
-        &principal_event_id);
-  }
-  if (rc == WYRELOG_E_OK && principal_audit_event != NULL) {
-    rc = append_policy_audit_event (store, principal_audit_id,
-        principal_audit_event);
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_set_session_state (store, session_id,
-        session_to_state);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_policy_store_append_session_event (store, session_id,
-        session_event_name, session_from_state, session_to_state,
-        &session_event_id);
-  }
-  if (rc == WYRELOG_E_OK && session_audit_event != NULL) {
-    rc = append_policy_audit_event (store, session_audit_id,
-        session_audit_event);
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_commit_mutation (store);
-  if (rc != WYRELOG_E_OK) {
-    wyl_policy_store_rollback_mutation (store);
-    return rc;
-  }
-  if (out_principal_event_id != NULL)
-    *out_principal_event_id = principal_event_id;
-  if (out_session_event_id != NULL)
-    *out_session_event_id = session_event_id;
-  return WYRELOG_E_OK;
+static wyrelog_error_t
+publish_login_mutation (WylLoginPublication *ctx)
+{
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (ctx->handle);
+  if (engine_session == NULL)
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication
+      (engine_session, mutate_login_publication, ctx,
+      verify_login_publication, ctx, produce_login_publication_deltas, ctx);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+#ifdef WYL_HAS_AUDIT
+  if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL)
+    (void) wyl_audit_mirror_event (ctx->handle, ctx->principal_audit_event);
+  if (rc == WYRELOG_E_OK && ctx->session_audit_event != NULL)
+    (void) wyl_audit_mirror_event (ctx->handle, ctx->session_audit_event);
+#endif
+  return rc;
 }
 
 static wyrelog_error_t
@@ -559,17 +611,12 @@ transition_session_state (WylHandle *handle, WylSession *session,
       old_state_name, new_state_name, request_id);
 #else
   WylAuditEvent *ev = NULL;
+  (void) request_id;
 #endif
-  gint64 event_id = -1;
-  wyrelog_error_t rc = apply_session_state_mutation (handle, session_id,
-      old_state, event, new_state, ev, &event_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = insert_session_event_fact (handle, event_id, session_id, old_state,
-      event, new_state);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (handle, rc);
-  rc = finish_session_mutation (handle, ev);
+  WylSessionPublication publication = { handle, session_id, old_state, event,
+    new_state, ev, -1
+  };
+  wyrelog_error_t rc = publish_session_mutation (&publication);
   if (rc != WYRELOG_E_OK)
     return rc;
   session->state = new_state;
@@ -658,39 +705,15 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylAuditEvent *principal_ev = NULL;
     WylAuditEvent *session_ev = NULL;
 #endif
-    gint64 principal_event_id = -1;
-    gint64 session_event_id = -1;
-    rc = apply_login_state_mutation (handle, username, event, state,
-        session_id, WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-        WYL_SESSION_STATE_ACTIVE, principal_ev, session_ev,
-        &principal_event_id, &session_event_id);
+    WylLoginPublication publication = { handle, username, event, state,
+      session_id, WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
+      WYL_SESSION_STATE_ACTIVE, principal_ev, session_ev, -1, -1
+    };
+    rc = publish_login_mutation (&publication);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
       return rc;
     }
-    rc = insert_principal_event_fact (handle, principal_event_id, username,
-        WYL_PRINCIPAL_STATE_UNVERIFIED, event, state);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (session);
-      return wyl_handle_fail_committed_engine_projection (handle, rc);
-    }
-    rc = insert_session_event_fact (handle, session_event_id, session_id,
-        WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-        WYL_SESSION_STATE_ACTIVE);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (session);
-      return wyl_handle_fail_committed_engine_projection (handle, rc);
-    }
-    rc = reload_session_snapshot (handle);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (session);
-      return wyl_handle_fail_committed_engine_projection (handle, rc);
-    }
-#ifdef WYL_HAS_AUDIT
-    /* Policy-store audit is durable; the live audit sink is best effort. */
-    (void) wyl_audit_mirror_event (handle, principal_ev);
-    (void) wyl_audit_mirror_event (handle, session_ev);
-#endif
     session->state = WYL_SESSION_STATE_ACTIVE;
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {
@@ -707,22 +730,11 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 #else
   WylAuditEvent *ev = NULL;
 #endif
-  gint64 event_id = -1;
-  wyrelog_error_t rc = apply_session_state_mutation (handle, session_id,
-      WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-      WYL_SESSION_STATE_ACTIVE, ev, &event_id);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (session);
-    return rc;
-  }
-  rc = insert_session_event_fact (handle, event_id, session_id,
-      WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-      WYL_SESSION_STATE_ACTIVE);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (session);
-    return wyl_handle_fail_committed_engine_projection (handle, rc);
-  }
-  rc = finish_session_mutation (handle, ev);
+  WylSessionPublication publication = { handle, session_id,
+    WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
+    WYL_SESSION_STATE_ACTIVE, ev, -1
+  };
+  wyrelog_error_t rc = publish_session_mutation (&publication);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (session);
     return rc;

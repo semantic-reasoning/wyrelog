@@ -125,6 +125,8 @@ void wyl_engine_session_release (WylEngineSession * session);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylEngineSession, wyl_engine_session_release);
 wyrelog_error_t wyl_engine_session_intern_symbol (WylEngineSession * session,
     const gchar * symbol, gint64 * out_id);
+wyrelog_error_t wyl_engine_session_lookup_symbol (WylEngineSession * session,
+    const gchar * symbol, gint64 * out_id);
 gchar *wyl_engine_session_dup_symbol (WylEngineSession * session, gint64 id);
 wyrelog_error_t wyl_engine_session_insert (WylEngineSession * session,
     const gchar * relation, const gint64 * row, gsize ncols);
@@ -357,6 +359,38 @@ wyrelog_error_t wyl_handle_fail_committed_engine_projection (WylHandle * self,
 
 typedef wyrelog_error_t (*WylEnginePairVerifier) (WylHandle * handle,
     gpointer data);
+
+typedef wyrelog_error_t (*WylCommittedEngineMutationBody)
+  (wyl_policy_store_t * store, gpointer data);
+typedef struct _WylEngineVerification WylEngineVerification;
+typedef wyrelog_error_t (*WylEnginePublicationVerifier)
+  (WylEngineVerification * verification, gpointer data);
+typedef wyrelog_error_t (*WylEnginePublicationDeltaProducer)
+  (WylEngineVerification * verification, gpointer data);
+wyrelog_error_t wyl_engine_verification_lookup_symbol
+    (WylEngineVerification * verification, const gchar * symbol,
+    gint64 * out_id);
+wyrelog_error_t wyl_engine_verification_contains
+    (WylEngineVerification * verification, const gchar * relation,
+    const gint64 * row, gsize ncols, gboolean * out_contains);
+wyrelog_error_t wyl_engine_verification_enqueue_delta
+    (WylEngineVerification * verification, const gchar * relation,
+    const gint64 * row, gsize ncols, WylDeltaKind kind);
+
+/*
+ * Runs one durable mutation while @session keeps every evaluator outside the
+ * commit/publication interval. A successful mutation is immediately followed
+ * by a complete durable-snapshot rebuild and an exact verifier before the new
+ * pair is published. Any post-commit failure poisons the pair before return.
+ *
+ * The caller acquires any service-auth lease first, then @session, and must not
+ * open a second store/engine ownership scope inside @verify.
+ */
+wyrelog_error_t wyl_engine_session_run_committed_publication
+    (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
+    gpointer mutate_data, WylEnginePublicationVerifier verify,
+    gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
+    gpointer delta_data);
 
 /*
  * Exclusively rebuilds the complete pair from durable state, then invokes
