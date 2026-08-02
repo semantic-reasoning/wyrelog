@@ -2594,9 +2594,10 @@ if get_option('enable_audit').allowed()
     'test-audit-emit.c',
     c_args : [
       '-DWYL_HAS_AUDIT',
+      '-DWYL_TEST_HANDLE_SEAMS',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
   test('audit-emit', test_audit_emit,

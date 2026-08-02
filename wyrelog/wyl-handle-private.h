@@ -133,9 +133,20 @@ typedef enum
 void wyl_handle_set_engine_session_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (WylEngineSessionCheckpoint phase, gpointer data),
     gpointer data);
+typedef enum
+{
+  WYL_ENGINE_REPLACEMENT_WAITING,
+  WYL_ENGINE_REPLACEMENT_ACQUIRED,
+} WylEngineReplacementCheckpoint;
+void wyl_handle_set_engine_replacement_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (WylEngineReplacementCheckpoint phase, gpointer data),
+    gpointer data);
 void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
     const gchar * relation, void (*checkpoint) (gpointer data), gpointer data);
+void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
+guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
 #endif
 
 #ifdef WYL_HAS_FACT_STORE
