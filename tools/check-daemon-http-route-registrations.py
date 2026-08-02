@@ -125,6 +125,7 @@ class Token:
     kind: str
     value: str
     line: int
+    offset: int
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ class OwnershipOccurrence:
     line: int
     symbol: str
     role: str
+    arguments: tuple[str, ...] | None = None
 
 
 def translation_phase_source(source: str) -> str:
@@ -235,7 +237,7 @@ def lex(source: str) -> list[Token]:
             else:
                 raise GuardError("unterminated C literal")
             tokens.append(Token("string" if quote == '"' else "char",
-                                source[start:index], line))
+                                source[start:index], line, start))
             continue
         if char.isalpha() or char == "_":
             start = index
@@ -243,9 +245,10 @@ def lex(source: str) -> list[Token]:
             while index < length and (source[index].isalnum()
                                       or source[index] == "_"):
                 index += 1
-            tokens.append(Token("identifier", source[start:index], line))
+            tokens.append(Token("identifier", source[start:index], line,
+                                start))
             continue
-        tokens.append(Token("punct", char, line))
+        tokens.append(Token("punct", char, line, index))
         index += 1
     return tokens
 
@@ -325,7 +328,15 @@ def ownership_occurrences(tokens: list[Token], pairing: dict[int, int],
                     and tokens[index + 1].value == "("
                     else f"indirect:{owner}")
         source, line = location_for_line(token.line)
-        result.append(OwnershipOccurrence(source, line, token.value, role))
+        arguments = None
+        if role.startswith("call:"):
+            closing = pairing.get(index + 1)
+            if closing is None:
+                raise GuardError("unparsed ownership call signature")
+            arguments = canonical_arguments(
+                split_arguments(tokens, index + 1, closing))
+        result.append(OwnershipOccurrence(
+            source, line, token.value, role, arguments))
     return result
 
 
@@ -348,6 +359,32 @@ def split_arguments(tokens: list[Token], opening: int, closing: int):
 
 def render(argument: list[Token]) -> str:
     return " ".join(token.value for token in argument)
+
+
+def canonical_argument(argument: list[Token]) -> str:
+    rendered = render(argument)
+    compact = re.sub(r"\s+", "", rendered)
+    while compact.startswith("(") and compact.endswith(")"):
+        depth = 0
+        wraps = True
+        for index, char in enumerate(compact):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index != len(compact) - 1:
+                    wraps = False
+                    break
+        if not wraps or depth != 0:
+            break
+        compact = compact[1:-1]
+    if compact in {"NULL", "0", "__null", "nullptr", "(void*)0"}:
+        return "NULL"
+    return rendered
+
+
+def canonical_arguments(arguments: list[list[Token]]) -> tuple[str, ...]:
+    return tuple(canonical_argument(argument) for argument in arguments)
 
 
 def literal_path(argument: list[Token]) -> str:
@@ -687,7 +724,8 @@ def raw_approved_occurrences(root: Path,
     return Counter(occurrences)
 
 
-def raw_feature_optional_occurrences(root: Path) \
+def raw_disabled_feature_occurrences(root: Path,
+                                     enabled: frozenset[str]) \
         -> Counter[OwnershipOccurrence]:
     path = root / "wyrelog" / "daemon" / "http.c"
     raw = path.read_text(encoding="utf-8")
@@ -695,12 +733,14 @@ def raw_feature_optional_occurrences(root: Path) \
     optional = []
     for registration in scan_source(path):
         spec = EXPECTED_BY_PATH[registration.path]
-        if spec.feature is None:
+        if spec.feature is None or spec.feature in enabled:
             continue
         optional.append(OwnershipOccurrence(
             registration.source.relative_to(root).as_posix(),
             line_map[registration.line - 1], registration.api,
-            f"call:{SERVER_OWNER}"))
+            f"call:{SERVER_OWNER}",
+            ("server", f'"{registration.path}"', registration.callback,
+             registration.data, registration.destroy)))
     return Counter(optional)
 
 
@@ -830,6 +870,46 @@ class CompileUnit:
     arguments: tuple[str, ...]
 
 
+def compile_unit_enabled_features(unit: CompileUnit,
+                                  compiler_id: str) -> frozenset[str]:
+    windows = compiler_id in {"clang-cl", "msvc"}
+    arguments = expand_response_files(
+        list(unit.arguments), unit.directory, windows)
+    enabled = set()
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        lower = argument.lower()
+        operand = None
+        define = False
+        if argument in {"-D", "-U"} or lower in {"/d", "/u"}:
+            if index + 1 >= len(arguments):
+                raise GuardError(f"compiler option lacks operand: {argument}")
+            operand = arguments[index + 1]
+            define = argument == "-D" or lower == "/d"
+            index += 2
+        elif argument.startswith("-D") or argument.startswith("-U"):
+            operand = argument[2:]
+            define = argument.startswith("-D")
+            index += 1
+        elif lower.startswith("/d") or lower.startswith("/u"):
+            operand = argument[2:]
+            define = lower.startswith("/d")
+            index += 1
+        else:
+            index += 1
+        if operand is None:
+            continue
+        name = operand.split("=", 1)[0]
+        if name not in {FACT, AUDIT}:
+            continue
+        if define:
+            enabled.add(name)
+        else:
+            enabled.discard(name)
+    return frozenset(enabled)
+
+
 def production_compile_units(root: Path, build_root: Path,
                              compiler_id: str) -> list[CompileUnit]:
     database_path = build_root / "compile_commands.json"
@@ -927,6 +1007,111 @@ def canonical_provenance(marked: str, directory: Path, root: Path,
     return relative.as_posix()
 
 
+def expanded_call_arguments(output: str, position: int,
+                            symbol: str) -> tuple[str, ...]:
+    """Parse one expanded ownership call without lexing the whole TU."""
+    cursor = position + len(symbol)
+    while cursor < len(output) and output[cursor].isspace():
+        cursor += 1
+    if cursor >= len(output) or output[cursor] != "(":
+        raise GuardError("expanded ownership API is not a direct call")
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = []
+    state = "code"
+    at_line_start = False
+    index = cursor
+    end = None
+    while index < len(output):
+        char = output[index]
+        if state == "line-comment":
+            if char == "\n":
+                state = "code"
+                at_line_start = True
+            index += 1
+            continue
+        if state == "block-comment":
+            if output.startswith("*/", index):
+                state = "code"
+                index += 2
+            else:
+                index += 1
+            continue
+        if state in {"string", "char"}:
+            quote = '"' if state == "string" else "'"
+            if char == "\\":
+                if index + 1 >= len(output):
+                    raise GuardError("unterminated expanded C literal")
+                index += 2
+            elif char == quote:
+                state = "code"
+                index += 1
+            elif char == "\n":
+                raise GuardError("newline in expanded C literal")
+            else:
+                index += 1
+            continue
+        if state == "directive":
+            if char == "\n":
+                state = "code"
+                at_line_start = True
+            index += 1
+            continue
+        if char == "\n":
+            at_line_start = True
+            index += 1
+            continue
+        if at_line_start and char in " \t\r\f\v":
+            index += 1
+            continue
+        if at_line_start and char == "#":
+            state = "directive"
+            index += 1
+            continue
+        at_line_start = False
+        if output.startswith("//", index):
+            state = "line-comment"
+            index += 2
+            continue
+        if output.startswith("/*", index):
+            state = "block-comment"
+            index += 2
+            continue
+        if char in {'"', "'"}:
+            state = "string" if char == '"' else "char"
+            index += 1
+            continue
+        if char in pairs:
+            stack.append(char)
+        elif char in pairs.values():
+            if not stack or pairs[stack[-1]] != char:
+                raise GuardError("unbalanced expanded ownership call")
+            stack.pop()
+            if not stack:
+                end = index + 1
+                break
+        index += 1
+    if end is None:
+        raise GuardError("unterminated expanded ownership call")
+    segment = output[position:end]
+    tokens = lex(segment)
+    if (len(tokens) < 2 or tokens[0].value != symbol
+            or tokens[1].value != "("):
+        raise GuardError("expanded ownership API is not a direct call")
+    closing = len(tokens) - 1
+    if tokens[closing].value != ")":
+        raise GuardError("expanded ownership call lacks closing token")
+    return canonical_arguments(split_arguments(tokens, 1, closing))
+
+
+def expanded_occurrence(source: str, physical_line: int, symbol: str,
+                        role: str, output: str,
+                        position: int) -> OwnershipOccurrence:
+    arguments = None
+    if role.startswith("call:") or role == "expanded-or-unapproved":
+        arguments = expanded_call_arguments(output, position, symbol)
+    return OwnershipOccurrence(source, physical_line, symbol, role, arguments)
+
+
 def preprocessed_ownership_occurrences(
         output: str, unit: CompileUnit, root: Path, build_root: Path,
         raw_roles: dict[tuple[str, int, str], str]) \
@@ -990,8 +1175,9 @@ def preprocessed_ownership_occurrences(
             role = raw_roles.get(key, "expanded-or-unapproved")
             if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
                 role = "expanded-or-unapproved"
-            result[OwnershipOccurrence(source, physical_line, token.value,
-                                       role)] += 1
+            token_position = line_start + token.offset
+            result[expanded_occurrence(source, physical_line, token.value,
+                                       role, output, token_position)] += 1
     return result
 
 
@@ -1064,7 +1250,8 @@ def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
             line_end = output.find("\n", line_start)
             if line_end < 0:
                 line_end = len(output)
-            tokens = lex(output[line_start:line_end])
+            line_text = output[line_start:line_end]
+            tokens = lex(line_text)
             for index, token in enumerate(tokens):
                 if (token.kind != "identifier"
                         or OWNERSHIP_API.fullmatch(token.value) is None):
@@ -1073,16 +1260,17 @@ def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
                 role = raw_roles.get(key, "expanded-or-unapproved")
                 if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
                     role = "expanded-or-unapproved"
-                result[OwnershipOccurrence(source, physical_line,
-                                           token.value, role)] += 1
+                token_position = line_start + token.offset
+                result[expanded_occurrence(
+                    source, physical_line, token.value, role, output,
+                    token_position)] += 1
     return result
 
 
 def semantic_occurrences(root: Path, build_root: Path,
-                         compiler_id: str,
+                         compiler_id: str, units: list[CompileUnit],
                          raw: Counter[OwnershipOccurrence]) \
         -> Counter[OwnershipOccurrence]:
-    units = production_compile_units(root, build_root, compiler_id)
     raw_roles = {}
     for occurrence in raw:
         key = (occurrence.source, occurrence.line, occurrence.symbol)
@@ -1099,18 +1287,32 @@ def semantic_occurrences(root: Path, build_root: Path,
     return result
 
 
-def check_semantic_boundary(root: Path, build_root: Path,
-                            compiler_id: str) -> None:
-    raw = raw_approved_occurrences(root, build_root)
-    expanded = semantic_occurrences(root, build_root, compiler_id, raw)
+def verify_semantic_counters(raw: Counter[OwnershipOccurrence],
+                             expanded: Counter[OwnershipOccurrence],
+                             allowed_missing: Counter[OwnershipOccurrence]) \
+        -> None:
     missing_counter = raw - expanded
     unexpected_counter = expanded - raw
-    unapproved_missing = missing_counter - raw_feature_optional_occurrences(root)
-    if unapproved_missing or unexpected_counter:
-        missing = list(unapproved_missing.elements())[:8]
+    if missing_counter != allowed_missing or unexpected_counter:
+        missing = list(missing_counter.elements())[:8]
+        allowed = list(allowed_missing.elements())[:8]
         unexpected = list(unexpected_counter.elements())[:8]
         raise GuardError("preprocessed ownership map differs from raw approval; "
-                         f"missing={missing!r}; unexpected={unexpected!r}")
+                         f"missing={missing!r}; allowed_missing={allowed!r}; "
+                         f"unexpected={unexpected!r}")
+
+
+def check_semantic_boundary(root: Path, build_root: Path,
+                            compiler_id: str) -> None:
+    units = production_compile_units(root, build_root, compiler_id)
+    daemon_http = (root / "wyrelog" / "daemon" / "http.c").resolve()
+    daemon_unit = next(unit for unit in units if unit.source == daemon_http)
+    enabled = compile_unit_enabled_features(daemon_unit, compiler_id)
+    raw = raw_approved_occurrences(root, build_root)
+    expanded = semantic_occurrences(
+        root, build_root, compiler_id, units, raw)
+    allowed_missing = raw_disabled_feature_occurrences(root, enabled)
+    verify_semantic_counters(raw, expanded, allowed_missing)
 
 
 def fixture_source() -> str:
@@ -1206,6 +1408,12 @@ def self_test() -> None:
         baseline = fixture_source()
         source_path.write_text(baseline, encoding="utf-8")
         check_root(root)
+        bounded_arguments = expanded_call_arguments(
+            f'{EXACT_API}(server, "/healthz", healthz_handler, NULL, NULL);\n'
+            '"unterminated tail', 0, EXACT_API)
+        if bounded_arguments != (
+                "server", '"/healthz"', "healthz_handler", "NULL", "NULL"):
+            raise GuardError("expanded call parser consumed the TU tail")
 
         mutants = {
             "macro alias": (
@@ -1352,6 +1560,95 @@ def self_test() -> None:
                        for item in result):
                 raise GuardError(f"semantic fixture accepted: {name}")
 
+        approved_health = (
+            f'  {EXACT_API} /* registration */ ( server, "/healthz",'
+            ' healthz_handler, NULL, NULL );')
+        paste_macros = (
+            "#define CAT_RAW(a,b) a ## b\n"
+            "#define CAT(a,b) CAT_RAW(a,b)\n")
+        consumed_expansions = {
+            "consumed path": (
+                f'{EXACT_API}(server, "/hidden", healthz_handler, NULL, NULL)',
+                EXACT_API),
+            "consumed callback": (
+                f'{EXACT_API}(server, "/healthz", hidden_handler, NULL, NULL)',
+                EXACT_API),
+            "consumed data": (
+                f'{EXACT_API}(server, "/healthz", healthz_handler, ctx, NULL)',
+                EXACT_API),
+            "consumed destroy": (
+                f'{EXACT_API}(server, "/healthz", healthz_handler, NULL, '
+                'hidden_destroy)', EXACT_API),
+            "consumed wrapper": (
+                f'{RAW_SINGLETON_API}(server, "/healthz", healthz_handler, '
+                'NULL, NULL)', RAW_SINGLETON_API),
+            "consumed Soup call": (
+                f'{SOUP_API}(server, "/healthz", healthz_handler, NULL, NULL)',
+                SOUP_API),
+        }
+        for name, (expansion, symbol) in consumed_expansions.items():
+            if symbol == EXACT_API:
+                macro_expansion = expansion.replace(
+                    EXACT_API,
+                    "CAT(wyl_daemon_http_add_,exact_handler)", 1)
+            elif symbol == RAW_SINGLETON_API:
+                macro_expansion = expansion.replace(
+                    RAW_SINGLETON_API,
+                    "CAT(wyl_daemon_http_add_,singleton_handler)", 1)
+            else:
+                macro_expansion = expansion.replace(
+                    SOUP_API, "CAT(soup_server_,add_handler)", 1)
+            replacement = (
+                paste_macros
+                + f"#define REPLACE(ignored) {macro_expansion}\n")
+            mutant = replacement + baseline.replace(
+                approved_health, f"  REPLACE({approved_health.strip()})", 1)
+            source_path.write_text(mutant, encoding="utf-8")
+            check_root(root)
+            raw = raw_approved_occurrences(root, root / "build")
+            target = next(
+                item for item in raw
+                if item.role == f"call:{SERVER_OWNER}"
+                and item.arguments is not None
+                and item.arguments[1] == '"/healthz"')
+            raw_roles = {
+                (item.source, item.line, item.symbol): item.role for item in raw
+            }
+            unit = CompileUnit(source_path.resolve(), root.resolve(), ())
+            output = (f'# 1 "{source_path.resolve()}"\n'
+                      f'# {target.line} "{source_path.resolve()}"\n'
+                      f'{expansion};\n')
+            expanded = preprocessed_ownership_occurrences(
+                output, unit, root, root / "build", raw_roles)
+            expect_guard_error(
+                lambda raw=Counter({target: 1}), expanded=expanded:
+                verify_semantic_counters(raw, expanded, Counter()), name)
+
+        source_path.write_text(baseline, encoding="utf-8")
+        raw = raw_approved_occurrences(root, root / "build")
+        feature_sets = (
+            frozenset(), frozenset({AUDIT}), frozenset({FACT}),
+            frozenset({AUDIT, FACT}),
+        )
+        for enabled in feature_sets:
+            allowed = raw_disabled_feature_occurrences(root, enabled)
+            expanded = raw - allowed
+            verify_semantic_counters(raw, expanded, allowed)
+            for active_feature in (None, *sorted(enabled)):
+                dropped = next(
+                    item for item in expanded
+                    if item.role == f"call:{SERVER_OWNER}"
+                    and item.arguments is not None
+                    and EXPECTED_BY_PATH.get(item.arguments[1][1:-1],
+                                             RouteSpec("", "")).feature
+                    == active_feature)
+                expect_guard_error(
+                    lambda raw=raw,
+                    expanded=expanded - Counter({dropped: 1}),
+                    allowed=allowed: verify_semantic_counters(
+                        raw, expanded, allowed),
+                    f"active feature occurrence missing: {sorted(enabled)}")
+
         nested = daemon / "nested-route.h"
         inner = daemon / "inner-route.h"
         inner.write_text(semantic_macros["two-level paste"][0],
@@ -1419,6 +1716,17 @@ def self_test() -> None:
             source_path.resolve(), "clang-cl")
         if "/DROUTE_SEMANTIC=1" not in response_command:
             raise GuardError("clang-cl response-file fixture failed")
+        gcc_features = compile_unit_enabled_features(CompileUnit(
+            source_path.resolve(), root,
+            ("cc", f"-D{FACT}", f"-U{FACT}", "-D", AUDIT)), "gcc")
+        if gcc_features != frozenset({AUDIT}):
+            raise GuardError("GCC feature-definition fixture failed")
+        clang_cl_features = compile_unit_enabled_features(CompileUnit(
+            source_path.resolve(), root,
+            ("clang-cl", f"/D{FACT}=1", "/D", AUDIT, f"/U{AUDIT}")),
+            "clang-cl")
+        if clang_cl_features != frozenset({FACT}):
+            raise GuardError("clang-cl feature-definition fixture failed")
         response.unlink()
         expect_guard_error(
             lambda: semantic_command(["cc", str(source_path)], root,
