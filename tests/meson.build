@@ -233,7 +233,7 @@ if build_client
     '-Wno-unused-function',
   ]
   test_daemon_http_decide_deps = [
-    wyrelog_handle_test_seams_dep,
+    wyrelog_dep,
     wyrelog_client_dep,
     libsoup_dep,
     sqlite_dep,
