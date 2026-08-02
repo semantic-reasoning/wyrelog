@@ -176,6 +176,28 @@ wyrelog_dep = declare_dependency(
   dependencies : [glib_dep, gio_dep],
 )
 
+# Deterministic engine-session checkpoints live only in this non-installed
+# full-source test archive. Production shared/static libraries compile the
+# same hot paths without WYL_TEST_HANDLE_SEAMS or any checkpoint symbols.
+wyrelog_handle_test_seams_lib = static_library(
+  'wyrelog-handle-test-seams',
+  wyrelog_sources,
+  include_directories : wyrelog_inc,
+  dependencies : wyrelog_deps,
+  c_args : wyrelog_c_args + ['-DWYL_TEST_HANDLE_SEAMS'],
+  override_options : wyrelog_override_options,
+  link_language : get_option('enable_secure_duckdb_bridge').enabled() ? 'cpp' : 'c',
+  gnu_symbol_visibility : 'hidden',
+  install : false,
+  build_by_default : false,
+)
+
+wyrelog_handle_test_seams_dep = declare_dependency(
+  link_with : wyrelog_handle_test_seams_lib,
+  include_directories : wyrelog_inc,
+  dependencies : [glib_dep, gio_dep],
+)
+
 # Host-only private companion: never installed and never linked into
 # libwyrelog. Focused tests and the exact future #358 daemon owner opt in.
 service_session_private_lib = static_library('wyrelog-service-session-private',
