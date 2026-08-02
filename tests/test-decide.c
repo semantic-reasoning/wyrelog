@@ -4,6 +4,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-decide-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 /*
@@ -129,6 +130,39 @@ insert_grant_fixture (WylHandle *handle, const gchar *subject,
     return rc;
   return insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
       resource);
+}
+
+/*
+ * Seeds everything allow_guard_base (templates/access/decision.dl) needs
+ * for an ALLOW EXCEPT the store fact principal_state(subject,
+ * "authenticated"). This mirrors a fully validated live service (svc:)
+ * bearer: it holds a role grant, its session scope is active, and the
+ * permission is armed, but no principal_state row was ever written for it
+ * (that fact is emitted only for human sessions,
+ * insert_policy_store_principal_state in wyl-handle.c). Wall 1 (#740) --
+ * the missing principal_state fact -- is therefore the sole remaining
+ * blocker on this subject.
+ */
+static wyrelog_error_t
+insert_service_grant_fixture (WylHandle *handle, const gchar *subject,
+    const gchar *action, const gchar *resource)
+{
+  wyrelog_error_t rc =
+      insert_symbol_row2 (handle, "role_permission", "wr.decide-role", action);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
+      resource);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", resource, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row1 (handle, "session_active", "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
+      "armed");
 }
 
 static wyrelog_error_t
@@ -1316,6 +1350,230 @@ check_decide_evaluates_window_guard (void)
   return 0;
 }
 
+/*
+ * #740 WALL 1: a fully validated live service (svc:) bearer has no store
+ * fact principal_state(subject,"authenticated") -- that row is written
+ * only for human sessions -- so allow_guard_base denies not_authenticated
+ * even after a role grant. wyl_decide injects the fact TRANSIENTLY when
+ * the request carries the daemon-set service-bearer-authenticated flag,
+ * and removes it on every exit path.
+ *
+ * SCOPE: these cases exercise ONLY the principal_state blocker (Wall 1).
+ * They seed session_state active directly so Wall 2 (fresh-tenant
+ * session_state seeding, #382) is not in play; public end-to-end service
+ * /decide allow at a fresh tenant remains gated by Wall 2 and is out of
+ * scope for this test.
+ */
+static gint
+check_decide_service_bearer_injects_principal_state (void)
+{
+  const gchar *subject = "svc:decide-user-740";
+  const gchar *action = "wr.decide-permission-svc";
+  const gchar *resource = "svc-decide-resource-740";
+  gint64 probe_row[2];
+  gboolean present = TRUE;
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 700;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 701;
+  if (insert_service_grant_fixture (handle, subject, action, resource)
+      != WYRELOG_E_OK)
+    return 702;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  /* Case A (bug): flag unset -> DENY not_authenticated / principal_state. */
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 703;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 704;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_authenticated")
+      != 0)
+    return 705;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "principal_state")
+      != 0)
+    return 706;
+
+  /* Case B (deny->allow): flag set -> ALLOW. */
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 707;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 708;
+
+  /* Case C (no residue): the transient fact must not persist. */
+  if (intern_symbol (handle, subject, &probe_row[0]) != WYRELOG_E_OK)
+    return 709;
+  if (intern_symbol (handle, "authenticated", &probe_row[1]) != WYRELOG_E_OK)
+    return 710;
+  if (wyl_handle_engine_contains (handle, "principal_state", probe_row, 2,
+          &present) != WYRELOG_E_OK)
+    return 711;
+  if (present)
+    return 712;
+  /* A subsequent flag-unset decide must deny again (no leaked authority). */
+  wyl_decide_req_set_service_bearer_authenticated (req, FALSE);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 713;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 714;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_authenticated")
+      != 0)
+    return 715;
+
+  return 0;
+}
+
+/*
+ * With the service-bearer flag set, blockers that outrank
+ * not_authenticated must still deny: the transient principal_state fact
+ * clears ONLY the authentication gate, it does not force an ALLOW.
+ */
+static gint
+check_decide_service_bearer_respects_other_blockers (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 720;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 721;
+
+  /* Case D (freeze still denies). */
+  if (insert_service_grant_fixture (handle, "svc:frozen-user-740",
+          "wr.decide-permission-svc", "svc-frozen-resource-740")
+      != WYRELOG_E_OK)
+    return 722;
+  if (insert_symbol_row1 (handle, "frozen", "svc-frozen-resource-740")
+      != WYRELOG_E_OK)
+    return 723;
+
+  g_autoptr (wyl_decide_req_t) freeze_req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (freeze_req, "svc:frozen-user-740");
+  wyl_decide_req_set_action (freeze_req, "wr.decide-permission-svc");
+  wyl_decide_req_set_resource_id (freeze_req, "svc-frozen-resource-740");
+  wyl_decide_req_set_service_bearer_authenticated (freeze_req, TRUE);
+  g_autoptr (wyl_decide_resp_t) freeze_resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, freeze_req, freeze_resp) != WYRELOG_E_OK)
+    return 724;
+  if (wyl_decide_resp_get_decision (freeze_resp) != WYL_DECISION_DENY)
+    return 725;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (freeze_resp), "frozen") != 0)
+    return 726;
+
+  /* Case E (disabled_role still denies). */
+  if (insert_service_grant_fixture (handle, "svc:disabled-user-740",
+          "wr.decide-permission-svc", "svc-disabled-resource-740")
+      != WYRELOG_E_OK)
+    return 727;
+  if (insert_symbol_row2 (handle, "disabled_role_for", "svc:disabled-user-740",
+          "wr.decide-permission-svc") != WYRELOG_E_OK)
+    return 728;
+
+  g_autoptr (wyl_decide_req_t) disabled_req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (disabled_req, "svc:disabled-user-740");
+  wyl_decide_req_set_action (disabled_req, "wr.decide-permission-svc");
+  wyl_decide_req_set_resource_id (disabled_req, "svc-disabled-resource-740");
+  wyl_decide_req_set_service_bearer_authenticated (disabled_req, TRUE);
+  g_autoptr (wyl_decide_resp_t) disabled_resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, disabled_req, disabled_resp) != WYRELOG_E_OK)
+    return 729;
+  if (wyl_decide_resp_get_decision (disabled_resp) != WYL_DECISION_DENY)
+    return 730;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (disabled_resp),
+          "disabled_role") != 0)
+    return 731;
+
+  return 0;
+}
+
+/*
+ * Case F: a human subject with a real principal_state row and the flag
+ * left unset behaves exactly as before -- ALLOW -- proving the new lever
+ * is inert for the human path.
+ */
+static gint
+check_decide_human_path_unchanged_without_flag (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 740;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 741;
+  if (insert_allow_fixture (handle, "human-user-740",
+          "wr.decide-permission-human", "human-resource-740") != WYRELOG_E_OK)
+    return 742;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "human-user-740");
+  wyl_decide_req_set_action (req, "wr.decide-permission-human");
+  wyl_decide_req_set_resource_id (req, "human-resource-740");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 743;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 744;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 745;
+  return 0;
+}
+
+/*
+ * #740 WALL 1 fail-closed: if the transient principal_state row cannot be
+ * removed after the decide, wyl_decide must fail closed (DENY,
+ * principal_state_cleanup_failed) and propagate the error rather than let
+ * the injected authenticated state leak into a later decide. Mirrors the
+ * guard-eval cleanup-fault behaviour, using the same engine-remove
+ * fault-once seam.
+ */
+static gint
+check_decide_fail_closes_on_pstate_cleanup_fault (void)
+{
+  const gchar *subject = "svc:cleanup-user-740";
+  const gchar *action = "wr.decide-permission-svc";
+  const gchar *resource = "svc-cleanup-resource-740";
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 760;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 761;
+  if (insert_service_grant_fixture (handle, subject, action, resource)
+      != WYRELOG_E_OK)
+    return 762;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_handle_set_engine_remove_fault_once (handle, "principal_state",
+      WYRELOG_E_INTERNAL);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INTERNAL)
+    return 763;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 764;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "principal_state_cleanup_failed") != 0)
+    return 765;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "principal_state")
+      != 0)
+    return 766;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -1362,6 +1620,14 @@ main (void)
   if ((rc = check_window_guard_cleanup_fault ()) != 0)
     return rc;
   if ((rc = check_decide_evaluates_window_guard ()) != 0)
+    return rc;
+  if ((rc = check_decide_service_bearer_injects_principal_state ()) != 0)
+    return rc;
+  if ((rc = check_decide_service_bearer_respects_other_blockers ()) != 0)
+    return rc;
+  if ((rc = check_decide_human_path_unchanged_without_flag ()) != 0)
+    return rc;
+  if ((rc = check_decide_fail_closes_on_pstate_cleanup_fault ()) != 0)
     return rc;
   return 0;
 }

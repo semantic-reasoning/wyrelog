@@ -5,6 +5,7 @@
 
 #include "access/break-glass-private.h"
 #include "access/decision-private.h"
+#include "wyl-decide-private.h"
 #include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-permission-scope-private.h"
@@ -21,6 +22,7 @@ struct _wyl_decide_req
   gint64 guard_risk;
   wyl_guard_window_matcher_t guard_in_window;
   gpointer guard_in_window_user_data;
+  gboolean service_bearer_authenticated;
 };
 
 struct _wyl_decide_resp
@@ -196,6 +198,21 @@ wyl_decide_req_get_guard_window_matcher (const wyl_decide_req_t *req,
   if (out_user_data != NULL)
     *out_user_data = req->guard_in_window_user_data;
   return req->guard_in_window;
+}
+
+void
+wyl_decide_req_set_service_bearer_authenticated (wyl_decide_req_t *req,
+    gboolean authenticated)
+{
+  g_return_if_fail (req != NULL);
+  req->service_bearer_authenticated = authenticated;
+}
+
+gboolean
+wyl_decide_req_get_service_bearer_authenticated (const wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, FALSE);
+  return req->service_bearer_authenticated;
 }
 
 wyl_decide_resp_t *
@@ -659,10 +676,58 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
 
     gboolean allowed = FALSE;
     guard_eval_facts_t guard_facts = { 0 };
+    wyrelog_error_t cleanup_rc = WYRELOG_E_OK;
 #ifdef WYL_HAS_BREAK_GLASS
     break_glass_eval_facts_t break_glass_facts = { 0 };
     gboolean break_glass_active_now = wyl_handle_break_glass_is_active (handle);
 #endif
+
+    /*
+     * #740 WALL 1: a fully validated live service (svc:) bearer has no
+     * store fact principal_state(subject,"authenticated") -- that row is
+     * written only for human sessions (insert_policy_store_principal_state
+     * in wyl-handle.c). allow_guard_base (templates/access/decision.dl)
+     * requires it, so a service token that authenticated and holds a role
+     * grant still denies not_authenticated. Inject the fact TRANSIENTLY
+     * into the read engine for the duration of THIS decide only, gated on
+     * req->service_bearer_authenticated -- a flag the daemon sets ONLY
+     * after it has fully validated a live service bearer. Nothing is
+     * written to the policy store: no .dl change, no re-sign, no manifest
+     * bump. The fact is removed on every exit path via decide_cleanup.
+     *
+     * The insert is guarded by a was-absent probe so a set-semantics
+     * remove can never delete a pre-existing legitimate row. Injection
+     * runs BEFORE the guard-arm-rule lookup so a guarded service action
+     * with a guard-context miss reports not_armed, not not_authenticated.
+     *
+     * SCOPE: this clears ONLY the principal_state blocker (Wall 1). Public
+     * end-to-end service /decide allow at a FRESH tenant remains gated by
+     * Wall 2 (fresh-tenant session_state seeding, #382), out of scope here.
+     */
+    gint64 pstate_row[2] = { 0, 0 };
+    gboolean pstate_injected = FALSE;
+    if (wyl_decide_req_get_service_bearer_authenticated (req)) {
+      gint64 authenticated_id = 0;
+      rc = wyl_engine_session_intern_symbol (session, "authenticated",
+          &authenticated_id);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      pstate_row[0] = row[0];
+      pstate_row[1] = authenticated_id;
+      gboolean present = FALSE;
+      rc = wyl_engine_session_contains (session, "principal_state", pstate_row,
+          2, &present);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (!present) {
+        rc = wyl_engine_session_insert (session, "principal_state", pstate_row,
+            2);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+        pstate_injected = TRUE;
+      }
+    }
+
     const wyl_guard_expr_t *guard =
         wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
     if (guard != NULL) {
@@ -670,36 +735,34 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
         rc = fill_guard_miss_deny_reason (session, row, reason_names,
             reason_origins, &code);
-        if (rc != WYRELOG_E_OK)
-          return rc;
+        if (rc != WYRELOG_E_OK) {
+          cleanup_rc = rc;
+          goto decide_cleanup;
+        }
         deny_reason = wyl_deny_reason_name (code);
         deny_origin = wyl_deny_reason_origin (code);
-        wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
-        goto emit_audit;
+        goto decide_cleanup;
       }
       rc = insert_guard_eval_facts (session, row, guard, req, &guard_facts);
-      if (rc != WYRELOG_E_OK)
-        return rc;
+      if (rc != WYRELOG_E_OK) {
+        cleanup_rc = rc;
+        goto decide_cleanup;
+      }
     }
 #ifdef WYL_HAS_BREAK_GLASS
     if (break_glass_active_now) {
       rc = insert_break_glass_facts (session, handle, &break_glass_facts);
       if (rc != WYRELOG_E_OK) {
-        if (guard_facts.eval_guard_inserted)
-          (void) remove_guard_eval_facts (session, &guard_facts);
-        return rc;
+        cleanup_rc = rc;
+        goto decide_cleanup;
       }
     }
 #endif
 
     rc = wyl_engine_session_decide (session, row, &allowed);
     if (rc != WYRELOG_E_OK) {
-      if (guard_facts.eval_guard_inserted)
-        (void) remove_guard_eval_facts (session, &guard_facts);
-#ifdef WYL_HAS_BREAK_GLASS
-      (void) remove_break_glass_facts (session, &break_glass_facts);
-#endif
-      return rc;
+      cleanup_rc = rc;
+      goto decide_cleanup;
     }
     if (allowed) {
       wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
@@ -707,35 +770,61 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
       rc = find_deny_reason (session, row, reason_names, reason_origins, &code);
       if (rc != WYRELOG_E_OK) {
-        if (guard_facts.eval_guard_inserted)
-          (void) remove_guard_eval_facts (session, &guard_facts);
-#ifdef WYL_HAS_BREAK_GLASS
-        (void) remove_break_glass_facts (session, &break_glass_facts);
-#endif
-        return rc;
+        cleanup_rc = rc;
+        goto decide_cleanup;
       }
       deny_reason = wyl_deny_reason_name (code);
       deny_origin = wyl_deny_reason_origin (code);
     }
-    if (guard_facts.eval_guard_inserted) {
-      rc = remove_guard_eval_facts (session, &guard_facts);
-      if (rc != WYRELOG_E_OK) {
+
+    /*
+     * Single cleanup boundary (#740): EVERY exit path in the read-engine
+     * block after the transient inject above reaches this label, so the
+     * guard-eval facts, break-glass facts, and the transient
+     * principal_state fact are removed exactly once and never leak into a
+     * subsequent decide (a leaked principal_state row would be a privilege
+     * escalation across requests). cleanup_rc carries any error that must
+     * be returned WITHOUT emitting an audit row; a clean fall-through
+     * continues to the audit emit below.
+     */
+  decide_cleanup:
+    {
+      wyrelog_error_t guard_remove_rc = WYRELOG_E_OK;
+      wyrelog_error_t pstate_remove_rc = WYRELOG_E_OK;
+      if (guard_facts.eval_guard_inserted)
+        guard_remove_rc = remove_guard_eval_facts (session, &guard_facts);
+#ifdef WYL_HAS_BREAK_GLASS
+      (void) remove_break_glass_facts (session, &break_glass_facts);
+#endif
+      if (pstate_injected)
+        pstate_remove_rc = wyl_engine_session_remove (session, "principal_state",
+            pstate_row, 2);
+      /*
+       * All removes run BEFORE any failure-return so nothing leaks, then
+       * the fail-closed checks fire in precedence order. The transient
+       * principal_state removal is fail-closed symmetrically with the
+       * guard-eval cleanup: if the row cannot be removed it would persist
+       * on the read engine and pass the auth gate on a later decide for
+       * this subject -- the exact cross-request escalation this change
+       * guards against -- so surface it as a DENY and propagate the error.
+       */
+      if (cleanup_rc != WYRELOG_E_OK)
+        return cleanup_rc;
+      if (guard_remove_rc != WYRELOG_E_OK) {
         wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
         wyl_decide_resp_set_deny_tags (resp, "guard_cleanup_failed",
             "eval_guard");
-#ifdef WYL_HAS_BREAK_GLASS
-        (void) remove_break_glass_facts (session, &break_glass_facts);
-#endif
-        return rc;
+        return guard_remove_rc;
+      }
+      if (pstate_remove_rc != WYRELOG_E_OK) {
+        wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+        wyl_decide_resp_set_deny_tags (resp, "principal_state_cleanup_failed",
+            "principal_state");
+        return pstate_remove_rc;
       }
     }
-#ifdef WYL_HAS_BREAK_GLASS
-    (void) remove_break_glass_facts (session, &break_glass_facts);
-#endif
   }
   wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
-emit_audit:
-  ;
 #ifndef WYL_HAS_AUDIT
   (void) deny_reason;
   (void) deny_origin;
