@@ -199,7 +199,7 @@ wyl_fact_graph_locator_relative_dir (const WylFactGraphLocator *locator)
 {
   if (!locator_is_valid (locator))
     return NULL;
-  return g_build_filename (locator->tenant_component,
+  return g_build_path ("/", locator->tenant_component,
       locator->graph_component, NULL);
 }
 

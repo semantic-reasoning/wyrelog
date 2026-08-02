@@ -146,6 +146,12 @@ gboolean wyl_fact_graph_owner_mode_is_secure_for_test (guint32 mode,
 wyrelog_error_t wyl_fact_graph_locator_init (WylFactGraphLocator * locator,
     const gchar * tenant_id, const gchar * graph_id);
 void wyl_fact_graph_locator_clear (WylFactGraphLocator * locator);
+/* Two distinct domains.  `relative_dir` composes the canonical relative-path
+ * domain, which is forward-slash on every platform: it is what the journal
+ * and the store's CHECK constraints accept, and what
+ * `wyl_fact_graph_relative_path_is_valid` validates.  `descriptive_path`
+ * composes a native filesystem path under |fact_root| and therefore uses the
+ * platform separator.  Neither is a substitute for the other. */
 gchar *wyl_fact_graph_locator_relative_dir (const WylFactGraphLocator *
     locator);
 gchar *wyl_fact_graph_locator_descriptive_path (const gchar * fact_root,
