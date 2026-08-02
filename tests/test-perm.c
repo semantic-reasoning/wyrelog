@@ -811,6 +811,49 @@ check_role_grant_rolls_back_invalid_snapshot (void)
   return exists ? 161 : 0;
 }
 
+static gint
+check_poisoned_engine_rejects_permission_mutations (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 162;
+  wyl_handle_poison_engine_pair (handle);
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "poison-perm-user");
+  wyl_grant_req_set_action (grant, "poison.permission");
+  wyl_grant_req_set_resource_id (grant, "poison-scope");
+  g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
+  wyl_revoke_req_set_subject_id (revoke, "poison-perm-user");
+  wyl_revoke_req_set_action (revoke, "poison.permission");
+  wyl_revoke_req_set_resource_id (revoke, "poison-scope");
+  g_autoptr (wyl_role_grant_req_t) role_grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (role_grant, "poison-role-user");
+  wyl_role_grant_req_set_role_id (role_grant, "poison-role");
+  wyl_role_grant_req_set_scope (role_grant, "poison-scope");
+  g_autoptr (wyl_role_revoke_req_t) role_revoke = wyl_role_revoke_req_new ();
+  wyl_role_revoke_req_set_subject_id (role_revoke, "poison-role-user");
+  wyl_role_revoke_req_set_role_id (role_revoke, "poison-role");
+  wyl_role_revoke_req_set_scope (role_revoke, "poison-scope");
+
+  if (wyl_perm_grant (handle, grant) != WYRELOG_E_INVALID
+      || wyl_perm_revoke (handle, revoke) != WYRELOG_E_INVALID
+      || wyl_role_grant (handle, role_grant) != WYRELOG_E_INVALID
+      || wyl_role_revoke (handle, role_revoke) != WYRELOG_E_INVALID)
+    return 163;
+
+  gboolean exists = TRUE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_direct_permission_exists (store, "poison-perm-user",
+          "poison.permission", "poison-scope", &exists) != WYRELOG_E_OK
+      || exists)
+    return 164;
+  if (wyl_policy_store_role_membership_exists (store, "poison-role-user",
+          "poison-role", "poison-scope", &exists) != WYRELOG_E_OK || exists)
+    return 165;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -858,6 +901,8 @@ main (void)
   if ((rc = check_role_revoke_removes_engine_membership ()) != 0)
     return rc;
   if ((rc = check_role_grant_rolls_back_invalid_snapshot ()) != 0)
+    return rc;
+  if ((rc = check_poisoned_engine_rejects_permission_mutations ()) != 0)
     return rc;
   return 0;
 }

@@ -1899,6 +1899,32 @@ check_session_elevation_rejects_invalid_args (void)
   return 0;
 }
 
+static gint
+check_poisoned_engine_rejects_session_mutations (void)
+{
+  g_autoptr (WylHandle) live_handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &live_handle) != WYRELOG_E_OK)
+    return 760;
+  g_autoptr (WylSession) live_session = NULL;
+  if (wyl_session_login (live_handle, NULL, &live_session) != WYRELOG_E_OK)
+    return 761;
+  wyl_handle_poison_engine_pair (live_handle);
+  if (wyl_session_close (live_handle, live_session) != WYRELOG_E_INVALID)
+    return 762;
+
+  g_autoptr (WylHandle) login_handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &login_handle) != WYRELOG_E_OK)
+    return 763;
+  wyl_handle_poison_engine_pair (login_handle);
+  g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
+  wyl_login_req_set_username (req, "poison-login-user");
+  WylSession *session = NULL;
+  if (wyl_session_login (login_handle, req, &session) != WYRELOG_E_INVALID
+      || session != NULL)
+    return 764;
+  return 0;
+}
+
 /*
  * The session-username test surface has been split across two binaries
  * compiled from this single translation unit:
@@ -1983,6 +2009,8 @@ main (void)
   if ((rc = check_login_skip_mfa_inserts_wirelog_principal_fired ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_does_not_bypass_guarded_permission ()) != 0)
+    return rc;
+  if ((rc = check_poisoned_engine_rejects_session_mutations ()) != 0)
     return rc;
 
   return 0;
