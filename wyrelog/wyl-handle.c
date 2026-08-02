@@ -3173,8 +3173,11 @@ wyrelog_error_t
 wyl_engine_session_run_committed_publication (WylEngineSession *session,
     WylCommittedEngineMutationBody mutate, gpointer mutate_data,
     WylEnginePublicationVerifier verify, gpointer verify_data,
-    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data)
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
+    gboolean *out_commit_confirmed)
 {
+  if (out_commit_confirmed != NULL)
+    *out_commit_confirmed = FALSE;
   if (!engine_session_is_valid (session) || mutate == NULL || verify == NULL)
     return WYRELOG_E_INVALID;
   if (session->acquisition_depth != 1
@@ -3251,6 +3254,8 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     goto out;
   }
   state = PUBLICATION_COMMITTED_UNPUBLISHED;
+  if (out_commit_confirmed != NULL)
+    *out_commit_confirmed = TRUE;
   rc = wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
   store_rank_active = FALSE;
   if (rc != WYRELOG_E_OK) {

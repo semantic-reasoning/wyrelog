@@ -502,7 +502,7 @@ wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
     return WYRELOG_E_BUSY;
   rc = wyl_engine_session_run_committed_publication (engine_session,
       mutate_role_permission_snapshot, NULL, verify_role_permission_snapshot,
-      NULL, NULL, NULL);
+      NULL, NULL, NULL, NULL);
   g_clear_pointer (&engine_session, wyl_engine_session_release);
   if (rc != WYRELOG_E_OK)
     return rc;

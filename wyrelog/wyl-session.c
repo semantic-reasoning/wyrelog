@@ -331,7 +331,7 @@ publish_principal_mutation (WylPrincipalPublication *ctx)
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication
       (engine_session, mutate_principal_publication, ctx,
       verify_principal_publication, ctx, produce_principal_publication_delta,
-      ctx);
+      ctx, NULL);
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK && ctx->audit_event != NULL)
@@ -449,7 +449,7 @@ publish_session_mutation (WylSessionPublication *ctx)
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication
       (engine_session, mutate_session_publication, ctx,
       verify_session_publication, ctx, produce_session_publication_delta,
-      ctx);
+      ctx, NULL);
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK && ctx->audit_event != NULL)
@@ -584,7 +584,8 @@ publish_login_mutation (WylLoginPublication *ctx)
     return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication
       (engine_session, mutate_login_publication, ctx,
-      verify_login_publication, ctx, produce_login_publication_deltas, ctx);
+      verify_login_publication, ctx, produce_login_publication_deltas, ctx,
+      NULL);
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL)

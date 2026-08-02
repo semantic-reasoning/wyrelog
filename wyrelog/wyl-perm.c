@@ -65,7 +65,6 @@ typedef struct
   WylPermissionPublication publication;
   wyl_policy_store_t *store;
   const gchar *event;
-  gint64 *out_event_id;
   gchar *from_state;
   gchar *to_state;
   gint64 event_id;
@@ -640,7 +639,7 @@ publish_permission_mutation (WylPermissionPublication *ctx,
   if (session == NULL)
     return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
-      mutate, ctx, verify, ctx, NULL, NULL);
+      mutate, ctx, verify, ctx, NULL, NULL, NULL);
   g_clear_pointer (&session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK && ctx->audit_event != NULL)
@@ -686,8 +685,6 @@ mutate_permission_transition (wyl_policy_store_t *store, gpointer data)
         ctx->event, ctx->from_state, ctx->to_state, &ctx->event_id);
   if (rc == WYRELOG_E_OK)
     rc = append_permission_audit_body (store, ctx->publication.audit_event);
-  if (rc == WYRELOG_E_OK && ctx->out_event_id != NULL)
-    *ctx->out_event_id = ctx->event_id;
   return rc;
 }
 
@@ -728,6 +725,8 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
     const gchar *subject_id, const gchar *perm_id, const gchar *scope,
     const gchar *event, const WylAuditEvent *audit_event, gint64 *out_event_id)
 {
+  if (out_event_id != NULL)
+    *out_event_id = -1;
   if (handle == NULL || !WYL_IS_HANDLE (handle))
     return WYRELOG_E_INVALID;
   if (subject_id == NULL || perm_id == NULL || scope == NULL || event == NULL)
@@ -741,15 +740,17 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
     .publication = {handle, subject_id, perm_id, scope, TRUE, audit_event},
     .store = store,
     .event = event,
-    .out_event_id = out_event_id,
     .event_id = -1,
   };
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (session == NULL)
     return WYRELOG_E_BUSY;
+  gboolean commit_confirmed = FALSE;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
       mutate_permission_transition, &transition, verify_permission_transition,
-      &transition, NULL, NULL);
+      &transition, NULL, NULL, &commit_confirmed);
+  if (commit_confirmed && out_event_id != NULL)
+    *out_event_id = transition.event_id;
   g_clear_pointer (&session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK && audit_event != NULL)
