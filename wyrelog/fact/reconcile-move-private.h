@@ -63,8 +63,27 @@ wyrelog_error_t wyl_fact_reconcile_move_publish (const
  * and 16-byte file id.  It is the single collector used both to seed the
  * journal and to re-verify the source at move time, so a matching digest
  * proves the same bytes across different inodes.
+ *
+ * The capture does not depend on the descriptor's current file position: it
+ * establishes offset 0 itself.  It is not position-preserving on every
+ * platform, though - POSIX reads with pread and leaves the caller's offset
+ * untouched, while Windows rewinds the shared handle and leaves it at EOF.
+ * Callers must not depend on the file position after this call.
  */
 wyrelog_error_t wyl_fact_reconcile_capture_artifact_evidence (gint fd,
     WylPolicyFactReconcileArtifactEvidence * out_evidence);
+
+#ifdef G_OS_WIN32
+/*
+ * Test-only seam onto the Windows leaf that captures evidence straight from a
+ * native handle.  Production reaches that leaf through the handle the opened
+ * source struct holds, bypassing the fd entry point above and its zeroing, so
+ * this is the only way a unit test can pin the leaf's own contract that
+ * |out_evidence| is fully initialised on every return path.  |handle| is a
+ * native HANDLE carried as gpointer so this header needs no <windows.h>.
+ */
+wyrelog_error_t wyl_fact_reconcile_capture_evidence_from_handle_for_test
+    (gpointer handle, WylPolicyFactReconcileArtifactEvidence * out_evidence);
+#endif /* G_OS_WIN32 */
 
 G_END_DECLS;
