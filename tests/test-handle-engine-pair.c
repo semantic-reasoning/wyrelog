@@ -3385,6 +3385,602 @@ check_decision_holds_one_recursive_engine_session (void)
   return ok ? 0 : 803;
 }
 
+typedef enum
+{
+  ENGINE_MATRIX_INSERT,
+  ENGINE_MATRIX_REMOVE,
+  ENGINE_MATRIX_CONTAINS,
+  ENGINE_MATRIX_STEP,
+  ENGINE_MATRIX_REPLAY,
+  ENGINE_MATRIX_CALLBACK,
+} EngineMatrixOperation;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  EngineMatrixOperation operation;
+  gint64 row[1];
+  gboolean operation_entered;
+  gboolean allow_operation;
+  gboolean replacement_waiting;
+  gboolean replacement_acquired;
+  gboolean poison_waiting;
+  gboolean poison_completed;
+  gboolean contains;
+  wyrelog_error_t operation_rc;
+  wyrelog_error_t replacement_rc;
+} EngineOperationRace;
+
+static gboolean
+wait_for_engine_operation_flag (EngineOperationRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  return reached;
+}
+
+static void
+block_engine_operation (gpointer data)
+{
+  EngineOperationRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->operation_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_operation)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+observe_matrix_replacement (WylEngineReplacementCheckpoint phase, gpointer data)
+{
+  EngineOperationRace *race = data;
+  g_mutex_lock (&race->mutex);
+  if (phase == WYL_ENGINE_REPLACEMENT_WAITING)
+    race->replacement_waiting = TRUE;
+  else
+    race->replacement_acquired = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+matrix_delta_callback (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
+{
+  (void) relation;
+  (void) row;
+  (void) ncols;
+  (void) kind;
+  (void) user_data;
+}
+
+static gpointer
+run_matrix_operation (gpointer data)
+{
+  EngineOperationRace *race = data;
+  switch (race->operation) {
+    case ENGINE_MATRIX_INSERT:
+    {
+      g_autoptr (WylEngineSession) session =
+          wyl_engine_session_acquire (race->handle);
+      race->operation_rc = wyl_engine_session_intern_symbol (session,
+          "matrix-session-active", &race->row[0]);
+      if (race->operation_rc == WYRELOG_E_OK)
+        race->operation_rc = wyl_engine_session_insert (session,
+            "login_skip_mfa_authz", race->row, 1);
+    }
+      break;
+    case ENGINE_MATRIX_REMOVE:
+      race->operation_rc = wyl_handle_engine_remove (race->handle,
+          "login_skip_mfa_authz", race->row, 1);
+      break;
+    case ENGINE_MATRIX_CONTAINS:
+      race->operation_rc = wyl_handle_engine_contains (race->handle,
+          "login_skip_mfa_authz", race->row, 1, &race->contains);
+      break;
+    case ENGINE_MATRIX_STEP:
+      race->operation_rc = wyl_handle_engine_step_delta (race->handle);
+      break;
+    case ENGINE_MATRIX_REPLAY:
+      race->operation_rc = wyl_handle_replay_delta_insert (race->handle,
+          "login_skip_mfa_authz", race->row, 1);
+      break;
+    case ENGINE_MATRIX_CALLBACK:
+      race->operation_rc = wyl_handle_engine_set_delta_callback (race->handle,
+          matrix_delta_callback, race);
+      break;
+  }
+  return NULL;
+}
+
+static gpointer
+run_matrix_replacement (gpointer data)
+{
+  EngineOperationRace *race = data;
+  race->replacement_rc = wyl_handle_reload_engine_pair (race->handle);
+  return NULL;
+}
+
+static void
+observe_matrix_poison_waiting (WylEngineSessionCheckpoint phase, gpointer data)
+{
+  EngineOperationRace *race = data;
+  if (phase != WYL_ENGINE_SESSION_WAITING)
+    return;
+  g_mutex_lock (&race->mutex);
+  race->poison_waiting = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_matrix_poison (gpointer data)
+{
+  EngineOperationRace *race = data;
+  wyl_handle_poison_engine_pair (race->handle);
+  g_mutex_lock (&race->mutex);
+  race->poison_completed = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  return NULL;
+}
+
+static gint
+check_engine_operations_serialize_with_replacement (void)
+{
+  static const EngineMatrixOperation operations[] = {
+    ENGINE_MATRIX_INSERT,
+    ENGINE_MATRIX_REMOVE,
+    ENGINE_MATRIX_CONTAINS,
+    ENGINE_MATRIX_STEP,
+    ENGINE_MATRIX_REPLAY,
+    ENGINE_MATRIX_CALLBACK,
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (operations); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 815;
+    EngineOperationRace race = {
+      .handle = handle,
+      .operation = operations[i],
+      .operation_rc = WYRELOG_E_INTERNAL,
+      .replacement_rc = WYRELOG_E_INTERNAL,
+    };
+    g_mutex_init (&race.mutex);
+    g_cond_init (&race.changed);
+    if (wyl_handle_intern_engine_symbol (handle, "matrix-active", &race.row[0])
+        != WYRELOG_E_OK) {
+      g_cond_clear (&race.changed);
+      g_mutex_clear (&race.mutex);
+      return 816;
+    }
+    if ((operations[i] == ENGINE_MATRIX_REMOVE
+            || operations[i] == ENGINE_MATRIX_CONTAINS)
+        && wyl_handle_engine_insert (handle, "login_skip_mfa_authz", race.row,
+            1)
+        != WYRELOG_E_OK) {
+      g_cond_clear (&race.changed);
+      g_mutex_clear (&race.mutex);
+      return 817;
+    }
+
+    const gchar *checkpoint = operations[i] == ENGINE_MATRIX_STEP ? "@step" :
+        operations[i] == ENGINE_MATRIX_CALLBACK ? "@callback" :
+        "login_skip_mfa_authz";
+    wyl_handle_set_engine_operation_checkpoint_for_test (handle, checkpoint,
+        block_engine_operation, &race);
+    GThread *operation =
+        g_thread_new ("engine-matrix-operation", run_matrix_operation, &race);
+    if (!wait_for_engine_operation_flag (&race, &race.operation_entered)) {
+      g_mutex_lock (&race.mutex);
+      race.allow_operation = TRUE;
+      g_cond_broadcast (&race.changed);
+      g_mutex_unlock (&race.mutex);
+      g_thread_join (operation);
+      g_cond_clear (&race.changed);
+      g_mutex_clear (&race.mutex);
+      return 818;
+    }
+
+    wyl_handle_set_engine_replacement_checkpoint_for_test (handle,
+        observe_matrix_replacement, &race);
+    GThread *replacement = g_thread_new ("engine-matrix-replacement",
+        run_matrix_replacement, &race);
+    gboolean waiting = wait_for_engine_operation_flag (&race,
+        &race.replacement_waiting);
+    g_mutex_lock (&race.mutex);
+    gboolean blocked = !race.replacement_acquired;
+    race.allow_operation = TRUE;
+    g_cond_broadcast (&race.changed);
+    g_mutex_unlock (&race.mutex);
+    g_thread_join (operation);
+    g_thread_join (replacement);
+    wyl_handle_set_engine_operation_checkpoint_for_test (handle, NULL, NULL,
+        NULL);
+    wyl_handle_set_engine_replacement_checkpoint_for_test (handle, NULL, NULL);
+    gboolean ok = waiting && blocked && race.replacement_acquired
+        && race.operation_rc == WYRELOG_E_OK
+        && race.replacement_rc == WYRELOG_E_OK
+        && wyl_handle_engine_pair_is_ready (handle)
+        && (operations[i] != ENGINE_MATRIX_CONTAINS || race.contains);
+    g_cond_clear (&race.changed);
+    g_mutex_clear (&race.mutex);
+    if (!ok) {
+      g_printerr ("matrix[%zu] waiting=%d blocked=%d acquired=%d op=%d "
+          "reload=%d ready=%d contains=%d\n", i, waiting, blocked,
+          race.replacement_acquired, race.operation_rc, race.replacement_rc,
+          wyl_handle_engine_pair_is_ready (handle), race.contains);
+      return 819 + (gint) i;
+    }
+  }
+  return 0;
+}
+
+static gint
+check_poison_waits_for_inflight_operation (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 824;
+  EngineOperationRace race = {
+    .handle = handle,
+    .operation = ENGINE_MATRIX_INSERT,
+    .operation_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_handle_set_engine_operation_checkpoint_for_test (handle,
+      "login_skip_mfa_authz", block_engine_operation, &race);
+  GThread *operation =
+      g_thread_new ("engine-poison-operation", run_matrix_operation, &race);
+  if (!wait_for_engine_operation_flag (&race, &race.operation_entered)) {
+    g_mutex_lock (&race.mutex);
+    race.allow_operation = TRUE;
+    g_cond_broadcast (&race.changed);
+    g_mutex_unlock (&race.mutex);
+    g_thread_join (operation);
+    g_cond_clear (&race.changed);
+    g_mutex_clear (&race.mutex);
+    return 825;
+  }
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      observe_matrix_poison_waiting, &race);
+  GThread *poison = g_thread_new ("engine-poison", run_matrix_poison, &race);
+  gboolean waiting =
+      wait_for_engine_operation_flag (&race, &race.poison_waiting);
+  g_mutex_lock (&race.mutex);
+  gboolean blocked = !race.poison_completed;
+  race.allow_operation = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (operation);
+  g_thread_join (poison);
+  wyl_handle_set_engine_operation_checkpoint_for_test (handle, NULL, NULL,
+      NULL);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  gboolean ok = waiting && blocked && race.poison_completed
+      && race.operation_rc == WYRELOG_E_OK
+      && wyl_handle_engine_pair_is_poisoned (handle)
+      && !wyl_handle_engine_pair_is_ready (handle)
+      && wyl_handle_reload_engine_pair (handle) == WYRELOG_E_INVALID;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok ? 0 : 826;
+}
+
+typedef struct _ReloadOrderRace ReloadOrderRace;
+typedef struct
+{
+  ReloadOrderRace *race;
+  guint index;
+  wyrelog_error_t rc;
+} ReloadOrderWorker;
+
+struct _ReloadOrderRace
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  GThread *threads[2];
+  gboolean started[2];
+  gboolean waiting[2];
+  gboolean acquired[2];
+  gboolean candidate_ready[2];
+  gboolean allow_first_publish;
+  guint publish_order[2];
+  guint publish_count;
+};
+
+static guint
+reload_order_current_index (ReloadOrderRace *race)
+{
+  GThread *current = g_thread_self ();
+  return current == race->threads[0] ? 0 : 1;
+}
+
+static void
+observe_reload_order (WylEngineReplacementCheckpoint phase, gpointer data)
+{
+  ReloadOrderRace *race = data;
+  g_mutex_lock (&race->mutex);
+  guint index = reload_order_current_index (race);
+  if (phase == WYL_ENGINE_REPLACEMENT_WAITING)
+    race->waiting[index] = TRUE;
+  else if (phase == WYL_ENGINE_REPLACEMENT_ACQUIRED)
+    race->acquired[index] = TRUE;
+  else if (phase == WYL_ENGINE_REPLACEMENT_CANDIDATE_READY) {
+    race->candidate_ready[index] = TRUE;
+    g_cond_broadcast (&race->changed);
+    while (index == 0 && !race->allow_first_publish)
+      g_cond_wait (&race->changed, &race->mutex);
+  } else if (phase == WYL_ENGINE_REPLACEMENT_PUBLISHED) {
+    race->publish_order[race->publish_count++] = index;
+  }
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_ordered_reload (gpointer data)
+{
+  ReloadOrderWorker *worker = data;
+  g_mutex_lock (&worker->race->mutex);
+  worker->race->threads[worker->index] = g_thread_self ();
+  worker->race->started[worker->index] = TRUE;
+  g_cond_broadcast (&worker->race->changed);
+  g_mutex_unlock (&worker->race->mutex);
+  worker->rc = wyl_handle_reload_engine_pair (worker->race->handle);
+  return NULL;
+}
+
+static gboolean
+wait_for_reload_order_flag (ReloadOrderRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  return *flag;
+}
+
+static gint
+check_concurrent_reloads_publish_in_acquisition_order (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 827;
+  ReloadOrderRace race = {.handle = handle };
+  ReloadOrderWorker workers[2] = {
+    {.race = &race,.index = 0,.rc = WYRELOG_E_INTERNAL},
+    {.race = &race,.index = 1,.rc = WYRELOG_E_INTERNAL},
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_handle_set_engine_replacement_checkpoint_for_test (handle,
+      observe_reload_order, &race);
+  GThread *first = g_thread_new ("reload-order-first", run_ordered_reload,
+      &workers[0]);
+  g_mutex_lock (&race.mutex);
+  gboolean first_ready = wait_for_reload_order_flag (&race,
+      &race.candidate_ready[0]);
+  g_mutex_unlock (&race.mutex);
+  GThread *second = g_thread_new ("reload-order-second", run_ordered_reload,
+      &workers[1]);
+  g_mutex_lock (&race.mutex);
+  gboolean second_started = wait_for_reload_order_flag (&race,
+      &race.started[1]);
+  gboolean second_blocked = !race.acquired[1] && !race.candidate_ready[1];
+  race.allow_first_publish = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (first);
+  g_thread_join (second);
+  wyl_handle_set_engine_replacement_checkpoint_for_test (handle, NULL, NULL);
+  gboolean ok = first_ready && second_started && second_blocked
+      && workers[0].rc == WYRELOG_E_OK && workers[1].rc == WYRELOG_E_OK
+      && race.acquired[0] && race.acquired[1] && race.candidate_ready[1]
+      && race.publish_count == 2 && race.publish_order[0] == 0
+      && race.publish_order[1] == 1;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  if (!ok)
+    g_printerr ("reload-order ready=%d waiting=%d blocked=%d rc=%d/%d "
+        "acquired=%d/%d candidate2=%d count=%u order=%u/%u\n", first_ready,
+        second_started, second_blocked, workers[0].rc, workers[1].rc,
+        race.acquired[0], race.acquired[1], race.candidate_ready[1],
+        race.publish_count, race.publish_order[0], race.publish_order[1]);
+  return ok ? 0 : 828;
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean snapshot_entered;
+  gboolean allow_snapshot;
+  gboolean writer_started;
+  gboolean writer_completed;
+  wyrelog_error_t writer_rc;
+  wyrelog_error_t reload_rc;
+} EngineSnapshotRace;
+
+static void
+block_engine_snapshot (gpointer data)
+{
+  EngineSnapshotRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->snapshot_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_snapshot)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gboolean
+wait_for_engine_snapshot_flag (EngineSnapshotRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  return reached;
+}
+
+static gpointer
+run_snapshot_reload (gpointer data)
+{
+  EngineSnapshotRace *race = data;
+  race->reload_rc = wyl_handle_reload_engine_pair (race->handle);
+  return NULL;
+}
+
+static gpointer
+run_same_handle_snapshot_writer (gpointer data)
+{
+  EngineSnapshotRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->writer_started = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  race->writer_rc =
+      wyl_policy_store_set_principal_state (wyl_handle_get_policy_store
+      (race->handle), "snapshot-writer", "authenticated");
+  g_mutex_lock (&race->mutex);
+  race->writer_completed = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  return NULL;
+}
+
+static gint
+check_reload_uses_one_external_wal_snapshot (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 829;
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  g_autoptr (WylHandle) handle = NULL;
+  WylHandleOpenOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = path,
+  };
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK) {
+    rmdir_recursive (dir);
+    return 830;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "snapshot-role", "snapshot role")
+      != WYRELOG_E_OK
+      || wyl_policy_store_upsert_permission (store, "snapshot.permission",
+          "snapshot permission", "sensitive") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, "snapshot-role",
+          "snapshot.permission") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "snapshot-subject",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, "snapshot-scope",
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "snapshot-subject",
+          "snapshot.permission", "snapshot-scope", "armed")
+      != WYRELOG_E_OK) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 831;
+  }
+  g_autoptr (wyl_policy_store_t) external = NULL;
+  if (wyl_policy_store_open (path, &external) != WYRELOG_E_OK) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 832;
+  }
+
+  EngineSnapshotRace race = {
+    .handle = handle,
+    .writer_rc = WYRELOG_E_INTERNAL,
+    .reload_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_handle_set_engine_snapshot_checkpoint_for_test (handle,
+      block_engine_snapshot, &race);
+  GThread *reload =
+      g_thread_new ("engine-snapshot-reload", run_snapshot_reload, &race);
+  if (!wait_for_engine_snapshot_flag (&race, &race.snapshot_entered)) {
+    g_mutex_lock (&race.mutex);
+    race.allow_snapshot = TRUE;
+    g_cond_broadcast (&race.changed);
+    g_mutex_unlock (&race.mutex);
+    g_thread_join (reload);
+    g_cond_clear (&race.changed);
+    g_mutex_clear (&race.mutex);
+    g_clear_object (&handle);
+    g_clear_pointer (&external, wyl_policy_store_close);
+    rmdir_recursive (dir);
+    return 833;
+  }
+
+  sqlite3_mutex *db_mutex = sqlite3_db_mutex (wyl_policy_store_get_db (store));
+  int mutex_rc = db_mutex != NULL ? sqlite3_mutex_try (db_mutex) : SQLITE_ERROR;
+  gboolean same_handle_excluded = mutex_rc == SQLITE_BUSY;
+  if (mutex_rc == SQLITE_OK)
+    sqlite3_mutex_leave (db_mutex);
+  GThread *writer = g_thread_new ("engine-snapshot-same-writer",
+      run_same_handle_snapshot_writer, &race);
+  gboolean writer_started =
+      wait_for_engine_snapshot_flag (&race, &race.writer_started);
+  g_mutex_lock (&race.mutex);
+  gboolean writer_blocked = !race.writer_completed;
+  g_mutex_unlock (&race.mutex);
+  wyrelog_error_t external_rc =
+      wyl_policy_store_grant_role_membership (external, "snapshot-subject",
+      "snapshot-role", "snapshot-scope");
+  g_mutex_lock (&race.mutex);
+  race.allow_snapshot = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (reload);
+  g_thread_join (writer);
+
+  gint64 decision_row[3];
+  gboolean first_allowed = TRUE;
+  gboolean first_complete = intern3 (handle, "snapshot-subject",
+      "snapshot.permission", "snapshot-scope", decision_row) == WYRELOG_E_OK
+      && wyl_handle_engine_decide (handle, decision_row, &first_allowed)
+      == WYRELOG_E_OK;
+  gboolean absent_from_first = first_complete && !first_allowed;
+  gboolean second_allowed = FALSE;
+  gboolean visible_on_next =
+      wyl_handle_reload_engine_pair (handle) == WYRELOG_E_OK;
+  if (visible_on_next)
+    visible_on_next = intern3 (handle, "snapshot-subject",
+        "snapshot.permission", "snapshot-scope", decision_row)
+        == WYRELOG_E_OK
+        && wyl_handle_engine_decide (handle, decision_row, &second_allowed)
+        == WYRELOG_E_OK && second_allowed;
+  gboolean ok = same_handle_excluded && writer_started && writer_blocked
+      && external_rc == WYRELOG_E_OK && race.reload_rc == WYRELOG_E_OK
+      && race.writer_rc == WYRELOG_E_OK && race.writer_completed
+      && absent_from_first && visible_on_next;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  g_clear_object (&handle);
+  g_clear_pointer (&external, wyl_policy_store_close);
+  rmdir_recursive (dir);
+  if (!ok)
+    g_printerr ("snapshot mutex=%d started=%d blocked=%d external=%d "
+        "reload=%d writer=%d completed=%d absent=%d next=%d mixed=%d\n",
+        same_handle_excluded, writer_started, writer_blocked, external_rc,
+        race.reload_rc, race.writer_rc, race.writer_completed,
+        absent_from_first, visible_on_next, first_allowed);
+  return ok ? 0 : 834;
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -5332,6 +5928,14 @@ main (void)
     return rc;
 #ifdef WYL_TEST_HANDLE_SEAMS
   if ((rc = check_decision_holds_one_recursive_engine_session ()) != 0)
+    return rc;
+  if ((rc = check_engine_operations_serialize_with_replacement ()) != 0)
+    return rc;
+  if ((rc = check_poison_waits_for_inflight_operation ()) != 0)
+    return rc;
+  if ((rc = check_concurrent_reloads_publish_in_acquisition_order ()) != 0)
+    return rc;
+  if ((rc = check_reload_uses_one_external_wal_snapshot ()) != 0)
     return rc;
   if ((rc = check_shutdown_waits_for_engine_session ()) != 0)
     return rc;
