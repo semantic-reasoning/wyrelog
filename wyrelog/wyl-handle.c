@@ -1229,6 +1229,13 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
+  /* Reconciliation crosses engine, Policy DB, and DuckDB state. Hold the
+   * engine session for the whole transaction so snapshots cannot observe a
+   * replacement and every path uses the engine -> store lock order. */
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (self);
+  if (engine_locker == NULL)
+    return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || self->audit_conn == NULL)
     return WYRELOG_E_INVALID;
 
@@ -3356,6 +3363,10 @@ wyrelog_error_t
 wyl_handle_load_policy_store_audit_facts (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (self);
+  if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
   if (self->policy_store == NULL || self->read_engine == NULL
       || self->delta_engine == NULL)
