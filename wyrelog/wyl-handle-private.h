@@ -392,6 +392,33 @@ wyrelog_error_t wyl_engine_session_run_committed_publication
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data);
 
+#ifdef WYL_HAS_AUDIT
+typedef struct
+{
+  const gchar *id;
+  gint64 created_at_us;
+  const gchar *subject_id;
+  const gchar *action;
+  const gchar *resource_id;
+  const gchar *deny_reason;
+  const gchar *deny_origin;
+  const gchar *request_id;
+  wyl_decision_t decision;
+} WylCommittedAuditProjection;
+
+/* Commits one audit mutation, then projects only that row into the current
+ * pair.  Unlike the general publication runner this lane may re-enter from a
+ * detached delta callback and never replaces the pair or replays history. */
+wyrelog_error_t wyl_engine_session_run_committed_audit_publication
+    (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
+    gpointer mutate_data, const WylCommittedAuditProjection * projection);
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t wyl_handle_classify_audit_projection_for_test
+    (WylHandle * self, const WylCommittedAuditProjection * projection,
+    gboolean * out_absent);
+#endif
+#endif
+
 /*
  * Exclusively rebuilds the complete pair from durable state, then invokes
  * @verify while retaining the recursive engine session. Any rebuild or

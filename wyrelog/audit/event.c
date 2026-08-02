@@ -289,73 +289,6 @@ mutate_audit_publication (wyl_policy_store_t *store, gpointer data)
   return rc;
 }
 
-static wyrelog_error_t
-verify_audit_symbol_pair (WylEngineVerification *verification,
-    const gchar *relation, const gchar *id, const gchar *value)
-{
-  if (value == NULL)
-    return WYRELOG_E_OK;
-  gint64 row[2] = { 0 };
-  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-      id, &row[0]);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_engine_verification_lookup_symbol (verification, value, &row[1]);
-  gboolean found = FALSE;
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_engine_verification_contains (verification, relation, row,
-        G_N_ELEMENTS (row), &found);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
-}
-
-static wyrelog_error_t
-verify_audit_publication (WylEngineVerification *verification, gpointer data)
-{
-  WylAuditPublication *ctx = data;
-  const WylAuditEvent *event = ctx->event;
-  const gchar *decision = event->decision == WYL_DECISION_ALLOW ?
-      "allow" : event->decision == WYL_DECISION_DENY ? "deny" : NULL;
-  if (decision == NULL)
-    return WYRELOG_E_INVALID;
-  gint64 row[3] = { 0, event->created_at_us, 0 };
-  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-      ctx->id, &row[0]);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_engine_verification_lookup_symbol (verification, decision,
-        &row[2]);
-  gboolean found = FALSE;
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_engine_verification_contains (verification, "audit_event", row,
-        G_N_ELEMENTS (row), &found);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (!found)
-    return WYRELOG_E_POLICY;
-  const gchar *relations[] = {
-    "audit_event_subject",
-    "audit_event_action",
-    "audit_event_resource",
-    "audit_event_deny_reason",
-    "audit_event_deny_origin",
-    "audit_event_request_id",
-  };
-  const gchar *values[] = {
-    event->subject_id,
-    event->action,
-    event->resource_id,
-    event->deny_reason,
-    event->deny_origin,
-    event->request_id,
-  };
-  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
-    rc = verify_audit_symbol_pair (verification, relations[i], ctx->id,
-        values[i]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
-  return WYRELOG_E_OK;
-}
 #endif
 
 wyrelog_error_t
@@ -374,9 +307,20 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   if (session == NULL)
     return WYRELOG_E_BUSY;
   WylAuditPublication publication = { event, id_buf };
-  wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
-      mutate_audit_publication, &publication, verify_audit_publication,
-      &publication, NULL, NULL);
+  WylCommittedAuditProjection projection = {
+    .id = id_buf,
+    .created_at_us = event->created_at_us,
+    .subject_id = event->subject_id,
+    .action = event->action,
+    .resource_id = event->resource_id,
+    .deny_reason = event->deny_reason,
+    .deny_origin = event->deny_origin,
+    .request_id = event->request_id,
+    .decision = event->decision,
+  };
+  wyrelog_error_t rc =
+      wyl_engine_session_run_committed_audit_publication (session,
+      mutate_audit_publication, &publication, &projection);
   g_clear_pointer (&session, wyl_engine_session_release);
   if (rc != WYRELOG_E_OK)
     return rc;

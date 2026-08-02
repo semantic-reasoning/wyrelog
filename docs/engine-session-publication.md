@@ -11,8 +11,11 @@ owner is file-local implementation detail and is not a production symbol.
 A session token is thread-affine. A foreign-thread release is rejected without
 consuming or unlocking the token; the owner must subsequently release it.
 Nested owner-thread sessions are allowed and must be released on that same
-thread. Holding a session and requesting reload or committed reconciliation is
-rejected with `WYRELOG_E_BUSY`, including from a delta callback.
+thread in reverse acquisition order. The general committed-publication runner
+accepts only an outermost session and rejects entry from a nested session or a
+delta callback with `WYRELOG_E_BUSY` before starting the durable transaction.
+Holding a session and requesting reload or committed reconciliation is also
+rejected, including from a delta callback.
 
 The lock rank is:
 
@@ -50,6 +53,17 @@ run under one exclusive recursive engine session. Any load or verification
 failure leaves the handle poisoned; only successful full reconstruction and
 verification publishes READY.
 
+The audit publication lane is the one deliberate reentrant exception. An
+audit emitted by a detached delta callback commits its durable row, classifies
+that one audit projection against the current pair without interning symbols,
+and inserts only the missing audit input facts. Exact projections are
+read-only; partial or contradictory projections fail closed. This lane never
+replaces the pair, changes the store generation, replays historical rows, or
+fans audit relations out through the delta callback. A post-commit projection
+or exact-readback failure preserves the durable audit row and poisons the
+pair. Consequently, request-local facts and compound identifiers remain valid
+for the rest of their owning insert/query/remove interval.
+
 Raw read/delta getters and legacy handle-level evaluator helpers exist only in
 the `WYL_TEST_HANDLE_SEAMS` archive. They return borrowed pointers for focused
 tests and are unavailable to production callers. Production code uses
@@ -58,7 +72,9 @@ protected entry-point inventory and an explicit owner-function allowlist.
 
 Delta callbacks receive an immutable detached batch. Clearing or replacing the
 callback during delivery affects later batches only; every row in the detached
-batch is delivered exactly once to the callback captured for that batch.
+batch is delivered exactly once to the callback captured for that batch. If a
+callback poisons the pair, delivery stops immediately and the publication that
+owned the batch fails, including when poisoning occurs on the last row.
 
 Deterministic concurrency checkpoints are compiled only into the non-installed
 handle test archive. Production shared and static artifacts must not contain
