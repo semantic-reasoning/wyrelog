@@ -7,6 +7,8 @@
 #include "access/decision-private.h"
 #include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
+#include "wyl-id-private.h"
+#include "wyl-decide-private.h"
 #include "wyl-permission-scope-private.h"
 
 struct _wyl_decide_req
@@ -28,6 +30,17 @@ struct _wyl_decide_resp
   wyl_decision_t decision;
   gchar *deny_reason;
   gchar *deny_origin;
+};
+
+struct _WylServiceDecisionAuthority
+{
+  GMutex mutex;
+  WylHandle *handle;
+  WylServiceAuthReadLease *lease;
+  gchar *context_id;
+  gchar *subject_id;
+  gchar *tenant_id;
+  gboolean consumed;
 };
 
 typedef struct guard_eval_facts_t
@@ -531,6 +544,179 @@ fail_closed_for_audit (wyl_decide_resp_t *resp)
 }
 #endif
 
+static void
+emit_decide_audit (WylHandle *handle, const wyl_decide_req_t *req,
+    wyl_decide_resp_t *resp)
+{
+#ifndef WYL_HAS_AUDIT
+  (void) handle;
+  (void) req;
+  (void) resp;
+#else
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, wyl_decide_req_get_subject_id (req));
+  wyl_audit_event_set_action (ev, wyl_decide_req_get_action (req));
+  wyl_audit_event_set_resource_id (ev, wyl_decide_req_get_resource_id (req));
+  wyl_audit_event_set_deny_reason (ev, wyl_decide_resp_get_deny_reason (resp));
+  wyl_audit_event_set_deny_origin (ev, wyl_decide_resp_get_deny_origin (resp));
+  wyl_audit_event_set_request_id (ev, wyl_decide_req_get_request_id (req));
+  wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK)
+    fail_closed_for_audit (resp);
+#endif
+}
+
+wyrelog_error_t
+wyl_service_decision_authority_new_resolved (WylHandle *handle,
+    WylServiceAuthReadLease **inout_lease, const gchar *subject_id,
+    const gchar *tenant_id, WylServiceDecisionAuthority **out_authority)
+{
+  if (out_authority != NULL)
+    *out_authority = NULL;
+  if (!WYL_IS_HANDLE (handle) || inout_lease == NULL || *inout_lease == NULL
+      || subject_id == NULL || tenant_id == NULL || out_authority == NULL)
+    return WYRELOG_E_INVALID;
+  if (!wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_auth_read_lease_validate (*inout_lease, handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_id_t id = WYL_ID_NIL;
+  rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gchar id_string[WYL_ID_STRING_BUF] = { 0 };
+  rc = wyl_id_format (&id, id_string, sizeof id_string);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylServiceDecisionAuthority *authority =
+      g_new0 (WylServiceDecisionAuthority, 1);
+  g_mutex_init (&authority->mutex);
+  authority->handle = g_object_ref (handle);
+  authority->lease = g_steal_pointer (inout_lease);
+  authority->context_id = g_strdup (id_string);
+  authority->subject_id = g_strdup (subject_id);
+  authority->tenant_id = g_strdup (tenant_id);
+  *out_authority = authority;
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_service_decision_authority_free (WylServiceDecisionAuthority *authority)
+{
+  if (authority == NULL)
+    return;
+  if (authority->lease != NULL)
+    (void) wyl_service_auth_read_lease_release_terminal (&authority->lease);
+  g_clear_object (&authority->handle);
+  g_clear_pointer (&authority->context_id, g_free);
+  g_clear_pointer (&authority->subject_id, g_free);
+  g_clear_pointer (&authority->tenant_id, g_free);
+  g_mutex_clear (&authority->mutex);
+  g_free (authority);
+}
+
+wyrelog_error_t
+wyl_decide_with_service_authority (WylHandle *handle,
+    const wyl_decide_req_t *req, WylServiceDecisionAuthority *authority,
+    wyl_decide_resp_t *resp)
+{
+  if (handle == NULL || req == NULL || authority == NULL || resp == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+  wyl_decide_resp_set_deny_tags (resp, NULL, NULL);
+  const gchar *subject = wyl_decide_req_get_subject_id (req);
+  const gchar *action = wyl_decide_req_get_action (req);
+  const gchar *scope = wyl_decide_req_get_resource_id (req);
+  if (subject == NULL || action == NULL || scope == NULL
+      || authority->handle != handle)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_auth_read_lease_validate (authority->lease, handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (GMutexLocker) decision_locker =
+      wyl_handle_lock_decision_engine (handle);
+  if (decision_locker == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&authority->mutex);
+  if (authority->consumed) {
+    g_mutex_unlock (&authority->mutex);
+    return WYRELOG_E_INVALID;
+  }
+  authority->consumed = TRUE;
+  g_mutex_unlock (&authority->mutex);
+
+  gboolean inserted = FALSE;
+  gboolean allowed = FALSE;
+  if (!g_str_equal (subject, authority->subject_id)) {
+    rc = WYRELOG_E_INVALID;
+    goto release;
+  }
+  if (wyl_handle_get_read_engine (handle) == NULL) {
+    rc = WYRELOG_E_INVALID;
+    goto release;
+  }
+
+  gint64 context_row[3];
+  rc = wyl_handle_intern_engine_symbol (handle, authority->context_id,
+      &context_row[0]);
+  if (rc != WYRELOG_E_OK)
+    goto release;
+  rc = wyl_handle_intern_engine_symbol (handle, authority->subject_id,
+      &context_row[1]);
+  if (rc != WYRELOG_E_OK)
+    goto release;
+  rc = wyl_handle_intern_engine_symbol (handle, authority->tenant_id,
+      &context_row[2]);
+  if (rc != WYRELOG_E_OK)
+    goto release;
+  rc = wyl_handle_engine_insert (handle, "service_request_auth", context_row,
+      G_N_ELEMENTS (context_row));
+  if (rc != WYRELOG_E_OK)
+    goto release;
+  inserted = TRUE;
+
+  gint64 decision_row[4] = { context_row[0], context_row[1], 0, 0 };
+  rc = wyl_handle_intern_engine_symbol (handle, action, &decision_row[2]);
+  if (rc != WYRELOG_E_OK)
+    goto cleanup;
+  rc = wyl_handle_intern_engine_symbol (handle, scope, &decision_row[3]);
+  if (rc != WYRELOG_E_OK)
+    goto cleanup;
+  rc = wyl_handle_engine_contains (handle, "service_allow_bool",
+      decision_row, G_N_ELEMENTS (decision_row), &allowed);
+
+cleanup:
+  if (inserted) {
+    wyrelog_error_t cleanup_rc = wyl_handle_engine_remove (handle,
+        "service_request_auth", context_row, G_N_ELEMENTS (context_row));
+    if (cleanup_rc != WYRELOG_E_OK) {
+      wyl_handle_poison_engine_pair (handle);
+      rc = cleanup_rc;
+    }
+  }
+
+release:
+  {
+    wyrelog_error_t release_rc =
+        wyl_service_auth_read_lease_release_terminal (&authority->lease);
+    if (release_rc != WYRELOG_E_OK)
+      rc = release_rc;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (allowed)
+    wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  emit_decide_audit (handle, req, resp);
+  return WYRELOG_E_OK;
+}
+
 #ifdef WYL_HAS_BREAK_GLASS
 typedef struct
 {
@@ -617,6 +803,10 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       || wyl_decide_req_get_resource_id (req) == NULL)
     return WYRELOG_E_INVALID;
   if (!guard_context_is_valid (req))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GMutexLocker) decision_locker =
+      wyl_handle_lock_decision_engine (handle);
+  if (decision_locker == NULL)
     return WYRELOG_E_INVALID;
 
   const gchar *deny_reason = NULL;
@@ -724,22 +914,7 @@ emit_audit:
   (void) deny_reason;
   (void) deny_origin;
 #endif
-#ifdef WYL_HAS_AUDIT
-  /* Mirror the decision into the audit log so every decide call
-   * leaves a row regardless of whether downstream callers also
-   * emit explicitly. If the append fails, close the response back
-   * to DENY so the caller never observes an unaudited ALLOW. */
-  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, wyl_decide_req_get_subject_id (req));
-  wyl_audit_event_set_action (ev, wyl_decide_req_get_action (req));
-  wyl_audit_event_set_resource_id (ev, wyl_decide_req_get_resource_id (req));
-  wyl_audit_event_set_deny_reason (ev, deny_reason);
-  wyl_audit_event_set_deny_origin (ev, deny_origin);
-  wyl_audit_event_set_request_id (ev, wyl_decide_req_get_request_id (req));
-  wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
-  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK)
-    fail_closed_for_audit (resp);
-#endif
+  emit_decide_audit (handle, req, resp);
 
 #ifdef WYL_HAS_BREAK_GLASS
   /*

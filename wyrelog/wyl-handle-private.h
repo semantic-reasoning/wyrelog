@@ -114,6 +114,9 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
     (WylHandle * self);
+/* Serializes every decision's request-local engine mutation/query/cleanup
+ * interval. The evaluator session is not safe for parallel mutations. */
+GMutexLocker *wyl_handle_lock_decision_engine (WylHandle * self);
 /* Reloads the policy engines while the caller owns the service-auth WRITE
  * lease. The lease spans durable service lifecycle commit and projection, so
  * no service resolver can observe the new lifecycle before its signed-policy
@@ -277,6 +280,7 @@ typedef struct
 
 typedef WylHandleEngineFaultOnce WylHandleEngineInsertFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineRemoveFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineContainsFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaInsertFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaRemoveFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaStepFaultOnce;
@@ -302,6 +306,13 @@ static inline GQuark
 wyl_handle_engine_remove_fault_once_quark (void)
 {
   return g_quark_from_static_string ("wyrelog-handle-engine-remove-fault-once");
+}
+
+static inline GQuark
+wyl_handle_engine_contains_fault_once_quark (void)
+{
+  return
+      g_quark_from_static_string ("wyrelog-handle-engine-contains-fault-once");
 }
 
 static inline GQuark
@@ -374,6 +385,26 @@ wyl_handle_set_engine_remove_fault_once (WylHandle *self,
   g_object_set_qdata_full (G_OBJECT (self),
       wyl_handle_engine_remove_fault_once_quark (), fault,
       wyl_handle_engine_remove_fault_once_free);
+}
+
+/* Test-only fault hook for private query-path coverage. The next exact
+ * relation probe fails before snapshotting and clears the hook. */
+static inline void
+wyl_handle_set_engine_contains_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineContainsFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineContainsFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_contains_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
 }
 
 /*
@@ -559,6 +590,10 @@ wyrelog_error_t wyl_handle_insert_audit_fact (WylHandle * self,
 wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols,
     gboolean * out_contains);
+
+/* Makes an uncertain request-local cleanup fail closed. All later engine
+ * operations reject the poisoned pair until an explicit successful reload. */
+void wyl_handle_poison_engine_pair (WylHandle * self);
 
 /*
  * Reads allow_bool/3 from the handle-owned read engine for @row

@@ -71,6 +71,7 @@ struct _WylHandle
   gint64 created_at_us;
   WylEngine *read_engine;
   WylEngine *delta_engine;
+  GMutex decision_mutex;
   GHashTable *engine_symbols_by_id;
   gchar *template_dir;
   WylDeltaCallback delta_callback;
@@ -150,6 +151,13 @@ wyl_handle_get_service_auth_authority (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return self->service_auth_authority;
+}
+
+GMutexLocker *
+wyl_handle_lock_decision_engine (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  return g_mutex_locker_new (&self->decision_mutex);
 }
 
 WylServiceAuthUnavailableReason
@@ -235,6 +243,7 @@ wyl_handle_finalize (GObject *object)
   g_assert_true (self->policy_store_shutdown_completed);
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
+  g_mutex_clear (&self->decision_mutex);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
 #ifdef WYL_HAS_FACT_STORE
   g_clear_pointer (&self->fact_root, g_free);
@@ -285,6 +294,7 @@ wyl_handle_init (WylHandle *self)
   if (wyl_id_new (&self->id) != WYRELOG_E_OK)
     g_error ("wyl_handle_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
+  g_mutex_init (&self->decision_mutex);
   self->service_auth_authority = wyl_service_auth_authority_new (self);
   g_mutex_init (&self->policy_store_lifecycle_mutex);
   g_cond_init (&self->policy_store_lifecycle_changed);
@@ -2183,6 +2193,13 @@ poison_engine_pair (WylHandle *self)
   self->engine_pair_poisoned = TRUE;
 }
 
+void
+wyl_handle_poison_engine_pair (WylHandle *self)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  poison_engine_pair (self);
+}
+
 static gboolean
 engine_pair_unavailable (WylHandle *self)
 {
@@ -2244,6 +2261,10 @@ wyrelog_error_t
 wyl_handle_reload_engine_pair_with_service_auth_write (WylHandle *self,
     WylServiceAuthWriteLease *write_lease)
 {
+  g_autoptr (GMutexLocker) decision_locker =
+      wyl_handle_lock_decision_engine (self);
+  if (decision_locker == NULL)
+    return WYRELOG_E_INVALID;
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
   wyrelog_error_t rc = replace_engine_pair (self, template_dir);
   if (rc != WYRELOG_E_OK)
@@ -3273,6 +3294,11 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
   if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
+
+  wyrelog_error_t fault_rc = WYRELOG_E_OK;
+  if (take_engine_fault_once (self,
+          wyl_handle_engine_contains_fault_once_quark (), relation, &fault_rc))
+    return fault_rc;
 
   const gchar *snapshot_relation = relation;
   /* The engine snapshots derived outputs, so principal_state probes use
