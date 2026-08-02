@@ -40,6 +40,21 @@ LOCKED_ENTRY_POINTS = (
     "wyl_decide",
 )
 
+POISON_DISTINGUISHED_ENTRY_POINTS = {
+    "reload_policy_snapshot": "wyl-perm.c",
+    "wyl_perm_grant": "wyl-perm.c",
+    "wyl_perm_revoke": "wyl-perm.c",
+    "wyl_role_grant": "wyl-perm.c",
+    "wyl_role_revoke": "wyl-perm.c",
+    "reload_session_snapshot": "wyl-session.c",
+    "login_skip_mfa_allowed": "wyl-session.c",
+    "insert_principal_event_fact": "wyl-session.c",
+    "insert_session_event_fact": "wyl-session.c",
+    "apply_principal_state_mutation": "wyl-session.c",
+    "apply_session_state_mutation": "wyl-session.c",
+    "apply_login_state_mutation": "wyl-session.c",
+}
+
 
 def function_body(source: str, name: str) -> str | None:
     match = re.search(rf"\b{re.escape(name)}\s*\([^;]*?\)\s*\{{", source,
@@ -69,6 +84,10 @@ def main() -> int:
     sources = {
         "wyl_decide": decide_path.read_text(encoding="utf-8"),
         "handle": handle_path.read_text(encoding="utf-8"),
+        "wyl-perm.c": (root / "wyrelog" / "wyl-perm.c").read_text(
+            encoding="utf-8"),
+        "wyl-session.c": (root / "wyrelog" / "wyl-session.c").read_text(
+            encoding="utf-8"),
     }
 
     errors = []
@@ -86,6 +105,13 @@ def main() -> int:
         errors.append("reload must delegate to serialized replacement")
     if reload_body is not None and re.search(r"\breplace_engine_pair\s*\(", reload_body):
         errors.append("reload bypasses serialized replacement")
+
+    for name, source_name in POISON_DISTINGUISHED_ENTRY_POINTS.items():
+        body = function_body(sources[source_name], name)
+        if body is None:
+            errors.append(f"missing poison-sensitive entry point: {name}")
+        elif "wyl_handle_engine_pair_is_poisoned" not in body:
+            errors.append(f"poison is conflated with an unopened pair: {name}")
 
     raw_getter = re.compile(r"\bwyl_handle_get_(?:read|delta)_engine\s*\(")
     for path in (root / "wyrelog").rglob("*.c"):

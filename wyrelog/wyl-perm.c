@@ -612,6 +612,8 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
 static wyrelog_error_t
 reload_policy_snapshot (WylHandle *handle)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   return wyl_handle_reload_engine_pair (handle);
@@ -640,6 +642,8 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
   if (wyl_grant_req_get_subject_id (req) == NULL
       || wyl_grant_req_get_action (req) == NULL
       || wyl_grant_req_get_resource_id (req) == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
   if (wyl_handle_engine_pair_is_ready (handle)
       && wyl_perm_arm_rule_lookup (wyl_grant_req_get_action (req)) != NULL)
@@ -680,6 +684,8 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
       || wyl_revoke_req_get_action (req) == NULL
       || wyl_revoke_req_get_resource_id (req) == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
 
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
@@ -712,6 +718,8 @@ wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
   if (wyl_role_grant_req_get_subject_id (req) == NULL
       || wyl_role_grant_req_get_role_id (req) == NULL
       || wyl_role_grant_req_get_scope (req) == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
 
 #ifdef WYL_HAS_AUDIT
@@ -746,6 +754,8 @@ wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
   if (wyl_role_revoke_req_get_subject_id (req) == NULL
       || wyl_role_revoke_req_get_role_id (req) == NULL
       || wyl_role_revoke_req_get_scope (req) == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
 
 #ifdef WYL_HAS_AUDIT

@@ -52,6 +52,8 @@ session_is_service (const WylSession *session)
 static wyrelog_error_t
 reload_session_snapshot (WylHandle *handle)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   return wyl_handle_reload_engine_pair (handle);
@@ -68,6 +70,8 @@ login_skip_mfa_allowed (WylHandle *handle, const wyl_login_req_t *req,
     gboolean *out_allowed)
 {
   if (handle == NULL || req == NULL || out_allowed == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
 
   *out_allowed = FALSE;
@@ -180,6 +184,8 @@ insert_principal_event_fact (WylHandle *handle, gint64 event_id,
     const gchar *username, wyl_principal_state_t old_state,
     wyl_principal_event_t event, wyl_principal_state_t new_state)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   if (event_id <= 0)
@@ -215,6 +221,8 @@ apply_principal_state_mutation (WylHandle *handle, const gchar *username,
     wyl_principal_state_t new_state, const WylAuditEvent *audit_event,
     gint64 *out_event_id)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (username == NULL)
     return WYRELOG_E_OK;
 
@@ -335,6 +343,8 @@ insert_session_event_fact (WylHandle *handle, gint64 event_id,
     const gchar *session_id, wyl_session_state_t old_state,
     wyl_session_event_t event, wyl_session_state_t new_state)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (!wyl_handle_engine_pair_is_ready (handle))
     return WYRELOG_E_OK;
   if (event_id <= 0)
@@ -370,6 +380,8 @@ apply_session_state_mutation (WylHandle *handle, const gchar *session_id,
     wyl_session_state_t new_state, const WylAuditEvent *audit_event,
     gint64 *out_event_id)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (session_id == NULL)
     return WYRELOG_E_OK;
 
@@ -431,6 +443,8 @@ apply_login_state_mutation (WylHandle *handle, const gchar *username,
     const WylAuditEvent *session_audit_event, gint64 *out_principal_event_id,
     gint64 *out_session_event_id)
 {
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
   if (username == NULL || session_id == NULL)
     return WYRELOG_E_INVALID;
 
