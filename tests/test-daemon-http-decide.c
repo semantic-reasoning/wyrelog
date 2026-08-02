@@ -14390,6 +14390,7 @@ main (void)
   TestHttpServer http = { 0 };
   GThread *thread = NULL;
   guint status = 0;
+  g_autoptr (GError) error = NULL;
 
   if (templates == NULL || wyl_init (templates, &handle) != WYRELOG_E_OK) {
     result = 2700;
@@ -14408,7 +14409,6 @@ main (void)
     .listen_port = 0,
   };
   http.loop = g_main_loop_new (NULL, FALSE);
-  g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server (&opts, handle, &error);
   if (http.server == NULL) {
     result = 2702;
