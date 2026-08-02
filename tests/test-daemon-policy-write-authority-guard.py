@@ -213,6 +213,9 @@ def main():
             "wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);",
             "wyrelog_error_t rc = WYRELOG_E_OK;"),
         "outside-mutator": source + "\nvoid bad(void){ wyl_perm_grant (NULL, NULL); }\n",
+        "outside-generic-publication": source +
+            "\nvoid bad(void){ wyl_engine_session_run_committed_publication "
+            "(NULL, NULL, NULL, NULL, NULL, NULL, NULL); }\n",
         "shadow-write": mutate_function(source, "tenant_mutation_handler",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };\n"
