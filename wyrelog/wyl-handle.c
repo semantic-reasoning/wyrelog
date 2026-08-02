@@ -72,6 +72,9 @@ struct _WylHandle
   WylEngine *read_engine;
   WylEngine *delta_engine;
   GRecMutex engine_session_mutex;
+  void (*engine_session_checkpoint) (WylEngineSessionCheckpoint phase,
+      gpointer data);
+  gpointer engine_session_checkpoint_data;
   gboolean engine_pair_replacement_building;
   void (*reload_decision_checkpoint) (WylEngineReplacementCheckpoint phase,
       gpointer data);
@@ -79,6 +82,8 @@ struct _WylHandle
   gchar *engine_operation_checkpoint_relation;
   void (*engine_operation_checkpoint) (gpointer data);
   gpointer engine_operation_checkpoint_data;
+  void (*audit_replay_checkpoint) (gpointer data);
+  gpointer audit_replay_checkpoint_data;
   GHashTable *engine_symbols_by_id;
   gchar *template_dir;
   WylDeltaCallback delta_callback;
@@ -164,7 +169,26 @@ GRecMutexLocker *
 wyl_handle_lock_engine_session (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
-  return g_rec_mutex_locker_new (&self->engine_session_mutex);
+  void (*checkpoint) (WylEngineSessionCheckpoint phase,
+      gpointer data) = self->engine_session_checkpoint;
+  gpointer checkpoint_data = self->engine_session_checkpoint_data;
+  if (checkpoint != NULL)
+    checkpoint (WYL_ENGINE_SESSION_WAITING, checkpoint_data);
+  GRecMutexLocker *locker =
+      g_rec_mutex_locker_new (&self->engine_session_mutex);
+  if (locker != NULL && checkpoint != NULL)
+    checkpoint (WYL_ENGINE_SESSION_ACQUIRED, checkpoint_data);
+  return locker;
+}
+
+void
+wyl_handle_set_engine_session_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (WylEngineSessionCheckpoint phase, gpointer data),
+    gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->engine_session_checkpoint = checkpoint;
+  self->engine_session_checkpoint_data = data;
 }
 
 void
@@ -188,6 +212,34 @@ wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle *self,
   self->engine_operation_checkpoint_relation = g_strdup (relation);
   self->engine_operation_checkpoint = checkpoint;
   self->engine_operation_checkpoint_data = data;
+}
+
+void
+wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->audit_replay_checkpoint = checkpoint;
+  self->audit_replay_checkpoint_data = data;
+}
+
+gboolean
+wyl_handle_engine_session_locked_for_test (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
+  if (!g_rec_mutex_trylock (&self->engine_session_mutex))
+    return TRUE;
+  g_rec_mutex_unlock (&self->engine_session_mutex);
+  return FALSE;
+}
+
+guint
+wyl_handle_pending_delta_count_for_test (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), 0);
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (self);
+  return self->pending_deltas != NULL ? self->pending_deltas->len : 0;
 }
 
 WylServiceAuthUnavailableReason
@@ -1236,6 +1288,12 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
       wyl_handle_lock_engine_session (self);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+  if (self->audit_replay_checkpoint != NULL) {
+    void (*checkpoint) (gpointer data) = self->audit_replay_checkpoint;
+    gpointer checkpoint_data = self->audit_replay_checkpoint_data;
+    self->audit_replay_checkpoint = NULL;
+    checkpoint (checkpoint_data);
+  }
   if (self->policy_store == NULL || self->audit_conn == NULL)
     return WYRELOG_E_INVALID;
 

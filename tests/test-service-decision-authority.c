@@ -384,10 +384,8 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   }
 
   ServiceProjectionDeltaWitness delta_witness = { 0 };
-  if (step_fault)
-    g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
-            service_projection_delta_witness, &delta_witness), ==,
-        WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
+          service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
 
   if (step_fault)
     wyl_handle_set_engine_delta_step_fault_once (handle,
@@ -415,6 +413,9 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   g_assert_true (completed);
   g_thread_join (thread);
   g_assert_cmpint (worker.rc, ==, WYRELOG_E_BUSY);
+  /* Inspect before reload, callback reset, or another delta step can clear
+   * pending state. A failed candidate must leave no buffered emission. */
+  g_assert_cmpuint (wyl_handle_pending_delta_count_for_test (handle), ==, 0);
 
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
@@ -427,13 +428,11 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
       (wyl_handle_get_service_auth_authority (handle), handle, NULL,
           &read_lease), ==, WYRELOG_E_BUSY);
   g_assert_null (read_lease);
-  if (step_fault) {
-    g_assert_cmpuint (delta_witness.total, ==, 0);
-    g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
-    emit_successful_delta_witness (handle, "latched");
-    g_assert_cmpuint (delta_witness.total, >, 0);
-    g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
-  }
+  g_assert_cmpuint (delta_witness.total, ==, 0);
+  g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
+  emit_successful_delta_witness (handle, "latched");
+  g_assert_cmpuint (delta_witness.total, >, 0);
+  g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
 
   wyl_service_principal_t durable = { 0 };
   g_assert_cmpint (wyl_service_principal_get (handle, subject, &durable), ==,
@@ -455,15 +454,12 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
       (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
-  if (step_fault) {
-    memset (&delta_witness, 0, sizeof delta_witness);
-    g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
-            service_projection_delta_witness, &delta_witness), ==,
-        WYRELOG_E_OK);
-    emit_successful_delta_witness (handle, "reopened");
-    g_assert_cmpuint (delta_witness.total, >, 0);
-    g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
-  }
+  memset (&delta_witness, 0, sizeof delta_witness);
+  g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
+          service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
+  emit_successful_delta_witness (handle, "reopened");
+  g_assert_cmpuint (delta_witness.total, >, 0);
+  g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
 
   g_cond_clear (&worker.changed);
   g_mutex_clear (&worker.mutex);

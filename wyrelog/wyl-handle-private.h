@@ -120,6 +120,15 @@ WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
 GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
 typedef enum
 {
+  WYL_ENGINE_SESSION_WAITING,
+  WYL_ENGINE_SESSION_ACQUIRED,
+} WylEngineSessionCheckpoint;
+/* Test-only checkpoint around every engine-session acquisition. */
+void wyl_handle_set_engine_session_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (WylEngineSessionCheckpoint phase, gpointer data),
+    gpointer data);
+typedef enum
+{
   WYL_ENGINE_REPLACEMENT_WAITING,
   WYL_ENGINE_REPLACEMENT_ACQUIRED,
 } WylEngineReplacementCheckpoint;
@@ -133,6 +142,13 @@ void wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle * self,
  * acquired the engine-session mutex and before it touches either engine. */
 void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
     const gchar * relation, void (*checkpoint) (gpointer data), gpointer data);
+/* Test-only one-shot checkpoint invoked by audit reconciliation after taking
+ * the outer engine-session lock and before touching store or engine state. */
+void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (gpointer data), gpointer data);
+/* Test-only cross-thread ownership probe and pending-delta snapshot. */
+gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
+guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
 /* Reloads the policy engines while the caller owns the service-auth WRITE
  * lease. The lease spans durable service lifecycle commit and projection, so
  * no service resolver can observe the new lifecycle before its signed-policy

@@ -95,7 +95,10 @@ typedef struct
   gboolean reload_waiting;
   gboolean reload_acquired;
   gboolean decision_started;
+  gboolean decision_lock_waiting;
+  gboolean decision_lock_acquired;
   gboolean decision_acquired;
+  GThread *decision_thread;
   gboolean ordering_ok;
   wyrelog_error_t replay_rc;
   wyrelog_error_t reload_rc;
@@ -144,6 +147,24 @@ audit_replay_reload_checkpoint (WylEngineReplacementCheckpoint phase,
   g_mutex_unlock (&race->mutex);
 }
 
+static void
+audit_replay_engine_session_checkpoint (WylEngineSessionCheckpoint phase,
+    gpointer data)
+{
+  AuditReplayConcurrency *race = data;
+  g_mutex_lock (&race->mutex);
+  if (g_thread_self () == race->decision_thread) {
+    if (phase == WYL_ENGINE_SESSION_WAITING)
+      race->decision_lock_waiting = TRUE;
+    else {
+      race->decision_lock_acquired = TRUE;
+      race->ordering_ok = race->ordering_ok && race->replay_released;
+    }
+    g_cond_broadcast (&race->changed);
+  }
+  g_mutex_unlock (&race->mutex);
+}
+
 static gboolean
 audit_replay_window_matcher (gint64 timestamp, const gchar *window_name,
     gpointer data)
@@ -187,6 +208,7 @@ run_decision_during_audit_replay (gpointer data)
   wyl_decide_req_set_guard_window_matcher (req, audit_replay_window_matcher,
       race);
   g_mutex_lock (&race->mutex);
+  race->decision_thread = g_thread_self ();
   race->decision_started = TRUE;
   g_cond_broadcast (&race->changed);
   g_mutex_unlock (&race->mutex);
@@ -241,8 +263,8 @@ check_audit_replay_serializes_reload_and_decision (void)
   };
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
-  wyl_handle_set_engine_operation_checkpoint_for_test (handle,
-      "audit_event_input", blocking_audit_replay_checkpoint, &race);
+  wyl_handle_set_audit_replay_checkpoint_for_test (handle,
+      blocking_audit_replay_checkpoint, &race);
   GThread *replay = g_thread_new ("audit-reconcile", run_audit_replay, &race);
   if (!wait_for_audit_replay_flag (&race, &race.replay_entered)) {
     g_mutex_lock (&race.mutex);
@@ -254,31 +276,43 @@ check_audit_replay_serializes_reload_and_decision (void)
     g_mutex_clear (&race.mutex);
     return 193;
   }
+  /* No contender exists yet, so a failed try-lock proves the replay thread
+   * owns the outer engine session before classify/snapshot/helper entry. */
+  gboolean replay_holds_engine_session =
+      wyl_handle_engine_session_locked_for_test (handle);
 
   wyl_handle_set_reload_decision_checkpoint_for_test (handle,
       audit_replay_reload_checkpoint, &race);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      audit_replay_engine_session_checkpoint, &race);
   GThread *reload = g_thread_new ("audit-reconcile-reload",
       run_reload_during_audit_replay, &race);
   GThread *decision = g_thread_new ("audit-reconcile-decision",
       run_decision_during_audit_replay, &race);
   gboolean ready = wait_for_audit_replay_flag (&race, &race.reload_waiting)
-      && wait_for_audit_replay_flag (&race, &race.decision_started);
+      && wait_for_audit_replay_flag (&race, &race.decision_started)
+      && wait_for_audit_replay_flag (&race, &race.decision_lock_waiting);
+  gboolean contenders_observe_owned_session =
+      wyl_handle_engine_session_locked_for_test (handle);
   g_mutex_lock (&race.mutex);
   race.ordering_ok = race.ordering_ok && !race.reload_acquired
-      && !race.decision_acquired;
+      && !race.decision_lock_acquired && !race.decision_acquired;
   race.allow_replay = TRUE;
   g_cond_broadcast (&race.changed);
   g_mutex_unlock (&race.mutex);
   gboolean completed = wait_for_audit_replay_flag (&race,
       &race.reload_acquired) && wait_for_audit_replay_flag (&race,
+      &race.decision_lock_acquired) && wait_for_audit_replay_flag (&race,
       &race.decision_acquired);
   g_thread_join (replay);
   g_thread_join (reload);
   g_thread_join (decision);
   wyl_handle_set_reload_decision_checkpoint_for_test (handle, NULL, NULL);
-  wyl_handle_set_engine_operation_checkpoint_for_test (handle, NULL, NULL,
-      NULL);
-  gboolean ok = ready && completed && race.ordering_ok
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  wyl_handle_set_audit_replay_checkpoint_for_test (handle, NULL, NULL);
+  gboolean ok = replay_holds_engine_session
+      && contenders_observe_owned_session && ready && completed
+      && race.ordering_ok
       && race.replay_rc == WYRELOG_E_OK && race.reload_rc == WYRELOG_E_OK
       && race.decision_rc == WYRELOG_E_OK
       && race.decision == WYL_DECISION_ALLOW;
