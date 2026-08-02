@@ -38,9 +38,11 @@ EXPECTED_EXECUTABLE_NAMES = {
     "test-daemon-http-decide",
     "test-daemon-http-decide-refresh",
     "test-daemon-http-decide-service",
+    "test-daemon-http-service-decision",
     "test-daemon-http-decide-audit",
 }
 SERVICE_EXECUTABLE_NAME = "test-daemon-http-decide-service"
+SERVICE_DECISION_EXECUTABLE_NAME = "test-daemon-http-service-decision"
 
 
 def run(command: list[str]) -> str:
@@ -265,6 +267,10 @@ def self_test() -> int:
             "test-daemon-http-decide",
             COMMON_EXECUTABLE_IMPORTS):
         return 1
+    if missing_executable_imports(
+            SERVICE_DECISION_EXECUTABLE_NAME,
+            COMMON_EXECUTABLE_IMPORTS):
+        return 1
     missing_common_import = COMMON_EXECUTABLE_IMPORTS - {LOCK_RELEASE_SYMBOL}
     if missing_executable_imports(
             "test-daemon-http-decide-audit",
@@ -281,6 +287,11 @@ def self_test() -> int:
         return 1
     if executable_names_are_exact(
             expected_executables + [expected_executables[0]]):
+        return 1
+    unexpected_executables = expected_executables[:-1] + [
+        Path("/tmp/test-daemon-http-unexpected")
+    ]
+    if executable_names_are_exact(unexpected_executables):
         return 1
     artifact = Path("/tmp/test-daemon-http-decide")
     if defined_command("nm", artifact, False) != [
@@ -318,6 +329,12 @@ def self_test() -> int:
         return 1
     if missing_runtime_dependencies(
             "test-daemon-http-decide",
+            library.name,
+            helper,
+            library):
+        return 1
+    if missing_runtime_dependencies(
+            SERVICE_DECISION_EXECUTABLE_NAME,
             library.name,
             helper,
             library):

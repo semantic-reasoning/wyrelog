@@ -17,6 +17,7 @@ EXPECTED_TARGETS = {
     "test_daemon_http_decide",
     "test_daemon_http_decide_refresh",
     "test_daemon_http_decide_service",
+    "test_daemon_http_service_decision",
     "test_daemon_http_decide_audit",
 }
 
@@ -129,7 +130,8 @@ if "link_whole" in helper:
     fail("daemon HTTP seed helper must not use link_whole")
 
 actual_consumers = set(re.findall(
-    r"(test_daemon_http_decide(?:_refresh|_service|_audit)?)\s*="
+    r"(test_daemon_http_(?:decide(?:_refresh|_service|_audit)?|"
+    r"service_decision))\s*="
     r"\s*executable\(.*?\n\s*link_with\s*:\s*"
     r"test_daemon_http_decide_link_with,",
     source,
@@ -142,7 +144,8 @@ if actual_consumers != EXPECTED_TARGETS:
     )
 
 if re.search(
-        r"test_daemon_http_decide(?:_refresh|_service|_audit)?\s*="
+        r"test_daemon_http_(?:decide(?:_refresh|_service|_audit)?|"
+        r"service_decision)\s*="
         r"\s*executable\(.*?\n\s*link_whole\s*:",
         source,
         re.DOTALL,
