@@ -524,6 +524,8 @@ verify_bootstrap_publication (WylEngineVerification *verification,
     gpointer data)
 {
   WylBootstrapPublication *ctx = data;
+  if (!ctx->applied)
+    return WYRELOG_E_OK;
   const gchar *membership[] = {
     ctx->subject,
     "wr.system_admin",
