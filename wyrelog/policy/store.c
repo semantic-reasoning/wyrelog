@@ -648,6 +648,7 @@ static const BuiltinPermission builtin_permissions[] = {
       "critical"},
   {"wr.service_credential.manage", "service credential manage",
       "critical"},
+  {"wr.service.self_authorize", "service self authorize", "critical"},
   {"wr.svc.reload", "service reload", "sensitive"},
   {"wr.svc.flush_cache", "service cache flush", "sensitive"},
   {"wr.svc.grant_role", "service role grant", "critical"},

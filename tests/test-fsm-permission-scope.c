@@ -279,7 +279,7 @@ check_stratification (void)
 static gint
 check_catalogue_invariants (void)
 {
-  if (wyl_perm_arm_rule_count () != 11)
+  if (wyl_perm_arm_rule_count () != 12)
     return 11;
   if (wyl_perm_arm_rule_lookup (NULL) != NULL)
     return 12;
@@ -293,6 +293,13 @@ check_catalogue_invariants (void)
   if (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
           ("wr.audit.read")) != NULL)
     return 16;
+  /* The self-arm eligibility permission is a strict non-window guard, so it
+   * arms via rule-3 (perm_state) and exposes no timestamp window. */
+  if (wyl_perm_arm_rule_lookup ("wr.service.self_authorize") == NULL)
+    return 100;
+  if (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
+          ("wr.service.self_authorize")) != NULL)
+    return 101;
   /* The accessor view of the catalogue must agree with the lookup
    * view on every row. */
   for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {

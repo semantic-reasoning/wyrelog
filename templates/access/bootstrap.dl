@@ -120,6 +120,11 @@ permission("wr.svc.unfreeze").
 permission("wr.svc.read_decision").
 permission("wr.service_principal.manage").
 permission("wr.service_credential.manage").
+// Eligibility to self-arm the service-management authority. The guard on this
+// permission is NOT the primary security control (guard params are
+// client-asserted, matching wr.policy.write); the real controls at the route
+// are SYSTEM profile + loopback + live human-MFA session + system_admin role.
+permission("wr.service.self_authorize").
 permission("wr.explain.read").
 permission("wr.explain.read_sensitive").
 
@@ -159,6 +164,7 @@ role_permission("wr.system_admin", "wr.schema.manage").
 role_permission("wr.system_admin", "wr.fact.write").
 role_permission("wr.system_admin", "wr.fact.read").
 role_permission("wr.system_admin", "wr.datalog.query").
+role_permission("wr.system_admin", "wr.service.self_authorize").
 // NOTE: system_admin deliberately has no wr.audit.* — SoD with wr.auditor.
 
 role_permission("wr.auditor", "wr.audit.read").

@@ -726,6 +726,64 @@ check_decide_denies_guarded_permission_on_context_miss (void)
   return 0;
 }
 
+/* The self-arm route's eligibility gate is decide(actor,
+ * wr.service.self_authorize, __wr_default). Prove the bootstrap wr.system_admin
+ * role carries that permission and that its strict guard (risk < 30 AND loc
+ * trusted) arms it via rule-3: ALLOW under a satisfying guard, DENY otherwise.
+ * The guard is not the primary control (see the route), but a failing guard
+ * must still deny the eligibility decision. */
+static gint
+check_decide_allows_self_authorize_for_system_admin (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 300;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 301;
+  /* Seed only a wr.system_admin membership at __wr_default and rely on the
+   * bootstrap role_permission fact for has_permission -- no direct grant. */
+  if (insert_symbol_row3 (handle, "member_of", "self-arm-admin",
+          "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
+    return 302;
+  if (insert_symbol_row2 (handle, "principal_state", "self-arm-admin",
+          "authenticated") != WYRELOG_E_OK)
+    return 303;
+  if (insert_symbol_row2 (handle, "session_state", "__wr_default", "active")
+      != WYRELOG_E_OK)
+    return 304;
+  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 305;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "self-arm-admin");
+  wyl_decide_req_set_action (req, "wr.service.self_authorize");
+  wyl_decide_req_set_resource_id (req, "__wr_default");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_guard_context (req, 123, "trusted", 29);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 306;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 307;
+
+  wyl_decide_req_set_guard_context (req, 123, "trusted", 30);
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 308;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 309;
+
+  wyl_decide_req_set_guard_context (req, 123, "untrusted", 1);
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 310;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 311;
+
+  return 0;
+}
+
 static gint
 check_policy_store_replay_requires_durable_permission_state (void)
 {
@@ -1279,6 +1337,8 @@ main (void)
   if ((rc = check_decide_allows_guarded_permission_with_context ()) != 0)
     return rc;
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
+    return rc;
+  if ((rc = check_decide_allows_self_authorize_for_system_admin ()) != 0)
     return rc;
   if ((rc = check_policy_store_replay_requires_durable_permission_state ())
       != 0)
