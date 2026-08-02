@@ -38,6 +38,23 @@ test('check-explicit-encoding-self-test', python3,
   env : python_strict_encoding_env,
 )
 
+test('engine-session-boundary', python3,
+  args : [
+    files('../tools/check-engine-session-boundary.py'),
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+)
+
+test('handle-test-seams-not-shipped', python3,
+  args : [
+    files('../tools/check-handle-test-seam-exports.py'),
+    libwyrelog.full_path(),
+  ],
+  depends : libwyrelog,
+  env : python_strict_encoding_env,
+)
+
 if host_machine.system() == 'windows'
   advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
     required : true)

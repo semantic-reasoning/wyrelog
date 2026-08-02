@@ -3384,6 +3384,73 @@ check_decision_holds_one_recursive_engine_session (void)
   g_mutex_clear (&race.mutex);
   return ok ? 0 : 803;
 }
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean shutdown_waiting;
+  wyrelog_error_t shutdown_rc;
+} EngineSessionShutdownRace;
+
+static void
+observe_shutdown_engine_session (WylEngineSessionCheckpoint phase,
+    gpointer data)
+{
+  EngineSessionShutdownRace *race = data;
+  if (phase != WYL_ENGINE_SESSION_WAITING)
+    return;
+  g_mutex_lock (&race->mutex);
+  race->shutdown_waiting = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+run_engine_session_shutdown (gpointer data)
+{
+  EngineSessionShutdownRace *race = data;
+  race->shutdown_rc = wyl_handle_shutdown_ordered (race->handle);
+  return NULL;
+}
+
+static gint
+check_shutdown_waits_for_engine_session (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 813;
+  EngineSessionShutdownRace race = {
+    .handle = handle,
+    .shutdown_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GRecMutexLocker) engine_locker =
+      wyl_handle_lock_engine_session (handle);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      observe_shutdown_engine_session, &race);
+  GThread *shutdown =
+      g_thread_new ("engine-session-shutdown", run_engine_session_shutdown,
+      &race);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race.mutex);
+  while (!race.shutdown_waiting
+      && g_cond_wait_until (&race.changed, &race.mutex, deadline));
+  gboolean blocked = race.shutdown_waiting;
+  g_mutex_unlock (&race.mutex);
+  wyrelog_error_t recursive_shutdown_rc = wyl_handle_shutdown_ordered (handle);
+  g_clear_pointer (&engine_locker, g_rec_mutex_locker_free);
+  g_thread_join (shutdown);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  gboolean ok = blocked && recursive_shutdown_rc == WYRELOG_E_BUSY
+      && race.shutdown_rc == WYRELOG_E_OK
+      && !wyl_handle_engine_pair_is_ready (handle);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok ? 0 : 814;
+}
 #endif
 
 static gint
@@ -4994,6 +5061,103 @@ check_policy_store_session_events_require_engine_pair (void)
   return 0;
 }
 
+typedef struct
+{
+  gboolean fail;
+  guint calls;
+} EnginePairVerify;
+
+static wyrelog_error_t
+verify_reconciled_engine_pair (WylHandle *handle, gpointer data)
+{
+  EnginePairVerify *verify = data;
+  verify->calls++;
+  if (verify->fail)
+    return WYRELOG_E_POLICY;
+
+  gint64 symbol_id = 0;
+  return wyl_handle_intern_engine_symbol (handle, "reconciled-engine-pair",
+      &symbol_id);
+}
+
+static gint
+check_poisoned_pair_requires_verified_reconciliation (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 805;
+
+  wyl_handle_poison_engine_pair (handle);
+  wyl_handle_poison_engine_pair (handle);
+  gint64 row[1] = { 1 };
+  gboolean contains = TRUE;
+  gint64 symbol_id = 0;
+  if (wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_get_read_engine (handle) != NULL
+      || wyl_handle_get_delta_engine (handle) != NULL
+      || wyl_handle_intern_engine_symbol (handle, "poisoned", &symbol_id)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_insert (handle, "session_active", row, 1)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_remove (handle, "session_active", row, 1)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_step_delta (handle) != WYRELOG_E_INVALID
+      || wyl_handle_replay_delta_insert (handle, "session_active", row, 1)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_contains (handle, "session_active", row, 1,
+          &contains) != WYRELOG_E_INVALID
+      || wyl_handle_insert_audit_fact (handle, "poison-audit", 1, NULL,
+          NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY)
+      != WYRELOG_E_INVALID)
+    return 806;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "poisoned-subject");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "poisoned-scope");
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 807;
+
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 808;
+
+  EnginePairVerify verify = {
+    .fail = TRUE,
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_reconciled_engine_pair, &verify) != WYRELOG_E_POLICY
+      || verify.calls != 1 || wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 809;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_permission_state (store, "repair-subject",
+          "wr.audit.read", "repair-scope", "missing") != WYRELOG_E_OK)
+    return 810;
+  verify.fail = FALSE;
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_reconciled_engine_pair, &verify) != WYRELOG_E_POLICY
+      || verify.calls != 1 || wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 811;
+
+  if (wyl_policy_store_set_permission_state (store, "repair-subject",
+          "wr.audit.read", "repair-scope", "armed") != WYRELOG_E_OK
+      || wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_reconciled_engine_pair, &verify) != WYRELOG_E_OK
+      || verify.calls != 2 || !wyl_handle_engine_pair_is_ready (handle)
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_intern_engine_symbol (handle, "ready-again", &symbol_id)
+      != WYRELOG_E_OK)
+    return 812;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -5141,6 +5305,8 @@ main (void)
 #ifdef WYL_TEST_HANDLE_SEAMS
   if ((rc = check_decision_holds_one_recursive_engine_session ()) != 0)
     return rc;
+  if ((rc = check_shutdown_waits_for_engine_session ()) != 0)
+    return rc;
 #endif
   if ((rc =
           check_policy_store_guarded_direct_permission_decides_with_context ())
@@ -5266,6 +5432,8 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_policy_store_session_events_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_poisoned_pair_requires_verified_reconciliation ()) != 0)
     return rc;
 
   return 0;

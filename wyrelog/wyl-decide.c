@@ -622,6 +622,8 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       wyl_handle_lock_engine_session (handle);
   if (engine_locker == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INVALID;
 
   const gchar *deny_reason = NULL;
   const gchar *deny_origin = NULL;
