@@ -132,6 +132,14 @@ class Registration:
     line: int
 
 
+def translation_phase_source(source: str) -> str:
+    """Apply C phase-1 newline normalization and phase-2 line splicing."""
+    if "\0" in source:
+        raise GuardError("NUL byte in preprocessing input")
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.replace("\\\n", "")
+
+
 def lex(source: str) -> list[Token]:
     """Tokenize C while discarding comments and preprocessor directives."""
     tokens = []
@@ -424,8 +432,16 @@ def reject_ownership_preprocessor_references(source: str, path: Path) -> None:
                          f"{path}:{directive_start}")
 
 
+def reject_line_marker_spoofing(source: str, path: Path) -> None:
+    view = preprocessing_view(source)
+    for number, line in enumerate(view.splitlines(), 1):
+        if re.match(r'^\s*#\s*(?:line\s+)?[0-9]+(?:\s|$)', line):
+            raise GuardError(f"project-owned line marker at {path}:{number}")
+
+
 def scan_source(path: Path) -> list[Registration]:
-    source = path.read_text(encoding="utf-8")
+    source = translation_phase_source(path.read_text(encoding="utf-8"))
+    reject_line_marker_spoofing(source, path)
     reject_ownership_preprocessor_references(source, path)
     tokens = lex(source)
     pairing = mates(tokens)
@@ -507,9 +523,15 @@ def check_root(root: Path) -> list[Registration]:
     sources = sorted(source_root.rglob("*.c"))
     if not sources:
         raise GuardError("no production C sources discovered")
-    for header in sorted(source_root.rglob("*.h")):
-        reject_ownership_preprocessor_references(
-            header.read_text(encoding="utf-8"), header)
+    preprocessing_inputs = sorted({
+        path for suffix in ("*.h", "*.inc")
+        for path in source_root.rglob(suffix)
+    })
+    for preprocessing_input in preprocessing_inputs:
+        hidden_registrations = scan_source(preprocessing_input)
+        if hidden_registrations:
+            raise GuardError(f"registration in project preprocessing input: "
+                             f"{preprocessing_input}")
     registrations = []
     for source in sources:
         registrations.extend(scan_source(source))
@@ -615,6 +637,12 @@ def self_test() -> None:
             "continued macro alias": (
                 "#define HIDDEN_ADD \\\n"
                 "  soup_server_add_handler\n" + baseline),
+            "LF identifier splice": (
+                "#define HIDDEN_ADD soup_server_add_\\\nhandler\n"
+                + baseline),
+            "CRLF identifier splice": (
+                "#define HIDDEN_ADD soup_server_add_\\\r\nhandler\r\n"
+                + baseline),
             "token-pasted macro alias": (
                 "#define HIDDEN_ADD soup_server_ ## add_handler\n"
                 + baseline),
@@ -628,6 +656,8 @@ def self_test() -> None:
                 "  soup_server_add_handler(server, \"/hidden\", callback, "
                 "data, NULL);\n"
                 "}\n"),
+            "project line-marker spoof": (
+                '#line 700 "trusted.c"\n' + baseline),
             "nonliteral": baseline.replace('"/healthz"', "health_path", 1),
             "concatenated": baseline.replace('"/healthz"',
                                                '"/health" "z"', 1),
@@ -671,6 +701,31 @@ def self_test() -> None:
         source_path.write_text(header_alias, encoding="utf-8")
         expect_failure(root, "included project-header alias")
         hidden_header.unlink()
+
+        hidden_header.write_text(
+            "static inline void hidden_add(void) {\n"
+            "  soup_server_add_handler(server, \"/hidden\", callback, "
+            "data, NULL);\n"
+            "}\n", encoding="utf-8")
+        source_path.write_text(
+            '#include "hidden-route.h"\n' + baseline, encoding="utf-8")
+        expect_failure(root, "project-header inline registration")
+        hidden_header.unlink()
+
+        hidden_include = daemon / "hidden-route.inc"
+        hidden_include.write_text(
+            "soup_server_add_\\\nhandler(server, \"/hidden\", callback, "
+            "data, NULL);\n", encoding="utf-8")
+        source_path.write_text(baseline, encoding="utf-8")
+        expect_failure(root, "project inc splice registration")
+        hidden_include.unlink()
+
+        for wrapper in (PREFIX_API, RAW_SINGLETON_API, EXACT_API):
+            hidden_header.write_text(
+                f"#define HIDDEN_ADD {wrapper}\n", encoding="utf-8")
+            source_path.write_text(header_alias, encoding="utf-8")
+            expect_failure(root, f"project-header {wrapper} alias")
+            hidden_header.unlink()
 
         source_path.write_text(baseline, encoding="utf-8")
         alternate = root / "wyrelog" / "alternate.c"
