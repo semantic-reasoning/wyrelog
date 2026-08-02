@@ -196,6 +196,7 @@ wyrelog_handle_test_seams_dep = declare_dependency(
   link_with : wyrelog_handle_test_seams_lib,
   include_directories : wyrelog_inc,
   dependencies : [glib_dep, gio_dep],
+  compile_args : ['-DWYL_TEST_HANDLE_SEAMS'],
 )
 
 # Host-only private companion: never installed and never linked into

@@ -21,6 +21,19 @@ G_BEGIN_DECLS;
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
 
+/* Non-nestable, same-thread frame holding the FULLMUTEX SQLite connection and
+ * one read-only transaction. It excludes same-handle writers and pins one
+ * MVCC snapshot against independent WAL writers across a multi-query engine
+ * candidate build. The snapshot body may only issue direct SQLite reads; it
+ * must not acquire a store coordination lock. Finish always rolls back. */
+typedef struct
+{
+  wyl_policy_store_t *store;
+  GThread *owner;
+  gboolean active;
+  gboolean locked;
+} WylPolicyStoreReadSnapshot;
+
 typedef enum
 {
   WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT,
@@ -1361,6 +1374,10 @@ void wyl_policy_store_graph_authority_mutation_fail_once
 wyrelog_error_t wyl_policy_store_validate_service_schema
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_read_snapshot_begin
+    (wyl_policy_store_t * store, WylPolicyStoreReadSnapshot * snapshot);
+wyrelog_error_t wyl_policy_store_read_snapshot_finish
+    (WylPolicyStoreReadSnapshot * snapshot);
 
 /*
  * Starts a non-nestable SQLite savepoint while claiming |write_lease| and

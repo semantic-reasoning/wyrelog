@@ -7,7 +7,13 @@
 #include "wyl-engine-private.h"
 
 G_BEGIN_DECLS;
+typedef struct _WylEngineSession WylEngineSession;
 
+wyrelog_error_t wyl_engine_session_make_guard_context_compound
+    (WylEngineSession * session, gint64 timestamp, gint64 loc_class_id,
+    gint64 risk, gint64 scope_id, gint64 * out_id);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
 /*
  * Allocates the same side-tier compound term in both handle-owned policy
  * engines and returns the shared handle. Rejected unless both engines are
@@ -37,5 +43,6 @@ wyrelog_error_t wyl_handle_make_read_engine_compound (WylHandle * self,
 wyrelog_error_t wyl_handle_make_guard_context_compound (WylHandle * self,
     gint64 timestamp, gint64 loc_class_id, gint64 risk, gint64 scope_id,
     gint64 * out_id);
+#endif
 
 G_END_DECLS;

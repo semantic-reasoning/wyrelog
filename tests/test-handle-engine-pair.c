@@ -5087,15 +5087,19 @@ check_poisoned_pair_requires_verified_reconciliation (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 805;
 
+  gint64 symbol_id = 0;
+  if (wyl_handle_intern_engine_symbol (handle, "poison-dup-witness",
+          &symbol_id) != WYRELOG_E_OK)
+    return 806;
   wyl_handle_poison_engine_pair (handle);
   wyl_handle_poison_engine_pair (handle);
   gint64 row[1] = { 1 };
   gboolean contains = TRUE;
-  gint64 symbol_id = 0;
   if (wyl_handle_engine_pair_is_ready (handle)
       || !wyl_handle_engine_pair_is_poisoned (handle)
       || wyl_handle_get_read_engine (handle) != NULL
       || wyl_handle_get_delta_engine (handle) != NULL
+      || wyl_handle_dup_engine_symbol (handle, symbol_id) != NULL
       || wyl_handle_intern_engine_symbol (handle, "poisoned", &symbol_id)
       != WYRELOG_E_INVALID
       || wyl_handle_engine_insert (handle, "session_active", row, 1)
@@ -5109,8 +5113,32 @@ check_poisoned_pair_requires_verified_reconciliation (void)
           &contains) != WYRELOG_E_INVALID
       || wyl_handle_insert_audit_fact (handle, "poison-audit", 1, NULL,
           NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_role_permissions (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_role_memberships (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_direct_permissions (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_permission_states (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_permission_state_events (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_principal_states (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_principal_events (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_session_states (handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_load_policy_store_session_events (handle)
+      != WYRELOG_E_INVALID || wyl_handle_load_policy_store_audit_facts (handle)
       != WYRELOG_E_INVALID)
-    return 806;
+    return 807;
+#ifdef WYL_HAS_AUDIT
+  if (wyl_handle_load_policy_store_audit_events (handle)
+      != WYRELOG_E_INVALID)
+    return 807;
+#endif
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -5119,12 +5147,12 @@ check_poisoned_pair_requires_verified_reconciliation (void)
   wyl_decide_req_set_resource_id (req, "poisoned-scope");
   if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID
       || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
-    return 807;
+    return 808;
 
-  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_INVALID
       || wyl_handle_engine_pair_is_ready (handle)
       || !wyl_handle_engine_pair_is_poisoned (handle))
-    return 808;
+    return 809;
 
   EnginePairVerify verify = {
     .fail = TRUE,
@@ -5133,18 +5161,18 @@ check_poisoned_pair_requires_verified_reconciliation (void)
           verify_reconciled_engine_pair, &verify) != WYRELOG_E_POLICY
       || verify.calls != 1 || wyl_handle_engine_pair_is_ready (handle)
       || !wyl_handle_engine_pair_is_poisoned (handle))
-    return 809;
+    return 810;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_set_permission_state (store, "repair-subject",
           "wr.audit.read", "repair-scope", "missing") != WYRELOG_E_OK)
-    return 810;
+    return 811;
   verify.fail = FALSE;
   if (wyl_handle_reconcile_committed_engine_pair (handle,
           verify_reconciled_engine_pair, &verify) != WYRELOG_E_POLICY
       || verify.calls != 1 || wyl_handle_engine_pair_is_ready (handle)
       || !wyl_handle_engine_pair_is_poisoned (handle))
-    return 811;
+    return 812;
 
   if (wyl_policy_store_set_permission_state (store, "repair-subject",
           "wr.audit.read", "repair-scope", "armed") != WYRELOG_E_OK
@@ -5154,7 +5182,7 @@ check_poisoned_pair_requires_verified_reconciliation (void)
       || wyl_handle_engine_pair_is_poisoned (handle)
       || wyl_handle_intern_engine_symbol (handle, "ready-again", &symbol_id)
       != WYRELOG_E_OK)
-    return 812;
+    return 813;
   return 0;
 }
 
