@@ -256,6 +256,12 @@ typedef struct
 #ifdef WYL_TEST_DAEMON_HTTP
 typedef struct
 {
+  guint64 selected;
+  guint64 terminal_entries;
+} WylDaemonExactRouteProbe;
+
+typedef struct
+{
   GMutex mutex;
   GCond changed;
   guint64 generation;
@@ -367,6 +373,9 @@ typedef struct _WylDaemonHttpContext
   void (*service_due_write_checkpoint) (gpointer data);
   gpointer service_due_write_checkpoint_data;
   GPtrArray *refresh_generated_ids;
+  GHashTable *exact_route_probes;
+  guint prefix_route_registrations;
+  guint exact_route_registrations;
   WylHumanRefreshTestLatch refresh_latch;
   /* Test-only escrow publication backend injection. When set, the service
    * credential issue/rotate handlers pass these into the handoff module context
@@ -831,6 +840,7 @@ wyl_daemon_http_context_unref (gpointer data)
   g_clear_pointer (&ctx->last_service_publication_token,
       wyl_sensitive_string_free);
   g_clear_pointer (&ctx->refresh_generated_ids, g_ptr_array_unref);
+  g_clear_pointer (&ctx->exact_route_probes, g_hash_table_unref);
   g_mutex_clear (&ctx->refresh_latch.mutex);
   g_cond_clear (&ctx->refresh_latch.changed);
 #endif
@@ -1166,6 +1176,8 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   g_cond_init (&ctx->refresh_latch.changed);
   ctx->refresh_generated_ids = g_ptr_array_new_with_free_func
       ((GDestroyNotify) wyl_sensitive_string_free);
+  ctx->exact_route_probes = g_hash_table_new_full (g_str_hash, g_str_equal,
+      g_free, g_free);
 #endif
   ctx->next_refresh_epoch = 1;
   ctx->next_refresh_claim = 1;
@@ -5012,12 +5024,95 @@ wyl_daemon_http_exact_handler_dispatch (SoupServer *server,
     gpointer user_data)
 {
   WylDaemonHttpExactHandler *exact = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (exact != NULL) {
+    WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+    if (ctx != NULL) {
+      g_mutex_lock (&ctx->lock);
+      WylDaemonExactRouteProbe *probe = g_hash_table_lookup
+          (ctx->exact_route_probes, exact->canonical_path);
+      if (probe != NULL)
+        probe->selected++;
+      g_mutex_unlock (&ctx->lock);
+    }
+  }
+#endif
   if (exact == NULL || g_strcmp0 (path, exact->canonical_path) != 0) {
     set_json_error (msg, 404, "not_found");
     return;
   }
+#ifdef WYL_TEST_DAEMON_HTTP
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx != NULL) {
+    g_mutex_lock (&ctx->lock);
+    WylDaemonExactRouteProbe *probe = g_hash_table_lookup
+        (ctx->exact_route_probes, exact->canonical_path);
+    if (probe != NULL)
+      probe->terminal_entries++;
+    g_mutex_unlock (&ctx->lock);
+  }
+#endif
   exact->callback (server, msg, path, query, exact->user_data);
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+static void
+wyl_daemon_http_note_route_registration_for_test (SoupServer *server,
+    const gchar *canonical_path, gboolean exact_singleton)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  if (exact_singleton) {
+    ctx->exact_route_registrations++;
+    g_hash_table_insert (ctx->exact_route_probes, g_strdup (canonical_path),
+        g_new0 (WylDaemonExactRouteProbe, 1));
+  } else {
+    ctx->prefix_route_registrations++;
+  }
+  g_mutex_unlock (&ctx->lock);
+}
+
+gboolean
+wyl_daemon_http_exact_route_probe_snapshot_for_test (SoupServer *server,
+    const gchar *canonical_path, WylDaemonExactRouteProbeSnapshot *out_snapshot)
+{
+  if (out_snapshot != NULL)
+    memset (out_snapshot, 0, sizeof *out_snapshot);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || canonical_path == NULL || out_snapshot == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylDaemonExactRouteProbe *probe = g_hash_table_lookup
+      (ctx->exact_route_probes, canonical_path);
+  if (probe != NULL) {
+    out_snapshot->selected = probe->selected;
+    out_snapshot->terminal_entries = probe->terminal_entries;
+  }
+  g_mutex_unlock (&ctx->lock);
+  return probe != NULL;
+}
+
+void
+wyl_daemon_http_route_registration_counts_for_test (SoupServer *server,
+    guint *out_prefixes, guint *out_exact_singletons)
+{
+  if (out_prefixes != NULL)
+    *out_prefixes = 0;
+  if (out_exact_singletons != NULL)
+    *out_exact_singletons = 0;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  if (out_prefixes != NULL)
+    *out_prefixes = ctx->prefix_route_registrations;
+  if (out_exact_singletons != NULL)
+    *out_exact_singletons = ctx->exact_route_registrations;
+  g_mutex_unlock (&ctx->lock);
+}
+#endif
 
 static void
 wyl_daemon_http_add_exact_handler (SoupServer *server,
@@ -5034,6 +5129,10 @@ wyl_daemon_http_add_exact_handler (SoupServer *server,
   exact->callback = callback;
   exact->user_data = user_data;
   exact->user_data_destroy = user_data_destroy;
+#ifdef WYL_TEST_DAEMON_HTTP
+  wyl_daemon_http_note_route_registration_for_test (server, canonical_path,
+      TRUE);
+#endif
   soup_server_add_handler (server, canonical_path,
       wyl_daemon_http_exact_handler_dispatch, exact,
       wyl_daemon_http_exact_handler_free);
@@ -12201,6 +12300,14 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   wyl_daemon_http_add_exact_handler (server,
       "/service-management-authority/arm",
       service_management_authority_arm_handler, ctx, NULL);
+#ifdef WYL_TEST_DAEMON_HTTP
+  wyl_daemon_http_note_route_registration_for_test (server, "/facts", FALSE);
+  wyl_daemon_http_note_route_registration_for_test (server, "/datalog", FALSE);
+  wyl_daemon_http_note_route_registration_for_test (server,
+      "/service-principals", FALSE);
+  wyl_daemon_http_note_route_registration_for_test (server,
+      "/service-credentials", FALSE);
+#endif
 #ifdef WYL_HAS_FACT_STORE
   wyl_daemon_http_add_exact_handler (server,
       "/service-credential-operations",
