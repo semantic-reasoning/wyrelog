@@ -36,6 +36,7 @@ AGGREGATE_FIELDS = (
     "delta_callback_user_data",
     "engine_pair_poisoned",
     "engine_pair_replacement_building",
+    "engine_session_depth",
 )
 OWNER_ONLY_FIELDS = ("template_dir", "engine_session_mutex")
 OWNER = "wyrelog/wyl-handle.c"
@@ -51,6 +52,8 @@ OWNER_FUNCTION_ALLOWLIST = {
     "classify_audit_projection",
     "clear_pending_deltas",
     "engine_pair_unavailable",
+    "reconcile_committed_engine_pair_in_session",
+    "reconcile_guarded_engine_pair_in_session",
     "fail_partial_engine_pair_mutation_locked",
     "flush_pending_deltas",
     "poison_engine_pair_locked",
@@ -59,35 +62,30 @@ OWNER_FUNCTION_ALLOWLIST = {
     "replace_engine_pair",
     "replace_live_engine_pair_serialized",
     "step_delta_engine_and_flush",
+    "wyl_engine_session_lookup_symbol",
     "wyl_engine_session_acquire",
+    "wyl_engine_session_release",
+    "wyl_engine_session_run_committed_audit_publication",
+    "wyl_engine_session_run_committed_publication",
+    "wyl_engine_verification_enqueue_delta",
     "wyl_handle_buffer_delta_cb",
     "wyl_handle_complete_shutdown",
     "wyl_handle_dup_engine_symbol_locked",
     "wyl_handle_engine_contains_locked",
-    "wyl_handle_engine_decide_locked",
     "wyl_handle_engine_insert_locked",
     "wyl_handle_engine_pair_is_poisoned",
-    "wyl_handle_engine_pair_is_ready",
     "wyl_handle_engine_remove_locked",
     "wyl_handle_engine_set_delta_callback_locked",
     "wyl_handle_engine_step_delta_locked",
     "wyl_handle_finalize",
     "wyl_handle_init",
     "wyl_handle_insert_audit_fact",
+    "wyl_handle_insert_audit_fact_locked",
     "wyl_handle_intern_engine_symbol_locked",
+    "wyl_handle_lookup_engine_symbol_locked",
     "wyl_handle_intern_guard_symbol",
     "wyl_handle_intern_symbol_on_engine",
     "wyl_handle_load_policy_store_audit_events",
-    "wyl_handle_load_policy_store_audit_facts",
-    "wyl_handle_load_policy_store_direct_permissions",
-    "wyl_handle_load_policy_store_permission_state_events",
-    "wyl_handle_load_policy_store_permission_states",
-    "wyl_handle_load_policy_store_principal_events",
-    "wyl_handle_load_policy_store_principal_states",
-    "wyl_handle_load_policy_store_role_memberships",
-    "wyl_handle_load_policy_store_role_permissions",
-    "wyl_handle_load_policy_store_session_events",
-    "wyl_handle_load_policy_store_session_states",
     "engine_session_lock_owner",
     "wyl_handle_make_engine_compound_locked",
     "wyl_handle_make_guard_binary_compound",
@@ -99,7 +97,6 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_handle_make_read_engine_compound_locked",
     "wyl_handle_open_engine_pair",
     "wyl_handle_open_with_options",
-    "wyl_handle_poison_engine_pair",
     "wyl_handle_reconcile_committed_engine_pair",
     "wyl_handle_replay_delta_insert_locked",
     "wyl_handle_seed_perm_arm_rule_on_engine",
@@ -186,9 +183,11 @@ def check(sources: dict[str, str]) -> list[str]:
     errors = []
     legacy = re.compile(r"\b(?:" + "|".join(map(re.escape,
                         LEGACY_HANDLE_OPERATIONS)) + r")\s*\(")
-    fields = re.compile(r"->(?:" + "|".join(map(re.escape,
-                        AGGREGATE_FIELDS)) + r")\b")
-    owner_fields = re.compile(r"->(?:" + "|".join(map(re.escape,
+    member = (r"(?:->|\(\s*\*\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*\."
+              r"|\b[A-Za-z_][A-Za-z0-9_]*\s*\[[^\]]+\]\s*\.)\s*(?:")
+    fields = re.compile(member + "|".join(map(re.escape,
+                        AGGREGATE_FIELDS + ("engine_session_mutex",))) + r")\b")
+    owner_fields = re.compile(member + "|".join(map(re.escape,
                               AGGREGATE_FIELDS + OWNER_ONLY_FIELDS)) + r")\b")
     owned = re.compile(r"\bwyl_engine_owned_[A-Za-z0-9_]*\s*\(")
     raw_lock = re.compile(r"\bwyl_handle_lock_engine_session\s*\(")
@@ -230,8 +229,12 @@ def self_test() -> int:
     mutants = (
         "void bad(WylHandle *h) { wyl_handle_engine_insert(h, 0, 0, 0); }",
         "void bad(WylHandle *h) { (void) h->delta_engine; }",
+        "void bad(WylHandle *h) { (void) (*h).read_engine; }",
+        "void bad(WylHandle *h) { (void) h[0].engine_pair_poisoned; }",
         "void bad(WylEngine *e) { wyl_engine_owned_insert(e, 0, 0, 0); }",
         "void bad(WylHandle *h) { wyl_handle_lock_engine_session(h); }",
+        "void bad(WylHandle *h) { g_rec_mutex_lock(&(*h).engine_session_mutex); }",
+        "void bad(WylHandle *h) { g_rec_mutex_unlock(&h[0].engine_session_mutex); }",
     )
     for mutant in mutants:
         if not check({OWNER: "", "wyrelog/bad.c": mutant}):
@@ -239,6 +242,8 @@ def self_test() -> int:
             return 1
     owner_mutants = (
         "static void bad_read(WylHandle *h) { h->read_engine = 0; }",
+        "static void bad_deref(WylHandle *h) { (*h).delta_engine = 0; }",
+        "static void bad_array(WylHandle *h) { h[0].pending_deltas = 0; }",
         "static void bad_template(WylHandle *h) { h->template_dir = 0; }",
         "static void bad_mutex(WylHandle *h) { g_rec_mutex_lock(&h->engine_session_mutex); }",
         "static void bad_owned(WylEngine *e) { wyl_engine_owned_step(e); }",
@@ -247,6 +252,14 @@ def self_test() -> int:
         if not check({OWNER: mutant}):
             print(f"self-test accepted owner mutant: {mutant}", file=sys.stderr)
             return 1
+    allowed_owner = (
+        "static void wyl_handle_init(WylHandle *h) { "
+        "(*h).read_engine = 0; h[0].engine_pair_poisoned = 0; "
+        "g_rec_mutex_init(&(*h).engine_session_mutex); }"
+    )
+    if check({OWNER: allowed_owner}):
+        print("self-test rejected allowlisted owner body", file=sys.stderr)
+        return 1
     literal = 'const char *s = "wyl_handle_get_read_engine(h)"; /* h->read_engine */'
     if check({OWNER: "", "wyrelog/literal.c": literal}):
         print("self-test rejected comments/literals", file=sys.stderr)

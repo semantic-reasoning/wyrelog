@@ -300,14 +300,11 @@ typedef struct
   const gchar *subject;
   const gchar *action;
   const gchar *resource;
+  const gchar *deny_reason;
+  const gchar *deny_origin;
+  const gchar *request_id;
+  gboolean runtime_expected;
 } AuditFactVerify;
-
-typedef struct
-{
-  const gchar *id;
-  const gchar *const *relations;
-  gsize n_relations;
-} AuditFactAbsenceVerify;
 
 typedef struct
 {
@@ -355,26 +352,27 @@ verify_reconciled_audit_fact (WylHandle *handle, gpointer data)
       || contains_audit_event_attr_fact (handle, "audit_event_action",
           verify->id, verify->action, &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_resource",
-          verify->id, verify->resource, &contains) != WYRELOG_E_OK || !contains
-      || !runtime_count_audit_rows (handle, verify->id, &count) || count != 1)
+          verify->id, verify->resource, &contains) != WYRELOG_E_OK || !contains)
     return WYRELOG_E_POLICY;
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-verify_reconciled_audit_fact_absence (WylHandle *handle, gpointer data)
-{
-  AuditFactAbsenceVerify *verify = data;
-  gint64 runtime_count = -1;
-
-  for (gsize i = 0; i < verify->n_relations; i++) {
-    guint count = 0;
-    if (count_audit_attr_facts (handle, verify->relations[i], verify->id,
-            &count) != WYRELOG_E_OK || count != 0)
+  const gchar *relations[] = {
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+    "audit_event_request_id",
+  };
+  const gchar *values[] = {
+    verify->deny_reason,
+    verify->deny_origin,
+    verify->request_id,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (relations); i++) {
+    if (values[i] == NULL)
+      continue;
+    if (contains_audit_event_attr_fact (handle, relations[i], verify->id,
+            values[i], &contains) != WYRELOG_E_OK || !contains)
       return WYRELOG_E_POLICY;
   }
-  if (!runtime_count_audit_rows (handle, verify->id, &runtime_count)
-      || runtime_count != 0)
+  if (!runtime_count_audit_rows (handle, verify->id, &count)
+      || count != (verify->runtime_expected ? 1 : 0))
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
@@ -2772,9 +2770,10 @@ check_denied_login_skip_mfa_reports_audit_failure (void)
 
   g_autofree gchar *audit_id = NULL;
   gint64 created_at_us = -1;
-  if (policy_get_audit_event_for_subject_action (handle,
+  if (!policy_get_audit_event_for_subject_action (handle,
           "audit-skip-mfa-fail-user", "login_skip_mfa", &audit_id,
-          &created_at_us) || !poisoned_audit_engine_access_is_closed (handle)) {
+          &created_at_us) || audit_id == NULL || created_at_us <= 0
+      || !poisoned_audit_engine_access_is_closed (handle)) {
     g_object_unref (handle);
     return 228;
   }
@@ -3432,6 +3431,127 @@ check_emit_projects_sparse_wirelog_facts_immediately (void)
 }
 
 static gint
+check_audit_projection_classification_is_read_only (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 510;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK)
+    return 511;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+  WylCommittedAuditProjection projection = {
+    .id = "audit-classify-read-only-id",
+    .created_at_us = 745,
+    .subject_id = "audit-classify-read-only-subject",
+    .action = "audit-classify-read-only-action",
+    .resource_id = "audit-classify-read-only-resource",
+    .decision = WYL_DECISION_ALLOW,
+  };
+  gboolean absent = FALSE;
+  if (wyl_handle_classify_audit_projection_for_test (handle, &projection,
+          &absent) != WYRELOG_E_OK || !absent
+      || wyl_handle_get_read_engine (handle) != read_engine
+      || wyl_handle_get_delta_engine (handle) != delta_engine
+      || wyl_handle_policy_store_validate_generation (handle, store,
+          generation) != WYRELOG_E_OK)
+    return 512;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  gint64 symbol = 0;
+  if (session == NULL
+      || wyl_engine_session_lookup_symbol (session, projection.id, &symbol)
+      != WYRELOG_E_NOT_FOUND
+      || wyl_engine_session_lookup_symbol (session, projection.action,
+          &symbol) != WYRELOG_E_NOT_FOUND)
+    return 513;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (event, "audit-incremental-pair-user");
+  wyl_audit_event_set_action (event, "audit-incremental-pair-action");
+  wyl_audit_event_set_resource_id (event, "audit-incremental-pair-resource");
+  wyl_audit_event_set_decision (event, WYL_DECISION_ALLOW);
+  if (wyl_audit_emit (handle, event) != WYRELOG_E_OK
+      || wyl_handle_get_read_engine (handle) != read_engine
+      || wyl_handle_get_delta_engine (handle) != delta_engine
+      || wyl_handle_policy_store_validate_generation (handle, store,
+          generation) != WYRELOG_E_OK)
+    return 514;
+  return 0;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  guint calls;
+  wyrelog_error_t publication_rc;
+} NestedPublicationProbe;
+
+static void
+nested_publication_probe_cb (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer data)
+{
+  (void) relation;
+  (void) row;
+  (void) ncols;
+  (void) kind;
+  NestedPublicationProbe *probe = data;
+  if (probe->calls++ > 0)
+    return;
+  g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (req, "nested-callback-publication-user");
+  wyl_grant_req_set_action (req, "site.nested-callback-publication");
+  wyl_grant_req_set_resource_id (req, "nested-callback-scope");
+  probe->publication_rc = wyl_perm_grant (probe->handle, req);
+}
+
+static gint
+check_general_publication_rejects_nested_engine_sessions (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 515;
+  g_autoptr (WylEngineSession) outer = wyl_engine_session_acquire (handle);
+  g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (req, "nested-publication-user");
+  wyl_grant_req_set_action (req, "site.nested-publication");
+  wyl_grant_req_set_resource_id (req, "nested-publication-scope");
+  if (outer == NULL || wyl_perm_grant (handle, req) != WYRELOG_E_BUSY)
+    return 516;
+  g_clear_pointer (&outer, wyl_engine_session_release);
+
+  NestedPublicationProbe probe = {
+    .handle = handle,
+    .publication_rc = WYRELOG_E_INTERNAL,
+  };
+  if (wyl_handle_engine_set_delta_callback (handle,
+          nested_publication_probe_cb, &probe) != WYRELOG_E_OK
+      || insert_symbol_row3 (handle, "member_of",
+          "nested-callback-source-user", "nested-callback-source-role",
+          "nested-callback-source-scope") != WYRELOG_E_OK
+      || probe.calls == 0 || probe.publication_rc != WYRELOG_E_BUSY
+      || wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
+      != WYRELOG_E_OK)
+    return 517;
+
+  gboolean exists = TRUE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_direct_permission_exists (store,
+          "nested-publication-user", "site.nested-publication",
+          "nested-publication-scope", &exists) != WYRELOG_E_OK || exists)
+    return 518;
+  if (wyl_policy_store_direct_permission_exists (store,
+          "nested-callback-publication-user",
+          "site.nested-callback-publication", "nested-callback-scope",
+          &exists) != WYRELOG_E_OK || exists)
+    return 519;
+  return 0;
+}
+
+static gint
 check_emit_reports_live_projection_failure (void)
 {
   WylHandle *handle = NULL;
@@ -3444,6 +3564,7 @@ check_emit_reports_live_projection_failure (void)
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, "audit-live-fail-user");
   wyl_audit_event_set_action (ev, "audit-live-fail-action");
+  wyl_audit_event_set_resource_id (ev, "audit-live-fail-resource");
   wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
   g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
   if (wyl_audit_emit (handle, ev) != WYRELOG_E_INTERNAL) {
@@ -3455,7 +3576,7 @@ check_emit_reports_live_projection_failure (void)
     g_object_unref (handle);
     return 225;
   }
-  if (!policy_count_audit_rows (handle, id, &count) || count != 0) {
+  if (!policy_count_audit_rows (handle, id, &count) || count != 1) {
     g_object_unref (handle);
     return 226;
   }
@@ -3465,9 +3586,25 @@ check_emit_reports_live_projection_failure (void)
     g_object_unref (handle);
     return 502;
   }
-  if (g_strcmp0 (state, "failed") != 0 || attempt_count != 1) {
+  if (g_strcmp0 (state, "pending") != 0 || attempt_count != 0
+      || !poisoned_audit_engine_access_is_closed (handle)) {
     g_object_unref (handle);
     return 503;
+  }
+  AuditFactVerify verify = {
+    .id = id,
+    .created_at_us = wyl_audit_event_get_created_at_us (ev),
+    .decision = "deny",
+    .subject = "audit-live-fail-user",
+    .action = "audit-live-fail-action",
+    .resource = "audit-live-fail-resource",
+  };
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || !wyl_handle_engine_pair_is_ready (handle)) {
+    g_object_unref (handle);
+    return 504;
   }
 
   g_object_unref (handle);
@@ -3497,8 +3634,9 @@ check_failed_duplicate_emit_keeps_durable_rows (void)
   wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
       WYRELOG_E_INTERNAL);
   wyrelog_error_t duplicate_rc = wyl_audit_emit (handle, ev);
-  if (duplicate_rc != WYRELOG_E_INTERNAL
-      || !poisoned_audit_engine_access_is_closed (handle)) {
+  if (duplicate_rc != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || !wyl_handle_engine_pair_is_ready (handle)) {
     g_object_unref (handle);
     return 229;
   }
@@ -3522,21 +3660,6 @@ check_failed_duplicate_emit_keeps_durable_rows (void)
     g_object_unref (handle);
     return 505;
   }
-  AuditFactVerify verify = {
-    .id = id,
-    .created_at_us = created_at_us,
-    .decision = "allow",
-    .subject = "audit-live-duplicate-user",
-    .action = "audit-live-duplicate-action",
-    .resource = "audit-live-duplicate-resource",
-  };
-  if (wyl_handle_reconcile_committed_engine_pair (handle,
-          verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
-      || wyl_handle_engine_pair_is_poisoned (handle)
-      || !wyl_handle_engine_pair_is_ready (handle)) {
-    g_object_unref (handle);
-    return 506;
-  }
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, id, created_at_us, "allow",
           &contains) != WYRELOG_E_OK || !contains) {
@@ -3559,16 +3682,6 @@ check_emit_rolls_back_partial_live_projection_failure (void)
     "audit_event_deny_origin_input",
     "audit_event_request_id_input",
   };
-  static const gchar *projected_relations[] = {
-    "audit_event",
-    "audit_event_subject",
-    "audit_event_action",
-    "audit_event_resource",
-    "audit_event_deny_reason",
-    "audit_event_deny_origin",
-    "audit_event_request_id",
-  };
-
   for (gsize i = 0; i < G_N_ELEMENTS (fault_relations); i++) {
     WylHandle *handle = NULL;
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -3600,18 +3713,32 @@ check_emit_rolls_back_partial_live_projection_failure (void)
       g_object_unref (handle);
       return (gint) (390 + i);
     }
-    if (!policy_count_audit_rows (handle, id, &count) || count != 0) {
+    if (!policy_count_audit_rows (handle, id, &count) || count != 1) {
       g_object_unref (handle);
       return (gint) (400 + i);
     }
+    g_autofree gchar *state = NULL;
+    gint64 attempt_count = -1;
+    if (!policy_get_audit_intention_state (handle, id, &state,
+            &attempt_count) || g_strcmp0 (state, "pending") != 0
+        || attempt_count != 0) {
+      g_object_unref (handle);
+      return (gint) (410 + i);
+    }
 
-    AuditFactAbsenceVerify verify = {
+    AuditFactVerify verify = {
       .id = id,
-      .relations = projected_relations,
-      .n_relations = G_N_ELEMENTS (projected_relations),
+      .created_at_us = wyl_audit_event_get_created_at_us (ev),
+      .decision = "deny",
+      .subject = "audit-live-partial-user",
+      .action = "audit-live-partial-action",
+      .resource = "audit-live-partial-resource",
+      .deny_reason = "not_armed",
+      .deny_origin = "perm_state",
+      .request_id = "req-partial",
     };
     if (wyl_handle_reconcile_committed_engine_pair (handle,
-            verify_reconciled_audit_fact_absence, &verify) != WYRELOG_E_OK
+            verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
         || wyl_handle_engine_pair_is_poisoned (handle)
         || !wyl_handle_engine_pair_is_ready (handle)) {
       g_object_unref (handle);
@@ -3843,6 +3970,10 @@ main (void)
   if ((rc = check_emit_projects_wirelog_facts_immediately ()) != 0)
     return rc;
   if ((rc = check_emit_projects_sparse_wirelog_facts_immediately ()) != 0)
+    return rc;
+  if ((rc = check_audit_projection_classification_is_read_only ()) != 0)
+    return rc;
+  if ((rc = check_general_publication_rejects_nested_engine_sessions ()) != 0)
     return rc;
   if ((rc = check_emit_reports_live_projection_failure ()) != 0)
     return rc;
