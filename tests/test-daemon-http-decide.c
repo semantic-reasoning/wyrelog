@@ -14386,6 +14386,7 @@ main (void)
   g_autofree gchar *base_url = NULL;
   g_autofree gchar *body = NULL;
   g_auto (ServiceResolverFixture) fixture = { 0 };
+  g_auto (ServiceResolverFixture) fixture_b = { 0 };
   TestHttpServer http = { 0 };
   GThread *thread = NULL;
   guint status = 0;
@@ -14476,10 +14477,34 @@ main (void)
     goto cleanup;
   }
 
+  if (!service_resolver_fixture_init_tenant (http.server, &fixture_b,
+          WYL_SERVICE_AUTH_ACTIVE, 0, "tenant-b")) {
+    result = 2710;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "tenant-b",
+          "tenant=tenant-b", fixture_b.token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":1") == NULL) {
+    result = 2711;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+          "svc:resolver:test", "wr.svc.read_decision", "__wr_default",
+          "tenant=tenant-b", fixture_b.token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":0") == NULL) {
+    result = 2712;
+    goto cleanup;
+  }
+
   if (wyl_policy_store_grant_role_membership (store, "svc:resolver:test",
           "wr.viewer", "__wr_default") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
-    result = 2710;
+    result = 2713;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
@@ -14488,13 +14513,13 @@ main (void)
           "tenant=__wr_default", fixture.token, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"decision\":1") == NULL) {
-    result = 2711;
+    result = 2714;
     goto cleanup;
   }
   if (wyl_policy_store_revoke_role_membership (store, "svc:resolver:test",
           "wr.viewer", "__wr_default") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
-    result = 2712;
+    result = 2715;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
@@ -14503,7 +14528,7 @@ main (void)
           "tenant=__wr_default", fixture.token, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"decision\":0") == NULL) {
-    result = 2713;
+    result = 2716;
     goto cleanup;
   }
 
