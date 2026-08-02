@@ -9820,7 +9820,7 @@ verify_mfa_enrollment_publication (WylEngineVerification *verification,
     mutation->enrollment->subject_id,
     "wr.login.skip_mfa",
     "login",
-    "revoked",
+    "dormant",
   };
   return verify_mfa_symbol_row (verification, "perm_state", state,
       G_N_ELEMENTS (state), TRUE);
@@ -11108,15 +11108,7 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  WylServiceAuthWriteLease *write_lease = NULL;
-  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
-      &write_lease);
-  if (rc != WYRELOG_E_OK) {
-    wyl_mfa_enroll_challenge_free (challenge);
-    set_json_error (msg, 500, "mfa_enroll_failed");
-    return;
-  }
+  wyrelog_error_t rc = WYRELOG_E_INTERNAL;
   WylTotpEnrollment enrollment = { 0 };
   enrollment.subject_id = g_strdup (challenge->subject);
   memcpy (enrollment.secret, challenge->secret, sizeof enrollment.secret);
@@ -11130,20 +11122,21 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
     .require_existing_subject = TRUE,
     .reject_existing_enrollment = TRUE,
   };
-  g_autoptr (WylEngineSession) engine_session =
-      wyl_engine_session_acquire (ctx->handle);
-  if (engine_session == NULL)
-    rc = WYRELOG_E_BUSY;
-  else
-    rc = wyl_engine_session_run_committed_publication (engine_session,
-        wyl_mfa_enrollment_mutate, &mutation,
-        verify_mfa_enrollment_publication, &mutation, NULL, NULL);
-  g_clear_pointer (&engine_session, wyl_engine_session_release);
-  wyrelog_error_t release_rc =
-      wyl_service_auth_write_lease_release (write_lease);
-  if (rc == WYRELOG_E_OK)
-    rc = release_rc;
-  wyl_service_auth_write_lease_free (write_lease);
+  {
+    g_auto (WylDaemonPolicyWrite) write = { 0 };
+    rc = wyl_daemon_policy_write_acquire (ctx, &write);
+    if (rc == WYRELOG_E_OK) {
+      g_autoptr (WylEngineSession) engine_session =
+          wyl_engine_session_acquire (ctx->handle);
+      if (engine_session == NULL)
+        rc = WYRELOG_E_BUSY;
+      else
+        rc = wyl_engine_session_run_committed_publication (engine_session,
+            wyl_mfa_enrollment_mutate, &mutation,
+            verify_mfa_enrollment_publication, &mutation, NULL, NULL);
+      g_clear_pointer (&engine_session, wyl_engine_session_release);
+    }
+  }
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK) {
     wyrelog_error_t mirror_rc =
