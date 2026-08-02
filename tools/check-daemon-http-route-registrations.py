@@ -8,17 +8,22 @@ import sys
 import tempfile
 
 
+SOUP_API = "soup_server_add_handler"
+PREFIX_API = "wyl_daemon_http_add_prefix_handler"
+RAW_SINGLETON_API = "wyl_daemon_http_add_singleton_handler"
 EXACT_API = "wyl_daemon_http_add_exact_handler"
-RAW_API = "soup_server_add_handler"
 SERVER_OWNER = "wyl_daemon_start_http_server_with_runtime"
+PREFIX_OWNER = "wyl_daemon_http_add_prefix_handler"
+RAW_SINGLETON_OWNER = "wyl_daemon_http_add_singleton_handler"
 EXACT_OWNER = "wyl_daemon_http_add_exact_handler"
 FACT = "WYL_HAS_FACT_STORE"
 AUDIT = "WYL_HAS_AUDIT"
 OWNERSHIP_API = re.compile(
     r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
-    r"[A-Za-z_][A-Za-z0-9_]*add_exact_handler)\Z")
+    r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)\Z")
 OWNERSHIP_DIRECTIVE = re.compile(
-    r"(?:soup_server_add_|[A-Za-z_][A-Za-z0-9_]*add_exact_handler)")
+    r"(?:soup_server_add_|"
+    r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)")
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,8 @@ ROUTES = (
     RouteSpec("/audit/events", "audit_events_handler"),
     RouteSpec("/service-principals", "service_principal_management_handler"),
     RouteSpec("/service-credentials", "service_credential_management_handler"),
+    RouteSpec("/service-management-authority/arm",
+              "service_management_authority_arm_handler"),
     RouteSpec("/service-credential-operations",
               "service_credential_operation_status_handler", feature=FACT),
     RouteSpec("/service-credential-operations/reconcile",
@@ -82,9 +89,13 @@ ISSUE_719_EXACT_PATHS = {
     "/service-credential-operations/recover",
     "/auth/service-token",
 }
+PREEXISTING_EXACT_PATHS = {
+    "/service-management-authority/arm",
+}
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
     if spec.path not in PREFIX_PATHS | ISSUE_719_EXACT_PATHS
+    | PREEXISTING_EXACT_PATHS
 }
 EXPECTED_BY_PATH = {spec.path: spec for spec in ROUTES}
 
@@ -328,16 +339,20 @@ def scan_source(path: Path) -> list[Registration]:
     registrations = []
     seen_calls = set()
     definitions = functions(tokens, pairing)
-    exact_definitions = {
+    ownership_owners = {PREFIX_OWNER, RAW_SINGLETON_OWNER, EXACT_OWNER}
+    owner_definitions = {
         name_index for owner, name_index, _start, _end in definitions
-        if owner == EXACT_OWNER
+        if owner in ownership_owners
     }
-    if exact_definitions and (len(exact_definitions) != 1
-                              or path.parts[-3:] !=
-                              ("wyrelog", "daemon", "http.c")):
-        raise GuardError(f"exact adapter definition outside its owner: {path}")
-    allowed_definitions = exact_definitions
-    exact_adapter_internal_calls = 0
+    defined_owners = [owner for owner, _name_index, _start, _end in definitions
+                      if owner in ownership_owners]
+    if defined_owners and (set(defined_owners) != ownership_owners
+                           or len(defined_owners) != len(ownership_owners)
+                           or path.parts[-3:] !=
+                           ("wyrelog", "daemon", "http.c")):
+        raise GuardError(f"ownership adapters outside their owner: {path}")
+    allowed_definitions = owner_definitions
+    adapter_internal_calls = {owner: 0 for owner in ownership_owners}
     for owner, _name_index, start, end in definitions:
         index = start
         while index < end:
@@ -353,16 +368,21 @@ def scan_source(path: Path) -> list[Registration]:
                 raise GuardError(f"unparsed registration call in {path}")
             seen_calls.add(index)
             arguments = split_arguments(tokens, index + 1, closing)
-            if token.value == RAW_API and owner == EXACT_OWNER:
-                expected = ["server", "canonical_path",
-                            "wyl_daemon_http_exact_handler_dispatch", "exact",
-                            "wyl_daemon_http_exact_handler_free"]
+            if token.value == SOUP_API and owner in ownership_owners:
+                if owner == EXACT_OWNER:
+                    expected = ["server", "canonical_path",
+                                "wyl_daemon_http_exact_handler_dispatch",
+                                "exact",
+                                "wyl_daemon_http_exact_handler_free"]
+                else:
+                    expected = ["server", "canonical_path", "callback",
+                                "user_data", "user_data_destroy"]
                 if [render(argument) for argument in arguments] != expected:
-                    raise GuardError("exact adapter internal Soup signature changed")
-                exact_adapter_internal_calls += 1
+                    raise GuardError("ownership adapter Soup signature changed")
+                adapter_internal_calls[owner] += 1
                 index = closing + 1
                 continue
-            if token.value not in {RAW_API, EXACT_API}:
+            if token.value not in {PREFIX_API, RAW_SINGLETON_API, EXACT_API}:
                 raise GuardError(f"alternate ownership API: {token.value}")
             if owner != SERVER_OWNER:
                 raise GuardError(f"registration outside {SERVER_OWNER}: {owner}")
@@ -382,8 +402,9 @@ def scan_source(path: Path) -> list[Registration]:
             continue
         raise GuardError(f"unparsed or indirect ownership API reference at "
                          f"{path}:{token.line}")
-    if exact_definitions and exact_adapter_internal_calls != 1:
-        raise GuardError("exact adapter must own one internal Soup registration")
+    if defined_owners and any(count != 1
+                              for count in adapter_internal_calls.values()):
+        raise GuardError("each ownership adapter must own one Soup registration")
     return registrations
 
 
@@ -405,8 +426,12 @@ def check_root(root: Path) -> list[Registration]:
         raise GuardError("unknown or missing public registration path")
     for registration in registrations:
         spec = EXPECTED_BY_PATH[registration.path]
-        expected_api = (RAW_API if registration.path in
-                        PREFIX_PATHS | PENDING_RAW_SINGLETONS else EXACT_API)
+        if registration.path in PREFIX_PATHS:
+            expected_api = PREFIX_API
+        elif registration.path in PENDING_RAW_SINGLETONS:
+            expected_api = RAW_SINGLETON_API
+        else:
+            expected_api = EXACT_API
         if registration.api != expected_api:
             raise GuardError(f"registration class mismatch: {registration.path}")
         if (registration.callback, registration.data, registration.destroy) != (
@@ -422,6 +447,18 @@ def check_root(root: Path) -> list[Registration]:
 def fixture_source() -> str:
     lines = [
         "typedef void *SoupServer;",
+        "static void wyl_daemon_http_add_prefix_handler(void *server,",
+        "  const char *canonical_path, void *callback, void *user_data,",
+        "  void *user_data_destroy) {",
+        "  soup_server_add_handler(server, canonical_path, callback,",
+        "    user_data, user_data_destroy);",
+        "}",
+        "static void wyl_daemon_http_add_singleton_handler(void *server,",
+        "  const char *canonical_path, void *callback, void *user_data,",
+        "  void *user_data_destroy) {",
+        "  soup_server_add_handler(server, canonical_path, callback,",
+        "    user_data, user_data_destroy);",
+        "}",
         "static void wyl_daemon_http_add_exact_handler(void *server,",
         "  const char *canonical_path, void *callback, void *user_data,",
         "  void *user_data_destroy) {",
@@ -439,8 +476,12 @@ def fixture_source() -> str:
             if spec.feature is not None:
                 lines.append(f"#ifdef {spec.feature}")
             active_feature = spec.feature
-        api = (RAW_API if spec.path in PREFIX_PATHS | PENDING_RAW_SINGLETONS
-               else EXACT_API)
+        if spec.path in PREFIX_PATHS:
+            api = PREFIX_API
+        elif spec.path in PENDING_RAW_SINGLETONS:
+            api = RAW_SINGLETON_API
+        else:
+            api = EXACT_API
         lines.append(f"  {api} /* registration */ ( server, \"{spec.path}\","
                      f" {spec.callback}, {spec.data}, {spec.destroy} );")
     if active_feature is not None:
@@ -491,19 +532,19 @@ def self_test() -> None:
                 'healthz_handler, NULL, NULL',
                 'healthz_handler, other_data, destroy_data', 1),
             "duplicate": baseline.replace(
-                "  soup_server_add_handler /* registration */ ( server, "
+                f"  {RAW_SINGLETON_API} /* registration */ ( server, "
                 '"/readyz"',
-                "  soup_server_add_handler /* registration */ ( server, "
+                f"  {RAW_SINGLETON_API} /* registration */ ( server, "
                 '"/healthz"', 1),
             "raw singleton": baseline.replace(
                 f'{EXACT_API} /* registration */ ( server, '
                 '"/auth/service-token"',
-                f'{RAW_API} /* registration */ ( server, '
+                f'{RAW_SINGLETON_API} /* registration */ ( server, '
                 '"/auth/service-token"', 1),
             "unknown exact": baseline.replace(
                 '"/auth/service-token"', '"/auth/service-token-v2"', 1),
             "alternate API": baseline.replace(
-                f'{RAW_API} /* registration */ ( server, "/facts"',
+                f'{PREFIX_API} /* registration */ ( server, "/facts"',
                 'soup_server_add_early_handler /* registration */ '
                 '( server, "/facts"', 1),
             "misplaced feature": baseline.replace(

@@ -375,6 +375,7 @@ typedef struct _WylDaemonHttpContext
   GPtrArray *refresh_generated_ids;
   GHashTable *exact_route_probes;
   guint prefix_route_registrations;
+  guint raw_singleton_route_registrations;
   guint exact_route_registrations;
   WylHumanRefreshTestLatch refresh_latch;
   /* Test-only escrow publication backend injection. When set, the service
@@ -5056,20 +5057,29 @@ wyl_daemon_http_exact_handler_dispatch (SoupServer *server,
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
+typedef enum
+{
+  WYL_DAEMON_HTTP_ROUTE_PREFIX,
+  WYL_DAEMON_HTTP_ROUTE_RAW_SINGLETON,
+  WYL_DAEMON_HTTP_ROUTE_EXACT_SINGLETON,
+} WylDaemonHttpRouteClass;
+
 static void
 wyl_daemon_http_note_route_registration_for_test (SoupServer *server,
-    const gchar *canonical_path, gboolean exact_singleton)
+    const gchar *canonical_path, WylDaemonHttpRouteClass route_class)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL)
     return;
   g_mutex_lock (&ctx->lock);
-  if (exact_singleton) {
+  if (route_class == WYL_DAEMON_HTTP_ROUTE_EXACT_SINGLETON) {
     ctx->exact_route_registrations++;
     g_hash_table_insert (ctx->exact_route_probes, g_strdup (canonical_path),
         g_new0 (WylDaemonExactRouteProbe, 1));
-  } else {
+  } else if (route_class == WYL_DAEMON_HTTP_ROUTE_PREFIX) {
     ctx->prefix_route_registrations++;
+  } else {
+    ctx->raw_singleton_route_registrations++;
   }
   g_mutex_unlock (&ctx->lock);
 }
@@ -5096,23 +5106,60 @@ wyl_daemon_http_exact_route_probe_snapshot_for_test (SoupServer *server,
 
 void
 wyl_daemon_http_route_registration_counts_for_test (SoupServer *server,
-    guint *out_prefixes, guint *out_exact_singletons)
+    guint *out_total, guint *out_prefixes, guint *out_raw_singletons,
+    guint *out_exact_singletons)
 {
+  if (out_total != NULL)
+    *out_total = 0;
   if (out_prefixes != NULL)
     *out_prefixes = 0;
+  if (out_raw_singletons != NULL)
+    *out_raw_singletons = 0;
   if (out_exact_singletons != NULL)
     *out_exact_singletons = 0;
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL)
     return;
   g_mutex_lock (&ctx->lock);
+  if (out_total != NULL)
+    *out_total = ctx->prefix_route_registrations
+        + ctx->raw_singleton_route_registrations
+        + ctx->exact_route_registrations;
   if (out_prefixes != NULL)
     *out_prefixes = ctx->prefix_route_registrations;
+  if (out_raw_singletons != NULL)
+    *out_raw_singletons = ctx->raw_singleton_route_registrations;
   if (out_exact_singletons != NULL)
     *out_exact_singletons = ctx->exact_route_registrations;
   g_mutex_unlock (&ctx->lock);
 }
 #endif
+
+static void
+wyl_daemon_http_add_prefix_handler (SoupServer *server,
+    const gchar *canonical_path, SoupServerCallback callback,
+    gpointer user_data, GDestroyNotify user_data_destroy)
+{
+#ifdef WYL_TEST_DAEMON_HTTP
+  wyl_daemon_http_note_route_registration_for_test (server, canonical_path,
+      WYL_DAEMON_HTTP_ROUTE_PREFIX);
+#endif
+  soup_server_add_handler (server, canonical_path, callback, user_data,
+      user_data_destroy);
+}
+
+static void
+wyl_daemon_http_add_singleton_handler (SoupServer *server,
+    const gchar *canonical_path, SoupServerCallback callback,
+    gpointer user_data, GDestroyNotify user_data_destroy)
+{
+#ifdef WYL_TEST_DAEMON_HTTP
+  wyl_daemon_http_note_route_registration_for_test (server, canonical_path,
+      WYL_DAEMON_HTTP_ROUTE_RAW_SINGLETON);
+#endif
+  soup_server_add_handler (server, canonical_path, callback, user_data,
+      user_data_destroy);
+}
 
 static void
 wyl_daemon_http_add_exact_handler (SoupServer *server,
@@ -5131,7 +5178,7 @@ wyl_daemon_http_add_exact_handler (SoupServer *server,
   exact->user_data_destroy = user_data_destroy;
 #ifdef WYL_TEST_DAEMON_HTTP
   wyl_daemon_http_note_route_registration_for_test (server, canonical_path,
-      TRUE);
+      WYL_DAEMON_HTTP_ROUTE_EXACT_SINGLETON);
 #endif
   soup_server_add_handler (server, canonical_path,
       wyl_daemon_http_exact_handler_dispatch, exact,
@@ -12244,70 +12291,73 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   g_signal_connect (server, "request-aborted",
       G_CALLBACK (service_response_aborted), NULL);
 #endif
-  soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
-  soup_server_add_handler (server, "/readyz", readyz_handler, ctx, NULL);
-  soup_server_add_handler (server, "/facts/status", facts_status_handler, ctx,
-      NULL);
-  soup_server_add_handler (server, "/facts/schema/register",
+  wyl_daemon_http_add_singleton_handler (server, "/healthz", healthz_handler,
+      NULL, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/readyz", readyz_handler,
+      ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/facts/status",
+      facts_status_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/facts/schema/register",
       schema_register_handler, ctx, NULL);
-  soup_server_add_handler (server, "/facts", facts_route_handler, ctx, NULL);
-  soup_server_add_handler (server, "/datalog", datalog_query_handler, ctx,
-      NULL);
-  soup_server_add_handler (server, "/profile/status", profile_status_handler,
+  wyl_daemon_http_add_prefix_handler (server, "/facts", facts_route_handler,
       ctx, NULL);
-  soup_server_add_handler (server, "/profile/events", profile_events_handler,
+  wyl_daemon_http_add_prefix_handler (server, "/datalog",
+      datalog_query_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/profile/status",
+      profile_status_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/profile/events",
+      profile_events_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/auth/login", login_handler,
       ctx, NULL);
-  soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
-  soup_server_add_handler (server, "/auth/mfa/verify", mfa_verify_handler,
-      ctx, NULL);
-  soup_server_add_handler (server, "/auth/mfa/enroll/start",
+  wyl_daemon_http_add_singleton_handler (server, "/auth/mfa/verify",
+      mfa_verify_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/auth/mfa/enroll/start",
       mfa_enroll_start_handler, ctx, NULL);
-  soup_server_add_handler (server, "/auth/mfa/enroll/confirm",
+  wyl_daemon_http_add_singleton_handler (server, "/auth/mfa/enroll/confirm",
       mfa_enroll_confirm_handler, ctx, NULL);
-  soup_server_add_handler (server, "/auth/refresh", refresh_handler, ctx, NULL);
-  soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
-  soup_server_add_handler (server, "/tenants", tenant_list_handler, ctx, NULL);
-  soup_server_add_handler (server, "/tenants/create", tenant_create_handler,
+  wyl_daemon_http_add_singleton_handler (server, "/auth/refresh",
+      refresh_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/auth/logout",
+      logout_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/tenants",
+      tenant_list_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/tenants/create",
+      tenant_create_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/tenants/seal",
+      tenant_seal_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/tenants/unseal",
+      tenant_unseal_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/tenants/delete",
+      tenant_delete_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/graphs/create",
+      graph_create_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/graphs/seal",
+      graph_seal_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/graphs",
+      graphs_list_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server, "/decide", decide_handler,
       ctx, NULL);
-  soup_server_add_handler (server, "/tenants/seal", tenant_seal_handler, ctx,
-      NULL);
-  soup_server_add_handler (server, "/tenants/unseal", tenant_unseal_handler,
-      ctx, NULL);
-  soup_server_add_handler (server, "/tenants/delete", tenant_delete_handler,
-      ctx, NULL);
-  soup_server_add_handler (server, "/graphs/create", graph_create_handler, ctx,
-      NULL);
-  soup_server_add_handler (server, "/graphs/seal", graph_seal_handler, ctx,
-      NULL);
-  soup_server_add_handler (server, "/graphs", graphs_list_handler, ctx, NULL);
-  soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
-  soup_server_add_handler (server, "/policy/permissions/grant",
-      policy_permission_grant_handler, ctx, NULL);
-  soup_server_add_handler (server, "/policy/permissions/revoke",
+  wyl_daemon_http_add_singleton_handler (server,
+      "/policy/permissions/grant", policy_permission_grant_handler, ctx, NULL);
+  wyl_daemon_http_add_singleton_handler (server,
+      "/policy/permissions/revoke",
       policy_permission_revoke_handler, ctx, NULL);
-  soup_server_add_handler (server, "/policy/permissions/transition",
+  wyl_daemon_http_add_singleton_handler (server,
+      "/policy/permissions/transition",
       policy_permission_transition_handler, ctx, NULL);
-  soup_server_add_handler (server, "/policy/roles/grant",
+  wyl_daemon_http_add_singleton_handler (server, "/policy/roles/grant",
       policy_role_grant_handler, ctx, NULL);
-  soup_server_add_handler (server, "/policy/roles/revoke",
+  wyl_daemon_http_add_singleton_handler (server, "/policy/roles/revoke",
       policy_role_revoke_handler, ctx, NULL);
-  soup_server_add_handler (server, "/audit/events", audit_events_handler,
-      ctx, NULL);
-  soup_server_add_handler (server, "/service-principals",
+  wyl_daemon_http_add_singleton_handler (server, "/audit/events",
+      audit_events_handler, ctx, NULL);
+  wyl_daemon_http_add_prefix_handler (server, "/service-principals",
       service_principal_management_handler, ctx, NULL);
-  soup_server_add_handler (server, "/service-credentials",
+  wyl_daemon_http_add_prefix_handler (server, "/service-credentials",
       service_credential_management_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server,
       "/service-management-authority/arm",
       service_management_authority_arm_handler, ctx, NULL);
-#ifdef WYL_TEST_DAEMON_HTTP
-  wyl_daemon_http_note_route_registration_for_test (server, "/facts", FALSE);
-  wyl_daemon_http_note_route_registration_for_test (server, "/datalog", FALSE);
-  wyl_daemon_http_note_route_registration_for_test (server,
-      "/service-principals", FALSE);
-  wyl_daemon_http_note_route_registration_for_test (server,
-      "/service-credentials", FALSE);
-#endif
 #ifdef WYL_HAS_FACT_STORE
   wyl_daemon_http_add_exact_handler (server,
       "/service-credential-operations",

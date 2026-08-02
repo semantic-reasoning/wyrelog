@@ -102,10 +102,11 @@ for enabled, expected_count in expected_matrix.items():
 
 
 # Freeze the actual registrations and their feature ownership.  Base prefix
-# dispatchers remain direct and unconditional; every singleton must use the
-# reusable exact adapter, with optional groups all-or-nothing.
+# dispatchers remain prefix registrations and unconditional; every singleton
+# must use the reusable exact adapter, with optional groups all-or-nothing.
 registration_pattern = re.compile(
-    r'(soup_server_add_handler|wyl_daemon_http_add_exact_handler)\s*'
+    r'(wyl_daemon_http_add_prefix_handler|'
+    r'wyl_daemon_http_add_exact_handler)\s*'
     r'\(\s*server\s*,\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\b')
 
 
@@ -117,9 +118,9 @@ def service_registration_manifest(text):
 
 service_registrations = service_registration_manifest(source)
 expected_registrations = [
-    ("soup_server_add_handler", "/service-principals",
+    ("wyl_daemon_http_add_prefix_handler", "/service-principals",
      "service_principal_management_handler"),
-    ("soup_server_add_handler", "/service-credentials",
+    ("wyl_daemon_http_add_prefix_handler", "/service-credentials",
      "service_credential_management_handler"),
     ("wyl_daemon_http_add_exact_handler",
      "/service-management-authority/arm",
@@ -140,7 +141,8 @@ if service_registrations != expected_registrations:
          f"{service_registrations!r}")
 
 registration_block_pattern = re.compile(
-    r'soup_server_add_handler\s*\(server,\s*"/service-principals".*?'
+    r'wyl_daemon_http_add_prefix_handler\s*'
+    r'\(server,\s*"/service-principals".*?'
     r'#ifdef WYL_HAS_FACT_STORE\s*'
     r'wyl_daemon_http_add_exact_handler\s*\(server,\s*'
     r'"/service-credential-operations".*?'
@@ -288,11 +290,11 @@ if service_registration_manifest(direct_singleton_mutant) == expected_registrati
     fail("structural guard accepted direct-singleton negative mutant")
 
 registration_anchor = (
-    'soup_server_add_handler (server, "/service-credentials",\n'
+    'wyl_daemon_http_add_prefix_handler (server, "/service-credentials",\n'
     '      service_credential_management_handler, ctx, NULL);')
 legacy_alias_mutant = source.replace(
     registration_anchor,
-    registration_anchor + '\n  soup_server_add_handler (server, '
+    registration_anchor + '\n  wyl_daemon_http_add_prefix_handler (server, '
     '"/service-credentials/legacy", legacy_handler, NULL, NULL);',
     1)
 if legacy_alias_mutant == source:
