@@ -106,6 +106,11 @@ OWNER_FUNCTION_ALLOWLIST = {
 CONTROL_WORDS = {"if", "for", "while", "switch"}
 
 
+def canonical_relative_path(path: str) -> str:
+    """Return a repository-relative path with portable POSIX separators."""
+    return path.replace("\\", "/")
+
+
 def without_test_seams(source: str) -> str:
     """Blank WYL_TEST_HANDLE_SEAMS branches while retaining line layout."""
     output = []
@@ -192,7 +197,8 @@ def check(sources: dict[str, str]) -> list[str]:
     owned = re.compile(r"\bwyl_engine_owned_[A-Za-z0-9_]*\s*\(")
     raw_lock = re.compile(r"\bwyl_handle_lock_engine_session\s*\(")
 
-    for path, raw in sources.items():
+    for raw_path, raw in sources.items():
+        path = canonical_relative_path(raw_path)
         source = mask_comments_and_literals(without_test_seams(raw))
         if legacy.search(source):
             errors.append(f"legacy handle engine operation in production: {path}")
@@ -224,6 +230,34 @@ def self_test() -> int:
     }
     if check(accepted):
         print("self-test rejected valid fixture", file=sys.stderr)
+        return 1
+
+    windows_accepted = {
+        r"wyrelog\wyl-handle.c": (
+            "static void wyl_handle_init(WylHandle *h) { "
+            "h->read_engine = 0; }"
+        ),
+        r"wyrelog\fact\compound.c": (
+            "void good(WylEngine *e) { "
+            "wyl_engine_owned_insert(e, 0, 0, 0); }"
+        ),
+    }
+    if check(windows_accepted):
+        print("self-test rejected Windows-style valid paths", file=sys.stderr)
+        return 1
+
+    windows_errors = check({
+        r"wyrelog\wyl-handle.c": "",
+        r"wyrelog\bad.c": (
+            "void bad(WylEngine *e) { "
+            "wyl_engine_owned_insert(e, 0, 0, 0); }"
+        ),
+    })
+    expected_windows_errors = [
+        "owned engine primitive outside allowlist: wyrelog/bad.c",
+    ]
+    if windows_errors != expected_windows_errors:
+        print("self-test mishandled Windows-style invalid path", file=sys.stderr)
         return 1
 
     mutants = (
