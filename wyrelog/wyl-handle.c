@@ -231,6 +231,11 @@ static wyrelog_error_t reconcile_guarded_engine_pair_in_session
     (WylEngineSession * session, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data);
+static wyrelog_error_t wyl_handle_insert_audit_fact_locked (WylHandle * self,
+    const gchar * id, gint64 created_at_us, const gchar * subject_id,
+    const gchar * action, const gchar * resource_id,
+    const gchar * deny_reason, const gchar * deny_origin,
+    const gchar * request_id, wyl_decision_t decision);
 #ifdef WYL_HAS_AUDIT
 typedef enum
 {
@@ -244,11 +249,6 @@ static wyrelog_error_t classify_audit_projection (WylHandle * self,
     const gchar * deny_reason, const gchar * deny_origin,
     const gchar * request_id, wyl_decision_t decision,
     WylAuditProjectionState * out_state);
-static wyrelog_error_t wyl_handle_insert_audit_fact_locked (WylHandle * self,
-    const gchar * id, gint64 created_at_us, const gchar * subject_id,
-    const gchar * action, const gchar * resource_id,
-    const gchar * deny_reason, const gchar * deny_origin,
-    const gchar * request_id, wyl_decision_t decision);
 #endif
 
 typedef struct
