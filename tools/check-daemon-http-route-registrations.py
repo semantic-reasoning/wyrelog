@@ -1301,6 +1301,13 @@ def preprocessed_ownership_occurrences(
 def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
                     compiler_id: str) \
         -> Counter[OwnershipOccurrence]:
+    # Compiler line markers are canonical filesystem paths.  Keep their
+    # comparison roots canonical too: macOS exposes /var through /private/var,
+    # and callers may otherwise supply an equivalent path containing `..`.
+    root = root.resolve()
+    build_root = build_root.resolve()
+    unit = CompileUnit(unit.source.resolve(), unit.directory.resolve(),
+                       unit.arguments)
     command = semantic_command(list(unit.arguments), unit.directory,
                                unit.source, compiler_id)
     try:
@@ -1740,6 +1747,18 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
             "expanded control envelope around raw-direct call")
 
         source_path.write_text(baseline, encoding="utf-8")
+        alias_root = root / "wyrelog" / ".."
+        alias_source = alias_root / "wyrelog" / "daemon" / "http.c"
+        aliased = self_test_preprocess(
+            alias_source, alias_root, alias_root / "build", compiler_id,
+            compiler)
+        if not any(item.source == "wyrelog/daemon/http.c"
+                   for item in aliased):
+            raise GuardError("canonical root alias lost source provenance")
+        outside = root.parent / (root.name + "-outside.c")
+        if semantic_fixture_result(
+                root, root / "build", source_path, outside, SOUP_API):
+            raise GuardError("outside source gained project provenance")
         raw = raw_approved_occurrences(root, root / "build")
         feature_sets = (
             frozenset(), frozenset({AUDIT}), frozenset({FACT}),
