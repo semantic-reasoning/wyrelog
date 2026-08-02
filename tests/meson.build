@@ -1400,15 +1400,41 @@ test('access-decision', test_access_decision)
 test_service_decision_authority = executable('test-service-decision-authority',
   'test-service-decision-authority.c',
   c_args : [
+    '-DWYL_TEST_HANDLE_SEAMS',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  dependencies : [wyrelog_dep],
+  dependencies : [wyrelog_handle_test_seams_dep],
 )
 
 test('service-decision-authority', test_service_decision_authority,
   timeout : 60,
 )
+
+check_handle_test_seam_exports = find_program(
+  '../tools/check-handle-test-seam-exports.py')
+test('check-handle-test-seam-exports-self-test',
+  check_handle_test_seam_exports,
+  args : ['--self-test'],
+)
+if get_option('default_library') != 'static'
+  handle_test_seam_export_artifact = libwyrelog
+  if get_option('default_library') == 'both'
+    handle_test_seam_export_artifact = libwyrelog.get_shared_lib()
+  endif
+  handle_test_seam_object_format = 'elf'
+  if host_machine.system() == 'darwin'
+    handle_test_seam_object_format = 'macho'
+  elif host_machine.system() == 'windows'
+    handle_test_seam_object_format = 'pe'
+  endif
+  test('check-handle-test-seam-exports',
+    check_handle_test_seam_exports,
+    args : [handle_test_seam_object_format,
+      handle_test_seam_export_artifact.full_path()],
+    depends : handle_test_seam_export_artifact,
+  )
+endif
 
 test_template_tree = executable('test-template-tree',
   'test-template-tree.c',
@@ -2607,9 +2633,10 @@ if get_option('enable_audit').allowed()
     'test-audit-emit.c',
     c_args : [
       '-DWYL_HAS_AUDIT',
+      '-DWYL_TEST_HANDLE_SEAMS',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
   test('audit-emit', test_audit_emit,

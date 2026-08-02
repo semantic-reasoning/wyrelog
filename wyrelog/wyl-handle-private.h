@@ -118,6 +118,7 @@ WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
  * ownership lets a decision, audit projection, or loader hold one complete
  * engine session while calling the ordinary handle helpers. */
 GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
+#ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
 {
   WYL_ENGINE_SESSION_WAITING,
@@ -149,6 +150,7 @@ void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
 /* Test-only cross-thread ownership probe and pending-delta snapshot. */
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
 guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
+#endif
 /* Reloads the policy engines while the caller owns the service-auth WRITE
  * lease. The lease spans durable service lifecycle commit and projection, so
  * no service resolver can observe the new lifecycle before its signed-policy
