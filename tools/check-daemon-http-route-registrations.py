@@ -21,9 +21,6 @@ AUDIT = "WYL_HAS_AUDIT"
 OWNERSHIP_API = re.compile(
     r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
     r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)\Z")
-OWNERSHIP_DIRECTIVE = re.compile(
-    r"(?:soup_server_add_|"
-    r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)")
 
 
 @dataclass(frozen=True)
@@ -315,19 +312,104 @@ def feature_contexts(source: str) -> dict[int, str | None]:
     return result
 
 
+def preprocessing_view(source: str) -> str:
+    """Mask comments and literals while preserving preprocessing layout."""
+    output = list(source)
+    index = 0
+    state = "code"
+    while index < len(source):
+        if state == "code" and source.startswith("//", index):
+            output[index] = output[index + 1] = " "
+            index += 2
+            state = "line-comment"
+            continue
+        if state == "code" and source.startswith("/*", index):
+            output[index] = output[index + 1] = " "
+            index += 2
+            state = "block-comment"
+            continue
+        if state == "line-comment":
+            if source[index] == "\n":
+                state = "code"
+            else:
+                output[index] = " "
+            index += 1
+            continue
+        if state == "block-comment":
+            if source.startswith("*/", index):
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "code"
+            else:
+                if source[index] != "\n":
+                    output[index] = " "
+                index += 1
+            continue
+        if state == "code" and source[index] in {'"', "'"}:
+            state = "string" if source[index] == '"' else "char"
+            output[index] = " "
+            index += 1
+            continue
+        if state in {"string", "char"}:
+            quote = '"' if state == "string" else "'"
+            if source[index] == "\\" and index + 1 < len(source):
+                output[index] = " "
+                if source[index + 1] != "\n":
+                    output[index + 1] = " "
+                index += 2
+            elif source[index] == quote:
+                output[index] = " "
+                index += 1
+                state = "code"
+            else:
+                if source[index] != "\n":
+                    output[index] = " "
+                index += 1
+            continue
+        index += 1
+    if state not in {"code", "line-comment"}:
+        raise GuardError("unterminated comment or literal in preprocessing input")
+    return "".join(output)
+
+
 def reject_ownership_preprocessor_references(source: str, path: Path) -> None:
     in_directive = False
     directive_start = 0
-    for number, line in enumerate(source.splitlines(), 1):
+    logical_lines = []
+    for number, line in enumerate(preprocessing_view(source).splitlines(), 1):
         starts_directive = line.lstrip().startswith("#")
         if starts_directive:
             in_directive = True
             directive_start = number
-        if in_directive and OWNERSHIP_DIRECTIVE.search(line):
-            raise GuardError(f"ownership API in preprocessor directive at "
-                             f"{path}:{directive_start}")
+            logical_lines = []
+        if in_directive:
+            logical_lines.append(line.rstrip().removesuffix("\\"))
         if in_directive and not line.rstrip().endswith("\\"):
+            directive = " ".join(logical_lines)
+            tokens = re.findall(r"##|[A-Za-z_][A-Za-z0-9_]*|\S", directive)
+            identifiers = [token for token in tokens
+                           if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)]
+            if any(OWNERSHIP_API.fullmatch(token) for token in identifiers):
+                raise GuardError(f"ownership API in preprocessor directive at "
+                                 f"{path}:{directive_start}")
+            for index, token in enumerate(tokens):
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
+                    continue
+                pasted = token
+                cursor = index
+                while (cursor + 2 < len(tokens)
+                       and tokens[cursor + 1] == "##"
+                       and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",
+                                        tokens[cursor + 2])):
+                    pasted += tokens[cursor + 2]
+                    cursor += 2
+                if cursor != index and OWNERSHIP_API.fullmatch(pasted):
+                    raise GuardError(f"token-pasted ownership API at "
+                                     f"{path}:{directive_start}")
             in_directive = False
+    if in_directive:
+        raise GuardError(f"unterminated preprocessor directive at "
+                         f"{path}:{directive_start}")
 
 
 def scan_source(path: Path) -> list[Registration]:
@@ -413,6 +495,9 @@ def check_root(root: Path) -> list[Registration]:
     sources = sorted(source_root.rglob("*.c"))
     if not sources:
         raise GuardError("no production C sources discovered")
+    for header in sorted(source_root.rglob("*.h")):
+        reject_ownership_preprocessor_references(
+            header.read_text(encoding="utf-8"), header)
     registrations = []
     for source in sources:
         registrations.extend(scan_source(source))
@@ -447,6 +532,9 @@ def check_root(root: Path) -> list[Registration]:
 def fixture_source() -> str:
     lines = [
         "typedef void *SoupServer;",
+        "#if 1 /* soup_server_add_handler is only documentation here */",
+        "#endif",
+        '#define OWNERSHIP_LABEL "soup_server_add_handler"',
         "static void wyl_daemon_http_add_prefix_handler(void *server,",
         "  const char *canonical_path, void *callback, void *user_data,",
         "  void *user_data_destroy) {",
@@ -515,6 +603,9 @@ def self_test() -> None:
             "continued macro alias": (
                 "#define HIDDEN_ADD \\\n"
                 "  soup_server_add_handler\n" + baseline),
+            "token-pasted macro alias": (
+                "#define HIDDEN_ADD soup_server_ ## add_handler\n"
+                + baseline),
             "function-pointer alias": baseline + (
                 "static void hidden_alias(void) {\n"
                 "  void (*hidden_add)(void) = soup_server_add_handler;\n"
@@ -556,6 +647,18 @@ def self_test() -> None:
         for name, mutant in mutants.items():
             source_path.write_text(mutant, encoding="utf-8")
             expect_failure(root, name)
+
+        hidden_header = daemon / "hidden-route.h"
+        hidden_header.write_text(
+            "#define HIDDEN_ADD soup_server_add_handler\n", encoding="utf-8")
+        header_alias = baseline.replace(
+            "static void wyl_daemon_start_http_server_with_runtime(void) {",
+            "#include \"hidden-route.h\"\n"
+            "static void wyl_daemon_start_http_server_with_runtime(void) {\n"
+            "  HIDDEN_ADD(server, \"/hidden\", callback, data, NULL);", 1)
+        source_path.write_text(header_alias, encoding="utf-8")
+        expect_failure(root, "included project-header alias")
+        hidden_header.unlink()
 
         source_path.write_text(baseline, encoding="utf-8")
         alternate = root / "wyrelog" / "alternate.c"
