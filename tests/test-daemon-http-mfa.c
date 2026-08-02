@@ -96,6 +96,10 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
       &error);
   if (bytes == NULL)
     return 3;
+  const gchar *request_id = soup_message_headers_get_one
+      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+  if (request_id == NULL || request_id[0] == '\0')
+    return 4;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -146,6 +150,61 @@ compute_current_code (gchar out_proof[8])
           NULL) != WYRELOG_E_OK)
     return -1;
   g_snprintf (out_proof, 8, "%06u", code);
+  return 0;
+}
+
+static gint
+check_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  WylDaemonExactRouteStateSnapshot before = { 0 }, after = { 0 };
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw (session, "POST", base_url,
+          "/auth/login/x?username=mfa.alias-login", &status, &body) != 0)
+    return 1300;
+  if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+    return 1301;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
+      || memcmp (&before, &after, sizeof before) != 0)
+    return 1302;
+
+  g_autofree gchar *session_token = NULL;
+  if (do_login (session, base_url, "mfa.alias-verify", &session_token) != 0
+      || seed_enrollment (handle, "mfa.alias-verify") != 0)
+    return 1303;
+  gchar proof[8];
+  if (compute_current_code (proof) != 0)
+    return 1304;
+  WylTotpEnrollment enrollment_before = { 0 }, enrollment_after = { 0 };
+  gboolean found_before = FALSE, found_after = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_totp_enrollment_lookup (store, "mfa.alias-verify",
+          &enrollment_before, &found_before) != WYRELOG_E_OK || !found_before)
+    return 1305;
+  g_autofree gchar *path = g_strdup_printf
+      ("/auth/mfa/verify/x?session_token=%s&code=%s", session_token, proof);
+  before = (WylDaemonExactRouteStateSnapshot) {
+  0};
+  after = (WylDaemonExactRouteStateSnapshot) {
+  0};
+  g_clear_pointer (&body, g_free);
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
+      || send_raw (session, "POST", base_url, path, &status, &body) != 0)
+    return 1306;
+  if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+    return 1307;
+  if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
+      || memcmp (&before, &after, sizeof before) != 0
+      || wyl_policy_store_totp_enrollment_lookup (store, "mfa.alias-verify",
+          &enrollment_after, &found_after) != WYRELOG_E_OK || !found_after
+      || enrollment_after.last_verified_step !=
+      enrollment_before.last_verified_step)
+    return 1308;
+  wyl_totp_enrollment_clear (&enrollment_before);
+  wyl_totp_enrollment_clear (&enrollment_after);
   return 0;
 }
 
@@ -590,6 +649,9 @@ main (void)
 
   gint rc;
   if ((rc = check_method_gate (http.server, base_url)) != 0)
+    goto out;
+  if ((rc = check_exact_auth_alias_canaries (http.server, handle,
+              base_url)) != 0)
     goto out;
   if ((rc = check_missing_session_token (http.server, base_url)) != 0)
     goto out;

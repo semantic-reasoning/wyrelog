@@ -112,8 +112,9 @@ test_server_stop (TestServer *ts)
 }
 
 static gint
-send_event (SoupSession *session, const gchar *method, const gchar *base_url,
-    const gchar *json, guint *out_status, gchar **out_body)
+send_event_path (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *json,
+    guint *out_status, gchar **out_body)
 {
   *out_status = 0;
   *out_body = NULL;
@@ -121,7 +122,7 @@ send_event (SoupSession *session, const gchar *method, const gchar *base_url,
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
     root[strlen (root) - 1] = '\0';
-  g_autofree gchar *uri = g_strdup_printf ("%s/profile/events", root);
+  g_autofree gchar *uri = g_strdup_printf ("%s%s", root, path);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 1;
@@ -134,10 +135,48 @@ send_event (SoupSession *session, const gchar *method, const gchar *base_url,
       &error);
   if (bytes == NULL)
     return 2;
+  const gchar *request_id = soup_message_headers_get_one
+      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+  if (request_id == NULL || request_id[0] == '\0')
+    return 3;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint
+send_event (SoupSession *session, const gchar *method, const gchar *base_url,
+    const gchar *json, guint *out_status, gchar **out_body)
+{
+  return send_event_path (session, method, base_url, "/profile/events", json,
+      out_status, out_body);
+}
+
+static gint
+check_exact_alias_producer_canary (SoupServer *server, const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  static const gchar *aliases[] = {
+    "/profile/events/x",
+    "/profile/eventsx",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (aliases); i++) {
+    WylDaemonExactRouteStateSnapshot before = { 0 }, after = { 0 };
+    if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before))
+      return 800 + (gint) i *10;
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_event_path (session, "POST", base_url, aliases[i],
+            PRODUCER_PAYLOAD, &status, &body) != 0)
+      return 801 + (gint) i *10;
+    if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
+      return 802 + (gint) i *10;
+    if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
+        || memcmp (&before, &after, sizeof before) != 0)
+      return 803 + (gint) i *10;
+  }
   return 0;
 }
 
@@ -349,6 +388,8 @@ main (void)
   if ((rc = check_happy_path (sys.base_url)) != 0)
     goto out_system;
   if ((rc = check_literal_producer_payload (sys.base_url)) != 0)
+    goto out_system;
+  if ((rc = check_exact_alias_producer_canary (sys.server, sys.base_url)) != 0)
     goto out_system;
   if ((rc = check_method_gate (sys.base_url)) != 0)
     goto out_system;
