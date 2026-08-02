@@ -41,6 +41,7 @@
 #include "wyrelog/auth/service-credential-operation-storage-private.h"
 #endif
 #include "wyrelog/wyl-common-private.h"
+#include "wyrelog/wyl-decide-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-session-private.h"
 #include "wyrelog/wyl-id-private.h"
@@ -211,6 +212,18 @@ typedef struct
   gchar *actor;
   gchar *tenant;
   gboolean bearer;
+  /*
+   * TRUE only after resolve_bearer_session's SERVICE branch has FULLY
+   * validated a live service (svc:) bearer (token-exact, live session
+   * active + SERVICE_CREDENTIAL, full live-field equality, registry
+   * ACTIVE + reservation match). Threaded into wyl_decide via
+   * wyl_decide_req_set_service_bearer_authenticated so the transient
+   * principal_state fact (#740 WALL 1) is injected ONLY for a genuine
+   * validated service bearer. Zero-init at every site and reset by
+   * wyl_daemon_auth_context_clear, so it can never read TRUE from
+   * uninitialised memory. Never set on the human or session-token path.
+   */
+  gboolean service_authenticated;
 } WylDaemonAuthContext;
 
 typedef struct _WylHumanRefreshResult
@@ -5370,6 +5383,16 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
       out_auth->actor = g_steal_pointer (&actor);
       out_auth->tenant = g_steal_pointer (&tenant);
       out_auth->bearer = TRUE;
+      /*
+       * #740 WALL 1: mark this bearer as a FULLY validated live service
+       * credential. Every check above (token-exact, live session active +
+       * SERVICE_CREDENTIAL, full live-field equality, registry ACTIVE +
+       * reservation match) has passed at this point. The decide handlers
+       * thread this into wyl_decide so it may transiently assert the
+       * service principal's authenticated state. Never set on the human
+       * bearer tail below or the session-token path.
+       */
+      out_auth->service_authenticated = TRUE;
 #ifdef WYL_TEST_DAEMON_HTTP
       if (ctx->resolver_checkpoint != NULL)
         ctx->resolver_checkpoint (WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED,
@@ -6580,6 +6603,10 @@ authorize_guarded_session_action_extended (SoupServer *server,
       resource != NULL ? resource : auth.session_id);
   wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
   wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+  /* #740 WALL 1: pass the validated service-bearer signal; FALSE for
+   * human/session-token bearers so nothing is asserted for them. */
+  wyl_decide_req_set_service_bearer_authenticated (req,
+      auth.service_authenticated);
 
   wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
   if (rc == WYRELOG_E_INVALID) {
@@ -7008,6 +7035,10 @@ service_principal_management_authorize_session (SoupServer *server,
   wyl_decide_req_set_resource_id (req, auth.session_id);
   wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
   wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+  /* #740 WALL 1: pass the validated service-bearer signal; FALSE for
+   * human/session-token bearers so nothing is asserted for them. */
+  wyl_decide_req_set_service_bearer_authenticated (req,
+      auth.service_authenticated);
   decision_rc = wyl_decide (ctx->handle, req, resp);
   if (decision_rc == WYRELOG_E_INVALID) {
     (void) wyl_service_auth_read_lease_release_terminal (&lease);
@@ -14301,6 +14332,10 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     }
     wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
   }
+  /* #740 WALL 1: pass the validated service-bearer signal; FALSE for
+   * human/session-token bearers so nothing is asserted for them. */
+  wyl_decide_req_set_service_bearer_authenticated (req,
+      auth.service_authenticated);
 
   wyrelog_error_t rc = wyl_decide (handle, req, resp);
   if (rc == WYRELOG_E_INVALID) {
