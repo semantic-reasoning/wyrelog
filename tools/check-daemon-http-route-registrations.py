@@ -1506,6 +1506,14 @@ def self_test_preprocess(source: Path, root: Path, build_root: Path,
     return preprocess_unit(unit, root, build_root, compiler_id)
 
 
+def write_exact_fixture(path: Path, source: str) -> None:
+    expected = source.encode("utf-8")
+    if path.write_bytes(expected) != len(expected):
+        raise GuardError("short self-test fixture write")
+    if path.read_bytes() != expected:
+        raise GuardError("self-test fixture bytes changed during write")
+
+
 def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
     with tempfile.TemporaryDirectory(prefix="wyl-route-guard-") as temporary:
         root = Path(temporary)
@@ -1513,7 +1521,7 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         daemon.mkdir(parents=True)
         source_path = daemon / "http.c"
         baseline = fixture_source()
-        source_path.write_text(baseline, encoding="utf-8")
+        write_exact_fixture(source_path, baseline)
         check_root(root)
         bounded_arguments = expanded_call_arguments(
             f'{EXACT_API}(server, "/healthz", healthz_handler, NULL, NULL);\n'
@@ -1577,48 +1585,59 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
                 'healthz_handler, NULL, NULL );',
                 'healthz_handler, NULL, NULL ;', 1),
         }
+        splice_prefixes = {
+            "LF identifier splice":
+                b"#define HIDDEN_ADD soup_server_add_\\\nhandler\n",
+            "CRLF identifier splice":
+                b"#define HIDDEN_ADD soup_server_add_\\\r\nhandler\r\n",
+        }
+        for name, prefix in splice_prefixes.items():
+            if not mutants[name].encode("utf-8").startswith(prefix):
+                raise GuardError(f"{name} fixture bytes changed")
         for name, mutant in mutants.items():
-            source_path.write_text(mutant, encoding="utf-8")
+            write_exact_fixture(source_path, mutant)
             expect_failure(root, name)
 
         hidden_header = daemon / "hidden-route.h"
-        hidden_header.write_text(
-            "#define HIDDEN_ADD soup_server_add_handler\n", encoding="utf-8")
+        write_exact_fixture(
+            hidden_header, "#define HIDDEN_ADD soup_server_add_handler\n")
         header_alias = baseline.replace(
             "static void wyl_daemon_start_http_server_with_runtime(void) {",
             "#include \"hidden-route.h\"\n"
             "static void wyl_daemon_start_http_server_with_runtime(void) {\n"
             "  HIDDEN_ADD(server, \"/hidden\", callback, data, NULL);", 1)
-        source_path.write_text(header_alias, encoding="utf-8")
+        write_exact_fixture(source_path, header_alias)
         expect_failure(root, "included project-header alias")
         hidden_header.unlink()
 
-        hidden_header.write_text(
+        write_exact_fixture(
+            hidden_header,
             "static inline void hidden_add(void) {\n"
             "  soup_server_add_handler(server, \"/hidden\", callback, "
             "data, NULL);\n"
-            "}\n", encoding="utf-8")
-        source_path.write_text(
-            '#include "hidden-route.h"\n' + baseline, encoding="utf-8")
+            "}\n")
+        write_exact_fixture(
+            source_path, '#include "hidden-route.h"\n' + baseline)
         expect_failure(root, "project-header inline registration")
         hidden_header.unlink()
 
         hidden_include = daemon / "hidden-route.inc"
-        hidden_include.write_text(
+        write_exact_fixture(
+            hidden_include,
             "soup_server_add_\\\nhandler(server, \"/hidden\", callback, "
-            "data, NULL);\n", encoding="utf-8")
-        source_path.write_text(baseline, encoding="utf-8")
+            "data, NULL);\n")
+        write_exact_fixture(source_path, baseline)
         expect_failure(root, "project inc splice registration")
         hidden_include.unlink()
 
         for wrapper in (PREFIX_API, RAW_SINGLETON_API, EXACT_API):
-            hidden_header.write_text(
-                f"#define HIDDEN_ADD {wrapper}\n", encoding="utf-8")
-            source_path.write_text(header_alias, encoding="utf-8")
+            write_exact_fixture(
+                hidden_header, f"#define HIDDEN_ADD {wrapper}\n")
+            write_exact_fixture(source_path, header_alias)
             expect_failure(root, f"project-header {wrapper} alias")
             hidden_header.unlink()
 
-        source_path.write_text(baseline, encoding="utf-8")
+        write_exact_fixture(source_path, baseline)
         semantic_macros = {
             "one-level generic paste": (
                 "#define CAT_RAW(a,b) a ## b\n"
@@ -1658,7 +1677,7 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         for name, (macros, symbol) in semantic_macros.items():
             semantic_source = macros + baseline.replace(
                 server_anchor, hidden_call, 1)
-            source_path.write_text(semantic_source, encoding="utf-8")
+            write_exact_fixture(source_path, semantic_source)
             check_root(root)
             result = semantic_fixture_result(
                 root, root / "build", source_path, source_path, symbol)
@@ -1711,7 +1730,7 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
                 + f"#define REPLACE(ignored) {macro_expansion}\n")
             mutant = replacement + baseline.replace(
                 approved_health, f"  REPLACE({approved_health_call});", 1)
-            source_path.write_text(mutant, encoding="utf-8")
+            write_exact_fixture(source_path, mutant)
             expect_failure(root, f"{name} raw macro argument")
             expanded = self_test_preprocess(
                 source_path, root, root / "build", compiler_id, compiler)
@@ -1746,7 +1765,7 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
                       + baseline.replace(
                           approved_health,
                           f"  REPLACE({approved_health_call});", 1))
-            source_path.write_text(mutant, encoding="utf-8")
+            write_exact_fixture(source_path, mutant)
             expect_failure(root, f"{name} raw context")
             expect_guard_error(
                 lambda: self_test_preprocess(
@@ -1758,14 +1777,14 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
                          server_anchor, server_anchor + "\n  BEFORE;", 1)
                      .replace(approved_health,
                               approved_health + "\n  AFTER;", 1))
-        source_path.write_text(enveloped, encoding="utf-8")
+        write_exact_fixture(source_path, enveloped)
         check_root(root)
         expect_guard_error(
             lambda: self_test_preprocess(
                 source_path, root, root / "build", compiler_id, compiler),
             "expanded control envelope around raw-direct call")
 
-        source_path.write_text(baseline, encoding="utf-8")
+        write_exact_fixture(source_path, baseline)
         alias_root = root / "wyrelog" / ".."
         alias_source = alias_root / "wyrelog" / "daemon" / "http.c"
         aliased = self_test_preprocess(
@@ -1804,12 +1823,11 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
 
         nested = daemon / "nested-route.h"
         inner = daemon / "inner-route.h"
-        inner.write_text(semantic_macros["two-level paste"][0],
-                         encoding="utf-8")
-        nested.write_text('#include "inner-route.h"\n', encoding="utf-8")
-        source_path.write_text(
-            '#include <nested-route.h>\n' + baseline.replace(
-                server_anchor, hidden_call, 1), encoding="utf-8")
+        write_exact_fixture(inner, semantic_macros["two-level paste"][0])
+        write_exact_fixture(nested, '#include "inner-route.h"\n')
+        write_exact_fixture(
+            source_path, '#include <nested-route.h>\n' + baseline.replace(
+                server_anchor, hidden_call, 1))
         check_root(root)
         result = semantic_fixture_result(
             root, root / "build", source_path, inner, SOUP_API, "clang-cl")
@@ -1827,15 +1845,13 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         inner.unlink()
 
         forced = daemon / "forced-route.h"
-        forced.write_text(semantic_macros["two-level paste"][0],
-                          encoding="utf-8")
+        write_exact_fixture(forced, semantic_macros["two-level paste"][0])
         generated_root = root / "build" / "generated"
         generated_root.mkdir(parents=True)
         generated = generated_root / "route-config.h"
-        generated.write_text(semantic_macros["three-token paste"][0],
-                             encoding="utf-8")
-        source_path.write_text(baseline.replace(
-            server_anchor, hidden_call, 1), encoding="utf-8")
+        write_exact_fixture(generated, semantic_macros["three-token paste"][0])
+        write_exact_fixture(source_path, baseline.replace(
+            server_anchor, hidden_call, 1))
         check_root(root)
         if not semantic_fixture_result(
                 root, root / "build", source_path, forced, SOUP_API):
@@ -1958,12 +1974,13 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
                                              "gcc"),
             "missing compile database")
 
-        source_path.write_text(baseline, encoding="utf-8")
+        write_exact_fixture(source_path, baseline)
         alternate = root / "wyrelog" / "alternate.c"
-        alternate.write_text(
+        write_exact_fixture(
+            alternate,
             "static void alternate(void) {\n"
             "  soup_server_add_websocket_handler(server, \"/hidden\", NULL, "
-            "NULL, NULL, callback, NULL);\n}\n", encoding="utf-8")
+            "NULL, NULL, callback, NULL);\n}\n")
         expect_failure(root, "alternate production source")
 
 
