@@ -351,71 +351,83 @@ mark_main_loop_ready (gpointer data)
 }
 
 static wyrelog_error_t
-intern_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
+intern_symbol (WylEngineSession *session, const gchar *symbol, gint64 *out_id)
 {
-  return wyl_handle_intern_engine_symbol (handle, symbol, out_id);
+  return wyl_engine_session_intern_symbol (session, symbol, out_id);
 }
 
 static wyrelog_error_t
 insert_symbol_row1 (WylHandle *handle, const gchar *relation,
     const gchar *value)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
   gint64 row[1];
-  wyrelog_error_t rc = intern_symbol (handle, value, &row[0]);
+  wyrelog_error_t rc = intern_symbol (session, value, &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 1);
+  return wyl_engine_session_insert (session, relation, row, 1);
 }
 
 static wyrelog_error_t
 insert_symbol_row2 (WylHandle *handle, const gchar *relation,
     const gchar *a, const gchar *b)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
   gint64 row[2];
-  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  wyrelog_error_t rc = intern_symbol (session, a, &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = intern_symbol (handle, b, &row[1]);
+  rc = intern_symbol (session, b, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 2);
+  return wyl_engine_session_insert (session, relation, row, 2);
 }
 
 static wyrelog_error_t
 insert_symbol_row3 (WylHandle *handle, const gchar *relation,
     const gchar *a, const gchar *b, const gchar *c)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
   gint64 row[3];
-  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  wyrelog_error_t rc = intern_symbol (session, a, &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = intern_symbol (handle, b, &row[1]);
+  rc = intern_symbol (session, b, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = intern_symbol (handle, c, &row[2]);
+  rc = intern_symbol (session, c, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 3);
+  return wyl_engine_session_insert (session, relation, row, 3);
 }
 
 static wyrelog_error_t
 insert_symbol_row4 (WylHandle *handle, const gchar *relation,
     const gchar *a, const gchar *b, const gchar *c, const gchar *d)
 {
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
   gint64 row[4];
-  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  wyrelog_error_t rc = intern_symbol (session, a, &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = intern_symbol (handle, b, &row[1]);
+  rc = intern_symbol (session, b, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = intern_symbol (handle, c, &row[2]);
+  rc = intern_symbol (session, c, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = intern_symbol (handle, d, &row[3]);
+  rc = intern_symbol (session, d, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 4);
+  return wyl_engine_session_insert (session, relation, row, 4);
 }
 
 static wyrelog_error_t
