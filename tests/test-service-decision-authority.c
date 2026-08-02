@@ -289,6 +289,15 @@ test_service_authority_allow_deny_and_binding (void)
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
       "svc:authority:allow", TRUE);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean tenant_created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
+          &tenant_created), ==, WYRELOG_E_OK);
+  g_assert_true (tenant_created);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+          "svc:authority:allow", "wr.stream.read", "tenant-b"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
 
   g_autoptr (wyl_decide_req_t) bare = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) bare_resp = wyl_decide_resp_new ();
@@ -467,6 +476,15 @@ test_service_authority_concurrent_context_isolation (void)
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
       "svc:authority:concurrent", TRUE);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean tenant_created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
+          &tenant_created), ==, WYRELOG_E_OK);
+  g_assert_true (tenant_created);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+          "svc:authority:concurrent", "wr.stream.read", "tenant-b"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
   DecisionBarrier barrier = { 0 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
@@ -498,6 +516,184 @@ test_service_authority_concurrent_context_isolation (void)
   remove_tree (templates);
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean decision_active;
+  gboolean allow_decision;
+  gboolean reload_checkpoint;
+  gboolean reload_completed;
+  wyrelog_error_t decision_rc;
+  wyrelog_error_t mutation_rc;
+  wyrelog_error_t reload_rc;
+  wyrelog_error_t release_rc;
+  wyl_decision_t decision;
+} ReloadDecisionRace;
+
+static gboolean
+blocking_window_matcher (gint64 timestamp, const gchar *window_name,
+    gpointer user_data)
+{
+  ReloadDecisionRace *race = user_data;
+  g_assert_cmpint (timestamp, ==, 4242);
+  g_assert_cmpstr (window_name, ==, "off_hours");
+  g_mutex_lock (&race->mutex);
+  race->decision_active = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_decision)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+  return TRUE;
+}
+
+static gpointer
+blocking_human_decide (gpointer data)
+{
+  ReloadDecisionRace *race = data;
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "reload-human");
+  wyl_decide_req_set_action (req, "wr.stream.write_reserved");
+  wyl_decide_req_set_resource_id (req, "reload-scope");
+  wyl_decide_req_set_guard_context (req, 4242, "trusted", 1);
+  wyl_decide_req_set_guard_window_matcher (req, blocking_window_matcher, race);
+  race->decision_rc = wyl_decide (race->handle, req, resp);
+  race->decision = wyl_decide_resp_get_decision (resp);
+  return NULL;
+}
+
+static void
+nested_reload_checkpoint (gpointer data)
+{
+  ReloadDecisionRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->reload_checkpoint = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+nested_write_reload (gpointer data)
+{
+  ReloadDecisionRace *race = data;
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (race->handle), race->handle,
+      NULL, &lease);
+  wyl_policy_store_t *store = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_write_lease_get_policy_store (lease, race->handle,
+        &store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_direct_permission (store, "reload-witness",
+        "wr.stream.read", "witness-scope");
+  race->mutation_rc = rc;
+  race->reload_rc = rc == WYRELOG_E_OK
+      ? wyl_handle_reload_engine_pair (race->handle) : rc;
+  race->release_rc = lease != NULL
+      ? wyl_service_auth_write_lease_release (lease) : rc;
+  wyl_service_auth_write_lease_free (lease);
+  g_mutex_lock (&race->mutex);
+  race->reload_completed = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  return NULL;
+}
+
+static void
+wait_for_race_flag (ReloadDecisionRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  g_assert_true (reached);
+}
+
+static void
+test_nested_write_reload_serializes_with_human_decide (void)
+{
+  g_autofree gchar *templates = copy_unsigned_template_tree ();
+  g_assert_nonnull (templates);
+  g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
+      "svc:reload:test", FALSE);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+          "reload-human", "wr.stream.write_reserved", "reload-scope"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store,
+          "reload-human", "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, "reload-scope",
+          "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store,
+          "reload-human", "wr.stream.write_reserved", "reload-scope",
+          "armed"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store,
+          "reload-witness", "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store,
+          "witness-scope", "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store,
+          "reload-witness", "wr.stream.read", "witness-scope", "armed"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+
+  ReloadDecisionRace race = {
+    .handle = handle,
+    .decision_rc = WYRELOG_E_INTERNAL,
+    .mutation_rc = WYRELOG_E_INTERNAL,
+    .reload_rc = WYRELOG_E_INTERNAL,
+    .release_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  GThread *decision = g_thread_new ("blocking-human-decision",
+      blocking_human_decide, &race);
+  wait_for_race_flag (&race, &race.decision_active);
+
+  wyl_handle_set_reload_decision_checkpoint_for_test (handle,
+      nested_reload_checkpoint, &race);
+  GThread *reload = g_thread_new ("nested-write-reload",
+      nested_write_reload, &race);
+  wait_for_race_flag (&race, &race.reload_checkpoint);
+
+  gint64 blocked_deadline =
+      g_get_monotonic_time () + 250 * G_TIME_SPAN_MILLISECOND;
+  g_mutex_lock (&race.mutex);
+  while (!race.reload_completed
+      && g_cond_wait_until (&race.changed, &race.mutex, blocked_deadline));
+  g_assert_false (race.reload_completed);
+  race.allow_decision = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+
+  g_thread_join (decision);
+  g_thread_join (reload);
+  wyl_handle_set_reload_decision_checkpoint_for_test (handle, NULL, NULL);
+  g_assert_cmpint (race.decision_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (race.decision, ==, WYL_DECISION_ALLOW);
+  g_assert_cmpint (race.mutation_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (race.reload_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (race.release_rc, ==, WYRELOG_E_OK);
+
+  g_autoptr (wyl_decide_req_t) witness_req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) witness_resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (witness_req, "reload-witness");
+  wyl_decide_req_set_action (witness_req, "wr.stream.read");
+  wyl_decide_req_set_resource_id (witness_req, "witness-scope");
+  g_assert_cmpint (wyl_decide (handle, witness_req, witness_resp), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_decide_resp_get_decision (witness_resp), ==,
+      WYL_DECISION_ALLOW);
+
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  g_clear_object (&handle);
+  remove_tree (templates);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -516,5 +712,7 @@ main (int argc, char **argv)
       test_service_authority_faults_fail_closed);
   g_test_add_func ("/service-decision/authority/concurrent-isolation",
       test_service_authority_concurrent_context_isolation);
+  g_test_add_func ("/service-decision/reload/nested-write-human-serialization",
+      test_nested_write_reload_serializes_with_human_decide);
   return g_test_run ();
 }

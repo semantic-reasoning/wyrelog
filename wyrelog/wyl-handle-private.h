@@ -117,6 +117,10 @@ WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
 /* Serializes every decision's request-local engine mutation/query/cleanup
  * interval. The evaluator session is not safe for parallel mutations. */
 GMutexLocker *wyl_handle_lock_decision_engine (WylHandle * self);
+/* Test-only checkpoint immediately before a reload waits on the decision
+ * mutex. The callback is borrowed and must outlive the configured interval. */
+void wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (gpointer data), gpointer data);
 /* Reloads the policy engines while the caller owns the service-auth WRITE
  * lease. The lease spans durable service lifecycle commit and projection, so
  * no service resolver can observe the new lifecycle before its signed-policy

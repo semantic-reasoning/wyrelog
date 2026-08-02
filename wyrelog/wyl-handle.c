@@ -72,6 +72,8 @@ struct _WylHandle
   WylEngine *read_engine;
   WylEngine *delta_engine;
   GMutex decision_mutex;
+  void (*reload_decision_checkpoint) (gpointer data);
+  gpointer reload_decision_checkpoint_data;
   GHashTable *engine_symbols_by_id;
   gchar *template_dir;
   WylDeltaCallback delta_callback;
@@ -158,6 +160,15 @@ wyl_handle_lock_decision_engine (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return g_mutex_locker_new (&self->decision_mutex);
+}
+
+void
+wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->reload_decision_checkpoint = checkpoint;
+  self->reload_decision_checkpoint_data = data;
 }
 
 WylServiceAuthUnavailableReason
@@ -2251,6 +2262,33 @@ wyl_handle_validate_service_permission_closure (WylHandle *self,
       WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
 }
 
+/* Every live engine-pair replacement shares the decision critical section.
+ * Callers may already own the service-auth WRITE lease, but none may already
+ * own decision_mutex. Keeping that distinction here avoids recursive WRITE
+ * acquisition without exposing a replacement path that can race wyl_decide. */
+static wyrelog_error_t
+replace_live_engine_pair_serialized (WylHandle *self,
+    gboolean repair_projection)
+{
+  if (!WYL_IS_HANDLE (self) || self->template_dir == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->reload_decision_checkpoint != NULL)
+    self->reload_decision_checkpoint (self->reload_decision_checkpoint_data);
+  g_autoptr (GMutexLocker) decision_locker =
+      wyl_handle_lock_decision_engine (self);
+  if (decision_locker == NULL)
+    return WYRELOG_E_INVALID;
+  if (repair_projection)
+    clear_pending_deltas (self);
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc == WYRELOG_E_OK)
+    self->engine_pair_poisoned = FALSE;
+  else if (repair_projection)
+    poison_engine_pair (self);
+  return rc;
+}
+
 /*
  * Reloads the engine pair and re-validates the persisted service closure
  * under a caller-supplied write lease.  A snapshot/engine failure propagates;
@@ -2261,15 +2299,9 @@ wyrelog_error_t
 wyl_handle_reload_engine_pair_with_service_auth_write (WylHandle *self,
     WylServiceAuthWriteLease *write_lease)
 {
-  g_autoptr (GMutexLocker) decision_locker =
-      wyl_handle_lock_decision_engine (self);
-  if (decision_locker == NULL)
-    return WYRELOG_E_INVALID;
-  g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_live_engine_pair_serialized (self, FALSE);
   if (rc != WYRELOG_E_OK)
     return rc;
-  self->engine_pair_poisoned = FALSE;
   return wyl_handle_validate_service_permission_closure (self, write_lease);
 }
 
@@ -2295,13 +2327,8 @@ wyl_handle_reload_engine_pair (WylHandle *self)
   WylServiceAuthWriteLease *lease = NULL;
   wyrelog_error_t acquire_rc = wyl_service_auth_authority_acquire_write
       (self->service_auth_authority, self, NULL, &lease);
-  if (acquire_rc == WYRELOG_E_BUSY) {
-    g_autofree gchar *template_dir = g_strdup (self->template_dir);
-    wyrelog_error_t rc = replace_engine_pair (self, template_dir);
-    if (rc == WYRELOG_E_OK)
-      self->engine_pair_poisoned = FALSE;
-    return rc;
-  }
+  if (acquire_rc == WYRELOG_E_BUSY)
+    return replace_live_engine_pair_serialized (self, FALSE);
   if (acquire_rc != WYRELOG_E_OK)
     return acquire_rc;
 
@@ -2518,13 +2545,7 @@ repair_engine_pair_after_projection_failure (WylHandle *self)
 {
   if (self->template_dir == NULL)
     return WYRELOG_E_INVALID;
-
-  clear_pending_deltas (self);
-  g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
-  if (rc != WYRELOG_E_OK)
-    poison_engine_pair (self);
-  return rc;
+  return replace_live_engine_pair_serialized (self, TRUE);
 }
 
 static wyrelog_error_t
