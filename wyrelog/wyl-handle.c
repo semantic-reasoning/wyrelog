@@ -203,6 +203,8 @@ static wyrelog_error_t wyl_handle_make_guard_context_compound_locked
     (WylHandle * self, gint64 timestamp, gint64 loc_class_id, gint64 risk,
     gint64 scope_id, gint64 * out_id);
 static void poison_engine_pair_locked (WylHandle * self);
+static wyrelog_error_t fail_partial_engine_pair_mutation_locked
+    (WylHandle * self, wyrelog_error_t failure);
 static gboolean engine_pair_unavailable (WylHandle * self);
 static void wyl_handle_buffer_delta_cb (const gchar * relation,
     const gint64 * row, guint ncols, WylDeltaKind kind, gpointer user_data);
