@@ -2190,6 +2190,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   rc = load_current_engine_pair (self);
   self->engine_pair_replacement_building = FALSE;
   if (rc != WYRELOG_E_OK) {
+    clear_pending_deltas (self);
     g_clear_object (&self->read_engine);
     g_clear_object (&self->delta_engine);
     g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
@@ -2204,6 +2205,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
     rc = wyl_engine_owned_set_delta_callback (self->delta_engine,
         wyl_handle_buffer_delta_cb, self);
     if (rc != WYRELOG_E_OK) {
+      clear_pending_deltas (self);
       g_clear_object (&self->read_engine);
       g_clear_object (&self->delta_engine);
       g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
@@ -2608,8 +2610,10 @@ repair_engine_pair_after_projection_failure (WylHandle *self)
   /* Candidate loading already runs inside the serialized replacement. Its
    * caller will discard the candidate on any projection error; recursively
    * replacing here would rebuild from inside its own rebuild. */
-  if (self->engine_pair_replacement_building)
+  if (self->engine_pair_replacement_building) {
+    clear_pending_deltas (self);
     return WYRELOG_E_OK;
+  }
   return replace_live_engine_pair_serialized (self, TRUE);
 }
 

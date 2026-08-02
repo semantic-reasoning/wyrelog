@@ -299,6 +299,42 @@ typedef struct
   wyrelog_error_t rc;
 } ServiceProjectionFaultWorker;
 
+typedef struct
+{
+  guint total;
+  guint service_principal_state;
+} ServiceProjectionDeltaWitness;
+
+static void
+service_projection_delta_witness (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  ServiceProjectionDeltaWitness *witness = user_data;
+  (void) row;
+  (void) ncols;
+  (void) kind;
+  witness->total++;
+  if (g_strcmp0 (relation, "service_principal_state") == 0)
+    witness->service_principal_state++;
+}
+
+static void
+emit_successful_delta_witness (WylHandle *handle, const gchar *suffix)
+{
+  gint64 row[3];
+  g_autofree gchar *subject = g_strdup_printf ("delta-subject-%s", suffix);
+  g_autofree gchar *role = g_strdup_printf ("delta-role-%s", suffix);
+  g_autofree gchar *scope = g_strdup_printf ("delta-scope-%s", suffix);
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, subject, &row[0]),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, role, &row[1]), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, scope, &row[2]),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_insert (handle, "member_of", row,
+          G_N_ELEMENTS (row)), ==, WYRELOG_E_OK);
+}
+
 static gpointer
 service_projection_fault_worker (gpointer data)
 {
@@ -347,6 +383,12 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
     wyl_service_principal_clear (&principal);
   }
 
+  ServiceProjectionDeltaWitness delta_witness = { 0 };
+  if (step_fault)
+    g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
+            service_projection_delta_witness, &delta_witness), ==,
+        WYRELOG_E_OK);
+
   if (step_fault)
     wyl_handle_set_engine_delta_step_fault_once (handle,
         "service_principal_state", WYRELOG_E_IO);
@@ -385,6 +427,13 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
       (wyl_handle_get_service_auth_authority (handle), handle, NULL,
           &read_lease), ==, WYRELOG_E_BUSY);
   g_assert_null (read_lease);
+  if (step_fault) {
+    g_assert_cmpuint (delta_witness.total, ==, 0);
+    g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
+    emit_successful_delta_witness (handle, "latched");
+    g_assert_cmpuint (delta_witness.total, >, 0);
+    g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
+  }
 
   wyl_service_principal_t durable = { 0 };
   g_assert_cmpint (wyl_service_principal_get (handle, subject, &durable), ==,
@@ -406,6 +455,15 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
       (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+  if (step_fault) {
+    memset (&delta_witness, 0, sizeof delta_witness);
+    g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
+            service_projection_delta_witness, &delta_witness), ==,
+        WYRELOG_E_OK);
+    emit_successful_delta_witness (handle, "reopened");
+    g_assert_cmpuint (delta_witness.total, >, 0);
+    g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
+  }
 
   g_cond_clear (&worker.changed);
   g_mutex_clear (&worker.mutex);
