@@ -264,6 +264,35 @@ context and is authorized again while its READ or WRITE service-authority lease
 is held. Principal routes require `wr.service_principal.manage`; credential and
 operation routes require `wr.service_credential.manage`.
 
+### Service-authority WRITE terminalization
+
+A daemon service-authority WRITE owner acquires resources in the order lease
+(rank 1), engine session (rank 2), policy-store pin (rank 3), request context
+(rank 4), and registry state (rank 5). Every terminal path unwinds that order
+in reverse, closes any authority transaction and maintenance claim, and then
+explicitly finalizes the WRITE lease. A route must not access the borrowed
+policy store after finalization and must not attach a success status, header,
+or body before finalization succeeds. The wrapper destructor is only a
+non-asserting fail-closed emergency path; production owners explicitly
+finalize, and repeated finalization returns the first cached result without
+entering terminal release again.
+
+Terminal release checks the store pin, lock rank, and sole-owner accounting.
+Any inconsistency latches service authentication unavailable for the remaining
+daemon process lifetime. Cleanup failure dominates the route result and emits
+HTTP 500 with `policy_write_cleanup_failed`, even when the primary operation
+had otherwise succeeded or failed differently. A durable mutation may already
+have committed before cleanup failed, so this response never represents a
+rollback or proves that no commit occurred. Diagnostics contain only the
+primary HTTP status and error code plus the numeric cleanup result; they must
+not include credentials, tokens, actors, tenants, request paths, or bodies.
+
+There is deliberately no in-process reset path for the unavailable latch.
+Human authentication, health, and ordinary decision handling remain available,
+but subsequent service-authority WRITE acquisition fails closed. Only daemon
+restart, which constructs a fresh handle and authority coordinator, restores
+service-management availability after the underlying fault is corrected.
+
 The management bearer tenant and the managed target tenant are deliberately
 different concepts. Credential and operation requests select their target with
 the `tenant` query parameter while authentication stays rooted in

@@ -562,6 +562,30 @@ Semantics:
   but is not the primary control — the profile, loopback, MFA-session, and role
   checks above are.
 
+### Service-authority cleanup failures
+
+Every service-management mutation finalizes its exclusive service-authority
+WRITE lease before the daemon sends response status, headers, or body. If that
+terminal cleanup detects inconsistent lock-rank, store-pin, or ownership state,
+cleanup takes precedence over the route result: the daemon returns HTTP 500
+with `policy_write_cleanup_failed` and refuses later service-authority WRITE
+requests for the lifetime of that process.
+
+Treat this response as an indeterminate mutation outcome. Durable work may
+already have committed, and the 500 response neither rolls it back nor proves
+that it did not commit. Preserve the request id, inspect the authoritative
+resource or operation state with a human session, and do not retry the mutation
+under a new id. The diagnostic log records only the primary status/error code
+and numeric cleanup result; it intentionally omits credentials, tokens, actors,
+tenants, paths, and request bodies.
+
+There is no reset endpoint for this fail-closed latch. Health, human
+authentication, and ordinary policy decisions remain available. Correct the
+underlying deployment or storage problem and restart the affected daemon to
+construct a fresh authority coordinator, then obtain a fresh human token,
+re-arm service-management authority, and verify the authoritative state before
+retrying with the original request id where that operation supports one.
+
 ```
 wyctl service-credential issue \
   --tenant <tenant> \
