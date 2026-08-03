@@ -500,8 +500,18 @@ void wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test
     (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_seal_verification_for_test
     (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_seal_write_release_for_test
+    (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_recovery_repair_for_test
+    (SoupServer * server);
+gboolean wyl_daemon_http_take_tenant_recovery_repair_failure_for_test
+    (SoupServer * server);
+void wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test
+    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test
     (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
+void wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
+    (guint * out_allocations, guint * out_frees);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
     (SoupServer * server);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test

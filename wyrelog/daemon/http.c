@@ -290,9 +290,9 @@ typedef enum
 
 typedef struct
 {
+  gint ref_count;
   WylHandle *handle;
   guint64 id;
-  WylTenantRecoveryState state;
   WylTenantRecoveryOperation operation;
   gchar *tenant;
   gboolean expected_active;
@@ -314,10 +314,15 @@ typedef struct
   gboolean invalidation_completed;
 } WylTenantRecoveryDescriptor;
 
+#ifdef WYL_TEST_DAEMON_HTTP
+static gint tenant_recovery_descriptor_allocations;
+static gint tenant_recovery_descriptor_frees;
+#endif
+
 static void
-tenant_recovery_descriptor_free (WylTenantRecoveryDescriptor *descriptor)
+tenant_recovery_descriptor_unref (WylTenantRecoveryDescriptor *descriptor)
 {
-  if (descriptor == NULL)
+  if (descriptor == NULL || !g_atomic_int_dec_and_test (&descriptor->ref_count))
     return;
   g_clear_object (&descriptor->handle);
   g_free (descriptor->tenant);
@@ -332,7 +337,33 @@ tenant_recovery_descriptor_free (WylTenantRecoveryDescriptor *descriptor)
   g_free (descriptor->receipt_actor);
   sodium_memzero (descriptor->receipt_fingerprint,
       sizeof descriptor->receipt_fingerprint);
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_atomic_int_inc (&tenant_recovery_descriptor_frees);
+#endif
   g_free (descriptor);
+}
+
+static WylTenantRecoveryDescriptor *
+tenant_recovery_descriptor_ref (WylTenantRecoveryDescriptor *descriptor)
+{
+  if (descriptor != NULL)
+    g_atomic_int_inc (&descriptor->ref_count);
+  return descriptor;
+}
+
+typedef struct
+{
+  WylTenantRecoveryDescriptor *descriptor;
+  WylTenantRecoveryState state;
+} WylTenantRecoverySlot;
+
+static void
+tenant_recovery_slot_free (WylTenantRecoverySlot *slot)
+{
+  if (slot == NULL)
+    return;
+  tenant_recovery_descriptor_unref (slot->descriptor);
+  g_free (slot);
 }
 
 typedef struct _WylDaemonHttpContext
@@ -392,7 +423,7 @@ typedef struct _WylDaemonHttpContext
   guint64 next_refresh_epoch;
   guint64 next_refresh_claim;
   guint64 next_tenant_recovery_id;
-  WylTenantRecoveryDescriptor *tenant_recovery;
+  WylTenantRecoverySlot *tenant_recovery;
   /* Wall-clock seconds, clamped monotonically for service JWT lifetime. */
   gint64 service_auth_clock_floor;
   gboolean shutting_down;
@@ -421,6 +452,10 @@ typedef struct _WylDaemonHttpContext
   gboolean fail_next_tenant_lifecycle_audit_insert;
   gboolean fail_next_tenant_lifecycle_verification;
   gboolean fail_next_tenant_seal_verification;
+  gboolean fail_next_tenant_seal_write_release;
+  gboolean fail_next_tenant_recovery_repair;
+  void (*tenant_recovery_install_checkpoint) (gpointer data);
+  gpointer tenant_recovery_install_checkpoint_data;
   void (*tenant_recovery_claim_checkpoint) (gpointer data);
   gpointer tenant_recovery_claim_checkpoint_data;
   guint resolver_terminal_entries;
@@ -1223,7 +1258,7 @@ wyl_daemon_http_context_unref (gpointer data)
   g_hash_table_unref (ctx->refresh_tokens_by_token);
   g_hash_table_unref (ctx->mfa_enroll_challenges);
   g_clear_pointer (&ctx->revoked_session_tokens, g_hash_table_unref);
-  g_clear_pointer (&ctx->tenant_recovery, tenant_recovery_descriptor_free);
+  g_clear_pointer (&ctx->tenant_recovery, tenant_recovery_slot_free);
   g_clear_pointer (&ctx->dispatch_context, g_main_context_unref);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_clear_pointer (&ctx->last_service_publication_token,
@@ -2992,6 +3027,53 @@ void wyl_daemon_http_fail_next_tenant_seal_verification_for_test
   g_mutex_unlock (&ctx->lock);
 }
 
+void wyl_daemon_http_fail_next_tenant_seal_write_release_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_tenant_seal_write_release = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_fail_next_tenant_recovery_repair_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_tenant_recovery_repair = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+gboolean wyl_daemon_http_take_tenant_recovery_repair_failure_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  gboolean pending = ctx->fail_next_tenant_recovery_repair;
+  ctx->fail_next_tenant_recovery_repair = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  return pending;
+}
+
+void wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test
+    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->tenant_recovery_install_checkpoint = checkpoint;
+  ctx->tenant_recovery_install_checkpoint_data = data;
+  g_mutex_unlock (&ctx->lock);
+}
+
 void wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test
     (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data)
 {
@@ -3002,6 +3084,16 @@ void wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test
   ctx->tenant_recovery_claim_checkpoint = checkpoint;
   ctx->tenant_recovery_claim_checkpoint_data = data;
   g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
+    (guint * out_allocations, guint * out_frees)
+{
+  if (out_allocations != NULL)
+    *out_allocations = (guint) g_atomic_int_get
+        (&tenant_recovery_descriptor_allocations);
+  if (out_frees != NULL)
+    *out_frees = (guint) g_atomic_int_get (&tenant_recovery_descriptor_frees);
 }
 
 guint
@@ -8318,8 +8410,11 @@ tenant_recovery_descriptor_new (WylHandle *handle,
     return NULL;
   WylTenantRecoveryDescriptor *descriptor =
       g_new0 (WylTenantRecoveryDescriptor, 1);
+  descriptor->ref_count = 1;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_atomic_int_inc (&tenant_recovery_descriptor_allocations);
+#endif
   descriptor->handle = g_object_ref (handle);
-  descriptor->state = WYL_TENANT_RECOVERY_PENDING;
   descriptor->operation = operation;
   descriptor->tenant = g_strdup (tenant);
   descriptor->expected_active = operation != WYL_TENANT_RECOVERY_SEAL;
@@ -8340,7 +8435,7 @@ tenant_recovery_descriptor_new (WylHandle *handle,
       || descriptor->audit_subject == NULL || descriptor->audit_action == NULL
       || descriptor->audit_resource == NULL
       || descriptor->audit_request_id == NULL) {
-    tenant_recovery_descriptor_free (descriptor);
+    tenant_recovery_descriptor_unref (descriptor);
     return NULL;
   }
   return descriptor;
@@ -8369,8 +8464,11 @@ tenant_seal_recovery_descriptor_new (WylHandle *handle,
     return NULL;
   WylTenantRecoveryDescriptor *descriptor =
       g_new0 (WylTenantRecoveryDescriptor, 1);
+  descriptor->ref_count = 1;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_atomic_int_inc (&tenant_recovery_descriptor_allocations);
+#endif
   descriptor->handle = g_object_ref (handle);
-  descriptor->state = WYL_TENANT_RECOVERY_PENDING;
   descriptor->operation = WYL_TENANT_RECOVERY_SEAL;
   descriptor->tenant = g_strdup (recovery->tenant_id);
   descriptor->expected_active = FALSE;
@@ -8396,7 +8494,7 @@ tenant_seal_recovery_descriptor_new (WylHandle *handle,
       || descriptor->audit_request_id == NULL
       || descriptor->receipt_request_id == NULL
       || descriptor->receipt_actor == NULL) {
-    tenant_recovery_descriptor_free (descriptor);
+    tenant_recovery_descriptor_unref (descriptor);
     return NULL;
   }
   return descriptor;
@@ -8413,7 +8511,9 @@ tenant_recovery_install (WylDaemonHttpContext *ctx,
       ? WYRELOG_E_OK : WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK) {
     descriptor->id = human_refresh_next_nonzero (&ctx->next_tenant_recovery_id);
-    ctx->tenant_recovery = descriptor;
+    ctx->tenant_recovery = g_new0 (WylTenantRecoverySlot, 1);
+    ctx->tenant_recovery->descriptor = descriptor;
+    ctx->tenant_recovery->state = WYL_TENANT_RECOVERY_PENDING;
   }
   g_mutex_unlock (&ctx->lock);
   return rc;
@@ -8426,17 +8526,41 @@ tenant_seal_recovery_retain (const WylTenantSealPublicationRecovery *recovery,
   WylTenantSealRecoveryLatch *latch = data;
   if (latch == NULL || latch->ctx == NULL || latch->installed_id != 0)
     return WYRELOG_E_INVALID;
+  WylDaemonHttpContext *ctx = latch->ctx;
   WylTenantRecoveryDescriptor *descriptor =
-      tenant_seal_recovery_descriptor_new (latch->ctx->handle, recovery);
+      tenant_seal_recovery_descriptor_new (ctx->handle, recovery);
   if (descriptor == NULL)
     return WYRELOG_E_NOMEM;
-  wyrelog_error_t rc = tenant_recovery_install (latch->ctx, descriptor);
-  if (rc == WYRELOG_E_OK)
+  wyrelog_error_t rc = tenant_recovery_install (ctx, descriptor);
+  if (rc == WYRELOG_E_OK) {
     latch->installed_id = descriptor->id;
-  else
-    tenant_recovery_descriptor_free (descriptor);
+#ifdef WYL_TEST_DAEMON_HTTP
+    void (*checkpoint) (gpointer data) = NULL;
+    gpointer checkpoint_data = NULL;
+    g_mutex_lock (&ctx->lock);
+    checkpoint = ctx->tenant_recovery_install_checkpoint;
+    checkpoint_data = ctx->tenant_recovery_install_checkpoint_data;
+    ctx->tenant_recovery_install_checkpoint = NULL;
+    ctx->tenant_recovery_install_checkpoint_data = NULL;
+    g_mutex_unlock (&ctx->lock);
+    if (checkpoint != NULL)
+      checkpoint (checkpoint_data);
+#endif
+  } else {
+    tenant_recovery_descriptor_unref (descriptor);
+  }
   return rc;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+static void
+tenant_seal_recovery_fail_write_release (WylServiceAuthWriteLease *lease,
+    gpointer data)
+{
+  (void) data;
+  wyl_service_auth_write_lease_test_fail_release_once (lease);
+}
+#endif
 
 static void
 tenant_seal_recovery_discard (gpointer data)
@@ -8445,15 +8569,15 @@ tenant_seal_recovery_discard (gpointer data)
   if (latch == NULL || latch->ctx == NULL || latch->installed_id == 0)
     return;
   WylDaemonHttpContext *ctx = latch->ctx;
-  WylTenantRecoveryDescriptor *discarded = NULL;
+  WylTenantRecoverySlot *discarded = NULL;
   g_mutex_lock (&ctx->lock);
   if (ctx->tenant_recovery != NULL
-      && ctx->tenant_recovery->id == latch->installed_id) {
+      && ctx->tenant_recovery->descriptor->id == latch->installed_id) {
     discarded = ctx->tenant_recovery;
     ctx->tenant_recovery = NULL;
   }
   g_mutex_unlock (&ctx->lock);
-  tenant_recovery_descriptor_free (discarded);
+  tenant_recovery_slot_free (discarded);
   latch->installed_id = 0;
 }
 
@@ -8468,7 +8592,9 @@ tenant_recovery_claim (WylDaemonHttpContext *ctx,
   if (ctx == NULL || tenant == NULL || out_descriptor == NULL)
     return WYL_TENANT_RECOVERY_CLAIM_MISMATCH;
   g_mutex_lock (&ctx->lock);
-  WylTenantRecoveryDescriptor *descriptor = ctx->tenant_recovery;
+  WylTenantRecoverySlot *slot = ctx->tenant_recovery;
+  WylTenantRecoveryDescriptor *descriptor =
+      slot != NULL ? slot->descriptor : NULL;
   WylTenantRecoveryClaimResult result = WYL_TENANT_RECOVERY_CLAIM_NONE;
   if (descriptor != NULL) {
     gboolean matches = descriptor->handle == ctx->handle
@@ -8480,11 +8606,11 @@ tenant_recovery_claim (WylDaemonHttpContext *ctx,
           receipt_request_id) == 0;
     if (!matches) {
       result = WYL_TENANT_RECOVERY_CLAIM_MISMATCH;
-    } else if (descriptor->state == WYL_TENANT_RECOVERY_CLAIMED) {
+    } else if (slot->state == WYL_TENANT_RECOVERY_CLAIMED) {
       result = WYL_TENANT_RECOVERY_CLAIM_BUSY;
     } else {
-      descriptor->state = WYL_TENANT_RECOVERY_CLAIMED;
-      *out_descriptor = descriptor;
+      slot->state = WYL_TENANT_RECOVERY_CLAIMED;
+      *out_descriptor = tenant_recovery_descriptor_ref (descriptor);
       result = WYL_TENANT_RECOVERY_CLAIM_MATCHED;
     }
   }
@@ -8496,20 +8622,38 @@ static void
 tenant_recovery_finish_claim (WylDaemonHttpContext *ctx,
     WylTenantRecoveryDescriptor *descriptor, gboolean consume)
 {
-  WylTenantRecoveryDescriptor *consumed = NULL;
+  WylTenantRecoverySlot *consumed = NULL;
   g_mutex_lock (&ctx->lock);
-  if (descriptor != NULL && ctx->tenant_recovery == descriptor
-      && ctx->tenant_recovery->id == descriptor->id
-      && descriptor->state == WYL_TENANT_RECOVERY_CLAIMED) {
+  if (descriptor != NULL && ctx->tenant_recovery != NULL
+      && ctx->tenant_recovery->descriptor == descriptor
+      && ctx->tenant_recovery->descriptor->id == descriptor->id
+      && ctx->tenant_recovery->state == WYL_TENANT_RECOVERY_CLAIMED) {
     if (consume) {
-      consumed = descriptor;
+      consumed = ctx->tenant_recovery;
       ctx->tenant_recovery = NULL;
     } else {
-      descriptor->state = WYL_TENANT_RECOVERY_PENDING;
+      ctx->tenant_recovery->state = WYL_TENANT_RECOVERY_PENDING;
     }
   }
   g_mutex_unlock (&ctx->lock);
-  tenant_recovery_descriptor_free (consumed);
+  tenant_recovery_slot_free (consumed);
+  tenant_recovery_descriptor_unref (descriptor);
+}
+
+static gboolean
+tenant_recovery_claim_is_current (WylDaemonHttpContext *ctx,
+    const WylTenantRecoveryDescriptor *descriptor)
+{
+  if (ctx == NULL || descriptor == NULL)
+    return FALSE;
+  if (service_publication_context_lock (ctx) != WYRELOG_E_OK)
+    return FALSE;
+  gboolean current = ctx->tenant_recovery != NULL
+      && ctx->tenant_recovery->descriptor == descriptor
+      && ctx->tenant_recovery->descriptor->id == descriptor->id
+      && ctx->tenant_recovery->state == WYL_TENANT_RECOVERY_CLAIMED;
+  return service_publication_context_unlock (ctx, WYRELOG_E_OK)
+      == WYRELOG_E_OK && current;
 }
 
 static wyrelog_error_t
@@ -8586,6 +8730,14 @@ tenant_recovery_repair_with_write (WylDaemonHttpContext *ctx,
       || write->lease == NULL || write->store == NULL
       || descriptor->handle != ctx->handle)
     return WYRELOG_E_INVALID;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  gboolean fail_repair = ctx->fail_next_tenant_recovery_repair;
+  ctx->fail_next_tenant_recovery_repair = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  if (fail_repair)
+    return WYRELOG_E_INTERNAL;
+#endif
   if (descriptor->operation == WYL_TENANT_RECOVERY_SEAL) {
     WylPolicyTenantSealReceiptProof proof = { 0 };
     wyrelog_error_t proof_rc =
@@ -8664,6 +8816,8 @@ tenant_recovery_attempt_before_authorization (WylDaemonHttpContext *ctx,
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, NULL,
       WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
+  if (rc == WYRELOG_E_OK && !tenant_recovery_claim_is_current (ctx, descriptor))
+    rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK)
     rc = tenant_recovery_repair_with_write (ctx, &write, descriptor);
   if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
@@ -8853,18 +9007,27 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     WylTenantSealRecoveryLatch recovery_latch = {
       .ctx = ctx,
     };
-    gboolean test_verify_opposite_state = FALSE;
 #ifdef WYL_TEST_DAEMON_HTTP
+    gboolean test_verify_opposite_state = FALSE;
+    gboolean test_fail_write_release = FALSE;
     g_mutex_lock (&ctx->lock);
     test_verify_opposite_state = ctx->fail_next_tenant_seal_verification;
+    test_fail_write_release = ctx->fail_next_tenant_seal_write_release;
     ctx->fail_next_tenant_seal_verification = FALSE;
+    ctx->fail_next_tenant_seal_write_release = FALSE;
     g_mutex_unlock (&ctx->lock);
 #endif
     wyl_tenant_seal_runtime_t runtime = {
       .registry = ctx->service_auth_registry,
+#ifdef WYL_TEST_DAEMON_HTTP
+      .before_write_release = test_fail_write_release
+          ? tenant_seal_recovery_fail_write_release : NULL,
+#endif
       .retain_publication_recovery = tenant_seal_recovery_retain,
       .discard_publication_recovery = tenant_seal_recovery_discard,
+#ifdef WYL_TEST_DAEMON_HTTP
       .test_verify_opposite_state = test_verify_opposite_state,
+#endif
       .authorization = &authorization,
       .data = &recovery_latch,
     };
@@ -8927,7 +9090,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
               ? tenant_recovery_install (ctx, descriptor)
               : WYRELOG_E_NOMEM;
           if (install_rc != WYRELOG_E_OK)
-            tenant_recovery_descriptor_free (descriptor);
+            tenant_recovery_descriptor_unref (descriptor);
           if (install_rc != WYRELOG_E_OK)
             rc = install_rc;
         }
