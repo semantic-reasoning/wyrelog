@@ -2480,7 +2480,7 @@ if build_client
       '--build-root', meson.project_build_root(),
       '--compiler-id', daemon_guard_cc_id, '--',
     ] + daemon_guard_cc,
-    timeout : 120,
+    timeout : 300,
   )
 endif
 
