@@ -266,10 +266,11 @@ def main():
             "    g_clear_pointer (&engine_session, wyl_engine_session_release);\n"
             "  }\n  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)\n"
             "    rc = wyl_daemon_policy_write_record_primary (&write, rc);"),
-        "raw-store-getter": source.replace(
-            "wyl_policy_store_create_tenant (write.store, tenant, &changed)",
+        "raw-store-getter": mutate_function(source,
+            "mutate_tenant_lifecycle_publication",
+            "wyl_policy_store_create_tenant (store, publication->tenant,",
             "wyl_policy_store_create_tenant "
-            "(wyl_handle_get_policy_store (ctx->handle), tenant, &changed)", 1),
+            "(wyl_handle_get_policy_store (NULL), publication->tenant,"),
         "tenant-delete-missing": mutate_function(source,
             "tenant_mutation_handler", "if (g_strcmp0 (action",
             "if (g_strcmp0_disabled (action"),
@@ -277,9 +278,18 @@ def main():
             facts_publication_acquire,
             "wyl_daemon_policy_write_acquire_removed (ctx, msg, &write);"),
         "outside-mutator": source + "\nvoid bad(void){ wyl_perm_grant (NULL, NULL); }\n",
+        "outside-create-tenant": source +
+            "\nvoid bad(void){ wyl_policy_store_create_tenant "
+            "(NULL, NULL, NULL); }\n",
         "outside-generic-publication": source +
             "\nvoid bad(void){ wyl_engine_session_run_committed_publication "
             "(NULL, NULL, NULL, NULL, NULL, NULL, NULL); }\n",
+        "publication-callback-acquire": mutate_function(source,
+            "mutate_tenant_lifecycle_publication",
+            "TenantLifecyclePublication *publication = data;",
+            "TenantLifecyclePublication *publication = data;\n"
+            "  (void) wyl_daemon_policy_write_acquire "
+            "(NULL, NULL, 0, NULL);"),
         "shadow-write": mutate_function(source, "tenant_mutation_handler",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };\n"

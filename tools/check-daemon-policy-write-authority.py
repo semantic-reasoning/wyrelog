@@ -26,6 +26,7 @@ FUNCTIONS = (
     "set_json_error", "set_json_ok",
     "set_tenant_mutation_json", "set_graph_mutation_json",
     "set_schema_ok_json", "set_fact_op_json",
+    "mutate_tenant_lifecycle_publication",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler",
     "graph_create_handler", "graph_seal_handler", "schema_register_handler",
@@ -126,6 +127,9 @@ ALLOW_ACQUIRE = {
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
     "service_management_authority_arm_handler",
+}
+ALLOW_MUTATORS = ALLOW_ACQUIRE | {
+    "mutate_tenant_lifecycle_publication",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
@@ -598,7 +602,7 @@ def global_invariants(tokens,defs):
             raise GuardError(f"authority symbol alias/reference is forbidden: {v}")
         if v=="wyl_daemon_policy_write_acquire" and values[i+1]=="(":
             if owner.get(i) is not None and owner.get(i) not in ALLOW_ACQUIRE: raise GuardError(f"acquire outside allowlist: {owner.get(i)}")
-        if v in MUTATORS and values[i+1]=="(" and owner.get(i) is not None and owner.get(i) not in ALLOW_ACQUIRE:
+        if v in MUTATORS and values[i+1]=="(" and owner.get(i) is not None and owner.get(i) not in ALLOW_MUTATORS:
             raise GuardError(f"authority mutator outside allowlist: {v}")
         if v in ("wyl_daemon_policy_write_clear","wyl_service_auth_write_lease_release","wyl_service_auth_write_lease_free") and owner.get(i) in ALLOW_ACQUIRE-set(("wyl_daemon_policy_write_acquire",)):
             raise GuardError(f"manual WRITE cleanup in {owner.get(i)}")
@@ -637,7 +641,7 @@ def raw_global_invariants(tokens, defs, check_directives=True):
             raise GuardError(f"raw authority symbol alias/reference is forbidden: {v}")
         if v=="wyl_daemon_policy_write_acquire" and i+1<len(values) and values[i+1]=="(" and owner.get(i) not in ALLOW_ACQUIRE:
             raise GuardError(f"raw acquire outside allowlist: {owner.get(i)}")
-        if v in MUTATORS and i+1<len(values) and values[i+1]=="(" and owner.get(i) not in ALLOW_ACQUIRE:
+        if v in MUTATORS and i+1<len(values) and values[i+1]=="(" and owner.get(i) not in ALLOW_MUTATORS:
             raise GuardError(f"raw authority mutator outside allowlist: {v}")
         if v in ("g_mutex_lock","g_mutex_unlock","g_mutex_trylock","g_mutex_lock_full") and i+1<len(values) and values[i+1]=="(":
             if v not in ("g_mutex_lock","g_mutex_unlock") or values[i+2:i+6] != ["&","ctx","->","lock"]:

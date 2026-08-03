@@ -56,6 +56,22 @@ retry returns the original `changed` result without another audit, receipt,
 authority transition, or service-session invalidation. A fresh key against an
 already stable sealed tenant is an audited no-op with `changed:false`.
 
+Tenant lifecycle state is also decision state. Every registered tenant is
+projected into the policy engine's `session_state(scope, state)` input: an
+unsealed tenant projects `active`, and a sealed tenant projects `closed`.
+Create, seal, and unseal publish a complete durable snapshot before returning
+success, so subsequent decisions observe the new state without a daemon
+restart or manual policy reload. If a legacy human-session row uses the same
+textual identifier as a tenant, the tenant row is authoritative for that
+scope; the human row and its event history remain durable and become visible
+again only if that identifier is no longer owned by the tenant registry.
+
+Private templates that omit `session_state` remain compatible only with the
+pristine built-in `__wr_default` tenant and no durable human session states.
+Once another tenant or human state exists, opening such a template fails
+closed. A declared `session_state` relation must have exactly two non-compound
+symbol columns.
+
 Tenant seal does not perform the graph-drain lifecycle owned by #549.
 `active`, `sealing`, or `unsealing` therefore returns
 `503 tenant_lifecycle_coordination_required` without mutation. If an earlier

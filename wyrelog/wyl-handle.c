@@ -355,6 +355,33 @@ wyl_engine_session_release (WylEngineSession *session)
 }
 
 wyrelog_error_t
+    wyl_engine_session_begin_external_service_authority_transaction
+    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+    guint64 expected_generation, WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction) {
+  if (out_transaction != NULL)
+    *out_transaction = NULL;
+  if (!engine_session_is_valid (session) || expected_store == NULL
+      || expected_generation == 0 || write_lease == NULL
+      || out_transaction == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylHandle *self = session->handle;
+  if (session->acquisition_depth != 1 || self->engine_session_depth != 1
+      || self->engine_delta_callback_depth > 0)
+    return WYRELOG_E_BUSY;
+  if (!wyl_service_auth_rank_has_external_publication_prefix (self))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_handle_policy_store_validate_generation (self,
+      expected_store, expected_generation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return
+      wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
+      (expected_store, self, write_lease, out_transaction);
+}
+
+wyrelog_error_t
 wyl_engine_session_intern_symbol (WylEngineSession *session,
     const gchar *symbol, gint64 *out_id)
 {

@@ -19,6 +19,10 @@ typedef struct
   WylServiceAuthWriteLease *lease;
   WylServiceAuthorityTransaction *transaction;
   WylServiceAuthorityCommitEvidence *evidence;
+  WylEngineSession *engine_session;
+  guint64 policy_store_generation;
+  WylEnginePublicationVerifier publication_verify;
+  gpointer publication_verify_data;
   gboolean owns_handle_pin;
   WylServiceAuthRegistryWriteParticipant *registry_participant;
   WylServiceAuthSelector invalidation_selector;
@@ -57,6 +61,12 @@ service_mutation_begin (WylHandle *handle, ServiceMutation *mutation)
 static wyrelog_error_t
 service_mutation_start_transaction (ServiceMutation *mutation)
 {
+  if (mutation->engine_session != NULL)
+    return
+        wyl_engine_session_begin_external_service_authority_transaction
+        (mutation->engine_session, mutation->store,
+        mutation->policy_store_generation, mutation->lease,
+        &mutation->transaction);
   return wyl_policy_store_service_authority_transaction_begin
       (mutation->store, mutation->handle, mutation->lease,
       &mutation->transaction);
@@ -84,6 +94,24 @@ service_mutation_prepare_commit_evidence (ServiceMutation *mutation)
 }
 
 static wyrelog_error_t
+service_mutation_prepare_engine_publication (ServiceMutation *mutation,
+    WylEnginePublicationVerifier verify, gpointer verify_data)
+{
+  if (mutation == NULL || mutation->store == NULL || verify == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_handle_policy_store_capture_generation
+      (mutation->handle, mutation->store, &mutation->policy_store_generation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  mutation->engine_session = wyl_engine_session_acquire (mutation->handle);
+  if (mutation->engine_session == NULL)
+    return WYRELOG_E_BUSY;
+  mutation->publication_verify = verify;
+  mutation->publication_verify_data = verify_data;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 service_mutation_authorize (ServiceMutation *mutation,
     const wyl_service_credential_mutation_authorization_t *authorization,
     const gchar *actor_subject_id)
@@ -94,6 +122,25 @@ service_mutation_authorize (ServiceMutation *mutation,
       || authorization->authorize == NULL)
     return WYRELOG_E_INVALID;
   return authorization->authorize (authorization->data, actor_subject_id);
+}
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *state;
+} TenantScopePublication;
+
+static wyrelog_error_t
+verify_tenant_scope_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  TenantScopePublication *publication = data;
+  gint64 symbol_id = 0;
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      publication->tenant_id, &symbol_id);
+  return rc == WYRELOG_E_OK ?
+      wyl_engine_verification_lookup_symbol (verification,
+      publication->state, &symbol_id) : rc;
 }
 
 static wyrelog_error_t
@@ -210,6 +257,21 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     }
     wyl_policy_store_service_authority_transaction_free (mutation->transaction);
     mutation->transaction = NULL;
+  }
+  if (mutation->engine_session != NULL) {
+    WylDurableCommitState commit_state =
+        outcome == SERVICE_MUTATION_COMMITTED ? WYL_DURABLE_COMMIT_COMMITTED :
+        outcome == SERVICE_MUTATION_UNCERTAIN ? WYL_DURABLE_COMMIT_UNCERTAIN :
+        WYL_DURABLE_COMMIT_NOT_COMMITTED;
+    wyrelog_error_t publication =
+        wyl_engine_session_finish_external_publication
+        (mutation->engine_session, mutation->store,
+        mutation->policy_store_generation, commit_state,
+        mutation->publication_verify, mutation->publication_verify_data);
+    wyl_engine_session_release (mutation->engine_session);
+    mutation->engine_session = NULL;
+    if (publication != WYRELOG_E_OK && result == WYRELOG_E_OK)
+      result = publication;
   }
   wyrelog_error_t invalidate = WYRELOG_E_OK;
   if ((outcome == SERVICE_MUTATION_COMMITTED
@@ -514,6 +576,13 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_authorize (&mutation, runtime->authorization,
         actor_subject_id);
+  TenantScopePublication publication = {
+    .tenant_id = tenant_id,
+    .state = "closed",
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_prepare_engine_publication (&mutation,
+        verify_tenant_scope_publication, &publication);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   WylPolicyServiceRetirementOutcome stored_retirement = { 0 };

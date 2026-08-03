@@ -130,6 +130,16 @@ wyl_service_auth_rank_is_held (WylHandle *handle, WylServiceAuthRank rank)
   return FALSE;
 }
 
+gboolean
+wyl_service_auth_rank_has_external_publication_prefix (WylHandle *handle)
+{
+  WylServiceAuthRankState *state = rank_state_get (FALSE);
+  return WYL_IS_HANDLE (handle) && state != NULL && state->depth == 2
+      && state->handles[0] == handle && state->handles[1] == handle
+      && state->ranks[0] == WYL_SERVICE_AUTH_RANK_COORDINATION
+      && state->ranks[1] == WYL_SERVICE_AUTH_RANK_ENGINE;
+}
+
 struct _WylServiceAuthReadLease
 {
   WylServiceAuthAuthority *authority;
@@ -664,6 +674,39 @@ wyrelog_error_t
   g_mutex_lock (&lease->authority->mutex);
   wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
       WYL_SERVICE_AUTH_RANK_COORDINATION);
+  if (rc == WYRELOG_E_OK && !lease->transaction_claimed)
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    lease->transaction_claimed = FALSE;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_write_lease_claim_external_publication_transaction
+    (WylServiceAuthWriteLease * lease, WylHandle * handle) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
+      WYL_SERVICE_AUTH_RANK_ENGINE);
+  if (rc == WYRELOG_E_OK && (lease->cleanup_only
+          || lease->transaction_claimed || lease->maintenance_claimed))
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    lease->transaction_claimed = TRUE;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_write_lease_unclaim_external_publication_transaction
+    (WylServiceAuthWriteLease * lease, WylHandle * handle) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
+      WYL_SERVICE_AUTH_RANK_ENGINE);
   if (rc == WYRELOG_E_OK && !lease->transaction_claimed)
     rc = WYRELOG_E_INVALID;
   if (rc == WYRELOG_E_OK)
