@@ -382,7 +382,7 @@ def has_token_sequence(values, expected):
     return any(values[i:i+width]==list(expected)
         for i in range(len(values)-width+1))
 
-def mask_comments(source):
+def mask_comments_and_literals(source):
     out=list(source)
     i=0
     while i<len(source):
@@ -408,11 +408,13 @@ def mask_comments(source):
             i=end+2
             continue
         if source[i] in "\"'":
-            quote=source[i]; i+=1
+            start=i; quote=source[i]; i+=1
             while i<len(source):
                 if source[i]=="\\": i+=2; continue
                 if source[i]==quote: i+=1; break
                 i+=1
+            for j in range(start,i):
+                if out[j] not in "\r\n": out[j]=" "
             continue
         i+=1
     return "".join(out)
@@ -484,7 +486,7 @@ def validate_owner_fault_matrix(root):
     service_start=source.index(service_marker)+len(service_marker)
     service_end=source.index(service_end_marker,service_start)
     service=source[service_start:service_end]
-    masked_service=mask_comments(service)
+    masked_service=mask_comments_and_literals(service)
     main_items=defs.get("main",[])
     service_mains=[item for item in main_items
         if "check_service_access_token_state_contract" in
