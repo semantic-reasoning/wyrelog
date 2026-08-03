@@ -21,6 +21,22 @@
 
 #define HANDOFF_MANAGE_ACTION "wr.service_credential.manage"
 
+#ifdef WYL_ENABLE_FAULT_INJECTION
+/* Single-shot local-publication fault-injection seam (#754).  Compiled in ONLY
+ * when the enable_fault_injection build option is set; a release build omits it
+ * entirely.  Zero (disarmed) until the test-only arm entry point below sets it
+ * to one.  The next execute_handoff to reach the post-server-commit publication
+ * step consumes it via compare-and-exchange and fails once before any
+ * publication I/O; it can never fire twice or bypass a check. */
+static gint g_sc_publication_fault_once = 0;
+
+void wyl_service_credential_operation_coordinator_arm_publication_fault_once
+    (void)
+{
+  g_atomic_int_set (&g_sc_publication_fault_once, 1);
+}
+#endif /* WYL_ENABLE_FAULT_INJECTION */
+
 typedef struct
 {
   WylHandle *handle;
@@ -1301,6 +1317,13 @@ wyrelog_error_t
       goto out;
     }
   }
+
+#ifdef WYL_ENABLE_FAULT_INJECTION
+  if (g_atomic_int_compare_and_exchange (&g_sc_publication_fault_once, 1, 0)) {
+    rc = WYRELOG_E_IO;          /* #754 one-shot injected local-publication fault */
+    goto out;
+  }
+#endif /* WYL_ENABLE_FAULT_INJECTION */
 
   rc = resume_committed_handoff (handle, storage, anchor, request_id, runtime,
       &authorization, &escrow_id, target_digest, &record);

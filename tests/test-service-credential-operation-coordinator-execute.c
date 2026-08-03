@@ -1172,6 +1172,68 @@ test_authenticated_handoff_issue_end_to_end (void)
       credentials_before_crash + 1);
   g_assert_cmpuint (publication.plan_calls, ==, 2);
 
+#ifdef WYL_ENABLE_FAULT_INJECTION
+  /* #754 production-reachable single-shot publication-fault seam.  Compiled in
+   * only for enable_fault_injection builds (the arm symbol exists only then).
+   * Unlike fail_plan_once (a mock plan() that fails), this arms the REAL
+   * in-tree trigger with no mock: it fails BEFORE plan()/unseal/stage, so a
+   * durable SERVER_COMMITTED orphan is minted with a successor id but
+   * publication.plan is never called.  A second (now self-disarmed) run must
+   * resume and publish, proving single-shot and no daemon wedge. */
+  gchar fault_seam_request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (fault_seam_request_id);
+  wyl_id_t fault_seam_escrow;
+  gchar fault_seam_escrow_id[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_new (&fault_seam_escrow), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&fault_seam_escrow, fault_seam_escrow_id,
+          sizeof fault_seam_escrow_id), ==, WYRELOG_E_OK);
+  g_free (request.request_id);
+  g_free (request.escrow_id);
+  request.request_id = g_strdup (fault_seam_request_id);
+  request.escrow_id = g_strdup (fault_seam_escrow_id);
+  request.expected_generation = 0;
+  WylServiceCredentialOperationRecord fault_seam_prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &fault_seam_prepared), ==,
+      WYRELOG_E_OK);
+  publication = (HandoffPublication) {
+  .store = store};
+  runtime.decision_request_id = fault_seam_request_id;
+  runtime.rotate_runtime = NULL;
+  WylServiceCredentialOperationRecord fault_seam_outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gint64 credentials_before_fault_seam = count_credentials (db_of (handle));
+  wyl_service_credential_operation_coordinator_arm_publication_fault_once ();
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, fault_seam_request_id, &runtime,
+          &fault_seam_outcome), ==, WYRELOG_E_IO);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==,
+      credentials_before_fault_seam + 1);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
+          &anchor, fault_seam_request_id, &fault_seam_outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (fault_seam_outcome.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_nonnull (fault_seam_outcome.successor_credential_id);
+  g_assert_cmpstr (fault_seam_outcome.successor_credential_id, !=, "");
+  /* The seam fires BEFORE plan(), so publication.plan is never reached. */
+  g_assert_cmpuint (publication.plan_calls, ==, 0);
+  /* Second run: the seam self-disarmed (CAS), so resume publishes and the
+   * operation completes without minting another credential. */
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, fault_seam_request_id, &runtime,
+          &fault_seam_outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==,
+      credentials_before_fault_seam + 1);
+  g_assert_cmpuint (publication.plan_calls, ==, 1);
+  wyl_service_credential_operation_record_clear (&fault_seam_prepared);
+  wyl_service_credential_operation_record_clear (&fault_seam_outcome);
+#endif /* WYL_ENABLE_FAULT_INJECTION */
+
   gchar publish_crash_request_id[WYL_REQUEST_ID_STRING_BUF];
   fresh_request_id (publish_crash_request_id);
   wyl_id_t publish_crash_escrow;

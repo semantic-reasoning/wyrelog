@@ -49,6 +49,20 @@ option('enable_fact_store',
               + 'still make DuckDB available for fact storage.'
 )
 
+option('enable_fault_injection',
+  type : 'feature',
+  value : 'disabled',
+  description : 'Compile in the test-only, single-shot service-credential '
+              + 'publication fault-injection seam and its daemon arming flag '
+              + '(--fault-inject-sc-publication-once). Disabled by default so '
+              + 'release builds do not contain the seam or the flag at all: '
+              + 'with this off the macro WYL_ENABLE_FAULT_INJECTION is '
+              + 'undefined and the injection code is not compiled, making a '
+              + 'release daemon byte-identical to today and impossible to arm. '
+              + 'Enable only for test/CI builds that run the packaged '
+              + 'service-credential publication-fault end-to-end proof.'
+)
+
 option('duckdb_source',
   type : 'combo',
   choices : ['prebuilt', 'subproject'],

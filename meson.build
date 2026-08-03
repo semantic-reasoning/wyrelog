@@ -159,6 +159,18 @@ if not libchronoid_dep.found()
   )
 endif
 
+# Test-only, single-shot service-credential publication fault-injection seam
+# (#754). Compile-gated OFF by default: when the option is not enabled the
+# WYL_ENABLE_FAULT_INJECTION macro is undefined project-wide, so the seam, its
+# daemon flag, and the focused unit subtest are not compiled at all -- a release
+# daemon is byte-identical to today and can never be armed. A project argument
+# (not a per-target c_arg) is used so libwyrelog, wyrelogd, and every test that
+# compiles the affected translation units see the same definition uniformly.
+enable_fault_injection_opt = get_option('enable_fault_injection')
+if enable_fault_injection_opt.allowed()
+  add_project_arguments('-DWYL_ENABLE_FAULT_INJECTION', language : 'c')
+endif
+
 subdir('wyrelog')
 subdir('tests')
 
