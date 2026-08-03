@@ -8045,6 +8045,40 @@ tenant_scope_is_allowed (const gchar *tenant, const gchar *scope)
   return g_strcmp0 (tenant, scope) == 0;
 }
 
+typedef struct
+{
+  const gchar *tenant;
+  gboolean create;
+  gboolean *changed;
+} TenantLifecyclePublication;
+
+static wyrelog_error_t
+mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
+{
+  TenantLifecyclePublication *publication = data;
+  if (publication->create)
+    return wyl_policy_store_create_tenant (store, publication->tenant,
+        publication->changed);
+  wyrelog_error_t rc = wyl_policy_store_set_tenant_sealed (store,
+      publication->tenant, FALSE);
+  if (rc == WYRELOG_E_OK)
+    *publication->changed = TRUE;
+  return rc;
+}
+
+static wyrelog_error_t
+verify_active_tenant_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  TenantLifecyclePublication *publication = data;
+  gint64 symbol_id = 0;
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      publication->tenant, &symbol_id);
+  return rc == WYRELOG_E_OK ?
+      wyl_engine_verification_lookup_symbol (verification, "active",
+      &symbol_id) : rc;
+}
+
 static wyrelog_error_t
 emit_tenant_lifecycle_audit (WylDaemonHttpContext *ctx, const gchar *actor,
     const gchar *tenant, const gchar *action, const gchar *request_id)
@@ -8238,11 +8272,23 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   } else {
     rc = wyl_daemon_policy_write_acquire (ctx, msg,
         WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
-    if (rc == WYRELOG_E_OK && g_strcmp0 (action, "create") == 0)
-      rc = wyl_policy_store_create_tenant (write.store, tenant, &changed);
-    else if (rc == WYRELOG_E_OK && g_strcmp0 (action, "unseal") == 0) {
-      rc = wyl_policy_store_set_tenant_sealed (write.store, tenant, FALSE);
-      changed = rc == WYRELOG_E_OK;
+    TenantLifecyclePublication publication = {
+      .tenant = tenant,
+      .create = g_strcmp0 (action, "create") == 0,
+      .changed = &changed,
+    };
+    if (rc == WYRELOG_E_OK) {
+      g_autoptr (WylEngineSession) engine_session =
+          wyl_engine_session_acquire (ctx->handle);
+      if (engine_session == NULL) {
+        rc = WYRELOG_E_BUSY;
+      } else {
+        wyl_daemon_policy_write_observe_cleanup_resource (&write,
+            WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+        rc = wyl_engine_session_run_committed_publication (engine_session,
+            mutate_tenant_lifecycle_publication, &publication,
+            verify_active_tenant_publication, &publication, NULL, NULL, NULL);
+      }
     }
     if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
       rc = wyl_daemon_policy_write_record_primary (&write, rc);

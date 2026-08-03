@@ -1415,6 +1415,12 @@ wyrelog_error_t wyl_policy_store_service_authority_transaction_begin
     (wyl_policy_store_t * store, WylHandle * handle,
     WylServiceAuthWriteLease * write_lease,
     WylServiceAuthorityTransaction ** out_transaction);
+/* Handle-owned retained-engine entry; direct consumers must not call this. */
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
+    (wyl_policy_store_t * store, WylHandle * handle,
+    WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction);
 gboolean wyl_policy_store_service_authority_transaction_is_active
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_service_authority_transaction_commit

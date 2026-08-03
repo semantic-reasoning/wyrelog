@@ -1737,6 +1737,196 @@ test_authority_transaction_rejects_outer_transaction (void)
 
 typedef struct
 {
+  WylEngineSession *session;
+  wyl_policy_store_t *store;
+  guint64 generation;
+  WylServiceAuthWriteLease *lease;
+  wyrelog_error_t rc;
+} ExternalTransactionBeginThread;
+
+static gpointer
+foreign_external_transaction_begin (gpointer data)
+{
+  ExternalTransactionBeginThread *attempt = data;
+  WylServiceAuthorityTransaction *txn = NULL;
+  attempt->rc =
+      wyl_engine_session_begin_external_service_authority_transaction
+      (attempt->session, attempt->store, attempt->generation, attempt->lease,
+      &txn);
+  g_assert_null (txn);
+  return NULL;
+}
+
+static void
+assert_external_parent_retained (WylHandle *handle)
+{
+  guint total_pins = 0;
+  guint current_thread_pins = 0;
+  g_assert_true
+      (wyl_service_auth_rank_has_external_publication_prefix (handle));
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
+      &current_thread_pins);
+  g_assert_cmpuint (total_pins, ==, 1);
+  g_assert_cmpuint (current_thread_pins, ==, 1);
+}
+
+static void
+test_external_transaction_typed_parent_and_rejections (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (WylHandle) other = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  guint64 generation = 0;
+  g_assert_cmpint (wyl_handle_policy_store_capture_generation (handle, store,
+          &generation), ==, WYRELOG_E_OK);
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  g_assert_nonnull (session);
+  assert_external_parent_retained (handle);
+
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_INVALID);
+  g_assert_null (txn);
+  assert_external_parent_retained (handle);
+
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (NULL, store, generation, lease, &txn), ==, WYRELOG_E_INVALID);
+  g_assert_null (txn);
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, NULL, &txn), ==, WYRELOG_E_INVALID);
+  g_assert_null (txn);
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, wyl_handle_get_policy_store (other), generation, lease, &txn),
+      ==, WYRELOG_E_INVALID);
+  g_assert_null (txn);
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation + 1, lease, &txn), ==, WYRELOG_E_INVALID);
+  g_assert_null (txn);
+
+  ExternalTransactionBeginThread foreign = {
+    session, store, generation, lease, WYRELOG_E_OK,
+  };
+  g_autoptr (GThread) thread = g_thread_new ("foreign-engine-parent",
+      foreign_external_transaction_begin, &foreign);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (foreign.rc, ==, WYRELOG_E_INVALID);
+  assert_external_parent_retained (handle);
+
+  g_autoptr (WylEngineSession) nested = wyl_engine_session_acquire (handle);
+  g_assert_nonnull (nested);
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (nested, store, generation, lease, &txn), ==, WYRELOG_E_BUSY);
+  g_assert_null (txn);
+  g_clear_pointer (&nested, wyl_engine_session_release);
+  assert_external_parent_retained (handle);
+
+  g_assert_cmpint (wyl_service_auth_rank_enter (handle,
+          WYL_SERVICE_AUTH_RANK_CONTEXT), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, lease, &txn), ==, WYRELOG_E_BUSY);
+  g_assert_null (txn);
+  g_assert_cmpint (wyl_service_auth_rank_leave (handle,
+          WYL_SERVICE_AUTH_RANK_CONTEXT), ==, WYRELOG_E_OK);
+  assert_external_parent_retained (handle);
+
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_nonnull (txn);
+  g_assert_true (wyl_service_auth_rank_is_held (handle,
+          WYL_SERVICE_AUTH_RANK_STORE));
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  assert_external_parent_retained (handle);
+
+  txn = NULL;
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit (txn),
+      ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  assert_external_parent_retained (handle);
+
+  txn = NULL;
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, lease, &txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  assert_external_parent_retained (handle);
+
+  g_clear_pointer (&session, wyl_engine_session_release);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_external_transaction_begin_cleanup (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  guint64 generation = 0;
+  g_assert_cmpint (wyl_handle_policy_store_capture_generation (handle, store,
+          &generation), ==, WYRELOG_E_OK);
+  sqlite_exec_ok (db, "BEGIN;");
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  g_assert_nonnull (session);
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, lease, &txn), ==, WYRELOG_E_BUSY);
+  g_assert_null (txn);
+  assert_external_parent_retained (handle);
+  g_clear_pointer (&session, wyl_engine_session_release);
+  sqlite_exec_ok (db, "ROLLBACK;");
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+
+  g_clear_object (&handle);
+  handle = new_store_handle ();
+  store = wyl_handle_get_policy_store (handle);
+  lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  generation = 0;
+  g_assert_cmpint (wyl_handle_policy_store_capture_generation (handle, store,
+          &generation), ==, WYRELOG_E_OK);
+  session = wyl_engine_session_acquire (handle);
+  g_assert_nonnull (session);
+  g_assert_cmpint (wyl_service_auth_write_lease_terminalize_cleanup (lease,
+          handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_engine_session_begin_external_service_authority_transaction
+      (session, store, generation, lease, &txn), ==, WYRELOG_E_BUSY);
+  g_assert_null (txn);
+  assert_external_parent_retained (handle);
+  g_clear_pointer (&session, wyl_engine_session_release);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+typedef struct
+{
   wyl_policy_store_t *store;
   WylHandle *handle;
   WylServiceAuthWriteLease *lease;
@@ -3366,6 +3556,10 @@ main (int argc, char **argv)
       test_authority_transaction_rollback_and_cleanup);
   g_test_add_func ("/service-auth/transaction/reject-outer",
       test_authority_transaction_rejects_outer_transaction);
+  g_test_add_func ("/service-auth/transaction/external-typed-parent",
+      test_external_transaction_typed_parent_and_rejections);
+  g_test_add_func ("/service-auth/transaction/external-begin-cleanup",
+      test_external_transaction_begin_cleanup);
   g_test_add_func ("/service-auth/transaction/reject-wrong-owner",
       test_authority_transaction_rejects_wrong_owner);
   g_test_add_func ("/service-auth/transaction/release-faults",

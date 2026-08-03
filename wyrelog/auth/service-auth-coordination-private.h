@@ -66,6 +66,9 @@ wyrelog_error_t wyl_service_auth_rank_leave (WylHandle * handle,
     WylServiceAuthRank rank);
 gboolean wyl_service_auth_rank_is_held (WylHandle * handle,
     WylServiceAuthRank rank);
+/* Exact parent proof for the retained-engine service transaction lane. */
+gboolean wyl_service_auth_rank_has_external_publication_prefix
+    (WylHandle * handle);
 
 wyrelog_error_t wyl_service_auth_read_lease_validate
     (WylServiceAuthReadLease * lease, WylHandle * handle);
@@ -104,6 +107,12 @@ wyrelog_error_t wyl_service_auth_authority_validate_available
 wyrelog_error_t wyl_service_auth_write_lease_claim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
 wyrelog_error_t wyl_service_auth_write_lease_unclaim_transaction
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
+wyrelog_error_t
+    wyl_service_auth_write_lease_claim_external_publication_transaction
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
+wyrelog_error_t
+    wyl_service_auth_write_lease_unclaim_external_publication_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
 wyrelog_error_t wyl_service_auth_write_lease_claim_maintenance
     (WylServiceAuthWriteLease * lease, WylHandle * handle);

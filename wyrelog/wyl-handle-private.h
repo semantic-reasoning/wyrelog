@@ -132,6 +132,16 @@ typedef struct _WylEngineSession WylEngineSession;
 WylEngineSession *wyl_engine_session_acquire (WylHandle * self);
 void wyl_engine_session_release (WylEngineSession * session);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylEngineSession, wyl_engine_session_release);
+/*
+ * Starts the sole service-authority transaction allowed below a retained,
+ * outermost engine session. The session, store generation and WRITE lease
+ * must prove one exact COORDINATION -> ENGINE parent chain.
+ */
+wyrelog_error_t
+    wyl_engine_session_begin_external_service_authority_transaction
+    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+    guint64 expected_generation, WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction);
 wyrelog_error_t wyl_engine_session_intern_symbol (WylEngineSession * session,
     const gchar * symbol, gint64 * out_id);
 wyrelog_error_t wyl_engine_session_lookup_symbol (WylEngineSession * session,

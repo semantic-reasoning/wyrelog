@@ -6468,7 +6468,9 @@ static gint
       || !policy_write_fault_snapshot_is_clean (&snapshot,
           expected_primary_status, expected_primary_code,
           route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 3 : 9,
-          expected_owner, 0, 1, WYRELOG_E_INTERNAL, 0)
+          expected_owner,
+          route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 1 : 0,
+          1, WYRELOG_E_INTERNAL, 0)
       || strstr (snapshot.primary_code, actor) != NULL
       || strstr (snapshot.primary_code, "cleanup-route-secret-tenant") != NULL
       || strstr (snapshot.primary_code, session_token) != NULL) {
@@ -6772,6 +6774,19 @@ tenant_state_matches (wyl_policy_store_t *store, const gchar *tenant,
   gboolean active = FALSE;
   return wyl_policy_store_tenant_is_active (store, tenant, &active)
       == WYRELOG_E_OK && active == expected_active;
+}
+
+static gboolean
+tenant_projection_decision_matches (WylHandle *handle, const gchar *tenant,
+    wyl_decision_t expected)
+{
+  g_autoptr (wyl_decide_req_t) request = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) response = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (request, "tenant-target");
+  wyl_decide_req_set_action (request, "site.policy.read");
+  wyl_decide_req_set_resource_id (request, tenant);
+  return wyl_decide (handle, request, response) == WYRELOG_E_OK
+      && wyl_decide_resp_get_decision (response) == expected;
 }
 
 static gboolean
@@ -7269,6 +7284,14 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (!direct_permission_exists (handle, "tenant-target", "site.policy.read",
           "tenant-a"))
     return 199;
+  if (wyl_policy_store_set_principal_state (store, "tenant-target",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "tenant-target",
+          "site.policy.read", "tenant-a", "armed") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
+      || !tenant_projection_decision_matches (handle, "tenant-a",
+          WYL_DECISION_ALLOW))
+    return 1991;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *tenant_seal_query =
@@ -7331,6 +7354,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 200;
+  if (!tenant_projection_decision_matches (handle, "tenant-a",
+          WYL_DECISION_DENY))
+    return 2005;
   if (g_strcmp0 (tenant_seal_correlation, "000000000000000000000000222") == 0)
     return 2002;
   g_autofree gchar *first_tenant_seal_response = g_strdup (body);
@@ -7372,6 +7398,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return rc;
   if (status != 200)
     return 202;
+  if (!tenant_projection_decision_matches (handle, "tenant-a",
+          WYL_DECISION_ALLOW))
+    return 2026;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
@@ -13404,7 +13433,7 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
         | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 0, "non_http"},
   {1, "test_configure", 0, 0, "non_http"},
   {2, "test_policy_write", 0, 0, "non_http"},
-  {3, "tenant", 0, 500, "tenant_mutation_failed"},
+  {3, "tenant", 1, 500, "tenant_mutation_failed"},
   {4, "graph_create", 0, 500, "graph_mutation_failed"},
   {5, "graph_seal", 0, 500, "graph_mutation_failed"},
   {6, "schema_register", 0, 500, "schema_register_failed"},

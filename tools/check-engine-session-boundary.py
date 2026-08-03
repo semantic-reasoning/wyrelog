@@ -84,6 +84,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "step_delta_engine_and_flush",
     "wyl_engine_session_lookup_symbol",
     "wyl_engine_session_acquire",
+    "wyl_engine_session_begin_external_service_authority_transaction",
     "wyl_engine_session_finish_external_publication",
     "wyl_engine_session_release",
     "wyl_engine_session_run_committed_audit_publication",
@@ -123,6 +124,21 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_handle_seed_perm_arm_rule_on_engine",
     "wyl_handle_seed_perm_arm_rules",
     "wyl_handle_shutdown_ordered",
+}
+TYPED_EXTERNAL_TRANSACTION_BEGIN = (
+    "wyl_engine_session_begin_external_service_authority_transaction")
+RAW_EXTERNAL_TRANSACTION_BEGIN = (
+    "wyl_policy_store_service_authority_transaction_"
+    "begin_retained_engine_parent")
+TYPED_EXTERNAL_TRANSACTION_CONSUMERS = {
+    OWNER,
+    RepoPath("wyrelog/wyl-handle-private.h"),
+    RepoPath("wyrelog/auth/service-credential-domain.c"),
+}
+RAW_EXTERNAL_TRANSACTION_CONSUMERS = {
+    OWNER,
+    RepoPath("wyrelog/policy/store.c"),
+    RepoPath("wyrelog/policy/store-private.h"),
 }
 CONTROL_WORDS = {"if", "for", "while", "switch"}
 
@@ -295,6 +311,10 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
                               AGGREGATE_FIELDS + OWNER_ONLY_FIELDS)) + r")\b")
     owned = re.compile(r"\bwyl_engine_owned_[A-Za-z0-9_]*\s*\(")
     raw_lock = re.compile(r"\bwyl_handle_lock_engine_session\s*\(")
+    typed_external_begin = re.compile(
+        rf"\b{re.escape(TYPED_EXTERNAL_TRANSACTION_BEGIN)}\s*\(")
+    raw_external_begin = re.compile(
+        rf"\b{re.escape(RAW_EXTERNAL_TRANSACTION_BEGIN)}\s*\(")
 
     for path, raw in sources.items():
         invalid_reason = invalid_repo_path_reason(path)
@@ -319,6 +339,16 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
         if path != OWNER and raw_lock.search(source):
             errors.append(
                 f"untyped engine lock outside owner: {path.spelling!r}")
+        if (path not in TYPED_EXTERNAL_TRANSACTION_CONSUMERS
+                and typed_external_begin.search(source)):
+            errors.append(
+                "typed external transaction begin outside allowlist: "
+                f"{path.spelling!r}")
+        if (path not in RAW_EXTERNAL_TRANSACTION_CONSUMERS
+                and raw_external_begin.search(source)):
+            errors.append(
+                "raw external transaction begin outside owner/store: "
+                f"{path.spelling!r}")
         if path == OWNER:
             for name, body in top_level_functions(source):
                 if (owner_fields.search(body) or owned.search(body)
@@ -378,6 +408,27 @@ def self_test() -> int:
     }
     if check(accepted):
         print("self-test rejected valid fixture", file=sys.stderr)
+        return 1
+
+    typed_bypass = RepoPath("wyrelog/auth/typed-bypass.c")
+    if check({typed_bypass: (
+            "void bad(WylEngineSession *s) { "
+            f"{TYPED_EXTERNAL_TRANSACTION_BEGIN}(s, 0, 0, 0, 0); }}"
+            )}) != [
+            "typed external transaction begin outside allowlist: "
+            "'wyrelog/auth/typed-bypass.c'"]:
+        print("self-test accepted typed external begin bypass",
+              file=sys.stderr)
+        return 1
+
+    raw_bypass = RepoPath("wyrelog/auth/raw-bypass.c")
+    if check({raw_bypass: (
+            "void bad(void) { "
+            f"{RAW_EXTERNAL_TRANSACTION_BEGIN}(0, 0, 0, 0); }}"
+            )}) != [
+            "raw external transaction begin outside owner/store: "
+            "'wyrelog/auth/raw-bypass.c'"]:
+        print("self-test accepted raw external begin bypass", file=sys.stderr)
         return 1
 
     windows_root = PureWindowsPath(r"C:\source\wyrelog")

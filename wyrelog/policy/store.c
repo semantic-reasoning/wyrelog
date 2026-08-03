@@ -240,6 +240,12 @@ struct _WylServiceAuthorityCommitEvidence
   GThread *pending_owner;
 };
 
+typedef enum
+{
+  WYL_SERVICE_AUTHORITY_TXN_COORDINATION_PARENT,
+  WYL_SERVICE_AUTHORITY_TXN_RETAINED_ENGINE_PARENT,
+} WylServiceAuthorityTransactionParentMode;
+
 struct _WylServiceAuthorityTransaction
 {
   wyl_policy_store_t *store;
@@ -256,6 +262,7 @@ struct _WylServiceAuthorityTransaction
   gboolean owns_store_locks;
   gboolean owns_handle_pin;
   gboolean owns_store_rank;
+  WylServiceAuthorityTransactionParentMode parent_mode;
   guint64 originating_writer_serial;
   GMutex abort_barrier_mutex;
   GCond abort_barrier_cond;
@@ -7809,7 +7816,11 @@ service_authority_transaction_finish (WylServiceAuthorityTransaction *txn)
     txn->owns_store_rank = FALSE;
   wyrelog_error_t unclaim_rc = txn->fault ==
       WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_BEFORE ? WYRELOG_E_INTERNAL
-      : wyl_service_auth_write_lease_unclaim_transaction (txn->write_lease,
+      : txn->parent_mode ==
+      WYL_SERVICE_AUTHORITY_TXN_RETAINED_ENGINE_PARENT ?
+      wyl_service_auth_write_lease_unclaim_external_publication_transaction
+      (txn->write_lease, txn->handle) :
+      wyl_service_auth_write_lease_unclaim_transaction (txn->write_lease,
       txn->handle);
   if (txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AFTER
       || txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AND_CLAIM_AFTER)
@@ -7854,11 +7865,13 @@ service_authority_transaction_finish (WylServiceAuthorityTransaction *txn)
   txn->owns_handle_pin = FALSE;
 }
 
-wyrelog_error_t
-    wyl_policy_store_service_authority_transaction_begin
+static wyrelog_error_t
+    service_authority_transaction_begin
     (wyl_policy_store_t * store, WylHandle * handle,
     WylServiceAuthWriteLease * write_lease,
-    WylServiceAuthorityTransaction ** out_transaction) {
+    WylServiceAuthorityTransactionParentMode parent_mode,
+    WylServiceAuthorityTransaction ** out_transaction)
+{
   if (out_transaction != NULL)
     *out_transaction = NULL;
   if (store == NULL || !WYL_IS_HANDLE (handle)
@@ -7883,7 +7896,10 @@ wyrelog_error_t
     return rc;
   }
 
-  rc = wyl_service_auth_write_lease_claim_transaction (write_lease, handle);
+  rc = parent_mode == WYL_SERVICE_AUTHORITY_TXN_RETAINED_ENGINE_PARENT ?
+      wyl_service_auth_write_lease_claim_external_publication_transaction
+      (write_lease, handle) :
+      wyl_service_auth_write_lease_claim_transaction (write_lease, handle);
   if (rc != WYRELOG_E_OK) {
     service_mutation_scope_leave (store);
     wyl_handle_policy_store_unpin (handle, store);
@@ -7891,8 +7907,12 @@ wyrelog_error_t
   }
   rc = wyl_service_auth_rank_enter (handle, WYL_SERVICE_AUTH_RANK_STORE);
   if (rc != WYRELOG_E_OK) {
-    g_assert_cmpint (wyl_service_auth_write_lease_unclaim_transaction
-        (write_lease, handle), ==, WYRELOG_E_OK);
+    wyrelog_error_t unclaim_rc = parent_mode ==
+        WYL_SERVICE_AUTHORITY_TXN_RETAINED_ENGINE_PARENT ?
+        wyl_service_auth_write_lease_unclaim_external_publication_transaction
+        (write_lease, handle) :
+        wyl_service_auth_write_lease_unclaim_transaction (write_lease, handle);
+    g_assert_cmpint (unclaim_rc, ==, WYRELOG_E_OK);
     service_mutation_scope_leave (store);
     wyl_handle_policy_store_unpin (handle, store);
     return rc;
@@ -7907,8 +7927,12 @@ wyrelog_error_t
     g_mutex_unlock (&store->service_domain_gate_mutex);
     g_assert_cmpint (wyl_service_auth_rank_leave (handle,
             WYL_SERVICE_AUTH_RANK_STORE), ==, WYRELOG_E_OK);
-    g_assert_cmpint (wyl_service_auth_write_lease_unclaim_transaction
-        (write_lease, handle), ==, WYRELOG_E_OK);
+    wyrelog_error_t unclaim_rc = parent_mode ==
+        WYL_SERVICE_AUTHORITY_TXN_RETAINED_ENGINE_PARENT ?
+        wyl_service_auth_write_lease_unclaim_external_publication_transaction
+        (write_lease, handle) :
+        wyl_service_auth_write_lease_unclaim_transaction (write_lease, handle);
+    g_assert_cmpint (unclaim_rc, ==, WYRELOG_E_OK);
     service_mutation_scope_leave (store);
     wyl_handle_policy_store_unpin (handle, store);
     return WYRELOG_E_BUSY;
@@ -7939,6 +7963,7 @@ wyrelog_error_t
   txn->owns_store_locks = TRUE;
   txn->owns_handle_pin = TRUE;
   txn->owns_store_rank = TRUE;
+  txn->parent_mode = parent_mode;
   g_assert_cmpint (wyl_service_auth_write_lease_get_serial (write_lease,
           handle, &txn->originating_writer_serial), ==, WYRELOG_E_OK);
   g_atomic_int_set (&store->service_authority_transaction_active, TRUE);
@@ -7961,6 +7986,24 @@ wyrelog_error_t
   }
   *out_transaction = txn;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_begin
+    (wyl_policy_store_t * store, WylHandle * handle,
+    WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction) {
+  return service_authority_transaction_begin (store, handle, write_lease,
+      WYL_SERVICE_AUTHORITY_TXN_COORDINATION_PARENT, out_transaction);
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
+    (wyl_policy_store_t * store, WylHandle * handle,
+    WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction) {
+  return service_authority_transaction_begin (store, handle, write_lease,
+      WYL_SERVICE_AUTHORITY_TXN_RETAINED_ENGINE_PARENT, out_transaction);
 }
 
 wyrelog_error_t
