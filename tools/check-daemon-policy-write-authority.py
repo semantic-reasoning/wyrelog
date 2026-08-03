@@ -27,6 +27,8 @@ FUNCTIONS = (
     "set_tenant_mutation_json", "set_graph_mutation_json",
     "set_schema_ok_json", "set_fact_op_json",
     "mutate_tenant_lifecycle_publication",
+    "tenant_create_durable_bundle",
+    "tenant_create_resolve_failed_publication",
     "tenant_recovery_install", "tenant_recovery_finish_claim",
     "tenant_recovery_repair_with_write",
     "tenant_recovery_attempt_before_authorization",
@@ -47,12 +49,15 @@ FUNCTIONS = (
     "service_credential_operation_recover_execute",
     "service_management_authority_arm_handler",
     "wyl_daemon_http_configure_tenant_for_test",
+    "wyl_daemon_http_resolve_tenant_create_outcome_for_test",
 )
 OWNER_INVENTORY = {
     "wyl_daemon_http_context_rotate_access_token_key":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_KEY_ROTATION",),
     "wyl_daemon_http_configure_tenant_for_test":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_TEST_CONFIGURE",),
+    "wyl_daemon_http_resolve_tenant_create_outcome_for_test":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
     "wyl_daemon_http_policy_write_for_test":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_TEST_POLICY_WRITE",),
     "tenant_mutation_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
@@ -82,6 +87,7 @@ OWNER_INVENTORY = {
 }
 TEST_ONLY_OWNER_FUNCTIONS = {
     "wyl_daemon_http_configure_tenant_for_test",
+    "wyl_daemon_http_resolve_tenant_create_outcome_for_test",
     "wyl_daemon_http_policy_write_for_test",
 }
 FACT_STORE_OWNER_FUNCTIONS = {
@@ -131,12 +137,14 @@ ALLOW_ACQUIRE = {
     "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
     "wyl_daemon_http_policy_write_for_test",
     "wyl_daemon_http_configure_tenant_for_test",
+    "wyl_daemon_http_resolve_tenant_create_outcome_for_test",
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
     "service_management_authority_arm_handler",
 }
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
     "mutate_tenant_lifecycle_publication", "tenant_recovery_repair_with_write",
+    "tenant_create_resolve_failed_publication",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
@@ -759,8 +767,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 17:
-        raise GuardError("daemon WRITE owner inventory must contain 17 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 18:
+        raise GuardError("daemon WRITE owner inventory must contain 18 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():

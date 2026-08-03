@@ -74,6 +74,7 @@ struct _WylHandle
   WylEngine *delta_engine;
   GRecMutex engine_session_mutex;
 #ifdef WYL_TEST_HANDLE_SEAMS
+  WylCommittedPublicationFault committed_publication_fault_once;
   void (*engine_session_checkpoint) (WylEngineSessionCheckpoint phase,
       gpointer data);
   gpointer engine_session_checkpoint_data;
@@ -825,6 +826,20 @@ wyl_handle_flush_pending_deltas_for_test (WylHandle *self)
   if (session == NULL || engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
   return flush_pending_deltas (self);
+}
+#endif
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+void
+wyl_handle_set_committed_publication_fault_once_for_test (WylHandle *self,
+    WylCommittedPublicationFault fault)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (fault > WYL_COMMITTED_PUBLICATION_FAULT_NONE
+      && fault <= WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR);
+  g_rec_mutex_lock (&self->engine_session_mutex);
+  self->committed_publication_fault_once = fault;
+  g_rec_mutex_unlock (&self->engine_session_mutex);
 }
 #endif
 
@@ -3343,10 +3358,10 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     WylCommittedEngineMutationBody mutate, gpointer mutate_data,
     WylEnginePublicationVerifier verify, gpointer verify_data,
     WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
-    gboolean *out_commit_confirmed)
+    WylCommittedPublicationStage *out_stage)
 {
-  if (out_commit_confirmed != NULL)
-    *out_commit_confirmed = FALSE;
+  if (out_stage != NULL)
+    *out_stage = WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   if (!engine_session_is_valid (session) || mutate == NULL || verify == NULL)
     return WYRELOG_E_INVALID;
   if (session->acquisition_depth != 1
@@ -3364,6 +3379,9 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   } PublicationState;
   PublicationState state = PUBLICATION_PRECOMMIT;
   gboolean begun = FALSE;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gboolean commit_rejected_cleanly = FALSE;
+#endif
   WylHandle *self = session->handle;
   wyl_policy_store_t *store = NULL;
   guint64 generation = 0;
@@ -3389,6 +3407,15 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   } else if (!wyl_policy_store_is_autocommit (store)) {
     poison_engine_pair_locked (self);
   }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK
+      && self->committed_publication_fault_once ==
+      WYL_COMMITTED_PUBLICATION_FAULT_VALIDATE) {
+    self->committed_publication_fault_once =
+        WYL_COMMITTED_PUBLICATION_FAULT_NONE;
+    rc = WYRELOG_E_IO;
+  }
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
   if (rc != WYRELOG_E_OK) {
@@ -3406,14 +3433,42 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     }
     goto out;
   }
-
-  rc = wyl_policy_store_publication_transaction_commit (store);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (self->committed_publication_fault_once ==
+      WYL_COMMITTED_PUBLICATION_FAULT_COMMIT) {
+    self->committed_publication_fault_once =
+        WYL_COMMITTED_PUBLICATION_FAULT_NONE;
+    rc = wyl_policy_store_publication_transaction_rollback_checked (store);
+    begun = FALSE;
+    if (rc == WYRELOG_E_OK) {
+      commit_rejected_cleanly = TRUE;
+      rc = WYRELOG_E_IO;
+    }
+  } else if (self->committed_publication_fault_once ==
+      WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR) {
+    self->committed_publication_fault_once =
+        WYL_COMMITTED_PUBLICATION_FAULT_NONE;
+    rc = wyl_policy_store_publication_transaction_commit (store);
+    if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+  } else
+#endif
+    rc = wyl_policy_store_publication_transaction_commit (store);
   if (rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store)) {
     /* RELEASE ambiguity is committed-state uncertainty even if a recovery
      * rollback succeeds. */
     if (!wyl_policy_store_is_autocommit (store))
       (void) wyl_policy_store_publication_transaction_rollback_checked (store);
-    poison_engine_pair_locked (self);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (!commit_rejected_cleanly)
+#endif
+      poison_engine_pair_locked (self);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (!commit_rejected_cleanly && out_stage != NULL)
+#else
+    if (out_stage != NULL)
+#endif
+      *out_stage = WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS;
     if (store_rank_active) {
       (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
       store_rank_active = FALSE;
@@ -3423,8 +3478,8 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     goto out;
   }
   state = PUBLICATION_COMMITTED_UNPUBLISHED;
-  if (out_commit_confirmed != NULL)
-    *out_commit_confirmed = TRUE;
+  if (out_stage != NULL)
+    *out_stage = WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED;
   rc = wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
   store_rank_active = FALSE;
   if (rc != WYRELOG_E_OK) {

@@ -166,6 +166,16 @@ wyrelog_error_t wyl_engine_session_replay_delta_insert
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
 {
+  WYL_COMMITTED_PUBLICATION_FAULT_NONE = 0,
+  WYL_COMMITTED_PUBLICATION_FAULT_VALIDATE,
+  WYL_COMMITTED_PUBLICATION_FAULT_COMMIT,
+  WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR,
+} WylCommittedPublicationFault;
+void wyl_handle_set_committed_publication_fault_once_for_test
+    (WylHandle * self, WylCommittedPublicationFault fault);
+
+typedef enum
+{
   WYL_ENGINE_SESSION_WAITING,
   WYL_ENGINE_SESSION_ACQUIRED,
 } WylEngineSessionCheckpoint;
@@ -426,19 +436,24 @@ wyrelog_error_t wyl_engine_verification_enqueue_delta
  * commit/publication interval. A successful mutation is immediately followed
  * by a complete durable-snapshot rebuild and an exact verifier before the new
  * pair is published. Any post-commit failure poisons the pair before return.
- * When non-NULL, @out_commit_confirmed is reset to FALSE on entry and becomes
- * TRUE only after COMMIT succeeds with autocommit restored. A FALSE result
- * does not prove rollback when commit itself fails; that ambiguity poisons the
- * pair. TRUE remains observable when later projection or verification fails.
+ * @out_stage distinguishes a clean pre-commit rejection from commit
+ * ambiguity and a confirmed durable commit. COMMIT_CONFIRMED remains
+ * observable when later projection or verification fails.
  *
  * The caller acquires any service-auth lease first, then @session, and must not
  * open a second store/engine ownership scope inside @verify.
  */
+typedef enum
+{
+  WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED = 0,
+  WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS,
+  WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED,
+} WylCommittedPublicationStage;
 wyrelog_error_t wyl_engine_session_run_committed_publication
     (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
     gpointer mutate_data, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
-    gpointer delta_data, gboolean * out_commit_confirmed);
+    gpointer delta_data, WylCommittedPublicationStage * out_stage);
 
 /* Repairs only a poisoned pair from the durable snapshot while the caller
  * retains the same-handle service-auth WRITE lease and outermost engine

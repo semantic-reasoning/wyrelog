@@ -296,6 +296,7 @@ typedef struct
   WylTenantRecoveryOperation operation;
   gchar *tenant;
   gboolean expected_active;
+  gchar *creator_subject;
   gchar *audit_id;
   gint64 audit_created_at_us;
   gchar *audit_subject;
@@ -326,6 +327,7 @@ tenant_recovery_descriptor_unref (WylTenantRecoveryDescriptor *descriptor)
     return;
   g_clear_object (&descriptor->handle);
   g_free (descriptor->tenant);
+  g_free (descriptor->creator_subject);
   g_free (descriptor->audit_id);
   g_free (descriptor->audit_subject);
   g_free (descriptor->audit_action);
@@ -450,7 +452,13 @@ typedef struct _WylDaemonHttpContext
   gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
   gboolean fail_next_tenant_lifecycle_audit_insert;
+  gboolean fail_next_tenant_lifecycle_audit_append;
+  gboolean fail_next_tenant_creator_grant;
+  gboolean fail_next_tenant_creator_event;
+  gboolean fail_next_tenant_creator_receipt_verification;
   gboolean fail_next_tenant_lifecycle_verification;
+  guint tenant_create_publication_attempts;
+  guint tenant_create_noop_fault_discards;
   gboolean fail_next_tenant_seal_verification;
   gboolean fail_next_tenant_seal_write_release;
   gboolean fail_next_tenant_recovery_repair;
@@ -3005,6 +3013,50 @@ void wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test
   g_mutex_unlock (&ctx->lock);
 }
 
+void wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_tenant_lifecycle_audit_append = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_fail_next_tenant_creator_grant_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_tenant_creator_grant = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_fail_next_tenant_creator_event_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_tenant_creator_event = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_fail_next_tenant_creator_receipt_verification_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_tenant_creator_receipt_verification = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
 void wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test
     (SoupServer * server)
 {
@@ -3108,6 +3160,24 @@ void wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
         (&tenant_recovery_descriptor_allocations);
   if (out_frees != NULL)
     *out_frees = (guint) g_atomic_int_get (&tenant_recovery_descriptor_frees);
+}
+
+void wyl_daemon_http_tenant_create_publication_snapshot_for_test
+    (SoupServer * server, guint * out_attempts, guint * out_noop_fault_discards)
+{
+  if (out_attempts != NULL)
+    *out_attempts = 0;
+  if (out_noop_fault_discards != NULL)
+    *out_noop_fault_discards = 0;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  if (out_attempts != NULL)
+    *out_attempts = ctx->tenant_create_publication_attempts;
+  if (out_noop_fault_discards != NULL)
+    *out_noop_fault_discards = ctx->tenant_create_noop_fault_discards;
+  g_mutex_unlock (&ctx->lock);
 }
 
 guint
@@ -8269,12 +8339,18 @@ tenant_scope_is_allowed (const gchar *tenant, const gchar *scope)
 typedef struct
 {
   const gchar *tenant;
+  const gchar *creator_subject;
   gboolean create;
   gboolean *changed;
+  gboolean expected_active;
   const WylAuditEvent *audit_event;
   const gchar *audit_id;
 #ifdef WYL_TEST_DAEMON_HTTP
   gboolean fail_audit_insert;
+  gboolean fail_audit_append;
+  gboolean fail_creator_grant;
+  gboolean fail_creator_event;
+  gboolean fail_creator_receipt_verification;
   gboolean verify_opposite_state;
 #endif
 } TenantLifecyclePublication;
@@ -8288,8 +8364,31 @@ mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
       publication->changed) :
       wyl_policy_store_set_tenant_sealed_full (store, publication->tenant,
       FALSE, publication->changed);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_tenant_is_active (store, publication->tenant,
+        &publication->expected_active);
   if (rc != WYRELOG_E_OK || !*publication->changed)
     return rc;
+
+  if (publication->create) {
+#ifdef WYL_TEST_DAEMON_HTTP
+    if (publication->fail_creator_grant)
+      return WYRELOG_E_IO;
+#endif
+    rc = wyl_policy_store_grant_role_membership (store,
+        publication->creator_subject, "wr.system_admin", publication->tenant);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+#ifdef WYL_TEST_DAEMON_HTTP
+    if (publication->fail_creator_event)
+      return WYRELOG_E_IO;
+#endif
+    rc = wyl_policy_store_append_role_membership_event (store,
+        publication->creator_subject, "wr.system_admin", publication->tenant,
+        "grant");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
 #ifdef WYL_TEST_DAEMON_HTTP
   if (publication->fail_audit_insert)
@@ -8307,6 +8406,10 @@ mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
       wyl_audit_event_get_deny_origin (event),
       wyl_audit_event_get_request_id (event),
       wyl_audit_event_get_decision (event), &inserted);
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (rc == WYRELOG_E_OK && publication->fail_audit_append)
+    return WYRELOG_E_IO;
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_audit_event_full (store,
         publication->audit_id, wyl_audit_event_get_created_at_us (event),
@@ -8343,6 +8446,45 @@ verify_tenant_lifecycle_symbol_row (WylEngineVerification *verification,
 }
 
 static wyrelog_error_t
+verify_tenant_creator_anchor (WylEngineVerification *verification,
+    const gchar *creator_subject, const gchar *tenant,
+    gboolean force_receipt_missing)
+{
+  const gchar *membership[] = {
+    creator_subject, "wr.system_admin", tenant,
+  };
+  gint64 member_row[G_N_ELEMENTS (membership)] = { 0 };
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (membership); i++)
+    rc = wyl_engine_verification_lookup_symbol (verification, membership[i],
+        &member_row[i]);
+  gboolean exact_member = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_has_exact_accepted_member_of (verification,
+        member_row, &exact_member);
+  if (rc == WYRELOG_E_OK && force_receipt_missing)
+    exact_member = FALSE;
+  if (rc == WYRELOG_E_OK && !exact_member)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = verify_tenant_lifecycle_symbol_row (verification,
+        "effective_member", membership, G_N_ELEMENTS (membership), TRUE);
+
+  static const gchar *permissions[] = {
+    "wr.policy.write",
+    "wr.policy.grant_role",
+  };
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (permissions); i++) {
+    const gchar *permission[] = {
+      creator_subject, permissions[i], tenant,
+    };
+    rc = verify_tenant_lifecycle_symbol_row (verification,
+        "has_permission", permission, G_N_ELEMENTS (permission), TRUE);
+  }
+  return rc;
+}
+
+static wyrelog_error_t
 verify_active_tenant_publication (WylEngineVerification *verification,
     gpointer data)
 {
@@ -8355,9 +8497,10 @@ verify_active_tenant_publication (WylEngineVerification *verification,
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_verification_lookup_symbol (verification,
 #ifdef WYL_TEST_DAEMON_HTTP
-        publication->verify_opposite_state ? "closed" :
+        publication->verify_opposite_state ?
+        (publication->expected_active ? "closed" : "active") :
 #endif
-        "active", &active);
+        (publication->expected_active ? "active" : "closed"), &active);
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_verification_get_accepted_session_state (verification,
         tenant, &accepted);
@@ -8367,6 +8510,18 @@ verify_active_tenant_publication (WylEngineVerification *verification,
     return WYRELOG_E_POLICY;
   if (!*publication->changed)
     return WYRELOG_E_OK;
+  if (publication->create) {
+    rc = verify_tenant_creator_anchor (verification,
+        publication->creator_subject, publication->tenant,
+#ifdef WYL_TEST_DAEMON_HTTP
+        publication->fail_creator_receipt_verification
+#else
+        FALSE
+#endif
+        );
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   gint64 event[3] = {
     0, wyl_audit_event_get_created_at_us (publication->audit_event), 0,
@@ -8406,6 +8561,50 @@ verify_active_tenant_publication (WylEngineVerification *verification,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+verify_absent_tenant_create_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  TenantLifecyclePublication *publication = data;
+  const gchar *tenant_states[][2] = {
+    {publication->tenant, "active"},
+    {publication->tenant, "closed"},
+  };
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (tenant_states); i++)
+    rc = verify_tenant_lifecycle_symbol_row (verification, "session_state",
+        tenant_states[i], G_N_ELEMENTS (tenant_states[i]), FALSE);
+  const gchar *membership[] = {
+    publication->creator_subject, "wr.system_admin", publication->tenant,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = verify_tenant_lifecycle_symbol_row (verification, "member_of",
+        membership, G_N_ELEMENTS (membership), FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = verify_tenant_lifecycle_symbol_row (verification,
+        "effective_member", membership, G_N_ELEMENTS (membership), FALSE);
+  static const gchar *permissions[] = {
+    "wr.policy.write",
+    "wr.policy.grant_role",
+  };
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (permissions); i++) {
+    const gchar *permission[] = {
+      publication->creator_subject, permissions[i], publication->tenant,
+    };
+    rc = verify_tenant_lifecycle_symbol_row (verification, "has_permission",
+        permission, G_N_ELEMENTS (permission), FALSE);
+  }
+  const gchar *audit_subject[] = {
+    publication->audit_id,
+    wyl_audit_event_get_subject_id (publication->audit_event),
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = verify_tenant_lifecycle_symbol_row (verification,
+        "audit_event_subject", audit_subject, G_N_ELEMENTS (audit_subject),
+        FALSE);
+  return rc;
+}
+
 typedef enum
 {
   WYL_TENANT_RECOVERY_CLAIM_NONE = 0,
@@ -8417,10 +8616,19 @@ typedef enum
 static WylTenantRecoveryDescriptor *
 tenant_recovery_descriptor_new (WylHandle *handle,
     WylTenantRecoveryOperation operation, const gchar *tenant,
-    const WylAuditEvent *event, const gchar *audit_id)
+    const gchar *creator_subject, const WylAuditEvent *event,
+    const gchar *audit_id)
 {
   if (!WYL_IS_HANDLE (handle) || tenant == NULL || event == NULL
       || audit_id == NULL)
+    return NULL;
+  if (operation == WYL_TENANT_RECOVERY_CREATE
+      && (creator_subject == NULL
+          || g_strcmp0 (creator_subject,
+              wyl_audit_event_get_subject_id (event)) != 0
+          || g_strcmp0 (wyl_audit_event_get_action (event),
+              "tenant_create") != 0
+          || g_strcmp0 (wyl_audit_event_get_resource_id (event), tenant) != 0))
     return NULL;
   WylTenantRecoveryDescriptor *descriptor =
       g_new0 (WylTenantRecoveryDescriptor, 1);
@@ -8432,6 +8640,8 @@ tenant_recovery_descriptor_new (WylHandle *handle,
   descriptor->operation = operation;
   descriptor->tenant = g_strdup (tenant);
   descriptor->expected_active = operation != WYL_TENANT_RECOVERY_SEAL;
+  if (operation == WYL_TENANT_RECOVERY_CREATE)
+    descriptor->creator_subject = g_strdup (creator_subject);
   descriptor->audit_id = g_strdup (audit_id);
   descriptor->audit_created_at_us = wyl_audit_event_get_created_at_us (event);
   descriptor->audit_subject = g_strdup (wyl_audit_event_get_subject_id (event));
@@ -8448,7 +8658,9 @@ tenant_recovery_descriptor_new (WylHandle *handle,
   if (descriptor->tenant == NULL || descriptor->audit_id == NULL
       || descriptor->audit_subject == NULL || descriptor->audit_action == NULL
       || descriptor->audit_resource == NULL
-      || descriptor->audit_request_id == NULL) {
+      || descriptor->audit_request_id == NULL
+      || (operation == WYL_TENANT_RECOVERY_CREATE
+          && descriptor->creator_subject == NULL)) {
     tenant_recovery_descriptor_unref (descriptor);
     return NULL;
   }
@@ -8532,6 +8744,181 @@ tenant_recovery_install (WylDaemonHttpContext *ctx,
   g_mutex_unlock (&ctx->lock);
   return rc;
 }
+
+typedef enum
+{
+  WYL_TENANT_CREATE_FAILED_PUBLICATION_FAIL_CLOSED_UNKNOWN = 0,
+  WYL_TENANT_CREATE_FAILED_PUBLICATION_INSTALL_ORIGINAL_DESCRIPTOR,
+  WYL_TENANT_CREATE_FAILED_PUBLICATION_REPAIR_ABSENT_PAIR,
+} WylTenantCreateFailedPublicationEffect;
+
+static WylPolicyTenantCreateBundle
+tenant_create_durable_bundle (const TenantLifecyclePublication *publication)
+{
+  const WylAuditEvent *event = publication->audit_event;
+  return (WylPolicyTenantCreateBundle) {
+  .tenant_id = publication->tenant,.creator_subject_id =
+        publication->creator_subject,.audit_id =
+        publication->audit_id,.audit_created_at_us =
+        wyl_audit_event_get_created_at_us (event),.audit_subject_id =
+        wyl_audit_event_get_subject_id (event),.audit_action =
+        wyl_audit_event_get_action (event),.audit_resource_id =
+        wyl_audit_event_get_resource_id (event),.audit_deny_reason =
+        wyl_audit_event_get_deny_reason (event),.audit_deny_origin =
+        wyl_audit_event_get_deny_origin (event),.audit_request_id =
+        wyl_audit_event_get_request_id (event),.audit_decision =
+        wyl_audit_event_get_decision (event),};
+}
+
+static wyrelog_error_t
+tenant_create_resolve_failed_publication (WylDaemonHttpContext *ctx,
+    WylDaemonPolicyWrite *write, WylEngineSession *engine_session,
+    TenantLifecyclePublication *publication,
+    WylCommittedPublicationStage stage, wyrelog_error_t publication_rc,
+    WylTenantCreateFailedPublicationEffect *out_effect)
+{
+  if (out_effect != NULL)
+    *out_effect = WYL_TENANT_CREATE_FAILED_PUBLICATION_FAIL_CLOSED_UNKNOWN;
+  if (ctx == NULL || write == NULL || engine_session == NULL
+      || publication == NULL || !publication->create
+      || publication->audit_event == NULL || publication->audit_id == NULL
+      || out_effect == NULL || publication_rc == WYRELOG_E_OK
+      || (stage != WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
+          && stage != WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS))
+    return WYRELOG_E_INVALID;
+
+  WylPolicyTenantCreateBundleState bundle_state =
+      WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT;
+  wyrelog_error_t classify_rc = WYRELOG_E_OK;
+  if (stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS) {
+    WylPolicyTenantCreateBundle bundle =
+        tenant_create_durable_bundle (publication);
+    classify_rc = wyl_policy_store_classify_tenant_create_bundle
+        (write->store, &bundle, &bundle_state);
+    if (classify_rc != WYRELOG_E_OK) {
+      (void) wyl_handle_fail_committed_engine_projection (engine_session,
+          classify_rc);
+      return classify_rc;
+    }
+  }
+
+  if (bundle_state == WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT) {
+    WylTenantRecoveryDescriptor *descriptor =
+        tenant_recovery_descriptor_new (ctx->handle,
+        WYL_TENANT_RECOVERY_CREATE, publication->tenant,
+        publication->creator_subject, publication->audit_event,
+        publication->audit_id);
+    wyrelog_error_t install_rc = descriptor != NULL
+        ? tenant_recovery_install (ctx, descriptor) : WYRELOG_E_NOMEM;
+    if (install_rc != WYRELOG_E_OK)
+      tenant_recovery_descriptor_unref (descriptor);
+    if (install_rc != WYRELOG_E_OK)
+      return install_rc;
+    *out_effect =
+        WYL_TENANT_CREATE_FAILED_PUBLICATION_INSTALL_ORIGINAL_DESCRIPTOR;
+    return publication_rc;
+  }
+
+  if (bundle_state == WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_ABSENT) {
+    if (wyl_handle_engine_pair_is_poisoned (ctx->handle)) {
+      guint64 generation = 0;
+      wyrelog_error_t repair_rc = wyl_handle_policy_store_capture_generation
+          (ctx->handle, write->store, &generation);
+      if (repair_rc == WYRELOG_E_OK)
+        repair_rc = wyl_engine_session_repair_committed_publication
+            (engine_session, write->lease, write->store, generation,
+            verify_absent_tenant_create_publication, publication);
+      if (repair_rc != WYRELOG_E_OK)
+        return repair_rc;
+    }
+    *out_effect = WYL_TENANT_CREATE_FAILED_PUBLICATION_REPAIR_ABSENT_PAIR;
+    return publication_rc;
+  }
+
+  (void) wyl_handle_fail_committed_engine_projection (engine_session,
+      publication_rc);
+  return publication_rc;
+}
+
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_resolve_tenant_create_outcome_for_test (SoupServer *server,
+    const WylDaemonTenantCreateOutcomeBundle *bundle,
+    WylDaemonTenantCreateOutcomeEffect *out_effect)
+{
+  if (out_effect != NULL)
+    *out_effect = WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || bundle == NULL
+      || !wyl_policy_store_tenant_id_is_valid (bundle->tenant_id)
+      || bundle->creator_subject_id == NULL || bundle->audit_id == NULL
+      || out_effect == NULL
+      || g_strcmp0 (bundle->creator_subject_id,
+          bundle->audit_subject_id) != 0
+      || g_strcmp0 (bundle->tenant_id, bundle->audit_resource_id) != 0
+      || g_strcmp0 (bundle->audit_action, "tenant_create") != 0)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (WylAuditEvent) event = NULL;
+  wyrelog_error_t rc = wyl_audit_event_new_from_fields (bundle->audit_id,
+      bundle->audit_created_at_us, bundle->audit_subject_id,
+      bundle->audit_action, bundle->audit_resource_id,
+      bundle->audit_deny_reason, bundle->audit_deny_origin,
+      bundle->audit_request_id, bundle->audit_decision, &event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean changed = FALSE;
+  TenantLifecyclePublication publication = {
+    .tenant = bundle->tenant_id,
+    .creator_subject = bundle->creator_subject_id,
+    .create = TRUE,
+    .changed = &changed,
+    .audit_event = event,
+    .audit_id = bundle->audit_id,
+  };
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  rc = wyl_daemon_policy_write_acquire (ctx, NULL,
+      WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
+
+  g_autoptr (WylEngineSession) engine_session = NULL;
+  if (rc == WYRELOG_E_OK) {
+    engine_session = wyl_engine_session_acquire (ctx->handle);
+    if (engine_session == NULL)
+      rc = WYRELOG_E_BUSY;
+  }
+  WylTenantCreateFailedPublicationEffect effect =
+      WYL_TENANT_CREATE_FAILED_PUBLICATION_FAIL_CLOSED_UNKNOWN;
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t resolved_rc = tenant_create_resolve_failed_publication
+        (ctx, &write, engine_session, &publication,
+        WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS, WYRELOG_E_IO, &effect);
+    rc = resolved_rc == WYRELOG_E_IO ? WYRELOG_E_OK : resolved_rc;
+  }
+  if (rc == WYRELOG_E_OK) {
+    switch (effect) {
+      case WYL_TENANT_CREATE_FAILED_PUBLICATION_INSTALL_ORIGINAL_DESCRIPTOR:
+        *out_effect =
+            WYL_DAEMON_TENANT_CREATE_OUTCOME_INSTALL_ORIGINAL_DESCRIPTOR;
+        break;
+      case WYL_TENANT_CREATE_FAILED_PUBLICATION_REPAIR_ABSENT_PAIR:
+        *out_effect = WYL_DAEMON_TENANT_CREATE_OUTCOME_REPAIR_ABSENT_PAIR;
+        break;
+      case WYL_TENANT_CREATE_FAILED_PUBLICATION_FAIL_CLOSED_UNKNOWN:
+        *out_effect = WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN;
+        break;
+      default:
+        rc = WYRELOG_E_INTERNAL;
+        break;
+    }
+  }
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+    rc = wyl_daemon_policy_write_finish_result (&write, rc);
+  return rc;
+}
+
+#endif
 
 static wyrelog_error_t
 tenant_seal_recovery_retain (const WylTenantSealPublicationRecovery *recovery,
@@ -8729,6 +9116,12 @@ verify_tenant_recovery_descriptor (WylEngineVerification *verification,
     return rc;
   if (accepted_state != expected_state)
     return WYRELOG_E_POLICY;
+  if (descriptor->operation == WYL_TENANT_RECOVERY_CREATE) {
+    rc = verify_tenant_creator_anchor (verification,
+        descriptor->creator_subject, descriptor->tenant, FALSE);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   gint64 event[3] = { 0, descriptor->audit_created_at_us, 0 };
   rc = wyl_engine_verification_lookup_symbol (verification,
@@ -8774,6 +9167,53 @@ verify_tenant_recovery_descriptor (WylEngineVerification *verification,
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  const gchar *subject;
+  const gchar *tenant;
+  guint grant_count;
+} WylTenantCreatorGrantProbe;
+
+static wyrelog_error_t
+count_tenant_creator_grant_event (const gchar *subject_id,
+    const gchar *role_id, const gchar *scope, const gchar *operation,
+    gpointer data)
+{
+  WylTenantCreatorGrantProbe *probe = data;
+  if (g_strcmp0 (subject_id, probe->subject) == 0
+      && g_strcmp0 (role_id, "wr.system_admin") == 0
+      && g_strcmp0 (scope, probe->tenant) == 0
+      && g_strcmp0 (operation, "grant") == 0)
+    probe->grant_count++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+verify_durable_tenant_creator_anchor (wyl_policy_store_t *store,
+    const WylTenantRecoveryDescriptor *descriptor)
+{
+  gboolean exists = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_role_membership_exists (store,
+      descriptor->creator_subject, "wr.system_admin", descriptor->tenant,
+      &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exists)
+    return WYRELOG_E_POLICY;
+
+  WylTenantCreatorGrantProbe probe = {
+    .subject = descriptor->creator_subject,
+    .tenant = descriptor->tenant,
+  };
+  rc = wyl_policy_store_foreach_role_membership_event (store,
+      count_tenant_creator_grant_event, &probe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (probe.grant_count != 1)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 tenant_recovery_repair_with_write (WylDaemonHttpContext *ctx,
     WylDaemonPolicyWrite *write, WylTenantRecoveryDescriptor *descriptor)
@@ -8816,6 +9256,11 @@ tenant_recovery_repair_with_write (WylDaemonHttpContext *ctx,
             || !descriptor->invalidation_completed))
       proof_rc = WYRELOG_E_POLICY;
     sodium_memzero (&proof, sizeof proof);
+    if (proof_rc != WYRELOG_E_OK)
+      return proof_rc;
+  } else if (descriptor->operation == WYL_TENANT_RECOVERY_CREATE) {
+    wyrelog_error_t proof_rc = verify_durable_tenant_creator_anchor
+        (write->store, descriptor);
     if (proof_rc != WYRELOG_E_OK)
       return proof_rc;
   }
@@ -8927,6 +9372,32 @@ authorize_tenant_management (SoupServer *server, SoupServerMessage *msg,
       "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed", out_actor);
 }
 
+#ifdef WYL_TEST_DAEMON_HTTP
+static void
+tenant_create_discard_noop_faults_for_test (WylDaemonHttpContext *ctx)
+{
+  guint discarded = 0;
+  g_mutex_lock (&ctx->lock);
+  discarded += ctx->fail_next_tenant_lifecycle_audit_insert;
+  discarded += ctx->fail_next_tenant_lifecycle_audit_append;
+  discarded += ctx->fail_next_tenant_creator_grant;
+  discarded += ctx->fail_next_tenant_creator_event;
+  discarded += ctx->fail_next_tenant_creator_receipt_verification;
+  discarded += ctx->fail_next_tenant_lifecycle_verification;
+  ctx->fail_next_tenant_lifecycle_audit_insert = FALSE;
+  ctx->fail_next_tenant_lifecycle_audit_append = FALSE;
+  ctx->fail_next_tenant_creator_grant = FALSE;
+  ctx->fail_next_tenant_creator_event = FALSE;
+  ctx->fail_next_tenant_creator_receipt_verification = FALSE;
+  ctx->fail_next_tenant_lifecycle_verification = FALSE;
+  g_mutex_unlock (&ctx->lock);
+
+  g_mutex_lock (&ctx->lock);
+  ctx->tenant_create_noop_fault_discards += discarded;
+  g_mutex_unlock (&ctx->lock);
+}
+#endif
+
 static void
 tenant_list_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -8992,6 +9463,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylDaemonHttpContext *ctx = user_data;
   gboolean sealing = g_strcmp0 (action, "seal") == 0;
+  gboolean creating = g_strcmp0 (action, "create") == 0;
   static const WylDaemonHttpStrictJsonField retirement_fields[] = {
     {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"request_id", WYL_REQUEST_ID_STRING_LEN,
@@ -9012,8 +9484,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylTenantRecoveryOperation recovery_operation = sealing
       ? WYL_TENANT_RECOVERY_SEAL
-      : (g_strcmp0 (action, "create") == 0 ? WYL_TENANT_RECOVERY_CREATE
-      : WYL_TENANT_RECOVERY_UNSEAL);
+      : (creating ? WYL_TENANT_RECOVERY_CREATE : WYL_TENANT_RECOVERY_UNSEAL);
   wyrelog_error_t recovery_rc = tenant_recovery_attempt_before_authorization
       (ctx, recovery_operation, tenant,
       sealing ? WYL_SERVICE_RETIREMENT_RECEIPT_VERSION : 0,
@@ -9104,40 +9575,68 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
         &retirement);
     changed = retirement.recorded_transitioned;
   } else {
-    decision_request_id = ensure_request_id_header (msg);
-    lifecycle_audit = wyl_audit_event_new ();
-    lifecycle_audit_action = g_strdup_printf ("tenant_%s", action);
-    wyl_audit_event_set_subject_id (lifecycle_audit, actor);
-    wyl_audit_event_set_action (lifecycle_audit, lifecycle_audit_action);
-    wyl_audit_event_set_resource_id (lifecycle_audit, tenant);
-    wyl_audit_event_set_request_id (lifecycle_audit, decision_request_id);
-    wyl_audit_event_set_decision (lifecycle_audit, WYL_DECISION_ALLOW);
-    lifecycle_audit_id = wyl_audit_event_dup_id_string (lifecycle_audit);
-    if (lifecycle_audit_id == NULL) {
-      set_json_error (msg, 500, "tenant_mutation_failed");
-      return;
-    }
     rc = wyl_daemon_policy_write_acquire (ctx, msg,
         WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
+    gboolean tenant_exists = FALSE;
+    if (rc == WYRELOG_E_OK && creating)
+      rc = wyl_policy_store_tenant_exists (write.store, tenant, &tenant_exists);
+    if (rc == WYRELOG_E_OK && tenant_exists) {
+#ifdef WYL_TEST_DAEMON_HTTP
+      tenant_create_discard_noop_faults_for_test (ctx);
+#endif
+      rc = wyl_daemon_policy_write_record_primary (&write, WYRELOG_E_OK);
+      if (rc == WYRELOG_E_OK) {
+        set_tenant_mutation_json (msg, ctx, tenant, FALSE, NULL, NULL);
+        return;
+      }
+    }
+
+    if (rc == WYRELOG_E_OK) {
+      decision_request_id = ensure_request_id_header (msg);
+      lifecycle_audit = wyl_audit_event_new ();
+      lifecycle_audit_action = g_strdup_printf ("tenant_%s", action);
+      wyl_audit_event_set_subject_id (lifecycle_audit, actor);
+      wyl_audit_event_set_action (lifecycle_audit, lifecycle_audit_action);
+      wyl_audit_event_set_resource_id (lifecycle_audit, tenant);
+      wyl_audit_event_set_request_id (lifecycle_audit, decision_request_id);
+      wyl_audit_event_set_decision (lifecycle_audit, WYL_DECISION_ALLOW);
+      lifecycle_audit_id = wyl_audit_event_dup_id_string (lifecycle_audit);
+      if (lifecycle_audit_id == NULL)
+        rc = WYRELOG_E_NOMEM;
+    }
     TenantLifecyclePublication publication = {
       .tenant = tenant,
-      .create = g_strcmp0 (action, "create") == 0,
+      .creator_subject = actor,
+      .create = creating,
       .changed = &changed,
       .audit_event = lifecycle_audit,
       .audit_id = lifecycle_audit_id,
     };
 #ifdef WYL_TEST_DAEMON_HTTP
-    g_mutex_lock (&ctx->lock);
-    publication.fail_audit_insert =
-        ctx->fail_next_tenant_lifecycle_audit_insert;
-    publication.verify_opposite_state =
-        ctx->fail_next_tenant_lifecycle_verification;
-    ctx->fail_next_tenant_lifecycle_audit_insert = FALSE;
-    ctx->fail_next_tenant_lifecycle_verification = FALSE;
-    g_mutex_unlock (&ctx->lock);
+    if (rc == WYRELOG_E_OK) {
+      g_mutex_lock (&ctx->lock);
+      publication.fail_audit_insert =
+          ctx->fail_next_tenant_lifecycle_audit_insert;
+      publication.fail_audit_append =
+          ctx->fail_next_tenant_lifecycle_audit_append;
+      publication.fail_creator_grant = ctx->fail_next_tenant_creator_grant;
+      publication.fail_creator_event = ctx->fail_next_tenant_creator_event;
+      publication.fail_creator_receipt_verification =
+          ctx->fail_next_tenant_creator_receipt_verification;
+      publication.verify_opposite_state =
+          ctx->fail_next_tenant_lifecycle_verification;
+      ctx->fail_next_tenant_lifecycle_audit_insert = FALSE;
+      ctx->fail_next_tenant_lifecycle_audit_append = FALSE;
+      ctx->fail_next_tenant_creator_grant = FALSE;
+      ctx->fail_next_tenant_creator_event = FALSE;
+      ctx->fail_next_tenant_creator_receipt_verification = FALSE;
+      ctx->fail_next_tenant_lifecycle_verification = FALSE;
+      g_mutex_unlock (&ctx->lock);
+    }
 #endif
     if (rc == WYRELOG_E_OK) {
-      gboolean commit_confirmed = FALSE;
+      WylCommittedPublicationStage stage =
+          WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
       g_autoptr (WylEngineSession) engine_session =
           wyl_engine_session_acquire (ctx->handle);
       if (engine_session == NULL) {
@@ -9145,14 +9644,45 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       } else {
         wyl_daemon_policy_write_observe_cleanup_resource (&write,
             WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+#ifdef WYL_TEST_DAEMON_HTTP
+        if (creating) {
+          g_mutex_lock (&ctx->lock);
+          ctx->tenant_create_publication_attempts++;
+          g_mutex_unlock (&ctx->lock);
+        }
+#endif
         rc = wyl_engine_session_run_committed_publication (engine_session,
             mutate_tenant_lifecycle_publication, &publication,
-            verify_active_tenant_publication, &publication, NULL, NULL,
-            &commit_confirmed);
-        if (rc != WYRELOG_E_OK && commit_confirmed) {
+            verify_active_tenant_publication, &publication, NULL, NULL, &stage);
+        if (rc != WYRELOG_E_OK && publication.create
+            && (stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
+                || stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS)) {
+          WylTenantCreateFailedPublicationEffect effect =
+              WYL_TENANT_CREATE_FAILED_PUBLICATION_FAIL_CLOSED_UNKNOWN;
+          rc = tenant_create_resolve_failed_publication (ctx, &write,
+              engine_session, &publication, stage, rc, &effect);
+        } else if (rc != WYRELOG_E_OK
+            && stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED && !changed
+            && !publication.create) {
+          guint64 generation = 0;
+          TenantLifecyclePublication repair_publication = publication;
+#ifdef WYL_TEST_DAEMON_HTTP
+          repair_publication.verify_opposite_state = FALSE;
+#endif
+          wyrelog_error_t repair_rc =
+              wyl_handle_policy_store_capture_generation (ctx->handle,
+              write.store, &generation);
+          if (repair_rc == WYRELOG_E_OK)
+            repair_rc = wyl_engine_session_repair_committed_publication
+                (engine_session, write.lease, write.store, generation,
+                verify_active_tenant_publication, &repair_publication);
+          if (repair_rc != WYRELOG_E_OK)
+            rc = repair_rc;
+        } else if (rc != WYRELOG_E_OK
+            && stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED) {
           WylTenantRecoveryDescriptor *descriptor =
               tenant_recovery_descriptor_new (ctx->handle,
-              recovery_operation, tenant, lifecycle_audit,
+              recovery_operation, tenant, actor, lifecycle_audit,
               lifecycle_audit_id);
           wyrelog_error_t install_rc = descriptor != NULL
               ? tenant_recovery_install (ctx, descriptor)

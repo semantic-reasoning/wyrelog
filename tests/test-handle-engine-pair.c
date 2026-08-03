@@ -4968,6 +4968,15 @@ mutate_committed_crash_publication (wyl_policy_store_t *store, gpointer data)
       "crash-restart-tenant", &created);
   if (rc != WYRELOG_E_OK || !created)
     return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  rc = wyl_policy_store_grant_role_membership (store,
+      "crash-restart-actor", "wr.system_admin", "crash-restart-tenant");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_append_role_membership_event (store,
+      "crash-restart-actor", "wr.system_admin", "crash-restart-tenant",
+      "grant");
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_policy_store_record_audit_intention_full (store,
       publication->audit_id,
       wyl_audit_event_get_created_at_us (publication->event),
@@ -4986,6 +4995,136 @@ mutate_committed_crash_publication (wyl_policy_store_t *store, gpointer data)
       wyl_audit_event_get_resource_id (publication->event), NULL, NULL,
       wyl_audit_event_get_request_id (publication->event),
       wyl_audit_event_get_decision (publication->event), &inserted);
+}
+
+static WylPolicyTenantCreateBundle
+committed_crash_durable_bundle (const CommittedCrashPublication *publication)
+{
+  return (WylPolicyTenantCreateBundle) {
+  .tenant_id = "crash-restart-tenant",.creator_subject_id =
+        "crash-restart-actor",.audit_id =
+        publication->audit_id,.audit_created_at_us =
+        wyl_audit_event_get_created_at_us (publication->
+        event),.audit_subject_id =
+        wyl_audit_event_get_subject_id (publication->event),.audit_action =
+        wyl_audit_event_get_action (publication->event),.audit_resource_id =
+        wyl_audit_event_get_resource_id (publication->
+        event),.audit_deny_reason =
+        wyl_audit_event_get_deny_reason (publication->
+        event),.audit_deny_origin =
+        wyl_audit_event_get_deny_origin (publication->
+        event),.audit_request_id =
+        wyl_audit_event_get_request_id (publication->event),.audit_decision =
+        wyl_audit_event_get_decision (publication->event),};
+}
+
+static gint
+interrupt_tenant_create_bundle_readback (gpointer data)
+{
+  (void) data;
+  return 1;
+}
+
+static gint
+check_committed_publication_fault_stages_and_bundle_classifier (void)
+{
+  static const WylCommittedPublicationFault faults[] = {
+    WYL_COMMITTED_PUBLICATION_FAULT_VALIDATE,
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT,
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 960 + (gint) i *4;
+    g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+    wyl_audit_event_set_subject_id (event, "crash-restart-actor");
+    wyl_audit_event_set_action (event, "tenant_create");
+    wyl_audit_event_set_resource_id (event, "crash-restart-tenant");
+    wyl_audit_event_set_request_id (event, "commit-stage-request");
+    wyl_audit_event_set_decision (event, WYL_DECISION_ALLOW);
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (event);
+    if (audit_id == NULL)
+      return 961 + (gint) i *4;
+    CommittedCrashPublication publication = { event, audit_id };
+    WylPolicyTenantCreateBundle bundle =
+        committed_crash_durable_bundle (&publication);
+    ExternalPublicationVerify verify = {
+      .scope = "crash-restart-tenant",
+      .state = "active",
+    };
+
+    /* The setter takes engine_session_mutex.  The runner reads and consumes
+     * the seam only while its outermost WylEngineSession retains that same
+     * recursive mutex. */
+    wyl_handle_set_committed_publication_fault_once_for_test (handle,
+        faults[i]);
+    g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+    WylCommittedPublicationStage stage =
+        WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+    wyrelog_error_t rc = session != NULL
+        ? wyl_engine_session_run_committed_publication (session,
+        mutate_committed_crash_publication, &publication,
+        verify_external_scope_publication, &verify, NULL, NULL, &stage)
+        : WYRELOG_E_BUSY;
+    WylPolicyTenantCreateBundleState bundle_state =
+        WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN;
+    wyrelog_error_t classify_rc =
+        wyl_policy_store_classify_tenant_create_bundle
+        (wyl_handle_get_policy_store (handle), &bundle, &bundle_state);
+    gboolean applied =
+        faults[i] == WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR;
+    if (rc != WYRELOG_E_IO || classify_rc != WYRELOG_E_OK
+        || stage != (applied ? WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS :
+            WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED)
+        || bundle_state != (applied ?
+            WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT :
+            WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_ABSENT)
+        || wyl_handle_engine_pair_is_poisoned (handle) != applied
+        || wyl_handle_engine_pair_is_ready (handle) == applied)
+      return 962 + (gint) i *4;
+  }
+
+  g_autoptr (WylHandle) partial_handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &partial_handle) != WYRELOG_E_OK)
+    return 972;
+  g_autoptr (WylAuditEvent) partial_event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (partial_event, "crash-restart-actor");
+  wyl_audit_event_set_action (partial_event, "tenant_create");
+  wyl_audit_event_set_resource_id (partial_event, "crash-restart-tenant");
+  wyl_audit_event_set_request_id (partial_event, "partial-stage-request");
+  wyl_audit_event_set_decision (partial_event, WYL_DECISION_ALLOW);
+  g_autofree gchar *partial_audit_id =
+      wyl_audit_event_dup_id_string (partial_event);
+  CommittedCrashPublication partial_publication = {
+    partial_event, partial_audit_id,
+  };
+  WylPolicyTenantCreateBundle partial_bundle =
+      committed_crash_durable_bundle (&partial_publication);
+  gboolean created = FALSE;
+  wyl_policy_store_t *partial_store =
+      wyl_handle_get_policy_store (partial_handle);
+  WylPolicyTenantCreateBundleState partial_state =
+      WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT;
+  if (partial_audit_id == NULL
+      || wyl_policy_store_create_tenant (partial_store,
+          "crash-restart-tenant", &created) != WYRELOG_E_OK || !created
+      || wyl_policy_store_classify_tenant_create_bundle (partial_store,
+          &partial_bundle, &partial_state) != WYRELOG_E_OK
+      || partial_state != WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN)
+    return 973;
+
+  sqlite3 *db = wyl_policy_store_get_db (partial_store);
+  sqlite3_progress_handler (db, 1, interrupt_tenant_create_bundle_readback,
+      NULL);
+  partial_state = WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT;
+  wyrelog_error_t read_rc = wyl_policy_store_classify_tenant_create_bundle
+      (partial_store, &partial_bundle, &partial_state);
+  sqlite3_progress_handler (db, 0, NULL, NULL);
+  if (read_rc == WYRELOG_E_OK
+      || partial_state != WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN)
+    return 974;
+  return 0;
 }
 
 static void
@@ -5008,6 +5147,13 @@ run_committed_crash_child (const gchar *policy_path, const gchar *marker_path)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
     return 911;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_role_permission (store, "wr.system_admin",
+          "wr.policy.write") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, "wr.system_admin",
+          "wr.policy.grant_role") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 912;
   g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (event, "crash-restart-actor");
   wyl_audit_event_set_action (event, "tenant_create");
@@ -5016,7 +5162,7 @@ run_committed_crash_child (const gchar *policy_path, const gchar *marker_path)
   wyl_audit_event_set_decision (event, WYL_DECISION_ALLOW);
   g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (event);
   if (audit_id == NULL)
-    return 912;
+    return 913;
   CommittedCrashPublication publication = { event, audit_id };
   ExternalPublicationVerify verify = {
     .scope = "crash-restart-tenant",
@@ -5025,19 +5171,59 @@ run_committed_crash_child (const gchar *policy_path, const gchar *marker_path)
   wyl_handle_set_committed_publication_checkpoint_for_test (handle,
       committed_crash_checkpoint, (gpointer) marker_path);
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
-  gboolean committed = FALSE;
+  WylCommittedPublicationStage stage =
+      WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
       mutate_committed_crash_publication, &publication,
-      verify_external_scope_publication, &verify, NULL, NULL, &committed);
-  if (rc == WYRELOG_E_OK || committed)
-    return 913;
-  return 914;
+      verify_external_scope_publication, &verify, NULL, NULL, &stage);
+  if (rc == WYRELOG_E_OK || stage != WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED)
+    return 914;
+  return 915;
 }
 
 typedef struct
 {
   guint matches;
 } CommittedCrashAuditProbe;
+
+static wyrelog_error_t
+count_committed_crash_grant (const gchar *subject_id, const gchar *role_id,
+    const gchar *scope, const gchar *operation, gpointer data)
+{
+  guint *matches = data;
+  if (g_strcmp0 (subject_id, "crash-restart-actor") == 0
+      && g_strcmp0 (role_id, "wr.system_admin") == 0
+      && g_strcmp0 (scope, "crash-restart-tenant") == 0
+      && g_strcmp0 (operation, "grant") == 0)
+    (*matches)++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+count_committed_crash_session_state (const gchar *session_id,
+    const gchar *state, gpointer data)
+{
+  (void) state;
+  guint *matches = data;
+  if (g_strcmp0 (session_id, "crash-restart-tenant") == 0)
+    (*matches)++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+count_committed_crash_session_event (gint64 event_id,
+    const gchar *session_id, const gchar *event, const gchar *from_state,
+    const gchar *to_state, gpointer data)
+{
+  (void) event_id;
+  (void) event;
+  (void) from_state;
+  (void) to_state;
+  guint *matches = data;
+  if (g_strcmp0 (session_id, "crash-restart-tenant") == 0)
+    (*matches)++;
+  return WYRELOG_E_OK;
+}
 
 static wyrelog_error_t
 count_committed_crash_audit (const gchar *id, gint64 created_at_us,
@@ -5107,13 +5293,43 @@ check_committed_unpublished_process_kill_recovers_on_restart (void)
   };
   g_autoptr (WylHandle) handle = NULL;
   gboolean exists = FALSE;
+  gboolean member = FALSE;
+  gboolean write = FALSE;
+  gboolean grant = FALSE;
+  guint grant_events = 0;
+  guint session_rows = 0;
   CommittedCrashAuditProbe probe = { 0 };
   if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK
       || wyl_policy_store_tenant_exists (wyl_handle_get_policy_store (handle),
           "crash-restart-tenant", &exists) != WYRELOG_E_OK || !exists
+      || wyl_policy_store_role_membership_exists
+      (wyl_handle_get_policy_store (handle), "crash-restart-actor",
+          "wr.system_admin", "crash-restart-tenant", &member)
+      != WYRELOG_E_OK || !member
+      || wyl_policy_store_subject_has_permission
+      (wyl_handle_get_policy_store (handle), "crash-restart-actor",
+          "wr.policy.write", "crash-restart-tenant", &write)
+      != WYRELOG_E_OK || !write
+      || wyl_policy_store_subject_has_permission
+      (wyl_handle_get_policy_store (handle), "crash-restart-actor",
+          "wr.policy.grant_role", "crash-restart-tenant", &grant)
+      != WYRELOG_E_OK || !grant
+      || wyl_policy_store_foreach_role_membership_event
+      (wyl_handle_get_policy_store (handle), count_committed_crash_grant,
+          &grant_events) != WYRELOG_E_OK || grant_events != 1
+      || wyl_policy_store_foreach_session_state
+      (wyl_handle_get_policy_store (handle),
+          count_committed_crash_session_state, &session_rows) != WYRELOG_E_OK
+      || wyl_policy_store_foreach_session_event
+      (wyl_handle_get_policy_store (handle),
+          count_committed_crash_session_event, &session_rows) != WYRELOG_E_OK
+      || session_rows != 0
       || wyl_policy_store_foreach_audit_event
       (wyl_handle_get_policy_store (handle), count_committed_crash_audit,
           &probe) != WYRELOG_E_OK || probe.matches != 1) {
+    g_printerr ("committed crash proof exists=%d member=%d write=%d grant=%d "
+        "grant_events=%u session_rows=%u audit=%u\n", exists, member, write,
+        grant, grant_events, session_rows, probe.matches);
     g_clear_object (&handle);
     rmdir_recursive (dir);
     return 919;
@@ -5121,13 +5337,20 @@ check_committed_unpublished_process_kill_recovers_on_restart (void)
   gint64 scope = 0;
   gint64 active = 0;
   gint64 accepted = 0;
+  gint64 member_row[3] = { 0 };
+  gboolean exact_member = FALSE;
   if (wyl_handle_intern_engine_symbol (handle, "crash-restart-tenant",
           &scope) != WYRELOG_E_OK
       || wyl_handle_intern_engine_symbol (handle, "active", &active)
       != WYRELOG_E_OK
       || wyl_engine_owned_get_accepted_session_state
       (wyl_handle_get_read_engine (handle), "session_state", scope, &accepted)
-      != WYRELOG_E_OK || accepted != active) {
+      != WYRELOG_E_OK || accepted != active
+      || intern3 (handle, "crash-restart-actor", "wr.system_admin",
+          "crash-restart-tenant", member_row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", member_row,
+          &exact_member) != WYRELOG_E_OK || !exact_member) {
     g_clear_object (&handle);
     rmdir_recursive (dir);
     return 920;
@@ -7482,6 +7705,9 @@ main (int argc, char **argv)
   if ((rc = check_replacement_faults_preserve_published_pair ()) != 0)
     return rc;
   if ((rc = check_postcommit_not_found_is_internal ()) != 0)
+    return rc;
+  if ((rc = check_committed_publication_fault_stages_and_bundle_classifier ())
+      != 0)
     return rc;
   if ((rc = check_retained_external_publication_outcomes ()) != 0)
     return rc;
