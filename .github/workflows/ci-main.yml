@@ -381,6 +381,107 @@ jobs:
           path: build-daemon-http-shared/meson-logs/
           if-no-files-found: ignore
 
+  policy-write-focused-sanitizer:
+    name: policy-write-focused-sanitizer-ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1
+      UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1:print_stacktrace=1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
+
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@v5
+        with:
+          path: subprojects/packagecache
+          key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            Linux-packagecache-
+
+      - name: Set up sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Select compiler cache
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache.outcome }}" = success ] \
+            && command -v sccache >/dev/null 2>&1 \
+            && sccache --version >/dev/null 2>&1; then
+            echo 'CC=sccache cc' >> "$GITHUB_ENV"
+            echo 'CXX=sccache c++' >> "$GITHUB_ENV"
+          else
+            echo 'CC=cc' >> "$GITHUB_ENV"
+            echo 'CXX=c++' >> "$GITHUB_ENV"
+            echo 'sccache unavailable; using native compiler'
+          fi
+
+      - name: Configure policy WRITE sanitizer tests
+        run: |
+          meson setup build-policy-write-sanitizer \
+            -Ddefault_library=shared \
+            -Denable_tpm=disabled \
+            -Denable_client=enabled \
+            -Denable_fact_store=enabled \
+            -Denable_audit=enabled \
+            -Dduckdb_source=prebuilt \
+            -Db_sanitize=address,undefined
+
+      - name: Compile focused policy WRITE tests
+        run: |
+          meson compile -C build-policy-write-sanitizer \
+            test-service-auth-coordination \
+            test-daemon-http-decide \
+            test-daemon-http-decide-audit \
+            test-daemon-http-decide-service
+
+      - name: Test focused policy WRITE paths
+        run: |
+          meson test -C build-policy-write-sanitizer --no-rebuild \
+            service-auth-coordination \
+            daemon-http-decide \
+            daemon-http-decide-audit \
+            daemon-http-decide-service \
+            --print-errorlogs
+
+      - name: Repeat policy WRITE coordination paths
+        run: |
+          meson test -C build-policy-write-sanitizer --no-rebuild \
+            service-auth-coordination \
+            daemon-http-decide \
+            daemon-http-decide-audit \
+            --repeat 5 \
+            --print-errorlogs
+
+      - name: Show sccache statistics
+        if: always()
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo 'sccache statistics unavailable'
+          else
+            echo 'sccache unavailable; no statistics to show'
+          fi
+
+      - name: Upload policy WRITE sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: policy-write-focused-sanitizer-logs-ubuntu
+          path: build-policy-write-sanitizer/meson-logs/
+          if-no-files-found: ignore
+
   daemon-http-shared-fact-audit-disabled:
     name: daemon-http-shared-fact-audit-disabled-ubuntu
     runs-on: ubuntu-latest
