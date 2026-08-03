@@ -6326,6 +6326,21 @@ check_scope_projection_requires_compatible_engine_relation (void)
   }
 
   if (!write_file_in_dir (tmpdir, "lobac/decision.dl",
+          ".decl seed(scope: symbol, state: symbol)\n"
+          ".decl session_state(scope: symbol, state: symbol)\n"
+          "session_state(S, T) :- seed(S, T).\n")) {
+    rmdir_recursive (tmpdir);
+    return 891;
+  }
+  g_autoptr (WylHandle) derived_handle = NULL;
+  if (wyl_init (NULL, &derived_handle) != WYRELOG_E_OK
+      || wyl_handle_open_engine_pair (derived_handle, tmpdir)
+      != WYRELOG_E_POLICY) {
+    rmdir_recursive (tmpdir);
+    return 892;
+  }
+
+  if (!write_file_in_dir (tmpdir, "lobac/decision.dl",
           ".decl session_state(scope: symbol, state: symbol)\n")) {
     rmdir_recursive (tmpdir);
     return 888;

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include <sodium.h>
+#include <wirelog/wirelog-ir.h>
 #include <wirelog/wirelog-parser.h>
 
 #include "wyrelog/wyrelog.h"
@@ -794,6 +795,11 @@ inspect_session_state_capability (const gchar *source)
   uint32_t inline_cols = 0;
   int inline_rc = wirelog_program_get_facts (program, "session_state",
       &inline_facts, &inline_rows, &inline_cols);
+  const wirelog_ir_node_t *derived_head =
+      wirelog_program_get_relation_ir (program, "session_state");
+  /* The accepted-input witness is complete only when every row can enter
+   * through the canonical insert/remove funnels.  Inline facts and derived
+   * heads are ambient sources, so policies containing either are rejected. */
   WylEngineSessionStateCapability capability =
       schema == NULL ? WYL_ENGINE_SESSION_STATE_ABSENT :
       schema->column_count == 2
@@ -801,7 +807,7 @@ inspect_session_state_capability (const gchar *source)
       && schema->columns[1].type == WIRELOG_TYPE_STRING
       && schema->columns[0].compound_kind == WIRELOG_COMPOUND_KIND_NONE
       && schema->columns[1].compound_kind == WIRELOG_COMPOUND_KIND_NONE
-      && inline_rc == 1 && inline_rows == 0 ?
+      && inline_rc == 1 && inline_rows == 0 && derived_head == NULL ?
       WYL_ENGINE_SESSION_STATE_EXACT : WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
   free (inline_facts);
   wirelog_program_free (program);
