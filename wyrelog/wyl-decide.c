@@ -5,6 +5,7 @@
 
 #include "access/break-glass-private.h"
 #include "access/decision-private.h"
+#include "policy/store-private.h"
 #include "wyl-decide-private.h"
 #include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
@@ -706,6 +707,13 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
      */
     gint64 pstate_row[2] = { 0, 0 };
     gboolean pstate_injected = FALSE;
+    /*
+     * #762: perm_state cleanup state, declared alongside pstate_row BEFORE
+     * the first goto decide_cleanup so the cleanup block can reference it
+     * (clang rejects a goto into the scope of a later declaration).
+     */
+    gint64 perm_state_row[4] = { 0, 0, 0, 0 };
+    gboolean perm_state_injected = FALSE;
     if (wyl_decide_req_get_service_bearer_authenticated (req)) {
       gint64 authenticated_id = 0;
       rc = wyl_engine_session_intern_symbol (session, "authenticated",
@@ -725,6 +733,95 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         if (rc != WYRELOG_E_OK)
           return rc;
         pstate_injected = TRUE;
+      }
+    }
+
+    /*
+     * #762 WALL 3: a granted svc: principal for an unguarded APPROVED
+     * data-plane permission still can't authorize. armed/3 rule-1
+     * (templates/access/fsm/permission_scope.dl) needs a durable
+     * perm_state(U,P,S,"armed") EDB row, but the store hard-rejects
+     * perm_state for svc: subjects, so the row is never written and the
+     * decide denies not_armed. Mirror the #740 principal_state injection:
+     * insert the armed perm_state TRANSIENTLY into the read engine for
+     * THIS decide only, so armed derives and (with the #740
+     * principal_state + #744 session_state) allow_guard_base allows.
+     * Nothing is written to the policy store: no .dl change, no re-sign.
+     * The fact is removed on every exit path via decide_cleanup.
+     *
+     * Triple gate -- inject ONLY when ALL hold (any false -> skip, deny
+     * path unchanged); the three cheap gates run before the insert so
+     * nothing is written when any fails:
+     *   1. the daemon-set service-bearer-authenticated flag (#740, reused
+     *      -- no new flag, no daemon change);
+     *   2. has_permission(U,P,S) already holds -- arm a real grant only;
+     *   3. the action is one of the approved data-plane permissions. The
+     *      authoritative source is the C-list the .dl mirrors
+     *      (approved_data_plane_permissions[] in policy/store.c), read via
+     *      the parameterless accessors below -- NOT a snapshot probe.
+     *      Control-plane actions are never in this closed set, so a svc:
+     *      principal can never arm a control-plane perm.
+     *
+     * Inject the RAW "perm_state" EDB only (arity 4) -- the relation
+     * armed/3 rule-1 reads. Do NOT inject "perm_state_replayed": that is
+     * the public durable replay-observation path, and a transient arming
+     * must never appear there (an observability lie). NOTE the
+     * observed-vs-raw asymmetry: the was-absent probe below reads the
+     * snapshot mirror perm_state_observed (wyl_handle_engine_contains
+     * remaps "perm_state"), which derives from perm_state_replayed, NOT
+     * the raw EDB rule-1 reads. It is safe here only because a svc:
+     * subject has neither a raw nor a replayed perm_state row (the store
+     * rejects durable svc: perm_state), so the mirror faithfully reports
+     * the raw EDB is absent. Do NOT "fix" this by also injecting
+     * perm_state_replayed. The was-absent probe is kept for
+     * defense-in-depth so a set-semantics remove can never delete a
+     * pre-existing legitimate row, mirroring #740.
+     */
+    if (wyl_decide_req_get_service_bearer_authenticated (req)) {
+      gboolean has_perm = FALSE;
+      rc = wyl_handle_engine_contains (handle, "has_permission", row, 3,
+          &has_perm);
+      if (rc != WYRELOG_E_OK) {
+        cleanup_rc = rc;
+        goto decide_cleanup;
+      }
+      gboolean data_plane = FALSE;
+      const gchar *action_id = wyl_decide_req_get_action (req);
+      for (gsize i = 0;
+          i < wyl_policy_store_approved_data_plane_permission_count (); i++) {
+        if (g_strcmp0 (wyl_policy_store_approved_data_plane_permission_id (i),
+                action_id) == 0) {
+          data_plane = TRUE;
+          break;
+        }
+      }
+      if (has_perm && data_plane) {
+        gint64 armed_id = 0;
+        rc = wyl_handle_intern_engine_symbol (handle, "armed", &armed_id);
+        if (rc != WYRELOG_E_OK) {
+          cleanup_rc = rc;
+          goto decide_cleanup;
+        }
+        perm_state_row[0] = row[0];
+        perm_state_row[1] = row[1];
+        perm_state_row[2] = row[2];
+        perm_state_row[3] = armed_id;
+        gboolean present = FALSE;
+        rc = wyl_handle_engine_contains (handle, "perm_state", perm_state_row,
+            4, &present);
+        if (rc != WYRELOG_E_OK) {
+          cleanup_rc = rc;
+          goto decide_cleanup;
+        }
+        if (!present) {
+          rc = wyl_handle_engine_insert (handle, "perm_state", perm_state_row,
+              4);
+          if (rc != WYRELOG_E_OK) {
+            cleanup_rc = rc;
+            goto decide_cleanup;
+          }
+          perm_state_injected = TRUE;
+        }
       }
     }
 
@@ -791,6 +888,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     {
       wyrelog_error_t guard_remove_rc = WYRELOG_E_OK;
       wyrelog_error_t pstate_remove_rc = WYRELOG_E_OK;
+      wyrelog_error_t perm_state_remove_rc = WYRELOG_E_OK;
       if (guard_facts.eval_guard_inserted)
         guard_remove_rc = remove_guard_eval_facts (session, &guard_facts);
 #ifdef WYL_HAS_BREAK_GLASS
@@ -799,6 +897,9 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       if (pstate_injected)
         pstate_remove_rc = wyl_engine_session_remove (session, "principal_state",
             pstate_row, 2);
+      if (perm_state_injected)
+        perm_state_remove_rc = wyl_handle_engine_remove (handle, "perm_state",
+            perm_state_row, 4);
       /*
        * All removes run BEFORE any failure-return so nothing leaks, then
        * the fail-closed checks fire in precedence order. The transient
@@ -821,6 +922,20 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         wyl_decide_resp_set_deny_tags (resp, "principal_state_cleanup_failed",
             "principal_state");
         return pstate_remove_rc;
+      }
+      /*
+       * #762: the transient perm_state removal is fail-closed
+       * symmetrically with the principal_state cleanup. A row that cannot
+       * be removed would persist on the read engine and arm this subject
+       * on a later decide -- a cross-request escalation -- so surface it
+       * as a DENY and propagate the error. Precedence after cleanup_rc:
+       * guard -> principal_state -> perm_state.
+       */
+      if (perm_state_remove_rc != WYRELOG_E_OK) {
+        wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+        wyl_decide_resp_set_deny_tags (resp, "perm_state_cleanup_failed",
+            "perm_state");
+        return perm_state_remove_rc;
       }
     }
   }

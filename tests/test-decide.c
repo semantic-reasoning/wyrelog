@@ -165,6 +165,35 @@ insert_service_grant_fixture (WylHandle *handle, const gchar *subject,
       "armed");
 }
 
+/*
+ * #762: like insert_service_grant_fixture but WITHOUT the durable
+ * perm_state("armed") row and without principal_state -- exactly the fact
+ * shape of a fully validated live service (svc:) bearer that holds an
+ * approved data-plane grant at an active scope. The store rejects a
+ * durable perm_state row for svc: subjects, so armed/3 rule-1 has nothing
+ * to fire on and the decide denies not_armed. wyl_decide injects the
+ * armed perm_state TRANSIENTLY when the service-bearer flag is set and the
+ * action is an approved data-plane permission, which is what this fixture
+ * exercises. principal_state is likewise supplied transiently (#740).
+ */
+static wyrelog_error_t
+insert_service_grant_unarmed_fixture (WylHandle *handle, const gchar *subject,
+    const gchar *action, const gchar *resource)
+{
+  wyrelog_error_t rc =
+      insert_symbol_row2 (handle, "role_permission", "wr.decide-role", action);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
+      resource);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", resource, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row1 (handle, "session_active", "active");
+}
+
 static wyrelog_error_t
 seed_policy_store_decide_fixture (WylHandle *handle, const gchar *subject,
     const gchar *action, const gchar *resource, const gchar *perm_state)
@@ -1574,6 +1603,254 @@ check_decide_fail_closes_on_pstate_cleanup_fault (void)
   return 0;
 }
 
+/*
+ * #762 WALL 3 (deny->allow): a fully validated live service (svc:) bearer
+ * that holds an APPROVED data-plane grant at an active scope still can't
+ * authorize -- armed/3 rule-1 needs a durable perm_state("armed") EDB row
+ * and the store rejects perm_state for svc: subjects. wyl_decide injects
+ * that armed row TRANSIENTLY when the service-bearer flag is set AND the
+ * action is an approved data-plane permission, so the grant arms and
+ * (with the #740 principal_state + #744 session_state) allows. The fact
+ * is removed on every exit path; nothing is written to the policy store.
+ */
+static gint
+check_decide_service_bearer_arms_data_plane_permission (void)
+{
+  const gchar *subject = "svc:decide-user-762";
+  const gchar *action = "wr.svc.read_decision";
+  const gchar *resource = "svc-decide-resource-762";
+  gint64 probe_row[4];
+  gboolean present = TRUE;
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 800;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 801;
+  if (insert_service_grant_unarmed_fixture (handle, subject, action, resource)
+      != WYRELOG_E_OK)
+    return 802;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  /* Case A (bug): flag unset -> DENY (no principal_state either). */
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 803;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 804;
+
+  /* Case B (deny->allow): flag set -> ALLOW. Before the #762 injection
+   * this denies not_armed / perm_state even with the flag set. */
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 805;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 806;
+
+  /* Case C (no residue): the transient armed perm_state must not persist. */
+  if (intern_symbol (handle, subject, &probe_row[0]) != WYRELOG_E_OK)
+    return 807;
+  if (intern_symbol (handle, action, &probe_row[1]) != WYRELOG_E_OK)
+    return 808;
+  if (intern_symbol (handle, resource, &probe_row[2]) != WYRELOG_E_OK)
+    return 809;
+  if (intern_symbol (handle, "armed", &probe_row[3]) != WYRELOG_E_OK)
+    return 810;
+  if (wyl_handle_engine_contains (handle, "perm_state", probe_row, 4, &present)
+      != WYRELOG_E_OK)
+    return 811;
+  if (present)
+    return 812;
+
+  /* A subsequent flag-unset decide must deny again (no leaked arming). */
+  wyl_decide_req_set_service_bearer_authenticated (req, FALSE);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 813;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 814;
+
+  return 0;
+}
+
+/*
+ * #762 control-plane guard: the transient arming is gated on the approved
+ * data-plane C-list (wyl_policy_store_approved_data_plane_permission_*).
+ * A svc: bearer that holds a NON data-plane (control-plane) permission is
+ * never armed, even with the flag set and has_permission true -> DENY
+ * not_armed / perm_state.
+ */
+static gint
+check_decide_service_bearer_does_not_arm_control_plane (void)
+{
+  const gchar *subject = "svc:decide-user-762-cp";
+  const gchar *action = "wr.policy.grant_role";
+  const gchar *resource = "svc-decide-resource-762-cp";
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 820;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 821;
+  if (insert_service_grant_unarmed_fixture (handle, subject, action, resource)
+      != WYRELOG_E_OK)
+    return 822;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 823;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 824;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 825;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 826;
+
+  return 0;
+}
+
+/*
+ * #762 ungranted guard: a svc: bearer WITHOUT the data-plane grant fails
+ * gate-2 (has_permission false), so nothing is armed. The deny is a
+ * pre-arm authorization reason, never not_armed (which requires
+ * has_permission to hold).
+ */
+static gint
+check_decide_service_bearer_ungranted_denies (void)
+{
+  const gchar *subject = "svc:decide-user-762-ung";
+  const gchar *action = "wr.svc.read_decision";
+  const gchar *resource = "svc-decide-resource-762-ung";
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 830;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 831;
+  /* Active scope but NO role grant -> has_permission is false. */
+  if (insert_symbol_row2 (handle, "session_state", resource, "active")
+      != WYRELOG_E_OK)
+    return 832;
+  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 833;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 834;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 835;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") == 0)
+    return 836;
+
+  return 0;
+}
+
+/*
+ * #762 freeze still denies: an armed data-plane grant with the flag set is
+ * still denied on the freeze gate -- the transient arming clears only the
+ * not_armed blocker, it never forces ALLOW past an independent conjunct of
+ * allow_guard_base.
+ */
+static gint
+check_decide_service_bearer_data_plane_respects_freeze (void)
+{
+  const gchar *subject = "svc:decide-user-762-frz";
+  const gchar *action = "wr.svc.read_decision";
+  const gchar *resource = "svc-decide-resource-762-frz";
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 840;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 841;
+  if (insert_service_grant_unarmed_fixture (handle, subject, action, resource)
+      != WYRELOG_E_OK)
+    return 842;
+  if (insert_symbol_row1 (handle, "frozen", resource) != WYRELOG_E_OK)
+    return 843;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 844;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 845;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "frozen") != 0)
+    return 846;
+
+  return 0;
+}
+
+/*
+ * #762 fail-closed: if the transient armed perm_state row cannot be
+ * removed after the decide, wyl_decide must fail closed (DENY,
+ * perm_state_cleanup_failed) and propagate the error rather than let the
+ * injected arming leak into a later decide. Mirrors the principal_state
+ * cleanup-fault behaviour using the same engine-remove fault-once seam.
+ */
+static gint
+check_decide_fail_closes_on_perm_state_cleanup_fault (void)
+{
+  const gchar *subject = "svc:decide-user-762-clf";
+  const gchar *action = "wr.svc.read_decision";
+  const gchar *resource = "svc-decide-resource-762-clf";
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 850;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 851;
+  if (insert_service_grant_unarmed_fixture (handle, subject, action, resource)
+      != WYRELOG_E_OK)
+    return 852;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  wyl_decide_req_set_service_bearer_authenticated (req, TRUE);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_handle_set_engine_remove_fault_once (handle, "perm_state",
+      WYRELOG_E_INTERNAL);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INTERNAL)
+    return 853;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 854;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "perm_state_cleanup_failed") != 0)
+    return 855;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 856;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -1628,6 +1905,16 @@ main (void)
   if ((rc = check_decide_human_path_unchanged_without_flag ()) != 0)
     return rc;
   if ((rc = check_decide_fail_closes_on_pstate_cleanup_fault ()) != 0)
+    return rc;
+  if ((rc = check_decide_service_bearer_arms_data_plane_permission ()) != 0)
+    return rc;
+  if ((rc = check_decide_service_bearer_does_not_arm_control_plane ()) != 0)
+    return rc;
+  if ((rc = check_decide_service_bearer_ungranted_denies ()) != 0)
+    return rc;
+  if ((rc = check_decide_service_bearer_data_plane_respects_freeze ()) != 0)
+    return rc;
+  if ((rc = check_decide_fail_closes_on_perm_state_cleanup_fault ()) != 0)
     return rc;
   return 0;
 }

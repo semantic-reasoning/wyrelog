@@ -5091,16 +5091,16 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 4629;
 
-  /* Arm the service's workload perm at <tenant>.  A service subject cannot
-   * hold a durable perm_state row (the store rejects svc:), so inject the
-   * armed fact straight into the read engine -- it persists until the next
-   * reload, which spans the allow-decide window below. */
-  if (insert_symbol_row4 (handle, "perm_state", svc, perm, fresh, "armed")
-      != WYRELOG_E_OK)
-    return 4627;
+  /* #762: the service's workload perm arms with no manual perm_state row.
+   * A service subject cannot hold a durable perm_state (the store rejects
+   * svc:), and wr.svc.read_decision is an approved data-plane permission,
+   * so wyl_decide injects the armed fact TRANSIENTLY for this validated
+   * service bearer at decide -- the previous manual read-engine injection
+   * is no longer needed. */
 
   /* (3) The service bearer now decides ALLOW at <tenant>: the seeded
-   * session_state(active) is what makes <tenant> a valid decision scope. */
+   * session_state(active) is what makes <tenant> a valid decision scope,
+   * and the #762 transient arming supplies the armed perm_state. */
   g_autofree gchar *fresh_tenant_query = g_strdup_printf ("tenant=%s", fresh);
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,
       fresh_tenant_query, fixture.token, &status, &body);
@@ -5132,6 +5132,83 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
     return rc;
   if (status != 400 || strstr (body, "tenant_sealed") == NULL)
     return 4633;
+  g_clear_pointer (&body, g_free);
+
+  return 0;
+}
+
+/*
+ * #762 WALL 3 end-to-end: a genuine, FULLY validated live service (svc:)
+ * bearer that holds an APPROVED data-plane grant authorises through the
+ * real HTTP /decide route with NO durable or manually injected perm_state
+ * -- the daemon-validated service branch arms the grant TRANSIENTLY at
+ * decide because the action is on the approved data-plane C-list. The
+ * same bearer holding a control-plane grant is NEVER armed (the C-list is
+ * a closed data-plane set), so that decide denies not_armed. Nothing is
+ * written to the store: the public perm_state transition path for svc:
+ * still rejects, asserted separately.
+ */
+static gint
+check_service_bearer_decide_arms_data_plane_permission (SoupServer *server,
+    const gchar *base_url)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  if (handle == NULL)
+    return 2450;
+
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (!service_resolver_fixture_init (server, &fixture, WYL_SERVICE_AUTH_ACTIVE,
+          0)
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+    return 2451;
+
+  const gchar *subject = "svc:resolver:test";
+  const gchar *dp_perm = "wr.svc.read_decision";        /* approved data-plane */
+  const gchar *cp_perm = "wr.policy.grant_role";        /* control-plane */
+  const gchar *role = "wr.svc-762-role";
+  /* Grant both perms at the fixture scope, active session, NO perm_state. */
+  if (insert_symbol_row2 (handle, "role_permission", role, dp_perm)
+      != WYRELOG_E_OK)
+    return 2452;
+  if (insert_symbol_row2 (handle, "role_permission", role, cp_perm)
+      != WYRELOG_E_OK)
+    return 2453;
+  if (insert_symbol_row3 (handle, "member_of", subject, role, fixture.sid)
+      != WYRELOG_E_OK)
+    return 2454;
+  if (insert_symbol_row2 (handle, "session_state", fixture.sid, "active")
+      != WYRELOG_E_OK)
+    return 2455;
+  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 2456;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /* (1) data-plane action -> decision:1, armed transiently by #762. */
+  gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, dp_perm,
+      fixture.sid, NULL, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 2457;
+  if (strstr (body, "\"decision\":1") == NULL)
+    return 2458;
+  g_clear_pointer (&body, g_free);
+
+  /* (2) control-plane action -> decision:0 not_armed: the C-list gate
+   * blocks arming even though has_permission holds. */
+  rc = send_raw_decide_bearer (session, "POST", base_url, subject, cp_perm,
+      fixture.sid, NULL, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 2459;
+  if (strstr (body, "\"decision\":0") == NULL)
+    return 2460;
+  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL)
+    return 2461;
   g_clear_pointer (&body, g_free);
 
   return 0;
@@ -9397,6 +9474,26 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 178;
   if (transition_audit.matches != 1)
     return 179;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * #762 unchanged: the public POST /policy/permissions/transition path
+   * still rejects a svc: subject. The read-path transient arming does NOT
+   * open a durable write path -- the store refuses perm_state for svc:
+   * (WYRELOG_E_POLICY), surfaced as 400 invalid_policy_mutation. The same
+   * authenticated admin/authority that just succeeded for a human subject
+   * is used, so the rejection is the svc: subject, not an auth failure.
+   */
+  g_autofree gchar *svc_transition_query =
+      g_strdup_printf ("subject=svc:transition-reject-762&perm=site.policy.read"
+      "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition", svc_transition_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 203;
   g_clear_pointer (&body, g_free);
 
   if (wyl_policy_store_set_principal_state (store, "client-state-target",
@@ -18648,6 +18745,13 @@ main (void)
       check_fresh_tenant_activation_grants_and_decides (http.server, base_url);
   if (fresh_tenant_rc != 0) {
     result = fresh_tenant_rc;
+    goto cleanup;
+  }
+  gint service_data_plane_rc =
+      check_service_bearer_decide_arms_data_plane_permission (http.server,
+      base_url);
+  if (service_data_plane_rc != 0) {
+    result = service_data_plane_rc;
     goto cleanup;
   }
 #ifdef WYL_HAS_AUDIT
