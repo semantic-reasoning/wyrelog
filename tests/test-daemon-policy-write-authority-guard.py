@@ -537,6 +537,14 @@ def main():
                 "#if 1\n  gint all_owner_fault_rc = 0;\n#else\n"
                 "  gint all_owner_fault_rc = "
                 "check_policy_write_all_owner_faults ();\n#endif", 1),
+            "comment-alternate-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "  /* gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults (); */\n"
+                "#if 1\n  gint all_owner_fault_rc = 0;\n#else\n"
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();\n#endif", 1),
         }
         for name, text in matrix_fixtures.items():
             if text == test_source:
