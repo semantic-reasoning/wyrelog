@@ -67,6 +67,24 @@ OWNER_INVENTORY = {
     "service_management_authority_arm_handler":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM",),
 }
+OWNER_TABLE = (
+    ("KEY_ROTATION", "key_rotation"),
+    ("TEST_CONFIGURE", "test_configure"),
+    ("TEST_POLICY_WRITE", "test_policy_write"),
+    ("TENANT", "tenant"),
+    ("GRAPH_CREATE", "graph_create"),
+    ("GRAPH_SEAL", "graph_seal"),
+    ("SCHEMA_REGISTER", "schema_register"),
+    ("FACT_FORGET", "fact_forget"),
+    ("FACT_PUBLICATION", "fact_publication"),
+    ("DIRECT_PERMISSION", "direct_permission"),
+    ("PERMISSION_TRANSITION", "permission_transition"),
+    ("ROLE_MEMBERSHIP", "role_membership"),
+    ("OPERATION_RECONCILE", "operation_reconcile"),
+    ("OPERATION_RECOVER", "operation_recover"),
+    ("MFA_CONFIRM", "mfa_confirm"),
+    ("SELF_ARM", "self_arm"),
+)
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_http_context_rotate_access_token_key",
@@ -312,15 +330,30 @@ def definitions(tokens,mate, allow_duplicates=False, full=False):
 def serialize(tokens):
     return b"".join(f"{k}:{len(v.encode())}:".encode()+v.encode()+b"\n" for k,v in tokens)
 
-def candidate(defs, raw_tokens):
+def owner_table_freeze(source):
+    marker="#define WYL_DAEMON_POLICY_WRITE_OWNER_TABLE(X)"
+    if source.count(marker) != 1:
+        raise GuardError("daemon WRITE owner table declaration mismatch")
+    start=source.index(marker)
+    end=source.index("\ntypedef enum",start)
+    block=source[start:end]
+    rows=tuple(re.findall(r"^\s*X\s*\(\s*([A-Z][A-Z0-9_]*)\s*,\s*"
+        r"([a-z][a-z0-9_]*)\s*\)\s*\\?\s*$",block,re.MULTILINE))
+    if rows != OWNER_TABLE:
+        raise GuardError("daemon WRITE owner table order/name mismatch")
+    material="".join(symbol+":"+name+"\n" for symbol,name in rows).encode()
+    return {"count":len(rows),"sha256":hashlib.sha256(material).hexdigest()}
+
+def candidate(defs, raw_tokens, owner_freeze):
     hashes={name:hashlib.sha256(b"".join(serialize(item[2]) for item in defs[name])).hexdigest() for name in FUNCTIONS}
     directives=[token for token in raw_tokens if token[0]=="directive"]
     directive_freeze={"count":len(directives),
         "sha256":hashlib.sha256(serialize(directives)).hexdigest()}
     material="".join(name+hashes[name] for name in FUNCTIONS)
     material+="directives"+str(directive_freeze["count"])+directive_freeze["sha256"]
+    material+="owners"+str(owner_freeze["count"])+owner_freeze["sha256"]
     aggregate=hashlib.sha256(material.encode()).hexdigest()
-    return {"version":VERSION,"profile":PROFILE,"rationale":"Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.","functions":hashes,"directives":directive_freeze,"aggregate":aggregate}
+    return {"version":VERSION,"profile":PROFILE,"rationale":"Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.","functions":hashes,"directives":directive_freeze,"owners":owner_freeze,"aggregate":aggregate}
 
 def validate_test_only_tenant_seam(source, raw_defs, active_defs=None):
     name="wyl_daemon_http_configure_tenant_for_test"
@@ -614,12 +647,15 @@ def strict_json(path):
 
 def validate_manifest(value):
     if not isinstance(value, dict): raise GuardError("manifest must be an object")
-    if set(value)!={"version","profile","rationale","functions","directives","aggregate"}: raise GuardError("manifest keys mismatch")
+    if set(value)!={"version","profile","rationale","functions","directives","owners","aggregate"}: raise GuardError("manifest keys mismatch")
     if not isinstance(value["functions"], dict): raise GuardError("manifest functions must be an object")
     if set(value["functions"])!=set(FUNCTIONS): raise GuardError("manifest function set mismatch")
     if not isinstance(value["directives"],dict) or set(value["directives"])!={"count","sha256"}: raise GuardError("manifest directive freeze mismatch")
     if not isinstance(value["directives"]["count"],int) or value["directives"]["count"]<0: raise GuardError("invalid directive count")
     if not isinstance(value["directives"]["sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",value["directives"]["sha256"]): raise GuardError("invalid directive digest")
+    if not isinstance(value["owners"],dict) or set(value["owners"])!={"count","sha256"}: raise GuardError("manifest owner freeze mismatch")
+    if value["owners"].get("count")!=len(OWNER_TABLE): raise GuardError("invalid owner count")
+    if not isinstance(value["owners"].get("sha256"),str) or not re.fullmatch(r"[0-9a-f]{64}",value["owners"]["sha256"]): raise GuardError("invalid owner digest")
     if value["version"]!=VERSION or value["profile"]!=PROFILE or value["rationale"]!="Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.": raise GuardError("manifest metadata mismatch")
     if not isinstance(value["aggregate"], str) or not re.fullmatch(r"[0-9a-f]{64}",value["aggregate"]): raise GuardError("invalid aggregate digest")
     if any(not isinstance(x, str) or not re.fullmatch(r"[0-9a-f]{64}",x) for x in value["functions"].values()): raise GuardError("invalid function digest")
@@ -629,6 +665,7 @@ def main(argv=None):
     path=Path(ns.root)/"wyrelog/daemon/http.c"; manifest=Path(ns.manifest) if ns.manifest else Path(ns.root)/"tools/daemon-policy-write-authority.json"
     if not path.is_file(): raise GuardError(f"missing source: {path}")
     source=path.read_text(encoding="utf-8")
+    owner_freeze=owner_table_freeze(source)
     raw_tokens=lex(source,preserve_pp=True); raw_mate=pairs(raw_tokens); raw_defs=definitions(raw_tokens,raw_mate,allow_duplicates=True,full=True)
     missing=[x for x in FUNCTIONS if x not in raw_defs]
     if missing: raise GuardError("missing function definitions: "+", ".join(missing))
@@ -654,7 +691,7 @@ def main(argv=None):
             allow_missing=True)
         global_invariants(tokens,defs)
         raw_global_invariants(tokens,{name:[item] for name,item in defs.items()},False)
-    actual=candidate(raw_defs,raw_tokens)
+    actual=candidate(raw_defs,raw_tokens,owner_freeze)
     if ns.print_candidate: print(json.dumps(actual,indent=2,sort_keys=True)); return
     expected=strict_json(manifest); validate_manifest(expected)
     for name in FUNCTIONS:

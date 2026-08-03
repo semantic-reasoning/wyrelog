@@ -192,6 +192,12 @@ def main():
         "duplicate-owner-id": mutate_function(source, "graph_create_handler",
             "WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE",
             "WYL_DAEMON_POLICY_WRITE_OWNER_TENANT"),
+        "owner-table-numeric-alias": source.replace(
+            "X (GRAPH_CREATE, graph_create)",
+            "X (TENANT, graph_create)", 1),
+        "owner-table-reordered": source.replace(
+            "X (GRAPH_CREATE, graph_create) \\\n  X (GRAPH_SEAL, graph_seal)",
+            "X (GRAPH_SEAL, graph_seal) \\\n  X (GRAPH_CREATE, graph_create)", 1),
         "recover-acquire-removed": mutate_function(source,
             "service_credential_operation_recover_execute",
             "wyl_daemon_policy_write_acquire", "recover_acquire_removed"),

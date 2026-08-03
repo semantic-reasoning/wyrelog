@@ -477,25 +477,31 @@ typedef enum
   WYL_DAEMON_POLICY_WRITE_FINALIZED,
 } WylDaemonPolicyWriteState;
 
+#define WYL_DAEMON_POLICY_WRITE_OWNER_TABLE(X) \
+  X (KEY_ROTATION, key_rotation) \
+  X (TEST_CONFIGURE, test_configure) \
+  X (TEST_POLICY_WRITE, test_policy_write) \
+  X (TENANT, tenant) \
+  X (GRAPH_CREATE, graph_create) \
+  X (GRAPH_SEAL, graph_seal) \
+  X (SCHEMA_REGISTER, schema_register) \
+  X (FACT_FORGET, fact_forget) \
+  X (FACT_PUBLICATION, fact_publication) \
+  X (DIRECT_PERMISSION, direct_permission) \
+  X (PERMISSION_TRANSITION, permission_transition) \
+  X (ROLE_MEMBERSHIP, role_membership) \
+  X (OPERATION_RECONCILE, operation_reconcile) \
+  X (OPERATION_RECOVER, operation_recover) \
+  X (MFA_CONFIRM, mfa_confirm) \
+  X (SELF_ARM, self_arm)
+
 typedef enum
 {
-  WYL_DAEMON_POLICY_WRITE_OWNER_KEY_ROTATION = 0,
-  WYL_DAEMON_POLICY_WRITE_OWNER_TEST_CONFIGURE,
-  WYL_DAEMON_POLICY_WRITE_OWNER_TEST_POLICY_WRITE,
-  WYL_DAEMON_POLICY_WRITE_OWNER_TENANT,
-  WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE,
-  WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_SEAL,
-  WYL_DAEMON_POLICY_WRITE_OWNER_SCHEMA_REGISTER,
-  WYL_DAEMON_POLICY_WRITE_OWNER_FACT_FORGET,
-  WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION,
-  WYL_DAEMON_POLICY_WRITE_OWNER_DIRECT_PERMISSION,
-  WYL_DAEMON_POLICY_WRITE_OWNER_PERMISSION_TRANSITION,
-  WYL_DAEMON_POLICY_WRITE_OWNER_ROLE_MEMBERSHIP,
-  WYL_DAEMON_POLICY_WRITE_OWNER_OPERATION_RECONCILE,
-  WYL_DAEMON_POLICY_WRITE_OWNER_OPERATION_RECOVER,
-  WYL_DAEMON_POLICY_WRITE_OWNER_MFA_CONFIRM,
-  WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM,
-  WYL_DAEMON_POLICY_WRITE_OWNER_COUNT,
+#define WYL_DAEMON_POLICY_WRITE_OWNER_ENUM(symbol, name) \
+  WYL_DAEMON_POLICY_WRITE_OWNER_##symbol,
+  WYL_DAEMON_POLICY_WRITE_OWNER_TABLE (WYL_DAEMON_POLICY_WRITE_OWNER_ENUM)
+#undef WYL_DAEMON_POLICY_WRITE_OWNER_ENUM
+      WYL_DAEMON_POLICY_WRITE_OWNER_COUNT,
 } WylDaemonPolicyWriteOwner;
 
 typedef struct
@@ -518,11 +524,10 @@ static const gchar *
 wyl_daemon_policy_write_owner_name (WylDaemonPolicyWriteOwner owner)
 {
   static const gchar *const names[] = {
-    "key_rotation", "test_configure", "test_policy_write", "tenant",
-    "graph_create", "graph_seal", "schema_register", "fact_forget",
-    "fact_publication", "direct_permission", "permission_transition",
-    "role_membership", "operation_reconcile", "operation_recover",
-    "mfa_confirm", "self_arm",
+#define WYL_DAEMON_POLICY_WRITE_OWNER_NAME(symbol, name) \
+    [WYL_DAEMON_POLICY_WRITE_OWNER_##symbol] = #name,
+    WYL_DAEMON_POLICY_WRITE_OWNER_TABLE (WYL_DAEMON_POLICY_WRITE_OWNER_NAME)
+#undef WYL_DAEMON_POLICY_WRITE_OWNER_NAME
   };
   G_STATIC_ASSERT (G_N_ELEMENTS (names)
       == WYL_DAEMON_POLICY_WRITE_OWNER_COUNT);
