@@ -15,8 +15,10 @@ agreement with docs/service-credential-platform-support.md:
   * the matrix doc             -- MUST classify all three platforms exactly as
                                   the meson gating implies (Linux=runtime,
                                   macOS/Windows=build-only) and MUST reference
-                                  the #754 predecessor that gates the #380
-                                  orphan-recovery portion.
+                                  the #380 orphan-recovery portion together with
+                                  its now-implemented #754 packaged
+                                  fault-injection proof
+                                  (service-credential-publication-fault-e2e).
   * .github/workflows/ci-*.yml -- the RUNTIME platform (Linux) MUST have a
                                   runner job that runs the packaged meson
                                   suite, and each BUILD-ONLY platform
@@ -41,6 +43,13 @@ SC_E2E_TESTS = (
     "service-credential-rotation-e2e",
     "service-credential-leak-scan-e2e",
 )
+
+# The #380 orphan-recovery packaged proof (#754). It runs on Linux like the
+# others, but is nested one level deeper under the enable_fault_injection build
+# gate: the single-shot publication-fault seam and its daemon flag are compiled
+# in only when that option is set, so a release build cannot be armed.
+FAULT_INJECTION_TEST = "service-credential-publication-fault-e2e"
+FAULT_INJECTION_GATE = "enable_fault_injection"
 
 LINUX_GATE = "host_machine.system() == 'linux'"
 WINDOWS_NEGATIVE_GATE = "host_machine.system() != 'windows'"
@@ -190,6 +199,25 @@ def check_meson_gating(meson_text: str) -> None:
                 "doc and this checker deliberately."
             )
 
+    # The #380 orphan-recovery proof (#754) must be registered AND gated on both
+    # Linux (like the others) and the enable_fault_injection build option, so it
+    # only exists where the packaged fault seam is compiled in.
+    fault_idx = find_test_line(lines, FAULT_INJECTION_TEST)
+    fault_conditions = open_if_conditions_at(lines, fault_idx)
+    fault_joined = " || ".join(fault_conditions)
+    if LINUX_GATE not in fault_joined:
+        fail(
+            f"test('{FAULT_INJECTION_TEST}') is not inside a `{LINUX_GATE}` "
+            f"gate; open conditions were: {fault_conditions!r}"
+        )
+    if FAULT_INJECTION_GATE not in fault_joined:
+        fail(
+            f"test('{FAULT_INJECTION_TEST}') (the #380/#754 orphan-recovery "
+            f"proof) must be nested under a `{FAULT_INJECTION_GATE}` build gate "
+            "so the packaged fault seam only exists in enable_fault_injection "
+            f"builds; open conditions were: {fault_conditions!r}"
+        )
+
 
 def check_matrix_doc(doc_text: str) -> None:
     lowered = doc_text.lower()
@@ -219,19 +247,32 @@ def check_matrix_doc(doc_text: str) -> None:
     if "skip != pass" not in lowered:
         fail("matrix doc must state the rule explicitly: 'skip != pass'")
 
-    # Predecessor-gated #380 portion must reference #754 and the C-unit evidence.
+    # The #380 orphan-recovery portion must reference #754 and its now-running
+    # packaged proof, plus the C-unit evidence that covers the same boundary.
     if "#754" not in doc_text:
         fail(
-            "matrix doc must reference predecessor #754 as the blocker for the "
-            "#380 orphan-recovery runtime portion"
+            "matrix doc must reference #754 (the implemented packaged "
+            "fault-injection seam) for the #380 orphan-recovery runtime portion"
         )
     if "#380" not in doc_text:
         fail("matrix doc must reference the #380 orphan-recovery portion")
+    if FAULT_INJECTION_TEST not in doc_text:
+        fail(
+            "matrix doc must reference the packaged #380 orphan-recovery proof "
+            f"'{FAULT_INJECTION_TEST}' now that #754 is implemented and it runs "
+            "on Linux"
+        )
+    if FAULT_INJECTION_GATE not in doc_text:
+        fail(
+            "matrix doc must state that the #380 proof additionally requires the "
+            f"'{FAULT_INJECTION_GATE}' build option (a documented build gate, "
+            "not a skip-as-pass)"
+        )
     if "test-service-credential-operation-coordinator-execute.c" not in doc_text:
         fail(
             "matrix doc must link the C-unit evidence "
             "(test-service-credential-operation-coordinator-execute.c) covering "
-            "the #754-gated #380 portion"
+            "the #380 orphan-recovery boundary"
         )
 
 

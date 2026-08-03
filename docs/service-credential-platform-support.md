@@ -64,6 +64,9 @@ Runtime `test(...)` registrations (Linux-only):
 - `service-credential-leak-scan-e2e` — per-run unique canaries for every
   observable sensitive value are asserted ABSENT (raw+base64+hex) from every
   forbidden sink.
+- `service-credential-publication-fault-e2e` — the **#380** server-success /
+  local-publication-failure + orphan-recovery proof (see below). Registered
+  additionally under `get_option('enable_fault_injection').allowed()`.
 
 Build-guaranteed helper executables the suite depends on (they read the
 encrypted store / durable audit that a system CLI cannot):
@@ -75,21 +78,32 @@ These helper `executable()` builds remain available on the other POSIX build
 platform (macOS) as a build gate; only their consuming runtime `test(...)`
 registrations are Linux-only.
 
-#### Predecessor-gated portion (NOT claimed as runtime-proven)
+#### #380 orphan-recovery portion — now packaged-runtime-proven (#754)
 
-The **#380** server-success / local-publication-failure + orphan-recovery
-runtime portion is **BLOCKED by predecessor #754**: there is no packaged
-fault-injection seam that lets the packaged e2e harness force a
-local-publication failure after a server-side success, so that path cannot yet
-be proven at packaged-runtime scope. Until **#754** lands that seam, this
-portion is covered by **C-unit evidence**, not by a packaged-runtime gate:
+**#754 is implemented**, so the **#380** server-success /
+local-publication-failure + orphan-recovery runtime portion is **NO LONGER
+predecessor-gated**: it now runs on Linux as `service-credential-publication-
+fault-e2e`. The packaged fault-injection seam is a compile-gated, single-shot,
+production-inert trigger in the real service-credential handoff backend; the
+daemon arms it via `--fault-inject-sc-publication-once`, and the e2e proves that
+a server-committed handoff whose local publication fails leaves NO secret on
+disk and a restart-surviving, recoverable and revocable orphan credential.
+
+This test additionally requires the **`enable_fault_injection`** build option.
+When the option is off, the seam, its daemon flag, and this test do not compile
+at all, so a release daemon contains no fault-injection code and can never be
+armed. Honest CI status: the packaged service-credential e2e suite (this test and
+the other lifecycle units) is currently a **documented local/manual gate** — the
+CI `--suite wyrelog` job does not yet build with `enable_client` /
+`enable_fact_store` / `enable_fault_injection`, so none of the packaged SC e2e
+tests register in CI today. Wiring those options into a Linux CI job (so the
+matrix's runtime claim is actually exercised in CI) is a tracked follow-up; the
+matrix checker deliberately does NOT assert CI enables the option, so it stays
+honest. The per-boundary C-unit evidence still stands and DOES run in CI:
 
 - `tests/test-service-credential-operation-coordinator-execute.c`
-  (registered as the `service-credential-operation-coordinator-execute` test).
-
-This is deliberately **not** counted as runtime proof in the matrix. When #754
-lands the fault-injection seam, promote the #380 orphan-recovery portion into
-the Linux packaged-runtime suite and update this document and the checker.
+  (registered as the `service-credential-operation-coordinator-execute` test)
+  arms the same real seam at unit scope.
 
 ### macOS — build-only + native POSIX security/file gates
 
@@ -138,20 +152,24 @@ proof.
 The classification is not aspirational prose; it is derived from and checked
 against these authoritative artifacts:
 
-1. **Meson test gating** — `tests/meson.build`. The four
+1. **Meson test gating** — `tests/meson.build`. The
    `service-credential-*-e2e` `test(...)` registrations live inside a
    `host_machine.system() == 'linux'` gate (nested under `build_client`,
    `enable_fact_store`, `enable_audit`). This is what makes Linux the sole
    packaged-runtime platform: the suite does not silently run or skip elsewhere.
+   `service-credential-publication-fault-e2e` (the #380 orphan-recovery proof)
+   is nested one level deeper under `enable_fault_injection`.
 2. **CI workflow definitions** — `.github/workflows/ci-main.yml` and
    `.github/workflows/ci-pr.yml`. The `build-posix` job provides the Linux
    (`ubuntu-latest`) and macOS (`macos-latest`) runners; the Linux leg runs the
    `meson test ... --suite wyrelog` packaged suite. The `build-windows` job
    provides the Windows runner and its named native gates
    (`secure-duckdb-bridge`, `fact-artifact-namespace-windows`).
-3. **C-unit predecessor evidence** —
+3. **C-unit evidence** —
    `tests/test-service-credential-operation-coordinator-execute.c` covers the
-   #380 orphan-recovery portion that is blocked by predecessor #754.
+   #380 orphan-recovery portion at unit scope (arming the same real seam); the
+   packaged Linux `service-credential-publication-fault-e2e` gate (#754) now
+   proves it at packaged-runtime scope.
 
 If any of these drift out of agreement with this matrix,
 `tests/check-service-credential-platform-matrix.py` fails the build.
