@@ -88,6 +88,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_engine_session_begin_external_service_authority_transaction",
     "wyl_engine_session_finish_external_publication",
     "wyl_engine_session_release",
+    "wyl_engine_session_repair_committed_publication",
     "wyl_engine_session_run_committed_audit_publication",
     "wyl_engine_session_run_committed_publication",
     "wyl_engine_verification_enqueue_delta",
@@ -675,6 +676,22 @@ def self_test() -> int:
     )
     if check({OWNER: allowed_owner}):
         print("self-test rejected allowlisted owner body", file=sys.stderr)
+        return 1
+    typed_repair_owner = (
+        "static void wyl_engine_session_repair_committed_publication"
+        "(WylHandle *h) { (void) h->engine_pair_poisoned; }"
+    )
+    if check({OWNER: typed_repair_owner}):
+        print("self-test rejected typed repair owner access", file=sys.stderr)
+        return 1
+    other_repair_owner = typed_repair_owner.replace(
+        "wyl_engine_session_repair_committed_publication",
+        "wyl_engine_session_repair_other_publication")
+    if check({OWNER: other_repair_owner}) != [
+            "owner aggregate access outside function allowlist: "
+            "wyl_engine_session_repair_other_publication"]:
+        print("self-test accepted aggregate access in another repair helper",
+              file=sys.stderr)
         return 1
     literal = 'const char *s = "wyl_handle_get_read_engine(h)"; /* h->read_engine */'
     if check({OWNER: "", RepoPath("wyrelog/literal.c"): literal}):

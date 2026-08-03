@@ -6267,7 +6267,7 @@ typedef struct
   GCond changed;
   gboolean entered;
   gboolean released;
-} TenantRecoveryClaimBarrier;
+} TenantRecoveryBarrier;
 
 typedef struct
 {
@@ -6280,9 +6280,9 @@ typedef struct
 } TenantRecoveryRequest;
 
 static void
-tenant_recovery_claim_checkpoint (gpointer data)
+tenant_recovery_checkpoint (gpointer data)
 {
-  TenantRecoveryClaimBarrier *barrier = data;
+  TenantRecoveryBarrier *barrier = data;
   g_mutex_lock (&barrier->mutex);
   barrier->entered = TRUE;
   g_cond_broadcast (&barrier->changed);
@@ -7694,7 +7694,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
    * the concurrent CLAIMED observation.  Audit still exercises the same
    * exact-request recovery synchronously below. */
 #ifndef WYL_HAS_AUDIT
-  TenantRecoveryClaimBarrier recovery_barrier = { 0 };
+  TenantRecoveryBarrier recovery_barrier = { 0 };
   g_mutex_init (&recovery_barrier.mutex);
   g_cond_init (&recovery_barrier.changed);
   TenantRecoveryRequest recovery_request = {
@@ -7703,7 +7703,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .body = tenant_seal_body,
   };
   wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test (server,
-      tenant_recovery_claim_checkpoint, &recovery_barrier);
+      tenant_recovery_checkpoint, &recovery_barrier);
   g_autoptr (GThread) recovery_thread = g_thread_new ("tenant-recovery",
       tenant_recovery_request_thread, &recovery_request);
   g_mutex_lock (&recovery_barrier.mutex);
@@ -7773,6 +7773,116 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (status != 200 || g_strcmp0 (body, first_tenant_seal_response) != 0)
     return 2003;
   g_clear_pointer (&body, g_free);
+
+  /* A owns the recovery slot while it still holds WRITE. B claims the slot,
+   * taking its own immutable descriptor reference, and pauses before WRITE.
+   * A's injected final release failure then detaches only slot ownership.
+   * B must survive on its claimant reference, revalidate the missing slot
+   * after acquiring WRITE, and leave the fail-closed publication fence intact
+   * without entering reconstruction. */
+#ifndef WYL_HAS_AUDIT
+  static const gchar *tenant_seal_detached_body =
+      "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000230\"}";
+  guint recovery_allocations_before = 0;
+  guint recovery_frees_before = 0;
+  guint recovery_allocations_after_a = 0;
+  guint recovery_frees_after_a = 0;
+  guint recovery_allocations_after_b = 0;
+  guint recovery_frees_after_b = 0;
+  guint recovery_write_terminals_before =
+      wyl_daemon_http_policy_write_terminal_entries_for_test (server);
+  wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
+      (&recovery_allocations_before, &recovery_frees_before);
+
+  TenantRecoveryBarrier install_barrier = { 0 };
+  TenantRecoveryBarrier claim_barrier = { 0 };
+  g_mutex_init (&install_barrier.mutex);
+  g_cond_init (&install_barrier.changed);
+  g_mutex_init (&claim_barrier.mutex);
+  g_cond_init (&claim_barrier.changed);
+  TenantRecoveryRequest request_a = {
+    .base_url = base_url,
+    .query = tenant_seal_query,
+    .body = tenant_seal_detached_body,
+  };
+  TenantRecoveryRequest request_b = {
+    .base_url = base_url,
+    .query = tenant_seal_query,
+    .body = tenant_seal_detached_body,
+  };
+  wyl_daemon_http_fail_next_tenant_seal_verification_for_test (server);
+  wyl_daemon_http_fail_next_tenant_seal_write_release_for_test (server);
+  wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test (server,
+      tenant_recovery_checkpoint, &install_barrier);
+  g_autoptr (GThread) thread_a = g_thread_new ("tenant-recovery-owner",
+      tenant_recovery_request_thread, &request_a);
+  g_mutex_lock (&install_barrier.mutex);
+  while (!install_barrier.entered)
+    g_cond_wait (&install_barrier.changed, &install_barrier.mutex);
+  g_mutex_unlock (&install_barrier.mutex);
+
+  wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test (server,
+      tenant_recovery_checkpoint, &claim_barrier);
+  g_autoptr (GThread) thread_b = g_thread_new ("tenant-recovery-claimant",
+      tenant_recovery_request_thread, &request_b);
+  g_mutex_lock (&claim_barrier.mutex);
+  while (!claim_barrier.entered)
+    g_cond_wait (&claim_barrier.changed, &claim_barrier.mutex);
+  g_mutex_unlock (&claim_barrier.mutex);
+
+  /* If B reaches reconstruction despite the slot mismatch, this sentinel
+   * changes its response from the expected BUSY/503 to INTERNAL/500. */
+  wyl_daemon_http_fail_next_tenant_recovery_repair_for_test (server);
+  g_mutex_lock (&install_barrier.mutex);
+  install_barrier.released = TRUE;
+  g_cond_broadcast (&install_barrier.changed);
+  g_mutex_unlock (&install_barrier.mutex);
+  g_thread_join (g_steal_pointer (&thread_a));
+  wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
+      (&recovery_allocations_after_a, &recovery_frees_after_a);
+  gboolean request_a_detached = request_a.rc == 0
+      && request_a.status == 503 && request_a.response != NULL
+      && strstr (request_a.response, "tenant_mutation_unavailable") != NULL
+      && wyl_handle_engine_pair_is_poisoned (handle)
+      && tenant_state_matches (store, "tenant-a", TRUE, FALSE)
+      && recovery_allocations_after_a == recovery_allocations_before + 1
+      && recovery_frees_after_a == recovery_frees_before;
+
+  g_mutex_lock (&claim_barrier.mutex);
+  claim_barrier.released = TRUE;
+  g_cond_broadcast (&claim_barrier.changed);
+  g_mutex_unlock (&claim_barrier.mutex);
+  g_thread_join (g_steal_pointer (&thread_b));
+  wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
+      (&recovery_allocations_after_b, &recovery_frees_after_b);
+  gboolean repair_failure_unconsumed =
+      wyl_daemon_http_take_tenant_recovery_repair_failure_for_test (server);
+  gboolean request_b_rejected = request_b.rc == 0
+      && request_b.status == 503 && request_b.response != NULL
+      && strstr (request_b.response, "tenant_mutation_unavailable") != NULL
+      && wyl_handle_engine_pair_is_poisoned (handle)
+      && tenant_state_matches (store, "tenant-a", TRUE, FALSE)
+      && wyl_daemon_http_policy_write_terminal_entries_for_test (server)
+      == recovery_write_terminals_before + 1
+      && repair_failure_unconsumed
+      && recovery_allocations_after_b == recovery_allocations_before + 1
+      && recovery_frees_after_b == recovery_frees_before + 1;
+  g_free (request_a.response);
+  g_free (request_b.response);
+  g_cond_clear (&install_barrier.changed);
+  g_mutex_clear (&install_barrier.mutex);
+  g_cond_clear (&claim_barrier.changed);
+  g_mutex_clear (&claim_barrier.mutex);
+  if (!request_a_detached)
+    return 22481;
+  if (!request_b_rejected)
+    return 22482;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle)
+      || !tenant_projection_decision_matches (handle, "tenant-a",
+          WYL_DECISION_DENY))
+    return 22483;
+#endif
 
   static const gchar *const tenant_unseal_aliases[] = {
     "/tenants/unseal/x",
