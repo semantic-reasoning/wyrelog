@@ -899,6 +899,29 @@ if host_machine.system() != 'windows' and build_client
       is_parallel : false,
       timeout : 120,
     )
+
+    # Packaged, encrypted, end-to-end service-credential lifecycle runtime proof
+    # (#382 Unit 1a): bootstrap -> real-TOTP admin -> self-arm -> tenant/principal
+    # -> issue -> exchange -> /decide deny -> grant -> /decide allow. The audit
+    # sink is exercised end-to-end, so it is additionally gated on enable_audit.
+    if get_option('enable_audit').allowed()
+      test('service-credential-lifecycle-e2e', sh,
+        args : [
+          meson.current_source_dir() / 'check-service-credential-lifecycle-e2e.sh',
+          wyrelogd_exe.full_path(),
+          wyctl_exe.full_path(),
+          check_service_credential_store_inspect.full_path(),
+          meson.project_source_root() / 'templates' / 'access',
+          python3.full_path(),
+          meson.current_source_dir() / 'wyrelog_sc_e2e.py',
+        ],
+        depends : [
+          wyrelogd_exe, wyctl_exe, check_service_credential_store_inspect,
+        ],
+        is_parallel : false,
+        timeout : 300,
+      )
+    endif
   endif
 
   test('packaged-install-readiness', sh,
