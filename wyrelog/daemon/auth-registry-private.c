@@ -1185,6 +1185,31 @@ wyrelog_error_t
   return rc == WYRELOG_E_OK ? leave_rc : rc;
 }
 
+wyrelog_error_t
+    wyl_service_auth_registry_write_participant_revoke_retained_engine
+    (WylServiceAuthRegistryWriteParticipant * participant,
+    wyl_policy_store_t * expected_store,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result)
+{
+  if (participant == NULL || expected_store == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_auth_write_lease_validate_retained_engine_repair
+      (participant->lease, participant->handle, expected_store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_rank_enter (participant->handle,
+      WYL_SERVICE_AUTH_RANK_REGISTRY);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = registry_revoke_selector_zero_survivors (participant->registry,
+      selector, out_result);
+  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected
+      (participant->handle, WYL_SERVICE_AUTH_RANK_REGISTRY);
+  return rc == WYRELOG_E_OK ? leave_rc : rc;
+}
+
 #if defined(WYL_AUTH_REGISTRY_TESTING) || defined(WYL_TEST_DAEMON_HTTP)
 wyrelog_error_t
     wyl_service_auth_registry_revoke_selector_zero_survivors

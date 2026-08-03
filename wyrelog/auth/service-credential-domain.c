@@ -2,6 +2,7 @@
 #include "service-credential-domain-private.h"
 
 #include <string.h>
+#include <sodium.h>
 
 #include "wyrelog/daemon/auth-registry-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -31,6 +32,13 @@ typedef struct
   void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
   void (*before_write_release) (WylServiceAuthWriteLease * lease,
       gpointer data);
+  WylTenantSealPublicationRecoveryRetainFn retain_publication_recovery;
+  void (*discard_publication_recovery) (gpointer data);
+  const gchar *recovery_tenant_id;
+  const gchar *recovery_actor_subject_id;
+  const gchar *recovery_request_id;
+  guint32 recovery_receipt_version;
+  gboolean recovery_installed;
   gpointer fault_data;
 } ServiceMutation;
 
@@ -296,17 +304,22 @@ service_mutation_latch_unavailable (ServiceMutation *mutation,
 static wyrelog_error_t
 service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
 {
+  wyrelog_error_t operation_rc = operation;
+  wyrelog_error_t terminal_rc = WYRELOG_E_OK;
+  wyrelog_error_t publication_rc = WYRELOG_E_OK;
+  wyrelog_error_t invalidation_rc = WYRELOG_E_OK;
+  wyrelog_error_t release_rc = WYRELOG_E_OK;
   wyrelog_error_t result = operation;
   ServiceMutationCommitOutcome outcome = SERVICE_MUTATION_NOT_COMMITTED;
   if (mutation->transaction != NULL) {
-    wyrelog_error_t terminal = operation == WYRELOG_E_OK ?
+    terminal_rc = operation == WYRELOG_E_OK ?
         wyl_policy_store_service_authority_transaction_commit
         (mutation->transaction) :
         wyl_policy_store_service_authority_transaction_rollback
         (mutation->transaction);
     if (operation == WYRELOG_E_OK) {
-      result = terminal;
-      if (terminal == WYRELOG_E_OK) {
+      result = terminal_rc;
+      if (terminal_rc == WYRELOG_E_OK) {
         outcome = SERVICE_MUTATION_COMMITTED;
       } else if (mutation->evidence != NULL
           &&
@@ -328,8 +341,8 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
       } else {
         outcome = SERVICE_MUTATION_UNCERTAIN;
       }
-    } else if (terminal != WYRELOG_E_OK) {
-      result = terminal;
+    } else if (terminal_rc != WYRELOG_E_OK) {
+      result = terminal_rc;
       outcome = SERVICE_MUTATION_UNCERTAIN;
     }
     if (wyl_policy_store_service_authority_transaction_is_poisoned
@@ -348,37 +361,80 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
         outcome == SERVICE_MUTATION_COMMITTED ? WYL_DURABLE_COMMIT_COMMITTED :
         outcome == SERVICE_MUTATION_UNCERTAIN ? WYL_DURABLE_COMMIT_UNCERTAIN :
         WYL_DURABLE_COMMIT_NOT_COMMITTED;
-    wyrelog_error_t publication =
-        wyl_engine_session_finish_external_publication
+    publication_rc = wyl_engine_session_finish_external_publication
         (mutation->engine_session, mutation->store,
         mutation->policy_store_generation, commit_state,
         mutation->publication_verify, mutation->publication_verify_data);
-    wyl_engine_session_release (mutation->engine_session);
-    mutation->engine_session = NULL;
-    if (publication != WYRELOG_E_OK && result == WYRELOG_E_OK)
-      result = publication;
+    if (publication_rc != WYRELOG_E_OK && result == WYRELOG_E_OK)
+      result = publication_rc;
   }
-  wyrelog_error_t invalidate = WYRELOG_E_OK;
   if ((outcome == SERVICE_MUTATION_COMMITTED
           || outcome == SERVICE_MUTATION_UNCERTAIN)
       && mutation->has_invalidation_selector) {
     if (mutation->before_invalidation != NULL)
       mutation->before_invalidation (mutation->lease, mutation->fault_data);
     WylServiceAuthRevokeResult revoke = { 0 };
-    invalidate =
+    invalidation_rc = mutation->engine_session != NULL ?
+        wyl_service_auth_registry_write_participant_revoke_retained_engine
+        (mutation->registry_participant, mutation->store,
+        &mutation->invalidation_selector, &revoke) :
         wyl_service_auth_registry_write_participant_revoke_zero_survivors
         (mutation->registry_participant, &mutation->invalidation_selector,
         &revoke);
-    if (invalidate != WYRELOG_E_OK && result == WYRELOG_E_OK)
-      result = invalidate;
+    if (invalidation_rc != WYRELOG_E_OK && result == WYRELOG_E_OK)
+      result = invalidation_rc;
   }
-  gboolean latch_required = invalidate != WYRELOG_E_OK
+
+  gboolean recoverable_publication_failure = operation_rc == WYRELOG_E_OK
+      && terminal_rc == WYRELOG_E_OK
+      && outcome == SERVICE_MUTATION_COMMITTED
+      && publication_rc != WYRELOG_E_OK
+      && invalidation_rc == WYRELOG_E_OK
+      && mutation->engine_session != NULL
+      && mutation->retain_publication_recovery != NULL
+      && mutation->recovery_tenant_id != NULL
+      && mutation->recovery_actor_subject_id != NULL
+      && mutation->recovery_request_id != NULL;
+  if (recoverable_publication_failure) {
+    WylPolicyTenantSealReceiptProof proof = { 0 };
+    wyrelog_error_t proof_rc =
+        wyl_policy_store_read_exact_tenant_seal_receipt_proof
+        (mutation->store, mutation->recovery_tenant_id,
+        mutation->recovery_actor_subject_id, mutation->recovery_request_id,
+        mutation->recovery_receipt_version, &proof);
+    WylTenantSealPublicationRecovery recovery = {
+      .receipt_version = proof.receipt_version,
+      .request_id = proof.request_id,
+      .tenant_id = proof.tenant_id,
+      .actor_subject_id = proof.actor_subject_id,
+      .input_fingerprint = proof.input_fingerprint,
+      .input_fingerprint_len = sizeof proof.input_fingerprint,
+      .tenant_lifecycle_generation = proof.tenant_lifecycle_generation,
+      .tenant_sealed_generation = proof.tenant_sealed_generation,
+      .audit_id = proof.audit_id,
+      .audit_created_at_us = proof.created_at_us,
+      .invalidation_completed = TRUE,
+    };
+    if (proof_rc == WYRELOG_E_OK)
+      proof_rc = mutation->retain_publication_recovery (&recovery,
+          mutation->fault_data);
+    mutation->recovery_installed = proof_rc == WYRELOG_E_OK;
+    recoverable_publication_failure = mutation->recovery_installed;
+    sodium_memzero (&proof, sizeof proof);
+  }
+
+  if (mutation->engine_session != NULL) {
+    wyl_engine_session_release (mutation->engine_session);
+    mutation->engine_session = NULL;
+  }
+  gboolean latch_required = invalidation_rc != WYRELOG_E_OK
       || (outcome == SERVICE_MUTATION_UNCERTAIN
       && mutation->authority_write_attempted)
-      || (outcome == SERVICE_MUTATION_COMMITTED && result != WYRELOG_E_OK);
+      || (outcome == SERVICE_MUTATION_COMMITTED && result != WYRELOG_E_OK
+      && !recoverable_publication_failure);
   if (latch_required)
     result = service_mutation_latch_unavailable (mutation,
-        invalidate == WYRELOG_E_OK ?
+        invalidation_rc == WYRELOG_E_OK ?
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT :
         WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
   if (mutation->evidence != NULL) {
@@ -389,8 +445,7 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
   if (mutation->lease != NULL) {
     if (mutation->before_write_release != NULL)
       mutation->before_write_release (mutation->lease, mutation->fault_data);
-    wyrelog_error_t release_rc =
-        wyl_service_auth_write_lease_release (mutation->lease);
+    release_rc = wyl_service_auth_write_lease_release (mutation->lease);
     if (release_rc != WYRELOG_E_OK) {
       wyrelog_error_t cleanup_rc =
           wyl_service_auth_write_lease_terminalize_cleanup (mutation->lease,
@@ -399,6 +454,11 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
           (mutation->lease);
       result = cleanup_rc == WYRELOG_E_OK && retry_rc == WYRELOG_E_OK
           && result != WYRELOG_E_INTERNAL ? WYRELOG_E_BUSY : WYRELOG_E_INTERNAL;
+      if (mutation->recovery_installed
+          && mutation->discard_publication_recovery != NULL) {
+        mutation->discard_publication_recovery (mutation->fault_data);
+        mutation->recovery_installed = FALSE;
+      }
     }
     wyl_service_auth_write_lease_free (mutation->lease);
     mutation->lease = NULL;
@@ -653,6 +713,12 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   mutation.before_invalidation = runtime->before_invalidation;
   mutation.before_write_release = runtime->before_write_release;
+  mutation.retain_publication_recovery = runtime->retain_publication_recovery;
+  mutation.discard_publication_recovery = runtime->discard_publication_recovery;
+  mutation.recovery_tenant_id = tenant_id;
+  mutation.recovery_actor_subject_id = actor_subject_id;
+  mutation.recovery_request_id = request_id;
+  mutation.recovery_receipt_version = receipt_version;
   mutation.fault_data = runtime->data;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
@@ -664,7 +730,7 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
   WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
   TenantScopePublication publication = {
     .tenant_id = tenant_id,
-    .state = "closed",
+    .state = runtime->test_verify_opposite_state ? "active" : "closed",
     .actor_subject_id = actor_subject_id,
     .request_id = request_id,
     .retirement = &stored_retirement,

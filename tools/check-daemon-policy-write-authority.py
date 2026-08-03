@@ -27,6 +27,10 @@ FUNCTIONS = (
     "set_tenant_mutation_json", "set_graph_mutation_json",
     "set_schema_ok_json", "set_fact_op_json",
     "mutate_tenant_lifecycle_publication",
+    "tenant_recovery_install", "tenant_recovery_finish_claim",
+    "tenant_recovery_repair_with_write",
+    "tenant_recovery_attempt_before_authorization",
+    "tenant_seal_recovery_retain", "tenant_seal_recovery_discard",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler",
     "graph_create_handler", "graph_seal_handler", "schema_register_handler",
@@ -52,6 +56,8 @@ OWNER_INVENTORY = {
     "wyl_daemon_http_policy_write_for_test":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_TEST_POLICY_WRITE",),
     "tenant_mutation_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
+    "tenant_recovery_attempt_before_authorization":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
     "graph_create_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE",),
     "graph_seal_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_SEAL",),
     "schema_register_handler":
@@ -118,7 +124,8 @@ OWNER_TABLE = (
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_http_context_rotate_access_token_key",
-    "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
+    "tenant_mutation_handler", "tenant_recovery_attempt_before_authorization",
+    "graph_create_handler", "graph_seal_handler",
     "schema_register_handler", "facts_route_handler",
     "direct_permission_mutation_handler", "policy_permission_transition_handler",
     "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
@@ -129,7 +136,7 @@ ALLOW_ACQUIRE = {
     "service_management_authority_arm_handler",
 }
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
-    "mutate_tenant_lifecycle_publication",
+    "mutate_tenant_lifecycle_publication", "tenant_recovery_repair_with_write",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
@@ -151,6 +158,7 @@ MUTATORS = {
     "wyl_perm_grant", "wyl_perm_revoke", "wyl_role_grant", "wyl_role_revoke",
     "wyl_handle_apply_permission_state_transition", "wyl_mfa_enrollment_commit",
     "wyl_engine_session_run_committed_publication",
+    "wyl_engine_session_repair_committed_publication",
 }
 DAEMON_HTTP_OUTPUT = {
     "posix": "wyrelog/wyrelogd.p/daemon_http.c.o",
@@ -751,8 +759,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 16:
-        raise GuardError("daemon WRITE owner inventory must contain 16 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 17:
+        raise GuardError("daemon WRITE owner inventory must contain 17 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():

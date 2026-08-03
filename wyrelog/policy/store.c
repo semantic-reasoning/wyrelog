@@ -16083,6 +16083,72 @@ service_retirement_validate_tenant_fingerprint (const ServiceRetirementReceipt
 }
 
 wyrelog_error_t
+    wyl_policy_store_read_exact_tenant_seal_receipt_proof
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, WylPolicyTenantSealReceiptProof * out_proof)
+{
+  G_STATIC_ASSERT (WYL_SERVICE_RETIREMENT_FINGERPRINT_BYTES ==
+      crypto_generichash_BYTES);
+  if (out_proof != NULL)
+    sodium_memzero (out_proof, sizeof *out_proof);
+  if (store == NULL || out_proof == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
+      || !wyl_request_id_is_canonical (request_id)
+      || receipt_version != WYL_SERVICE_RETIREMENT_RECEIPT_VERSION)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = service_domain_validate_mutation (store);
+  g_autoptr (GRecMutexLocker) authority_locker = rc == WYRELOG_E_OK ?
+      g_rec_mutex_locker_new (&store->graph_authority_mutex) : NULL;
+  ServiceRetirementReceipt receipt = { 0 };
+  gboolean found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_receipt_lookup (store, request_id, &found,
+        &receipt);
+  if (rc == WYRELOG_E_OK && !found)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK
+      && !service_retirement_tenant_request_matches (&receipt, tenant_id,
+          actor_subject_id, receipt_version))
+    rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_validate_tenant_fingerprint (&receipt, tenant_id,
+        actor_subject_id, receipt_version);
+  ServiceRetirementTenantState current = { 0 };
+  WylPolicyServiceRetirementOutcome retirement = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_retirement_validate_tenant_replay (store, &receipt, &current,
+        &retirement);
+  if (rc == WYRELOG_E_OK
+      && (retirement.disposition !=
+          WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY
+          || !receipt.transitioned || !current.sealed))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    out_proof->receipt_version = receipt.receipt_version;
+    g_strlcpy (out_proof->request_id, receipt.request_id,
+        sizeof out_proof->request_id);
+    g_strlcpy (out_proof->tenant_id, receipt.tenant_id,
+        sizeof out_proof->tenant_id);
+    g_strlcpy (out_proof->actor_subject_id, receipt.actor_subject_id,
+        sizeof out_proof->actor_subject_id);
+    memcpy (out_proof->input_fingerprint, receipt.input_fingerprint,
+        sizeof out_proof->input_fingerprint);
+    out_proof->tenant_lifecycle_generation =
+        receipt.tenant_lifecycle_generation;
+    out_proof->tenant_sealed_generation = receipt.tenant_sealed_generation;
+    g_strlcpy (out_proof->audit_id, receipt.audit_id,
+        sizeof out_proof->audit_id);
+    out_proof->created_at_us = receipt.created_at_us;
+  } else {
+    sodium_memzero (out_proof, sizeof *out_proof);
+  }
+  sodium_memzero (&receipt, sizeof receipt);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_policy_store_seal_tenant_keyed_precheck_core
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,

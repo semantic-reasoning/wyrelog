@@ -1524,6 +1524,9 @@ typedef struct
 {
   guint authorization_calls;
   guint invalidation_calls;
+  guint recovery_retain_calls;
+  guint recovery_discard_calls;
+  wyrelog_error_t recovery_retain_rc;
   gboolean deny;
 } TenantRetirementProbe;
 
@@ -1543,6 +1546,137 @@ tenant_retirement_before_invalidation (WylServiceAuthWriteLease *lease,
   TenantRetirementProbe *probe = data;
   g_assert_nonnull (lease);
   probe->invalidation_calls++;
+}
+
+static wyrelog_error_t
+    tenant_retirement_retain_recovery
+    (const WylTenantSealPublicationRecovery * recovery, gpointer data)
+{
+  TenantRetirementProbe *probe = data;
+  probe->recovery_retain_calls++;
+  g_assert_nonnull (recovery);
+  g_assert_cmpuint (recovery->receipt_version, ==, 1);
+  g_assert_true (wyl_request_id_is_canonical (recovery->request_id));
+  g_assert_true (wyl_policy_store_tenant_id_is_valid (recovery->tenant_id));
+  g_assert_nonnull (recovery->actor_subject_id);
+  g_assert_nonnull (recovery->input_fingerprint);
+  g_assert_cmpuint (recovery->input_fingerprint_len, ==,
+      WYL_SERVICE_RETIREMENT_FINGERPRINT_BYTES);
+  g_assert_nonnull (recovery->audit_id);
+  g_assert_cmpint (recovery->audit_created_at_us, >, 0);
+  g_assert_true (recovery->invalidation_completed);
+  return probe->recovery_retain_rc;
+}
+
+static void
+tenant_retirement_discard_recovery (gpointer data)
+{
+  TenantRetirementProbe *probe = data;
+  probe->recovery_discard_calls++;
+}
+
+static void
+assert_service_auth_latch (WylHandle *handle,
+    WylServiceAuthUnavailableReason expected)
+{
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+      WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==, expected);
+}
+
+static void
+test_tenant_seal_publication_recovery_classification (void)
+{
+  for (guint fault = 0; fault < 5; fault++) {
+    g_autoptr (WylHandle) handle = NULL;
+    WylHandleOpenOptions options = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+    };
+    g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+        WYRELOG_E_OK);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    g_autofree gchar *tenant = g_strdup_printf ("tenant-recovery-%u", fault);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant, &created),
+        ==, WYRELOG_E_OK);
+    g_assert_true (created);
+    TenantRetirementProbe probe = {
+      .recovery_retain_rc = fault == 1 ? WYRELOG_E_IO : WYRELOG_E_OK,
+    };
+    wyl_service_credential_mutation_authorization_t authorization = {
+      .authorize = tenant_retirement_authorize,
+      .data = &probe,
+    };
+    WylServiceAuthRegistry *registry = NULL;
+    g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==,
+        WYRELOG_E_OK);
+    if (fault == 2) {
+      WylServiceAuthReservation reservation = {
+        .session_id = (gchar *) SESSION_A,
+        .jti = (gchar *) JTI_A,
+        .credential_id = (gchar *) CREDENTIAL_A,
+        .generation = 1,
+        .principal = (gchar *) "svc:recovery:worker",
+        .tenant = tenant,
+        .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
+      };
+      g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
+              &reservation), ==, WYRELOG_E_OK);
+      WylServiceAuthSelector selector = { 0 };
+      g_assert_cmpint (wyl_service_auth_selector_init_tenant (&selector,
+              tenant), ==, WYRELOG_E_OK);
+      g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
+          (registry, &selector));
+    }
+    wyl_tenant_seal_runtime_t runtime = {
+      .registry = registry,
+      .before_write_release = fault == 3 ? fail_write_release_once : NULL,
+      .retain_publication_recovery = tenant_retirement_retain_recovery,
+      .discard_publication_recovery = tenant_retirement_discard_recovery,
+      .test_verify_opposite_state = TRUE,
+      .authorization = &authorization,
+      .data = &probe,
+    };
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF] = { 0 };
+    g_assert_cmpint (wyl_request_id_new (request_id, sizeof request_id), ==,
+        WYRELOG_E_OK);
+    if (fault == 4)
+      wyl_policy_store_service_authority_transaction_fail_once (store,
+          WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+    WylServiceRetirementOutcome outcome = { 0 };
+    wyrelog_error_t rc = wyl_tenant_seal_keyed_with_runtime (handle, tenant,
+        "operator", request_id, 1, &runtime, &outcome);
+    if (fault == 0) {
+      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      g_assert_cmpuint (probe.recovery_retain_calls, ==, 1);
+      g_assert_cmpuint (probe.recovery_discard_calls, ==, 0);
+      WylServiceAuthUnavailableReason reason =
+          WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+      g_assert_cmpint (wyl_service_auth_authority_validate_available
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason),
+          ==, WYRELOG_E_OK);
+    } else if (fault == 2) {
+      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+      g_assert_cmpuint (probe.recovery_retain_calls, ==, 0);
+      assert_service_auth_latch (handle,
+          WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+    } else if (fault == 4) {
+      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+      g_assert_cmpuint (probe.recovery_retain_calls, ==, 0);
+      g_assert_cmpuint (probe.recovery_discard_calls, ==, 0);
+      assert_service_auth_latch (handle,
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    } else {
+      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+      g_assert_cmpuint (probe.recovery_retain_calls, ==, 1);
+      g_assert_cmpuint (probe.recovery_discard_calls, ==, fault == 3 ? 1 : 0);
+      assert_service_auth_latch (handle,
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    }
+    wyl_service_auth_registry_unref (registry);
+  }
 }
 
 static void
@@ -2069,6 +2203,8 @@ main (int argc, char **argv)
       test_keyed_tenant_seal_receipt_semantics);
   g_test_add_func ("/auth/tenant/keyed-seal-restart-commit-fault",
       test_keyed_tenant_seal_restart_and_commit_fault);
+  g_test_add_func ("/auth/tenant/seal-publication-recovery-classification",
+      test_tenant_seal_publication_recovery_classification);
   g_test_add_func ("/auth/retirement/postcommit-error-normalization",
       test_retirement_postcommit_error_normalization);
   return g_test_run ();

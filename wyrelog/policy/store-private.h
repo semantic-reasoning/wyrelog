@@ -12,6 +12,7 @@
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/wyl-traits-private.h"
 #include "wyrelog/wyl-id-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 
 G_BEGIN_DECLS;
 
@@ -859,6 +860,7 @@ typedef enum
 } WylPolicyServiceRetirementOperation;
 
 #define WYL_SERVICE_RETIREMENT_RECEIPT_VERSION 1u
+#define WYL_POLICY_TENANT_SELECTOR_BYTES 256u
 
 typedef struct
 {
@@ -878,6 +880,29 @@ typedef struct
   gchar audit_id[WYL_ID_STRING_BUF];
   gint64 created_at_us;
 } WylPolicyServiceRetirementOutcome;
+
+#define WYL_SERVICE_RETIREMENT_FINGERPRINT_BYTES 32u
+
+/* Immutable proof re-read from the durable keyed tenant-seal receipt. The
+ * read succeeds only while that receipt is still the exact current closed
+ * tenant lifecycle state; superseded lifecycles fail closed. */
+typedef struct
+{
+  guint32 receipt_version;
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar tenant_id[WYL_POLICY_TENANT_SELECTOR_BYTES];
+  gchar actor_subject_id[129];
+  guint8 input_fingerprint[WYL_SERVICE_RETIREMENT_FINGERPRINT_BYTES];
+  guint64 tenant_lifecycle_generation;
+  guint64 tenant_sealed_generation;
+  gchar audit_id[WYL_ID_STRING_BUF];
+  gint64 created_at_us;
+} WylPolicyTenantSealReceiptProof;
+
+wyrelog_error_t wyl_policy_store_read_exact_tenant_seal_receipt_proof
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, WylPolicyTenantSealReceiptProof * out_proof);
 
 typedef struct
 {
@@ -2079,7 +2104,6 @@ wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
 wyrelog_error_t wyl_policy_store_set_tenant_sealed_full
     (wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
     gboolean * out_changed);
-#define WYL_POLICY_TENANT_SELECTOR_BYTES 256u
 wyrelog_error_t wyl_policy_store_seal_tenant_keyed_core
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,

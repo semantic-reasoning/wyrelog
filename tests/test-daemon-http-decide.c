@@ -6261,6 +6261,47 @@ typedef struct
   ConcurrentPolicyMutation mutation;
 } ConcurrentTenantMutation;
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean entered;
+  gboolean released;
+} TenantRecoveryClaimBarrier;
+
+typedef struct
+{
+  const gchar *base_url;
+  const gchar *query;
+  const gchar *body;
+  gint rc;
+  guint status;
+  gchar *response;
+} TenantRecoveryRequest;
+
+static void
+tenant_recovery_claim_checkpoint (gpointer data)
+{
+  TenantRecoveryClaimBarrier *barrier = data;
+  g_mutex_lock (&barrier->mutex);
+  barrier->entered = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  while (!barrier->released)
+    g_cond_wait (&barrier->changed, &barrier->mutex);
+  g_mutex_unlock (&barrier->mutex);
+}
+
+static gpointer
+tenant_recovery_request_thread (gpointer data)
+{
+  TenantRecoveryRequest *request = data;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  request->rc = send_raw_policy_mutation_body (session, "POST",
+      request->base_url, "/tenants/seal", request->query, request->body,
+      &request->status, &request->response);
+  return NULL;
+}
+
 static gpointer
 concurrent_permission_grant_thread (gpointer user_data)
 {
@@ -7581,6 +7622,129 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (status != 400 || strstr (body, "invalid_tenant_request") == NULL)
     return 2004;
   g_clear_pointer (&body, g_free);
+
+  guint tenant_seal_audit_before = 0;
+  guint tenant_seal_audit_after = 0;
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_seal", "tenant-a", &tenant_seal_audit_before))
+    return 2242;
+  wyl_daemon_http_fail_next_tenant_seal_verification_for_test (server);
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+  WylServiceAuthUnavailableReason seal_unavailable =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (rc != 0)
+    return rc;
+  gboolean seal_state_closed = tenant_state_matches (store, "tenant-a",
+      TRUE, FALSE);
+  gboolean seal_pair_poisoned = wyl_handle_engine_pair_is_poisoned (handle);
+  wyrelog_error_t seal_available_rc =
+      wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+      &seal_unavailable);
+  gboolean seal_audit_counted = policy_lifecycle_audit_count (handle,
+      "http-policy-admin", "tenant_seal", "tenant-a",
+      &tenant_seal_audit_after);
+  if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
+      || !seal_state_closed || !seal_pair_poisoned
+      || seal_available_rc != WYRELOG_E_OK || !seal_audit_counted
+      || tenant_seal_audit_after != tenant_seal_audit_before + 1) {
+    g_printerr ("WYRELOG_TEST_DIAG tenant_seal_recovery status=%u body=%s "
+        "closed=%d poisoned=%d available=%d reason=%d audit=%d before=%u "
+        "after=%u\n", status, body != NULL ? body : "(null)",
+        seal_state_closed, seal_pair_poisoned, seal_available_rc,
+        seal_unavailable, seal_audit_counted, tenant_seal_audit_before,
+        tenant_seal_audit_after);
+    return 2243;
+  }
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"000000000000000000000000229\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 2245;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/unseal", tenant_seal_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 2246;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *wrong_recovery_tenant_query =
+      g_strdup_printf ("name=tenant-wrong&tenant=%s&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      WYL_TENANT_DEFAULT, session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/create", wrong_recovery_tenant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 2247;
+  g_clear_pointer (&body, g_free);
+
+  /* The audit fixture serializes route dispatch, so the default fixture owns
+   * the concurrent CLAIMED observation.  Audit still exercises the same
+   * exact-request recovery synchronously below. */
+#ifndef WYL_HAS_AUDIT
+  TenantRecoveryClaimBarrier recovery_barrier = { 0 };
+  g_mutex_init (&recovery_barrier.mutex);
+  g_cond_init (&recovery_barrier.changed);
+  TenantRecoveryRequest recovery_request = {
+    .base_url = base_url,
+    .query = tenant_seal_query,
+    .body = tenant_seal_body,
+  };
+  wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test (server,
+      tenant_recovery_claim_checkpoint, &recovery_barrier);
+  g_autoptr (GThread) recovery_thread = g_thread_new ("tenant-recovery",
+      tenant_recovery_request_thread, &recovery_request);
+  g_mutex_lock (&recovery_barrier.mutex);
+  while (!recovery_barrier.entered)
+    g_cond_wait (&recovery_barrier.changed, &recovery_barrier.mutex);
+  g_mutex_unlock (&recovery_barrier.mutex);
+  rc = send_raw_policy_mutation_body (session, "POST", base_url,
+      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+  if (rc != 0 || status != 503
+      || strstr (body, "tenant_mutation_unavailable") == NULL
+      || !wyl_handle_engine_pair_is_poisoned (handle)) {
+    g_mutex_lock (&recovery_barrier.mutex);
+    recovery_barrier.released = TRUE;
+    g_cond_broadcast (&recovery_barrier.changed);
+    g_mutex_unlock (&recovery_barrier.mutex);
+    g_thread_join (g_steal_pointer (&recovery_thread));
+    g_free (recovery_request.response);
+    g_cond_clear (&recovery_barrier.changed);
+    g_mutex_clear (&recovery_barrier.mutex);
+    return 2248;
+  }
+  g_clear_pointer (&body, g_free);
+  g_mutex_lock (&recovery_barrier.mutex);
+  recovery_barrier.released = TRUE;
+  g_cond_broadcast (&recovery_barrier.changed);
+  g_mutex_unlock (&recovery_barrier.mutex);
+  g_thread_join (g_steal_pointer (&recovery_thread));
+  if (recovery_request.rc != 0 || recovery_request.status != 200
+      || recovery_request.response == NULL
+      || strstr (recovery_request.response, "\"changed\":true") == NULL
+      || wyl_handle_engine_pair_is_poisoned (handle)) {
+    g_free (recovery_request.response);
+    g_cond_clear (&recovery_barrier.changed);
+    g_mutex_clear (&recovery_barrier.mutex);
+    return 2249;
+  }
+  g_free (recovery_request.response);
+  g_cond_clear (&recovery_barrier.changed);
+  g_mutex_clear (&recovery_barrier.mutex);
+#endif
+
   g_autofree gchar *tenant_seal_correlation = NULL;
   rc = send_raw_policy_mutation_body_full (session, "POST", base_url,
       "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body,
@@ -7589,6 +7753,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 200;
+  if (wyl_handle_engine_pair_is_poisoned (handle)
+      || !policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_seal", "tenant-a", &tenant_seal_audit_after)
+      || tenant_seal_audit_after != tenant_seal_audit_before + 1)
+    return 2244;
   if (!tenant_projection_decision_matches (handle, "tenant-a",
           WYL_DECISION_DENY))
     return 2005;
