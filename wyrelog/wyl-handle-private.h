@@ -98,6 +98,15 @@ wyrelog_error_t wyl_handle_policy_store_pin_current (WylHandle * self,
     wyl_policy_store_t ** out_store);
 void wyl_handle_policy_store_unpin (WylHandle * self,
     wyl_policy_store_t * expected_store);
+/*
+ * Terminal, non-asserting counterpart used when an authority owner must be
+ * consumed even after detecting cleanup corruption.  If the calling thread
+ * owns a pin, exactly one pin is released.  A store-identity mismatch is
+ * reported after restoring that accounting; contradictory counter ownership
+ * is reported without guessing at a repair.
+ */
+wyrelog_error_t wyl_handle_policy_store_unpin_terminal (WylHandle * self,
+    wyl_policy_store_t * expected_store);
 wyrelog_error_t wyl_handle_policy_store_capture_generation (WylHandle * self,
     wyl_policy_store_t * expected_store, guint64 * out_generation);
 wyrelog_error_t wyl_handle_policy_store_validate_generation (WylHandle * self,

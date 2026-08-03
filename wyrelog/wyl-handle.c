@@ -2045,6 +2045,35 @@ wyl_handle_policy_store_unpin (WylHandle *self,
 }
 
 wyrelog_error_t
+wyl_handle_policy_store_unpin_terminal (WylHandle *self,
+    wyl_policy_store_t *expected_store)
+{
+  if (!WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  GThread *owner = g_thread_self ();
+  guint owner_pins = GPOINTER_TO_UINT (g_hash_table_lookup
+      (self->policy_store_pin_owners, owner));
+  if (self->policy_store_active_operations == 0 || owner_pins == 0) {
+    g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+    return WYRELOG_E_INVALID;
+  }
+
+  wyrelog_error_t rc = self->policy_store == expected_store
+      ? WYRELOG_E_OK : WYRELOG_E_INVALID;
+  if (owner_pins == 1)
+    g_hash_table_remove (self->policy_store_pin_owners, owner);
+  else
+    g_hash_table_insert (self->policy_store_pin_owners, owner,
+        GUINT_TO_POINTER (owner_pins - 1));
+  self->policy_store_active_operations--;
+  g_cond_broadcast (&self->policy_store_lifecycle_changed);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_handle_policy_store_capture_generation (WylHandle *self,
     wyl_policy_store_t *expected_store, guint64 *out_generation)
 {

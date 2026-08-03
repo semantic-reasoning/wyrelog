@@ -156,6 +156,9 @@ void wyl_service_auth_write_lease_test_corrupt_serial
     (WylServiceAuthWriteLease * lease);
 void wyl_service_auth_write_lease_test_fail_terminal_prevalidation
     (WylServiceAuthWriteLease * lease);
+/* Test-only: leave the rank correctly, then report a one-shot cleanup fault. */
+void wyl_service_auth_write_lease_test_fail_terminal_rank_after_pop
+    (WylServiceAuthWriteLease * lease);
 void wyl_service_auth_write_lease_test_set_terminal_checkpoint
     (WylServiceAuthWriteLease * lease, void (*checkpoint) (gpointer data),
     gpointer data);

@@ -122,7 +122,14 @@ writer_is_waiting (const WylServiceAuthAuthoritySnapshot *snapshot)
   return snapshot->waiting_writers == 1;
 }
 
+static gboolean
+reader_is_waiting (const WylServiceAuthAuthoritySnapshot *snapshot)
+{
+  return snapshot->waiting_readers == 1;
+}
+
 static WylHandle *new_handle (void);
+static WylHandle *new_store_handle (void);
 
 static void
 terminal_entry_checkpoint (gpointer data)
@@ -398,6 +405,84 @@ test_write_terminal_release_faults (void)
 {
   assert_write_terminal_fault_consumes (FALSE);
   assert_write_terminal_fault_consumes (TRUE);
+}
+
+static void
+assert_write_terminal_cleanup_fault_consumes (gboolean rank_fault)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  if (rank_fault)
+    wyl_service_auth_write_lease_test_fail_terminal_rank_after_pop (lease);
+  else
+    (void) wyl_service_auth_write_lease_test_swap_pinned_store (lease,
+        (wyl_policy_store_t *) handle);
+
+  LeaseThread reader = { 0 };
+  lease_thread_init (&reader, authority, handle);
+  g_autoptr (GThread) reader_handle = g_thread_new ("terminal-fault-reader",
+      reader_thread, &reader);
+  wait_for_snapshot (authority, reader_is_waiting);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&lease), ==,
+      rank_fault ? WYRELOG_E_INTERNAL : WYRELOG_E_INVALID);
+  g_assert_null (lease);
+  g_thread_join (g_steal_pointer (&reader_handle));
+  g_assert_cmpint (reader.rc, ==, WYRELOG_E_BUSY);
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_false (snapshot.writer_active);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+  g_assert_cmpuint (snapshot.waiting_readers, ==, 0);
+  guint total_pins = G_MAXUINT;
+  guint thread_pins = G_MAXUINT;
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
+      &thread_pins);
+  g_assert_cmpuint (total_pins, ==, 0);
+  g_assert_cmpuint (thread_pins, ==, 0);
+  g_assert_cmpint (wyl_service_auth_rank_enter (handle,
+          WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_rank_leave (handle,
+          WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  lease_thread_clear (&reader);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+}
+
+static void
+test_write_terminal_cleanup_faults (void)
+{
+  assert_write_terminal_cleanup_fault_consumes (TRUE);
+  assert_write_terminal_cleanup_fault_consumes (FALSE);
+}
+
+static void
+test_write_terminal_rejects_live_maintenance (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_claim_maintenance (lease,
+          handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&lease), ==,
+      WYRELOG_E_BUSY);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (wyl_service_auth_write_lease_unclaim_maintenance (lease,
+          handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&lease), ==,
+      WYRELOG_E_OK);
+  g_assert_null (lease);
 }
 
 static void
@@ -3235,6 +3320,10 @@ main (int argc, char **argv)
       test_write_terminal_release_contract);
   g_test_add_func ("/service-auth/lease/write-terminal-release-faults",
       test_write_terminal_release_faults);
+  g_test_add_func ("/service-auth/lease/write-terminal-cleanup-faults",
+      test_write_terminal_cleanup_faults);
+  g_test_add_func ("/service-auth/lease/write-terminal-live-maintenance",
+      test_write_terminal_rejects_live_maintenance);
   g_test_add_func ("/service-auth/lease/write-terminal-release-wrong-thread",
       test_write_terminal_release_wrong_thread);
   g_test_add_func ("/service-auth/lease/rank-inversion-write-serial",
