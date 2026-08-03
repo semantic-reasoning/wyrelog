@@ -442,9 +442,20 @@ gboolean wyl_daemon_http_refresh_context_is_for_test (SoupServer * server,
     GMainContext * expected);
 gboolean wyl_daemon_http_test_human_refresh_classifier (SoupServer * server);
 typedef void (*WylDaemonPolicyWriteCheckpoint) (gpointer data);
+typedef enum
+{
+  WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE = 0,
+  WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION,
+  WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_RANK_AFTER_POP,
+  WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY,
+} WylDaemonPolicyWriteFinalizeFault;
 /* Runs a representative daemon policy mutation while holding its WRITE lease. */
 wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
     WylDaemonPolicyWriteCheckpoint checkpoint, gpointer data);
+void wyl_daemon_http_fail_next_policy_write_finalize_for_test
+    (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
+guint wyl_daemon_http_policy_write_terminal_entries_for_test
+    (SoupServer * server);
 /*
  * Test seam: drive the tenant-gate cross-check between the tenant
  * declared by the request (request_tenant, may be NULL meaning "no

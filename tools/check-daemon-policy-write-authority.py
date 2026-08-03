@@ -7,7 +7,16 @@ from pathlib import Path
 VERSION = 1
 PROFILE = "raw-conditional-declarations-v1"
 FUNCTIONS = (
+    "wyl_daemon_policy_write_detach_message",
+    "wyl_daemon_policy_write_clear",
+    "wyl_daemon_policy_write_finalize",
+    "wyl_daemon_policy_write_finish",
     "wyl_daemon_policy_write_acquire",
+    "wyl_daemon_policy_write_finalize_for_response",
+    "wyl_daemon_policy_write_prepare_success_response",
+    "set_json_error", "set_json_ok",
+    "set_tenant_mutation_json", "set_graph_mutation_json",
+    "set_schema_ok_json", "set_fact_op_json",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler",
     "graph_create_handler", "graph_seal_handler", "schema_register_handler",
@@ -467,6 +476,63 @@ def validate_recover_write_boundary(defs):
     if any(symbol in values for symbol in forbidden):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
+def validate_terminal_write_contract(defs):
+    required_helpers=(
+        "wyl_daemon_policy_write_detach_message",
+        "wyl_daemon_policy_write_clear",
+        "wyl_daemon_policy_write_finalize",
+        "wyl_daemon_policy_write_finish",
+        "wyl_daemon_policy_write_finalize_for_response",
+        "wyl_daemon_policy_write_prepare_success_response",
+        "set_json_error", "set_json_ok",
+    )
+    for name in required_helpers:
+        items=defs.get(name,[])
+        if len(items)!=1:
+            raise GuardError(f"terminal WRITE helper cardinality mismatch: {name}")
+    helper_values={name:[v for _,v in defs[name][0][2]]
+        for name in required_helpers}
+    if helper_values["wyl_daemon_policy_write_clear"].count(
+            "wyl_service_auth_write_lease_release_terminal")!=2:
+        raise GuardError("emergency WRITE cleanup terminal-entry mismatch")
+    if helper_values["wyl_daemon_policy_write_finalize"].count(
+            "wyl_service_auth_write_lease_release_terminal")!=1:
+        raise GuardError("checked WRITE finalize terminal-entry mismatch")
+    if "g_assert" in helper_values["wyl_daemon_policy_write_clear"]:
+        raise GuardError("emergency WRITE cleanup must not assert")
+    if helper_values["wyl_daemon_policy_write_finish"].count(
+            "wyl_daemon_policy_write_finalize")!=1:
+        raise GuardError("WRITE finish must delegate exactly once")
+    if helper_values["wyl_daemon_policy_write_finalize_for_response"].count(
+            "wyl_daemon_policy_write_finalize")!=1:
+        raise GuardError("response finalizer must delegate exactly once")
+    if helper_values["wyl_daemon_policy_write_prepare_success_response"].count(
+            "wyl_daemon_policy_write_finalize_for_response")!=1:
+        raise GuardError("success response must finalize exactly once")
+    if helper_values["set_json_error"].count(
+            "wyl_daemon_policy_write_finalize_for_response")!=1:
+        raise GuardError("error response must finalize exactly once")
+    if helper_values["set_json_ok"].count(
+            "wyl_daemon_policy_write_finalize_for_response")!=1:
+        raise GuardError("OK response must finalize exactly once")
+
+    raw_release_owners={
+        "service_auth_invalidation_execute_locked",
+        "service_auth_retire_exact", "service_auth_retire_due",
+        "wyl_daemon_http_latch_service_unavailable_for_test",
+    }
+    for name,items in defs.items():
+        for _,_,tokens in items:
+            values=[v for _,v in tokens]
+            if "wyl_service_auth_write_lease_release" in values or \
+                    "wyl_service_auth_write_lease_free" in values:
+                raise GuardError(f"ordinary WRITE release remains in {name}")
+            if "wyl_service_auth_write_lease_release_terminal" in values \
+                    and name not in raw_release_owners | {
+                        "wyl_daemon_policy_write_clear",
+                        "wyl_daemon_policy_write_finalize"}:
+                raise GuardError(f"unreviewed raw terminal WRITE owner: {name}")
+
 def strict_json(path):
     def pairs_hook(items):
         obj={}
@@ -500,6 +566,7 @@ def main(argv=None):
         raise GuardError("acquire allowlist must be contained by the frozen function set")
     validate_test_only_tenant_seam(source,raw_defs)
     validate_recover_write_boundary(raw_defs)
+    validate_terminal_write_contract(raw_defs)
     raw_global_invariants(raw_tokens,raw_defs)
     if not ns.raw_only:
         if not ns.build_root or not ns.compiler_id: raise GuardError("active check requires build-root and compiler-id")

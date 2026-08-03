@@ -255,6 +255,92 @@ check_daemon_policy_write_shutdown_contract (void)
   return rc;
 }
 
+static gint
+check_daemon_policy_write_finalize_case (WylDaemonPolicyWriteFinalizeFault
+    fault, wyrelog_error_t expected, gint base_error)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return base_error;
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts,
+      handle, &error);
+  if (server == NULL)
+    return base_error + 1;
+
+  wyl_daemon_http_fail_next_policy_write_finalize_for_test (server, fault);
+  guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
+      (server);
+  wyrelog_error_t rc = wyl_daemon_http_policy_write_for_test (server, NULL,
+      NULL);
+  guint after = wyl_daemon_http_policy_write_terminal_entries_for_test (server);
+  if (rc != expected)
+    return base_error + 2;
+  if (after != before + 1)
+    return base_error + 3;
+
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  if (snapshot.writer_active || snapshot.active_readers != 0
+      || snapshot.waiting_readers != 0 || snapshot.waiting_writers != 0)
+    return base_error + 4;
+  guint total_pins = G_MAXUINT;
+  guint thread_pins = G_MAXUINT;
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
+      &thread_pins);
+  if (total_pins != 0 || thread_pins != 0)
+    return base_error + 5;
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  wyrelog_error_t available = wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason);
+  if (fault == WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE) {
+    if (available != WYRELOG_E_OK
+        || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+      return base_error + 6;
+  } else {
+    if (available != WYRELOG_E_BUSY
+        || reason != WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT)
+      return base_error + 7;
+    if (wyl_daemon_http_policy_write_for_test (server, NULL, NULL)
+        != WYRELOG_E_BUSY)
+      return base_error + 8;
+    if (wyl_daemon_http_policy_write_terminal_entries_for_test (server)
+        != after)
+      return base_error + 9;
+  }
+  if (wyl_handle_shutdown_ordered (handle) != WYRELOG_E_OK)
+    return base_error + 10;
+  soup_server_disconnect (server);
+  return 0;
+}
+
+static gint
+check_daemon_policy_write_finalize_contract (void)
+{
+  gint rc = check_daemon_policy_write_finalize_case
+      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 1910);
+  if (rc != 0)
+    return rc;
+  rc = check_daemon_policy_write_finalize_case
+      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION,
+      WYRELOG_E_INTERNAL, 1930);
+  if (rc != 0)
+    return rc;
+  rc = check_daemon_policy_write_finalize_case
+      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_RANK_AFTER_POP,
+      WYRELOG_E_INTERNAL, 1950);
+  if (rc != 0)
+    return rc;
+  return check_daemon_policy_write_finalize_case
+      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY,
+      WYRELOG_E_INVALID, 1970);
+}
+
 typedef struct
 {
   const gchar *subject_id;
@@ -15402,6 +15488,10 @@ main (void)
   gint policy_shutdown_rc = check_daemon_policy_write_shutdown_contract ();
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
+
+  gint policy_finalize_rc = check_daemon_policy_write_finalize_contract ();
+  if (policy_finalize_rc != 0)
+    return policy_finalize_rc;
 
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
