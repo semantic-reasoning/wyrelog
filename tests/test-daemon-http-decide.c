@@ -9903,6 +9903,8 @@ cleanup:
     g_mutex_clear (&retire.mutex);
   }
   if (delivery_initialized) {
+    g_clear_pointer (&delivery.session_id, g_free);
+    g_clear_pointer (&delivery.jti, g_free);
     g_cond_clear (&delivery.changed);
     g_mutex_clear (&delivery.mutex);
   }
