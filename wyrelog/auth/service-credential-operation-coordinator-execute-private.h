@@ -139,4 +139,26 @@ wyrelog_error_t
     const WylServiceCredentialOperationHandoffExecuteRuntime * runtime,
     WylServiceCredentialOperationRecord * out_record);
 
+#ifdef WYL_ENABLE_FAULT_INJECTION
+/* Single-shot local-publication fault-injection seam (#754).  Compiled in ONLY
+ * when the enable_fault_injection build option is set; release builds omit the
+ * option, so the WYL_ENABLE_FAULT_INJECTION macro is undefined, this symbol
+ * does not exist, and no daemon can be armed.  Production-inert unless armed:
+ * with the seam disarmed, execute_handoff behaves byte-identically to today.
+ * When armed, the NEXT execute_handoff that reaches the post-server-commit
+ * publication step fails exactly once with WYRELOG_E_IO BEFORE any publication
+ * I/O (before plan/unseal/stage), leaving a durable SERVER_COMMITTED orphan
+ * with no secret on disk; the seam then self-disarms (compare-and-exchange) so
+ * it can never wedge the daemon.  It can ONLY cause one publication failure,
+ * never bypass a check or grant authority.
+ *
+ * Visibility: exported with default visibility (NOT G_GNUC_INTERNAL), matching
+ * its sibling execute_handoff/handoff declarations above, because the arming
+ * caller (wyrelogd) and the focused unit test are separate binaries that link
+ * libwyrelog.so and could not resolve a hidden symbol.  Privacy is enforced by
+ * this header never being installed, not by symbol visibility. */
+void wyl_service_credential_operation_coordinator_arm_publication_fault_once
+    (void);
+#endif /* WYL_ENABLE_FAULT_INJECTION */
+
 G_END_DECLS
