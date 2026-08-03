@@ -1,8 +1,8 @@
 {
-  "aggregate": "6aa67dafc094be989e687ba1567e7d1cab155910f2b939d0dd84e5f6bf7d4028",
+  "aggregate": "8aa1ecbd0cae61ca49dc5e0d9a8d1e7b1b90ce16cbcdd7ad3cf90402e6780ac1",
   "directives": {
-    "count": 380,
-    "sha256": "2d2d4add924858adc3615ab6e854f6ceeebd8dab7855393c1fec52559a7c5a13"
+    "count": 385,
+    "sha256": "f16ede92901d7d18cf5a2367862a3b2d42764c2d13af678acfada7d7d700573e"
   },
   "functions": {
     "direct_permission_mutation_handler": "b507c2085c91eab9f62119466a1926ea728de012064d96cb7e29f74b65f4bacf",
@@ -45,9 +45,13 @@
     "wyl_daemon_policy_write_finalize_for_response": "8a95ffd477b12704658b38ce3b52ccf88d766b0969658832a878e99d4c78e859",
     "wyl_daemon_policy_write_finish": "9952e17686b2b2f5c15269ab0b038fbe68469bf4868a89c87eedfd73c3c791ee",
     "wyl_daemon_policy_write_finish_result": "d863a009dd24e9def71edecc082e73aa1cb24d84c014c1ecbef59d6c7a21c46f",
-    "wyl_daemon_policy_write_owner_name": "eb0f518d850b7437de5c0da59d6d38d07ed981dd58a8a1b6e080ef689cd025b1",
+    "wyl_daemon_policy_write_owner_name": "bc03ac0fdee0415e4583464e459d3b58f3da122715be9121bc54561d1a13e78c",
     "wyl_daemon_policy_write_prepare_success_response": "e130d634f9cc7832f25c391a5dd3bedf0444d71843ede1b55764f09c686fa392",
     "wyl_daemon_policy_write_record_primary": "fd545eb0aa25baaf932a661079bf4cf18a04b49204f08d86f45db4ebbfae4e30"
+  },
+  "owners": {
+    "count": 16,
+    "sha256": "5370abeb081779c503975d502a45cc63ee1346f768de436f3360b5ecbab3f4fb"
   },
   "profile": "raw-conditional-declarations-v1",
   "rationale": "Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.",
