@@ -875,6 +875,37 @@ test_warn_indeterminate_on_probe_error (void)
    * Grep target there: `wyrelogd: bootstrap_admin: indeterminate`. */
 }
 
+#ifdef WYL_ENABLE_FAULT_INJECTION
+/* #754: the test-only publication fault-injection flag parses into the options
+ * struct and resolves cleanly.  It works alongside --production by design (the
+ * seam requires an encrypted store, which the daemon only wires under
+ * --production); a release build simply omits the flag entirely via the
+ * enable_fault_injection compile gate, so no --production rejection is needed. */
+static void
+test_fault_inject_sc_publication_parses (void)
+{
+  g_auto (WylDaemonOptions) opts = {
+    .template_dir = "borrowed-template",
+    .production_mode = TRUE,
+    .listen_port = -1,
+  };
+  gchar *argv[] = {
+    (gchar *) "test-daemon-options",
+    (gchar *) "--fault-inject-sc-publication-once",
+    NULL,
+  };
+  gint argc = (gint) G_N_ELEMENTS (argv) - 1;
+  gchar **argv_ptr = argv;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_parse_options (&argc, &argv_ptr, &opts, &error));
+  g_assert_no_error (error);
+  g_assert_true (opts.fault_inject_sc_publication_once);
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+}
+#endif /* WYL_ENABLE_FAULT_INJECTION */
+
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
@@ -939,6 +970,11 @@ main (int argc, char **argv)
       test_warn_subject_ansi_sanitized);
   g_test_add_func ("/daemon-options/warn/indeterminate-on-probe-error",
       test_warn_indeterminate_on_probe_error);
+
+#ifdef WYL_ENABLE_FAULT_INJECTION
+  g_test_add_func ("/daemon-options/fault-inject/parses",
+      test_fault_inject_sc_publication_parses);
+#endif
 
   /* Bootstrap-WARN policy-store fixture coverage:
    * The wyrelogd-side WARN path opens the policy store at the resolved
