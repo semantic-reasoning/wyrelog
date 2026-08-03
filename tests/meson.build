@@ -921,6 +921,29 @@ if host_machine.system() != 'windows' and build_client
         is_parallel : false,
         timeout : 300,
       )
+
+      # Packaged, encrypted, end-to-end ZERO-SURVIVOR + NO-REFRESH runtime proof
+      # (#382 Unit 2): credential revoke / principal disable / tenant seal each
+      # leave zero usable or pending service tokens (fresh exchange fails; an
+      # already-minted token stops resolving), and a service token has no
+      # refresh/renewal path. Same gating as the lifecycle driver.
+      test('service-credential-zero-survivor-e2e', sh,
+        args : [
+          meson.current_source_dir()
+            / 'check-service-credential-zero-survivor-e2e.sh',
+          wyrelogd_exe.full_path(),
+          wyctl_exe.full_path(),
+          check_service_credential_store_inspect.full_path(),
+          meson.project_source_root() / 'templates' / 'access',
+          python3.full_path(),
+          meson.current_source_dir() / 'wyrelog_sc_e2e.py',
+        ],
+        depends : [
+          wyrelogd_exe, wyctl_exe, check_service_credential_store_inspect,
+        ],
+        is_parallel : false,
+        timeout : 300,
+      )
     endif
   endif
 
