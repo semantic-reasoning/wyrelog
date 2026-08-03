@@ -510,6 +510,8 @@ gboolean wyl_daemon_http_detach_tenant_recovery_slot_for_test
     (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_seal_tenant_recovery_for_test
     (SoupServer * server, const gchar * tenant, const gchar * request_id);
+wyrelog_error_t wyl_daemon_http_attempt_seal_tenant_recovery_for_test
+    (SoupServer * server, const gchar * tenant, const gchar * request_id);
 void wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test
     (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test
