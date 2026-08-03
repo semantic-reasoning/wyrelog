@@ -16501,9 +16501,14 @@ main (void)
     return policy_shutdown_rc;
 
 #ifdef WYL_HAS_FACT_STORE
+#ifndef G_OS_WIN32
+  /* This matrix provisions POSIX owner-mode fact roots.  Windows fact roots
+   * require the separate fixed-volume, owner-only ACL fixture contract; #757
+   * deliberately validates the complete 16x2 owner matrix on POSIX lanes. */
   gint all_owner_fault_rc = check_policy_write_all_owner_faults ();
   if (all_owner_fault_rc != 0)
     return all_owner_fault_rc;
+#endif
 #endif
 
 #if defined(WYL_HAS_FACT_STORE) || defined(WYL_HAS_AUDIT)
