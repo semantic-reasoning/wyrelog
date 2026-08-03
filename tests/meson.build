@@ -1042,6 +1042,42 @@ if host_machine.system() != 'windows' and build_client
         is_parallel : false,
         timeout : 300,
       )
+
+      # Packaged, encrypted, end-to-end LOCAL-PUBLICATION-FAULT + ORPHAN-RECOVERY
+      # runtime proof (#382 Unit 4; the #380 orphan-window contract). Arms the
+      # compile-gated single-shot #754 seam via --fault-inject-sc-publication-once
+      # so a service-credential SERVER-COMMIT succeeds but the post-commit LOCAL
+      # publication fails once, then proves NO secret on disk + a
+      # restart-surviving, recoverable/revocable orphan keyed by the request id.
+      # The daemon runs WITH --production (a real encrypted daemon: the CVK the
+      # SC issue needs is wired only under --production). This is registered ONLY
+      # when enable_fault_injection is set -- the seam and its flag do not exist
+      # in a release build -- ADDITIONALLY to the linux + enable_audit gating of
+      # the other SC e2e drivers. Honest status: the packaged SC e2e suite is a
+      # documented LOCAL/manual gate today -- the CI --suite wyrelog job does not
+      # yet build enable_client/enable_fact_store/enable_fault_injection, so none
+      # of these packaged tests run in CI. Wiring them into a Linux CI job is a
+      # tracked follow-up; the platform-matrix checker does NOT assert CI enables
+      # the option, so it stays honest.
+      if get_option('enable_fault_injection').allowed()
+        test('service-credential-publication-fault-e2e', sh,
+          args : [
+            meson.current_source_dir()
+              / 'check-service-credential-publication-fault-e2e.sh',
+            wyrelogd_exe.full_path(),
+            wyctl_exe.full_path(),
+            check_service_credential_store_inspect.full_path(),
+            meson.project_source_root() / 'templates' / 'access',
+            python3.full_path(),
+            meson.current_source_dir() / 'wyrelog_sc_e2e.py',
+          ],
+          depends : [
+            wyrelogd_exe, wyctl_exe, check_service_credential_store_inspect,
+          ],
+          is_parallel : false,
+          timeout : 300,
+        )
+      endif
     endif
   endif
 
