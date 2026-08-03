@@ -449,10 +449,31 @@ def validate_owner_fault_matrix(root):
     service_start=source.index(service_marker)+len(service_marker)
     service_end=source.index(service_end_marker,service_start)
     service=source[service_start:service_end]
-    call="check_policy_write_all_owner_faults ();"
-    if service.count(call)!=1 or source.count(call)!=1:
+    main_items=defs.get("main",[])
+    service_mains=[item for item in main_items
+        if "check_service_access_token_state_contract" in
+        [value for _,value in item[2]]]
+    if len(service_mains)!=1:
+        raise GuardError("daemon WRITE service main token tree mismatch")
+    service_values=[value for _,value in service_mains[0][2]]
+    call_count=sum(1 for i,value in enumerate(service_values[:-1])
+        if value=="check_policy_write_all_owner_faults"
+        and service_values[i+1]=="(")
+    all_main_calls=sum(1 for item in main_items
+        for i,(_,value) in enumerate(item[2][:-1])
+        if value=="check_policy_write_all_owner_faults"
+        and item[2][i+1][1]=="(")
+    call_sequence=("gint","all_owner_fault_rc","=",
+        "check_policy_write_all_owner_faults","(",")",";")
+    if call_count!=1 or all_main_calls!=1 \
+            or not has_token_sequence(service_values,call_sequence):
         raise GuardError("daemon WRITE owner fault service invocation mismatch")
-    call_pos=service.index(call)
+    call_line=re.search(r"^\s*gint\s+all_owner_fault_rc\s*=\s*"
+        r"check_policy_write_all_owner_faults\s*\(\s*\)\s*;\s*$",
+        service,re.MULTILINE)
+    if call_line is None:
+        raise GuardError("daemon WRITE owner fault service call shape mismatch")
+    call_pos=call_line.start()
     stack=[]
     for line in service[:call_pos].splitlines():
         directive=re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)",
@@ -461,14 +482,17 @@ def validate_owner_fault_matrix(root):
             continue
         kind,value=directive.groups()
         if kind in ("if","ifdef","ifndef"):
-            stack.append((kind,value.strip()))
+            stack.append((kind,value.strip(),"initial"))
         elif kind=="endif":
             if not stack:
                 raise GuardError("unbalanced conditional before owner fault matrix")
             stack.pop()
-        elif not stack:
-            raise GuardError("orphan conditional before owner fault matrix")
-    if stack!=[("ifdef","WYL_HAS_FACT_STORE")]:
+        else:
+            if not stack:
+                raise GuardError("orphan conditional before owner fault matrix")
+            parent_kind,parent_value,_=stack[-1]
+            stack[-1]=(parent_kind,parent_value,"alternate")
+    if stack!=[("ifdef","WYL_HAS_FACT_STORE","initial")]:
         raise GuardError("owner fault matrix is not live in fact-enabled service main")
 
 def active_fact_store_enabled(tokens):

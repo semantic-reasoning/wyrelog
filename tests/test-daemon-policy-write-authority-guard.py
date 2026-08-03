@@ -526,6 +526,17 @@ def main():
                 "check_policy_write_all_owner_faults ();",
                 "  gint all_owner_fault_rc = "
                 "check_policy_write_actual_owner_finalize_contract ();", 1),
+            "comment-only-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "  gint all_owner_fault_rc = 0;\n"
+                "  /* check_policy_write_all_owner_faults (); */", 1),
+            "alternate-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "#if 1\n  gint all_owner_fault_rc = 0;\n#else\n"
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();\n#endif", 1),
         }
         for name, text in matrix_fixtures.items():
             if text == test_source:
