@@ -13362,6 +13362,22 @@ typedef struct
   const gchar *acquire_code;
 } PolicyWriteOwnerFaultCase;
 
+typedef struct
+{
+  const gchar *graph_id;
+  gboolean found;
+} PolicyWriteOwnerGraphProbe;
+
+static wyrelog_error_t
+policy_write_owner_graph_probe_cb (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
+{
+  PolicyWriteOwnerGraphProbe *probe = user_data;
+  if (g_strcmp0 (info->graph_id, probe->graph_id) == 0)
+    probe->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
 static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
   {0, "key_rotation", WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE
         | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
@@ -13534,6 +13550,39 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
           WYL_TENANT_DEFAULT, guard);
       break;
     case 4:
+    {
+      gboolean tenant_active = FALSE;
+      PolicyWriteOwnerGraphProbe probe = {.graph_id = "owner-fault" };
+      wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+      if (wyl_policy_store_tenant_is_active (store, WYL_TENANT_DEFAULT,
+              &tenant_active) != WYRELOG_E_OK || !tenant_active) {
+        g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
+            "tenant_inactive\n");
+        return 10;
+      }
+      if (wyl_policy_store_foreach_fact_graph (store, WYL_TENANT_DEFAULT,
+              policy_write_owner_graph_probe_cb, &probe) != WYRELOG_E_OK
+          || probe.found) {
+        g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
+            "registry_present\n");
+        return 11;
+      }
+      WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+      wyrelog_error_t directory_rc = wyl_policy_store_open_fact_graph_directory
+          (store, env->fact_root, WYL_TENANT_DEFAULT, "owner-fault", FALSE,
+          &directory);
+      wyl_fact_graph_directory_clear (&directory);
+      if (directory_rc == WYRELOG_E_OK) {
+        g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
+            "storage_present\n");
+        return 12;
+      }
+      if (directory_rc != WYRELOG_E_NOT_FOUND) {
+        g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
+            "storage_error rc=%d\n", directory_rc);
+        return 13;
+      }
+    }
       path = "/graphs/create";
       query = g_strdup_printf ("tenant=%s&graph=owner-fault&%s",
           WYL_TENANT_DEFAULT, guard);
@@ -13691,7 +13740,6 @@ check_policy_write_all_owner_faults (void)
         service_denial_env_clear (&env);
         return error_base + 1;
       }
-
       guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
           (env.http.server);
       wyrelog_error_t non_http_rc = WYRELOG_E_OK;
