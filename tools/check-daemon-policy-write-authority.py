@@ -16,6 +16,11 @@ FUNCTIONS = (
     "wyl_daemon_policy_write_finish",
     "wyl_daemon_policy_write_finish_result",
     "wyl_daemon_policy_write_acquire",
+    "policy_write_acquire_fault_hit_count",
+    "policy_write_record_non_http_finalize_snapshot",
+    "policy_write_record_finalize_snapshot",
+    "wyl_daemon_http_fail_next_policy_write_finalize_for_test",
+    "wyl_daemon_http_fail_next_policy_write_acquire_for_test",
     "wyl_daemon_policy_write_finalize_for_response",
     "wyl_daemon_policy_write_prepare_success_response",
     "set_json_error", "set_json_ok",
@@ -371,6 +376,77 @@ def owner_table_freeze(source):
 def validate_feature_marker_source(source):
     if source.count(FACT_STORE_FEATURE_MARKER) != 1:
         raise GuardError("daemon WRITE fact-store feature marker mismatch")
+
+def has_token_sequence(values, expected):
+    width=len(expected)
+    return any(values[i:i+width]==list(expected)
+        for i in range(len(values)-width+1))
+
+def validate_owner_fault_matrix(root):
+    path=Path(root)/"tests/test-daemon-http-decide.c"
+    if not path.is_file():
+        raise GuardError(f"missing owner fault matrix: {path}")
+    source=path.read_text(encoding="utf-8")
+    table_marker=("static const PolicyWriteOwnerFaultCase "
+        "policy_write_owner_fault_cases[] = {")
+    if source.count(table_marker)!=1:
+        raise GuardError("daemon WRITE owner fault table declaration mismatch")
+    start=source.index(table_marker)+len(table_marker)
+    end=source.index("\n};",start)
+    block=source[start:end]
+    rows=tuple((int(owner),name) for owner,name in re.findall(
+        r"^\s*\{\s*(\d+)\s*,\s*\"([a-z][a-z0-9_]*)\"\s*,",
+        block,re.MULTILINE))
+    expected=tuple((index,name) for index,(_,name) in enumerate(OWNER_TABLE))
+    if rows!=expected:
+        raise GuardError("daemon WRITE owner fault table order/name mismatch")
+
+    enum_start=source.index("typedef enum\n{\n  POLICY_WRITE_OWNER_FAULT_FINALIZE")
+    enum_end=source.index("} PolicyWriteOwnerFaultMode;",enum_start)
+    enum_values=[value for _,value in lex(source[enum_start:enum_end])]
+    expected_enum=("typedef","enum","{","POLICY_WRITE_OWNER_FAULT_FINALIZE",
+        "=","0",",","POLICY_WRITE_OWNER_FAULT_ACQUIRE_AFTER_STORE",",",
+        "POLICY_WRITE_OWNER_FAULT_MODE_COUNT",",")
+    if tuple(enum_values)!=expected_enum:
+        raise GuardError("daemon WRITE owner fault mode inventory mismatch")
+
+    tokens=lex(source,preserve_pp=True)
+    defs=definitions(tokens,pairs(tokens),allow_duplicates=True)
+    matrix=defs.get("check_policy_write_all_owner_faults",[])
+    invoke=defs.get("policy_write_owner_fault_invoke_http",[])
+    if len(matrix)!=1 or len(invoke)!=1:
+        raise GuardError("daemon WRITE owner fault matrix function mismatch")
+    matrix_values=[value for _,value in matrix[0][2]]
+    invoke_values=[value for _,value in invoke[0][2]]
+    required_sequences=(
+        ("G_STATIC_ASSERT","(","G_N_ELEMENTS","(",
+            "policy_write_owner_fault_cases",")","==","16",")",";"),
+        ("G_STATIC_ASSERT","(","POLICY_WRITE_OWNER_FAULT_MODE_COUNT","==",
+            "2",")",";"),
+        ("for","(","guint","mode","=","0",";","mode","<",
+            "POLICY_WRITE_OWNER_FAULT_MODE_COUNT",";","mode","++",")","{"),
+        ("for","(","gsize","i","=","0",";","i","<",
+            "G_N_ELEMENTS","(","policy_write_owner_fault_cases",")",";",
+            "i","++",")","{"),
+        ("policy_write_owner_fault_invoke_http","(","&","env",",",
+            "test_case",",","(","PolicyWriteOwnerFaultMode",")","mode",",",
+            "&","before",")",";"),
+    )
+    if any(not has_token_sequence(matrix_values, sequence)
+            for sequence in required_sequences):
+        raise GuardError("daemon WRITE owner fault 16x2 traversal mismatch")
+    for values,label in ((matrix_values,"matrix"),(invoke_values,"HTTP invoke")):
+        for api in ("wyl_daemon_http_fail_next_policy_write_finalize_for_test",
+                "wyl_daemon_http_fail_next_policy_write_acquire_for_test"):
+            calls=sum(1 for i,value in enumerate(values[:-1])
+                if value==api and values[i+1]=="(")
+            if calls!=1:
+                raise GuardError(f"daemon WRITE owner fault {label} {api}={calls}")
+    call_count=sum(1 for items in defs.values() for _,_,item in items
+        for i,(_,value) in enumerate(item[:-1])
+        if value=="check_policy_write_all_owner_faults" and item[i+1][1]=="(")
+    if call_count!=2:
+        raise GuardError("daemon WRITE owner fault matrix invocation mismatch")
 
 def active_fact_store_enabled(tokens):
     marker="WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE"
@@ -746,6 +822,7 @@ def main(argv=None):
     path=Path(ns.root)/"wyrelog/daemon/http.c"; manifest=Path(ns.manifest) if ns.manifest else Path(ns.root)/"tools/daemon-policy-write-authority.json"
     if not path.is_file(): raise GuardError(f"missing source: {path}")
     source=path.read_text(encoding="utf-8")
+    validate_owner_fault_matrix(ns.root)
     validate_feature_marker_source(source)
     owner_freeze=owner_table_freeze(source)
     raw_tokens=lex(source,preserve_pp=True); raw_mate=pairs(raw_tokens); raw_defs=definitions(raw_tokens,raw_mate,allow_duplicates=True,full=True)

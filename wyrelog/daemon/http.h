@@ -451,6 +451,11 @@ typedef enum
 } WylDaemonPolicyWriteFinalizeFault;
 typedef enum
 {
+  WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_NONE = 0,
+  WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_AFTER_STORE,
+} WylDaemonPolicyWriteAcquireFault;
+typedef enum
+{
   WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE = 1u << 0,
   WYL_DAEMON_POLICY_WRITE_RESOURCE_TRANSACTION = 1u << 1,
   WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_STORAGE = 1u << 2,
@@ -477,6 +482,8 @@ typedef struct
   guint post_finalize_thread_pins;
   guint post_finalize_rank_mask;
   guint observed_cleanup_resources;
+  guint acquire_fault_hits;
+  gboolean post_finalize_transaction_active;
   guint owner;
   gchar owner_name[32];
 } WylDaemonPolicyWriteFinalizeSnapshot;
@@ -485,6 +492,8 @@ wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
     WylDaemonPolicyWriteCheckpoint checkpoint, gpointer data);
 void wyl_daemon_http_fail_next_policy_write_finalize_for_test
     (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
+void wyl_daemon_http_fail_next_policy_write_acquire_for_test
+    (SoupServer * server, WylDaemonPolicyWriteAcquireFault fault);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
     (SoupServer * server);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test
