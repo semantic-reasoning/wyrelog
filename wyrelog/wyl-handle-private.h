@@ -383,6 +383,12 @@ typedef wyrelog_error_t (*WylEnginePublicationVerifier)
   (WylEngineVerification * verification, gpointer data);
 typedef wyrelog_error_t (*WylEnginePublicationDeltaProducer)
   (WylEngineVerification * verification, gpointer data);
+typedef enum
+{
+  WYL_DURABLE_COMMIT_NOT_COMMITTED = 0,
+  WYL_DURABLE_COMMIT_COMMITTED,
+  WYL_DURABLE_COMMIT_UNCERTAIN,
+} WylDurableCommitState;
 wyrelog_error_t wyl_engine_verification_lookup_symbol
     (WylEngineVerification * verification, const gchar * symbol,
     gint64 * out_id);
@@ -411,6 +417,16 @@ wyrelog_error_t wyl_engine_session_run_committed_publication
     gpointer mutate_data, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data, gboolean * out_commit_confirmed);
+
+/* Completes publication for a transaction committed by an enclosing owner
+ * while that owner still retains both its store pin and @session. A confirmed
+ * commit validates the exact store generation before rebuilding and verifying
+ * the full pair. A known rollback preserves the published pair; uncertainty
+ * poisons it immediately. */
+wyrelog_error_t wyl_engine_session_finish_external_publication
+    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+    guint64 expected_generation, WylDurableCommitState commit_state,
+    WylEnginePublicationVerifier verify, gpointer verify_data);
 
 #ifdef WYL_HAS_AUDIT
 typedef struct

@@ -4400,6 +4400,105 @@ check_postcommit_not_found_is_internal (void)
     return 853;
   return 0;
 }
+
+typedef struct
+{
+  const gchar *scope;
+  const gchar *state;
+  guint calls;
+} ExternalPublicationVerify;
+
+static wyrelog_error_t
+verify_external_scope_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  ExternalPublicationVerify *verify = data;
+  gint64 symbol_id = 0;
+  verify->calls++;
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      verify->scope, &symbol_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, verify->state,
+        &symbol_id);
+  return rc;
+}
+
+static gint
+check_retained_external_publication_outcomes (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 854;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK)
+    return 855;
+
+  g_autoptr (WylEngine) old_read =
+      g_object_ref (wyl_handle_get_read_engine (handle));
+  g_autoptr (WylEngine) old_delta =
+      g_object_ref (wyl_handle_get_delta_engine (handle));
+  ExternalPublicationVerify verify = {
+    .scope = "external-publication-tenant",
+    .state = "active",
+  };
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_engine_session_finish_external_publication (session, store,
+          generation, WYL_DURABLE_COMMIT_NOT_COMMITTED,
+          verify_external_scope_publication, &verify) != WYRELOG_E_OK
+      || verify.calls != 0 || wyl_handle_get_read_engine (handle) != old_read
+      || wyl_handle_get_delta_engine (handle) != old_delta
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 856;
+
+  gboolean created = FALSE;
+  if (wyl_policy_store_create_tenant (store, verify.scope, &created)
+      != WYRELOG_E_OK || !created
+      || wyl_engine_session_finish_external_publication (session, store,
+          generation, WYL_DURABLE_COMMIT_COMMITTED,
+          verify_external_scope_publication, &verify) != WYRELOG_E_OK
+      || verify.calls != 1 || wyl_handle_get_read_engine (handle) == old_read
+      || wyl_handle_get_delta_engine (handle) == old_delta
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 857;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  g_autoptr (WylHandle) wrong_generation_handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &wrong_generation_handle)
+      != WYRELOG_E_OK)
+    return 858;
+  store = wyl_handle_get_policy_store (wrong_generation_handle);
+  if (wyl_handle_policy_store_capture_generation (wrong_generation_handle,
+          store, &generation) != WYRELOG_E_OK)
+    return 859;
+  session = wyl_engine_session_acquire (wrong_generation_handle);
+  if (session == NULL
+      || wyl_engine_session_finish_external_publication (session, store,
+          generation + 1, WYL_DURABLE_COMMIT_COMMITTED,
+          verify_external_scope_publication, &verify) != WYRELOG_E_INVALID
+      || !wyl_handle_engine_pair_is_poisoned (wrong_generation_handle))
+    return 860;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  g_autoptr (WylHandle) uncertain_handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &uncertain_handle) != WYRELOG_E_OK)
+    return 861;
+  store = wyl_handle_get_policy_store (uncertain_handle);
+  if (wyl_handle_policy_store_capture_generation (uncertain_handle, store,
+          &generation) != WYRELOG_E_OK)
+    return 862;
+  session = wyl_engine_session_acquire (uncertain_handle);
+  if (session == NULL
+      || wyl_engine_session_finish_external_publication (session, store,
+          generation, WYL_DURABLE_COMMIT_UNCERTAIN,
+          verify_external_scope_publication, &verify) != WYRELOG_E_INTERNAL
+      || !wyl_handle_engine_pair_is_poisoned (uncertain_handle))
+    return 863;
+  g_clear_pointer (&session, wyl_engine_session_release);
+  return 0;
+}
 #endif
 
 static gint
@@ -6627,6 +6726,8 @@ main (void)
   if ((rc = check_replacement_faults_preserve_published_pair ()) != 0)
     return rc;
   if ((rc = check_postcommit_not_found_is_internal ()) != 0)
+    return rc;
+  if ((rc = check_retained_external_publication_outcomes ()) != 0)
     return rc;
 #endif
   if ((rc =

@@ -84,6 +84,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "step_delta_engine_and_flush",
     "wyl_engine_session_lookup_symbol",
     "wyl_engine_session_acquire",
+    "wyl_engine_session_finish_external_publication",
     "wyl_engine_session_release",
     "wyl_engine_session_run_committed_audit_publication",
     "wyl_engine_session_run_committed_publication",
