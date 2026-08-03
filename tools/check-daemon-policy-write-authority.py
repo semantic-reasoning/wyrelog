@@ -530,8 +530,11 @@ def validate_owner_fault_matrix(root):
                 raise GuardError("orphan conditional before owner fault matrix")
             parent_kind,parent_value,_=stack[-1]
             stack[-1]=(parent_kind,parent_value,"alternate")
-    if stack!=[("ifdef","WYL_HAS_FACT_STORE","initial")]:
-        raise GuardError("owner fault matrix is not live in fact-enabled service main")
+    expected_stack=[("ifdef","WYL_HAS_FACT_STORE","initial"),
+        ("ifndef","G_OS_WIN32","initial")]
+    if stack!=expected_stack:
+        raise GuardError(
+            "owner fault matrix is not live in POSIX fact-enabled service main")
 
 def active_fact_store_enabled(tokens):
     marker="WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE"

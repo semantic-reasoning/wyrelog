@@ -516,6 +516,16 @@ def main():
                 "  gint all_owner_fault_rc = "
                 "check_policy_write_all_owner_faults ();",
                 "  gint all_owner_fault_rc = 0;", 1),
+            "windows-live-service-invocation": test_source.replace(
+                "#ifndef G_OS_WIN32\n"
+                "  /* This matrix provisions POSIX owner-mode fact roots.",
+                "#ifdef G_OS_WIN32\n"
+                "  /* This matrix provisions POSIX owner-mode fact roots.", 1),
+            "windows-broadened-service-invocation": test_source.replace(
+                "#ifndef G_OS_WIN32\n"
+                "  /* This matrix provisions POSIX owner-mode fact roots.",
+                "#if 1\n"
+                "  /* This matrix provisions POSIX owner-mode fact roots.", 1),
             "dead-service-invocation": test_source.replace(
                 "  gint all_owner_fault_rc = "
                 "check_policy_write_all_owner_faults ();",
