@@ -24,12 +24,11 @@ G_BEGIN_DECLS;
  *                                  match-with-replay-defense, persist
  *                                  the watermark.
  *
- * Replay defense: the validator persists last_verified_step in the
- * policy store BEFORE the caller drives the FSM transition (the
- * fact-mutation ordering critic F3 mandates), and rejects any match
- * whose matched_step is <= the persisted watermark using strict >
- * comparison.  See mfa-validator.c for the crash-safety rationale on
- * a restart between the store write and the FSM transition.
+ * Replay defense: the validator persists last_verified_step before the caller
+ * drives MFA_OK.  The later FULL publication CASes MFA_REQUIRED and resets the
+ * counter with its state/event, so a racing threshold lock wins without being
+ * overwritten.  A restart between commits stays fail closed because the code
+ * watermark was consumed.
  *
  * Error-code surface (commit 3 contract):
  *   WYRELOG_E_OK       proof matched, watermark advanced, caller may
@@ -43,13 +42,30 @@ G_BEGIN_DECLS;
  *                      separately and never by branching on this
  *                      validator's return code (F5).
  *
- * No audit emission inside this module.  The FSM transition the
- * caller drives on success already emits a principal_state audit;
- * commit 5 will add failed-attempt audit on the FAILED_ATTEMPT
- * branch.  No log/audit site here ever sees the seed, the submitted
- * code, or any HMAC intermediate (F2).
+ * No log or audit site here ever sees the seed, submitted code, or HMAC
+ * intermediate.  Durable principal events are projected by the committed
+ * publication path.
  */
+typedef enum
+{
+  WYL_MFA_VALIDATION_ERROR = 0,
+  WYL_MFA_VALIDATION_REJECTED,
+  WYL_MFA_VALIDATION_REJECTED_LOCKED,
+  WYL_MFA_VALIDATION_LOCKED,
+  WYL_MFA_VALIDATION_AUTH_REQUIRED,
+  WYL_MFA_VALIDATION_AUTH_REQUIRED_UNPUBLISHED,
+  WYL_MFA_VALIDATION_VERIFIED,
+} WylMfaValidationOutcome;
+
 wyrelog_error_t wyl_mfa_validator_totp (WylHandle * handle,
     WylSession * session, const gchar * proof, gpointer user_data);
+
+/* Daemon HTTP boundary for the built-in validator.  Unlike the generic
+ * callback shape, this preserves the security-relevant result that was
+ * established by the same durable transaction and then applies MFA_OK only
+ * after a verified proof. */
+wyrelog_error_t wyl_mfa_verify_totp_with_outcome (WylHandle * handle,
+    WylSession * session, const gchar * proof,
+    WylMfaValidationOutcome * out_outcome);
 
 G_END_DECLS;

@@ -84,6 +84,8 @@ struct _WylHandle
   gpointer engine_operation_checkpoint_data;
   void (*engine_snapshot_checkpoint) (gpointer data);
   gpointer engine_snapshot_checkpoint_data;
+  void (*committed_publication_checkpoint) (gpointer data);
+  gpointer committed_publication_checkpoint_data;
   void (*audit_replay_checkpoint) (gpointer data);
   gpointer audit_replay_checkpoint_data;
   WylEnginePartialFault engine_partial_fault_once;
@@ -643,7 +645,7 @@ wyl_handle_set_engine_replacement_fault_once_for_test (WylHandle *self,
 {
   g_return_if_fail (WYL_IS_HANDLE (self));
   g_return_if_fail (fault > WYL_ENGINE_REPLACEMENT_FAULT_NONE);
-  g_return_if_fail (fault <= WYL_ENGINE_REPLACEMENT_FAULT_SWAP);
+  g_return_if_fail (fault <= WYL_ENGINE_REPLACEMENT_FAULT_PUBLICATION_DELTA);
   self->engine_replacement_fault_once = fault;
 }
 
@@ -655,6 +657,15 @@ wyl_handle_set_engine_replacement_checkpoint_for_test (WylHandle *self,
   g_return_if_fail (WYL_IS_HANDLE (self));
   self->engine_replacement_checkpoint = checkpoint;
   self->engine_replacement_checkpoint_data = data;
+}
+
+void
+wyl_handle_set_committed_publication_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->committed_publication_checkpoint = checkpoint;
+  self->committed_publication_checkpoint_data = data;
 }
 
 void
@@ -2942,14 +2953,14 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   self->engine_pair_replacement_building = FALSE;
   if (rc != WYRELOG_E_OK)
     goto fail_after_install;
-#ifdef WYL_TEST_HANDLE_SEAMS
-  if (take_engine_replacement_fault (self,
-          WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK)) {
-    rc = WYRELOG_E_IO;
-    goto fail_after_install;
-  }
-#endif
   if (self->delta_callback != NULL) {
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (take_engine_replacement_fault (self,
+            WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK)) {
+      rc = WYRELOG_E_IO;
+      goto fail_after_install;
+    }
+#endif
     rc = wyl_engine_owned_set_delta_callback (self->delta_engine,
         wyl_handle_buffer_delta_cb, self);
     if (rc != WYRELOG_E_OK)
@@ -3159,7 +3170,13 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
     .symbols = self->engine_symbols_by_id,
     .active = TRUE,
   };
-  rc = verify (&verification, verify_data);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (take_engine_replacement_fault (self,
+          WYL_ENGINE_REPLACEMENT_FAULT_PUBLICATION_VERIFY_POLICY))
+    rc = WYRELOG_E_POLICY;
+  else
+#endif
+    rc = verify (&verification, verify_data);
   if (rc == WYRELOG_E_OK && (self->engine_pair_poisoned
           || self->read_engine == NULL || self->delta_engine == NULL
           || self->read_engine != verification.read_engine
@@ -3167,9 +3184,17 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
           || self->engine_symbols_by_id != verification.symbols))
     rc = WYRELOG_E_INTERNAL;
   if (rc == WYRELOG_E_OK && produce_deltas != NULL) {
-    verification.producing_deltas = TRUE;
-    rc = produce_deltas (&verification, delta_data);
-    verification.producing_deltas = FALSE;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (take_engine_replacement_fault (self,
+            WYL_ENGINE_REPLACEMENT_FAULT_PUBLICATION_DELTA))
+      rc = WYRELOG_E_IO;
+    else
+#endif
+    {
+      verification.producing_deltas = TRUE;
+      rc = produce_deltas (&verification, delta_data);
+      verification.producing_deltas = FALSE;
+    }
   }
   verification.active = FALSE;
   if (rc != WYRELOG_E_OK)
@@ -3177,16 +3202,21 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
   return rc;
 }
 
-wyrelog_error_t
-wyl_engine_session_run_committed_publication (WylEngineSession *session,
+static wyrelog_error_t
+run_committed_publication (WylEngineSession *session,
     WylCommittedEngineMutationBody mutate, gpointer mutate_data,
+    WylEnginePublicationMode *publication_mode, gboolean conditional,
     WylEnginePublicationVerifier verify, gpointer verify_data,
     WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
     gboolean *out_commit_confirmed)
 {
   if (out_commit_confirmed != NULL)
     *out_commit_confirmed = FALSE;
-  if (!engine_session_is_valid (session) || mutate == NULL || verify == NULL)
+  if (conditional && publication_mode != NULL)
+    *publication_mode = WYL_ENGINE_PUBLICATION_INVALID;
+  if (!engine_session_is_valid (session) || mutate == NULL
+      || (conditional && publication_mode == NULL)
+      || (!conditional && verify == NULL))
     return WYRELOG_E_INVALID;
   if (session->acquisition_depth != 1
       || session->handle->engine_session_depth != 1
@@ -3228,6 +3258,13 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   } else if (!wyl_policy_store_is_autocommit (store)) {
     poison_engine_pair_locked (self);
   }
+  if (rc == WYRELOG_E_OK && conditional
+      && *publication_mode != WYL_ENGINE_PUBLICATION_NONE
+      && *publication_mode != WYL_ENGINE_PUBLICATION_FULL)
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK && conditional
+      && *publication_mode == WYL_ENGINE_PUBLICATION_FULL && verify == NULL)
+    rc = WYRELOG_E_INVALID;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
   if (rc != WYRELOG_E_OK) {
@@ -3248,11 +3285,17 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
 
   rc = wyl_policy_store_publication_transaction_commit (store);
   if (rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store)) {
-    /* RELEASE ambiguity is committed-state uncertainty even if a recovery
-     * rollback succeeds. */
+    /* RELEASE ambiguity is durable-state uncertainty even if a recovery
+     * rollback succeeds.  A NONE mutation cannot affect either engine, so
+     * that pair remains a coherent published projection under both possible
+     * durable outcomes.  FULL and unconditional mutations may have changed
+     * projected authority and must fence the pair. */
+    gboolean projection_may_have_changed = !conditional
+        || *publication_mode != WYL_ENGINE_PUBLICATION_NONE;
     if (!wyl_policy_store_is_autocommit (store))
       (void) wyl_policy_store_publication_transaction_rollback_checked (store);
-    poison_engine_pair_locked (self);
+    if (projection_may_have_changed)
+      poison_engine_pair_locked (self);
     if (store_rank_active) {
       (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
       store_rank_active = FALSE;
@@ -3270,15 +3313,28 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     poison_engine_pair_locked (self);
     goto out;
   }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (self->committed_publication_checkpoint != NULL) {
+    void (*checkpoint) (gpointer data) = self->committed_publication_checkpoint;
+    gpointer checkpoint_data = self->committed_publication_checkpoint_data;
+    self->committed_publication_checkpoint = NULL;
+    self->committed_publication_checkpoint_data = NULL;
+    checkpoint (checkpoint_data);
+  }
+#endif
   rc = wyl_handle_policy_store_validate_generation (self, store, generation);
   if (rc != WYRELOG_E_OK) {
     poison_engine_pair_locked (self);
     goto out;
   }
-  rc = reconcile_guarded_engine_pair_in_session (session, verify,
-      verify_data, produce_deltas, delta_data);
-  if (rc == WYRELOG_E_OK)
-    rc = flush_pending_deltas (self);
+  WylEnginePublicationMode effective_mode = conditional ? *publication_mode :
+      WYL_ENGINE_PUBLICATION_FULL;
+  if (effective_mode == WYL_ENGINE_PUBLICATION_FULL) {
+    rc = reconcile_guarded_engine_pair_in_session (session, verify,
+        verify_data, produce_deltas, delta_data);
+    if (rc == WYRELOG_E_OK)
+      rc = flush_pending_deltas (self);
+  }
   if (rc == WYRELOG_E_OK)
     state = PUBLICATION_PUBLISHED;
 
@@ -3293,6 +3349,29 @@ out:
   if (store_rank_active)
     (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_STORE);
   return rc;
+}
+
+wyrelog_error_t
+wyl_engine_session_run_committed_publication (WylEngineSession *session,
+    WylCommittedEngineMutationBody mutate, gpointer mutate_data,
+    WylEnginePublicationVerifier verify, gpointer verify_data,
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
+    gboolean *out_commit_confirmed)
+{
+  return run_committed_publication (session, mutate, mutate_data, NULL, FALSE,
+      verify, verify_data, produce_deltas, delta_data, out_commit_confirmed);
+}
+
+wyrelog_error_t
+    wyl_engine_session_run_conditional_committed_publication
+    (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
+    gpointer mutate_data, WylEnginePublicationMode * publication_mode,
+    WylEnginePublicationVerifier verify, gpointer verify_data,
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
+    gboolean * out_commit_confirmed) {
+  return run_committed_publication (session, mutate, mutate_data,
+      publication_mode, TRUE, verify, verify_data, produce_deltas, delta_data,
+      out_commit_confirmed);
 }
 
 #ifdef WYL_HAS_AUDIT

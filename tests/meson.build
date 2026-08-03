@@ -450,10 +450,11 @@ if build_client
   test_daemon_http_mfa_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
+    '-DWYL_TEST_HANDLE_SEAMS',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ]
   test_daemon_http_mfa_deps = [
-    wyrelog_dep,
+    wyrelog_handle_test_seams_dep,
     wyrelog_client_dep,
     libsoup_dep,
     sodium_dep,
@@ -1301,10 +1302,11 @@ test('policy-store-totp', test_policy_store_totp)
 test_daemon_mfa_validator = executable('test-daemon-mfa-validator',
   'test-daemon-mfa-validator.c',
   c_args : [
+    '-DWYL_TEST_HANDLE_SEAMS',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, sodium_dep],
 )
 
 test('daemon-mfa-validator', test_daemon_mfa_validator)

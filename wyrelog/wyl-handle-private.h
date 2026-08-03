@@ -193,6 +193,8 @@ typedef enum
   WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK,
   WYL_ENGINE_REPLACEMENT_FAULT_READBACK,
   WYL_ENGINE_REPLACEMENT_FAULT_SWAP,
+  WYL_ENGINE_REPLACEMENT_FAULT_PUBLICATION_VERIFY_POLICY,
+  WYL_ENGINE_REPLACEMENT_FAULT_PUBLICATION_DELTA,
 } WylEngineReplacementFault;
 
 void wyl_handle_set_engine_partial_fault_once_for_test (WylHandle * self,
@@ -206,6 +208,8 @@ void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
     const gchar * relation, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_set_engine_snapshot_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
+void wyl_handle_set_committed_publication_checkpoint_for_test
+    (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
@@ -374,6 +378,12 @@ typedef wyrelog_error_t (*WylEnginePublicationVerifier)
   (WylEngineVerification * verification, gpointer data);
 typedef wyrelog_error_t (*WylEnginePublicationDeltaProducer)
   (WylEngineVerification * verification, gpointer data);
+typedef enum
+{
+  WYL_ENGINE_PUBLICATION_INVALID = 0,
+  WYL_ENGINE_PUBLICATION_NONE,
+  WYL_ENGINE_PUBLICATION_FULL,
+} WylEnginePublicationMode;
 wyrelog_error_t wyl_engine_verification_lookup_symbol
     (WylEngineVerification * verification, const gchar * symbol,
     gint64 * out_id);
@@ -402,6 +412,18 @@ wyrelog_error_t wyl_engine_session_run_committed_publication
     gpointer mutate_data, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data, gboolean * out_commit_confirmed);
+/* Variant for mutations whose durable receipt decides whether the live
+ * projection changed.  @publication_mode is reset to INVALID before @mutate;
+ * the mutation body must set it to NONE or FULL before returning OK.  NONE
+ * commits without replacing the pair.  FULL has the same rebuild, exact
+ * verification, cleanup, and post-commit poison contract as the unconditional
+ * runner. */
+wyrelog_error_t wyl_engine_session_run_conditional_committed_publication
+    (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
+    gpointer mutate_data, WylEnginePublicationMode * publication_mode,
+    WylEnginePublicationVerifier verify, gpointer verify_data,
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
+    gboolean * out_commit_confirmed);
 
 #ifdef WYL_HAS_AUDIT
 typedef struct

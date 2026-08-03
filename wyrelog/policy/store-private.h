@@ -45,6 +45,10 @@ typedef enum
 
 void wyl_policy_store_read_snapshot_finish_fail_once_for_test
     (wyl_policy_store_t * store, WylPolicySnapshotFinishFailStage stage);
+void wyl_policy_store_principal_state_lookup_fail_on_call_for_test
+    (wyl_policy_store_t * store, guint call);
+void wyl_policy_store_totp_enrollment_lookup_fail_on_call_for_test
+    (wyl_policy_store_t * store, guint call);
 #endif
 
 typedef enum
@@ -1383,6 +1387,10 @@ wyrelog_error_t wyl_policy_store_publication_transaction_commit
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_publication_transaction_rollback_checked
     (wyl_policy_store_t * store);
+#ifdef WYL_TEST_HANDLE_SEAMS
+void wyl_policy_store_publication_commit_fail_once_for_test
+    (wyl_policy_store_t * store);
+#endif
 
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 void wyl_policy_store_graph_authority_migration_fail_once
@@ -2238,6 +2246,13 @@ wyrelog_error_t wyl_policy_store_foreach_permission_state_event
     gpointer user_data);
 wyrelog_error_t wyl_policy_store_set_principal_state (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * state);
+/* Caller-transaction body for an exact principal-state transition.  A missing
+ * row is the canonical UNVERIFIED authority and may only be materialised when
+ * @expected_state is "unverified".  Existing rows update only when their state
+ * exactly matches @expected_state; stale observations return CONFLICT. */
+wyrelog_error_t wyl_policy_store_compare_and_set_principal_state_body
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * expected_state, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_principal_state (wyl_policy_store_t *
     store, wyl_policy_principal_state_cb cb, gpointer user_data);
 /* Look up the current principal_state for |subject_id|. On a row match,
@@ -2257,6 +2272,34 @@ wyrelog_error_t wyl_policy_store_get_principal_lock_info
     (wyl_policy_store_t * store, const gchar * subject_id,
     gchar ** out_state, gint64 * out_failed_count, gint64 * out_locked_at,
     gboolean * out_found);
+typedef struct
+{
+  gboolean projection_changed;
+  gint64 failed_count;
+  gint64 locked_at;
+  gint64 event_id;
+} WylPolicyPrincipalFailureReceipt;
+typedef struct
+{
+  enum
+  {
+    WYL_POLICY_PRINCIPAL_UNLOCK_NOT_LOCKED = 0,
+    WYL_POLICY_PRINCIPAL_UNLOCK_NOT_ELAPSED,
+    WYL_POLICY_PRINCIPAL_UNLOCKED,
+  } outcome;
+  gint64 observed_locked_at;
+  gint64 event_id;
+} WylPolicyPrincipalUnlockReceipt;
+/* Transaction-body variants used by the committed-publication runner.  They
+ * require an active caller-owned transaction and leave COMMIT/rollback to the
+ * caller.  Failure receipts are written after the compare-and-swap and any
+ * event append succeed; unlock receipts also describe non-mutating outcomes. */
+wyrelog_error_t wyl_policy_store_apply_principal_failure_body
+    (wyl_policy_store_t * store, const gchar * subject_id, gint64 threshold,
+    gint64 now_secs, WylPolicyPrincipalFailureReceipt * out_receipt);
+wyrelog_error_t wyl_policy_store_apply_principal_unlock_body
+    (wyl_policy_store_t * store, const gchar * subject_id, gint64 now_secs,
+    gint64 lock_duration_secs, WylPolicyPrincipalUnlockReceipt * out_receipt);
 /* Atomic mutation for a FAILED_ATTEMPT.  Inside a single savepoint:
  *   - reads the current row (state + counter)
  *   - if the row is missing, materialises mfa_required + counter=1
