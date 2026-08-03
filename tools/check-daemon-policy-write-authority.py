@@ -382,6 +382,33 @@ def has_token_sequence(values, expected):
     return any(values[i:i+width]==list(expected)
         for i in range(len(values)-width+1))
 
+def mask_comments(source):
+    out=list(source)
+    i=0
+    while i<len(source):
+        if source.startswith("//",i):
+            end=source.find("\n",i+2)
+            end=len(source) if end<0 else end
+            for j in range(i,end): out[j]=" "
+            i=end
+            continue
+        if source.startswith("/*",i):
+            end=source.find("*/",i+2)
+            if end<0: raise GuardError("unterminated comment")
+            for j in range(i,end+2):
+                if out[j] not in "\r\n": out[j]=" "
+            i=end+2
+            continue
+        if source[i] in "\"'":
+            quote=source[i]; i+=1
+            while i<len(source):
+                if source[i]=="\\": i+=2; continue
+                if source[i]==quote: i+=1; break
+                i+=1
+            continue
+        i+=1
+    return "".join(out)
+
 def validate_owner_fault_matrix(root):
     path=Path(root)/"tests/test-daemon-http-decide.c"
     if not path.is_file():
@@ -449,6 +476,7 @@ def validate_owner_fault_matrix(root):
     service_start=source.index(service_marker)+len(service_marker)
     service_end=source.index(service_end_marker,service_start)
     service=source[service_start:service_end]
+    masked_service=mask_comments(service)
     main_items=defs.get("main",[])
     service_mains=[item for item in main_items
         if "check_service_access_token_state_contract" in
@@ -468,14 +496,14 @@ def validate_owner_fault_matrix(root):
     if call_count!=1 or all_main_calls!=1 \
             or not has_token_sequence(service_values,call_sequence):
         raise GuardError("daemon WRITE owner fault service invocation mismatch")
-    call_line=re.search(r"^\s*gint\s+all_owner_fault_rc\s*=\s*"
-        r"check_policy_write_all_owner_faults\s*\(\s*\)\s*;\s*$",
-        service,re.MULTILINE)
+    call_line=re.search(r"^[ \t]*gint[ \t]+all_owner_fault_rc[ \t]*=[ \t]*"
+        r"check_policy_write_all_owner_faults[ \t]*\([ \t]*\)[ \t]*;[ \t]*$",
+        masked_service,re.MULTILINE)
     if call_line is None:
         raise GuardError("daemon WRITE owner fault service call shape mismatch")
     call_pos=call_line.start()
     stack=[]
-    for line in service[:call_pos].splitlines():
+    for line in masked_service[:call_pos].splitlines():
         directive=re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)",
             line)
         if not directive:
