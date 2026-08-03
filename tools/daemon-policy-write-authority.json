@@ -1,8 +1,8 @@
 {
-  "aggregate": "81be747796d3c544ff9cd7b121884a8a894dbb18be9a0198e2de325cc11f0c3b",
+  "aggregate": "b4576428d1f85a04e4f9fb2cd22e7008b82003507bebf15aabd41d3417940ae7",
   "directives": {
-    "count": 391,
-    "sha256": "ee4ff6dbb2cada3d697c4a2aeba921180b1aad95bb7c83d491adbf1156cdac3b"
+    "count": 398,
+    "sha256": "7f1361ac6890c5e20d6d8a5044a36aebd81d6c57653adc88dd374bb62db7de5b"
   },
   "functions": {
     "direct_permission_mutation_handler": "a92ce39084b189af1cc8a3fa09412338b774397d870852ad20fb3c08ec5a4656",
@@ -14,7 +14,7 @@
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
     "mfa_enroll_confirm_handler": "6cc30363c707becfa081f40cb66c1cba37c6a29687fe1f217303d5c123fb785d",
     "mfa_enroll_subject_exists": "31828cb845bc6efd434f7c40a584da350ac9ae432b852f3e1697867456d56a3d",
-    "mutate_tenant_lifecycle_publication": "fd751df1172ca1c2388568f7229f07cdef159d0bc5ba81809459379785b0669f",
+    "mutate_tenant_lifecycle_publication": "409176d6b28a585305a88f26ec4f0f93ebc6524ae15385cd0ba78786cfe2712a",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
     "policy_permission_revoke_handler": "9b67475d2adc3a6006559ea5fc3e66b65508bb5cb0abbdba1e85e1266fd9e736",
     "policy_permission_transition_handler": "dee6193f7b999901e44b1275711972c08998f661aeb668b4da9f7ea8b1cdae02",
@@ -36,7 +36,7 @@
     "set_tenant_mutation_json": "f167a0efcff9bb2d342b6b8332a0ab446006ed9b5b31bba3a63432ea2b137fde",
     "tenant_create_handler": "46772d7892d18662bde4f9427e1c87385c24866ff69b7407e4ce09dc6a2115b1",
     "tenant_delete_handler": "3322ba825e54b5e9a9711aceccb0f089162fd496df668a6bc8037161dc1c8783",
-    "tenant_mutation_handler": "8f92b357d4c3a7b16159bf294b18409a2f7f8e7a06c20328874346d3d0a5aa90",
+    "tenant_mutation_handler": "d9ff631ec19ed447efc9b4353f50e742ab80a92bfa7206d285376922bb42ab1d",
     "tenant_seal_handler": "0c9ddde9ba74d1d5554f7bb8346ef21a55db32fc7a8b58597f9b0beec5a05911",
     "tenant_unseal_handler": "e1a3c2a0c38383cb5a2fdc0b35e285ee08e65be86ea9716bac14e24ca18f3d7e",
     "wyl_daemon_http_configure_tenant_for_test": "e58f35d09656858fac08945d50f5fb7de79690c0c7efe4d23b8100517320d24e",

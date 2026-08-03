@@ -494,6 +494,10 @@ void wyl_daemon_http_fail_next_policy_write_finalize_for_test
     (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
 void wyl_daemon_http_fail_next_policy_write_acquire_for_test
     (SoupServer * server, WylDaemonPolicyWriteAcquireFault fault);
+void wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test
+    (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test
+    (SoupServer * server);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
     (SoupServer * server);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test

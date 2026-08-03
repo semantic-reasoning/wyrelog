@@ -227,6 +227,8 @@ void wyl_handle_set_engine_snapshot_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
+void wyl_handle_set_committed_publication_checkpoint_for_test
+    (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
 guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
 wyrelog_error_t wyl_handle_buffer_delta_for_test (WylHandle * self,
@@ -405,6 +407,11 @@ wyrelog_error_t wyl_engine_verification_lookup_symbol
 wyrelog_error_t wyl_engine_verification_contains
     (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, gboolean * out_contains);
+/* Reads the host-accepted session_state input witness from the unpublished
+ * read candidate. Success requires exactly one accepted row for @scope and
+ * returns that row's state symbol. Inline template facts are forbidden. */
+wyrelog_error_t wyl_engine_verification_get_accepted_session_state
+    (WylEngineVerification * verification, gint64 scope, gint64 * out_state);
 wyrelog_error_t wyl_engine_verification_enqueue_delta
     (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, WylDeltaKind kind);
