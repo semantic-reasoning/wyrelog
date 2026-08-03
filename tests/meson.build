@@ -1594,7 +1594,10 @@ test_service_principal_domain = executable('test-service-principal-domain',
     '../wyrelog/daemon/auth-registry-private.c',
   ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  c_args : ['-DWYL_AUTH_REGISTRY_TESTING'],
+  c_args : [
+    '-DWYL_AUTH_REGISTRY_TESTING',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )
 

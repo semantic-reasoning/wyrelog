@@ -66,6 +66,24 @@ typedef struct
 
 typedef struct
 {
+  guint32 receipt_version;
+  const gchar *request_id;
+  const gchar *tenant_id;
+  const gchar *actor_subject_id;
+  const guint8 *input_fingerprint;
+  gsize input_fingerprint_len;
+  guint64 tenant_lifecycle_generation;
+  guint64 tenant_sealed_generation;
+  const gchar *audit_id;
+  gint64 audit_created_at_us;
+  gboolean invalidation_completed;
+} WylTenantSealPublicationRecovery;
+
+typedef wyrelog_error_t (*WylTenantSealPublicationRecoveryRetainFn)
+  (const WylTenantSealPublicationRecovery * recovery, gpointer data);
+
+typedef struct
+{
   /* Borrowed for the complete call.  NULL keeps the legacy authority-only
    * operation for callers that do not own the daemon registry; #376 wires the
    * compound entry point into real handlers. */
@@ -91,6 +109,14 @@ typedef struct
   void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
   void (*before_write_release) (WylServiceAuthWriteLease * lease,
       gpointer data);
+  /* Called only for a clean confirmed commit whose sole remaining failure is
+   * engine publication and whose registry invalidation completed. The callback
+   * runs while the original WRITE and engine session are still retained. */
+  WylTenantSealPublicationRecoveryRetainFn retain_publication_recovery;
+  /* Invalidates a descriptor installed above if later WRITE cleanup fails. */
+  void (*discard_publication_recovery) (gpointer data);
+  /* Private deterministic daemon-test seam; production leaves FALSE. */
+  gboolean test_verify_opposite_state;
   const wyl_service_credential_mutation_authorization_t *authorization;
   gpointer data;
 } wyl_tenant_seal_runtime_t;

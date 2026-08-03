@@ -207,6 +207,14 @@ wyrelog_error_t
     (WylServiceAuthRegistryWriteParticipant * participant,
     const WylServiceAuthSelector * selector,
     WylServiceAuthRevokeResult * out_result);
+/* Exact retained WRITE -> ENGINE counterpart used only after a committed
+ * external publication transaction has been consumed. */
+wyrelog_error_t
+    wyl_service_auth_registry_write_participant_revoke_retained_engine
+    (WylServiceAuthRegistryWriteParticipant * participant,
+    wyl_policy_store_t * expected_store,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result);
 /*
  * Lease-bound session mutation capability. The participant retains the
  * registry and handle but borrows the WRITE lease; its owner must keep that

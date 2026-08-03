@@ -290,6 +290,11 @@ def main():
             "TenantLifecyclePublication *publication = data;\n"
             "  (void) wyl_daemon_policy_write_acquire "
             "(NULL, NULL, 0, NULL);"),
+        "other-preauth-recovery-write-user": mutate_function(source,
+            "tenant_recovery_claim",
+            "if (out_descriptor != NULL)",
+            "(void) wyl_daemon_policy_write_acquire "
+            "(NULL, NULL, 0, NULL);\n  if (out_descriptor != NULL)"),
         "shadow-write": mutate_function(source, "tenant_mutation_handler",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };\n"
