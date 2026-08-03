@@ -28,6 +28,13 @@ typedef enum
   WYL_ENGINE_OWNER_DELTA,
 } wyl_engine_owner_t;
 
+typedef enum
+{
+  WYL_ENGINE_SESSION_STATE_ABSENT = 0,
+  WYL_ENGINE_SESSION_STATE_EXACT,
+  WYL_ENGINE_SESSION_STATE_INCOMPATIBLE,
+} WylEngineSessionStateCapability;
+
 typedef struct _WylDeltaCookie WylDeltaCookie;
 
 typedef struct
@@ -48,6 +55,7 @@ struct _WylEngine
   wyl_engine_mode_t mode;       /* Latched at first step or snapshot. */
   wyl_engine_owner_t owner;     /* Handle pair role, or standalone. */
   WylDeltaCookie *delta_cookie; /* Heap-owned, NULL when no cb. */
+  WylEngineSessionStateCapability session_state_capability;
 };
 
 /*
@@ -113,6 +121,8 @@ wyrelog_error_t wyl_engine_make_compound (WylEngine * self,
     gint64 * out_id);
 
 void wyl_engine_set_owner (WylEngine * self, wyl_engine_owner_t owner);
+WylEngineSessionStateCapability
+wyl_engine_session_state_capability (WylEngine * self);
 wyrelog_error_t wyl_engine_owned_intern_symbol (WylEngine * self,
     const gchar * symbol, gint64 * out_id);
 gchar *wyl_engine_owned_dup_interned_symbol (WylEngine * self, gint64 id);

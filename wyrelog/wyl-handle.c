@@ -16,6 +16,7 @@
 #include "wyl-log-private.h"
 #include "wyl-keyprovider-file-private.h"
 #include "wyl-permission-scope-private.h"
+#include "wyl-common-private.h"
 #include "policy/store-private.h"
 
 #ifdef WYL_HAS_FACT_STORE
@@ -170,6 +171,7 @@ struct _WylEngineSession
 {
   WylHandle *handle;
   GThread *owner;
+  WylEngineSessionStateCapability session_state_capability;
   gboolean active;
   gboolean rank_active;
   guint acquisition_depth;
@@ -317,6 +319,8 @@ wyl_engine_session_acquire (WylHandle *self)
   }
   session->handle = g_object_ref (self);
   session->owner = g_thread_self ();
+  session->session_state_capability =
+      wyl_engine_session_state_capability (self->read_engine);
   session->acquisition_depth = ++self->engine_session_depth;
   session->active = TRUE;
   return session;
@@ -2720,6 +2724,47 @@ preintern_policy_store_session_event_symbols (gint64 event_id,
   return preintern_policy_store_symbol (self, to_state);
 }
 
+static wyrelog_error_t
+validate_implicit_default_tenant (const gchar *tenant_id, gboolean sealed,
+    gpointer user_data)
+{
+  (void) user_data;
+  return !sealed && g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0 ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+reject_projectionless_session_state (const gchar *session_id,
+    const gchar *state, gpointer user_data)
+{
+  (void) session_id;
+  (void) state;
+  (void) user_data;
+  return WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+validate_projectionless_store (WylHandle *self)
+{
+  wyrelog_error_t rc = wyl_policy_store_foreach_tenant (self->policy_store,
+      validate_implicit_default_tenant, self);
+  return rc == WYRELOG_E_OK ?
+      wyl_policy_store_foreach_session_state (self->policy_store,
+      reject_projectionless_session_state, self) : rc;
+}
+
+static wyrelog_error_t
+preintern_effective_scope_symbols (WylHandle *self,
+    WylEngineSessionStateCapability capability)
+{
+  if (capability == WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
+    return WYRELOG_E_POLICY;
+  return capability == WYL_ENGINE_SESSION_STATE_ABSENT ?
+      validate_projectionless_store (self) :
+      wyl_policy_store_foreach_effective_scope_state (self->policy_store,
+      preintern_policy_store_session_state_symbols, self);
+}
+
 /* WYL_ENGINE_SESSION_REQUIRES: locked candidate-build callback chain. */
 static wyrelog_error_t
 preintern_deny_reason_catalog_symbols (WylHandle *self)
@@ -2742,7 +2787,8 @@ preintern_deny_reason_catalog_symbols (WylHandle *self)
 
 /* WYL_ENGINE_SESSION_REQUIRES: locked candidate-build callback chain. */
 static wyrelog_error_t
-preintern_policy_store_symbols (WylHandle *self)
+preintern_policy_store_symbols (WylHandle *self,
+    WylEngineSessionStateCapability session_state_capability)
 {
   wyrelog_error_t rc = preintern_deny_reason_catalog_symbols (self);
   if (rc != WYRELOG_E_OK)
@@ -2776,8 +2822,7 @@ preintern_policy_store_symbols (WylHandle *self)
       preintern_policy_store_principal_event_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_policy_store_foreach_session_state (self->policy_store,
-      preintern_policy_store_session_state_symbols, self);
+  rc = preintern_effective_scope_symbols (self, session_state_capability);
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_policy_store_foreach_session_event (self->policy_store,
@@ -2804,10 +2849,12 @@ take_engine_replacement_fault (WylHandle *self, WylEngineReplacementFault fault)
 
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
 static wyrelog_error_t
-load_current_engine_pair (WylHandle *self)
+load_current_engine_pair (WylHandle *self,
+    WylEngineSessionStateCapability session_state_capability)
 {
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_INTERN);
-  wyrelog_error_t rc = preintern_policy_store_symbols (self);
+  wyrelog_error_t rc =
+      preintern_policy_store_symbols (self, session_state_capability);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_AUDIT_FACTS);
@@ -2954,6 +3001,11 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
       self->require_template_manifest, &new_delta_engine);
   if (rc != WYRELOG_E_OK)
     goto fail_before_install;
+  if (wyl_engine_session_state_capability (new_read_engine)
+      != wyl_engine_session_state_capability (new_delta_engine)) {
+    rc = WYRELOG_E_POLICY;
+    goto fail_before_install;
+  }
   wyl_engine_set_owner (new_read_engine, WYL_ENGINE_OWNER_READ);
   wyl_engine_set_owner (new_delta_engine, WYL_ENGINE_OWNER_DELTA);
 
@@ -2967,7 +3019,8 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   self->engine_pair_replacement_building = TRUE;
   rc = preintern_published_engine_symbols (self, old_symbols);
   if (rc == WYRELOG_E_OK)
-    rc = load_current_engine_pair (self);
+    rc = load_current_engine_pair (self,
+        wyl_engine_session_state_capability (new_read_engine));
   self->engine_pair_replacement_building = FALSE;
   if (rc != WYRELOG_E_OK)
     goto fail_after_install;
@@ -4429,7 +4482,13 @@ wyl_handle_load_policy_store_session_states (WylHandle *self)
   if (self->policy_store == NULL || engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
-  return wyl_policy_store_foreach_session_state (self->policy_store,
+  WylEngineSessionStateCapability capability =
+      engine_session->session_state_capability;
+  if (capability == WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
+    return WYRELOG_E_POLICY;
+  return capability == WYL_ENGINE_SESSION_STATE_ABSENT ?
+      validate_projectionless_store (self) :
+      wyl_policy_store_foreach_effective_scope_state (self->policy_store,
       insert_policy_store_session_state, self);
 }
 

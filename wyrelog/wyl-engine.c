@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include <sodium.h>
+#include <wirelog/wirelog-parser.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyl-engine-private.h"
@@ -521,6 +522,13 @@ wyl_engine_set_owner (WylEngine *self, wyl_engine_owner_t owner)
   self->owner = owner;
 }
 
+WylEngineSessionStateCapability
+wyl_engine_session_state_capability (WylEngine *self)
+{
+  return WYL_IS_ENGINE (self) ? self->session_state_capability :
+      WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
+}
+
 static void
 wyl_engine_finalize (GObject *object)
 {
@@ -651,6 +659,30 @@ load_templates_internal (const gchar *template_dir,
   return WYRELOG_E_OK;
 }
 
+static WylEngineSessionStateCapability
+inspect_session_state_capability (const gchar *source)
+{
+  wirelog_error_t parse_error = WIRELOG_OK;
+  wirelog_program_t *program = wirelog_parse_string (source, &parse_error);
+  if (program == NULL || parse_error != WIRELOG_OK) {
+    if (program != NULL)
+      wirelog_program_free (program);
+    return WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
+  }
+  const wirelog_schema_t *schema = wirelog_program_get_schema (program,
+      "session_state");
+  WylEngineSessionStateCapability capability =
+      schema == NULL ? WYL_ENGINE_SESSION_STATE_ABSENT :
+      schema->column_count == 2
+      && schema->columns[0].type == WIRELOG_TYPE_STRING
+      && schema->columns[1].type == WIRELOG_TYPE_STRING
+      && schema->columns[0].compound_kind == WIRELOG_COMPOUND_KIND_NONE
+      && schema->columns[1].compound_kind == WIRELOG_COMPOUND_KIND_NONE ?
+      WYL_ENGINE_SESSION_STATE_EXACT : WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
+  wirelog_program_free (program);
+  return capability;
+}
+
 wyrelog_error_t
 wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
     gsize *dl_src_len_out)
@@ -696,6 +728,8 @@ wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
 
   wirelog_easy_session_t *session = NULL;
   wirelog_error_t wl_rc = wirelog_easy_open_opts (dl_src, &opts, &session);
+  const WylEngineSessionStateCapability session_state_capability =
+      inspect_session_state_capability (dl_src);
 
   /* FC4: zero-fill the policy source buffer before freeing to avoid leaving
    * policy text in core dumps or swap.  Use the tracked length rather than
@@ -716,6 +750,7 @@ wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
 
   WylEngine *engine = g_object_new (WYL_TYPE_ENGINE, NULL);
   engine->session = session;
+  engine->session_state_capability = session_state_capability;
   /* Keep the initial mode explicit instead of relying on zero-fill. */
   engine->mode = WYL_ENGINE_MODE_NONE;
 
@@ -765,6 +800,7 @@ wyl_engine_open_source (const gchar *dl_src, guint32 num_workers,
 
   WylEngine *engine = g_object_new (WYL_TYPE_ENGINE, NULL);
   engine->session = session;
+  engine->session_state_capability = inspect_session_state_capability (dl_src);
   engine->mode = WYL_ENGINE_MODE_NONE;
   *out = engine;
   return WYRELOG_E_OK;
