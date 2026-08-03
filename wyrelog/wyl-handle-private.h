@@ -435,6 +435,15 @@ wyrelog_error_t wyl_engine_session_run_committed_publication
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data, gboolean * out_commit_confirmed);
 
+/* Repairs only a poisoned pair from the durable snapshot while the caller
+ * retains the same-handle service-auth WRITE lease and outermost engine
+ * session. No transaction or delta callback may be active. The pair becomes
+ * ready only after a complete rebuild and exact verification. */
+wyrelog_error_t wyl_engine_session_repair_committed_publication
+    (WylEngineSession * session, WylServiceAuthWriteLease * write_lease,
+    wyl_policy_store_t * expected_store, guint64 expected_generation,
+    WylEnginePublicationVerifier verify, gpointer verify_data);
+
 /* Completes publication for a transaction committed by an enclosing owner
  * while that owner still retains both its store pin and @session. A confirmed
  * commit validates the exact store generation before rebuilding and verifying

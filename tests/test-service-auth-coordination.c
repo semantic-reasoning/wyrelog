@@ -1737,11 +1737,13 @@ test_authority_transaction_rejects_outer_transaction (void)
 
 typedef struct
 {
+  WylHandle *handle;
   WylEngineSession *session;
   wyl_policy_store_t *store;
   guint64 generation;
   WylServiceAuthWriteLease *lease;
   wyrelog_error_t rc;
+  wyrelog_error_t repair_validation_rc;
 } ExternalTransactionBeginThread;
 
 static gpointer
@@ -1753,6 +1755,9 @@ foreign_external_transaction_begin (gpointer data)
       wyl_engine_session_begin_external_service_authority_transaction
       (attempt->session, attempt->store, attempt->generation, attempt->lease,
       &txn);
+  attempt->repair_validation_rc =
+      wyl_service_auth_write_lease_validate_retained_engine_repair
+      (attempt->lease, attempt->handle, attempt->store);
   g_assert_null (txn);
   return NULL;
 }
@@ -1786,6 +1791,13 @@ test_external_transaction_typed_parent_and_rejections (void)
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   g_assert_nonnull (session);
   assert_external_parent_retained (handle);
+  g_assert_cmpint
+      (wyl_service_auth_write_lease_validate_retained_engine_repair
+      (lease, handle, store), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_auth_write_lease_validate_retained_engine_repair
+      (lease, handle, wyl_handle_get_policy_store (other)), ==,
+      WYRELOG_E_INVALID);
 
   WylServiceAuthorityTransaction *txn = NULL;
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
@@ -1812,16 +1824,20 @@ test_external_transaction_typed_parent_and_rejections (void)
   g_assert_null (txn);
 
   ExternalTransactionBeginThread foreign = {
-    session, store, generation, lease, WYRELOG_E_OK,
+    handle, session, store, generation, lease, WYRELOG_E_OK, WYRELOG_E_OK,
   };
   g_autoptr (GThread) thread = g_thread_new ("foreign-engine-parent",
       foreign_external_transaction_begin, &foreign);
   g_thread_join (g_steal_pointer (&thread));
   g_assert_cmpint (foreign.rc, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (foreign.repair_validation_rc, ==, WYRELOG_E_INVALID);
   assert_external_parent_retained (handle);
 
   g_autoptr (WylEngineSession) nested = wyl_engine_session_acquire (handle);
   g_assert_nonnull (nested);
+  g_assert_cmpint
+      (wyl_service_auth_write_lease_validate_retained_engine_repair
+      (lease, handle, store), ==, WYRELOG_E_INVALID);
   g_assert_cmpint
       (wyl_engine_session_begin_external_service_authority_transaction
       (nested, store, generation, lease, &txn), ==, WYRELOG_E_BUSY);
@@ -1843,6 +1859,9 @@ test_external_transaction_typed_parent_and_rejections (void)
       (wyl_engine_session_begin_external_service_authority_transaction
       (session, store, generation, lease, &txn), ==, WYRELOG_E_OK);
   g_assert_nonnull (txn);
+  g_assert_cmpint
+      (wyl_service_auth_write_lease_validate_retained_engine_repair
+      (lease, handle, store), ==, WYRELOG_E_INVALID);
   g_assert_true (wyl_service_auth_rank_is_held (handle,
           WYL_SERVICE_AUTH_RANK_STORE));
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback

@@ -6856,15 +6856,6 @@ set_tenant_updated_at_for_test (wyl_policy_store_t *store,
   return ok;
 }
 
-static wyrelog_error_t
-accept_reconciled_tenant_lifecycle_pair (WylHandle *handle, gpointer data)
-{
-  (void) data;
-  return wyl_handle_engine_pair_is_ready (handle)
-      && !wyl_handle_engine_pair_is_poisoned (handle) ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
-}
-
 static gboolean
 tenant_projection_decision_matches (WylHandle *handle, const gchar *tenant,
     wyl_decision_t expected)
@@ -7417,10 +7408,6 @@ check_policy_permission_mutation_contract (SoupServer *server,
       || !wyl_handle_engine_pair_is_poisoned (handle))
     return 2232;
   g_clear_pointer (&body, g_free);
-  if (wyl_handle_reconcile_committed_engine_pair (handle,
-          accept_reconciled_tenant_lifecycle_pair, NULL) != WYRELOG_E_OK
-      || wyl_handle_engine_pair_is_poisoned (handle))
-    return 2233;
   lifecycle_audit_before = lifecycle_audit_after;
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/tenants/create", postcommit_tenant_query, &status, &body);

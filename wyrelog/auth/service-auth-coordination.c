@@ -537,6 +537,28 @@ wyl_service_auth_write_lease_get_policy_store (WylServiceAuthWriteLease *lease,
 }
 
 wyrelog_error_t
+    wyl_service_auth_write_lease_validate_retained_engine_repair
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    wyl_policy_store_t * expected_store) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle) || expected_store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
+      WYL_SERVICE_AUTH_RANK_ENGINE);
+  if (rc == WYRELOG_E_OK
+      && !wyl_service_auth_rank_has_external_publication_prefix (handle))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK && (lease->cleanup_only
+          || lease->transaction_claimed || lease->maintenance_claimed))
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK && (lease->pinned_store == NULL
+          || lease->pinned_store != expected_store))
+    rc = WYRELOG_E_INVALID;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_service_auth_write_lease_get_serial (WylServiceAuthWriteLease *lease,
     WylHandle *handle, guint64 *out_serial)
 {

@@ -85,6 +85,12 @@ wyrelog_error_t wyl_service_auth_write_lease_validate_operation
 wyrelog_error_t wyl_service_auth_write_lease_get_policy_store
     (WylServiceAuthWriteLease * lease, WylHandle * handle,
     wyl_policy_store_t ** out_store);
+/* Validates the exact retained WRITE -> engine repair lane and its original
+ * store pin. Unlike the ordinary getter this is callable only while ENGINE is
+ * the top rank and never exposes a new store pointer. */
+wyrelog_error_t wyl_service_auth_write_lease_validate_retained_engine_repair
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    wyl_policy_store_t * expected_store);
 wyrelog_error_t wyl_service_auth_write_lease_get_serial
     (WylServiceAuthWriteLease * lease, WylHandle * handle,
     guint64 * out_serial);
