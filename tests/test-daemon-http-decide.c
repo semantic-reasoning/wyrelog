@@ -6247,6 +6247,20 @@ typedef struct
   gchar *body;
 } ConcurrentPolicyMutation;
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  guint ready;
+  gboolean go;
+} ConcurrentTenantMutationRace;
+
+typedef struct
+{
+  ConcurrentTenantMutationRace *race;
+  ConcurrentPolicyMutation mutation;
+} ConcurrentTenantMutation;
+
 static gpointer
 concurrent_permission_grant_thread (gpointer user_data)
 {
@@ -6255,6 +6269,28 @@ concurrent_permission_grant_thread (gpointer user_data)
 
   mutation->rc = send_raw_policy_mutation (session, "POST",
       mutation->base_url, "/policy/permissions/grant", mutation->query,
+      &mutation->status, &mutation->body);
+  return NULL;
+}
+
+static gpointer
+concurrent_tenant_create_thread (gpointer user_data)
+{
+  ConcurrentTenantMutation *thread = user_data;
+  g_mutex_lock (&thread->race->mutex);
+  thread->race->ready++;
+  if (thread->race->ready == 2) {
+    thread->race->go = TRUE;
+    g_cond_broadcast (&thread->race->changed);
+  }
+  while (!thread->race->go)
+    g_cond_wait (&thread->race->changed, &thread->race->mutex);
+  g_mutex_unlock (&thread->race->mutex);
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  ConcurrentPolicyMutation *mutation = &thread->mutation;
+  mutation->rc = send_raw_policy_mutation (session, "POST",
+      mutation->base_url, "/tenants/create", mutation->query,
       &mutation->status, &mutation->body);
   return NULL;
 }
@@ -6777,6 +6813,59 @@ tenant_state_matches (wyl_policy_store_t *store, const gchar *tenant,
 }
 
 static gboolean
+tenant_metadata (wyl_policy_store_t *store, const gchar *tenant,
+    gint64 *out_sealed_generation, gint64 *out_updated_at)
+{
+  if (store == NULL || tenant == NULL || out_sealed_generation == NULL
+      || out_updated_at == NULL)
+    return FALSE;
+  *out_sealed_generation = -1;
+  *out_updated_at = -1;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *stmt = NULL;
+  if (db == NULL || sqlite3_prepare_v2 (db,
+          "SELECT sealed_generation,updated_at FROM tenants "
+          "WHERE tenant_id=?;", -1, &stmt, NULL) != SQLITE_OK)
+    return FALSE;
+  gboolean ok = sqlite3_bind_text (stmt, 1, tenant, -1, SQLITE_TRANSIENT)
+      == SQLITE_OK && sqlite3_step (stmt) == SQLITE_ROW;
+  if (ok) {
+    *out_sealed_generation = sqlite3_column_int64 (stmt, 0);
+    *out_updated_at = sqlite3_column_int64 (stmt, 1);
+  }
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gboolean
+set_tenant_updated_at_for_test (wyl_policy_store_t *store,
+    const gchar *tenant, gint64 updated_at)
+{
+  if (store == NULL || tenant == NULL)
+    return FALSE;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *stmt = NULL;
+  if (db == NULL || sqlite3_prepare_v2 (db,
+          "UPDATE tenants SET updated_at=? WHERE tenant_id=?;", -1, &stmt,
+          NULL) != SQLITE_OK)
+    return FALSE;
+  gboolean ok = sqlite3_bind_int64 (stmt, 1, updated_at) == SQLITE_OK
+      && sqlite3_bind_text (stmt, 2, tenant, -1, SQLITE_TRANSIENT) == SQLITE_OK
+      && sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (db) == 1;
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+static wyrelog_error_t
+accept_reconciled_tenant_lifecycle_pair (WylHandle *handle, gpointer data)
+{
+  (void) data;
+  return wyl_handle_engine_pair_is_ready (handle)
+      && !wyl_handle_engine_pair_is_poisoned (handle) ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static gboolean
 tenant_projection_decision_matches (WylHandle *handle, const gchar *tenant,
     wyl_decision_t expected)
 {
@@ -6851,6 +6940,78 @@ policy_audit_event_count (WylHandle *handle, guint64 *out_count)
   return wyl_policy_store_foreach_audit_event
       (wyl_handle_get_policy_store (handle), audit_event_count_cb, out_count)
       == WYRELOG_E_OK;
+}
+
+static gboolean
+policy_lifecycle_audit_count (WylHandle *handle, const gchar *subject,
+    const gchar *action, const gchar *tenant, guint *out_count)
+{
+  if (out_count == NULL)
+    return FALSE;
+  AuditEventProbe probe = {
+    .subject_id = subject,
+    .action = action,
+    .resource_id = tenant,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event
+      (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &probe)
+      != WYRELOG_E_OK)
+    return FALSE;
+  *out_count = probe.matches;
+  return TRUE;
+}
+
+static gint
+check_concurrent_tenant_creates_serialize (WylHandle *handle,
+    const gchar *base_url, const gchar *session_token)
+{
+  ConcurrentTenantMutationRace race = { 0 };
+  ConcurrentTenantMutation threads[2] = { 0 };
+  GThread *workers[2] = { NULL, NULL };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  for (guint i = 0; i < G_N_ELEMENTS (threads); i++) {
+    threads[i].race = &race;
+    threads[i].mutation.base_url = base_url;
+    threads[i].mutation.query = g_strdup_printf
+        ("name=tenant-concurrent&tenant=%s&session_token=%s"
+        "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+        WYL_TENANT_DEFAULT, session_token);
+    workers[i] = g_thread_new ("tenant-create",
+        concurrent_tenant_create_thread, &threads[i]);
+  }
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++)
+    g_thread_join (workers[i]);
+
+  guint changed_true = 0;
+  guint changed_false = 0;
+  gint result = 0;
+  for (guint i = 0; i < G_N_ELEMENTS (threads); i++) {
+    ConcurrentPolicyMutation *mutation = &threads[i].mutation;
+    if (mutation->rc != 0 || mutation->status != 200 || mutation->body == NULL) {
+      result = 2242;
+      break;
+    }
+    changed_true += strstr (mutation->body, "\"changed\":true") != NULL;
+    changed_false += strstr (mutation->body, "\"changed\":false") != NULL;
+  }
+  guint audit_count = 0;
+  if (result == 0 && (changed_true != 1 || changed_false != 1
+          || !tenant_state_matches (wyl_handle_get_policy_store (handle),
+              "tenant-concurrent", TRUE, TRUE)
+          || !policy_lifecycle_audit_count (handle, "http-policy-admin",
+              "tenant_create", "tenant-concurrent", &audit_count)
+          || audit_count != 1 || wyl_handle_engine_pair_is_poisoned (handle)))
+    result = 2243;
+  for (guint i = 0; i < G_N_ELEMENTS (threads); i++) {
+    g_free (threads[i].mutation.query);
+    g_free (threads[i].mutation.body);
+  }
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return result;
 }
 
 static gint
@@ -7198,6 +7359,84 @@ check_policy_permission_mutation_contract (SoupServer *server,
       return 207 + (gint) i;
     g_clear_pointer (&body, g_free);
   }
+
+  gint concurrent_tenant_rc = check_concurrent_tenant_creates_serialize
+      (handle, base_url, session_token);
+  if (concurrent_tenant_rc != 0)
+    return concurrent_tenant_rc;
+
+  guint lifecycle_audit_before = 0;
+  guint lifecycle_audit_after = 0;
+  g_autofree gchar *rollback_tenant_query =
+      g_strdup_printf ("name=tenant-rollback&tenant=%s&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      WYL_TENANT_DEFAULT, session_token);
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-rollback", &lifecycle_audit_before))
+    return 2230;
+  wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test (server);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/create", rollback_tenant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  gboolean rollback_tenant_absent = tenant_state_matches (store,
+      "tenant-rollback", FALSE, FALSE);
+  gboolean rollback_audit_counted = policy_lifecycle_audit_count (handle,
+      "http-policy-admin", "tenant_create", "tenant-rollback",
+      &lifecycle_audit_after);
+  gboolean rollback_poisoned = wyl_handle_engine_pair_is_poisoned (handle);
+  if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
+      || !rollback_tenant_absent || !rollback_audit_counted
+      || lifecycle_audit_after != lifecycle_audit_before || rollback_poisoned) {
+    g_printerr ("WYRELOG_TEST_DIAG tenant_lifecycle_rollback status=%u "
+        "body=%s absent=%d audit=%d before=%u after=%u poisoned=%d\n", status,
+        body != NULL ? body : "(null)", rollback_tenant_absent,
+        rollback_audit_counted, lifecycle_audit_before,
+        lifecycle_audit_after, rollback_poisoned);
+    return 2231;
+  }
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *postcommit_tenant_query =
+      g_strdup_printf ("name=tenant-postcommit&tenant=%s&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      WYL_TENANT_DEFAULT, session_token);
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-postcommit", &lifecycle_audit_before))
+    return 2230;
+  wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test (server);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/create", postcommit_tenant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
+      || !tenant_state_matches (store, "tenant-postcommit", TRUE, TRUE)
+      || !policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
+      || lifecycle_audit_after != lifecycle_audit_before + 1
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 2232;
+  g_clear_pointer (&body, g_free);
+  if (wyl_handle_reconcile_committed_engine_pair (handle,
+          accept_reconciled_tenant_lifecycle_pair, NULL) != WYRELOG_E_OK
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 2233;
+  lifecycle_audit_before = lifecycle_audit_after;
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/create", postcommit_tenant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"changed\":false") == NULL
+      || !policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
+      || lifecycle_audit_after != lifecycle_audit_before
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 2234;
+  g_clear_pointer (&body, g_free);
+
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-a", &lifecycle_audit_before))
+    return 2235;
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/tenants/create", tenant_create_query, &status, &body);
   if (rc != 0)
@@ -7205,14 +7444,23 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (status != 200 || strstr (body, "\"tenant\":\"tenant-a\"") == NULL ||
       strstr (body, "\"changed\":true") == NULL)
     return 190;
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-a", &lifecycle_audit_after)
+      || lifecycle_audit_after != lifecycle_audit_before + 1)
+    return 2236;
   g_clear_pointer (&body, g_free);
 
+  lifecycle_audit_before = lifecycle_audit_after;
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/tenants/create", tenant_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL)
     return 191;
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_create", "tenant-a", &lifecycle_audit_after)
+      || lifecycle_audit_after != lifecycle_audit_before)
+    return 2237;
   g_clear_pointer (&body, g_free);
 
   static const gchar *const tenant_list_aliases[] = {
@@ -7392,15 +7640,48 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 201;
   g_clear_pointer (&body, g_free);
 
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_unseal", "tenant-a", &lifecycle_audit_before))
+    return 2238;
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/tenants/unseal", tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 200)
+  if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 202;
   if (!tenant_projection_decision_matches (handle, "tenant-a",
           WYL_DECISION_ALLOW))
     return 2026;
+  if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_unseal", "tenant-a", &lifecycle_audit_after)
+      || lifecycle_audit_after != lifecycle_audit_before + 1)
+    return 2239;
+  g_clear_pointer (&body, g_free);
+
+  static const gint64 no_op_updated_at = G_GINT64_CONSTANT (4102444800);
+  gint64 unseal_generation_before = -1;
+  gint64 unseal_updated_at_before = -1;
+  gint64 unseal_generation_after = -1;
+  gint64 unseal_updated_at_after = -1;
+  if (!set_tenant_updated_at_for_test (store, "tenant-a", no_op_updated_at)
+      || !tenant_metadata (store, "tenant-a", &unseal_generation_before,
+          &unseal_updated_at_before)
+      || unseal_updated_at_before != no_op_updated_at)
+    return 2240;
+  lifecycle_audit_before = lifecycle_audit_after;
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/unseal", tenant_seal_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"changed\":false") == NULL
+      || !tenant_metadata (store, "tenant-a", &unseal_generation_after,
+          &unseal_updated_at_after)
+      || unseal_generation_after != unseal_generation_before
+      || unseal_updated_at_after != unseal_updated_at_before
+      || !policy_lifecycle_audit_count (handle, "http-policy-admin",
+          "tenant_unseal", "tenant-a", &lifecycle_audit_after)
+      || lifecycle_audit_after != lifecycle_audit_before)
+    return 2241;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_body (session, "POST", base_url,

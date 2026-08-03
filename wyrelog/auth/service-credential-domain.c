@@ -128,19 +128,104 @@ typedef struct
 {
   const gchar *tenant_id;
   const gchar *state;
+  const gchar *actor_subject_id;
+  const gchar *request_id;
+  const WylPolicyServiceRetirementOutcome *retirement;
 } TenantScopePublication;
+
+static wyrelog_error_t
+verify_engine_symbol_row (WylEngineVerification *verification,
+    const gchar *relation, const gchar *const *symbols, gsize ncols,
+    gboolean expected)
+{
+  g_autofree gint64 *row = g_new0 (gint64, ncols);
+  for (gsize i = 0; i < ncols; i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i]);
+    if (rc == WYRELOG_E_NOT_FOUND && !expected)
+      return WYRELOG_E_OK;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_contains (verification,
+      relation, row, ncols, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found == expected ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+verify_exact_tenant_scope_state (WylEngineVerification *verification,
+    const gchar *tenant_id, const gchar *expected_state)
+{
+  gint64 tenant = 0;
+  gint64 expected = 0;
+  gint64 accepted = 0;
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      tenant_id, &tenant);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, expected_state,
+        &expected);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_get_accepted_session_state (verification,
+        tenant, &accepted);
+  return rc == WYRELOG_E_OK && accepted != expected ? WYRELOG_E_POLICY : rc;
+}
+
+static wyrelog_error_t
+verify_service_retirement_audit (WylEngineVerification *verification,
+    const TenantScopePublication *publication)
+{
+  const WylPolicyServiceRetirementOutcome *retirement = publication->retirement;
+  if (retirement == NULL || retirement->audit_id[0] == '\0'
+      || retirement->created_at_us <= 0)
+    return WYRELOG_E_POLICY;
+  gint64 event[3] = { 0, retirement->created_at_us, 0 };
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      retirement->audit_id, &event[0]);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, "allow",
+        &event[2]);
+  gboolean found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_contains (verification, "audit_event",
+        event, G_N_ELEMENTS (event), &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+  const gchar *relations[] = {
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_request_id",
+  };
+  const gchar *values[] = {
+    publication->actor_subject_id,
+    "tenant_seal",
+    publication->tenant_id,
+    publication->request_id,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
+    const gchar *row[] = { retirement->audit_id, values[i] };
+    rc = verify_engine_symbol_row (verification, relations[i], row,
+        G_N_ELEMENTS (row), TRUE);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
 
 static wyrelog_error_t
 verify_tenant_scope_publication (WylEngineVerification *verification,
     gpointer data)
 {
   TenantScopePublication *publication = data;
-  gint64 symbol_id = 0;
-  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-      publication->tenant_id, &symbol_id);
+  wyrelog_error_t rc = verify_exact_tenant_scope_state (verification,
+      publication->tenant_id, publication->state);
   return rc == WYRELOG_E_OK ?
-      wyl_engine_verification_lookup_symbol (verification,
-      publication->state, &symbol_id) : rc;
+      verify_service_retirement_audit (verification, publication) : rc;
 }
 
 static wyrelog_error_t
@@ -576,16 +661,19 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_authorize (&mutation, runtime->authorization,
         actor_subject_id);
+  WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
   TenantScopePublication publication = {
     .tenant_id = tenant_id,
     .state = "closed",
+    .actor_subject_id = actor_subject_id,
+    .request_id = request_id,
+    .retirement = &stored_retirement,
   };
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_prepare_engine_publication (&mutation,
         verify_tenant_scope_publication, &publication);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
-  WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
   gboolean receipt_found = FALSE;
   gchar stored_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES] = { 0 };
   if (rc == WYRELOG_E_OK)

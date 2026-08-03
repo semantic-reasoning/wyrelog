@@ -2076,6 +2076,9 @@ wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
  * keyed authority core below; non-test callers use this only to unseal. */
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean sealed);
+wyrelog_error_t wyl_policy_store_set_tenant_sealed_full
+    (wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
+    gboolean * out_changed);
 #define WYL_POLICY_TENANT_SELECTOR_BYTES 256u
 wyrelog_error_t wyl_policy_store_seal_tenant_keyed_core
     (WylServiceAuthorityTransaction * transaction,

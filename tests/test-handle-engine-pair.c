@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gio/gio.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -8,6 +9,7 @@
 #include "wyrelog/wyl-handle-compound-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-engine-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -109,6 +111,8 @@ typedef struct
 {
   guint internal_deltas;
 } InternalProjectionDeltaExpect;
+
+static const gchar *test_program_path;
 
 typedef struct
 {
@@ -1907,6 +1911,18 @@ check_insert_fanout_delta_insert_failure_repairs_pair (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 157;
+  gint64 witness_scope = 0;
+  gint64 witness_unknown = 0;
+  if (wyl_handle_intern_engine_symbol (handle, "repair-witness-scope",
+          &witness_scope) != WYRELOG_E_OK
+      || wyl_handle_intern_engine_symbol (handle, "repair-witness-unknown",
+          &witness_unknown) != WYRELOG_E_OK)
+    return 157;
+  gint64 witness_row[] = { witness_scope, witness_unknown };
+  if (wyl_handle_engine_insert (handle, "session_state", witness_row, 2)
+      != WYRELOG_E_OK)
+    return 157;
+  WylEngine *old_read = wyl_handle_get_read_engine (handle);
   if (intern_event5 (handle, 231, "delta-insert-fail-session",
           "elevate_grant", "active", "elevated", event_row) != WYRELOG_E_OK)
     return 158;
@@ -1915,6 +1931,12 @@ check_insert_fanout_delta_insert_failure_repairs_pair (void)
       WYRELOG_E_IO);
   if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
       != WYRELOG_E_IO)
+    return 159;
+  gint64 accepted = 0;
+  if (wyl_handle_get_read_engine (handle) == old_read
+      || wyl_engine_owned_get_accepted_session_state
+      (wyl_handle_get_read_engine (handle), "session_state", witness_scope,
+          &accepted) != WYRELOG_E_POLICY)
     return 159;
 
   if (intern_event5 (handle, 231, "delta-insert-fail-session", "active",
@@ -4345,6 +4367,17 @@ check_replacement_faults_preserve_published_pair (void)
     if (wyl_handle_buffer_delta_for_test (handle, "old_pending", pending, 1,
             WYL_DELTA_INSERT) != WYRELOG_E_OK)
       return 848;
+    gint64 default_scope = 0;
+    gint64 active_state = 0;
+    gint64 accepted_state = 0;
+    if (wyl_handle_intern_engine_symbol (handle, WYL_TENANT_DEFAULT,
+            &default_scope) != WYRELOG_E_OK
+        || wyl_handle_intern_engine_symbol (handle, "active", &active_state)
+        != WYRELOG_E_OK
+        || wyl_engine_owned_get_accepted_session_state (old_read,
+            "session_state", default_scope, &accepted_state) != WYRELOG_E_OK
+        || accepted_state != active_state)
+      return 848;
     wyl_handle_set_engine_replacement_fault_once_for_test (handle, faults[i]);
     if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_IO)
       return 849;
@@ -4352,7 +4385,10 @@ check_replacement_faults_preserve_published_pair (void)
         || wyl_handle_engine_pair_is_poisoned (handle)
         || wyl_handle_get_read_engine (handle) != old_read
         || wyl_handle_get_delta_engine (handle) != old_delta
-        || wyl_handle_pending_delta_count_for_test (handle) != 1)
+        || wyl_handle_pending_delta_count_for_test (handle) != 1
+        || wyl_engine_owned_get_accepted_session_state (old_read,
+            "session_state", default_scope, &accepted_state) != WYRELOG_E_OK
+        || accepted_state != active_state)
       return 850;
   }
   return 0;
@@ -4413,14 +4449,20 @@ verify_external_scope_publication (WylEngineVerification *verification,
     gpointer data)
 {
   ExternalPublicationVerify *verify = data;
-  gint64 symbol_id = 0;
+  gint64 scope_id = 0;
+  gint64 expected_state = 0;
+  gint64 accepted_state = 0;
   verify->calls++;
   wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-      verify->scope, &symbol_id);
+      verify->scope, &scope_id);
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_verification_lookup_symbol (verification, verify->state,
-        &symbol_id);
-  return rc;
+        &expected_state);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_get_accepted_session_state (verification,
+        scope_id, &accepted_state);
+  return rc == WYRELOG_E_OK && accepted_state != expected_state ?
+      WYRELOG_E_POLICY : rc;
 }
 
 static gint
@@ -4497,6 +4539,456 @@ check_retained_external_publication_outcomes (void)
       || !wyl_handle_engine_pair_is_poisoned (uncertain_handle))
     return 863;
   g_clear_pointer (&session, wyl_engine_session_release);
+  return 0;
+}
+
+static gint
+check_session_state_accepted_input_witness (void)
+{
+  static const gchar source[] =
+      ".decl session_state(scope: symbol, state: symbol)\n";
+  g_autoptr (WylEngine) engine = NULL;
+  if (wyl_engine_open_source (source, 1, &engine) != WYRELOG_E_OK)
+    return 891;
+  wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
+
+  gint64 scope = 0;
+  gint64 active = 0;
+  gint64 closed = 0;
+  gint64 unknown = 0;
+  if (wyl_engine_owned_intern_symbol (engine, "witness-scope", &scope)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (engine, "active", &active)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (engine, "closed", &closed)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (engine, "unknown-state", &unknown)
+      != WYRELOG_E_OK)
+    return 892;
+
+  gint64 accepted = -1;
+  gint64 active_row[] = { scope, active };
+  gint64 closed_row[] = { scope, closed };
+  gint64 unknown_row[] = { scope, unknown };
+  if (wyl_engine_owned_get_accepted_session_state (engine, "session_state",
+          scope, &accepted) != WYRELOG_E_POLICY || accepted != 0
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "unsupported_relation", scope, &accepted) != WYRELOG_E_INVALID)
+    return 893;
+  if (wyl_engine_owned_insert (engine, "session_state", active_row, 1)
+      != WYRELOG_E_INVALID
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_POLICY)
+    return 894;
+
+  if (wyl_engine_owned_insert (engine, "session_state", active_row, 2)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_OK
+      || accepted != active)
+    return 895;
+  if (wyl_engine_owned_insert (engine, "session_state", active_row, 2)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_POLICY
+      || wyl_engine_owned_remove (engine, "session_state", active_row, 2)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_OK
+      || accepted != active)
+    return 896;
+
+  if (wyl_engine_owned_insert (engine, "session_state", closed_row, 2)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_POLICY
+      || wyl_engine_owned_remove (engine, "session_state", closed_row, 2)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_insert (engine, "session_state", unknown_row, 2)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_POLICY
+      || wyl_engine_owned_remove (engine, "session_state", unknown_row, 2)
+      != WYRELOG_E_OK)
+    return 897;
+
+  if (wyl_engine_owned_remove (engine, "session_state", closed_row, 2)
+      != WYRELOG_E_NOT_FOUND
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_OK
+      || accepted != active)
+    return 898;
+
+  wirelog_easy_session_t *saved_session = engine->session;
+  engine->session = NULL;
+  if (wyl_engine_owned_insert (engine, "session_state", closed_row, 2)
+      != WYRELOG_E_INVALID
+      || wyl_engine_owned_remove (engine, "session_state", active_row, 2)
+      != WYRELOG_E_INVALID) {
+    engine->session = saved_session;
+    return 899;
+  }
+  engine->session = saved_session;
+  if (wyl_engine_owned_get_accepted_session_state (engine, "session_state",
+          scope, &accepted) != WYRELOG_E_OK || accepted != active)
+    return 900;
+
+  if (wyl_engine_owned_set_session_state_witness_for_test (engine, active_row,
+          G_MAXUINT64, G_MAXUINT64) != WYRELOG_E_OK
+      || wyl_engine_owned_insert (engine, "session_state", active_row, 2)
+      != WYRELOG_E_INTERNAL
+      || wyl_engine_owned_get_accepted_session_state (engine,
+          "session_state", scope, &accepted) != WYRELOG_E_POLICY)
+    return 901;
+
+  g_autoptr (WylEngine) missing = NULL;
+  if (wyl_engine_open_source (".decl other(v: int64)\n", 1, &missing)
+      != WYRELOG_E_OK)
+    return 902;
+  wyl_engine_set_owner (missing, WYL_ENGINE_OWNER_READ);
+  gint64 missing_scope = 0;
+  gint64 missing_active = 0;
+  if (wyl_engine_owned_intern_symbol (missing, "missing-scope",
+          &missing_scope) != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (missing, "active", &missing_active)
+      != WYRELOG_E_OK)
+    return 903;
+  gint64 missing_row[] = { missing_scope, missing_active };
+  if (wyl_engine_owned_insert (missing, "session_state", missing_row, 2)
+      != WYRELOG_E_EXEC
+      || wyl_engine_owned_get_accepted_session_state (missing,
+          "session_state", missing_scope, &accepted) != WYRELOG_E_POLICY)
+    return 904;
+  return 0;
+}
+
+static gint
+check_session_state_witness_survives_durable_restart (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 905;
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  WylHandleOpenOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = path,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK) {
+    rmdir_recursive (dir);
+    return 906;
+  }
+  gboolean created = FALSE;
+  if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
+          "restart-witness-tenant", &created) != WYRELOG_E_OK || !created
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 907;
+  }
+  gint64 scope = 0;
+  gint64 active = 0;
+  gint64 accepted = 0;
+  if (wyl_handle_intern_engine_symbol (handle, "restart-witness-tenant",
+          &scope) != WYRELOG_E_OK
+      || wyl_handle_intern_engine_symbol (handle, "active", &active)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state
+      (wyl_handle_get_read_engine (handle), "session_state", scope, &accepted)
+      != WYRELOG_E_OK || accepted != active) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 908;
+  }
+
+  g_clear_object (&handle);
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK) {
+    rmdir_recursive (dir);
+    return 909;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "restart-witness-tenant",
+          &scope) != WYRELOG_E_OK
+      || wyl_handle_intern_engine_symbol (handle, "active", &active)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state
+      (wyl_handle_get_read_engine (handle), "session_state", scope, &accepted)
+      != WYRELOG_E_OK || accepted != active) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 910;
+  }
+  g_clear_object (&handle);
+  rmdir_recursive (dir);
+  return 0;
+}
+
+typedef struct
+{
+  const WylAuditEvent *event;
+  const gchar *audit_id;
+} CommittedCrashPublication;
+
+static wyrelog_error_t
+mutate_committed_crash_publication (wyl_policy_store_t *store, gpointer data)
+{
+  CommittedCrashPublication *publication = data;
+  gboolean created = FALSE;
+  gboolean inserted = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_create_tenant (store,
+      "crash-restart-tenant", &created);
+  if (rc != WYRELOG_E_OK || !created)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  rc = wyl_policy_store_record_audit_intention_full (store,
+      publication->audit_id,
+      wyl_audit_event_get_created_at_us (publication->event),
+      wyl_audit_event_get_subject_id (publication->event),
+      wyl_audit_event_get_action (publication->event),
+      wyl_audit_event_get_resource_id (publication->event), NULL, NULL,
+      wyl_audit_event_get_request_id (publication->event),
+      wyl_audit_event_get_decision (publication->event), &inserted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_policy_store_append_audit_event_full (store,
+      publication->audit_id,
+      wyl_audit_event_get_created_at_us (publication->event),
+      wyl_audit_event_get_subject_id (publication->event),
+      wyl_audit_event_get_action (publication->event),
+      wyl_audit_event_get_resource_id (publication->event), NULL, NULL,
+      wyl_audit_event_get_request_id (publication->event),
+      wyl_audit_event_get_decision (publication->event), &inserted);
+}
+
+static void
+committed_crash_checkpoint (gpointer data)
+{
+  const gchar *marker_path = data;
+  if (!g_file_set_contents (marker_path, "committed\n", -1, NULL))
+    return;
+  for (;;)
+    g_usleep (G_USEC_PER_SEC);
+}
+
+static gint
+run_committed_crash_child (const gchar *policy_path, const gchar *marker_path)
+{
+  WylHandleOpenOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy_path,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
+    return 911;
+  g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (event, "crash-restart-actor");
+  wyl_audit_event_set_action (event, "tenant_create");
+  wyl_audit_event_set_resource_id (event, "crash-restart-tenant");
+  wyl_audit_event_set_request_id (event, "crash-restart-request");
+  wyl_audit_event_set_decision (event, WYL_DECISION_ALLOW);
+  g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (event);
+  if (audit_id == NULL)
+    return 912;
+  CommittedCrashPublication publication = { event, audit_id };
+  ExternalPublicationVerify verify = {
+    .scope = "crash-restart-tenant",
+    .state = "active",
+  };
+  wyl_handle_set_committed_publication_checkpoint_for_test (handle,
+      committed_crash_checkpoint, (gpointer) marker_path);
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  gboolean committed = FALSE;
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
+      mutate_committed_crash_publication, &publication,
+      verify_external_scope_publication, &verify, NULL, NULL, &committed);
+  if (rc == WYRELOG_E_OK || committed)
+    return 913;
+  return 914;
+}
+
+typedef struct
+{
+  guint matches;
+} CommittedCrashAuditProbe;
+
+static wyrelog_error_t
+count_committed_crash_audit (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) deny_reason;
+  (void) deny_origin;
+  CommittedCrashAuditProbe *probe = data;
+  if (g_strcmp0 (subject_id, "crash-restart-actor") == 0
+      && g_strcmp0 (action, "tenant_create") == 0
+      && g_strcmp0 (resource_id, "crash-restart-tenant") == 0
+      && g_strcmp0 (request_id, "crash-restart-request") == 0
+      && decision == WYL_DECISION_ALLOW)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_committed_unpublished_process_kill_recovers_on_restart (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL || test_program_path == NULL)
+    return 915;
+  g_autofree gchar *policy_path = g_build_filename (dir, "policy.db", NULL);
+  g_autofree gchar *marker_path = g_build_filename (dir, "committed", NULL);
+  g_autoptr (GSubprocessLauncher) launcher =
+      g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
+  g_subprocess_launcher_setenv (launcher, "WYL_COMMITTED_CRASH_POLICY",
+      policy_path, TRUE);
+  g_subprocess_launcher_setenv (launcher, "WYL_COMMITTED_CRASH_MARKER",
+      marker_path, TRUE);
+  const gchar *argv[] = { test_program_path, NULL };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSubprocess) child = g_subprocess_launcher_spawnv (launcher,
+      argv, &error);
+  if (child == NULL) {
+    rmdir_recursive (dir);
+    return 916;
+  }
+  gboolean committed = FALSE;
+  for (guint i = 0; i < 1000; i++) {
+    if (g_file_test (marker_path, G_FILE_TEST_IS_REGULAR)) {
+      committed = TRUE;
+      break;
+    }
+    g_usleep (10 * 1000);
+  }
+  if (!committed) {
+    g_subprocess_force_exit (child);
+    (void) g_subprocess_wait (child, NULL, NULL);
+    rmdir_recursive (dir);
+    return 917;
+  }
+  g_subprocess_force_exit (child);
+  if (!g_subprocess_wait (child, NULL, &error)) {
+    rmdir_recursive (dir);
+    return 918;
+  }
+
+  WylHandleOpenOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy_path,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  gboolean exists = FALSE;
+  CommittedCrashAuditProbe probe = { 0 };
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK
+      || wyl_policy_store_tenant_exists (wyl_handle_get_policy_store (handle),
+          "crash-restart-tenant", &exists) != WYRELOG_E_OK || !exists
+      || wyl_policy_store_foreach_audit_event
+      (wyl_handle_get_policy_store (handle), count_committed_crash_audit,
+          &probe) != WYRELOG_E_OK || probe.matches != 1) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 919;
+  }
+  gint64 scope = 0;
+  gint64 active = 0;
+  gint64 accepted = 0;
+  if (wyl_handle_intern_engine_symbol (handle, "crash-restart-tenant",
+          &scope) != WYRELOG_E_OK
+      || wyl_handle_intern_engine_symbol (handle, "active", &active)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_get_accepted_session_state
+      (wyl_handle_get_read_engine (handle), "session_state", scope, &accepted)
+      != WYRELOG_E_OK || accepted != active) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 920;
+  }
+  g_clear_object (&handle);
+  rmdir_recursive (dir);
+  return 0;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyl_policy_store_t *store;
+  guint64 generation;
+  GMutex mutex;
+  GCond changed;
+  guint ready;
+  gboolean go;
+  wyrelog_error_t results[2];
+  ExternalPublicationVerify verifiers[2];
+} ConcurrentRetainedVerification;
+
+typedef struct
+{
+  ConcurrentRetainedVerification *race;
+  guint index;
+} ConcurrentRetainedVerificationThread;
+
+static gpointer
+run_concurrent_retained_verification (gpointer data)
+{
+  ConcurrentRetainedVerificationThread *thread = data;
+  ConcurrentRetainedVerification *race = thread->race;
+  g_mutex_lock (&race->mutex);
+  race->ready++;
+  if (race->ready == 2) {
+    race->go = TRUE;
+    g_cond_broadcast (&race->changed);
+  }
+  while (!race->go)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+
+  g_autoptr (WylEngineSession) session =
+      wyl_engine_session_acquire (race->handle);
+  race->results[thread->index] = session != NULL ?
+      wyl_engine_session_finish_external_publication (session, race->store,
+      race->generation, WYL_DURABLE_COMMIT_COMMITTED,
+      verify_external_scope_publication, &race->verifiers[thread->index]) :
+      WYRELOG_E_INTERNAL;
+  return NULL;
+}
+
+static gint
+check_concurrent_retained_session_state_verification (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 911;
+  ConcurrentRetainedVerification race = {
+    .handle = handle,
+    .store = wyl_handle_get_policy_store (handle),
+    .results = {WYRELOG_E_INTERNAL, WYRELOG_E_INTERNAL},
+    .verifiers = {
+          {.scope = WYL_TENANT_DEFAULT,.state = "active"},
+          {.scope = WYL_TENANT_DEFAULT,.state = "active"},
+        },
+  };
+  if (wyl_handle_policy_store_capture_generation (handle, race.store,
+          &race.generation) != WYRELOG_E_OK)
+    return 912;
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  ConcurrentRetainedVerificationThread threads[] = {
+    {.race = &race,.index = 0},
+    {.race = &race,.index = 1},
+  };
+  GThread *first = g_thread_new ("retained-verify-1",
+      run_concurrent_retained_verification, &threads[0]);
+  GThread *second = g_thread_new ("retained-verify-2",
+      run_concurrent_retained_verification, &threads[1]);
+  g_thread_join (first);
+  g_thread_join (second);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  if (race.results[0] != WYRELOG_E_OK
+      || race.results[1] != WYRELOG_E_OK
+      || race.verifiers[0].calls != 1 || race.verifiers[1].calls != 1
+      || !wyl_handle_engine_pair_is_ready (handle)
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 913;
   return 0;
 }
 #endif
@@ -6429,6 +6921,8 @@ typedef struct
 {
   gboolean fail;
   guint calls;
+  const gchar *scope;
+  const gchar *state;
 } EnginePairVerify;
 
 static wyrelog_error_t
@@ -6439,9 +6933,18 @@ verify_reconciled_engine_pair (WylHandle *handle, gpointer data)
   if (verify->fail)
     return WYRELOG_E_POLICY;
 
-  gint64 symbol_id = 0;
-  return wyl_handle_intern_engine_symbol (handle, "reconciled-engine-pair",
-      &symbol_id);
+  gint64 scope = 0;
+  gint64 state = 0;
+  gint64 accepted = 0;
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, verify->scope,
+      &scope);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_intern_engine_symbol (handle, verify->state, &state);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_owned_get_accepted_session_state
+        (wyl_handle_get_read_engine (handle), "session_state", scope,
+        &accepted);
+  return rc == WYRELOG_E_OK && accepted != state ? WYRELOG_E_POLICY : rc;
 }
 
 static gint
@@ -6521,6 +7024,8 @@ check_poisoned_pair_requires_verified_reconciliation (void)
 
   EnginePairVerify verify = {
     .fail = TRUE,
+    .scope = WYL_TENANT_DEFAULT,
+    .state = "active",
   };
   if (wyl_handle_reconcile_committed_engine_pair (handle,
           verify_reconciled_engine_pair, &verify) != WYRELOG_E_POLICY
@@ -6552,8 +7057,14 @@ check_poisoned_pair_requires_verified_reconciliation (void)
 }
 
 int
-main (void)
+main (int argc, char **argv)
 {
+  const gchar *crash_policy = g_getenv ("WYL_COMMITTED_CRASH_POLICY");
+  const gchar *crash_marker = g_getenv ("WYL_COMMITTED_CRASH_MARKER");
+  if (crash_policy != NULL || crash_marker != NULL)
+    return crash_policy != NULL && crash_marker != NULL ?
+        run_committed_crash_child (crash_policy, crash_marker) : 921;
+  test_program_path = argc > 0 ? argv[0] : NULL;
   gint rc;
 
   if ((rc = check_tenant_registry_projects_effective_scope_state ()) != 0)
@@ -6728,6 +7239,15 @@ main (void)
   if ((rc = check_postcommit_not_found_is_internal ()) != 0)
     return rc;
   if ((rc = check_retained_external_publication_outcomes ()) != 0)
+    return rc;
+  if ((rc = check_session_state_accepted_input_witness ()) != 0)
+    return rc;
+  if ((rc = check_session_state_witness_survives_durable_restart ()) != 0)
+    return rc;
+  if ((rc = check_committed_unpublished_process_kill_recovers_on_restart ())
+      != 0)
+    return rc;
+  if ((rc = check_concurrent_retained_session_state_verification ()) != 0)
     return rc;
 #endif
   if ((rc =

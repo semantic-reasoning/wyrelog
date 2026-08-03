@@ -87,6 +87,8 @@ struct _WylHandle
   gpointer engine_snapshot_checkpoint_data;
   void (*audit_replay_checkpoint) (gpointer data);
   gpointer audit_replay_checkpoint_data;
+  void (*committed_publication_checkpoint) (gpointer data);
+  gpointer committed_publication_checkpoint_data;
   WylEnginePartialFault engine_partial_fault_once;
   WylEngineReplacementFault engine_replacement_fault_once;
 #endif
@@ -443,6 +445,25 @@ wyl_engine_verification_contains (WylEngineVerification *verification,
 }
 
 wyrelog_error_t
+    wyl_engine_verification_get_accepted_session_state
+    (WylEngineVerification * verification, gint64 scope, gint64 * out_state) {
+  if (out_state != NULL)
+    *out_state = 0;
+  if (verification == NULL || !verification->active || out_state == NULL)
+    return WYRELOG_E_INVALID;
+  WylEngineSession *session = verification->session;
+  if (!engine_session_is_valid (session) || session->acquisition_depth != 1
+      || session->handle->engine_session_depth != 1
+      || session->handle->engine_pair_poisoned
+      || session->handle->read_engine != verification->read_engine
+      || session->handle->delta_engine != verification->delta_engine
+      || session->handle->engine_symbols_by_id != verification->symbols)
+    return WYRELOG_E_INVALID;
+  return wyl_engine_owned_get_accepted_session_state
+      (verification->read_engine, "session_state", scope, out_state);
+}
+
+wyrelog_error_t
 wyl_engine_verification_enqueue_delta (WylEngineVerification *verification,
     const gchar *relation, const gint64 *row, gsize ncols, WylDeltaKind kind)
 {
@@ -730,6 +751,15 @@ wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle *self,
   g_return_if_fail (WYL_IS_HANDLE (self));
   self->audit_replay_checkpoint = checkpoint;
   self->audit_replay_checkpoint_data = data;
+}
+
+void
+wyl_handle_set_committed_publication_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->committed_publication_checkpoint = checkpoint;
+  self->committed_publication_checkpoint_data = data;
 }
 
 gboolean
@@ -3379,6 +3409,14 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     poison_engine_pair_locked (self);
     goto out;
   }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (self->committed_publication_checkpoint != NULL) {
+    void (*checkpoint) (gpointer data) = self->committed_publication_checkpoint;
+    gpointer checkpoint_data = self->committed_publication_checkpoint_data;
+    self->committed_publication_checkpoint = NULL;
+    checkpoint (checkpoint_data);
+  }
+#endif
   rc = wyl_handle_policy_store_validate_generation (self, store, generation);
   if (rc != WYRELOG_E_OK) {
     poison_engine_pair_locked (self);

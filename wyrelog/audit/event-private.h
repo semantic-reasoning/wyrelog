@@ -23,4 +23,10 @@ wyrelog_error_t wyl_audit_event_new_from_fields (const gchar * id,
 wyrelog_error_t wyl_audit_mirror_event (WylHandle * handle,
     const WylAuditEvent * event);
 
+/* Best-effort completion for an event whose authoritative SQLite row and
+ * intention have already committed. Mirror failures are recorded on the
+ * intention and never invalidate the authoritative publication. */
+void wyl_audit_complete_authoritative_event (WylHandle * handle,
+    const WylAuditEvent * event);
+
 G_END_DECLS;
