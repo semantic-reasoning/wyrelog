@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Packaged, encrypted, end-to-end runtime proof for the service-credential
-# lifecycle (issue #382, Unit 1a -- the runtime de-risk). Drives the PACKAGED
-# production daemon and the wyctl client through the load-bearing deny->allow
-# transition, exercising the merged #729/#740/#744 authorization seams against a
-# real encrypted policy store, a real audit sink, and a real fact root.
+# lifecycle authorization MATRIX (issue #382, Units 1a + 1b). Drives the
+# PACKAGED production daemon and the wyctl client through the load-bearing
+# deny->allow transition AND the live revocation / cross-tenant isolation edges,
+# exercising the merged #729/#740/#744/#762 authorization seams against a real
+# encrypted policy store, a real audit sink, and a real fact root.
 #
-# Flow (happy path only; revoke/disable/seal/tenant-B/rotation/leak-scan/matrix
-# are later units and are deliberately NOT covered here):
+# Flow:
 #   1. bootstrap the production encrypted daemon;
 #   2. mint a bootstrap skip-MFA admin (admin1) bearer;
 #   3. seed admin2 as wr.system_admin so it can self-enroll;
@@ -27,6 +27,21 @@
 #  12. grant wr.viewer@tenant-a to svc:svc-app (carries the data-plane perm
 #      wr.svc.read_decision; admin2 holds grant authority at tenant-a via #744);
 #  13. /decide ALLOW -- the deny->allow proof.
+#
+# Unit 1b completes the live authorization matrix with the SAME unchanged
+# service token:
+#  14. create tenant-b (a second created tenant, seeded like tenant-a);
+#  15. TENANT ISOLATION: with the tenant-a-scoped token, re-confirm tenant-a
+#      ALLOW, then prove tenant-b is refused. The service token is bound to its
+#      credential's tenant (JWT claim tenant=tenant-a), so a tenant-b decide is
+#      rejected at the daemon's tenant gate with HTTP 403 tenant_denied -- a
+#      STRONGER isolation than a policy-level deny: the tenant-a token cannot
+#      even be presented for tenant-b. (assert-decide is reserved for genuine
+#      200+decision outcomes; the 403 gate is asserted with assert-http-status.)
+#  16. LIVE ROLE REVOKE: revoke wr.viewer@tenant-a from svc:svc-app;
+#  17. /decide DENY at tenant-a with the SAME unchanged token -- the allow->deny
+#      transition with no token change. Because revoke removes has_permission,
+#      the #762 decide-time arming of approved data-plane perms does not fire.
 #
 # NOTE ON SCOPES: the service principal svc:svc-app is a __wr_default identity
 # (service principals always live in __wr_default), yet the role grant and both
@@ -262,8 +277,55 @@ chmod 600 "$SVC_TOKEN"
   || fail "post-grant /decide was not an ALLOW (deny->allow transition broke)" \
     "$TMPDIR/decide-allow.out" "$TMPDIR/decide-allow.err" "$LOG.err"
 
-echo "check-service-credential-lifecycle-e2e: deny->allow proof"
-echo "  DENY : $(cat "$TMPDIR/decide-deny.out")"
-echo "  ALLOW: $(cat "$TMPDIR/decide-allow.out")"
+# --- 14. create tenant-b (a second created tenant, seeded like tenant-a). -----
+"$PY" "$SC_E2E_PY" http-post --base-url "$URL" \
+  --path /tenants/create --token-file "$ADMIN2_TOKEN" \
+  --query name=tenant-b --query tenant=__wr_default \
+  --query "guard_timestamp=$(now_us)" --query guard_loc_class=trusted \
+  --query guard_risk=10 \
+  >"$TMPDIR/tenant-b-create.out" 2>"$TMPDIR/tenant-b-create.err" \
+  || fail "creating tenant-b failed" "$TMPDIR/tenant-b-create.out" "$LOG.err"
+
+# --- 15. TENANT ISOLATION with the SAME tenant-a-scoped token. ----------------
+# Re-confirm tenant-a still ALLOWs (the grant is live), then prove the token is
+# refused for tenant-b. A tenant-a-bound service token cannot be presented for
+# tenant-b: the daemon's tenant gate rejects it with 403 tenant_denied BEFORE
+# any policy evaluation -- stronger isolation than a policy deny.
+"$PY" "$SC_E2E_PY" assert-decide --base-url "$URL" --token-file "$SVC_TOKEN" \
+  --user svc:svc-app --perm wr.svc.read_decision --tenant tenant-a \
+  --expect allow >"$TMPDIR/iso-a.out" 2>"$TMPDIR/iso-a.err" \
+  || fail "tenant-a ALLOW regressed before isolation check" \
+    "$TMPDIR/iso-a.out" "$TMPDIR/iso-a.err" "$LOG.err"
+
+"$PY" "$SC_E2E_PY" assert-http-status --base-url "$URL" \
+  --path /decide --token-file "$SVC_TOKEN" \
+  --query user=svc:svc-app --query perm=wr.svc.read_decision \
+  --query tenant=tenant-b --query session_token=tenant-b \
+  --expect-status 403 --expect-error tenant_denied \
+  >"$TMPDIR/iso-b.out" 2>"$TMPDIR/iso-b.err" \
+  || fail "tenant-b was NOT isolated (expected 403 tenant_denied)" \
+    "$TMPDIR/iso-b.out" "$TMPDIR/iso-b.err" "$LOG.err"
+
+# --- 16. LIVE ROLE REVOKE: revoke wr.viewer@tenant-a from svc:svc-app. --------
+"$PY" "$SC_E2E_PY" http-post --base-url "$URL" \
+  --path /policy/roles/revoke --token-file "$ADMIN2_TOKEN" \
+  --query subject=svc:svc-app --query role=wr.viewer \
+  --query scope=tenant-a --query "guard_timestamp=$(now_us)" \
+  --query guard_loc_class=trusted --query guard_risk=10 \
+  >"$TMPDIR/revoke.out" 2>"$TMPDIR/revoke.err" \
+  || fail "revoking wr.viewer@tenant-a failed" "$TMPDIR/revoke.out" "$LOG.err"
+
+# --- 17. /decide DENY with the SAME unchanged token -- the allow->deny proof. -
+"$PY" "$SC_E2E_PY" assert-decide --base-url "$URL" --token-file "$SVC_TOKEN" \
+  --user svc:svc-app --perm wr.svc.read_decision --tenant tenant-a \
+  --expect deny >"$TMPDIR/decide-revoked.out" 2>"$TMPDIR/decide-revoked.err" \
+  || fail "post-revoke /decide was not a DENY (allow->deny transition broke)" \
+    "$TMPDIR/decide-revoked.out" "$TMPDIR/decide-revoked.err" "$LOG.err"
+
+echo "check-service-credential-lifecycle-e2e: authorization matrix"
+echo "  DENY (zero-role) : $(cat "$TMPDIR/decide-deny.out")"
+echo "  ALLOW (granted)  : $(cat "$TMPDIR/decide-allow.out")"
+echo "  ISOLATION (t-b)  : $(cat "$TMPDIR/iso-b.out")"
+echo "  DENY (revoked)   : $(cat "$TMPDIR/decide-revoked.out")"
 echo "check-service-credential-lifecycle-e2e: PASS"
 exit 0
