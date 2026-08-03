@@ -449,6 +449,17 @@ typedef enum
   WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_RANK_AFTER_POP,
   WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY,
 } WylDaemonPolicyWriteFinalizeFault;
+typedef enum
+{
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE = 1u << 0,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_TRANSACTION = 1u << 1,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_STORAGE = 1u << 2,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_LOCK = 1u << 3,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE = 1u << 4,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE = 1u << 5,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT = 1u << 6,
+  WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY = 1u << 7,
+} WylDaemonPolicyWriteObservedResource;
 typedef struct
 {
   guint diagnostic_count;
@@ -465,6 +476,7 @@ typedef struct
   guint post_finalize_total_pins;
   guint post_finalize_thread_pins;
   guint post_finalize_rank_mask;
+  guint observed_cleanup_resources;
   guint owner;
   gchar owner_name[32];
 } WylDaemonPolicyWriteFinalizeSnapshot;

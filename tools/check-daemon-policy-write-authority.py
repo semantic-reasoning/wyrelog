@@ -12,6 +12,7 @@ FUNCTIONS = (
     "wyl_daemon_policy_write_owner_name",
     "wyl_daemon_policy_write_finalize",
     "wyl_daemon_policy_write_record_primary",
+    "wyl_daemon_policy_write_observe_cleanup_resource",
     "wyl_daemon_policy_write_finish",
     "wyl_daemon_policy_write_finish_result",
     "wyl_daemon_policy_write_acquire",

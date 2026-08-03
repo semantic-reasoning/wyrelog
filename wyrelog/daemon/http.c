@@ -504,6 +504,18 @@ typedef enum
       WYL_DAEMON_POLICY_WRITE_OWNER_COUNT,
 } WylDaemonPolicyWriteOwner;
 
+enum
+{
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE = 1u << 0,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_TRANSACTION = 1u << 1,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_OPERATION_STORAGE = 1u << 2,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_OPERATION_LOCK = 1u << 3,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE = 1u << 4,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_MAINTENANCE = 1u << 5,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_CONTEXT = 1u << 6,
+  WYL_DAEMON_POLICY_WRITE_OBSERVED_REGISTRY = 1u << 7,
+};
+
 typedef struct
 {
   WylServiceAuthWriteLease *lease;
@@ -517,6 +529,7 @@ typedef struct
   WylDaemonPolicyWriteOwner owner;
 #ifdef WYL_TEST_DAEMON_HTTP
   WylDaemonHttpContext *test_ctx;       /* borrowed with the daemon context */
+  guint observed_cleanup_resources;
 #endif
 } WylDaemonPolicyWrite;
 
@@ -617,6 +630,19 @@ wyl_daemon_policy_write_record_primary (WylDaemonPolicyWrite *write,
   return primary_rc;
 }
 
+static void
+wyl_daemon_policy_write_observe_cleanup_resource (WylDaemonPolicyWrite *write,
+    guint resources)
+{
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (write != NULL)
+    write->observed_cleanup_resources |= resources;
+#else
+  (void) write;
+  (void) resources;
+#endif
+}
+
 static wyrelog_error_t
 wyl_daemon_policy_write_finish (WylDaemonPolicyWrite *write,
     wyrelog_error_t primary_rc)
@@ -674,6 +700,7 @@ policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
     .post_finalize_store_live = write->store != NULL,
     .post_finalize_total_pins = G_MAXUINT,
     .post_finalize_thread_pins = G_MAXUINT,
+    .observed_cleanup_resources = write->observed_cleanup_resources,
     .owner = write->owner,
   };
   g_strlcpy (snapshot.primary_code, "non_http", sizeof snapshot.primary_code);
@@ -1348,6 +1375,10 @@ wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
   rc = service_publication_context_lock (ctx);
   if (rc != WYRELOG_E_OK)
     goto out;
+  wyl_daemon_policy_write_observe_cleanup_resource (&write,
+      WYL_DAEMON_POLICY_WRITE_OBSERVED_MAINTENANCE
+      | WYL_DAEMON_POLICY_WRITE_OBSERVED_CONTEXT
+      | WYL_DAEMON_POLICY_WRITE_OBSERVED_REGISTRY);
 #ifdef WYL_HAS_AUDIT
   if (ctx->service_exchange_limiter != NULL)
     rc = wyl_service_exchange_limiter_reseed (ctx->service_exchange_limiter,
@@ -5309,6 +5340,7 @@ policy_write_record_finalize_snapshot (WylDaemonPolicyWrite *write,
     .post_finalize_store_live = write->store != NULL,
     .post_finalize_total_pins = G_MAXUINT,
     .post_finalize_thread_pins = G_MAXUINT,
+    .observed_cleanup_resources = write->observed_cleanup_resources,
     .owner = write->owner,
   };
   g_strlcpy (snapshot.primary_code,
@@ -9555,6 +9587,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     };
     g_autoptr (wyl_fact_store_t) fact_store = NULL;
     rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
+    if (rc == WYRELOG_E_OK)
+      wyl_daemon_policy_write_observe_cleanup_resource (&write,
+          WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
     gsize rows_purged = 0;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_create_schema (fact_store);
@@ -9715,6 +9750,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
 
   g_autoptr (wyl_fact_store_t) fact_store = NULL;
   rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
+  if (rc == WYRELOG_E_OK)
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_create_schema (fact_store);
   gboolean inserted = FALSE;
@@ -9906,6 +9944,9 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_revoke_req_set_request_id (req, ensure_request_id_header (msg));
     rc = wyl_perm_revoke (ctx->handle, req);
   }
+  if (rc == WYRELOG_E_OK)
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
   if (rc != WYRELOG_E_OK) {
     set_policy_mutation_error (msg, rc);
     return;
@@ -9990,6 +10031,9 @@ policy_permission_transition_handler (SoupServer *server,
 
   rc = wyl_handle_apply_permission_state_transition
       (ctx->handle, subject, perm, scope, event, audit_event, NULL);
+  if (rc == WYRELOG_E_OK)
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
   if (rc != WYRELOG_E_OK) {
     set_policy_transition_error (msg, rc);
     return;
@@ -10056,6 +10100,9 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_role_revoke_req_set_request_id (req, ensure_request_id_header (msg));
     rc = wyl_role_revoke (ctx->handle, req);
   }
+  if (rc == WYRELOG_E_OK)
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
   if (rc != WYRELOG_E_OK) {
     set_policy_mutation_error (msg, rc);
     return;
@@ -10766,6 +10813,8 @@ service_credential_operation_reconcile_execute (SoupServer *server,
         : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
     return FALSE;
   }
+  wyl_daemon_policy_write_observe_cleanup_resource (&write,
+      WYL_DAEMON_POLICY_WRITE_OBSERVED_TRANSACTION);
 
   g_autoptr (WylServiceAuthorityCommitEvidence) evidence = NULL;
   rc = wyl_policy_store_service_authority_prepare_commit_evidence (txn,
@@ -11279,6 +11328,8 @@ service_credential_operation_recover_execute (SoupServer *server,
       (ctx->operation_root, &storage);
   if (rc == WYRELOG_E_OK) {
     storage_opened = TRUE;
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_OPERATION_STORAGE);
     rc = wyl_service_credential_operation_storage_capture_anchor (&storage,
         &anchor);
   }
@@ -11308,8 +11359,11 @@ service_credential_operation_recover_execute (SoupServer *server,
   if (rc == WYRELOG_E_OK) {
     rc = wyl_service_credential_operation_coordinator_lock_acquire (&storage,
         &anchor, request_id, &lock);
-    if (rc == WYRELOG_E_OK)
+    if (rc == WYRELOG_E_OK) {
       lock_acquired = TRUE;
+      wyl_daemon_policy_write_observe_cleanup_resource (&write,
+          WYL_DAEMON_POLICY_WRITE_OBSERVED_OPERATION_LOCK);
+    }
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_operation_coordinator_recover (&storage,
@@ -11577,10 +11631,13 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
         wyl_engine_session_acquire (ctx->handle);
     if (engine_session == NULL)
       rc = WYRELOG_E_BUSY;
-    else
+    else {
+      wyl_daemon_policy_write_observe_cleanup_resource (&write,
+          WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
       rc = wyl_engine_session_run_committed_publication (engine_session,
           wyl_mfa_enrollment_mutate, &mutation,
           verify_mfa_enrollment_publication, &mutation, NULL, NULL, NULL);
+    }
     g_clear_pointer (&engine_session, wyl_engine_session_release);
   }
   if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
@@ -12897,6 +12954,8 @@ service_management_authority_arm_handler (SoupServer *server,
       set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
       return;
     }
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
   }
 
   set_json_ok (msg);
