@@ -3443,6 +3443,64 @@ out:
 }
 
 wyrelog_error_t
+wyl_engine_session_repair_committed_publication (WylEngineSession *session,
+    WylServiceAuthWriteLease *write_lease,
+    wyl_policy_store_t *expected_store, guint64 expected_generation,
+    WylEnginePublicationVerifier verify, gpointer verify_data)
+{
+  if (!engine_session_is_valid (session) || write_lease == NULL
+      || expected_store == NULL || verify == NULL)
+    return WYRELOG_E_INVALID;
+  WylHandle *self = session->handle;
+  if (session->acquisition_depth != 1 || self->engine_session_depth != 1
+      || self->engine_delta_callback_depth > 0
+      || !self->engine_pair_poisoned || self->template_dir == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc =
+      wyl_service_auth_write_lease_validate_retained_engine_repair
+      (write_lease, self, expected_store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_policy_store_validate_generation (self, expected_store,
+        expected_generation);
+  if (rc == WYRELOG_E_OK && !wyl_policy_store_is_autocommit (expected_store))
+    rc = WYRELOG_E_BUSY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  rc = replace_engine_pair (self, template_dir);
+  if (rc != WYRELOG_E_OK)
+    goto fail;
+  self->engine_pair_poisoned = FALSE;
+  rc = wyl_handle_policy_store_validate_generation (self, expected_store,
+      expected_generation);
+
+  WylEngineVerification verification = {
+    .session = session,
+    .read_engine = self->read_engine,
+    .delta_engine = self->delta_engine,
+    .symbols = self->engine_symbols_by_id,
+    .active = TRUE,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = verify (&verification, verify_data);
+  if (rc == WYRELOG_E_OK && (self->engine_pair_poisoned
+          || self->read_engine == NULL || self->delta_engine == NULL
+          || self->read_engine != verification.read_engine
+          || self->delta_engine != verification.delta_engine
+          || self->engine_symbols_by_id != verification.symbols))
+    rc = WYRELOG_E_INTERNAL;
+  verification.active = FALSE;
+  if (rc == WYRELOG_E_OK)
+    return WYRELOG_E_OK;
+
+fail:
+  poison_engine_pair_locked (self);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_engine_session_finish_external_publication (WylEngineSession *session,
     wyl_policy_store_t *expected_store, guint64 expected_generation,
     WylDurableCommitState commit_state, WylEnginePublicationVerifier verify,
