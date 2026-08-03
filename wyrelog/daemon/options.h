@@ -45,6 +45,13 @@ typedef struct
   gint listen_port;
   gboolean check_only;
   gboolean production_mode;
+#ifdef WYL_ENABLE_FAULT_INJECTION
+  /* Test-only single-shot fault injection: fail the next service-credential
+   * local publication once (#754).  Present ONLY in enable_fault_injection
+   * builds; release builds omit the field and the flag entirely.  Zero-inits
+   * FALSE so an unarmed daemon is byte-identical to today. */
+  gboolean fault_inject_sc_publication_once;
+#endif
   gboolean show_version;
   gboolean show_template_version;
   gboolean show_template_info;

@@ -638,6 +638,13 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
         "Load policy templates and exit", NULL},
     {"production", 0, 0, G_OPTION_ARG_NONE, &opts->production_mode,
         "Enable production fail-closed startup gates", NULL},
+#ifdef WYL_ENABLE_FAULT_INJECTION
+    {"fault-inject-sc-publication-once", 0, 0, G_OPTION_ARG_NONE,
+          &opts->fault_inject_sc_publication_once,
+          "Fault injection (test only): fail the next service-credential "
+          "local publication once",
+        NULL},
+#endif
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts->show_version,
         "Print version and exit", NULL},
     {"template-version", 0, 0, G_OPTION_ARG_NONE,

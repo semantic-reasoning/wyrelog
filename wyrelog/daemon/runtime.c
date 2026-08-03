@@ -12,6 +12,7 @@
 
 #include "auth/mfa-validator.h"
 #include "auth/service-auth-coordination-private.h"
+#include "auth/service-credential-operation-coordinator-execute-private.h"
 #include "daemon/checks.h"
 #include "daemon/delta.h"
 #include "daemon/http.h"
@@ -405,6 +406,19 @@ open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
    * are reachable without an out-of-band registration table.  The
    * setter is total: it always succeeds. */
   wyl_handle_set_mfa_validator (*out_handle, wyl_mfa_validator_totp, NULL);
+
+#ifdef WYL_ENABLE_FAULT_INJECTION
+  /* #754 test-only single-shot publication fault injection.  This whole block
+   * is compiled in only for enable_fault_injection builds; a release daemon has
+   * neither the flag nor this arming path.  Arm the one-shot seam and warn
+   * loudly. */
+  if (opts->fault_inject_sc_publication_once) {
+    g_printerr ("wyrelogd: WARNING: service-credential publication fault "
+        "injection ARMED; test only, not for production\n");
+    wyl_service_credential_operation_coordinator_arm_publication_fault_once ();
+  }
+#endif /* WYL_ENABLE_FAULT_INJECTION */
+
   return WYRELOG_E_OK;
 }
 
