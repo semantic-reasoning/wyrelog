@@ -552,6 +552,16 @@ def main():
                 "  gint all_owner_fault_rc = "
                 "check_policy_write_all_owner_faults ();\n"
                 "  gint all_owner_fault_rc = 0;", 1),
+            "literal-directive-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "#if 1\n  gint all_owner_fault_rc = 0;\n#else\n"
+                "  const gchar *directive_spoof = \"\\\n"
+                "#endif\\\n#endif\\\n\";\n"
+                "#ifdef WYL_HAS_FACT_STORE\n"
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();\n"
+                "#endif\n#endif", 1),
         }
         for name, text in matrix_fixtures.items():
             if text == test_source:
