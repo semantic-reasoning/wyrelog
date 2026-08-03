@@ -504,6 +504,18 @@ typedef enum
       WYL_DAEMON_POLICY_WRITE_OWNER_COUNT,
 } WylDaemonPolicyWriteOwner;
 
+#ifdef WYL_HAS_FACT_STORE
+enum
+{
+  WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE = 1,
+};
+#else
+enum
+{
+  WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE = 0,
+};
+#endif
+
 enum
 {
   WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE = 1u << 0,
