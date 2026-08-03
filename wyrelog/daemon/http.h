@@ -449,6 +449,25 @@ typedef enum
   WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_RANK_AFTER_POP,
   WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY,
 } WylDaemonPolicyWriteFinalizeFault;
+typedef struct
+{
+  guint diagnostic_count;
+  guint primary_status;
+  gchar primary_code[64];
+  wyrelog_error_t primary_rc;
+  gboolean primary_rc_recorded;
+  wyrelog_error_t cleanup_rc;
+  guint pre_finalize_status;
+  guint pre_finalize_header_count;
+  gsize pre_finalize_body_length;
+  gboolean post_finalize_lease_live;
+  gboolean post_finalize_store_live;
+  guint post_finalize_total_pins;
+  guint post_finalize_thread_pins;
+  guint post_finalize_rank_mask;
+  guint owner;
+  gchar owner_name[32];
+} WylDaemonPolicyWriteFinalizeSnapshot;
 /* Runs a representative daemon policy mutation while holding its WRITE lease. */
 wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
     WylDaemonPolicyWriteCheckpoint checkpoint, gpointer data);
@@ -456,6 +475,8 @@ void wyl_daemon_http_fail_next_policy_write_finalize_for_test
     (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
     (SoupServer * server);
+gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test
+    (SoupServer * server, WylDaemonPolicyWriteFinalizeSnapshot * out_snapshot);
 /*
  * Test seam: drive the tenant-gate cross-check between the tenant
  * declared by the request (request_tenant, may be NULL meaning "no

@@ -114,20 +114,31 @@ def mutate_function(source, name, old, new):
     pos = source.index(old, start)
     return source[:pos] + source[pos:].replace(old, new, 1)
 
+def acquire_statement(source, name, ordinal=0):
+    start = source.index(name + " (")
+    pos = start
+    for _ in range(ordinal + 1):
+        pos = source.index("wyl_daemon_policy_write_acquire (", pos)
+        if _ != ordinal:
+            pos += 1
+    end = source.index(";", pos) + 1
+    return source[pos:end]
+
 def nested_write_scope(source):
+    acquire = acquire_statement(source, "tenant_mutation_handler")
     changed = mutate_function(source, "tenant_mutation_handler",
         "g_auto (WylDaemonPolicyWrite) write = { 0 };",
         "{ g_auto (WylDaemonPolicyWrite) write = { 0 };")
     return mutate_function(changed, "tenant_mutation_handler",
-        "rc = wyl_daemon_policy_write_acquire (ctx, msg, &write);",
-        "rc = wyl_daemon_policy_write_acquire (ctx, msg, &write); }")
+        acquire, acquire + " }")
 
 def move_append_acquire_to_forget(source):
     start = source.index("facts_route_handler (")
     first = source.index("g_auto (WylDaemonPolicyWrite) write", start)
     second = source.index("g_auto (WylDaemonPolicyWrite) write", first + 1)
-    acquire = source.index("wyl_daemon_policy_write_acquire (ctx, msg, &write);", second)
-    acquire_end = acquire + len("wyl_daemon_policy_write_acquire (ctx, msg, &write);")
+    statement = acquire_statement(source, "facts_route_handler", 1)
+    acquire = source.index(statement, second)
+    acquire_end = acquire + len(statement)
     chunk = source[second:acquire_end]
     changed = source[:second] + "wyrelog_error_t rc = WYRELOG_E_OK;" + source[acquire_end:]
     insert = changed.index("wyl_fact_store_forget (", start)
@@ -152,6 +163,11 @@ def main():
     invoke.real_build_root = Path(ns.build_root).resolve()
     invoke.real_compiler_id = ns.compiler_id
     source = (Path(ns.root) / "wyrelog/daemon/http.c").read_text(encoding="utf-8")
+    tenant_acquire = acquire_statement(source, "tenant_mutation_handler")
+    facts_publication_acquire = acquire_statement(source,
+        "facts_route_handler", 1)
+    test_configure_acquire = acquire_statement(source,
+        "wyl_daemon_http_configure_tenant_for_test")
     if invoke(ns.guard, ns.root, ns.compiler_id, compiler, ns.define,
               build_root=ns.build_root).returncode:
         raise SystemExit("production fixture rejected")
@@ -172,9 +188,10 @@ def main():
         "wrong-lock": source + "\ng_mutex_lock (&other->lock);\n",
         "missing-handler": source.replace("tenant_mutation_handler (", "tenant_mutation_removed (", 1),
         "duplicate-acquire": mutate_function(source, "tenant_mutation_handler",
-            "wyl_daemon_policy_write_acquire (ctx, msg, &write);",
-            "wyl_daemon_policy_write_acquire (ctx, msg, &write);\n"
-            "  wyl_daemon_policy_write_acquire (ctx, msg, &write);"),
+            tenant_acquire, tenant_acquire + "\n  " + tenant_acquire),
+        "duplicate-owner-id": mutate_function(source, "graph_create_handler",
+            "WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE",
+            "WYL_DAEMON_POLICY_WRITE_OWNER_TENANT"),
         "recover-acquire-removed": mutate_function(source,
             "service_credential_operation_recover_execute",
             "wyl_daemon_policy_write_acquire", "recover_acquire_removed"),
@@ -190,13 +207,12 @@ def main():
             "wyl_daemon_http_context_rotate_access_token_key",
             "wyl_daemon_policy_write_acquire", "rotation_key_acquire_removed"),
         "inactive-acquire": mutate_function(source, "tenant_mutation_handler",
-            "wyl_daemon_policy_write_acquire (ctx, msg, &write);",
-            "#if 0\n  wyl_daemon_policy_write_acquire (ctx, msg, &write);\n#endif"),
+            tenant_acquire, "#if 0\n  " + tenant_acquire + "\n#endif"),
         "mutation-before-acquire": mutate_function(source, "tenant_mutation_handler",
-            "rc = wyl_daemon_policy_write_acquire (ctx, msg, &write);",
+            "rc = " + tenant_acquire,
             "rc = wyl_policy_store_create_tenant "
             "(write.store, tenant, NULL);\n"
-            "  rc = wyl_daemon_policy_write_acquire (ctx, msg, &write);"),
+            "  rc = " + tenant_acquire),
         "manual-clear": source.replace(
             "set_tenant_mutation_json (msg, ctx, tenant, changed,",
             "wyl_daemon_policy_write_clear (&write);\n"
@@ -204,7 +220,7 @@ def main():
         "implicit-auto-only": mutate_function(source,
             "wyl_daemon_http_context_rotate_access_token_key",
             "  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)\n"
-            "    rc = wyl_daemon_policy_write_finish (&write, rc);\n", ""),
+            "    rc = wyl_daemon_policy_write_finish_result (&write, rc);\n", ""),
         "error-response-before-finalize": mutate_function(source,
             "set_json_error",
             "wyrelog_error_t cleanup_rc = "
@@ -213,19 +229,21 @@ def main():
             "wyl_daemon_policy_write_finalize_for_response"),
         "store-use-after-finalize": mutate_function(source,
             "tenant_mutation_handler",
-            "rc = wyl_daemon_policy_write_finish (&write, rc);",
-            "rc = wyl_daemon_policy_write_finish (&write, rc);\n"
+            "rc = wyl_daemon_policy_write_record_primary (&write, rc);",
+            "rc = wyl_daemon_policy_write_record_primary (&write, rc);\n"
+            "      (void) wyl_daemon_policy_write_finalize (&write);\n"
             "      (void) wyl_policy_store_set_tenant_sealed "
             "(write.store, tenant, FALSE);"),
         "finalize-before-engine-close": mutate_function(source,
             "mfa_enroll_confirm_handler",
             "    g_clear_pointer (&engine_session, wyl_engine_session_release);\n"
             "  }\n  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)\n"
-            "    rc = wyl_daemon_policy_write_finish (&write, rc);",
+            "    rc = wyl_daemon_policy_write_record_primary (&write, rc);",
             "    if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)\n"
-            "      rc = wyl_daemon_policy_write_finish (&write, rc);\n"
+            "      (void) wyl_daemon_policy_write_finalize (&write);\n"
             "    g_clear_pointer (&engine_session, wyl_engine_session_release);\n"
-            "  }"),
+            "  }\n  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)\n"
+            "    rc = wyl_daemon_policy_write_record_primary (&write, rc);"),
         "raw-store-getter": source.replace(
             "wyl_policy_store_create_tenant (write.store, tenant, &changed)",
             "wyl_policy_store_create_tenant "
@@ -234,8 +252,8 @@ def main():
             "tenant_mutation_handler", "if (g_strcmp0 (action",
             "if (g_strcmp0_disabled (action"),
         "facts-one-branch": mutate_function(source, "facts_route_handler",
-            "wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg, &write);",
-            "wyrelog_error_t rc = WYRELOG_E_OK;"),
+            facts_publication_acquire,
+            "wyl_daemon_policy_write_acquire_removed (ctx, msg, &write);"),
         "outside-mutator": source + "\nvoid bad(void){ wyl_perm_grant (NULL, NULL); }\n",
         "outside-generic-publication": source +
             "\nvoid bad(void){ wyl_engine_session_run_committed_publication "
@@ -319,9 +337,8 @@ def main():
             "#ifdef WYL_TEST_DAEMON_HTTP", "#if 1", 1),
         "test-tenant-seam-duplicate-acquire": mutate_function(source,
             "wyl_daemon_http_configure_tenant_for_test",
-            "wyl_daemon_policy_write_acquire (ctx, NULL, &write);",
-            "wyl_daemon_policy_write_acquire (ctx, NULL, &write);\n"
-            "  wyl_daemon_policy_write_acquire (ctx, NULL, &write);"),
+            test_configure_acquire,
+            test_configure_acquire + "\n  " + test_configure_acquire),
         "test-tenant-seam-missing-create": mutate_function(source,
             "wyl_daemon_http_configure_tenant_for_test",
             "wyl_policy_store_create_tenant", "tenant_create_removed"),
