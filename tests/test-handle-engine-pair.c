@@ -5516,6 +5516,245 @@ check_policy_store_session_states_autoload_on_open (void)
   return 0;
 }
 
+typedef struct
+{
+  const gchar *session_id;
+  const gchar *state;
+  guint matches;
+} EffectiveScopeDurableSessionExpect;
+
+static wyrelog_error_t
+effective_scope_durable_session_cb (const gchar *session_id,
+    const gchar *state, gpointer user_data)
+{
+  EffectiveScopeDurableSessionExpect *expect = user_data;
+  if (g_strcmp0 (session_id, expect->session_id) == 0
+      && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  const gchar *scope;
+  const gchar *state;
+  guint matches;
+} EffectiveScopeProjectionRow;
+
+typedef struct
+{
+  EffectiveScopeProjectionRow *rows;
+  gsize n_rows;
+  guint total;
+} EffectiveScopeProjectionExpect;
+
+static wyrelog_error_t
+effective_scope_projection_cb (const gchar *scope, const gchar *state,
+    gpointer user_data)
+{
+  EffectiveScopeProjectionExpect *expect = user_data;
+  expect->total++;
+  for (gsize i = 0; i < expect->n_rows; i++) {
+    if (g_strcmp0 (scope, expect->rows[i].scope) == 0
+        && g_strcmp0 (state, expect->rows[i].state) == 0)
+      expect->rows[i].matches++;
+  }
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_tenant_registry_projects_effective_scope_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 860;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean created = FALSE;
+  if (wyl_policy_store_create_tenant (store, "tenant-projection-active",
+          &created) != WYRELOG_E_OK || !created)
+    return 861;
+  if (wyl_policy_store_create_tenant (store, "tenant-projection-closed",
+          &created) != WYRELOG_E_OK || !created
+      || wyl_policy_store_set_tenant_sealed (store,
+          "tenant-projection-closed", TRUE) != WYRELOG_E_OK)
+    return 862;
+  if (wyl_policy_store_create_tenant (store, "svc:tenant-projection",
+          &created) != WYRELOG_E_OK || !created)
+    return 863;
+  if (wyl_policy_store_create_tenant (store, "tenant-session-collision",
+          &created) != WYRELOG_E_OK || !created
+      || wyl_policy_store_set_tenant_sealed (store,
+          "tenant-session-collision", TRUE) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store,
+          "tenant-session-collision", "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store,
+          "ordinary-human-session", "active") != WYRELOG_E_OK)
+    return 864;
+  if (wyl_policy_store_set_principal_state (store, "tenant-projection-user",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_upsert_permission (store,
+          "site.tenant-projection.read", "tenant projection read",
+          "basic") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+          "tenant-projection-user", "site.tenant-projection.read",
+          "tenant-projection-active") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+          "tenant-projection-user", "site.tenant-projection.read",
+          "tenant-projection-active", "armed") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+          "tenant-projection-user", "site.tenant-projection.read",
+          "tenant-session-collision") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+          "tenant-projection-user", "site.tenant-projection.read",
+          "tenant-session-collision", "armed") != WYRELOG_E_OK)
+    return 865;
+  gint64 event_id = -1;
+  if (wyl_policy_store_append_session_event (store,
+          "tenant-session-collision", "logout", "active", "closed",
+          &event_id) != WYRELOG_E_OK)
+    return 866;
+
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 867;
+
+  EffectiveScopeProjectionRow rows[] = {
+    {"tenant-projection-active", "active", 0},
+    {"tenant-projection-active", "closed", 0},
+    {"tenant-projection-closed", "closed", 0},
+    {"tenant-projection-closed", "active", 0},
+    {"svc:tenant-projection", "active", 0},
+    {"tenant-session-collision", "closed", 0},
+    {"tenant-session-collision", "active", 0},
+    {"ordinary-human-session", "active", 0},
+  };
+  EffectiveScopeProjectionExpect projection = {
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  if (wyl_policy_store_foreach_effective_scope_state (store,
+          effective_scope_projection_cb, &projection) != WYRELOG_E_OK)
+    return 868;
+  const guint expected[] = { 1, 0, 1, 0, 1, 1, 0, 1 };
+  for (guint i = 0; i < G_N_ELEMENTS (rows); i++) {
+    if (rows[i].matches != expected[i])
+      return 869 + (gint) i;
+  }
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (decide, "tenant-projection-user");
+  wyl_decide_req_set_action (decide, "site.tenant-projection.read");
+  wyl_decide_req_set_resource_id (decide, "tenant-projection-active");
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 877;
+  wyl_decide_req_set_resource_id (decide, "tenant-session-collision");
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 878;
+
+  EffectiveScopeDurableSessionExpect durable = {
+    .session_id = "tenant-session-collision",
+    .state = "active",
+  };
+  if (wyl_policy_store_foreach_session_state (store,
+          effective_scope_durable_session_cb, &durable) != WYRELOG_E_OK
+      || durable.matches != 1)
+    return 879;
+  gint64 fired_row[5];
+  if (intern_event5 (handle, event_id, "tenant-session-collision", "active",
+          "logout", "closed", fired_row) != WYRELOG_E_OK)
+    return 880;
+  RelationSnapshotExpect event_expect = {
+    .expected_relation = "session_fired",
+    .expected_row = fired_row,
+    .ncols = G_N_ELEMENTS (fired_row),
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "session_fired", relation_snapshot_expect_cb,
+          &event_expect) != WYRELOG_E_OK || event_expect.seen != 1)
+    return 881;
+  return 0;
+}
+
+static gint
+check_scope_projection_requires_compatible_engine_relation (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL || !write_compound_templates (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 882;
+  }
+
+  g_autoptr (WylHandle) tenant_handle = NULL;
+  gboolean created = FALSE;
+  if (wyl_init (NULL, &tenant_handle) != WYRELOG_E_OK
+      || wyl_policy_store_create_tenant
+      (wyl_handle_get_policy_store (tenant_handle), "nondefault-tenant",
+          &created) != WYRELOG_E_OK || !created
+      || wyl_handle_open_engine_pair (tenant_handle, tmpdir)
+      != WYRELOG_E_POLICY) {
+    rmdir_recursive (tmpdir);
+    return 883;
+  }
+
+  g_autoptr (WylHandle) human_handle = NULL;
+  if (wyl_init (NULL, &human_handle) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state
+      (wyl_handle_get_policy_store (human_handle), "human-session", "active")
+      != WYRELOG_E_OK || wyl_handle_open_engine_pair (human_handle, tmpdir)
+      != WYRELOG_E_POLICY) {
+    rmdir_recursive (tmpdir);
+    return 884;
+  }
+
+  g_autoptr (WylHandle) collision_handle = NULL;
+  if (wyl_init (NULL, &collision_handle) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state
+      (wyl_handle_get_policy_store (collision_handle), "__wr_default",
+          "active") != WYRELOG_E_OK
+      || wyl_handle_open_engine_pair (collision_handle, tmpdir)
+      != WYRELOG_E_POLICY) {
+    rmdir_recursive (tmpdir);
+    return 885;
+  }
+
+  if (!write_file_in_dir (tmpdir, "lobac/decision.dl",
+          ".decl session_state(scope: symbol, state: int64)\n")) {
+    rmdir_recursive (tmpdir);
+    return 886;
+  }
+  g_autoptr (WylHandle) incompatible_handle = NULL;
+  if (wyl_init (NULL, &incompatible_handle) != WYRELOG_E_OK
+      || wyl_handle_open_engine_pair (incompatible_handle, tmpdir)
+      != WYRELOG_E_POLICY) {
+    rmdir_recursive (tmpdir);
+    return 887;
+  }
+
+  if (!write_file_in_dir (tmpdir, "lobac/decision.dl",
+          ".decl session_state(scope: symbol, state: symbol)\n")) {
+    rmdir_recursive (tmpdir);
+    return 888;
+  }
+  g_autoptr (WylHandle) fault_handle = NULL;
+  if (wyl_init (NULL, &fault_handle) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 889;
+  }
+  wyl_handle_set_engine_insert_fault_once (fault_handle, "session_state",
+      WYRELOG_E_IO);
+  if (wyl_handle_open_engine_pair (fault_handle, tmpdir) != WYRELOG_E_IO) {
+    rmdir_recursive (tmpdir);
+    return 890;
+  }
+
+  rmdir_recursive (tmpdir);
+  return 0;
+}
+
 static gint
 check_policy_store_session_states_require_engine_pair (void)
 {
@@ -6218,6 +6457,11 @@ main (void)
 {
   gint rc;
 
+  if ((rc = check_tenant_registry_projects_effective_scope_state ()) != 0)
+    return rc;
+  if ((rc = check_scope_projection_requires_compatible_engine_relation ())
+      != 0)
+    return rc;
   if ((rc = check_init_keeps_engines_absent ()) != 0)
     return rc;
   if ((rc = check_open_pair_creates_distinct_engines ()) != 0)

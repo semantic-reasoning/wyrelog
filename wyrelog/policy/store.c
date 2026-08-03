@@ -10740,6 +10740,43 @@ wyl_policy_store_foreach_tenant (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+wyrelog_error_t
+wyl_policy_store_foreach_effective_scope_state (wyl_policy_store_t *store,
+    wyl_policy_session_state_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT tenant_id AS scope_id,"
+      " CASE sealed WHEN 0 THEN 'active' ELSE 'closed' END AS state"
+      " FROM tenants"
+      " UNION ALL"
+      " SELECT session_id AS scope_id, state FROM session_states AS s"
+      " WHERE NOT EXISTS"
+      " (SELECT 1 FROM tenants AS t WHERE t.tenant_id=s.session_id)"
+      " ORDER BY scope_id ASC;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *scope_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *state = (const gchar *) sqlite3_column_text (stmt, 1);
+    rc = cb (scope_id, state, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
 static gboolean
 fact_graph_component_is_valid (const gchar *component)
 {

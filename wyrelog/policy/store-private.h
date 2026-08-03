@@ -2291,6 +2291,12 @@ wyrelog_error_t wyl_policy_store_set_session_state (wyl_policy_store_t * store,
     const gchar * session_id, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_session_state (wyl_policy_store_t *
     store, wyl_policy_session_state_cb cb, gpointer user_data);
+/* Iterates the engine decision-scope projection. Tenant registry rows take
+ * precedence over colliding human session rows without mutating either
+ * durable source. */
+wyrelog_error_t wyl_policy_store_foreach_effective_scope_state
+    (wyl_policy_store_t * store, wyl_policy_session_state_cb cb,
+    gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_session_event (wyl_policy_store_t *
     store, const gchar * session_id, const gchar * event,
     const gchar * from_state, const gchar * to_state, gint64 * out_event_id);
