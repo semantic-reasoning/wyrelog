@@ -984,6 +984,34 @@ if host_machine.system() != 'windows' and build_client
         is_parallel : false,
         timeout : 360,
       )
+
+      # Packaged, encrypted, end-to-end LEAK SCAN (#382 Unit 5). Runs the full
+      # lifecycle prefix (issue -> exchange -> grant -> decide -> rotate),
+      # captures a per-run UNIQUE canary for every sensitive value the test can
+      # observe (issued + rotated secret, service JWT, bearer header, session
+      # id, jti, an injected request-body marker, the admin TOTP seed) and, via
+      # store-inspect, the authoritative verifier/salt, then asserts each canary
+      # is ABSENT (raw+base64+hex) from EVERY forbidden sink -- facts, audit,
+      # recovery records, daemon logs, and all CLI/HTTP capture files -- while
+      # confirming the encrypted policy store exposes no plaintext verifier/salt.
+      # A single hit is a real secret leak: the scan FAILS LOUD.
+      test('service-credential-leak-scan-e2e', sh,
+        args : [
+          meson.current_source_dir()
+            / 'check-service-credential-leak-scan-e2e.sh',
+          wyrelogd_exe.full_path(),
+          wyctl_exe.full_path(),
+          check_service_credential_store_inspect.full_path(),
+          meson.project_source_root() / 'templates' / 'access',
+          python3.full_path(),
+          meson.current_source_dir() / 'wyrelog_sc_e2e.py',
+        ],
+        depends : [
+          wyrelogd_exe, wyctl_exe, check_service_credential_store_inspect,
+        ],
+        is_parallel : false,
+        timeout : 300,
+      )
     endif
   endif
 

@@ -454,6 +454,36 @@ def cmd_assert_no_refresh(args):
     return 0
 
 
+def _expand_scan_targets(paths, recursive):
+    """Resolve the caller's scan targets into a concrete list of readable files.
+
+    A named target that is missing is a HARD FAILURE (never a vacuous "absent"
+    pass): the caller is asserting each named sink is clean, so a sink that
+    cannot even be located must fail loud. When --recursive is set a directory
+    target is walked and every regular file under it is scanned; without it a
+    directory target is itself an error, because the caller almost certainly
+    meant to scan a tree and silently scanning nothing would be a skip-as-pass.
+    """
+    resolved = []
+    for path in paths:
+        if not os.path.exists(path):
+            sys.stderr.write("scan-absent: sink not found: %s\n" % path)
+            return None
+        if os.path.isdir(path):
+            if not recursive:
+                sys.stderr.write(
+                    "scan-absent: %s is a directory (pass --recursive)\n" % path)
+                return None
+            for root, _dirs, files in os.walk(path):
+                for name in files:
+                    full = os.path.join(root, name)
+                    if os.path.isfile(full):
+                        resolved.append(full)
+        else:
+            resolved.append(path)
+    return resolved
+
+
 def cmd_scan_absent(args):
     if args.needle_file:
         with open(args.needle_file, "rb") as handle:
@@ -466,13 +496,30 @@ def cmd_scan_absent(args):
     if not needle:
         sys.stderr.write("scan-absent: empty needle\n")
         return 2
+    if args.hex_needle:
+        # The needle is a hex TEXT of an authoritative binary value (verifier /
+        # salt). Decode it so the scan covers BOTH the raw bytes (raw form) and
+        # the hex spelling (hex form) -- proving the value neither sits as
+        # plaintext bytes nor as a hex second-occurrence in any sink.
+        try:
+            needle = bytes.fromhex(needle.decode("ascii").strip())
+        except (ValueError, UnicodeDecodeError) as exc:
+            sys.stderr.write("scan-absent: --hex-needle not valid hex: %s\n"
+                             % exc)
+            return 2
+        if not needle:
+            sys.stderr.write("scan-absent: empty hex needle\n")
+            return 2
+    targets = _expand_scan_targets(args.files, args.recursive)
+    if targets is None:
+        return 2
     forms = {
         "raw": needle,
         "base64": base64.b64encode(needle),
         "hex": needle.hex().encode("ascii"),
     }
     leaked = False
-    for path in args.files:
+    for path in targets:
         try:
             with open(path, "rb") as handle:
                 data = handle.read()
@@ -489,7 +536,77 @@ def cmd_scan_absent(args):
                 leaked = True
     if leaked:
         return 1
-    print("scan-absent: needle absent from %d file(s)" % len(args.files))
+    print("scan-absent: needle absent from %d file(s)" % len(targets))
+    return 0
+
+
+def _write_secret_file(path, text):
+    """Write a captured sensitive canary to a 0600 file, never to stdout, so it
+    can be fed to scan-absent via --needle-file without ever transiting argv or
+    a scanned capture file."""
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.chmod(path, 0o600)
+
+
+def cmd_escrow_extract(args):
+    """Parse a published credential escrow document and write ONE field to a
+    0600 file. The escrow doc is the single place the plaintext credential
+    secret legitimately lives; this lifts the secret (or credential_id) out of
+    it into a 0600 needle file so the leak scan can assert the secret is ABSENT
+    from every OTHER (forbidden) sink. The value never touches stdout or argv."""
+    with open(args.escrow_file, "r", encoding="utf-8") as handle:
+        raw = handle.read()
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        sys.stderr.write("escrow-extract: unparseable escrow doc: %s\n" % exc)
+        return 1
+    key = {"secret": "credential_secret", "credential_id": "credential_id"}[
+        args.field]
+    value = doc.get(key)
+    if not value:
+        sys.stderr.write("escrow-extract: no %s in escrow doc\n" % key)
+        return 1
+    _write_secret_file(args.out, value)
+    return 0
+
+
+def _jwt_payload(token):
+    """Decode the (unverified) claim set of a compact JWS. The scan only needs
+    the claim VALUES as canaries; signature verification is irrelevant here."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError("not a compact JWS")
+    body = parts[1]
+    body += "=" * (-len(body) % 4)
+    return json.loads(base64.urlsafe_b64decode(body.encode("ascii")))
+
+
+def cmd_jwt_claim(args):
+    """Decode a service JWT (read from a 0600 token file) and write one claim
+    value (jti / session_id / sub) to a 0600 file so the leak scan can assert
+    that raw jti / session id never appears in a forbidden sink."""
+    token = _read_token(args.token_file)
+    try:
+        claims = _jwt_payload(token)
+    except (ValueError, TypeError) as exc:
+        sys.stderr.write("jwt-claim: cannot decode token: %s\n" % exc)
+        return 1
+    value = claims.get(args.claim)
+    if not value:
+        sys.stderr.write("jwt-claim: no %s claim in token\n" % args.claim)
+        return 1
+    _write_secret_file(args.out, str(value))
+    return 0
+
+
+def cmd_bearer_file(args):
+    """Reconstruct the exact `Authorization: Bearer <jwt>` header value into a
+    0600 file so the leak scan can assert the full bearer header string never
+    lands in a forbidden sink."""
+    token = _read_token(args.token_file)
+    _write_secret_file(args.out, "Bearer " + token)
     return 0
 
 
@@ -582,8 +699,34 @@ def build_parser():
     p.add_argument("--needle", default=None)
     p.add_argument("--needle-file", default=None,
                    help="read the secret needle from a 0600 file (avoids argv)")
+    p.add_argument("--recursive", action="store_true",
+                   help="walk directory targets, scanning every file under them")
+    p.add_argument("--hex-needle", action="store_true",
+                   help="decode the needle from hex so raw bytes AND the hex "
+                        "spelling are both scanned (verifier/salt)")
     p.add_argument("files", nargs="+")
     p.set_defaults(func=cmd_scan_absent)
+
+    p = sub.add_parser("escrow-extract")
+    p.add_argument("--escrow-file", required=True)
+    p.add_argument("--field", required=True, choices=("secret", "credential_id"))
+    p.add_argument("--out", required=True,
+                   help="0600 file to receive the extracted value")
+    p.set_defaults(func=cmd_escrow_extract)
+
+    p = sub.add_parser("jwt-claim")
+    p.add_argument("--token-file", required=True)
+    p.add_argument("--claim", required=True,
+                   choices=("jti", "session_id", "sub"))
+    p.add_argument("--out", required=True,
+                   help="0600 file to receive the claim value")
+    p.set_defaults(func=cmd_jwt_claim)
+
+    p = sub.add_parser("bearer-file")
+    p.add_argument("--token-file", required=True)
+    p.add_argument("--out", required=True,
+                   help="0600 file to receive the `Bearer <jwt>` header value")
+    p.set_defaults(func=cmd_bearer_file)
 
     return parser
 
