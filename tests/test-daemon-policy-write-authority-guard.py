@@ -512,6 +512,20 @@ def main():
             "missing-acquire-fault": test_source.replace(
                 "wyl_daemon_http_fail_next_policy_write_acquire_for_test",
                 "owner_fault_acquire_removed", 1),
+            "missing-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "  gint all_owner_fault_rc = 0;", 1),
+            "dead-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "#if 0\n  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();\n#endif", 1),
+            "wrong-service-invocation": test_source.replace(
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_all_owner_faults ();",
+                "  gint all_owner_fault_rc = "
+                "check_policy_write_actual_owner_finalize_contract ();", 1),
         }
         for name, text in matrix_fixtures.items():
             if text == test_source:

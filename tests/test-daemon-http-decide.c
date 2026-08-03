@@ -13743,9 +13743,10 @@ check_policy_write_all_owner_faults (void)
           acquire_mode ? 1 : 0);
       if ((test_case->owner <= 2
               && (non_http_rc != WYRELOG_E_INTERNAL
-                  || !snapshot.primary_rc_recorded
-                  || snapshot.primary_rc != (acquire_mode ?
-                      WYRELOG_E_INTERNAL : WYRELOG_E_OK)))
+                  || (!acquire_mode && (!snapshot.primary_rc_recorded
+                          || snapshot.primary_rc != WYRELOG_E_OK))))
+          || (acquire_mode && (!snapshot.primary_rc_recorded
+                  || snapshot.primary_rc != WYRELOG_E_INTERNAL))
           || after != before + 1 || !snapshot_ok) {
         g_printerr ("WYRELOG_TEST_DIAG owner_fault snapshot mode=%u owner=%u "
             "name=%s non_http_rc=%d terminal=%u/%u observed=%u expected=%u "

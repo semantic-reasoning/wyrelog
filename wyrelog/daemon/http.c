@@ -780,16 +780,19 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
         ctx->handle, &write->store);
 #ifdef WYL_TEST_DAEMON_HTTP
     WylDaemonPolicyWriteFinalizeFault fault;
-    WylDaemonPolicyWriteAcquireFault acquire_fault;
+    WylDaemonPolicyWriteAcquireFault acquire_fault =
+        WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_NONE;
     g_mutex_lock (&ctx->lock);
     fault = ctx->policy_write_finalize_fault;
     ctx->policy_write_finalize_fault =
         WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE;
-    acquire_fault = ctx->policy_write_acquire_fault;
-    ctx->policy_write_acquire_fault =
-        WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_NONE;
     g_mutex_unlock (&ctx->lock);
     if (rc == WYRELOG_E_OK) {
+      g_mutex_lock (&ctx->lock);
+      acquire_fault = ctx->policy_write_acquire_fault;
+      ctx->policy_write_acquire_fault =
+          WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_NONE;
+      g_mutex_unlock (&ctx->lock);
       wyl_service_auth_write_lease_test_set_terminal_checkpoint (write->lease,
           policy_write_terminal_checkpoint, ctx);
       if (fault == WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION)

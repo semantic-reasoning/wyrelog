@@ -442,11 +442,34 @@ def validate_owner_fault_matrix(root):
                 if value==api and values[i+1]=="(")
             if calls!=1:
                 raise GuardError(f"daemon WRITE owner fault {label} {api}={calls}")
-    call_count=sum(1 for items in defs.values() for _,_,item in items
-        for i,(_,value) in enumerate(item[:-1])
-        if value=="check_policy_write_all_owner_faults" and item[i+1][1]=="(")
-    if call_count!=2:
-        raise GuardError("daemon WRITE owner fault matrix invocation mismatch")
+    service_marker="#elif defined(WYL_TEST_VARIANT_SERVICE)\nint\nmain (void)\n{"
+    service_end_marker="\n#else /* WYL_TEST_VARIANT_AUDIT */"
+    if source.count(service_marker)!=1:
+        raise GuardError("daemon WRITE service test main mismatch")
+    service_start=source.index(service_marker)+len(service_marker)
+    service_end=source.index(service_end_marker,service_start)
+    service=source[service_start:service_end]
+    call="check_policy_write_all_owner_faults ();"
+    if service.count(call)!=1 or source.count(call)!=1:
+        raise GuardError("daemon WRITE owner fault service invocation mismatch")
+    call_pos=service.index(call)
+    stack=[]
+    for line in service[:call_pos].splitlines():
+        directive=re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)",
+            line)
+        if not directive:
+            continue
+        kind,value=directive.groups()
+        if kind in ("if","ifdef","ifndef"):
+            stack.append((kind,value.strip()))
+        elif kind=="endif":
+            if not stack:
+                raise GuardError("unbalanced conditional before owner fault matrix")
+            stack.pop()
+        elif not stack:
+            raise GuardError("orphan conditional before owner fault matrix")
+    if stack!=[("ifdef","WYL_HAS_FACT_STORE")]:
+        raise GuardError("owner fault matrix is not live in fact-enabled service main")
 
 def active_fact_store_enabled(tokens):
     marker="WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE"
