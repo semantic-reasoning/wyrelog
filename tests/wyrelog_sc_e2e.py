@@ -21,6 +21,7 @@ import struct
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_TENANT = "__wr_default"
@@ -337,6 +338,76 @@ def cmd_assert_decide(args):
     return 0
 
 
+def cmd_assert_http_status(args):
+    """Assert a POST to an arbitrary packaged route returns an EXACT HTTP status
+    (and, optionally, that the JSON error body carries an expected error code).
+
+    This is the fail-loud counterpart to assert-decide for the NON-200 outcomes
+    that assert-decide deliberately treats as hard failures: a 401 at service
+    bearer resolution (a revoked credential / disabled principal token that stops
+    resolving) or a 400 tenant_sealed (a decide against a sealed tenant). A bearer
+    token is optional (--token-file); query params and an optional JSON body are
+    composed exactly as cmd_http_post does, so /decide can be driven with the
+    service token in the Authorization header and user/perm/tenant/session_token
+    in the query string."""
+    token = _read_token(args.token_file) if args.token_file else None
+    query = "&".join(args.query) if args.query else ""
+    url = "%s%s" % (args.base_url, args.path)
+    if query:
+        url = "%s?%s" % (url, query)
+    data = None
+    if args.json_field:
+        obj = {}
+        for pair in args.json_field:
+            key, _, value = pair.partition("=")
+            obj[key] = value
+        data = json.dumps(obj).encode("utf-8")
+    status, body = _post(url, token=token, data=data)
+    if status != args.expect_status:
+        sys.stderr.write(
+            "assert-http-status: expected HTTP %d, got %d: %s\n" % (
+                args.expect_status, status, body))
+        return 1
+    if args.expect_error is not None:
+        observed = None
+        try:
+            observed = json.loads(body).get("error")
+        except (ValueError, TypeError):
+            observed = None
+        if observed != args.expect_error:
+            sys.stderr.write(
+                "assert-http-status: expected error %r, got %r (HTTP %d): %s\n"
+                % (args.expect_error, observed, status, body))
+            return 1
+    print("assert-http-status: HTTP %d%s (expected)" % (
+        status, (" error=%s" % args.expect_error) if args.expect_error else ""))
+    return 0
+
+
+def cmd_assert_no_refresh(args):
+    """Prove a LIVE service token has no refresh/renewal path.
+
+    A service-credential exchange yields ONLY an access token -- no refresh token
+    is ever issued for a service credential -- and the sole refresh route,
+    /auth/refresh, is human-only: it looks up an opaque server-side refresh token
+    (which a service exchange never mints) and additionally rejects any
+    service-prefixed subject. Presenting the live service access token to
+    /auth/refresh MUST fail with 401; a 200 minting a fresh token would be a
+    survivorship/renewal finding. The token is read from a 0600 file and only ever
+    placed in the request body-equivalent query, never on a command line."""
+    token = _read_token(args.token_file)
+    url = "%s/auth/refresh?refresh_token=%s" % (
+        args.base_url, urllib.parse.quote(token, safe=""))
+    status, body = _post(url)
+    if status != 401:
+        sys.stderr.write(
+            "assert-no-refresh: expected HTTP 401 (not refreshable), got %d: %s\n"
+            % (status, body))
+        return 1
+    print("assert-no-refresh: service token not refreshable (HTTP 401)")
+    return 0
+
+
 def cmd_scan_absent(args):
     needle = args.needle.encode("utf-8")
     forms = {
@@ -423,6 +494,24 @@ def build_parser():
     p.add_argument("--scope", default=None,
                    help="decision scope (session_token); defaults to --tenant")
     p.set_defaults(func=cmd_assert_decide)
+
+    p = sub.add_parser("assert-http-status")
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--path", required=True)
+    p.add_argument("--token-file", default=None,
+                   help="optional bearer token file (Authorization header)")
+    p.add_argument("--query", action="append", default=[])
+    p.add_argument("--json-field", action="append", default=[],
+                   help="k=v pair added to a JSON request body (string values)")
+    p.add_argument("--expect-status", required=True, type=int)
+    p.add_argument("--expect-error", default=None,
+                   help="expected JSON `error` field value, if any")
+    p.set_defaults(func=cmd_assert_http_status)
+
+    p = sub.add_parser("assert-no-refresh")
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--token-file", required=True)
+    p.set_defaults(func=cmd_assert_no_refresh)
 
     p = sub.add_parser("scan-absent")
     p.add_argument("--needle", required=True)
