@@ -3377,6 +3377,50 @@ out:
   return rc;
 }
 
+wyrelog_error_t
+wyl_engine_session_finish_external_publication (WylEngineSession *session,
+    wyl_policy_store_t *expected_store, guint64 expected_generation,
+    WylDurableCommitState commit_state, WylEnginePublicationVerifier verify,
+    gpointer verify_data)
+{
+  if (!engine_session_is_valid (session)
+      || commit_state < WYL_DURABLE_COMMIT_NOT_COMMITTED
+      || commit_state > WYL_DURABLE_COMMIT_UNCERTAIN)
+    return WYRELOG_E_INVALID;
+  if (session->acquisition_depth != 1
+      || session->handle->engine_session_depth != 1
+      || session->handle->engine_delta_callback_depth > 0)
+    return WYRELOG_E_BUSY;
+
+  WylHandle *self = session->handle;
+  if (commit_state == WYL_DURABLE_COMMIT_NOT_COMMITTED)
+    return WYRELOG_E_OK;
+  if (commit_state == WYL_DURABLE_COMMIT_UNCERTAIN) {
+    poison_engine_pair_locked (self);
+    return WYRELOG_E_INTERNAL;
+  }
+  if (expected_store == NULL || expected_generation == 0 || verify == NULL) {
+    poison_engine_pair_locked (self);
+    return WYRELOG_E_INVALID;
+  }
+  if (self->engine_pair_poisoned)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_handle_policy_store_validate_generation (self,
+      expected_store, expected_generation);
+  if (rc == WYRELOG_E_OK)
+    rc = reconcile_guarded_engine_pair_in_session (session, verify,
+        verify_data, NULL, NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = flush_pending_deltas (self);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_INTERNAL;
+    poison_engine_pair_locked (self);
+  }
+  return rc;
+}
+
 #ifdef WYL_HAS_AUDIT
 wyrelog_error_t
 wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
