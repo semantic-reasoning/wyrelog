@@ -60,6 +60,7 @@ class RepoPath:
 
 
 OWNER = RepoPath("wyrelog/wyl-handle.c")
+ENGINE_OWNER = RepoPath("wyrelog/wyl-engine.c")
 OWNED_ENGINE_ALLOWLIST = {
     OWNER,
     RepoPath("wyrelog/wyl-engine.c"),
@@ -90,6 +91,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_engine_session_run_committed_audit_publication",
     "wyl_engine_session_run_committed_publication",
     "wyl_engine_verification_enqueue_delta",
+    "wyl_engine_verification_get_accepted_session_state",
     "wyl_handle_buffer_delta_cb",
     "wyl_handle_complete_shutdown",
     "wyl_handle_dup_engine_symbol_locked",
@@ -124,6 +126,10 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_handle_seed_perm_arm_rule_on_engine",
     "wyl_handle_seed_perm_arm_rules",
     "wyl_handle_shutdown_ordered",
+}
+DIRECT_SUBSTRATE_FUNCTIONS = {
+    "wyl_engine_insert_unchecked",
+    "wyl_engine_remove_unchecked",
 }
 TYPED_EXTERNAL_TRANSACTION_BEGIN = (
     "wyl_engine_session_begin_external_service_authority_transaction")
@@ -315,6 +321,7 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
         rf"\b{re.escape(TYPED_EXTERNAL_TRANSACTION_BEGIN)}\s*\(")
     raw_external_begin = re.compile(
         rf"\b{re.escape(RAW_EXTERNAL_TRANSACTION_BEGIN)}\s*\(")
+    direct_substrate = re.compile(r"\bwirelog_easy_(?:insert|remove)\s*\(")
 
     for path, raw in sources.items():
         invalid_reason = invalid_repo_path_reason(path)
@@ -336,6 +343,10 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
             errors.append(
                 "owned engine primitive outside allowlist: "
                 f"{path.spelling!r}")
+        if path != ENGINE_OWNER and direct_substrate.search(source):
+            errors.append(
+                "direct Wirelog input mutation outside engine owner: "
+                f"{path.spelling!r}")
         if path != OWNER and raw_lock.search(source):
             errors.append(
                 f"untyped engine lock outside owner: {path.spelling!r}")
@@ -355,6 +366,13 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
                         or raw_lock.search(body)) and name not in OWNER_FUNCTION_ALLOWLIST:
                     errors.append(
                         f"owner aggregate access outside function allowlist: {name}")
+        if path == ENGINE_OWNER:
+            for name, body in top_level_functions(source):
+                if (direct_substrate.search(body)
+                        and name not in DIRECT_SUBSTRATE_FUNCTIONS):
+                    errors.append(
+                        "direct Wirelog input mutation outside funnel: "
+                        f"{name}")
     return sorted(set(errors))
 
 
@@ -408,6 +426,36 @@ def self_test() -> int:
     }
     if check(accepted):
         print("self-test rejected valid fixture", file=sys.stderr)
+        return 1
+
+    direct_bypass = RepoPath("wyrelog/auth/direct-bypass.c")
+    if check({direct_bypass: (
+            "void bad(void *s) { wirelog_easy_insert(s, \"r\", 0, 0); }"
+            )}) != [
+            "direct Wirelog input mutation outside engine owner: "
+            "'wyrelog/auth/direct-bypass.c'"]:
+        print("self-test accepted direct Wirelog input mutation",
+              file=sys.stderr)
+        return 1
+
+    if check({ENGINE_OWNER: (
+            "static void bad(void *s) { "
+            "wirelog_easy_remove(s, \"r\", 0, 0); }"
+            )}) != [
+            "direct Wirelog input mutation outside funnel: bad"]:
+        print("self-test accepted direct Wirelog mutation outside funnel",
+              file=sys.stderr)
+        return 1
+
+    canonical_funnels = (
+        "static void wyl_engine_insert_unchecked(void *s) { "
+        "wirelog_easy_insert(s, \"r\", 0, 0); } "
+        "static void wyl_engine_remove_unchecked(void *s) { "
+        "wirelog_easy_remove(s, \"r\", 0, 0); }"
+    )
+    if check({ENGINE_OWNER: canonical_funnels}):
+        print("self-test rejected canonical Wirelog mutation funnels",
+              file=sys.stderr)
         return 1
 
     typed_bypass = RepoPath("wyrelog/auth/typed-bypass.c")
