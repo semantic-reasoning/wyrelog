@@ -6281,6 +6281,291 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
+static wyrelog_error_t grant_tenant_manage_authority
+    (WylHandle * handle, const gchar * subject);
+
+typedef enum
+{
+  POLICY_WRITE_FAULT_ROUTE_SUCCESS = 0,
+  POLICY_WRITE_FAULT_ROUTE_PRIMARY_ERROR,
+} PolicyWriteFaultRouteCase;
+
+static gboolean
+    policy_write_fault_snapshot_is_clean
+    (const WylDaemonPolicyWriteFinalizeSnapshot * snapshot,
+    guint expected_primary_status, const gchar * expected_primary_code,
+    const gchar * expected_owner)
+{
+  return snapshot->diagnostic_count == 1
+      && snapshot->primary_status == expected_primary_status
+      && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
+      && snapshot->cleanup_rc == WYRELOG_E_INTERNAL
+      && snapshot->pre_finalize_status == 0
+      && snapshot->pre_finalize_header_count == 0
+      && snapshot->pre_finalize_body_length == 0
+      && !snapshot->post_finalize_lease_live
+      && !snapshot->post_finalize_store_live
+      && snapshot->post_finalize_total_pins == 0
+      && snapshot->post_finalize_thread_pins == 0
+      && snapshot->post_finalize_rank_mask == 0
+      && g_strcmp0 (snapshot->owner_name, expected_owner) == 0;
+}
+
+static gint
+check_policy_write_fault_human_surfaces (SoupServer *server,
+    WylHandle *handle, const gchar *base_url, SoupSession *session,
+    const gchar *actor, const gchar *session_token,
+    const gchar *access_token, const gchar *refresh_token, gint error_base)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (wyl_daemon_http_policy_write_for_test (server, NULL, NULL)
+      != WYRELOG_E_BUSY)
+    return error_base;
+  if (send_raw_path (session, "GET", base_url, "/healthz", &status, &body)
+      != 0 || status != 200)
+    return error_base + 1;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url, actor,
+          "cleanup.unrelated.read", session_token,
+          "tenant=__wr_default", access_token, &status, &body) != 0
+      || status != 200)
+    return error_base + 2;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_refresh (session, "POST", base_url, refresh_token, &status,
+          &body) != 0 || status != 200
+      || strstr (body, "\"access_token\"") == NULL
+      || strstr (body, "\"refresh_token\"") == NULL)
+    return error_base + 3;
+  g_clear_pointer (&body, g_free);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  gint login_rc = send_raw_login (session, "POST", base_url,
+      "username=cleanup-post-fault-login&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != 0 || status != 200
+      || strstr (body, "cleanup-post-fault-login") == NULL)
+    return error_base + 4;
+  return 0;
+}
+
+static gint
+    check_policy_write_actual_route_finalize_fault
+    (PolicyWriteFaultRouteCase route_case, gint error_base)
+{
+  static const gchar *const actor = "cleanup-route-secret-actor";
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = NULL;
+  g_autofree gchar *base_url = NULL;
+  TestHttpServer http = { 0 };
+  GThread *thread = NULL;
+  gint result = error_base;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return result;
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  context = g_main_context_new ();
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&options, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL)
+    goto cleanup;
+  thread = g_thread_new ("policy-write-route-fault",
+      test_http_server_thread_ctx, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL)
+    goto cleanup;
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  if (base_url == NULL)
+    goto cleanup;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  gint login_rc = send_raw_login (session, "POST", base_url,
+      "username=cleanup-route-secret-actor&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != 0 || status != 200)
+    goto cleanup;
+  g_autofree gchar *session_token = extract_json_string (body,
+      "session_token");
+  g_autofree gchar *access_token = extract_json_string (body,
+      "access_token");
+  g_autofree gchar *refresh_token = extract_json_string (body,
+      "refresh_token");
+  if (session_token == NULL || access_token == NULL || refresh_token == NULL)
+    goto cleanup;
+  g_clear_pointer (&body, g_free);
+
+  const gchar *path = NULL;
+  const gchar *expected_primary_code = NULL;
+  const gchar *expected_owner = NULL;
+  guint expected_primary_status = 0;
+  g_autofree gchar *query = NULL;
+  if (route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS) {
+    if (grant_tenant_manage_authority (handle, actor) != WYRELOG_E_OK)
+      goto cleanup;
+    path = "/tenants/create";
+    expected_primary_status = 200;
+    expected_primary_code = "success";
+    expected_owner = "tenant";
+    query = g_strdup_printf
+        ("name=cleanup-route-secret-tenant&tenant=%s&session_token=%s"
+        "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+        WYL_TENANT_DEFAULT, session_token);
+  } else {
+    if (grant_policy_write_authority (handle, actor, WYL_TENANT_DEFAULT)
+        != WYRELOG_E_OK)
+      goto cleanup;
+    path = "/policy/permissions/grant";
+    expected_primary_status = 400;
+    expected_primary_code = "invalid_policy_mutation";
+    expected_owner = "direct_permission";
+    query = g_strdup_printf
+        ("subject=cleanup-target&perm=cleanup.missing&scope=%s&tenant=%s"
+        "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+        "&guard_risk=49", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT,
+        session_token);
+  }
+
+  guint terminal_before =
+      wyl_daemon_http_policy_write_terminal_entries_for_test (http.server);
+  wyl_daemon_http_fail_next_policy_write_finalize_for_test (http.server,
+      WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  if (send_raw_policy_mutation (session, "POST", base_url, path, query,
+          &status, &body) != 0 || status != 500
+      || g_strcmp0 (body, "{\"error\":\"policy_write_cleanup_failed\"}") != 0)
+    goto cleanup;
+  guint terminal_after =
+      wyl_daemon_http_policy_write_terminal_entries_for_test (http.server);
+  if (terminal_after != terminal_before + 1)
+    goto cleanup;
+
+  WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
+  if (!wyl_daemon_http_policy_write_finalize_snapshot_for_test (http.server,
+          &snapshot)
+      || !policy_write_fault_snapshot_is_clean (&snapshot,
+          expected_primary_status, expected_primary_code, expected_owner)
+      || strstr (snapshot.primary_code, actor) != NULL
+      || strstr (snapshot.primary_code, "cleanup-route-secret-tenant") != NULL
+      || strstr (snapshot.primary_code, session_token) != NULL) {
+    g_printerr ("WYRELOG_TEST_DIAG policy_write_route_snapshot "
+        "case=%d diagnostics=%u primary_status=%u primary_code=%s "
+        "primary_rc=%d recorded=%d cleanup=%d pre_status=%u "
+        "pre_headers=%u pre_body=%zu lease=%d store=%d pins=%u/%u "
+        "rank_mask=%u owner=%s\n", route_case, snapshot.diagnostic_count,
+        snapshot.primary_status, snapshot.primary_code, snapshot.primary_rc,
+        snapshot.primary_rc_recorded, snapshot.cleanup_rc,
+        snapshot.pre_finalize_status, snapshot.pre_finalize_header_count,
+        snapshot.pre_finalize_body_length, snapshot.post_finalize_lease_live,
+        snapshot.post_finalize_store_live, snapshot.post_finalize_total_pins,
+        snapshot.post_finalize_thread_pins, snapshot.post_finalize_rank_mask,
+        snapshot.owner_name);
+    goto cleanup;
+  }
+  if (route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS
+      && (!snapshot.primary_rc_recorded || snapshot.primary_rc != WYRELOG_E_OK))
+    goto cleanup;
+
+  WylServiceAuthAuthoritySnapshot authority = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (http.server, &authority);
+  if (authority.writer_active || authority.active_readers != 0
+      || authority.waiting_readers != 0 || authority.waiting_writers != 0)
+    goto cleanup;
+  gint human_rc = check_policy_write_fault_human_surfaces (http.server,
+      handle, base_url, session, actor, session_token, access_token,
+      refresh_token, error_base + 10);
+  if (human_rc != 0) {
+    result = human_rc;
+    goto cleanup;
+  }
+  if (wyl_daemon_http_policy_write_terminal_entries_for_test (http.server)
+      != terminal_after)
+    goto cleanup;
+  result = 0;
+
+cleanup:
+  if (http.loop != NULL)
+    g_main_loop_quit (http.loop);
+  if (thread != NULL)
+    g_thread_join (thread);
+  if (http.server != NULL)
+    soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return result;
+}
+
+static gint
+check_policy_write_non_http_finalize_fault (gint error_base)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return error_base;
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&options,
+      handle, &error);
+  if (server == NULL)
+    return error_base + 1;
+  guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
+      (server);
+  wyl_daemon_http_fail_next_policy_write_finalize_for_test (server,
+      WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  if (wyl_daemon_http_rotate_access_token_key_for_test (server)
+      != WYRELOG_E_INTERNAL)
+    return error_base + 2;
+  guint after = wyl_daemon_http_policy_write_terminal_entries_for_test (server);
+  WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
+  if (after != before + 1
+      || !wyl_daemon_http_policy_write_finalize_snapshot_for_test (server,
+          &snapshot)
+      || !policy_write_fault_snapshot_is_clean (&snapshot, 0, "non_http",
+          "key_rotation") || !snapshot.primary_rc_recorded
+      || snapshot.primary_rc != WYRELOG_E_OK)
+    return error_base + 3;
+  if (wyl_daemon_http_policy_write_for_test (server, NULL, NULL)
+      != WYRELOG_E_BUSY
+      || wyl_daemon_http_policy_write_terminal_entries_for_test (server)
+      != after)
+    return error_base + 4;
+  soup_server_disconnect (server);
+  return 0;
+}
+
+static gint
+check_policy_write_actual_owner_finalize_contract (void)
+{
+  /* These probes exercise a simple success route, a primary error after WRITE
+   * acquisition, and a non-HTTP owner that holds higher-ranked resources. The
+   * owner inventory guard binds all 16 acquisition sites to this shared
+   * terminal path; destructive setup for every complex route is intentionally
+   * left to their existing success/error route coverage. */
+  gint rc = check_policy_write_actual_route_finalize_fault
+      (POLICY_WRITE_FAULT_ROUTE_SUCCESS, 2800);
+  if (rc != 0)
+    return rc;
+  rc = check_policy_write_actual_route_finalize_fault
+      (POLICY_WRITE_FAULT_ROUTE_PRIMARY_ERROR, 2820);
+  if (rc != 0)
+    return rc;
+  rc = check_policy_write_non_http_finalize_fault (2840);
+  if (rc != 0)
+    return rc;
+  /* A newly constructed handle/coordinator is the only recovery boundary. */
+  return check_daemon_policy_write_finalize_case
+      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 2860);
+}
+
 static gboolean
 exact_route_state_unchanged (SoupServer *server,
     const WylDaemonExactRouteStateSnapshot *before)
@@ -15492,6 +15777,10 @@ main (void)
   gint policy_finalize_rc = check_daemon_policy_write_finalize_contract ();
   if (policy_finalize_rc != 0)
     return policy_finalize_rc;
+  gint actual_owner_finalize_rc =
+      check_policy_write_actual_owner_finalize_contract ();
+  if (actual_owner_finalize_rc != 0)
+    return actual_owner_finalize_rc;
 
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -15961,6 +16250,11 @@ cleanup:
 int
 main (void)
 {
+  gint actual_owner_finalize_rc =
+      check_policy_write_actual_owner_finalize_contract ();
+  if (actual_owner_finalize_rc != 0)
+    return actual_owner_finalize_rc;
+
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
     return tenant_gate_rc;

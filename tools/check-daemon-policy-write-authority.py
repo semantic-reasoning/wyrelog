@@ -9,8 +9,11 @@ PROFILE = "raw-conditional-declarations-v1"
 FUNCTIONS = (
     "wyl_daemon_policy_write_detach_message",
     "wyl_daemon_policy_write_clear",
+    "wyl_daemon_policy_write_owner_name",
     "wyl_daemon_policy_write_finalize",
+    "wyl_daemon_policy_write_record_primary",
     "wyl_daemon_policy_write_finish",
+    "wyl_daemon_policy_write_finish_result",
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_policy_write_finalize_for_response",
     "wyl_daemon_policy_write_prepare_success_response",
@@ -34,6 +37,36 @@ FUNCTIONS = (
     "service_management_authority_arm_handler",
     "wyl_daemon_http_configure_tenant_for_test",
 )
+OWNER_INVENTORY = {
+    "wyl_daemon_http_context_rotate_access_token_key":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_KEY_ROTATION",),
+    "wyl_daemon_http_configure_tenant_for_test":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_TEST_CONFIGURE",),
+    "wyl_daemon_http_policy_write_for_test":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_TEST_POLICY_WRITE",),
+    "tenant_mutation_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
+    "graph_create_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE",),
+    "graph_seal_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_SEAL",),
+    "schema_register_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_SCHEMA_REGISTER",),
+    "facts_route_handler": (
+        "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_FORGET",
+        "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION"),
+    "direct_permission_mutation_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_DIRECT_PERMISSION",),
+    "policy_permission_transition_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_PERMISSION_TRANSITION",),
+    "role_membership_mutation_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_ROLE_MEMBERSHIP",),
+    "service_credential_operation_reconcile_execute":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_OPERATION_RECONCILE",),
+    "service_credential_operation_recover_execute":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_OPERATION_RECOVER",),
+    "mfa_enroll_confirm_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_MFA_CONFIRM",),
+    "service_management_authority_arm_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM",),
+}
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_http_context_rotate_access_token_key",
@@ -476,12 +509,35 @@ def validate_recover_write_boundary(defs):
     if any(symbol in values for symbol in forbidden):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
+def validate_owner_inventory(defs, allow_missing=False):
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 16:
+        raise GuardError("daemon WRITE owner inventory must contain 16 owners")
+    all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
+        for owner in owners}
+    for name,expected in OWNER_INVENTORY.items():
+        items=defs.get(name,[])
+        if allow_missing and not items:
+            continue
+        values=[value for _,_,tokens in items for _,value in tokens]
+        acquires=sum(1 for i,value in enumerate(values[:-1])
+            if value=="wyl_daemon_policy_write_acquire" and values[i+1]=="(")
+        if acquires != len(expected):
+            raise GuardError(f"daemon WRITE owner acquire mismatch: {name}={acquires}")
+        found={owner for owner in all_owner_tokens if owner in values}
+        if found != set(expected):
+            raise GuardError(f"daemon WRITE owner placement mismatch: {name}")
+        for owner in expected:
+            if values.count(owner) != 1:
+                raise GuardError(f"daemon WRITE owner id mismatch: {name}:{owner}")
+
 def validate_terminal_write_contract(defs):
     required_helpers=(
         "wyl_daemon_policy_write_detach_message",
         "wyl_daemon_policy_write_clear",
         "wyl_daemon_policy_write_finalize",
+        "wyl_daemon_policy_write_record_primary",
         "wyl_daemon_policy_write_finish",
+        "wyl_daemon_policy_write_finish_result",
         "wyl_daemon_policy_write_finalize_for_response",
         "wyl_daemon_policy_write_prepare_success_response",
         "set_json_error", "set_json_ok",
@@ -503,6 +559,20 @@ def validate_terminal_write_contract(defs):
     if helper_values["wyl_daemon_policy_write_finish"].count(
             "wyl_daemon_policy_write_finalize")!=1:
         raise GuardError("WRITE finish must delegate exactly once")
+    if helper_values["wyl_daemon_policy_write_finish"].count(
+            "wyl_daemon_policy_write_record_primary")!=1:
+        raise GuardError("WRITE finish must preserve primary exactly once")
+    if helper_values["wyl_daemon_policy_write_finish_result"].count(
+            "wyl_daemon_policy_write_finalize")!=1:
+        raise GuardError("non-HTTP WRITE result must finalize exactly once")
+    if helper_values["wyl_daemon_policy_write_finish_result"].count(
+            "wyl_daemon_policy_write_record_primary")!=1:
+        raise GuardError("non-HTTP WRITE result must preserve primary exactly once")
+    finish_values=helper_values["wyl_daemon_policy_write_finish"]
+    returns=[finish_values[i+1] for i,value in enumerate(finish_values[:-1])
+        if value=="return"]
+    if returns != ["primary_rc"]:
+        raise GuardError("HTTP WRITE finish must preserve the primary result")
     if helper_values["wyl_daemon_policy_write_finalize_for_response"].count(
             "wyl_daemon_policy_write_finalize")!=1:
         raise GuardError("response finalizer must delegate exactly once")
@@ -566,6 +636,7 @@ def main(argv=None):
         raise GuardError("acquire allowlist must be contained by the frozen function set")
     validate_test_only_tenant_seam(source,raw_defs)
     validate_recover_write_boundary(raw_defs)
+    validate_owner_inventory(raw_defs)
     validate_terminal_write_contract(raw_defs)
     raw_global_invariants(raw_tokens,raw_defs)
     if not ns.raw_only:
@@ -579,6 +650,8 @@ def main(argv=None):
             if name in raw_defs and len(items)==1}
         validate_test_only_tenant_seam(source,raw_defs,defs)
         validate_recover_write_boundary({name:[item] for name,item in defs.items()})
+        validate_owner_inventory({name:[item] for name,item in defs.items()},
+            allow_missing=True)
         global_invariants(tokens,defs)
         raw_global_invariants(tokens,{name:[item] for name,item in defs.items()},False)
     actual=candidate(raw_defs,raw_tokens)
