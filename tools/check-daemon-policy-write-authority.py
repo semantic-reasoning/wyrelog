@@ -387,10 +387,18 @@ def mask_comments(source):
     i=0
     while i<len(source):
         if source.startswith("//",i):
-            end=source.find("\n",i+2)
-            end=len(source) if end<0 else end
-            for j in range(i,end): out[j]=" "
-            i=end
+            start=i
+            while True:
+                end=source.find("\n",start+2)
+                end=len(source) if end<0 else end
+                for j in range(start,end): out[j]=" "
+                continued=end<len(source) and (source[end-1]=="\\"
+                    or (end>=2 and source[end-1]=="\r"
+                        and source[end-2]=="\\"))
+                if not continued:
+                    i=end
+                    break
+                start=end+1
             continue
         if source.startswith("/*",i):
             end=source.find("*/",i+2)
