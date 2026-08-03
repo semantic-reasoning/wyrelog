@@ -3062,6 +3062,20 @@ gboolean wyl_daemon_http_take_tenant_recovery_repair_failure_for_test
   return pending;
 }
 
+gboolean
+wyl_daemon_http_detach_tenant_recovery_slot_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylTenantRecoverySlot *detached = ctx->tenant_recovery;
+  ctx->tenant_recovery = NULL;
+  g_mutex_unlock (&ctx->lock);
+  tenant_recovery_slot_free (detached);
+  return detached != NULL;
+}
+
 void wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test
     (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data)
 {
@@ -8580,6 +8594,45 @@ tenant_seal_recovery_discard (gpointer data)
   tenant_recovery_slot_free (discarded);
   latch->installed_id = 0;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_seal_tenant_recovery_for_test (SoupServer *server,
+    const gchar *tenant, const gchar *request_id)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || tenant == NULL || request_id == NULL)
+    return WYRELOG_E_INVALID;
+  gboolean test_verify_opposite_state = FALSE;
+  gboolean test_fail_write_release = FALSE;
+  g_mutex_lock (&ctx->lock);
+  test_verify_opposite_state = ctx->fail_next_tenant_seal_verification;
+  test_fail_write_release = ctx->fail_next_tenant_seal_write_release;
+  ctx->fail_next_tenant_seal_verification = FALSE;
+  ctx->fail_next_tenant_seal_write_release = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = tenant_seal_test_authorize,
+  };
+  WylTenantSealRecoveryLatch recovery_latch = {
+    .ctx = ctx,
+  };
+  wyl_tenant_seal_runtime_t runtime = {
+    .registry = ctx->service_auth_registry,
+    .before_write_release = test_fail_write_release
+        ? tenant_seal_recovery_fail_write_release : NULL,
+    .retain_publication_recovery = tenant_seal_recovery_retain,
+    .discard_publication_recovery = tenant_seal_recovery_discard,
+    .test_verify_opposite_state = test_verify_opposite_state,
+    .authorization = &authorization,
+    .data = &recovery_latch,
+  };
+  WylServiceRetirementOutcome retirement = { 0 };
+  return wyl_tenant_seal_keyed_with_runtime (ctx->handle, tenant, "admin",
+      request_id, WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, &runtime,
+      &retirement);
+}
+#endif
 
 static WylTenantRecoveryClaimResult
 tenant_recovery_claim (WylDaemonHttpContext *ctx,
