@@ -6363,7 +6363,13 @@ static gint
   g_autoptr (WylHandle) handle = NULL;
   g_autoptr (GError) error = NULL;
   g_autoptr (GMainContext) context = NULL;
+  g_autoptr (SoupSession) session = NULL;
   g_autofree gchar *base_url = NULL;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *session_token = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *refresh_token = NULL;
+  g_autofree gchar *query = NULL;
   TestHttpServer http = { 0 };
   GThread *thread = NULL;
   gint result = error_base;
@@ -6391,21 +6397,17 @@ static gint
   if (base_url == NULL)
     goto cleanup;
 
-  g_autoptr (SoupSession) session = soup_session_new ();
+  session = soup_session_new ();
   guint status = 0;
-  g_autofree gchar *body = NULL;
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   gint login_rc = send_raw_login (session, "POST", base_url,
       "username=cleanup-route-secret-actor&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (login_rc != 0 || status != 200)
     goto cleanup;
-  g_autofree gchar *session_token = extract_json_string (body,
-      "session_token");
-  g_autofree gchar *access_token = extract_json_string (body,
-      "access_token");
-  g_autofree gchar *refresh_token = extract_json_string (body,
-      "refresh_token");
+  session_token = extract_json_string (body, "session_token");
+  access_token = extract_json_string (body, "access_token");
+  refresh_token = extract_json_string (body, "refresh_token");
   if (session_token == NULL || access_token == NULL || refresh_token == NULL)
     goto cleanup;
   g_clear_pointer (&body, g_free);
@@ -6414,7 +6416,6 @@ static gint
   const gchar *expected_primary_code = NULL;
   const gchar *expected_owner = NULL;
   guint expected_primary_status = 0;
-  g_autofree gchar *query = NULL;
   if (route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS) {
     if (grant_tenant_manage_authority (handle, actor) != WYRELOG_E_OK)
       goto cleanup;
