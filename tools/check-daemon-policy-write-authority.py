@@ -68,6 +68,29 @@ OWNER_INVENTORY = {
     "service_management_authority_arm_handler":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM",),
 }
+TEST_ONLY_OWNER_FUNCTIONS = {
+    "wyl_daemon_http_configure_tenant_for_test",
+    "wyl_daemon_http_policy_write_for_test",
+}
+FACT_STORE_OWNER_FUNCTIONS = {
+    "graph_create_handler", "schema_register_handler", "facts_route_handler",
+    "service_credential_operation_reconcile_execute",
+    "service_credential_operation_recover_execute",
+}
+FACT_STORE_DISABLED_STUBS = {
+    "graph_create_handler", "schema_register_handler", "facts_route_handler",
+}
+FACT_STORE_FEATURE_MARKER = """#ifdef WYL_HAS_FACT_STORE
+enum
+{
+  WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE = 1,
+};
+#else
+enum
+{
+  WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE = 0,
+};
+#endif"""
 OWNER_TABLE = (
     ("KEY_ROTATION", "key_rotation"),
     ("TEST_CONFIGURE", "test_configure"),
@@ -345,6 +368,22 @@ def owner_table_freeze(source):
     material="".join(symbol+":"+name+"\n" for symbol,name in rows).encode()
     return {"count":len(rows),"sha256":hashlib.sha256(material).hexdigest()}
 
+def validate_feature_marker_source(source):
+    if source.count(FACT_STORE_FEATURE_MARKER) != 1:
+        raise GuardError("daemon WRITE fact-store feature marker mismatch")
+
+def active_fact_store_enabled(tokens):
+    marker="WYL_DAEMON_POLICY_WRITE_ACTIVE_FACT_STORE"
+    positions=[i for i,(_,value) in enumerate(tokens) if value==marker]
+    if len(positions)!=1:
+        raise GuardError("active fact-store feature marker cardinality mismatch")
+    i=positions[0]
+    values=[value for _,value in tokens]
+    if i+3>=len(values) or values[i+1]!="=" or values[i+2] not in ("0","1") \
+            or values[i+3]!=",":
+        raise GuardError("active fact-store feature marker shape mismatch")
+    return values[i+2]=="1"
+
 def candidate(defs, raw_tokens, owner_freeze):
     hashes={name:hashlib.sha256(b"".join(serialize(item[2]) for item in defs[name])).hexdigest() for name in FUNCTIONS}
     directives=[token for token in raw_tokens if token[0]=="directive"]
@@ -543,15 +582,13 @@ def validate_recover_write_boundary(defs):
     if any(symbol in values for symbol in forbidden):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
-def validate_owner_inventory(defs, allow_missing=False):
+def validate_owner_inventory(defs):
     if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 16:
         raise GuardError("daemon WRITE owner inventory must contain 16 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():
         items=defs.get(name,[])
-        if allow_missing and not items:
-            continue
         values=[value for _,_,tokens in items for _,value in tokens]
         acquires=sum(1 for i,value in enumerate(values[:-1])
             if value=="wyl_daemon_policy_write_acquire" and values[i+1]=="(")
@@ -563,6 +600,49 @@ def validate_owner_inventory(defs, allow_missing=False):
         for owner in expected:
             if values.count(owner) != 1:
                 raise GuardError(f"daemon WRITE owner id mismatch: {name}:{owner}")
+
+def validate_active_owner_inventory(defs, fact_store_enabled):
+    expected=set(OWNER_INVENTORY)-TEST_ONLY_OWNER_FUNCTIONS
+    if not fact_store_enabled:
+        expected-=FACT_STORE_OWNER_FUNCTIONS
+    all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
+        for owner in owners}
+    for name in sorted(expected):
+        if name not in defs:
+            raise GuardError(f"missing active daemon WRITE owner: {name}")
+        values=[value for _,value in defs[name][2]]
+        owners=OWNER_INVENTORY[name]
+        acquires=sum(1 for i,value in enumerate(values[:-1])
+            if value=="wyl_daemon_policy_write_acquire" and values[i+1]=="(")
+        if acquires != len(owners):
+            raise GuardError(f"active daemon WRITE owner acquire mismatch: {name}={acquires}")
+        found={owner for owner in all_owner_tokens if owner in values}
+        if found != set(owners):
+            raise GuardError(f"active daemon WRITE owner placement mismatch: {name}")
+        for owner in owners:
+            if values.count(owner)!=1:
+                raise GuardError(f"active daemon WRITE owner id mismatch: {name}:{owner}")
+
+    for name in sorted(TEST_ONLY_OWNER_FUNCTIONS):
+        if name in defs:
+            raise GuardError(f"test-only daemon WRITE owner is active: {name}")
+
+    if fact_store_enabled:
+        return
+    for name in sorted(FACT_STORE_DISABLED_STUBS):
+        if name not in defs:
+            raise GuardError(f"missing fact-disabled WRITE owner stub: {name}")
+        values=[value for _,value in defs[name][2]]
+        if "\"fact_store_disabled\"" not in values:
+            raise GuardError(f"fact-disabled WRITE owner stub mismatch: {name}")
+        if "wyl_daemon_policy_write_acquire" in values \
+                or any(owner in values for owner in all_owner_tokens) \
+                or any(mutator in values for mutator in MUTATORS):
+            raise GuardError(f"fact-disabled WRITE owner stub retained authority: {name}")
+    absent=FACT_STORE_OWNER_FUNCTIONS-FACT_STORE_DISABLED_STUBS
+    leaked=sorted(name for name in absent if name in defs)
+    if leaked:
+        raise GuardError("fact-disabled WRITE owners remain active: "+", ".join(leaked))
 
 def validate_terminal_write_contract(defs):
     required_helpers=(
@@ -666,6 +746,7 @@ def main(argv=None):
     path=Path(ns.root)/"wyrelog/daemon/http.c"; manifest=Path(ns.manifest) if ns.manifest else Path(ns.root)/"tools/daemon-policy-write-authority.json"
     if not path.is_file(): raise GuardError(f"missing source: {path}")
     source=path.read_text(encoding="utf-8")
+    validate_feature_marker_source(source)
     owner_freeze=owner_table_freeze(source)
     raw_tokens=lex(source,preserve_pp=True); raw_mate=pairs(raw_tokens); raw_defs=definitions(raw_tokens,raw_mate,allow_duplicates=True,full=True)
     missing=[x for x in FUNCTIONS if x not in raw_defs]
@@ -686,10 +767,10 @@ def main(argv=None):
         if ambiguous: raise GuardError("ambiguous active function definitions: "+", ".join(sorted(ambiguous)))
         defs={name:items[0] for name,items in grouped.items()
             if name in raw_defs and len(items)==1}
+        fact_store_enabled=active_fact_store_enabled(tokens)
         validate_test_only_tenant_seam(source,raw_defs,defs)
         validate_recover_write_boundary({name:[item] for name,item in defs.items()})
-        validate_owner_inventory({name:[item] for name,item in defs.items()},
-            allow_missing=True)
+        validate_active_owner_inventory(defs,fact_store_enabled)
         global_invariants(tokens,defs)
         raw_global_invariants(tokens,{name:[item] for name,item in defs.items()},False)
     actual=candidate(raw_defs,raw_tokens,owner_freeze)

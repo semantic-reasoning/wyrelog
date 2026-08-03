@@ -70,7 +70,7 @@ def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
     return build_root
 
 def invoke(guard, root, compiler_id, compiler, defines=(), build_root=None,
-           extra=(), raw_only=False):
+           extra=(), raw_only=False, print_candidate=False):
     if build_root is None:
         build_root = synthetic_db(root, invoke.real_root, invoke.real_build_root,
             compiler_id, compiler, defines, extra, invoke.real_compiler_id)
@@ -80,9 +80,16 @@ def invoke(guard, root, compiler_id, compiler, defines=(), build_root=None,
     else:
         command += ["--build-root", str(build_root), "--compiler-id",
             compiler_id]
+    if print_candidate:
+        command.append("--print-candidate")
     return subprocess.run(command,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True)
+
+def fact_store_flag(compiler_id, enabled):
+    if compiler_id in ("clang-cl", "msvc"):
+        return "/DWYL_HAS_FACT_STORE=1" if enabled else "/UWYL_HAS_FACT_STORE"
+    return "-DWYL_HAS_FACT_STORE=1" if enabled else "-UWYL_HAS_FACT_STORE"
 
 def expect_compile_db_rejected(guard, root, compiler_id, compiler, build_root,
                                database, label):
@@ -171,6 +178,13 @@ def main():
     if invoke(ns.guard, ns.root, ns.compiler_id, compiler, ns.define,
               build_root=ns.build_root).returncode:
         raise SystemExit("production fixture rejected")
+    for enabled in (False, True):
+        result = invoke(ns.guard, ns.root, ns.compiler_id, compiler, ns.define,
+            extra=(fact_store_flag(ns.compiler_id, enabled),))
+        if result.returncode:
+            state = "enabled" if enabled else "disabled"
+            raise SystemExit(f"fact-store {state} active inventory rejected: "
+                + result.stderr.strip())
     graph_route = (
         '  wyl_daemon_http_add_exact_handler (server, "/graphs/create",\n'
         "      graph_create_handler, ctx, NULL);")
@@ -483,6 +497,30 @@ def main():
         if invoke(ns.guard, fixture_root, ns.compiler_id, compiler, ns.define,
                   build_root=obj_build).returncode:
             raise SystemExit("native compile entry fixture rejected")
+
+        hidden_acquire = acquire_statement(source, "graph_create_handler")
+        hidden_source = mutate_function(source, "graph_create_handler",
+            "wyrelog_error_t rc = " + hidden_acquire,
+            "wyrelog_error_t rc = WYRELOG_E_INTERNAL;\n"
+            "#ifndef WYL_HIDE_ACTIVE_WRITE_OWNER\n  rc = "
+            + hidden_acquire + "\n#endif")
+        target.write_text(hidden_source, encoding="utf-8")
+        generated = invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
+            ns.define, raw_only=True, print_candidate=True)
+        if generated.returncode:
+            raise SystemExit("conditional owner fixture raw inventory rejected: "
+                + generated.stderr.strip())
+        manifest.write_text(generated.stdout, encoding="utf-8")
+        hidden_flags = (fact_store_flag(ns.compiler_id, True),
+            "/DWYL_HIDE_ACTIVE_WRITE_OWNER=1" if ns.compiler_id in
+            ("clang-cl", "msvc") else "-DWYL_HIDE_ACTIVE_WRITE_OWNER=1")
+        if invoke(ns.guard, fixture_root, ns.compiler_id, compiler, ns.define,
+                  extra=hidden_flags).returncode == 0:
+            raise SystemExit("active inventory accepted conditionally hidden owner")
+        target.write_text(source, encoding="utf-8")
+        manifest.write_text((Path(ns.root) /
+            "tools/daemon-policy-write-authority.json").read_text(
+            encoding="utf-8"), encoding="utf-8")
         valid_entry = json.loads(json.dumps(obj_db[0]))
         near_misses = {
             "prefixed-target": "/tmp/" + valid_entry["output"],
