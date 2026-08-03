@@ -444,6 +444,21 @@ test_engine_open_null_out_rejects (void)
 }
 
 static gint
+test_engine_rejects_inline_session_state_capability (void)
+{
+  static const gchar source[] =
+      ".decl session_state(scope: symbol, state: symbol)\n"
+      "session_state(\"inline-scope\", \"active\").\n";
+  g_autoptr (WylEngine) engine = NULL;
+  if (wyl_engine_open_source (source, 1, &engine) != WYRELOG_E_OK)
+    return 186;
+  if (wyl_engine_session_state_capability (engine)
+      != WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
+    return 187;
+  return 0;
+}
+
+static gint
 test_engine_close_then_finalize_safe (void)
 {
   WylEngine *engine = NULL;
@@ -967,6 +982,9 @@ main (void)
     return rc;
 
   if ((rc = test_engine_open_null_out_rejects ()) != 0)
+    return rc;
+
+  if ((rc = test_engine_rejects_inline_session_state_capability ()) != 0)
     return rc;
 
   if ((rc = test_engine_close_then_finalize_safe ()) != 0)

@@ -56,6 +56,11 @@ struct _WylEngine
   wyl_engine_owner_t owner;     /* Handle pair role, or standalone. */
   WylDeltaCookie *delta_cookie; /* Heap-owned, NULL when no cb. */
   WylEngineSessionStateCapability session_state_capability;
+  /* Host-accepted session_state EDB multiplicities. Canonical templates must
+   * not contain inline session_state facts: this witness records only rows
+   * accepted through the owned engine insertion boundary. */
+  GHashTable *session_state_input_rows;
+  GHashTable *session_state_input_totals;
 };
 
 /*
@@ -133,8 +138,17 @@ wyrelog_error_t wyl_engine_owned_insert (WylEngine * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 wyrelog_error_t wyl_engine_owned_remove (WylEngine * self,
     const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_engine_owned_get_accepted_session_state
+    (WylEngine * self, const gchar * relation, gint64 scope,
+    gint64 * out_state);
 wyrelog_error_t wyl_engine_owned_step (WylEngine * self);
 wyrelog_error_t wyl_engine_owned_set_delta_callback (WylEngine * self,
     WylDeltaCallback cb, gpointer user_data);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t wyl_engine_owned_set_session_state_witness_for_test
+    (WylEngine * self, const gint64 row[2], guint64 row_multiplicity,
+    guint64 scope_total);
+#endif
 
 G_END_DECLS;

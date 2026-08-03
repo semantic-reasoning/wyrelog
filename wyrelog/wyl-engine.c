@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <stdlib.h>
 #include <string.h>
 
 #include <sodium.h>
@@ -41,6 +42,12 @@ typedef struct
   gpointer user_data;
 } wyl_engine_tuple_cookie_t;
 
+typedef struct
+{
+  gint64 scope;
+  gint64 state;
+} WylSessionStateInputKey;
+
 struct _WylDeltaCookie
 {
   WylDeltaCallback callback;
@@ -67,6 +74,110 @@ relation_emits_delta_callback (const char *relation)
     return FALSE;
 
   return TRUE;
+}
+
+static guint
+session_state_input_key_hash (gconstpointer data)
+{
+  const WylSessionStateInputKey *key = data;
+  guint hash = g_int64_hash (&key->scope);
+  return (hash * 33u) ^ g_int64_hash (&key->state);
+}
+
+static gboolean
+session_state_input_key_equal (gconstpointer a, gconstpointer b)
+{
+  const WylSessionStateInputKey *lhs = a;
+  const WylSessionStateInputKey *rhs = b;
+  return lhs->scope == rhs->scope && lhs->state == rhs->state;
+}
+
+static guint64
+session_state_input_count (GHashTable *table, gconstpointer key)
+{
+  const guint64 *count = g_hash_table_lookup (table, key);
+  return count != NULL ? *count : 0;
+}
+
+static void
+set_session_state_input_count (GHashTable *table, gconstpointer key,
+    guint64 count, gsize key_size)
+{
+  if (count == 0) {
+    g_hash_table_remove (table, key);
+    return;
+  }
+  gpointer stored_key = g_memdup2 (key, key_size);
+  guint64 *stored_count = g_new (guint64, 1);
+  *stored_count = count;
+  g_hash_table_replace (table, stored_key, stored_count);
+}
+
+static wyrelog_error_t
+reserve_session_state_input (WylEngine *self, const gchar *relation,
+    const gint64 *row, gsize ncols, gboolean *out_reserved)
+{
+  *out_reserved = FALSE;
+  if (g_strcmp0 (relation, "session_state") != 0
+      || self->owner == WYL_ENGINE_OWNER_DELTA)
+    return WYRELOG_E_OK;
+  if (ncols != 2)
+    return WYRELOG_E_INVALID;
+
+  WylSessionStateInputKey key = { row[0], row[1] };
+  guint64 row_count = session_state_input_count
+      (self->session_state_input_rows, &key);
+  guint64 scope_total = session_state_input_count
+      (self->session_state_input_totals, &row[0]);
+  if (row_count == G_MAXUINT64 || scope_total == G_MAXUINT64)
+    return WYRELOG_E_INTERNAL;
+
+  set_session_state_input_count (self->session_state_input_rows, &key,
+      row_count + 1, sizeof key);
+  set_session_state_input_count (self->session_state_input_totals, &row[0],
+      scope_total + 1, sizeof row[0]);
+  *out_reserved = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static void
+rollback_session_state_input_reservation (WylEngine *self, const gint64 row[2])
+{
+  WylSessionStateInputKey key = { row[0], row[1] };
+  guint64 row_count = session_state_input_count
+      (self->session_state_input_rows, &key);
+  guint64 scope_total = session_state_input_count
+      (self->session_state_input_totals, &row[0]);
+  g_assert_cmpuint (row_count, >, 0);
+  g_assert_cmpuint (scope_total, >, 0);
+  set_session_state_input_count (self->session_state_input_rows, &key,
+      row_count - 1, sizeof key);
+  set_session_state_input_count (self->session_state_input_totals, &row[0],
+      scope_total - 1, sizeof row[0]);
+}
+
+static wyrelog_error_t
+precheck_session_state_input_remove (WylEngine *self, const gchar *relation,
+    const gint64 *row, gsize ncols, gboolean *out_tracked)
+{
+  *out_tracked = FALSE;
+  if (g_strcmp0 (relation, "session_state") != 0
+      || self->owner == WYL_ENGINE_OWNER_DELTA)
+    return WYRELOG_E_OK;
+  if (ncols != 2)
+    return WYRELOG_E_INVALID;
+
+  WylSessionStateInputKey key = { row[0], row[1] };
+  guint64 row_count = session_state_input_count
+      (self->session_state_input_rows, &key);
+  guint64 scope_total = session_state_input_count
+      (self->session_state_input_totals, &row[0]);
+  if (row_count == 0)
+    return WYRELOG_E_NOT_FOUND;
+  if (scope_total < row_count)
+    return WYRELOG_E_INTERNAL;
+  *out_tracked = TRUE;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -537,6 +648,8 @@ wyl_engine_finalize (GObject *object)
   g_clear_pointer (&self->session, wirelog_easy_close);
   g_clear_pointer (&self->delta_cookie, g_free);
   g_clear_pointer (&self->symbols_by_id, g_hash_table_unref);
+  g_clear_pointer (&self->session_state_input_rows, g_hash_table_unref);
+  g_clear_pointer (&self->session_state_input_totals, g_hash_table_unref);
 
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     g_clear_pointer (&self->dl_src_logical_paths[i], g_free);
@@ -557,6 +670,11 @@ wyl_engine_init (WylEngine *self)
 {
   self->session = NULL;
   self->symbols_by_id =
+      g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
+  self->session_state_input_rows = g_hash_table_new_full
+      (session_state_input_key_hash, session_state_input_key_equal, g_free,
+      g_free);
+  self->session_state_input_totals =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
   self->mode = WYL_ENGINE_MODE_NONE;
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
@@ -671,14 +789,21 @@ inspect_session_state_capability (const gchar *source)
   }
   const wirelog_schema_t *schema = wirelog_program_get_schema (program,
       "session_state");
+  int64_t *inline_facts = NULL;
+  uint32_t inline_rows = 0;
+  uint32_t inline_cols = 0;
+  int inline_rc = wirelog_program_get_facts (program, "session_state",
+      &inline_facts, &inline_rows, &inline_cols);
   WylEngineSessionStateCapability capability =
       schema == NULL ? WYL_ENGINE_SESSION_STATE_ABSENT :
       schema->column_count == 2
       && schema->columns[0].type == WIRELOG_TYPE_STRING
       && schema->columns[1].type == WIRELOG_TYPE_STRING
       && schema->columns[0].compound_kind == WIRELOG_COMPOUND_KIND_NONE
-      && schema->columns[1].compound_kind == WIRELOG_COMPOUND_KIND_NONE ?
+      && schema->columns[1].compound_kind == WIRELOG_COMPOUND_KIND_NONE
+      && inline_rc == 1 && inline_rows == 0 ?
       WYL_ENGINE_SESSION_STATE_EXACT : WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
+  free (inline_facts);
   wirelog_program_free (program);
   return capability;
 }
@@ -940,10 +1065,18 @@ wyl_engine_insert_unchecked (WylEngine *self, const gchar *relation,
   if (self->session == NULL)
     return WYRELOG_E_INVALID;
 
+  gboolean witness_reserved = FALSE;
+  wyrelog_error_t rc = reserve_session_state_input (self, relation, row,
+      ncols, &witness_reserved);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   wirelog_error_t wl_rc =
       wirelog_easy_insert (self->session, relation, (const int64_t *) row,
       (uint32_t) ncols);
-  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc != WYRELOG_E_OK && witness_reserved)
+    rollback_session_state_input_reservation (self, row);
   if (rc != WYRELOG_E_OK) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
         "engine: insert failed for relation '%s' with %" G_GSIZE_FORMAT
@@ -1122,10 +1255,18 @@ wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
   if (self->session == NULL)
     return WYRELOG_E_INVALID;
 
+  gboolean witness_tracked = FALSE;
+  wyrelog_error_t rc = precheck_session_state_input_remove (self, relation,
+      row, ncols, &witness_tracked);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   wirelog_error_t wl_rc =
       wirelog_easy_remove (self->session, relation, (const int64_t *) row,
       (uint32_t) ncols);
-  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc == WYRELOG_E_OK && witness_tracked)
+    rollback_session_state_input_reservation (self, row);
   if (rc != WYRELOG_E_OK) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
         "engine: remove failed for relation '%s' with %" G_GSIZE_FORMAT
@@ -1134,6 +1275,56 @@ wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
 
   return rc;
 }
+
+wyrelog_error_t
+wyl_engine_owned_get_accepted_session_state (WylEngine *self,
+    const gchar *relation, gint64 scope, gint64 *out_state)
+{
+  if (out_state != NULL)
+    *out_state = 0;
+  if (self == NULL || !WYL_IS_ENGINE (self) || out_state == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_READ
+      || g_strcmp0 (relation, "session_state") != 0)
+    return WYRELOG_E_INVALID;
+
+  guint64 scope_total = session_state_input_count
+      (self->session_state_input_totals, &scope);
+  if (scope_total != 1)
+    return WYRELOG_E_POLICY;
+
+  GHashTableIter iter;
+  gpointer raw_key = NULL;
+  gpointer raw_count = NULL;
+  g_hash_table_iter_init (&iter, self->session_state_input_rows);
+  while (g_hash_table_iter_next (&iter, &raw_key, &raw_count)) {
+    const WylSessionStateInputKey *key = raw_key;
+    const guint64 *count = raw_count;
+    if (key->scope == scope && *count == 1) {
+      *out_state = key->state;
+      return WYRELOG_E_OK;
+    }
+  }
+  return WYRELOG_E_INTERNAL;
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t
+wyl_engine_owned_set_session_state_witness_for_test (WylEngine *self,
+    const gint64 row[2], guint64 row_multiplicity, guint64 scope_total)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self) || row == NULL
+      || self->owner == WYL_ENGINE_OWNER_DELTA
+      || scope_total < row_multiplicity)
+    return WYRELOG_E_INVALID;
+  WylSessionStateInputKey key = { row[0], row[1] };
+  set_session_state_input_count (self->session_state_input_rows, &key,
+      row_multiplicity, sizeof key);
+  set_session_state_input_count (self->session_state_input_totals, &row[0],
+      scope_total, sizeof row[0]);
+  return WYRELOG_E_OK;
+}
+#endif
 
 wyrelog_error_t
 wyl_engine_remove (WylEngine *self, const gchar *relation, const gint64 *row,
