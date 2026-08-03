@@ -885,6 +885,17 @@ if host_machine.system() != 'windows' and build_client
       dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
     )
 
+    # Build-guaranteed reader for the packaged service-credential rotation e2e:
+    # counts durable audit_events rows for an (action, decision) pair by linking
+    # the project's own DuckDB dependency, so the acceptance gate never silently
+    # skips on a host that happens to lack a system duckdb CLI.
+    check_audit_events_query = executable(
+      'check-audit-events-query',
+      'check-audit-events-query.c',
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+    )
+
     test('service-permission-closure', sh,
       args : [
         meson.current_source_dir() / 'check-service-permission-closure.sh',
@@ -943,6 +954,35 @@ if host_machine.system() != 'windows' and build_client
         ],
         is_parallel : false,
         timeout : 300,
+      )
+
+      # Packaged, encrypted, end-to-end KEYPROVIDER ROOT ROTATION + CREDENTIAL
+      # ROTATION + RESTART + AUDIT runtime proof (#382 Unit 3). This is the first
+      # test to `wyctl key rotate` a store that CONTAINS a live credential: it
+      # proves the populated CVK envelope + credential row survive byte-for-byte,
+      # then that `wyctl service-credential rotate` retires A and stands up B
+      # across real daemon restarts, with a durable sanitized audit. The audit
+      # DuckDB is read with the build-guaranteed check-audit-events-query helper
+      # (never a system duckdb CLI), so the gate cannot silently skip. Real TOTP
+      # + several daemon boots -> 360s.
+      test('service-credential-rotation-e2e', sh,
+        args : [
+          meson.current_source_dir()
+            / 'check-service-credential-rotation-e2e.sh',
+          wyrelogd_exe.full_path(),
+          wyctl_exe.full_path(),
+          check_service_credential_store_inspect.full_path(),
+          meson.project_source_root() / 'templates' / 'access',
+          python3.full_path(),
+          meson.current_source_dir() / 'wyrelog_sc_e2e.py',
+          check_audit_events_query.full_path(),
+        ],
+        depends : [
+          wyrelogd_exe, wyctl_exe, check_service_credential_store_inspect,
+          check_audit_events_query,
+        ],
+        is_parallel : false,
+        timeout : 360,
       )
     endif
   endif

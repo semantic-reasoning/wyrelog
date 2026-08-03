@@ -190,6 +190,52 @@ def cmd_totp_admin(args):
     return 0
 
 
+def cmd_login_totp(args):
+    """Mint a fresh MFA-assured bearer for an ALREADY-ENROLLED admin using its
+    saved TOTP secret. Unlike totp-admin (which enrolls), this only drives the
+    login -> mfa/verify handshake, so it can re-mint a live-MFA session on a
+    later daemon boot (sessions are in-memory and lost on restart; a management
+    self-arm + issue/rotate needs a live session on THAT boot). The secret is
+    read from a 0600 file, never passed on a command line.
+
+    mfa/verify consumes the current TOTP step as a replay watermark, so on a
+    non-200 verify we retry once on the next 30s window."""
+    with open(args.secret_file, "r", encoding="utf-8") as handle:
+        secret_b32 = handle.read().strip()
+    seed = base64.b32decode(secret_b32)
+
+    def one_attempt():
+        login_url = "%s/auth/login?username=%s&tenant=%s" % (
+            args.base_url, args.username, DEFAULT_TENANT)
+        status, lbody = _post(login_url)
+        if status != 200:
+            return status, "login: " + lbody, None
+        session = json.loads(lbody).get("session_token")
+        if not session:
+            return status, "login: no session_token in " + lbody, None
+        verify_url = "%s/auth/mfa/verify?session_token=%s&code=%06d" % (
+            args.base_url, session, _totp(seed))
+        vstatus, vbody = _post(verify_url)
+        if vstatus != 200:
+            return vstatus, "verify: " + vbody, None
+        token = json.loads(vbody).get("access_token")
+        if not token:
+            return vstatus, "verify: no access_token in " + vbody, None
+        return 200, None, token
+
+    status, err, token = one_attempt()
+    if token is None:
+        # Retry on the next TOTP window in case the current step was already
+        # consumed as a replay watermark.
+        time.sleep(30 - (time.time() % 30) + 0.25)
+        status, err, token = one_attempt()
+        if token is None:
+            sys.stderr.write("login-totp: %s (HTTP %d)\n" % (err, status))
+            return 1
+    print(token)
+    return 0
+
+
 def cmd_http_post(args):
     token = _read_token(args.token_file)
     query = "&".join(args.query) if args.query else ""
@@ -409,7 +455,17 @@ def cmd_assert_no_refresh(args):
 
 
 def cmd_scan_absent(args):
-    needle = args.needle.encode("utf-8")
+    if args.needle_file:
+        with open(args.needle_file, "rb") as handle:
+            needle = handle.read().strip()
+    elif args.needle is not None:
+        needle = args.needle.encode("utf-8")
+    else:
+        sys.stderr.write("scan-absent: --needle or --needle-file is required\n")
+        return 2
+    if not needle:
+        sys.stderr.write("scan-absent: empty needle\n")
+        return 2
     forms = {
         "raw": needle,
         "base64": base64.b64encode(needle),
@@ -420,8 +476,11 @@ def cmd_scan_absent(args):
         try:
             with open(path, "rb") as handle:
                 data = handle.read()
-        except OSError:
-            continue
+        except OSError as exc:
+            # A named target that cannot be read is a hard failure, never a
+            # vacuous "absent" pass: the caller is asserting this sink is clean.
+            sys.stderr.write("scan-absent: cannot read %s: %s\n" % (path, exc))
+            return 2
         for name, form in forms.items():
             if form and form in data:
                 sys.stderr.write(
@@ -451,6 +510,12 @@ def build_parser():
     p.add_argument("--admin-token-file", required=True)
     p.add_argument("--secret-out", default=None)
     p.set_defaults(func=cmd_totp_admin)
+
+    p = sub.add_parser("login-totp")
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--username", required=True)
+    p.add_argument("--secret-file", required=True)
+    p.set_defaults(func=cmd_login_totp)
 
     p = sub.add_parser("http-post")
     p.add_argument("--base-url", required=True)
@@ -514,7 +579,9 @@ def build_parser():
     p.set_defaults(func=cmd_assert_no_refresh)
 
     p = sub.add_parser("scan-absent")
-    p.add_argument("--needle", required=True)
+    p.add_argument("--needle", default=None)
+    p.add_argument("--needle-file", default=None,
+                   help="read the secret needle from a 0600 file (avoids argv)")
     p.add_argument("files", nargs="+")
     p.set_defaults(func=cmd_scan_absent)
 
