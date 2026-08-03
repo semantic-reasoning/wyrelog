@@ -62,6 +62,26 @@ test('handle-test-seams-not-shipped', python3,
   env : python_strict_encoding_env,
 )
 
+# Frozen service-credential platform evidence matrix (#382 Unit 6). This is a
+# STATIC source/doc/config consistency gate: it asserts the four packaged
+# service-credential e2e tests stay inside a `host_machine.system() == 'linux'`
+# gate, that docs/service-credential-platform-support.md classifies all three
+# platforms in agreement with that gating (Linux=runtime, macOS/Windows=
+# build-only) and references the #754-gated #380 portion, and that the CI
+# workflows provide each platform's runner + named native gates. Registered
+# UNCONDITIONALLY (no platform/build gate) so drift is caught on every runner.
+test('service-credential-platform-matrix', python3,
+  args : [
+    meson.current_source_dir() / 'check-service-credential-platform-matrix.py',
+    meson.current_source_dir() / 'meson.build',
+    meson.project_source_root() / 'docs' / 'service-credential-platform-support.md',
+    meson.project_source_root() / '.github' / 'workflows' / 'ci-main.yml',
+    meson.project_source_root() / '.github' / 'workflows' / 'ci-pr.yml',
+    meson.current_source_dir()
+      / 'test-service-credential-operation-coordinator-execute.c',
+  ],
+)
+
 if host_machine.system() == 'windows'
   advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
     required : true)
@@ -915,7 +935,17 @@ if host_machine.system() != 'windows' and build_client
     # (#382 Unit 1a): bootstrap -> real-TOTP admin -> self-arm -> tenant/principal
     # -> issue -> exchange -> /decide deny -> grant -> /decide allow. The audit
     # sink is exercised end-to-end, so it is additionally gated on enable_audit.
-    if get_option('enable_audit').allowed()
+    #
+    # Linux is the sole PACKAGED-RUNTIME platform for the service-credential
+    # lifecycle e2e suite (#382 Unit 6, docs/service-credential-platform-support.md):
+    # macOS and Windows are BUILD-ONLY for these gates. macOS packaged-runtime is
+    # not asserted because of documented runtime flakiness (handoff-e2e SIGABRT
+    # re-run-passes); the daemon/shell e2e harness is already POSIX-only. The
+    # helper exes above stay built (a macOS/Windows-eligible build gate); only the
+    # runtime test() registrations below are Linux-only. This gate is enforced by
+    # tests/check-service-credential-platform-matrix.py -- do not broaden it (for
+    # example back to != 'windows') without updating the frozen matrix doc.
+    if host_machine.system() == 'linux' and get_option('enable_audit').allowed()
       test('service-credential-lifecycle-e2e', sh,
         args : [
           meson.current_source_dir() / 'check-service-credential-lifecycle-e2e.sh',
