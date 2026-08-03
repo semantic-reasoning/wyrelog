@@ -65,7 +65,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         root / ".github" / "workflows" / workflow_name).read_text(
             encoding="utf-8")
     job_start = workflow.index("  duckdb-checkpoint-seam:")
-    job_end = workflow.index("\n  build-windows:", job_start)
+    job_end = workflow.index("\n  daemon-http-shared-fact:", job_start)
     job = workflow[job_start:job_end]
     required = (
         "os: [ubuntu-latest, macos-latest]",
