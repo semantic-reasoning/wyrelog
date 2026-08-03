@@ -8879,6 +8879,21 @@ tenant_recovery_attempt_before_authorization (WylDaemonHttpContext *ctx,
   return rc;
 }
 
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_attempt_seal_tenant_recovery_for_test (SoupServer *server,
+    const gchar *tenant, const gchar *request_id)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || !wyl_policy_store_tenant_id_is_valid (tenant)
+      || !wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  return tenant_recovery_attempt_before_authorization (ctx,
+      WYL_TENANT_RECOVERY_SEAL, tenant,
+      WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, request_id);
+}
+#endif
+
 static void
 set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
 {
