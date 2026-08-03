@@ -496,6 +496,14 @@ void wyl_daemon_http_fail_next_policy_write_acquire_for_test
     (SoupServer * server, WylDaemonPolicyWriteAcquireFault fault);
 void wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test
     (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test
+    (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_creator_grant_for_test
+    (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_creator_event_for_test
+    (SoupServer * server);
+void wyl_daemon_http_fail_next_tenant_creator_receipt_verification_for_test
+    (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test
     (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_seal_verification_for_test
@@ -518,6 +526,32 @@ void wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test
     (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
     (guint * out_allocations, guint * out_frees);
+void wyl_daemon_http_tenant_create_publication_snapshot_for_test
+    (SoupServer * server, guint * out_attempts,
+    guint * out_noop_fault_discards);
+typedef enum
+{
+  WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN = 0,
+  WYL_DAEMON_TENANT_CREATE_OUTCOME_INSTALL_ORIGINAL_DESCRIPTOR,
+  WYL_DAEMON_TENANT_CREATE_OUTCOME_REPAIR_ABSENT_PAIR,
+} WylDaemonTenantCreateOutcomeEffect;
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *creator_subject_id;
+  const gchar *audit_id;
+  gint64 audit_created_at_us;
+  const gchar *audit_subject_id;
+  const gchar *audit_action;
+  const gchar *audit_resource_id;
+  const gchar *audit_deny_reason;
+  const gchar *audit_deny_origin;
+  const gchar *audit_request_id;
+  wyl_decision_t audit_decision;
+} WylDaemonTenantCreateOutcomeBundle;
+wyrelog_error_t wyl_daemon_http_resolve_tenant_create_outcome_for_test
+    (SoupServer * server, const WylDaemonTenantCreateOutcomeBundle * bundle,
+    WylDaemonTenantCreateOutcomeEffect * out_effect);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
     (SoupServer * server);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test

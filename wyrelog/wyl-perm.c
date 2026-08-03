@@ -745,11 +745,13 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (session == NULL)
     return WYRELOG_E_BUSY;
-  gboolean commit_confirmed = FALSE;
+  WylCommittedPublicationStage stage =
+      WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
       mutate_permission_transition, &transition, verify_permission_transition,
-      &transition, NULL, NULL, &commit_confirmed);
-  if (commit_confirmed && out_event_id != NULL)
+      &transition, NULL, NULL, &stage);
+  if (stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
+      && out_event_id != NULL)
     *out_event_id = transition.event_id;
   g_clear_pointer (&session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT

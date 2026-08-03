@@ -10780,6 +10780,133 @@ wyl_policy_store_tenant_is_active (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_classify_tenant_create_bundle (wyl_policy_store_t *store,
+    const WylPolicyTenantCreateBundle *bundle,
+    WylPolicyTenantCreateBundleState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN;
+  if (store == NULL || store->db == NULL || bundle == NULL
+      || out_state == NULL
+      || !wyl_policy_store_tenant_id_is_valid (bundle->tenant_id)
+      || bundle->creator_subject_id == NULL || bundle->audit_id == NULL
+      || bundle->audit_created_at_us < 0
+      || g_strcmp0 (bundle->audit_subject_id,
+          bundle->creator_subject_id) != 0
+      || g_strcmp0 (bundle->audit_action, "tenant_create") != 0
+      || g_strcmp0 (bundle->audit_resource_id, bundle->tenant_id) != 0
+      || bundle->audit_request_id == NULL
+      || bundle->audit_decision != WYL_DECISION_ALLOW)
+    return WYRELOG_E_INVALID;
+  if (!wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+
+  static const gchar *sql =
+      "SELECT"
+      " (SELECT count(*) FROM tenants WHERE tenant_id=:tenant),"
+      " (SELECT count(*) FROM tenants WHERE tenant_id=:tenant AND sealed=0),"
+      " (SELECT count(*) FROM role_memberships WHERE subject_id=:creator"
+      "  AND role_id='wr.system_admin' AND scope=:tenant),"
+      " (SELECT count(*) FROM role_membership_events"
+      "  WHERE subject_id=:creator AND role_id='wr.system_admin'"
+      "  AND scope=:tenant),"
+      " (SELECT count(*) FROM role_membership_events"
+      "  WHERE subject_id=:creator AND role_id='wr.system_admin'"
+      "  AND scope=:tenant AND operation='grant'),"
+      " (SELECT count(*) FROM session_states WHERE session_id=:tenant),"
+      " (SELECT count(*) FROM session_events WHERE session_id=:tenant),"
+      " (SELECT count(*) FROM audit_events WHERE id=:audit_id),"
+      " (SELECT count(*) FROM audit_events WHERE id=:audit_id"
+      "  AND created_at_us=:audit_created AND subject_id IS :audit_subject"
+      "  AND action IS :audit_action AND resource_id IS :audit_resource"
+      "  AND deny_reason IS :audit_deny_reason"
+      "  AND deny_origin IS :audit_deny_origin"
+      "  AND request_id IS :audit_request AND decision=:audit_decision),"
+      " (SELECT count(*) FROM audit_intentions WHERE audit_id=:audit_id),"
+      " (SELECT count(*) FROM audit_intentions WHERE audit_id=:audit_id"
+      "  AND created_at_us=:audit_created AND subject_id IS :audit_subject"
+      "  AND action IS :audit_action AND resource_id IS :audit_resource"
+      "  AND deny_reason IS :audit_deny_reason"
+      "  AND deny_origin IS :audit_deny_origin"
+      "  AND request_id IS :audit_request AND decision=:audit_decision);";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, sqlite3_bind_parameter_index (stmt, ":tenant"),
+        bundle->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, sqlite3_bind_parameter_index (stmt, ":creator"),
+        bundle->creator_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, sqlite3_bind_parameter_index (stmt, ":audit_id"),
+        bundle->audit_id);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt,
+          sqlite3_bind_parameter_index (stmt, ":audit_created"),
+          bundle->audit_created_at_us) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_nullable_text (stmt,
+        sqlite3_bind_parameter_index (stmt, ":audit_subject"),
+        bundle->audit_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_nullable_text (stmt,
+        sqlite3_bind_parameter_index (stmt, ":audit_action"),
+        bundle->audit_action);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_nullable_text (stmt,
+        sqlite3_bind_parameter_index (stmt, ":audit_resource"),
+        bundle->audit_resource_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_nullable_text (stmt,
+        sqlite3_bind_parameter_index (stmt, ":audit_deny_reason"),
+        bundle->audit_deny_reason);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_nullable_text (stmt,
+        sqlite3_bind_parameter_index (stmt, ":audit_deny_origin"),
+        bundle->audit_deny_origin);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_nullable_text (stmt,
+        sqlite3_bind_parameter_index (stmt, ":audit_request"),
+        bundle->audit_request_id);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int (stmt,
+          sqlite3_bind_parameter_index (stmt, ":audit_decision"),
+          bundle->audit_decision) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    static const gint64 absent[11] = { 0 };
+    static const gint64 present[11] = { 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1 };
+    gboolean all_absent = TRUE;
+    gboolean all_present = TRUE;
+    for (guint i = 0; i < G_N_ELEMENTS (present); i++) {
+      if (sqlite3_column_type (stmt, (int) i) != SQLITE_INTEGER) {
+        all_absent = FALSE;
+        all_present = FALSE;
+        break;
+      }
+      gint64 count = sqlite3_column_int64 (stmt, (int) i);
+      all_absent = all_absent && count == absent[i];
+      all_present = all_present && count == present[i];
+    }
+    int final_step = sqlite3_step (stmt);
+    if (final_step != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    else if (all_present)
+      *out_state = WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT;
+    else if (all_absent)
+      *out_state = WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_ABSENT;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_policy_store_foreach_tenant (wyl_policy_store_t *store,
     wyl_policy_tenant_cb cb, gpointer user_data)
 {

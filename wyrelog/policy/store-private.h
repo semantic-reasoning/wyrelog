@@ -2121,6 +2121,31 @@ wyrelog_error_t wyl_policy_store_tenant_exists (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_tenant_is_active (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_active);
+typedef enum
+{
+  WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN = 0,
+  WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_ABSENT,
+  WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT,
+} WylPolicyTenantCreateBundleState;
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *creator_subject_id;
+  const gchar *audit_id;
+  gint64 audit_created_at_us;
+  const gchar *audit_subject_id;
+  const gchar *audit_action;
+  const gchar *audit_resource_id;
+  const gchar *audit_deny_reason;
+  const gchar *audit_deny_origin;
+  const gchar *audit_request_id;
+  wyl_decision_t audit_decision;
+} WylPolicyTenantCreateBundle;
+/* Exact durable readback classifier for an ambiguous tenant CREATE commit.
+ * The caller retains the daemon WRITE lease that owns @store. */
+wyrelog_error_t wyl_policy_store_classify_tenant_create_bundle
+    (wyl_policy_store_t * store, const WylPolicyTenantCreateBundle * bundle,
+    WylPolicyTenantCreateBundleState * out_state);
 wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
     wyl_policy_tenant_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
