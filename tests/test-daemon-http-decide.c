@@ -1,6 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <string.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <stdlib.h>
+#endif
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -13051,9 +13058,22 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
       || wyl_id_format (&session_id_value, env->session_token,
           sizeof env->session_token) != WYRELOG_E_OK)
     return 2103;
-  env->handoff_dir = g_dir_make_tmp ("wyl-daemon-http-denial-XXXXXX", NULL);
-  if (env->handoff_dir == NULL)
+  g_autofree gchar *created_handoff_dir = g_dir_make_tmp
+      ("wyl-daemon-http-denial-XXXXXX", NULL);
+  if (created_handoff_dir == NULL)
     return 2104;
+#ifdef G_OS_WIN32
+  env->handoff_dir = g_steal_pointer (&created_handoff_dir);
+#else
+  /* The POSIX graph resolver rejects symlink path components.  macOS commonly
+   * spells TMPDIR through /var -> /private/var, so retain the owned directory
+   * by its resolved path before deriving the fact root. */
+  env->handoff_dir = realpath (created_handoff_dir, NULL);
+  if (env->handoff_dir == NULL) {
+    (void) g_rmdir (created_handoff_dir);
+    return 2104;
+  }
+#endif
   env->operation_root = service_credential_operation_root_for_test
       (env->handoff_dir, "denial-operations");
   env->fact_root = g_build_filename (env->handoff_dir, "facts", NULL);
@@ -13567,11 +13587,20 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
             "registry_present\n");
         return 11;
       }
+      WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+      WylFactGraphLocator locator = { 0 };
       WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-      wyrelog_error_t directory_rc = wyl_policy_store_open_fact_graph_directory
-          (store, env->fact_root, WYL_TENANT_DEFAULT, "owner-fault", FALSE,
-          &directory);
+      wyrelog_error_t directory_rc = wyl_fact_graph_resolver_open
+          (env->fact_root, &resolver);
+      if (directory_rc == WYRELOG_E_OK)
+        directory_rc = wyl_fact_graph_locator_init (&locator,
+            WYL_TENANT_DEFAULT, "owner-fault");
+      if (directory_rc == WYRELOG_E_OK)
+        directory_rc = wyl_fact_graph_resolver_open_directory (&resolver,
+            &locator, FALSE, &directory);
       wyl_fact_graph_directory_clear (&directory);
+      wyl_fact_graph_locator_clear (&locator);
+      wyl_fact_graph_resolver_clear (&resolver);
       if (directory_rc == WYRELOG_E_OK) {
         g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
             "storage_present\n");
