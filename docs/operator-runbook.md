@@ -575,8 +575,9 @@ Treat this response as an indeterminate mutation outcome. Durable work may
 already have committed, and the 500 response neither rolls it back nor proves
 that it did not commit. Preserve the request id, inspect the authoritative
 resource or operation state with a human session, and do not retry the mutation
-under a new id. The diagnostic log records only the primary status/error code
-and numeric cleanup result; it intentionally omits credentials, tokens, actors,
+under a new id. The diagnostic log records only the static owner identifier,
+the primary internal result when known, the primary status/error code, and the
+numeric cleanup result; it intentionally omits credentials, tokens, actors,
 tenants, paths, and request bodies.
 
 There is no reset endpoint for this fail-closed latch. Health, human

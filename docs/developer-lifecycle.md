@@ -284,8 +284,9 @@ HTTP 500 with `policy_write_cleanup_failed`, even when the primary operation
 had otherwise succeeded or failed differently. A durable mutation may already
 have committed before cleanup failed, so this response never represents a
 rollback or proves that no commit occurred. Diagnostics contain only the
-primary HTTP status and error code plus the numeric cleanup result; they must
-not include credentials, tokens, actors, tenants, request paths, or bodies.
+static owner identifier, the primary internal result when known, the primary
+HTTP status and error code, and the numeric cleanup result; they must not
+include credentials, tokens, actors, tenants, request paths, or bodies.
 
 There is deliberately no in-process reset path for the unavailable latch.
 Human authentication, health, and ordinary decision handling remain available,
