@@ -170,6 +170,8 @@ def main():
     invoke.real_build_root = Path(ns.build_root).resolve()
     invoke.real_compiler_id = ns.compiler_id
     source = (Path(ns.root) / "wyrelog/daemon/http.c").read_text(encoding="utf-8")
+    test_source = (Path(ns.root) /
+        "tests/test-daemon-http-decide.c").read_text(encoding="utf-8")
     tenant_acquire = acquire_statement(source, "tenant_mutation_handler")
     facts_publication_acquire = acquire_statement(source,
         "facts_route_handler", 1)
@@ -485,6 +487,9 @@ def main():
         fixture_root = Path(tmp)
         target = fixture_root / "wyrelog/daemon/http.c"
         target.parent.mkdir(parents=True)
+        test_target = fixture_root / "tests/test-daemon-http-decide.c"
+        test_target.parent.mkdir(parents=True)
+        test_target.write_text(test_source, encoding="utf-8")
         manifest = fixture_root / "tools/daemon-policy-write-authority.json"
         manifest.parent.mkdir(parents=True)
         manifest.write_text((Path(ns.root) /
@@ -497,6 +502,26 @@ def main():
         if invoke(ns.guard, fixture_root, ns.compiler_id, compiler, ns.define,
                   build_root=obj_build).returncode:
             raise SystemExit("native compile entry fixture rejected")
+
+        matrix_fixtures = {
+            "missing-owner-row": test_source.replace(
+                '{5, "graph_seal",', '{5, "graph_seal_removed",', 1),
+            "single-fault-mode": test_source.replace(
+                "mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT",
+                "mode < 1", 1),
+            "missing-acquire-fault": test_source.replace(
+                "wyl_daemon_http_fail_next_policy_write_acquire_for_test",
+                "owner_fault_acquire_removed", 1),
+        }
+        for name, text in matrix_fixtures.items():
+            if text == test_source:
+                raise SystemExit(f"owner fault matrix anchor missing: {name}")
+            test_target.write_text(text, encoding="utf-8")
+            if invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
+                      ns.define, raw_only=True).returncode == 0:
+                raise SystemExit(
+                    f"guard accepted owner fault matrix fixture: {name}")
+        test_target.write_text(test_source, encoding="utf-8")
 
         hidden_acquire = acquire_statement(source, "graph_create_handler")
         hidden_source = mutate_function(source, "graph_create_handler",

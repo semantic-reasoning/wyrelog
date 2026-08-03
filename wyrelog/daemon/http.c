@@ -348,6 +348,8 @@ typedef struct _WylDaemonHttpContext
   void (*rotate_write_checkpoint) (gpointer data);
   gpointer rotate_write_checkpoint_data;
   WylDaemonPolicyWriteFinalizeFault policy_write_finalize_fault;
+  WylDaemonPolicyWriteAcquireFault policy_write_acquire_fault;
+  guint policy_write_acquire_fault_hits;
   guint policy_write_terminal_entries;
   WylDaemonPolicyWriteFinalizeSnapshot policy_write_finalize_snapshot;
   gboolean fail_next_retirement_latch;
@@ -698,6 +700,15 @@ policy_write_terminal_checkpoint (gpointer data)
   g_mutex_unlock (&ctx->lock);
 }
 
+static guint
+policy_write_acquire_fault_hit_count (WylDaemonHttpContext *ctx)
+{
+  g_mutex_lock (&ctx->lock);
+  guint hits = ctx->policy_write_acquire_fault_hits;
+  g_mutex_unlock (&ctx->lock);
+  return hits;
+}
+
 static void
 policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
     wyrelog_error_t primary_rc, wyrelog_error_t cleanup_rc)
@@ -713,6 +724,8 @@ policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
     .post_finalize_total_pins = G_MAXUINT,
     .post_finalize_thread_pins = G_MAXUINT,
     .observed_cleanup_resources = write->observed_cleanup_resources,
+    .acquire_fault_hits =
+        policy_write_acquire_fault_hit_count (write->test_ctx),
     .owner = write->owner,
   };
   g_strlcpy (snapshot.primary_code, "non_http", sizeof snapshot.primary_code);
@@ -721,6 +734,9 @@ policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
       sizeof snapshot.owner_name);
   WylHandle *handle = write->handle != NULL ? write->handle :
       write->test_ctx->handle;
+  snapshot.post_finalize_transaction_active =
+      wyl_policy_store_service_authority_transaction_is_active
+      (wyl_handle_get_policy_store (handle));
   wyl_handle_policy_store_pin_snapshot_for_test (handle,
       &snapshot.post_finalize_total_pins, &snapshot.post_finalize_thread_pins);
   for (guint rank = WYL_SERVICE_AUTH_RANK_COORDINATION;
@@ -764,10 +780,14 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
         ctx->handle, &write->store);
 #ifdef WYL_TEST_DAEMON_HTTP
     WylDaemonPolicyWriteFinalizeFault fault;
+    WylDaemonPolicyWriteAcquireFault acquire_fault;
     g_mutex_lock (&ctx->lock);
     fault = ctx->policy_write_finalize_fault;
     ctx->policy_write_finalize_fault =
         WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE;
+    acquire_fault = ctx->policy_write_acquire_fault;
+    ctx->policy_write_acquire_fault =
+        WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_NONE;
     g_mutex_unlock (&ctx->lock);
     if (rc == WYRELOG_E_OK) {
       wyl_service_auth_write_lease_test_set_terminal_checkpoint (write->lease,
@@ -781,6 +801,12 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
       else if (fault == WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY)
         (void) wyl_service_auth_write_lease_test_swap_pinned_store
             (write->lease, (wyl_policy_store_t *) ctx);
+      if (acquire_fault == WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_AFTER_STORE) {
+        g_mutex_lock (&ctx->lock);
+        ctx->policy_write_acquire_fault_hits++;
+        g_mutex_unlock (&ctx->lock);
+        rc = WYRELOG_E_INTERNAL;
+      }
     }
 #endif
   }
@@ -2844,6 +2870,19 @@ wyl_daemon_http_fail_next_policy_write_finalize_for_test (SoupServer *server,
     return;
   g_mutex_lock (&ctx->lock);
   ctx->policy_write_finalize_fault = fault;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_fail_next_policy_write_acquire_for_test (SoupServer *server,
+    WylDaemonPolicyWriteAcquireFault fault)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || fault < WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_NONE
+      || fault > WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_AFTER_STORE)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->policy_write_acquire_fault = fault;
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -5353,6 +5392,8 @@ policy_write_record_finalize_snapshot (WylDaemonPolicyWrite *write,
     .post_finalize_total_pins = G_MAXUINT,
     .post_finalize_thread_pins = G_MAXUINT,
     .observed_cleanup_resources = write->observed_cleanup_resources,
+    .acquire_fault_hits =
+        policy_write_acquire_fault_hit_count (write->test_ctx),
     .owner = write->owner,
   };
   g_strlcpy (snapshot.primary_code,
@@ -5366,6 +5407,9 @@ policy_write_record_finalize_snapshot (WylDaemonPolicyWrite *write,
       &snapshot.post_finalize_total_pins, &snapshot.post_finalize_thread_pins);
   WylHandle *handle = write->handle != NULL ? write->handle :
       write->test_ctx->handle;
+  snapshot.post_finalize_transaction_active =
+      wyl_policy_store_service_authority_transaction_is_active
+      (wyl_handle_get_policy_store (handle));
   for (guint rank = WYL_SERVICE_AUTH_RANK_COORDINATION;
       rank <= WYL_SERVICE_AUTH_RANK_REGISTRY; rank++) {
     if (wyl_service_auth_rank_is_held (handle, (WylServiceAuthRank) rank))

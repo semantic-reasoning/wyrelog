@@ -6296,12 +6296,13 @@ static gboolean
     (const WylDaemonPolicyWriteFinalizeSnapshot * snapshot,
     guint expected_primary_status, const gchar * expected_primary_code,
     guint expected_owner, const gchar * expected_owner_name,
-    guint expected_cleanup_resources)
+    guint expected_cleanup_resources, guint expected_diagnostic_count,
+    wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
-  return snapshot->diagnostic_count == 1
+  return snapshot->diagnostic_count == expected_diagnostic_count
       && snapshot->primary_status == expected_primary_status
       && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
-      && snapshot->cleanup_rc == WYRELOG_E_INTERNAL
+      && snapshot->cleanup_rc == expected_cleanup_rc
       && snapshot->pre_finalize_status == 0
       && snapshot->pre_finalize_header_count == 0
       && snapshot->pre_finalize_body_length == 0
@@ -6310,7 +6311,9 @@ static gboolean
       && snapshot->post_finalize_total_pins == 0
       && snapshot->post_finalize_thread_pins == 0
       && snapshot->post_finalize_rank_mask == 0
+      && !snapshot->post_finalize_transaction_active
       && snapshot->observed_cleanup_resources == expected_cleanup_resources
+      && snapshot->acquire_fault_hits == expected_acquire_fault_hits
       && snapshot->owner == expected_owner
       && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0;
 }
@@ -6457,7 +6460,7 @@ static gint
       || !policy_write_fault_snapshot_is_clean (&snapshot,
           expected_primary_status, expected_primary_code,
           route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 3 : 9,
-          expected_owner, 0)
+          expected_owner, 0, 1, WYRELOG_E_INTERNAL, 0)
       || strstr (snapshot.primary_code, actor) != NULL
       || strstr (snapshot.primary_code, "cleanup-route-secret-tenant") != NULL
       || strstr (snapshot.primary_code, session_token) != NULL) {
@@ -6538,7 +6541,7 @@ check_policy_write_non_http_finalize_fault (gint error_base)
       || !policy_write_fault_snapshot_is_clean (&snapshot, 0, "non_http",
           0, "key_rotation", WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE
           | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
-          | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY)
+          | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 1, WYRELOG_E_INTERNAL, 0)
       || !snapshot.primary_rc_recorded || snapshot.primary_rc != WYRELOG_E_OK)
     return error_base + 3;
   if (wyl_daemon_http_policy_write_for_test (server, NULL, NULL)
@@ -13342,35 +13345,53 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
 }
 
 #ifdef WYL_HAS_FACT_STORE
+typedef enum
+{
+  POLICY_WRITE_OWNER_FAULT_FINALIZE = 0,
+  POLICY_WRITE_OWNER_FAULT_ACQUIRE_AFTER_STORE,
+  POLICY_WRITE_OWNER_FAULT_MODE_COUNT,
+} PolicyWriteOwnerFaultMode;
+
 typedef struct
 {
   guint owner;
   const gchar *name;
   guint resources;
+  guint acquire_status;
+  const gchar *acquire_code;
 } PolicyWriteOwnerFaultCase;
 
 static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
   {0, "key_rotation", WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE
         | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
-        | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY},
-  {1, "test_configure", 0},
-  {2, "test_policy_write", 0},
-  {3, "tenant", 0},
-  {4, "graph_create", 0},
-  {5, "graph_seal", 0},
-  {6, "schema_register", 0},
-  {7, "fact_forget", WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE},
-  {8, "fact_publication", WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE},
-  {9, "direct_permission", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE},
-  {10, "permission_transition", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE},
-  {11, "role_membership", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE},
+        | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 0, "non_http"},
+  {1, "test_configure", 0, 0, "non_http"},
+  {2, "test_policy_write", 0, 0, "non_http"},
+  {3, "tenant", 0, 500, "tenant_mutation_failed"},
+  {4, "graph_create", 0, 500, "graph_mutation_failed"},
+  {5, "graph_seal", 0, 500, "graph_mutation_failed"},
+  {6, "schema_register", 0, 500, "schema_register_failed"},
+  {7, "fact_forget", WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE,
+      500, "fact_forget_failed"},
+  {8, "fact_publication", WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE,
+      500, "fact_append_failed"},
+  {9, "direct_permission", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
+      500, "policy_mutation_failed"},
+  {10, "permission_transition", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
+      500, "policy_mutation_failed"},
+  {11, "role_membership", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
+      500, "policy_mutation_failed"},
   {12, "operation_reconcile",
-      WYL_DAEMON_POLICY_WRITE_RESOURCE_TRANSACTION},
+        WYL_DAEMON_POLICY_WRITE_RESOURCE_TRANSACTION, 500,
+      "service_credential_operation_reconcile_failed"},
   {13, "operation_recover",
-      WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_STORAGE
-        | WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_LOCK},
-  {14, "mfa_confirm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE},
-  {15, "self_arm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE},
+        WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_STORAGE
+        | WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_LOCK, 500,
+      "service_credential_operation_recover_failed"},
+  {14, "mfa_confirm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
+      500, "mfa_enroll_failed"},
+  {15, "self_arm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
+      500, "service_authority_failed"},
 };
 
 static wyrelog_error_t
@@ -13493,7 +13514,8 @@ policy_write_owner_fault_prepare_mfa (ServiceDenialEnv *env,
 
 static gint
 policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
-    const PolicyWriteOwnerFaultCase *test_case, guint *out_terminal_before)
+    const PolicyWriteOwnerFaultCase *test_case, PolicyWriteOwnerFaultMode mode,
+    guint *out_terminal_before)
 {
   const gchar *guard = "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0";
   const gchar *method = "POST";
@@ -13621,110 +13643,167 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
   g_autofree gchar *response = NULL;
   *out_terminal_before =
       wyl_daemon_http_policy_write_terminal_entries_for_test (env->http.server);
-  wyl_daemon_http_fail_next_policy_write_finalize_for_test (env->http.server,
-      WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  if (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE)
+    wyl_daemon_http_fail_next_policy_write_finalize_for_test
+        (env->http.server,
+        WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  else
+    wyl_daemon_http_fail_next_policy_write_acquire_for_test (env->http.server,
+        WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_AFTER_STORE);
+  g_autofree gchar *expected_response =
+      mode ==
+      POLICY_WRITE_OWNER_FAULT_FINALIZE ?
+      g_strdup ("{\"error\":\"policy_write_cleanup_failed\"}")
+      : g_strdup_printf ("{\"error\":\"%s\"}", test_case->acquire_code);
   if (send_raw_service_principal_bearer (env->session, method, env->base_url,
           path, query, env->access_token, body, &status, &response) != 0
-      || status != 500
-      || g_strcmp0 (response,
-          "{\"error\":\"policy_write_cleanup_failed\"}") != 0)
+      || status != (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE ? 500 :
+          test_case->acquire_status)
+      || g_strcmp0 (response, expected_response) != 0)
     return 9;
   return 0;
 }
 
 static gint
-check_policy_write_all_owner_finalize_faults (void)
+check_policy_write_all_owner_faults (void)
 {
   G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 16);
-  for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {
-    const PolicyWriteOwnerFaultCase *test_case =
-        &policy_write_owner_fault_cases[i];
-    if (test_case->owner != i || test_case->name == NULL)
-      return 2999;
-    ServiceDenialEnv env = { 0 };
-    gint error_base = 3000 + (gint) i * 20;
-    gint result = service_denial_env_init (&env, TRUE,
-        test_case->owner != 15, test_case->owner != 15);
-    if (result != 0) {
-      service_denial_env_clear (&env);
-      return error_base;
-    }
-    wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
-    if (policy_write_owner_fault_prepare_authority (&env) != WYRELOG_E_OK) {
-      service_denial_env_clear (&env);
-      return error_base + 1;
-    }
-
-    guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
-        (env.http.server);
-    wyrelog_error_t non_http_rc = WYRELOG_E_OK;
-    if (test_case->owner == 0) {
-      wyl_daemon_http_fail_next_policy_write_finalize_for_test
-          (env.http.server,
-          WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
-      non_http_rc = wyl_daemon_http_rotate_access_token_key_for_test
-          (env.http.server);
-    } else if (test_case->owner == 1) {
-      wyl_daemon_http_fail_next_policy_write_finalize_for_test
-          (env.http.server,
-          WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
-      non_http_rc = wyl_daemon_http_configure_tenant_for_test
-          (env.http.server, "owner-configure-tenant", TRUE, FALSE);
-    } else if (test_case->owner == 2) {
-      wyl_daemon_http_fail_next_policy_write_finalize_for_test
-          (env.http.server,
-          WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
-      non_http_rc = wyl_daemon_http_policy_write_for_test (env.http.server,
-          NULL, NULL);
-    } else {
-      result = policy_write_owner_fault_invoke_http (&env, test_case, &before);
+  G_STATIC_ASSERT (POLICY_WRITE_OWNER_FAULT_MODE_COUNT == 2);
+  for (guint mode = 0; mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT; mode++) {
+    for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {
+      const PolicyWriteOwnerFaultCase *test_case =
+          &policy_write_owner_fault_cases[i];
+      if (test_case->owner != i || test_case->name == NULL
+          || test_case->acquire_code == NULL)
+        return 2999;
+      ServiceDenialEnv env = { 0 };
+      gint error_base = 3000 + (gint) mode * 400 + (gint) i * 20;
+      gint result = service_denial_env_init (&env, TRUE,
+          test_case->owner != 15, test_case->owner != 15);
       if (result != 0) {
-        g_printerr ("WYRELOG_TEST_DIAG owner_fault invoke owner=%u name=%s "
-            "stage=%d\n", test_case->owner, test_case->name, result);
         service_denial_env_clear (&env);
-        return error_base + 2;
+        return error_base;
       }
-    }
+      wyl_daemon_http_suspend_service_auth_maintenance_for_test
+          (env.http.server);
+      if (policy_write_owner_fault_prepare_authority (&env) != WYRELOG_E_OK) {
+        service_denial_env_clear (&env);
+        return error_base + 1;
+      }
 
-    guint after = wyl_daemon_http_policy_write_terminal_entries_for_test
-        (env.http.server);
-    WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
-    gboolean snapshot_ok =
-        wyl_daemon_http_policy_write_finalize_snapshot_for_test
-        (env.http.server, &snapshot)
-        && policy_write_fault_snapshot_is_clean (&snapshot,
-        test_case->owner <= 2 ? 0 : 200,
-        test_case->owner <= 2 ? "non_http" : "success", test_case->owner,
-        test_case->name, test_case->resources);
-    if ((test_case->owner <= 2 && non_http_rc != WYRELOG_E_INTERNAL)
-        || after != before + 1 || !snapshot_ok) {
-      g_printerr ("WYRELOG_TEST_DIAG owner_fault snapshot owner=%u name=%s "
-          "non_http_rc=%d terminal=%u/%u observed=%u expected=%u "
-          "snapshot_owner=%u snapshot_name=%s cleanup=%d rank=%u "
-          "pins=%u/%u pre=%u/%u/%zu\n", test_case->owner, test_case->name,
-          non_http_rc, before, after, snapshot.observed_cleanup_resources,
-          test_case->resources, snapshot.owner, snapshot.owner_name,
-          snapshot.cleanup_rc, snapshot.post_finalize_rank_mask,
-          snapshot.post_finalize_total_pins,
-          snapshot.post_finalize_thread_pins, snapshot.pre_finalize_status,
-          snapshot.pre_finalize_header_count,
-          snapshot.pre_finalize_body_length);
+      guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
+          (env.http.server);
+      wyrelog_error_t non_http_rc = WYRELOG_E_OK;
+      if (test_case->owner <= 2) {
+        if (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE)
+          wyl_daemon_http_fail_next_policy_write_finalize_for_test
+              (env.http.server,
+              WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+        else
+          wyl_daemon_http_fail_next_policy_write_acquire_for_test
+              (env.http.server,
+              WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_AFTER_STORE);
+        if (test_case->owner == 0)
+          non_http_rc = wyl_daemon_http_rotate_access_token_key_for_test
+              (env.http.server);
+        else if (test_case->owner == 1)
+          non_http_rc = wyl_daemon_http_configure_tenant_for_test
+              (env.http.server, "owner-configure-tenant", TRUE, FALSE);
+        else
+          non_http_rc = wyl_daemon_http_policy_write_for_test
+              (env.http.server, NULL, NULL);
+      } else {
+        result = policy_write_owner_fault_invoke_http (&env, test_case,
+            (PolicyWriteOwnerFaultMode) mode, &before);
+        if (result != 0) {
+          g_printerr ("WYRELOG_TEST_DIAG owner_fault invoke mode=%u owner=%u "
+              "name=%s stage=%d\n", mode, test_case->owner, test_case->name,
+              result);
+          service_denial_env_clear (&env);
+          return error_base + 2;
+        }
+      }
+
+      guint after = wyl_daemon_http_policy_write_terminal_entries_for_test
+          (env.http.server);
+      gboolean acquire_mode =
+          mode == POLICY_WRITE_OWNER_FAULT_ACQUIRE_AFTER_STORE;
+      WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
+      gboolean snapshot_ok =
+          wyl_daemon_http_policy_write_finalize_snapshot_for_test
+          (env.http.server, &snapshot)
+          && policy_write_fault_snapshot_is_clean (&snapshot,
+          acquire_mode ? test_case->acquire_status :
+          test_case->owner <= 2 ? 0 : 200,
+          acquire_mode ? test_case->acquire_code :
+          test_case->owner <= 2 ? "non_http" : "success", test_case->owner,
+          test_case->name, acquire_mode ? 0 : test_case->resources,
+          acquire_mode ? 0 : 1,
+          acquire_mode ? WYRELOG_E_OK : WYRELOG_E_INTERNAL,
+          acquire_mode ? 1 : 0);
+      if ((test_case->owner <= 2
+              && (non_http_rc != WYRELOG_E_INTERNAL
+                  || !snapshot.primary_rc_recorded
+                  || snapshot.primary_rc != (acquire_mode ?
+                      WYRELOG_E_INTERNAL : WYRELOG_E_OK)))
+          || after != before + 1 || !snapshot_ok) {
+        g_printerr ("WYRELOG_TEST_DIAG owner_fault snapshot mode=%u owner=%u "
+            "name=%s non_http_rc=%d terminal=%u/%u observed=%u expected=%u "
+            "snapshot_owner=%u snapshot_name=%s primary=%d/%d cleanup=%d "
+            "hits=%u txn=%d rank=%u pins=%u/%u pre=%u/%u/%zu\n", mode,
+            test_case->owner, test_case->name, non_http_rc, before, after,
+            snapshot.observed_cleanup_resources,
+            acquire_mode ? 0 : test_case->resources, snapshot.owner,
+            snapshot.owner_name, snapshot.primary_rc,
+            snapshot.primary_rc_recorded, snapshot.cleanup_rc,
+            snapshot.acquire_fault_hits,
+            snapshot.post_finalize_transaction_active,
+            snapshot.post_finalize_rank_mask,
+            snapshot.post_finalize_total_pins,
+            snapshot.post_finalize_thread_pins, snapshot.pre_finalize_status,
+            snapshot.pre_finalize_header_count,
+            snapshot.pre_finalize_body_length);
+        service_denial_env_clear (&env);
+        return error_base + 3;
+      }
+      WylServiceAuthAuthoritySnapshot authority = { 0 };
+      wyl_daemon_http_service_authority_snapshot_for_test (env.http.server,
+          &authority);
+      WylServiceAuthUnavailableReason reason =
+          WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+      wyrelog_error_t available =
+          wyl_service_auth_authority_validate_available
+          (wyl_handle_get_service_auth_authority (env.handle), env.handle,
+          &reason);
+      wyrelog_error_t subsequent = wyl_daemon_http_policy_write_for_test
+          (env.http.server, NULL, NULL);
+      guint subsequent_after =
+          wyl_daemon_http_policy_write_terminal_entries_for_test
+          (env.http.server);
+      if (authority.writer_active || authority.active_readers != 0
+          || authority.waiting_readers != 0 || authority.waiting_writers != 0
+          || (acquire_mode && (available != WYRELOG_E_OK
+                  || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE
+                  || subsequent != WYRELOG_E_OK
+                  || subsequent_after != after + 1))
+          || (!acquire_mode && (available != WYRELOG_E_BUSY
+                  || reason !=
+                  WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
+                  || subsequent != WYRELOG_E_BUSY
+                  || subsequent_after != after))) {
+        service_denial_env_clear (&env);
+        return error_base + 4;
+      }
+      memset (&authority, 0, sizeof authority);
+      wyl_daemon_http_service_authority_snapshot_for_test (env.http.server,
+          &authority);
+      if (authority.writer_active || authority.active_readers != 0
+          || authority.waiting_readers != 0 || authority.waiting_writers != 0) {
+        service_denial_env_clear (&env);
+        return error_base + 5;
+      }
       service_denial_env_clear (&env);
-      return error_base + 3;
     }
-    WylServiceAuthAuthoritySnapshot authority = { 0 };
-    wyl_daemon_http_service_authority_snapshot_for_test (env.http.server,
-        &authority);
-    if (authority.writer_active || authority.active_readers != 0
-        || authority.waiting_readers != 0 || authority.waiting_writers != 0
-        || wyl_daemon_http_policy_write_for_test (env.http.server, NULL, NULL)
-        != WYRELOG_E_BUSY
-        || wyl_daemon_http_policy_write_terminal_entries_for_test
-        (env.http.server) != after) {
-      service_denial_env_clear (&env);
-      return error_base + 4;
-    }
-    service_denial_env_clear (&env);
   }
   return 0;
 }
@@ -16343,9 +16422,9 @@ main (void)
     return policy_shutdown_rc;
 
 #ifdef WYL_HAS_FACT_STORE
-  gint all_owner_finalize_rc = check_policy_write_all_owner_finalize_faults ();
-  if (all_owner_finalize_rc != 0)
-    return all_owner_finalize_rc;
+  gint all_owner_fault_rc = check_policy_write_all_owner_faults ();
+  if (all_owner_fault_rc != 0)
+    return all_owner_fault_rc;
 #endif
 
 #if defined(WYL_HAS_FACT_STORE) || defined(WYL_HAS_AUDIT)
