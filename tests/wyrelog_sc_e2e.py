@@ -249,6 +249,94 @@ def cmd_decide(args):
     return 0
 
 
+def cmd_arm(args):
+    """Self-arm the service-credential management authority for the caller's own
+    live-MFA session (POST /service-management-authority/arm). The daemon's HTTP
+    query parser reads UNDERSCORE guard keys (guard_timestamp/guard_loc_class/
+    guard_risk); the hyphenated forms are only the wyctl CLI spelling. A 200 with
+    ok:true is the sole success shape."""
+    token = _read_token(args.token_file)
+    url = ("%s/service-management-authority/arm?guard_timestamp=%s"
+           "&guard_loc_class=%s&guard_risk=%s") % (
+        args.base_url, args.guard_timestamp, args.guard_loc_class,
+        args.guard_risk)
+    status, body = _post(url, token=token)
+    if status != 200:
+        sys.stderr.write("arm: expected HTTP 200, got %d: %s\n" % (status, body))
+        return 1
+    try:
+        ok = json.loads(body).get("ok")
+    except (ValueError, TypeError):
+        ok = None
+    if ok is not True:
+        sys.stderr.write("arm: response not ok:true: %s\n" % body)
+        return 1
+    print("arm: ok")
+    return 0
+
+
+def cmd_receipt_field(args):
+    """Read a whitespace-separated key=value receipt line from stdin and print a
+    single field's value. Used to lift credential_id/state/delivered out of the
+    `wyctl service-credential issue` receipt line without a shell parser."""
+    value = None
+    for line in sys.stdin:
+        for token in line.split():
+            key, sep, val = token.partition("=")
+            if sep and key == args.field:
+                value = val
+    if value is None:
+        sys.stderr.write("receipt-field: field %s not found\n" % args.field)
+        return 1
+    print(value)
+    return 0
+
+
+def cmd_assert_decide(args):
+    """Hardened service-token authorization assertion via raw POST /decide.
+
+    Unlike `decide`, a non-200 or an unparseable/decision-less body is a HARD
+    FAILURE, never silently counted as a deny. ALLOW requires HTTP 200 AND
+    decision==1; DENY requires HTTP 200 AND decision==0 (a true policy deny).
+    This keeps an expired service JWT (300s TTL) or an unrelated 403 gate from
+    falsely satisfying an --expect deny.
+
+    The daemon's /decide handler maps the session_token query param to the decide
+    request's resource id, which IS the decision SCOPE (the engine evaluates
+    allow(user, perm, scope) with scope=resource_id). It must therefore equal the
+    scope a role was granted at -- the tenant -- not an opaque literal. --scope
+    overrides it; by default the request tenant doubles as the scope, matching
+    the #744 public-path fixture in test-daemon-http-decide.c."""
+    token = _read_token(args.token_file)
+    scope = args.scope if args.scope else args.tenant
+    url = "%s/decide?user=%s&perm=%s&tenant=%s&session_token=%s" % (
+        args.base_url, args.user, args.perm, args.tenant, scope)
+    status, body = _post(url, token=token)
+    if status != 200:
+        sys.stderr.write(
+            "assert-decide: expected HTTP 200, got %d: %s\n" % (status, body))
+        return 1
+    try:
+        raw = json.loads(body).get("decision")
+    except (ValueError, TypeError):
+        sys.stderr.write("assert-decide: unparseable body: %s\n" % body)
+        return 1
+    if raw == 1:
+        decision = "allow"
+    elif raw == 0:
+        decision = "deny"
+    else:
+        sys.stderr.write("assert-decide: no decision field in body: %s\n" % body)
+        return 1
+    if decision != args.expect:
+        sys.stderr.write(
+            "assert-decide: expected %s, got %s (HTTP 200): %s\n" % (
+                args.expect, decision, body))
+        return 1
+    print("assert-decide: %s (expected)" % decision)
+    return 0
+
+
 def cmd_scan_absent(args):
     needle = args.needle.encode("utf-8")
     forms = {
@@ -312,6 +400,29 @@ def build_parser():
     p.add_argument("--tenant", required=True)
     p.add_argument("--resource", default=None)
     p.set_defaults(func=cmd_decide)
+
+    p = sub.add_parser("arm")
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--token-file", required=True)
+    p.add_argument("--guard-timestamp", required=True)
+    p.add_argument("--guard-loc-class", required=True)
+    p.add_argument("--guard-risk", required=True)
+    p.set_defaults(func=cmd_arm)
+
+    p = sub.add_parser("receipt-field")
+    p.add_argument("--field", required=True)
+    p.set_defaults(func=cmd_receipt_field)
+
+    p = sub.add_parser("assert-decide")
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--token-file", required=True)
+    p.add_argument("--user", required=True)
+    p.add_argument("--perm", required=True)
+    p.add_argument("--tenant", required=True)
+    p.add_argument("--expect", required=True, choices=("allow", "deny"))
+    p.add_argument("--scope", default=None,
+                   help="decision scope (session_token); defaults to --tenant")
+    p.set_defaults(func=cmd_assert_decide)
 
     p = sub.add_parser("scan-absent")
     p.add_argument("--needle", required=True)
