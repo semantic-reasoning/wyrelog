@@ -4722,6 +4722,236 @@ check_session_state_witness_survives_durable_restart (void)
   return 0;
 }
 
+static gint
+check_member_of_accepted_input_witness (void)
+{
+  static const gchar source[] =
+      ".decl member_of(subject: symbol, role: symbol, scope: symbol)\n";
+  g_autoptr (WylEngine) engine = NULL;
+  if (wyl_engine_open_source (source, 1, &engine) != WYRELOG_E_OK)
+    return 926;
+  wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
+
+  gint64 row[3] = { 0 };
+  if (wyl_engine_owned_intern_symbol (engine, "creator", &row[0])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (engine, "wr.system_admin", &row[1])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (engine, "tenant", &row[2])
+      != WYRELOG_E_OK)
+    return 927;
+  gboolean exact = TRUE;
+  if (wyl_engine_owned_has_exact_accepted_member_of (engine, "member_of", row,
+          &exact) != WYRELOG_E_OK || exact
+      || wyl_engine_owned_has_exact_accepted_member_of (engine, "wrong", row,
+          &exact) != WYRELOG_E_INVALID
+      || wyl_engine_owned_insert (engine, "member_of", row, 2)
+      != WYRELOG_E_INVALID)
+    return 928;
+  if (wyl_engine_owned_insert (engine, "member_of", row, 3) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of (engine, "member_of",
+          row, &exact) != WYRELOG_E_OK || !exact)
+    return 929;
+  if (wyl_engine_owned_insert (engine, "member_of", row, 3) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of (engine, "member_of",
+          row, &exact) != WYRELOG_E_OK || exact
+      || wyl_engine_owned_remove (engine, "member_of", row, 3)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of (engine, "member_of",
+          row, &exact) != WYRELOG_E_OK || !exact)
+    return 930;
+  if (wyl_engine_owned_remove (engine, "member_of", row, 3) != WYRELOG_E_OK
+      || wyl_engine_owned_remove (engine, "member_of", row, 3)
+      != WYRELOG_E_NOT_FOUND
+      || wyl_engine_owned_has_exact_accepted_member_of (engine, "member_of",
+          row, &exact) != WYRELOG_E_OK || exact)
+    return 931;
+
+  g_autoptr (WylEngine) missing = NULL;
+  if (wyl_engine_open_source (".decl other(v: int64)\n", 1, &missing)
+      != WYRELOG_E_OK)
+    return 932;
+  wyl_engine_set_owner (missing, WYL_ENGINE_OWNER_READ);
+  if (wyl_engine_owned_insert (missing, "member_of", row, 3)
+      != WYRELOG_E_EXEC
+      || wyl_engine_owned_has_exact_accepted_member_of (missing, "member_of",
+          row, &exact) != WYRELOG_E_OK || exact)
+    return 933;
+  return 0;
+}
+
+static gint
+check_member_of_accepted_input_owner_and_derivation_boundaries (void)
+{
+  static const gchar member_source[] =
+      ".decl member_of(subject: symbol, role: symbol, scope: symbol)\n";
+  gint64 row[3] = { 0 };
+  gboolean exact = TRUE;
+
+  g_autoptr (WylEngine) standalone = NULL;
+  if (wyl_engine_open_source (member_source, 1, &standalone) != WYRELOG_E_OK
+      || wyl_engine_intern_symbol (standalone, "owner-user", &row[0])
+      != WYRELOG_E_OK
+      || wyl_engine_intern_symbol (standalone, "owner-role", &row[1])
+      != WYRELOG_E_OK
+      || wyl_engine_intern_symbol (standalone, "owner-scope", &row[2])
+      != WYRELOG_E_OK
+      || wyl_engine_insert (standalone, "member_of", row, 3) != WYRELOG_E_OK
+      || wyl_engine_remove (standalone, "member_of", row, 3) != WYRELOG_E_OK
+      || wyl_engine_remove (standalone, "member_of", row, 3) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of (standalone,
+          "member_of", row, &exact) != WYRELOG_E_INVALID)
+    return 934;
+
+  g_autoptr (WylEngine) delta = NULL;
+  if (wyl_engine_open_source (member_source, 1, &delta) != WYRELOG_E_OK)
+    return 935;
+  wyl_engine_set_owner (delta, WYL_ENGINE_OWNER_DELTA);
+  if (wyl_engine_owned_intern_symbol (delta, "owner-user", &row[0])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (delta, "owner-role", &row[1])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (delta, "owner-scope", &row[2])
+      != WYRELOG_E_OK || wyl_engine_owned_insert (delta, "member_of", row, 3)
+      != WYRELOG_E_OK || wyl_engine_owned_remove (delta, "member_of", row, 3)
+      != WYRELOG_E_OK || wyl_engine_owned_remove (delta, "member_of", row, 3)
+      != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of (delta, "member_of",
+          row, &exact) != WYRELOG_E_INVALID)
+    return 936;
+
+  static const gchar derived_source[] =
+      ".decl seed(subject: symbol, role: symbol, scope: symbol)\n"
+      ".decl member_of(subject: symbol, role: symbol, scope: symbol)\n"
+      ".decl effective_member(subject: symbol, role: symbol, scope: symbol)\n"
+      "member_of(S, R, T) :- seed(S, R, T).\n"
+      "effective_member(S, R, T) :- member_of(S, R, T).\n";
+  g_autoptr (WylEngine) derived = NULL;
+  if (wyl_engine_open_source (derived_source, 1, &derived) != WYRELOG_E_OK)
+    return 937;
+  wyl_engine_set_owner (derived, WYL_ENGINE_OWNER_READ);
+  if (wyl_engine_owned_intern_symbol (derived, "derived-user", &row[0])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (derived, "derived-role", &row[1])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_intern_symbol (derived, "derived-scope", &row[2])
+      != WYRELOG_E_OK
+      || wyl_engine_owned_insert (derived, "seed", row, 3) != WYRELOG_E_OK)
+    return 938;
+  RelationSnapshotExpect expect = {
+    .expected_relation = "effective_member",
+    .expected_row = row,
+    .ncols = G_N_ELEMENTS (row),
+  };
+  if (wyl_engine_snapshot (derived, "effective_member",
+          relation_snapshot_expect_cb, &expect) != WYRELOG_E_OK
+      || expect.seen != 1
+      || wyl_engine_owned_has_exact_accepted_member_of (derived, "member_of",
+          row, &exact) != WYRELOG_E_OK || exact)
+    return 939;
+  return 0;
+}
+
+static gint
+check_member_of_accepted_input_survives_candidate_reload (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 940;
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  WylHandleOpenOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = path,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK) {
+    rmdir_recursive (dir);
+    return 941;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_role_membership (store, "reload-member",
+          "wr.system_admin", "reload-scope") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 942;
+  }
+  gint64 row[3] = { 0 };
+  gboolean exact = FALSE;
+  if (intern3 (handle, "reload-member", "wr.system_admin", "reload-scope",
+          row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", row, &exact)
+      != WYRELOG_E_OK || !exact
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
+      || intern3 (handle, "reload-member", "wr.system_admin", "reload-scope",
+          row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", row, &exact)
+      != WYRELOG_E_OK || !exact) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 943;
+  }
+
+  wyl_handle_set_engine_insert_fault_once (handle, "member_of", WYRELOG_E_IO);
+  wyrelog_error_t fault_rc = wyl_handle_reload_engine_pair (handle);
+  gboolean fault_poisoned = wyl_handle_engine_pair_is_poisoned (handle);
+  wyrelog_error_t repair_rc = wyl_handle_reload_engine_pair (handle);
+  if (fault_rc != WYRELOG_E_IO || fault_poisoned
+      || repair_rc != WYRELOG_E_OK
+      || intern3 (handle, "reload-member", "wr.system_admin", "reload-scope",
+          row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", row, &exact)
+      != WYRELOG_E_OK || !exact) {
+    g_printerr ("member receipt failed candidate fault=%d poisoned=%d "
+        "repair=%d exact=%d\n", fault_rc, fault_poisoned, repair_rc, exact);
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 944;
+  }
+
+  g_clear_object (&handle);
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK
+      || intern3 (handle, "reload-member", "wr.system_admin", "reload-scope",
+          row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", row, &exact)
+      != WYRELOG_E_OK || !exact) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 945;
+  }
+  store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_revoke_role_membership (store, "reload-member",
+          "wr.system_admin", "reload-scope") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
+      || intern3 (handle, "reload-member", "wr.system_admin", "reload-scope",
+          row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", row, &exact)
+      != WYRELOG_E_OK || exact) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 946;
+  }
+  g_clear_object (&handle);
+  if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK
+      || intern3 (handle, "reload-member", "wr.system_admin", "reload-scope",
+          row) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_member_of
+      (wyl_handle_get_read_engine (handle), "member_of", row, &exact)
+      != WYRELOG_E_OK || exact) {
+    g_clear_object (&handle);
+    rmdir_recursive (dir);
+    return 947;
+  }
+  g_clear_object (&handle);
+  rmdir_recursive (dir);
+  return 0;
+}
+
 typedef struct
 {
   const WylAuditEvent *event;
@@ -7256,6 +7486,13 @@ main (int argc, char **argv)
   if ((rc = check_retained_external_publication_outcomes ()) != 0)
     return rc;
   if ((rc = check_session_state_accepted_input_witness ()) != 0)
+    return rc;
+  if ((rc = check_member_of_accepted_input_witness ()) != 0)
+    return rc;
+  if ((rc = check_member_of_accepted_input_owner_and_derivation_boundaries ())
+      != 0)
+    return rc;
+  if ((rc = check_member_of_accepted_input_survives_candidate_reload ()) != 0)
     return rc;
   if ((rc = check_session_state_witness_survives_durable_restart ()) != 0)
     return rc;

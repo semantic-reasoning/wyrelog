@@ -49,6 +49,13 @@ typedef struct
   gint64 state;
 } WylSessionStateInputKey;
 
+typedef struct
+{
+  gint64 subject;
+  gint64 role;
+  gint64 scope;
+} WylMemberOfInputKey;
+
 struct _WylDeltaCookie
 {
   WylDeltaCallback callback;
@@ -93,6 +100,24 @@ session_state_input_key_equal (gconstpointer a, gconstpointer b)
   return lhs->scope == rhs->scope && lhs->state == rhs->state;
 }
 
+static guint
+member_of_input_key_hash (gconstpointer data)
+{
+  const WylMemberOfInputKey *key = data;
+  guint hash = g_int64_hash (&key->subject);
+  hash = (hash * 33u) ^ g_int64_hash (&key->role);
+  return (hash * 33u) ^ g_int64_hash (&key->scope);
+}
+
+static gboolean
+member_of_input_key_equal (gconstpointer a, gconstpointer b)
+{
+  const WylMemberOfInputKey *lhs = a;
+  const WylMemberOfInputKey *rhs = b;
+  return lhs->subject == rhs->subject && lhs->role == rhs->role
+      && lhs->scope == rhs->scope;
+}
+
 static guint64
 session_state_input_count (GHashTable *table, gconstpointer key)
 {
@@ -115,12 +140,30 @@ set_session_state_input_count (GHashTable *table, gconstpointer key,
 }
 
 static wyrelog_error_t
-reserve_session_state_input (WylEngine *self, const gchar *relation,
+reserve_accepted_input (WylEngine *self, const gchar *relation,
     const gint64 *row, gsize ncols, gboolean *out_reserved)
 {
   *out_reserved = FALSE;
-  if (g_strcmp0 (relation, "session_state") != 0
-      || self->owner == WYL_ENGINE_OWNER_DELTA)
+  if (self->owner == WYL_ENGINE_OWNER_DELTA)
+    return WYRELOG_E_OK;
+
+  if (g_strcmp0 (relation, "member_of") == 0) {
+    if (self->owner != WYL_ENGINE_OWNER_READ)
+      return WYRELOG_E_OK;
+    if (ncols != 3)
+      return WYRELOG_E_INVALID;
+    WylMemberOfInputKey key = { row[0], row[1], row[2] };
+    guint64 row_count = session_state_input_count
+        (self->member_of_input_rows, &key);
+    if (row_count == G_MAXUINT64)
+      return WYRELOG_E_INTERNAL;
+    set_session_state_input_count (self->member_of_input_rows, &key,
+        row_count + 1, sizeof key);
+    *out_reserved = TRUE;
+    return WYRELOG_E_OK;
+  }
+
+  if (g_strcmp0 (relation, "session_state") != 0)
     return WYRELOG_E_OK;
   if (ncols != 2)
     return WYRELOG_E_INVALID;
@@ -142,8 +185,18 @@ reserve_session_state_input (WylEngine *self, const gchar *relation,
 }
 
 static void
-rollback_session_state_input_reservation (WylEngine *self, const gint64 row[2])
+rollback_accepted_input_reservation (WylEngine *self, const gchar *relation,
+    const gint64 *row)
 {
+  if (g_strcmp0 (relation, "member_of") == 0) {
+    WylMemberOfInputKey key = { row[0], row[1], row[2] };
+    guint64 row_count = session_state_input_count
+        (self->member_of_input_rows, &key);
+    g_assert_cmpuint (row_count, >, 0);
+    set_session_state_input_count (self->member_of_input_rows, &key,
+        row_count - 1, sizeof key);
+    return;
+  }
   WylSessionStateInputKey key = { row[0], row[1] };
   guint64 row_count = session_state_input_count
       (self->session_state_input_rows, &key);
@@ -158,12 +211,26 @@ rollback_session_state_input_reservation (WylEngine *self, const gint64 row[2])
 }
 
 static wyrelog_error_t
-precheck_session_state_input_remove (WylEngine *self, const gchar *relation,
+precheck_accepted_input_remove (WylEngine *self, const gchar *relation,
     const gint64 *row, gsize ncols, gboolean *out_tracked)
 {
   *out_tracked = FALSE;
-  if (g_strcmp0 (relation, "session_state") != 0
-      || self->owner == WYL_ENGINE_OWNER_DELTA)
+  if (self->owner == WYL_ENGINE_OWNER_DELTA)
+    return WYRELOG_E_OK;
+
+  if (g_strcmp0 (relation, "member_of") == 0) {
+    if (self->owner != WYL_ENGINE_OWNER_READ)
+      return WYRELOG_E_OK;
+    if (ncols != 3)
+      return WYRELOG_E_INVALID;
+    WylMemberOfInputKey key = { row[0], row[1], row[2] };
+    if (session_state_input_count (self->member_of_input_rows, &key) == 0)
+      return WYRELOG_E_NOT_FOUND;
+    *out_tracked = TRUE;
+    return WYRELOG_E_OK;
+  }
+
+  if (g_strcmp0 (relation, "session_state") != 0)
     return WYRELOG_E_OK;
   if (ncols != 2)
     return WYRELOG_E_INVALID;
@@ -651,6 +718,7 @@ wyl_engine_finalize (GObject *object)
   g_clear_pointer (&self->symbols_by_id, g_hash_table_unref);
   g_clear_pointer (&self->session_state_input_rows, g_hash_table_unref);
   g_clear_pointer (&self->session_state_input_totals, g_hash_table_unref);
+  g_clear_pointer (&self->member_of_input_rows, g_hash_table_unref);
 
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     g_clear_pointer (&self->dl_src_logical_paths[i], g_free);
@@ -677,6 +745,8 @@ wyl_engine_init (WylEngine *self)
       g_free);
   self->session_state_input_totals =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
+  self->member_of_input_rows = g_hash_table_new_full
+      (member_of_input_key_hash, member_of_input_key_equal, g_free, g_free);
   self->mode = WYL_ENGINE_MODE_NONE;
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     self->dl_src_logical_paths[i] = NULL;
@@ -1072,7 +1142,7 @@ wyl_engine_insert_unchecked (WylEngine *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   gboolean witness_reserved = FALSE;
-  wyrelog_error_t rc = reserve_session_state_input (self, relation, row,
+  wyrelog_error_t rc = reserve_accepted_input (self, relation, row,
       ncols, &witness_reserved);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1082,7 +1152,7 @@ wyl_engine_insert_unchecked (WylEngine *self, const gchar *relation,
       (uint32_t) ncols);
   rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK && witness_reserved)
-    rollback_session_state_input_reservation (self, row);
+    rollback_accepted_input_reservation (self, relation, row);
   if (rc != WYRELOG_E_OK) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
         "engine: insert failed for relation '%s' with %" G_GSIZE_FORMAT
@@ -1262,7 +1332,7 @@ wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   gboolean witness_tracked = FALSE;
-  wyrelog_error_t rc = precheck_session_state_input_remove (self, relation,
+  wyrelog_error_t rc = precheck_accepted_input_remove (self, relation,
       row, ncols, &witness_tracked);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1272,7 +1342,7 @@ wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
       (uint32_t) ncols);
   rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc == WYRELOG_E_OK && witness_tracked)
-    rollback_session_state_input_reservation (self, row);
+    rollback_accepted_input_reservation (self, relation, row);
   if (rc != WYRELOG_E_OK) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
         "engine: remove failed for relation '%s' with %" G_GSIZE_FORMAT
@@ -1312,6 +1382,24 @@ wyl_engine_owned_get_accepted_session_state (WylEngine *self,
     }
   }
   return WYRELOG_E_INTERNAL;
+}
+
+wyrelog_error_t
+wyl_engine_owned_has_exact_accepted_member_of (WylEngine *self,
+    const gchar *relation, const gint64 row[3], gboolean *out_exact)
+{
+  if (out_exact != NULL)
+    *out_exact = FALSE;
+  if (self == NULL || !WYL_IS_ENGINE (self) || row == NULL || out_exact == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_READ
+      || g_strcmp0 (relation, "member_of") != 0)
+    return WYRELOG_E_INVALID;
+
+  WylMemberOfInputKey key = { row[0], row[1], row[2] };
+  *out_exact = session_state_input_count (self->member_of_input_rows, &key)
+      == 1;
+  return WYRELOG_E_OK;
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS

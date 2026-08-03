@@ -412,6 +412,11 @@ wyrelog_error_t wyl_engine_verification_contains
  * returns that row's state symbol. Inline template facts are forbidden. */
 wyrelog_error_t wyl_engine_verification_get_accepted_session_state
     (WylEngineVerification * verification, gint64 scope, gint64 * out_state);
+/* Proves that exactly one member_of/3 row with these symbols crossed the
+ * owned insertion boundary into the unpublished read candidate. */
+wyrelog_error_t wyl_engine_verification_has_exact_accepted_member_of
+    (WylEngineVerification * verification, const gint64 row[3],
+    gboolean * out_exact);
 wyrelog_error_t wyl_engine_verification_enqueue_delta
     (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, WylDeltaKind kind);
