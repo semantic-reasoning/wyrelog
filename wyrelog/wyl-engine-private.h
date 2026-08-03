@@ -61,6 +61,10 @@ struct _WylEngine
    * accepted through the owned engine insertion boundary. */
   GHashTable *session_state_input_rows;
   GHashTable *session_state_input_totals;
+  /* Exact host-accepted member_of/3 rows. Wirelog snapshots expose IDB only,
+   * so publication verification uses this narrow EDB receipt rather than a
+   * raw evaluator read. */
+  GHashTable *member_of_input_rows;
 };
 
 /*
@@ -141,6 +145,9 @@ wyrelog_error_t wyl_engine_owned_remove (WylEngine * self,
 wyrelog_error_t wyl_engine_owned_get_accepted_session_state
     (WylEngine * self, const gchar * relation, gint64 scope,
     gint64 * out_state);
+wyrelog_error_t wyl_engine_owned_has_exact_accepted_member_of
+    (WylEngine * self, const gchar * relation, const gint64 row[3],
+    gboolean * out_exact);
 wyrelog_error_t wyl_engine_owned_step (WylEngine * self);
 wyrelog_error_t wyl_engine_owned_set_delta_callback (WylEngine * self,
     WylDeltaCallback cb, gpointer user_data);

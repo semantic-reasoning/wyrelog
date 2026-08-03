@@ -464,6 +464,28 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
+    wyl_engine_verification_has_exact_accepted_member_of
+    (WylEngineVerification * verification, const gint64 row[3],
+    gboolean * out_exact)
+{
+  if (out_exact != NULL)
+    *out_exact = FALSE;
+  if (verification == NULL || !verification->active || row == NULL
+      || out_exact == NULL)
+    return WYRELOG_E_INVALID;
+  WylEngineSession *session = verification->session;
+  if (!engine_session_is_valid (session) || session->acquisition_depth != 1
+      || session->handle->engine_session_depth != 1
+      || session->handle->engine_pair_poisoned
+      || session->handle->read_engine != verification->read_engine
+      || session->handle->delta_engine != verification->delta_engine
+      || session->handle->engine_symbols_by_id != verification->symbols)
+    return WYRELOG_E_INVALID;
+  return wyl_engine_owned_has_exact_accepted_member_of
+      (verification->read_engine, "member_of", row, out_exact);
+}
+
+wyrelog_error_t
 wyl_engine_verification_enqueue_delta (WylEngineVerification *verification,
     const gchar *relation, const gint64 *row, gsize ncols, WylDeltaKind kind)
 {
