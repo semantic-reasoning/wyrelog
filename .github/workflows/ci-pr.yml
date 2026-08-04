@@ -184,6 +184,66 @@ jobs:
             build-secure-duckdb/meson-logs/
           if-no-files-found: ignore
 
+  service-credential-e2e:
+    name: service-credential-e2e
+    # Linux runtime enforcement of the packaged service-credential acceptance
+    # suite (#382 / #766). The SC e2e drivers are gated in tests/meson.build on
+    # host == linux AND build_client AND enable_fact_store AND enable_audit
+    # (and enable_fault_injection for the publication-fault proof), so a build
+    # that omits those options never registers them. This dedicated job builds
+    # with exactly those options and runs the packaged suite (NOT the whole
+    # --suite wyrelog, to keep it independent of unrelated pre-existing
+    # fact-store-config failures) so the platform matrix's Linux runtime claim
+    # is actually exercised on a runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config time python3 \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
+            libtss2-dev
+
+      - name: Cache meson packagecache
+        uses: actions/cache@v5
+        with:
+          path: subprojects/packagecache
+          key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            ${{ runner.os }}-packagecache-
+
+      - name: Configure packaged service-credential runtime
+        run: |
+          meson setup builddir \
+            -Denable_client=enabled \
+            -Denable_fact_store=enabled \
+            -Denable_audit=enabled \
+            -Denable_fault_injection=enabled \
+            -Dduckdb_source=prebuilt
+
+      - name: Run the packaged service-credential e2e suite
+        run: |
+          meson test -C builddir --print-errorlogs \
+            service-credential-lifecycle-e2e \
+            service-credential-zero-survivor-e2e \
+            service-credential-rotation-e2e \
+            service-credential-leak-scan-e2e \
+            service-credential-publication-fault-e2e \
+            service-credential-platform-matrix
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: meson-logs-service-credential-e2e
+          path: builddir/meson-logs/
+          if-no-files-found: ignore
+
   duckdb-checkpoint-seam:
     name: duckdb-checkpoint-seam-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
