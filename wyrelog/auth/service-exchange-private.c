@@ -46,11 +46,8 @@ service_exchange_authority_dispose (WylServiceExchangeAuthority *authority)
       (authority->transaction);
     authority->transaction = NULL;
   }
-  if (authority->lease != NULL) {
-    (void) wyl_service_auth_write_lease_release (authority->lease);
-    wyl_service_auth_write_lease_free (authority->lease);
-    authority->lease = NULL;
-  }
+  if (authority->lease != NULL)
+    (void) wyl_service_auth_write_lease_release_terminal (&authority->lease);
   authority->handle = NULL;
   authority->store = NULL;
   authority->cvk = NULL;
@@ -546,11 +543,9 @@ wyl_service_exchange_authority_rollback (WylServiceExchangeAuthority *authority)
   }
   if (authority->lease != NULL) {
     wyrelog_error_t release_rc =
-        wyl_service_auth_write_lease_release (authority->lease);
+        wyl_service_auth_write_lease_release_terminal (&authority->lease);
     if (rc == WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_write_lease_free (authority->lease);
-    authority->lease = NULL;
   }
   wyl_policy_service_credential_info_clear (&authority->credential);
   authority->handle = NULL;

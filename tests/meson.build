@@ -2700,6 +2700,19 @@ test('check-daemon-bearer-resolver-structure-self-test', python3,
   ],
 )
 
+service_auth_write_terminal_owners_guard = find_program(
+  '../tools/check-service-auth-write-terminal-owners.py')
+test('check-service-auth-write-terminal-owners',
+  service_auth_write_terminal_owners_guard,
+  args : [meson.project_source_root()],
+)
+test('check-service-auth-write-terminal-owners-self-test', python3,
+  args : [
+    meson.current_source_dir() / 'test-service-auth-write-terminal-owners.py',
+    service_auth_write_terminal_owners_guard.full_path(),
+  ],
+)
+
 bearer_resolver_export_guard = find_program(
   '../tools/check-daemon-bearer-resolver-exports.py')
 bearer_resolver_object_format = 'elf'

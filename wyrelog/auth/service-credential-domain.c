@@ -442,29 +442,36 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
       (mutation->evidence);
     mutation->evidence = NULL;
   }
+  /* Strict-LIFO teardown: the registry write participant is acquired after
+   * the lease and takes no coordination claim, so it must be freed before the
+   * lease it nests under. */
+  g_clear_pointer (&mutation->registry_participant,
+      wyl_service_auth_registry_write_participant_free);
   if (mutation->lease != NULL) {
     if (mutation->before_write_release != NULL)
       mutation->before_write_release (mutation->lease, mutation->fault_data);
-    release_rc = wyl_service_auth_write_lease_release (mutation->lease);
+    release_rc = wyl_service_auth_write_lease_release_terminal
+        (&mutation->lease);
     if (release_rc != WYRELOG_E_OK) {
-      wyrelog_error_t cleanup_rc =
-          wyl_service_auth_write_lease_terminalize_cleanup (mutation->lease,
-              mutation->handle);
-      wyrelog_error_t retry_rc = wyl_service_auth_write_lease_release
-            (mutation->lease);
-      result = cleanup_rc == WYRELOG_E_OK && retry_rc == WYRELOG_E_OK
-          && result != WYRELOG_E_INTERNAL ? WYRELOG_E_BUSY : WYRELOG_E_INTERNAL;
+      if (mutation->lease != NULL) {
+        /* A live claim is stuck (fault-injection only): a bare terminal does
+         * not latch on the WYRELOG_E_BUSY non-consume branch, so latch the
+         * coordination invariant explicitly, then finalize the lease through
+         * the terminal boundary so it is not leaked. */
+        (void) wyl_service_auth_write_lease_terminalize_cleanup
+            (mutation->lease, mutation->handle);
+        release_rc = wyl_service_auth_write_lease_release_terminal
+            (&mutation->lease);
+      }
+      if (result == WYRELOG_E_OK)
+        result = release_rc;
       if (mutation->recovery_installed
           && mutation->discard_publication_recovery != NULL) {
         mutation->discard_publication_recovery (mutation->fault_data);
         mutation->recovery_installed = FALSE;
       }
     }
-    wyl_service_auth_write_lease_free (mutation->lease);
-    mutation->lease = NULL;
   }
-  g_clear_pointer (&mutation->registry_participant,
-      wyl_service_auth_registry_write_participant_free);
   if (mutation->owns_handle_pin) {
     wyl_handle_policy_store_unpin (mutation->handle, mutation->store);
     mutation->owns_handle_pin = FALSE;

@@ -1113,10 +1113,10 @@ resume_committed_handoff (WylHandle *handle,
   g_clear_pointer (&capability,
       wyl_service_credential_handoff_delivery_capability_free);
   if (lease != NULL) {
-    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release_terminal (&lease);
     if (rc == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_write_lease_free (lease);
   }
   return rc;
 }
