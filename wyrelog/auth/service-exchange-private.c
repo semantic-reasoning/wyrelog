@@ -705,7 +705,7 @@ exchange_build_prepared (const WylServiceExchangeAuthority *authority,
 
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   session->id = descriptor.session_id;
-  session->state = WYL_SESSION_STATE_ACTIVE;
+  wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
   session->auth_method = WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
   session->service_jti = g_strdup (descriptor.jti);
   session->service_subject_id = g_strdup (descriptor.subject_id);

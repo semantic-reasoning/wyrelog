@@ -114,7 +114,7 @@ handoff_human_session_new (const gchar *username, const gchar *tenant)
   g_assert_cmpint (wyl_id_new (&session->id), ==, WYRELOG_E_OK);
   session->username = g_strdup (username);
   session->tenant = g_strdup ("__wr_default");
-  session->state = WYL_SESSION_STATE_ACTIVE;
+  wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
   g_atomic_int_set (&session->mfa_assured, 1);
   return session;

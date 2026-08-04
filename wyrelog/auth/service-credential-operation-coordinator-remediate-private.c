@@ -39,8 +39,11 @@ void wyl_service_credential_operation_handoff_remediation_result_clear
 static gboolean
 handoff_remediation_session_is_active_human (const WylSession *session)
 {
+  /* The decisive lifecycle read goes through the atomic state accessor so it
+   * is a single load coherent with logout's store; auth_method is immutable
+   * after login, so comparing it raw is race-free. */
   return WYL_IS_SESSION ((gpointer) session)
-      && session->state == WYL_SESSION_STATE_ACTIVE
+      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
       && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
 }
 

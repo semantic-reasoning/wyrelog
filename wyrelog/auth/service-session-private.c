@@ -61,7 +61,7 @@ wyl_session_new_service_detached (const
 
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   session->id = descriptor->session_id;
-  session->state = WYL_SESSION_STATE_ACTIVE;
+  wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
   session->auth_method = WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
   session->service_jti = g_strdup (descriptor->jti);
   session->service_subject_id = g_strdup (descriptor->subject_id);
@@ -85,14 +85,14 @@ gboolean
 wyl_session_is_active_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session)
-      && session->state == WYL_SESSION_STATE_ACTIVE;
+      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE;
 }
 
 gboolean
 wyl_session_is_active_human_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session)
-      && session->state == WYL_SESSION_STATE_ACTIVE
+      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
       && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
 }
 
@@ -102,6 +102,24 @@ wyl_session_is_mfa_assured_private (const WylSession *session)
   return WYL_IS_SESSION ((gpointer) session)
       && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
       && g_atomic_int_get ((gint *) & session->mfa_assured) != 0;
+}
+
+gboolean
+wyl_session_liveness_check_private (const WylSession *session,
+    const gchar *expect_session_id, const gchar *expect_actor,
+    const gchar *expect_tenant, gboolean require_mfa)
+{
+  if (session == NULL || !WYL_IS_SESSION ((gpointer) session)
+      || !wyl_session_is_active_human_private (session)
+      || (require_mfa && !wyl_session_is_mfa_assured_private (session)))
+    return FALSE;
+  g_autofree gchar *live_session_id = wyl_session_dup_id_string (session);
+  g_autofree gchar *live_actor = wyl_session_dup_username (session);
+  g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
+  return live_session_id != NULL && live_actor != NULL && live_tenant != NULL
+      && g_strcmp0 (live_session_id, expect_session_id) == 0
+      && g_strcmp0 (live_actor, expect_actor) == 0
+      && g_strcmp0 (live_tenant, expect_tenant) == 0;
 }
 
 wyrelog_error_t
@@ -173,7 +191,7 @@ wyl_session_matches_service_tuple_private (const WylSession *session,
 {
   gchar encoded[WYL_ID_STRING_BUF];
   return WYL_IS_SESSION ((gpointer) session)
-      && session->state == WYL_SESSION_STATE_ACTIVE
+      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
       && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
       && session_id != NULL
       && wyl_id_format (&session->id, encoded, sizeof encoded) == WYRELOG_E_OK
