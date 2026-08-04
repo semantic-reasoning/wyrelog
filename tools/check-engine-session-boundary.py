@@ -94,6 +94,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_engine_verification_enqueue_delta",
     "wyl_engine_verification_get_accepted_session_state",
     "wyl_engine_verification_has_exact_accepted_member_of",
+    "wyl_engine_verification_has_exact_keyed_row",
     "wyl_handle_buffer_delta_cb",
     "wyl_handle_complete_shutdown",
     "wyl_handle_dup_engine_symbol_locked",
