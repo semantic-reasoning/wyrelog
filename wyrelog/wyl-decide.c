@@ -767,7 +767,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
      * the public durable replay-observation path, and a transient arming
      * must never appear there (an observability lie). NOTE the
      * observed-vs-raw asymmetry: the was-absent probe below reads the
-     * snapshot mirror perm_state_observed (wyl_handle_engine_contains
+     * snapshot mirror perm_state_observed (wyl_engine_session_contains
      * remaps "perm_state"), which derives from perm_state_replayed, NOT
      * the raw EDB rule-1 reads. It is safe here only because a svc:
      * subject has neither a raw nor a replayed perm_state row (the store
@@ -779,7 +779,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
      */
     if (wyl_decide_req_get_service_bearer_authenticated (req)) {
       gboolean has_perm = FALSE;
-      rc = wyl_handle_engine_contains (handle, "has_permission", row, 3,
+      rc = wyl_engine_session_contains (session, "has_permission", row, 3,
           &has_perm);
       if (rc != WYRELOG_E_OK) {
         cleanup_rc = rc;
@@ -797,7 +797,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       }
       if (has_perm && data_plane) {
         gint64 armed_id = 0;
-        rc = wyl_handle_intern_engine_symbol (handle, "armed", &armed_id);
+        rc = wyl_engine_session_intern_symbol (session, "armed", &armed_id);
         if (rc != WYRELOG_E_OK) {
           cleanup_rc = rc;
           goto decide_cleanup;
@@ -807,14 +807,14 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         perm_state_row[2] = row[2];
         perm_state_row[3] = armed_id;
         gboolean present = FALSE;
-        rc = wyl_handle_engine_contains (handle, "perm_state", perm_state_row,
+        rc = wyl_engine_session_contains (session, "perm_state", perm_state_row,
             4, &present);
         if (rc != WYRELOG_E_OK) {
           cleanup_rc = rc;
           goto decide_cleanup;
         }
         if (!present) {
-          rc = wyl_handle_engine_insert (handle, "perm_state", perm_state_row,
+          rc = wyl_engine_session_insert (session, "perm_state", perm_state_row,
               4);
           if (rc != WYRELOG_E_OK) {
             cleanup_rc = rc;
@@ -895,10 +895,11 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       (void) remove_break_glass_facts (session, &break_glass_facts);
 #endif
       if (pstate_injected)
-        pstate_remove_rc = wyl_engine_session_remove (session, "principal_state",
-            pstate_row, 2);
+        pstate_remove_rc =
+            wyl_engine_session_remove (session, "principal_state", pstate_row,
+            2);
       if (perm_state_injected)
-        perm_state_remove_rc = wyl_handle_engine_remove (handle, "perm_state",
+        perm_state_remove_rc = wyl_engine_session_remove (session, "perm_state",
             perm_state_row, 4);
       /*
        * All removes run BEFORE any failure-return so nothing leaks, then
