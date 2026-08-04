@@ -17,6 +17,8 @@ TEST_SEAMS = {
     "wyl_handle_set_engine_partial_fault_once_for_test",
     "wyl_handle_set_engine_replacement_fault_once_for_test",
     "wyl_handle_engine_session_locked_for_test",
+    "wyl_handle_engine_session_depth_for_test",
+    "wyl_engine_verification_mutate_keyed_row_for_test",
     "wyl_handle_pending_delta_count_for_test",
     "wyl_handle_buffer_delta_for_test",
     "wyl_handle_flush_pending_deltas_for_test",

@@ -28,6 +28,21 @@ count_duckdb_rows (duckdb_connection conn, const gchar *sql, gint64 *out_count)
   return TRUE;
 }
 
+static gboolean
+count_sqlite_rows (sqlite3 *db, const gchar *sql, gint64 *out_count)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return FALSE;
+  if (sqlite3_step (stmt) != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return FALSE;
+  }
+  *out_count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return TRUE;
+}
+
 typedef struct
 {
   gint64 action_id;
@@ -270,8 +285,22 @@ check_policy_audit_facts_ready_loads_read_engine (void)
           "WHERE action = 'policy_audit_reload_check' "
           "AND request_id = 'wyrelogd-readiness-request';", &count))
     return 52;
-  if (count != 1)
+  if (count != 0)
     return 53;
+
+  sqlite3 *policy_db = wyl_policy_store_get_db (wyl_handle_get_policy_store
+      (handle));
+  if (!count_sqlite_rows (policy_db,
+          "SELECT COUNT(*) FROM audit_intentions "
+          "WHERE action='policy_audit_reload_check' "
+          "AND request_id='wyrelogd-readiness-request' "
+          "AND state='committed';", &count) || count != 1)
+    return 57;
+  if (!count_sqlite_rows (policy_db,
+          "SELECT COUNT(*) FROM audit_intentions "
+          "WHERE action='policy_audit_reload_check' "
+          "AND state IN ('pending','failed');", &count) || count != 0)
+    return 58;
 
   AuditActionProbe probe = { 0 };
   if (wyl_handle_intern_engine_symbol (handle, "policy_audit_reload_check",
@@ -282,6 +311,46 @@ check_policy_audit_facts_ready_loads_read_engine (void)
     return 55;
   if (probe.matches == 0)
     return 56;
+  if (wyl_daemon_check_audit_sink_ready (handle) != WYRELOG_E_OK)
+    return 59;
+  if (!count_duckdb_rows (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'policy_audit_reload_check' "
+          "AND request_id = 'wyrelogd-readiness-request';", &count))
+    return 67;
+  if (count != 1)
+    return 68;
+  if (!count_sqlite_rows (policy_db,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE subject_id='wyrelogd' AND action='daemon_check' "
+          "AND resource_id='audit_events' AND decision=1;", &count)
+      || count != 1)
+    return 69;
+  if (!count_sqlite_rows (policy_db,
+          "SELECT COUNT(*) FROM audit_intentions AS i "
+          "JOIN audit_events AS e ON e.id=i.audit_id "
+          "WHERE i.subject_id='wyrelogd' AND i.action='daemon_check' "
+          "AND i.resource_id='audit_events' AND i.decision=1 "
+          "AND i.state='committed' AND i.attempt_count=0 "
+          "AND i.last_error IS NULL "
+          "AND e.subject_id=i.subject_id AND e.action=i.action "
+          "AND e.resource_id=i.resource_id AND e.decision=i.decision "
+          "AND e.created_at_us=i.created_at_us "
+          "AND e.request_id IS i.request_id "
+          "AND e.deny_reason IS i.deny_reason "
+          "AND e.deny_origin IS i.deny_origin;", &count) || count != 1)
+    return 100;
+  if (!count_sqlite_rows (policy_db,
+          "SELECT COUNT(*) FROM audit_intentions "
+          "WHERE action='daemon_check' AND state IN ('pending','failed');",
+          &count) || count != 0)
+    return 101;
+  if (!count_duckdb_rows (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE subject_id='wyrelogd' AND action='daemon_check' "
+          "AND resource_id='audit_events' AND decision=1;", &count)
+      || count != 1)
+    return 102;
   return 0;
 }
 

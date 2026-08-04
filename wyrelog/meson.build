@@ -394,3 +394,19 @@ wyrelogd_exe = executable('wyrelogd',
   link_language : get_option('enable_secure_duckdb_bridge').enabled() ? 'cpp' : 'c',
   install : true,
 )
+
+wyrelogd_readiness_persistent_test_exe = disabler()
+if host_machine.system() != 'windows' and get_option('enable_audit').disabled()
+  # Compile-only daemon twin for the durable-root process proof. Production
+  # wyrelogd retains disposable readiness stores and contains no override.
+  wyrelogd_readiness_persistent_test_exe = executable(
+    'wyrelogd-readiness-persistent-test',
+    wyrelogd_sources,
+    include_directories : wyrelog_inc,
+    dependencies : wyrelogd_deps,
+    c_args : wyrelogd_c_args + ['-DWYL_TEST_PERSISTENT_READINESS_STORE'],
+    link_language : get_option('enable_secure_duckdb_bridge').enabled() ? 'cpp' : 'c',
+    build_by_default : false,
+    install : false,
+  )
+endif
