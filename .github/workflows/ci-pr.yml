@@ -531,9 +531,13 @@ jobs:
           if-no-files-found: ignore
 
   daemon-http-shared-fact-audit-disabled:
-    name: daemon-http-shared-fact-audit-disabled-ubuntu
+    name: daemon-http-shared-fact-audit-disabled-ubuntu-fact-${{ matrix.fact_store }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        fact_store: [enabled, disabled]
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -559,28 +563,41 @@ jobs:
             -Ddefault_library=shared \
             -Denable_tpm=disabled \
             -Denable_client=enabled \
-            -Denable_fact_store=enabled \
+            -Denable_fact_store=${{ matrix.fact_store }} \
             -Denable_audit=disabled \
             -Dduckdb_source=prebuilt
 
-      - name: Compile daemon HTTP variants without audit
+      - name: Compile audit-disabled daemon readiness targets
         run: |
           meson compile -C build-daemon-http-shared-audit-disabled \
             test-daemon-http-decide \
             test-daemon-http-decide-refresh \
-            test-daemon-http-decide-service
+            test-daemon-http-decide-service \
+            test-daemon-checks-noaudit \
+            wyrelogd-readiness-persistent-test \
+            wyrelogd
 
       - name: Test daemon HTTP private symbols without audit
+        if: matrix.fact_store == 'enabled'
         run: |
           meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \
             daemon-http-decide-private-symbols \
+            --print-errorlogs
+
+      - name: Test audit-disabled daemon readiness
+        run: |
+          meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \
+            daemon-checks-noaudit \
+            wyrelogd-check \
+            wyrelogd-healthz \
+            wyrelogd-readiness-persistent \
             --print-errorlogs
 
       - name: Upload audit-disabled daemon HTTP meson logs on failure
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: daemon-http-shared-fact-audit-disabled-logs-ubuntu
+          name: daemon-http-shared-fact-audit-disabled-logs-ubuntu-fact-${{ matrix.fact_store }}
           path: build-daemon-http-shared-audit-disabled/meson-logs/
           if-no-files-found: ignore
 

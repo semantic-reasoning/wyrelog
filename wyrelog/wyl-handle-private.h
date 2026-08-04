@@ -240,6 +240,7 @@ void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
 void wyl_handle_set_committed_publication_checkpoint_for_test
     (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
+guint wyl_handle_engine_session_depth_for_test (WylHandle * self);
 guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
 wyrelog_error_t wyl_handle_buffer_delta_for_test (WylHandle * self,
     const gchar * relation, const gint64 * row, guint ncols, WylDeltaKind kind);
@@ -417,6 +418,24 @@ wyrelog_error_t wyl_engine_verification_lookup_symbol
 wyrelog_error_t wyl_engine_verification_contains
     (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, gboolean * out_contains);
+/* Proves that exactly one row whose first column is @key exists in the
+ * unpublished read candidate and that row exactly equals @expected. */
+wyrelog_error_t wyl_engine_verification_has_exact_keyed_row
+    (WylEngineVerification * verification, const gchar * relation,
+    gint64 key, const gint64 * expected, gsize ncols, gboolean * out_exact);
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef enum
+{
+  WYL_ENGINE_VERIFICATION_CANDIDATE_EXTRA,
+  WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG,
+} WylEngineVerificationCandidateMutation;
+/* Mutates only the unpublished verification candidate so exact-cardinality
+ * rejection can be tested without weakening durable-store constraints. */
+wyrelog_error_t wyl_engine_verification_mutate_keyed_row_for_test
+    (WylEngineVerification * verification, const gchar * relation,
+    const gint64 * expected, const gint64 * mutant, gsize ncols,
+    WylEngineVerificationCandidateMutation mutation);
+#endif
 /* Reads the host-accepted session_state input witness from the unpublished
  * read candidate. Success requires exactly one accepted row for @scope and
  * returns that row's state symbol. Inline template facts are forbidden. */

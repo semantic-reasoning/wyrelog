@@ -2733,6 +2733,41 @@ if host_machine.system() != 'windows'
   )
 endif
 
+if get_option('enable_audit').disabled()
+  test_daemon_checks_noaudit = executable('test-daemon-checks-noaudit',
+    'test-daemon-checks-noaudit.c',
+    '../wyrelog/daemon/checks.c',
+    '../wyrelog/daemon/delta.c',
+    c_args : [
+      '-DWYL_TEST_DAEMON_CHECKS',
+      '-DWYL_TEST_HANDLE_SEAMS',
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, sqlite_dep],
+  )
+
+  test('daemon-checks-noaudit', test_daemon_checks_noaudit, timeout : 120)
+
+  if host_machine.system() != 'windows'
+    readiness_persistent_has_fact = '0'
+    if get_option('enable_fact_store').allowed()
+      readiness_persistent_has_fact = '1'
+    endif
+    test('wyrelogd-readiness-persistent', find_program('sh'),
+      args : [
+        meson.current_source_dir() / 'check-wyrelogd-readiness-persistent.sh',
+        wyrelogd_readiness_persistent_test_exe.full_path(),
+        meson.project_source_root() / 'templates' / 'access',
+        python3.full_path(),
+        readiness_persistent_has_fact,
+      ],
+      depends : wyrelogd_readiness_persistent_test_exe,
+      timeout : 120,
+    )
+  endif
+endif
+
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \

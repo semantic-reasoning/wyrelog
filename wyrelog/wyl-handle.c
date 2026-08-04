@@ -445,6 +445,102 @@ wyl_engine_verification_contains (WylEngineVerification *verification,
       ncols, out_contains);
 }
 
+typedef struct
+{
+  const gchar *relation;
+  gint64 key;
+  const gint64 *expected;
+  guint expected_ncols;
+  guint count;
+  guint exact_count;
+} WylExactKeyedRowProbe;
+
+static void
+exact_keyed_row_probe_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  WylExactKeyedRowProbe *probe = user_data;
+  if (g_strcmp0 (relation, probe->relation) != 0 || ncols == 0
+      || row[0] != probe->key)
+    return;
+
+  probe->count++;
+  if (ncols != probe->expected_ncols)
+    return;
+  for (guint i = 0; i < ncols; i++) {
+    if (row[i] != probe->expected[i])
+      return;
+  }
+  probe->exact_count++;
+}
+
+wyrelog_error_t
+    wyl_engine_verification_has_exact_keyed_row
+    (WylEngineVerification * verification, const gchar * relation,
+    gint64 key, const gint64 * expected, gsize ncols, gboolean * out_exact)
+{
+  if (out_exact != NULL)
+    *out_exact = FALSE;
+  if (verification == NULL || !verification->active || relation == NULL
+      || expected == NULL || ncols == 0 || ncols > G_MAXUINT
+      || expected[0] != key || out_exact == NULL)
+    return WYRELOG_E_INVALID;
+  WylEngineSession *session = verification->session;
+  if (!engine_session_is_valid (session) || session->acquisition_depth != 1
+      || session->handle->engine_session_depth != 1
+      || session->handle->engine_pair_poisoned
+      || session->handle->read_engine != verification->read_engine
+      || session->handle->delta_engine != verification->delta_engine
+      || session->handle->engine_symbols_by_id != verification->symbols)
+    return WYRELOG_E_INVALID;
+
+  WylExactKeyedRowProbe probe = {
+    .relation = relation,
+    .key = key,
+    .expected = expected,
+    .expected_ncols = (guint) ncols,
+  };
+  wyrelog_error_t rc = wyl_engine_snapshot (verification->read_engine,
+      relation, exact_keyed_row_probe_cb, &probe);
+  if (rc == WYRELOG_E_OK)
+    *out_exact = probe.count == 1 && probe.exact_count == 1;
+  return rc;
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t
+    wyl_engine_verification_mutate_keyed_row_for_test
+    (WylEngineVerification * verification, const gchar * relation,
+    const gint64 * expected, const gint64 * mutant, gsize ncols,
+    WylEngineVerificationCandidateMutation mutation)
+{
+  if (verification == NULL || !verification->active || relation == NULL
+      || expected == NULL || mutant == NULL || ncols < 2 || ncols > G_MAXUINT
+      || expected[0] != mutant[0]
+      || memcmp (expected, mutant, ncols * sizeof (*expected)) == 0
+      || (mutation != WYL_ENGINE_VERIFICATION_CANDIDATE_EXTRA
+          && mutation != WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG))
+    return WYRELOG_E_INVALID;
+  WylEngineSession *session = verification->session;
+  if (!engine_session_is_valid (session) || session->acquisition_depth != 1
+      || session->handle->engine_session_depth != 1
+      || session->handle->engine_pair_poisoned
+      || session->handle->read_engine != verification->read_engine
+      || session->handle->delta_engine != verification->delta_engine
+      || session->handle->engine_symbols_by_id != verification->symbols)
+    return WYRELOG_E_INVALID;
+
+  if (mutation == WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG) {
+    wyrelog_error_t rc = wyl_engine_owned_remove (verification->read_engine,
+        relation, expected, ncols);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return wyl_engine_owned_insert (verification->read_engine, relation, mutant,
+      ncols);
+}
+#endif
+
 wyrelog_error_t
     wyl_engine_verification_get_accepted_session_state
     (WylEngineVerification * verification, gint64 scope, gint64 * out_state) {
@@ -793,6 +889,16 @@ wyl_handle_engine_session_locked_for_test (WylHandle *self)
     return TRUE;
   g_rec_mutex_unlock (&self->engine_session_mutex);
   return FALSE;
+}
+
+guint
+wyl_handle_engine_session_depth_for_test (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), G_MAXUINT);
+  g_rec_mutex_lock (&self->engine_session_mutex);
+  guint depth = self->engine_session_depth;
+  g_rec_mutex_unlock (&self->engine_session_mutex);
+  return depth;
 }
 
 guint

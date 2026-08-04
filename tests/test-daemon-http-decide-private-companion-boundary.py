@@ -36,6 +36,24 @@ wrapper_source = Path(sys.argv[2]).read_text(encoding="utf-8")
 wrapper_header = Path(sys.argv[3]).read_text(encoding="utf-8")
 test_source = Path(sys.argv[4]).read_text(encoding="utf-8")
 
+persistent_test_guard = re.search(
+    r"if host_machine\.system\(\) != 'windows'\s+"
+    r"readiness_persistent_has_fact\s*=\s*'0'.*?"
+    r"test\('wyrelogd-readiness-persistent',\s*find_program\('sh'\),.*?"
+    r"wyrelogd_readiness_persistent_test_exe\.full_path\(\).*?"
+    r"depends\s*:\s*wyrelogd_readiness_persistent_test_exe,.*?"
+    r"\)\s*endif",
+    source,
+    re.DOTALL,
+)
+if persistent_test_guard is None:
+    fail(
+        "persistent readiness registration and target dereference must remain "
+        "inside the same non-Windows lease as its special executable"
+    )
+if source.count("test('wyrelogd-readiness-persistent'") != 1:
+    fail("persistent readiness must have exactly one non-Windows registration")
+
 matches = re.findall(
     r"test_daemon_http_decide_seed_helper\s*=\s*shared_library\((.*?)\n"
     r"\s*\)",
@@ -333,15 +351,25 @@ meson setup build-daemon-http-shared-audit-disabled \\
   -Ddefault_library=shared \\
   -Denable_tpm=disabled \\
   -Denable_client=enabled \\
-  -Denable_fact_store=enabled \\
+  -Denable_fact_store=${{ matrix.fact_store }} \\
   -Denable_audit=disabled \\
   -Dduckdb_source=prebuilt"""
 expected_audit_disabled_compile = """\
 meson compile -C build-daemon-http-shared-audit-disabled \\
   test-daemon-http-decide \\
   test-daemon-http-decide-refresh \\
-  test-daemon-http-decide-service"""
+  test-daemon-http-decide-service \\
+  test-daemon-checks-noaudit \\
+  wyrelogd-readiness-persistent-test \\
+  wyrelogd"""
 expected_audit_disabled_test = """\
+meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \\
+  daemon-checks-noaudit \\
+  wyrelogd-check \\
+  wyrelogd-healthz \\
+  wyrelogd-readiness-persistent \\
+  --print-errorlogs"""
+expected_audit_disabled_private_test = """\
 meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \\
   daemon-http-decide-private-symbols \\
   --print-errorlogs"""
@@ -350,8 +378,9 @@ expected_audit_disabled_steps = [
     "Install build dependencies",
     "Restore meson packagecache",
     "Configure shared fact-store daemon HTTP tests without audit",
-    "Compile daemon HTTP variants without audit",
+    "Compile audit-disabled daemon readiness targets",
     "Test daemon HTTP private symbols without audit",
+    "Test audit-disabled daemon readiness",
     "Upload audit-disabled daemon HTTP meson logs on failure",
 ]
 expected_audit_disabled_checkout = "uses: actions/checkout@v5"
@@ -366,7 +395,7 @@ expected_audit_disabled_upload = """\
 if: failure()
 uses: actions/upload-artifact@v6
 with:
-  name: daemon-http-shared-fact-audit-disabled-logs-ubuntu
+  name: daemon-http-shared-fact-audit-disabled-logs-ubuntu-fact-${{ matrix.fact_store }}
   path: build-daemon-http-shared-audit-disabled/meson-logs/
   if-no-files-found: ignore"""
 
@@ -437,9 +466,12 @@ for workflow_path in map(Path, sys.argv[5:]):
             f"{actual_steps}"
         )
     for required in (
-        "name: daemon-http-shared-fact-audit-disabled-ubuntu",
+        "name: daemon-http-shared-fact-audit-disabled-ubuntu-fact-"
+        "${{ matrix.fact_store }}",
         "runs-on: ubuntu-latest",
         "timeout-minutes: 30",
+        "fail-fast: false",
+        "fact_store: [enabled, disabled]",
     ):
         if audit_disabled_job.count(required) != 1:
             fail(
@@ -447,7 +479,6 @@ for workflow_path in map(Path, sys.argv[5:]):
                 f"one: {required}"
             )
     for forbidden in (
-        "matrix:",
         "macos",
         "windows",
         "-Denable_audit=enabled",
@@ -491,14 +522,32 @@ sudo apt-get install -y --no-install-recommends \\
         fail(f"{workflow_path} audit-disabled configure command changed")
     if step_body(
         audit_disabled_job,
-        "Compile daemon HTTP variants without audit",
+        "Compile audit-disabled daemon readiness targets",
     ) != run_step_body(expected_audit_disabled_compile):
-        fail(f"{workflow_path} must compile exactly three non-audit variants")
+        fail(
+            f"{workflow_path} must compile the three non-audit variants, "
+            "the no-audit readiness proofs, and wyrelogd"
+        )
+    expected_private_body = (
+        "if: matrix.fact_store == 'enabled'\n"
+        + run_step_body(expected_audit_disabled_private_test)
+    )
     if step_body(
         audit_disabled_job,
         "Test daemon HTTP private symbols without audit",
+    ) != expected_private_body:
+        fail(
+            f"{workflow_path} must retain the fact-enabled private-symbol "
+            "gate without selecting its absent fact-disabled test"
+        )
+    if step_body(
+        audit_disabled_job,
+        "Test audit-disabled daemon readiness",
     ) != run_step_body(expected_audit_disabled_test):
-        fail(f"{workflow_path} must run only the private-symbol checker")
+        fail(
+            f"{workflow_path} must run no-audit readiness, real --check, "
+            "ordinary startup, and durable repeat readiness"
+        )
     if audit_disabled_job.count("-Denable_audit=disabled") != 1:
         fail(f"{workflow_path} must explicitly disable audit exactly once")
 

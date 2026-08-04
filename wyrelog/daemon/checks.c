@@ -47,24 +47,238 @@ wyl_daemon_check_policy_store_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
-static wyrelog_error_t
-contains_symbol_row2 (WylEngineSession *session, const gchar *relation,
-    const gchar *a, const gchar *b, gboolean *out_found)
+typedef struct
 {
-  gint64 row[2];
+  const WylAuditEvent *event;
+  const gchar *id;
+#ifdef WYL_TEST_DAEMON_CHECKS
+  WylDaemonReadinessAuditFault fault;
+  WylDaemonReadinessVerifyFault verify_fault;
+  gboolean *out_verify_exact;
+#endif
+} WylPolicyAuditReadinessPublication;
 
-  wyrelog_error_t rc = wyl_engine_session_intern_symbol (session, a, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_session_intern_symbol (session, b, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_engine_session_contains (session, relation, row, 2, out_found);
+#ifdef WYL_TEST_DAEMON_CHECKS
+static gint policy_audit_fault_once;
+static gint policy_audit_verify_fault_once;
+
+void wyl_daemon_check_set_policy_audit_fault_once_for_test
+    (WylDaemonReadinessAuditFault fault)
+{
+  g_return_if_fail (fault > WYL_DAEMON_READINESS_AUDIT_FAULT_NONE);
+  g_return_if_fail (fault <= WYL_DAEMON_READINESS_AUDIT_FAULT_AFTER_COMMITTED);
+  g_atomic_int_set (&policy_audit_fault_once, fault);
 }
 
-wyrelog_error_t
-wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
+void wyl_daemon_check_set_policy_audit_verify_fault_once_for_test
+    (WylDaemonReadinessVerifyFault fault)
 {
+  g_return_if_fail (fault > WYL_DAEMON_READINESS_VERIFY_FAULT_NONE);
+  g_return_if_fail (fault <= WYL_DAEMON_READINESS_VERIFY_FAULT_REQUEST_WRONG);
+  g_atomic_int_set (&policy_audit_verify_fault_once, fault);
+}
+#endif
+
+#ifdef WYL_TEST_DAEMON_CHECKS
+static wyrelog_error_t
+    mutate_exact_verification_candidate_for_test
+    (WylPolicyAuditReadinessPublication * publication,
+    WylEngineVerification * verification, WylDaemonReadinessVerifyFault extra,
+    WylDaemonReadinessVerifyFault wrong, const gchar * relation,
+    const gint64 * expected, const gint64 * mutant, gsize ncols,
+    gboolean * out_targeted)
+{
+  *out_targeted = publication->verify_fault == extra
+      || publication->verify_fault == wrong;
+  if (!*out_targeted)
+    return WYRELOG_E_OK;
+  WylEngineVerificationCandidateMutation mutation =
+      publication->verify_fault == extra ?
+      WYL_ENGINE_VERIFICATION_CANDIDATE_EXTRA :
+      WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG;
+  return wyl_engine_verification_mutate_keyed_row_for_test (verification,
+      relation, expected, mutant, ncols, mutation);
+}
+#endif
+
+static wyrelog_error_t
+mutate_policy_audit_readiness_publication (wyl_policy_store_t *store,
+    gpointer data)
+{
+  WylPolicyAuditReadinessPublication *publication = data;
+  const WylAuditEvent *event = publication->event;
+  gboolean inserted = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_record_audit_intention_full (store,
+      publication->id, wyl_audit_event_get_created_at_us (event),
+      wyl_audit_event_get_subject_id (event),
+      wyl_audit_event_get_action (event),
+      wyl_audit_event_get_resource_id (event),
+      wyl_audit_event_get_deny_reason (event),
+      wyl_audit_event_get_deny_origin (event),
+      wyl_audit_event_get_request_id (event),
+      wyl_audit_event_get_decision (event), &inserted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!inserted)
+    return WYRELOG_E_POLICY;
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (publication->fault == WYL_DAEMON_READINESS_AUDIT_FAULT_AFTER_INTENTION)
+    return WYRELOG_E_IO;
+#endif
+
+  inserted = FALSE;
+  rc = wyl_policy_store_append_audit_event_full (store, publication->id,
+      wyl_audit_event_get_created_at_us (event),
+      wyl_audit_event_get_subject_id (event),
+      wyl_audit_event_get_action (event),
+      wyl_audit_event_get_resource_id (event),
+      wyl_audit_event_get_deny_reason (event),
+      wyl_audit_event_get_deny_origin (event),
+      wyl_audit_event_get_request_id (event),
+      wyl_audit_event_get_decision (event), &inserted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!inserted)
+    return WYRELOG_E_POLICY;
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (publication->fault == WYL_DAEMON_READINESS_AUDIT_FAULT_AFTER_EVENT)
+    return WYRELOG_E_IO;
+#endif
+
+  rc = wyl_policy_store_mark_audit_intention_committed (store, publication->id);
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (rc == WYRELOG_E_OK
+      && publication->fault == WYL_DAEMON_READINESS_AUDIT_FAULT_AFTER_COMMITTED)
+    return WYRELOG_E_IO;
+#endif
+  return rc;
+}
+
+static wyrelog_error_t
+    verify_exact_policy_audit_readiness_publication
+    (WylEngineVerification * verification, gpointer data)
+{
+  WylPolicyAuditReadinessPublication *publication = data;
+  const WylAuditEvent *event = publication->event;
+  gint64 event_row[3] = { 0 };
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      publication->id, &event_row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+  event_row[1] = wyl_audit_event_get_created_at_us (event);
+  rc = wyl_engine_verification_lookup_symbol (verification, "allow",
+      &event_row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+
+  gboolean exact = FALSE;
+#ifdef WYL_TEST_DAEMON_CHECKS
+  gboolean targeted = FALSE;
+  gint64 event_mutant[3] = { event_row[0], event_row[1], event_row[2] };
+  if (publication->verify_fault ==
+      WYL_DAEMON_READINESS_VERIFY_FAULT_EVENT_EXTRA
+      || publication->verify_fault ==
+      WYL_DAEMON_READINESS_VERIFY_FAULT_EVENT_WRONG) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+        wyl_audit_event_get_action (event), &event_mutant[2]);
+    if (rc != WYRELOG_E_OK)
+      return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+  }
+  rc = mutate_exact_verification_candidate_for_test (publication,
+      verification, WYL_DAEMON_READINESS_VERIFY_FAULT_EVENT_EXTRA,
+      WYL_DAEMON_READINESS_VERIFY_FAULT_EVENT_WRONG, "audit_event_input",
+      event_row, event_mutant, G_N_ELEMENTS (event_row), &targeted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
+  rc = wyl_engine_verification_has_exact_keyed_row (verification,
+      "audit_event", event_row[0], event_row, G_N_ELEMENTS (event_row), &exact);
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (targeted && publication->out_verify_exact != NULL)
+    *publication->out_verify_exact = exact;
+#endif
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+
+  gint64 attribute_row[2] = { event_row[0], 0 };
+  rc = wyl_engine_verification_lookup_symbol (verification,
+      wyl_audit_event_get_action (event), &attribute_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+#ifdef WYL_TEST_DAEMON_CHECKS
+  const gint64 action_id = attribute_row[1];
+  gint64 action_mutant[2] = { event_row[0], attribute_row[1] };
+  if (publication->verify_fault ==
+      WYL_DAEMON_READINESS_VERIFY_FAULT_ACTION_EXTRA
+      || publication->verify_fault ==
+      WYL_DAEMON_READINESS_VERIFY_FAULT_ACTION_WRONG) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+        wyl_audit_event_get_request_id (event), &action_mutant[1]);
+    if (rc != WYRELOG_E_OK)
+      return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+  }
+  targeted = FALSE;
+  rc = mutate_exact_verification_candidate_for_test (publication,
+      verification, WYL_DAEMON_READINESS_VERIFY_FAULT_ACTION_EXTRA,
+      WYL_DAEMON_READINESS_VERIFY_FAULT_ACTION_WRONG,
+      "audit_event_action_input", attribute_row, action_mutant,
+      G_N_ELEMENTS (attribute_row), &targeted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
+  rc = wyl_engine_verification_has_exact_keyed_row (verification,
+      "audit_event_action", event_row[0], attribute_row,
+      G_N_ELEMENTS (attribute_row), &exact);
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (targeted && publication->out_verify_exact != NULL)
+    *publication->out_verify_exact = exact;
+#endif
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+
+  rc = wyl_engine_verification_lookup_symbol (verification,
+      wyl_audit_event_get_request_id (event), &attribute_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+#ifdef WYL_TEST_DAEMON_CHECKS
+  const gint64 request_mutant[2] = { event_row[0], action_id };
+  targeted = FALSE;
+  rc = mutate_exact_verification_candidate_for_test (publication,
+      verification, WYL_DAEMON_READINESS_VERIFY_FAULT_REQUEST_EXTRA,
+      WYL_DAEMON_READINESS_VERIFY_FAULT_REQUEST_WRONG,
+      "audit_event_request_id_input", attribute_row, request_mutant,
+      G_N_ELEMENTS (attribute_row), &targeted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
+  rc = wyl_engine_verification_has_exact_keyed_row (verification,
+      "audit_event_request_id", event_row[0], attribute_row,
+      G_N_ELEMENTS (attribute_row), &exact);
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (targeted && publication->out_verify_exact != NULL)
+    *publication->out_verify_exact = exact;
+#endif
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+check_policy_audit_facts_ready (WylHandle *handle, gchar **out_id,
+    gint64 *out_created_at_us, WylCommittedPublicationStage *out_stage,
+    gboolean *out_verify_exact)
+{
+  if (out_id != NULL)
+    *out_id = NULL;
+  if (out_created_at_us != NULL)
+    *out_created_at_us = -1;
+  if (out_stage != NULL)
+    *out_stage = WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+  if (out_verify_exact != NULL)
+    *out_verify_exact = TRUE;
+  if (!WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
 
   wyl_audit_event_set_subject_id (ev, "wyrelogd");
@@ -78,65 +292,53 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
   g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (ev);
   if (audit_id == NULL)
     return WYRELOG_E_INTERNAL;
+  if (out_id != NULL)
+    *out_id = g_strdup (audit_id);
+  if (out_created_at_us != NULL)
+    *out_created_at_us = wyl_audit_event_get_created_at_us (ev);
 
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (session == NULL)
     return WYRELOG_E_BUSY;
-  wyrelog_error_t rc = wyl_audit_emit (handle, ev);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  gint64 event_row[3];
-  gboolean found = FALSE;
-  rc = wyl_engine_session_intern_symbol (session, audit_id, &event_row[0]);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-  event_row[1] = wyl_audit_event_get_created_at_us (ev);
-  rc = wyl_engine_session_intern_symbol (session, "allow", &event_row[2]);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-  rc = wyl_engine_session_contains (session, "audit_event", event_row, 3,
-      &found);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-  if (!found)
-    return wyl_handle_fail_committed_engine_projection (session,
-        WYRELOG_E_POLICY);
-
-  rc = contains_symbol_row2 (session, "audit_event_action", audit_id,
-      "policy_audit_reload_check", &found);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-  if (!found)
-    return wyl_handle_fail_committed_engine_projection (session,
-        WYRELOG_E_POLICY);
-
-  rc = contains_symbol_row2 (session, "audit_event_request_id", audit_id,
-      "wyrelogd-readiness-request", &found);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-  if (!found)
-    return wyl_handle_fail_committed_engine_projection (session,
-        WYRELOG_E_POLICY);
-
-#ifdef WYL_HAS_AUDIT
-  rc = wyl_handle_load_policy_store_audit_events (handle);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-
-  g_autofree gchar *json = NULL;
-  rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
-      "request_id(\"wyrelogd-readiness-request\")", &json);
-  if (rc != WYRELOG_E_OK)
-    return wyl_handle_fail_committed_engine_projection (session, rc);
-  if (json == NULL || strstr (json, "policy_audit_reload_check") == NULL
-      || strstr (json, "wyrelogd-readiness-request") == NULL)
-    return wyl_handle_fail_committed_engine_projection (session,
-        WYRELOG_E_POLICY);
+  WylPolicyAuditReadinessPublication publication = {
+    .event = ev,
+    .id = audit_id,
+#ifdef WYL_TEST_DAEMON_CHECKS
+    .fault = g_atomic_int_get (&policy_audit_fault_once),
+    .verify_fault = g_atomic_int_get (&policy_audit_verify_fault_once),
+    .out_verify_exact = out_verify_exact,
 #endif
-
-  return WYRELOG_E_OK;
+  };
+#ifdef WYL_TEST_DAEMON_CHECKS
+  if (publication.fault != WYL_DAEMON_READINESS_AUDIT_FAULT_NONE)
+    g_atomic_int_set (&policy_audit_fault_once,
+        WYL_DAEMON_READINESS_AUDIT_FAULT_NONE);
+  if (publication.verify_fault != WYL_DAEMON_READINESS_VERIFY_FAULT_NONE)
+    g_atomic_int_set (&policy_audit_verify_fault_once,
+        WYL_DAEMON_READINESS_VERIFY_FAULT_NONE);
+#endif
+  return wyl_engine_session_run_committed_publication (session,
+      mutate_policy_audit_readiness_publication, &publication,
+      verify_exact_policy_audit_readiness_publication, &publication, NULL,
+      NULL, out_stage);
 }
+
+wyrelog_error_t
+wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
+{
+  return check_policy_audit_facts_ready (handle, NULL, NULL, NULL, NULL);
+}
+
+#ifdef WYL_TEST_DAEMON_CHECKS
+wyrelog_error_t
+wyl_daemon_check_policy_audit_facts_ready_for_test (WylHandle *handle,
+    gchar **out_id, gint64 *out_created_at_us,
+    WylCommittedPublicationStage *out_stage, gboolean *out_verify_exact)
+{
+  return check_policy_audit_facts_ready (handle, out_id, out_created_at_us,
+      out_stage, out_verify_exact);
+}
+#endif
 
 wyrelog_error_t
 wyl_daemon_check_audit_sink_ready (WylHandle *handle)
@@ -151,6 +353,24 @@ wyl_daemon_check_audit_sink_ready (WylHandle *handle)
     return rc;
   if (!found)
     return WYRELOG_E_IO;
+
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_BUSY;
+  rc = wyl_handle_load_policy_store_audit_events (handle);
+  if (rc != WYRELOG_E_OK)
+    return wyl_handle_fail_committed_engine_projection (session, rc);
+
+  g_autofree gchar *json = NULL;
+  rc = wyl_audit_conn_query_events_json (conn,
+      "request_id(\"wyrelogd-readiness-request\")", &json);
+  if (rc != WYRELOG_E_OK)
+    return wyl_handle_fail_committed_engine_projection (session, rc);
+  if (json == NULL || strstr (json, "policy_audit_reload_check") == NULL
+      || strstr (json, "wyrelogd-readiness-request") == NULL)
+    return wyl_handle_fail_committed_engine_projection (session,
+        WYRELOG_E_POLICY);
+  g_clear_pointer (&session, wyl_engine_session_release);
 
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, "wyrelogd");

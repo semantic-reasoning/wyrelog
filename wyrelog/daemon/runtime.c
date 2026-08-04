@@ -358,6 +358,7 @@ cleanup_readiness_store (gpointer data)
   g_free (path);
 }
 
+#ifndef WYL_TEST_PERSISTENT_READINESS_STORE
 static wyrelog_error_t
 make_readiness_store_path (const gchar *pattern, gchar **out_path)
 {
@@ -369,6 +370,7 @@ make_readiness_store_path (const gchar *pattern, gchar **out_path)
   (void) g_remove (*out_path);
   return WYRELOG_E_OK;
 }
+#endif
 
 static wyrelog_error_t
 open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
@@ -431,6 +433,7 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
 
   g_autofree gchar *scratch_policy_store = NULL;
   g_autofree gchar *scratch_audit_store = NULL;
+#ifndef WYL_TEST_PERSISTENT_READINESS_STORE
   if (opts->production_mode) {
     wyrelog_error_t rc =
         make_readiness_store_path ("wyrelog-readiness-policy-XXXXXX.sqlite",
@@ -444,12 +447,21 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
       return rc;
 #endif
   }
+#endif
 
   /* Readiness probes intentionally run against scratch stores: the checks
-   * exercise mutation paths and must not seed configured authority data. */
+   * exercise mutation paths and must not seed configured authority data. The
+   * compile-only focused test executable overrides this to prove two real
+   * --check process invocations append to one durable root; the installed
+   * daemon never contains that override. */
   WylHandleOpenOptions open_opts = {
     .template_dir = opts->template_dir,
+#ifdef WYL_TEST_PERSISTENT_READINESS_STORE
+    .policy_store_path = opts->policy_store_path,
+    .fact_root = opts->fact_root,
+#else
     .policy_store_path = scratch_policy_store,
+#endif
     .policy_keyprovider_path = opts->policy_keyprovider_path,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
