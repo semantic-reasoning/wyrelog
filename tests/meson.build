@@ -1171,10 +1171,16 @@ test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   dependencies : [wyrelog_dep],
 )
 test('fact-artifact-namespace', test_fact_artifact_namespace)
-if host_machine.system() == 'windows'
+if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
   # This is intentionally separate from test-fact-artifact-namespace: that
   # historical POSIX test is compiled out on Windows and cannot prove native
   # HANDLE ownership or runtime behavior.
+  #
+  # It also requires enable_windows_artifact_test_hooks (#741): every case in
+  # this binary runs through the WinFaultGuard fixture, which arms and disarms
+  # both native artifact fault hooks between cases, so the binary cannot be
+  # built against a shipped library that does not contain them. The Windows CI
+  # jobs that run this test enable the option explicitly.
   test_fact_artifact_namespace_windows = executable(
     'test-fact-artifact-namespace-windows',
     'test-fact-artifact-namespace-windows.c',
@@ -2696,6 +2702,12 @@ test('duckdb-after-walstart-boundary', python3,
 
 test('duckdb-test-seam-wiring', python3,
   args : [files('test-duckdb-test-seam-wiring.py'),
+    meson.project_source_root()])
+
+# Registered unconditionally: the gate it enforces is a property of the source
+# tree, so a POSIX-only build must fail on a Windows hook that escapes it.
+test('windows-artifact-test-hook-wiring', python3,
+  args : [files('test-windows-artifact-test-hook-wiring.py'),
     meson.project_source_root()])
 
 test('duckdb-fixed-wal-lifecycle-boundary', python3,

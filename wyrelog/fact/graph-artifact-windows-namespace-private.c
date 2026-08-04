@@ -8,6 +8,7 @@
 
 #include <string.h>
 
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
 static gint win_namespace_test_fault;
 
 void wyl_fact_artifact_win_namespace_set_test_fault
@@ -34,6 +35,7 @@ win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
   return g_atomic_int_compare_and_exchange (&win_namespace_test_fault, fault,
       WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE);
 }
+#endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
 struct WylFactArtifactWinNamespace
 {
@@ -1088,6 +1090,7 @@ wyrelog_error_t
     rc = sidecar_revalidate_locked (destination, FALSE, INVALID_HANDLE_VALUE);
   if (rc != WYRELOG_E_OK)
     goto out;
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
   if (win_namespace_fault_take
       (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_PRE_FINAL_DESTINATION_SUBSTITUTE))
   {
@@ -1107,6 +1110,11 @@ wyrelog_error_t
         rc = WYRELOG_E_POLICY;
     }
   }
+#endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
+  /* Deliberately outside the gate above: an unhooked build already reached
+   * this revalidation with the fault block skipped, so keeping it here leaves
+   * shipped control flow exactly as it is today.  Narrowing it to the hooked
+   * build would be a separate behavioural change to the replacement path. */
   if (rc == WYRELOG_E_OK)
     rc = sidecar_revalidate_locked (destination, FALSE, INVALID_HANDLE_VALUE);
   if (rc != WYRELOG_E_OK)
@@ -1165,10 +1173,15 @@ wyrelog_error_t
     }
   }
   {
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
     wyrelog_error_t post = win_namespace_fault_take
         (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN)
         ? WYRELOG_E_IO : wyl_fact_artifact_win_locator_flush_directory
         (destination->lease->namespace_->locator);
+#else
+    wyrelog_error_t post = wyl_fact_artifact_win_locator_flush_directory
+        (destination->lease->namespace_->locator);
+#endif
     if (post == WYRELOG_E_OK)
       post = sidecar_revalidate_locked (destination, FALSE,
           INVALID_HANDLE_VALUE);

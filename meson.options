@@ -63,6 +63,23 @@ option('enable_fault_injection',
               + 'service-credential publication-fault end-to-end proof.'
 )
 
+option('enable_windows_artifact_test_hooks',
+  type : 'feature',
+  value : 'disabled',
+  description : 'Compile in the test-only fault hooks of the native Windows '
+              + 'graph-artifact modules: the locator directory-flush error '
+              + 'substitution and the namespace sidecar-replacement fault. '
+              + 'Disabled by default so release builds do not contain the '
+              + 'hooks at all: with this off the macro '
+              + 'WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS is undefined, neither '
+              + 'hook is declared or defined, and their consumption sites '
+              + 'compile down to the unhooked native call -- a shipped '
+              + 'library cannot be armed and pays no hot-path cost for them. '
+              + 'Enable only for test/CI builds that run the '
+              + 'fact-artifact-namespace-windows proof, whose per-case fault '
+              + 'guard is built on these hooks.'
+)
+
 option('duckdb_source',
   type : 'combo',
   choices : ['prebuilt', 'subproject'],
