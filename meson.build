@@ -171,6 +171,21 @@ if enable_fault_injection_opt.allowed()
   add_project_arguments('-DWYL_ENABLE_FAULT_INJECTION', language : 'c')
 endif
 
+# Test-only fault hooks of the native Windows graph-artifact modules (#741).
+# Compile-gated OFF by default on the same terms as the seam above: when the
+# option is not enabled the WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS macro is
+# undefined project-wide, so neither hook pair is declared or defined and each
+# consumption site compiles down to the unhooked native call. A shipped library
+# therefore cannot be armed and does not pay the interlocked read the armed
+# form costs on every directory flush. A project argument (not a per-target
+# c_arg) is used so libwyrelog and every test that compiles or links the
+# affected translation units see the same definition uniformly.
+win_artifact_test_hooks_opt = get_option('enable_windows_artifact_test_hooks')
+if win_artifact_test_hooks_opt.allowed()
+  add_project_arguments('-DWYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS',
+      language : 'c')
+endif
+
 subdir('wyrelog')
 subdir('tests')
 

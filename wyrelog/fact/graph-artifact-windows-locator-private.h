@@ -89,7 +89,11 @@ wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator *
  * ERROR_NOT_SUPPORTED/ERROR_INVALID_FUNCTION mean the backing filesystem
  * cannot prove a flush and map to POLICY; all other FlushFileBuffers failures
  * map to IO.  In both cases callers must reconcile rather than claim durable
- * publication.  The test hook only substitutes the next native result. */
+ * publication. */
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+/* Substitutes the next native directory-flush result.  Compiled only under
+ * enable_windows_artifact_test_hooks: a shipped library declares neither this
+ * hook nor its disarm below, and its flush path holds no armable state. */
 void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
     (DWORD error);
 /* Disarms the hook above and reports what was armed, ERROR_SUCCESS when
@@ -102,6 +106,7 @@ void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
  * clean-run property: a caller that aborts never reaches its own disarm. */
 DWORD wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test
     (void);
+#endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
 const gchar *wyl_fact_artifact_win_entry_name (const WylFactArtifactWinEntry *);

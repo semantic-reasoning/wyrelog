@@ -38,6 +38,10 @@ typedef enum
   WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED,
 } WylFactArtifactWinSidecarReplaceResult;
 
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+/* Compiled only under enable_windows_artifact_test_hooks.  A shipped library
+ * declares neither this fault vocabulary nor the hook pair below, and its
+ * sidecar-replacement path holds no armable state. */
 typedef enum
 {
   WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE = 0,
@@ -58,6 +62,7 @@ void wyl_fact_artifact_win_namespace_set_test_fault
  * its own disarm. */
 WylFactArtifactWinNamespaceTestFault
 wyl_fact_artifact_win_namespace_take_test_fault (void);
+#endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
 /* Opens only an already-provisioned main and lock pair.  It never creates
  * either artifact; callers that need initial main provisioning must use the

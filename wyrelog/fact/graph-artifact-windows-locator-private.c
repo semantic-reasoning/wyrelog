@@ -82,6 +82,7 @@ struct WylFactArtifactWinDirectory
   gchar *name;
 };
 
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
 static volatile LONG next_directory_flush_error;
 
 void
@@ -96,6 +97,7 @@ wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test (void)
   return (DWORD) InterlockedExchange (&next_directory_flush_error,
       ERROR_SUCCESS);
 }
+#endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
 static WylNtCreateFile
 nt_create_file (void)
@@ -685,14 +687,24 @@ wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator
     *locator)
 {
   wyrelog_error_t rc = wyl_fact_artifact_win_locator_revalidate (locator);
-  LONG forced;
   DWORD error;
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  LONG forced;
+#endif
   if (rc != WYRELOG_E_OK)
     return rc;
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
   forced = InterlockedExchange (&next_directory_flush_error, ERROR_SUCCESS);
   if (forced == ERROR_SUCCESS && FlushFileBuffers (locator->directory))
     return WYRELOG_E_OK;
   error = forced == ERROR_SUCCESS ? GetLastError () : (DWORD) forced;
+#else
+  /* Unhooked shipped form: the native result is the only result, and no
+   * armable state is read on this path. */
+  if (FlushFileBuffers (locator->directory))
+    return WYRELOG_E_OK;
+  error = GetLastError ();
+#endif
   /* A volume which cannot flush a directory offers no durable namespace
    * evidence.  Do not turn that into success: lifecycle callers must retain
    * their APPLIED/UNKNOWN reconciliation result and fail closed. */
