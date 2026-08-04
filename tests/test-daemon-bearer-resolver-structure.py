@@ -227,8 +227,42 @@ def main() -> int:
         BASE + "\nstatic gboolean rogue_management_handler(void) {\n"
         "  service_principal_management_authorize();\n"
         "  return service_management_read_release();\n}\n",
+        # #759: an error-path terminal release must not discard its result.
+        BASE.replace(
+            "  management_target_is_active();\n"
+            "  wyl_service_auth_read_lease_release_terminal();\n",
+            "  management_target_is_active();\n"
+            "  (void) wyl_service_auth_read_lease_release_terminal();\n",
+            1,
+        ),
+        # #759: an acquire owner must not free an active READ lease directly,
+        # even outside the frozen service branch (here in the human tail).
+        BASE.replace(
+            "  return claims.principal_state_at_issue != 0;",
+            "  wyl_service_auth_read_lease_free();\n"
+            "  return claims.principal_state_at_issue != 0;",
+        ),
+        # #759: acquiring a READ lease with no terminal release and no
+        # out_read_lease hand-off is rejected.
+        BASE + "\nstatic gboolean rogue_acquire_owner(void) {\n"
+        "  wyl_service_auth_authority_acquire_read();\n"
+        "  return 0;\n}\n",
+        # #759: the pinned store must not be read after the terminal release.
+        BASE.replace(
+            "  wyl_service_auth_authority_acquire_read();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n"
+            "  management_target_is_active();\n",
+            "  wyl_service_auth_authority_acquire_read();\n"
+            "  management_target_is_active();\n",
+        ).replace(
+            "  wyl_service_auth_read_lease_release_terminal();\n"
+            "  return 1;\n}",
+            "  wyl_service_auth_read_lease_release_terminal();\n"
+            "  wyl_service_auth_read_lease_get_policy_store();\n"
+            "  return 1;\n}",
+        ),
     ]
-    if len(management_mutants) != 9:
+    if len(management_mutants) != 13:
         return 4
     if run(guard, BASE) != 0 or run(guard, BASE_WITH_REGISTRY_TEST_SEAM) != 0:
         return 1

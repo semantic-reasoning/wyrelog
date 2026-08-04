@@ -22,10 +22,10 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_get (handle, credential_id, out);
   if (lease != NULL) {
-    wyrelog_error_t release_rc = wyl_service_auth_read_lease_release (lease);
+    wyrelog_error_t release_rc =
+        wyl_service_auth_read_lease_release_terminal (&lease);
     if (rc == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_read_lease_free (lease);
   }
   return rc;
 }

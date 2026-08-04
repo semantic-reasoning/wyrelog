@@ -149,6 +149,7 @@ struct _WylServiceAuthReadLease
   WylServiceAuthLeaseState state;
   wyl_policy_store_t *pinned_store;
   gboolean test_fail_terminal_prevalidation;
+  gboolean test_fail_terminal_rank_after_pop;
   void (*test_terminal_checkpoint) (gpointer data);
   gpointer test_terminal_checkpoint_data;
 };
@@ -820,6 +821,13 @@ void wyl_service_auth_read_lease_test_fail_terminal_prevalidation
     lease->test_fail_terminal_prevalidation = TRUE;
 }
 
+void wyl_service_auth_read_lease_test_fail_terminal_rank_after_pop
+    (WylServiceAuthReadLease * lease)
+{
+  if (lease != NULL)
+    lease->test_fail_terminal_rank_after_pop = TRUE;
+}
+
 void wyl_service_auth_read_lease_test_set_terminal_checkpoint
     (WylServiceAuthReadLease * lease, void (*checkpoint) (gpointer data),
     gpointer data)
@@ -855,6 +863,19 @@ wyl_service_auth_read_lease_release_terminal (WylServiceAuthReadLease
     authority->active_readers--;
     if (authority->active_readers == 0 && authority->waiting_writers > 0)
       authority->writer_priority_reserved = TRUE;
+    wyrelog_error_t rank_rc = wyl_service_auth_rank_leave_expected
+        (lease->handle, WYL_SERVICE_AUTH_RANK_COORDINATION);
+    if (rank_rc == WYRELOG_E_OK && lease->test_fail_terminal_rank_after_pop) {
+      lease->test_fail_terminal_rank_after_pop = FALSE;
+      rank_rc = WYRELOG_E_INTERNAL;
+    }
+    wyrelog_error_t pin_rc = wyl_handle_policy_store_unpin_terminal
+        (lease->handle, lease->pinned_store);
+    lease->pinned_store = NULL;
+    if (rc == WYRELOG_E_OK && rank_rc != WYRELOG_E_OK)
+      rc = rank_rc;
+    if (rc == WYRELOG_E_OK && pin_rc != WYRELOG_E_OK)
+      rc = pin_rc;
     if (rc != WYRELOG_E_OK)
       wyl_handle_service_auth_set_unavailable_reason_locked (lease->handle,
           WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -864,12 +885,6 @@ wyl_service_auth_read_lease_release_terminal (WylServiceAuthReadLease
   g_mutex_unlock (&authority->mutex);
   if (!consumed)
     return rc != WYRELOG_E_OK ? rc : WYRELOG_E_INVALID;
-  wyrelog_error_t rank_rc = wyl_service_auth_rank_leave_expected
-      (lease->handle, WYL_SERVICE_AUTH_RANK_COORDINATION);
-  if (rc == WYRELOG_E_OK && rank_rc != WYRELOG_E_OK)
-    rc = rank_rc;
-  wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
-  lease->pinned_store = NULL;
   g_clear_object (&lease->handle);
   wyl_service_auth_authority_unref (lease->authority);
   g_free (lease);
