@@ -7,7 +7,10 @@ import sys
 
 
 root = Path(sys.argv[1])
-runtime = (root / "wyrelog/daemon/runtime.c").read_text(encoding="utf-8")
+runtime_source = (root / "wyrelog/daemon/runtime.c").read_text(
+    encoding="utf-8"
+)
+build = (root / "wyrelog/meson.build").read_text(encoding="utf-8")
 handle = (root / "wyrelog/wyl-handle.c").read_text(encoding="utf-8")
 handle_private = (root / "wyrelog/wyl-handle-private.h").read_text(
     encoding="utf-8"
@@ -38,6 +41,52 @@ def body(source: str, name: str) -> str:
     raise AssertionError(f"unterminated function {name}")
 
 
+def without_macro_branches(source: str, macro: str) -> str:
+    """Blank branches that require @macro while retaining line layout."""
+    output = []
+    stack: list[tuple[bool, bool, bool]] = []
+    enabled = True
+    opener = re.compile(rf"#\s*(ifdef|ifndef)\s+{re.escape(macro)}\b")
+    defined_opener = re.compile(
+        rf"#\s*if\s+defined\s*\(\s*{re.escape(macro)}\s*\)")
+    for line in source.splitlines(keepends=True):
+        directive = line.lstrip()
+        match = opener.match(directive)
+        defined_match = defined_opener.match(directive)
+        if match or defined_match:
+            parent = enabled
+            positive = defined_match is not None or match.group(1) == "ifdef"
+            branch = not positive  # the macro is undefined in production
+            stack.append((True, parent, branch))
+            enabled = parent and branch
+            output.append("\n" if line.endswith("\n") else "")
+            continue
+        if re.match(r"#\s*(if|ifdef|ifndef)\b", directive):
+            stack.append((False, enabled, True))
+        elif re.match(r"#\s*else\b", directive) and stack and stack[-1][0]:
+            target, parent, branch = stack[-1]
+            branch = not branch
+            stack[-1] = (target, parent, branch)
+            enabled = parent and branch
+            output.append("\n" if line.endswith("\n") else "")
+            continue
+        elif re.match(r"#\s*endif\b", directive) and stack:
+            target, parent, _branch = stack.pop()
+            if target:
+                enabled = parent
+                output.append("\n" if line.endswith("\n") else "")
+                continue
+        output.append(line if enabled else ("\n" if line.endswith("\n") else ""))
+    return "".join(output)
+
+
+# The readiness override exists only in the non-installed compile-only daemon
+# twin, so the installed daemon is the text that survives with the macro
+# undefined.  Preprocess before extracting bodies so the ordering and
+# authority gates below read what production wyrelogd actually contains.
+READINESS_OVERRIDE = "WYL_TEST_PERSISTENT_READINESS_STORE"
+runtime = without_macro_branches(runtime_source, READINESS_OVERRIDE)
+
 open_runtime = body(runtime, "open_runtime_handle")
 open_readiness = body(runtime, "open_readiness_handle")
 open_handle = body(handle, "wyl_handle_open_with_options")
@@ -49,6 +98,23 @@ bind_locked = body(policy_store, "bind_fact_root_locked")
 
 assert ".fact_root = opts->fact_root" in open_runtime
 assert ".fact_root" not in open_readiness
+assert ".policy_store_path = scratch_policy_store" in open_readiness
+
+# Preprocessing the override away is only sound while the override cannot
+# reach an installed binary.  The macro must stay confined to one non-installed
+# compile-only twin, and the installed daemon must never receive it.
+assert build.count(READINESS_OVERRIDE) == 1
+twin_start = build.index(
+    "wyrelogd_readiness_persistent_test_exe = executable("
+)
+twin = build[twin_start:build.index("\nendif", twin_start)]
+assert f"-D{READINESS_OVERRIDE}" in twin
+assert "install : false" in twin
+assert "build_by_default : false" in twin
+daemon_start = build.index("wyrelogd_exe = executable('wyrelogd',")
+daemon = build[daemon_start:build.index("\n)\n", daemon_start)]
+assert READINESS_OVERRIDE not in daemon
+assert "install : true" in daemon
 assert open_handle.index("wyl_fact_root_writer_lease_acquire") < open_handle.index(
     "wyl_policy_store_open_with_options"
 )
