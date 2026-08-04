@@ -59,6 +59,65 @@ class RepoPath:
     spelling: str
 
 
+def escape_ascii_identity(spelling: str) -> str:
+    """Render a spelling as a double-quoted, ASCII-only, single-line literal.
+
+    The result is always wrapped in double quotes.  Reversing the escapes
+    ``\\\\ \\" \\n \\r \\t \\xHH \\uHHHH \\U00HHHHHH`` inside the outer double
+    quotes recovers the exact original spelling byte-for-byte: case is
+    preserved and no Unicode normalization is applied.  A literal single quote
+    is left as-is because it is unambiguous inside double quotes.
+    """
+    escaped = spelling.replace("\\", "\\\\")
+    escaped = escaped.replace("\"", "\\\"")
+    escaped = escaped.replace("\n", "\\n")
+    escaped = escaped.replace("\r", "\\r")
+    escaped = escaped.replace("\t", "\\t")
+    out = []
+    for char in escaped:
+        codepoint = ord(char)
+        if codepoint < 0x20 or codepoint == 0x7f or codepoint > 0x7e:
+            if codepoint <= 0xff:
+                out.append(f"\\x{codepoint:02x}")
+            elif codepoint <= 0xffff:
+                out.append(f"\\u{codepoint:04x}")
+            else:
+                out.append(f"\\U{codepoint:08x}")
+        else:
+            out.append(char)
+    result = "\"" + "".join(out) + "\""
+    assert result.isascii()
+    assert "\n" not in result
+    assert "\r" not in result
+    return result
+
+
+def render_source_identity(
+    value: "str | RepoPath | RawSourcePath | PurePath") -> str:
+    """Render any source identity as an ASCII-safe single-line diagnostic."""
+    flavor: PathFlavor | None = None
+    tagged = False
+    if isinstance(value, RepoPath):
+        spelling = value.spelling
+    elif isinstance(value, RawSourcePath):
+        spelling = value.spelling
+        flavor = value.flavor
+        tagged = True
+    elif isinstance(value, PurePath):
+        spelling = str(value)
+        flavor = native_path_flavor(value)
+        tagged = True
+    elif isinstance(value, str):
+        spelling = value
+    else:
+        spelling = str(value)
+    rendered = escape_ascii_identity(spelling)
+    if tagged:
+        tag = flavor.value if flavor is not None else "unknown-flavor"
+        rendered = f"{rendered} [{tag}]"
+    return rendered
+
+
 OWNER = RepoPath("wyrelog/wyl-handle.c")
 ENGINE_OWNER = RepoPath("wyrelog/wyl-engine.c")
 OWNED_ENGINE_ALLOWLIST = {
@@ -330,39 +389,41 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
         invalid_reason = invalid_repo_path_reason(path)
         if invalid_reason is not None:
             errors.append(
-                f"invalid source key ({invalid_reason}): {path!r}")
+                f"invalid source key ({invalid_reason}): "
+                f"{render_source_identity(path)}")
             continue
         assert isinstance(path, RepoPath)
         source = mask_comments_and_literals(without_test_seams(raw))
         if legacy.search(source):
             errors.append(
                 "legacy handle engine operation in production: "
-                f"{path.spelling!r}")
+                f"{render_source_identity(path)}")
         if path != OWNER and fields.search(source):
             errors.append(
                 "handle-owned engine aggregate accessed outside owner: "
-                f"{path.spelling!r}")
+                f"{render_source_identity(path)}")
         if path not in OWNED_ENGINE_ALLOWLIST and owned.search(source):
             errors.append(
                 "owned engine primitive outside allowlist: "
-                f"{path.spelling!r}")
+                f"{render_source_identity(path)}")
         if path != ENGINE_OWNER and direct_substrate.search(source):
             errors.append(
                 "direct Wirelog input mutation outside engine owner: "
-                f"{path.spelling!r}")
+                f"{render_source_identity(path)}")
         if path != OWNER and raw_lock.search(source):
             errors.append(
-                f"untyped engine lock outside owner: {path.spelling!r}")
+                "untyped engine lock outside owner: "
+                f"{render_source_identity(path)}")
         if (path not in TYPED_EXTERNAL_TRANSACTION_CONSUMERS
                 and typed_external_begin.search(source)):
             errors.append(
                 "typed external transaction begin outside allowlist: "
-                f"{path.spelling!r}")
+                f"{render_source_identity(path)}")
         if (path not in RAW_EXTERNAL_TRANSACTION_CONSUMERS
                 and raw_external_begin.search(source)):
             errors.append(
                 "raw external transaction begin outside owner/store: "
-                f"{path.spelling!r}")
+                f"{render_source_identity(path)}")
         if path == OWNER:
             for name, body in top_level_functions(source):
                 if (owner_fields.search(body) or owned.search(body)
@@ -391,26 +452,28 @@ def collect_sources(root: Path) -> tuple[dict[RepoPath, str], list[str]]:
         if discovery_error is not None:
             errors.append(
                 "invalid discovered source path "
-                f"({discovery_error}): {str(path)!r}")
+                f"({discovery_error}): {render_source_identity(path)}")
             continue
         assert raw_path is not None
         repo_path, canonical_error = canonical_repo_path(raw_path)
         if canonical_error is not None:
             errors.append(
-                f"invalid source path ({canonical_error}): {raw_path!r}")
+                f"invalid source path ({canonical_error}): "
+                f"{render_source_identity(raw_path)}")
             continue
         assert repo_path is not None
         if repo_path == OWNER:
             owner_occurrences += 1
         if repo_path in sources:
             errors.append(
-                f"duplicate canonical source path: {repo_path.spelling!r}")
+                "duplicate canonical source path: "
+                f"{render_source_identity(repo_path)}")
             continue
         sources[repo_path] = path.read_text(encoding="utf-8")
     if owner_occurrences != 1:
         errors.append(
             "owner source must occur exactly once: "
-            f"{OWNER.spelling!r} (found {owner_occurrences})")
+            f"{render_source_identity(OWNER)} (found {owner_occurrences})")
     return sources, errors
 
 
@@ -436,7 +499,7 @@ def self_test() -> int:
             "void bad(void *s) { wirelog_easy_insert(s, \"r\", 0, 0); }"
             )}) != [
             "direct Wirelog input mutation outside engine owner: "
-            "'wyrelog/auth/direct-bypass.c'"]:
+            "\"wyrelog/auth/direct-bypass.c\""]:
         print("self-test accepted direct Wirelog input mutation",
               file=sys.stderr)
         return 1
@@ -467,7 +530,7 @@ def self_test() -> int:
             f"{TYPED_EXTERNAL_TRANSACTION_BEGIN}(s, 0, 0, 0, 0); }}"
             )}) != [
             "typed external transaction begin outside allowlist: "
-            "'wyrelog/auth/typed-bypass.c'"]:
+            "\"wyrelog/auth/typed-bypass.c\""]:
         print("self-test accepted typed external begin bypass",
               file=sys.stderr)
         return 1
@@ -478,7 +541,7 @@ def self_test() -> int:
             f"{RAW_EXTERNAL_TRANSACTION_BEGIN}(0, 0, 0, 0); }}"
             )}) != [
             "raw external transaction begin outside owner/store: "
-            "'wyrelog/auth/raw-bypass.c'"]:
+            "\"wyrelog/auth/raw-bypass.c\""]:
         print("self-test accepted raw external begin bypass", file=sys.stderr)
         return 1
 
@@ -534,7 +597,7 @@ def self_test() -> int:
         ),
     })
     if windows_errors != [
-            "owned engine primitive outside allowlist: 'wyrelog/bad.c'"]:
+            "owned engine primitive outside allowlist: \"wyrelog/bad.c\""]:
         print("self-test emitted noncanonical Windows diagnostic",
               file=sys.stderr)
         return 1
@@ -556,7 +619,7 @@ def self_test() -> int:
         ),
     })
     if posix_spoof_errors != [
-            r"owned engine primitive outside allowlist: 'wyrelog/fact\\compound.c'"]:
+            r'owned engine primitive outside allowlist: "wyrelog/fact\\compound.c"']:
         print("self-test aliased POSIX literal-backslash fact path",
               file=sys.stderr)
         return 1
@@ -571,7 +634,7 @@ def self_test() -> int:
             "static void wyl_handle_init(WylHandle *h) { "
             "h->read_engine = 0; }"
             )}) != [
-            r"handle-owned engine aggregate accessed outside owner: 'wyrelog\\wyl-handle.c'"]:
+            r'handle-owned engine aggregate accessed outside owner: "wyrelog\\wyl-handle.c"']:
         print("self-test aliased POSIX literal-backslash owner path",
               file=sys.stderr)
         return 1
@@ -615,14 +678,15 @@ def self_test() -> int:
 
     untyped_errors = check({OWNER.spelling: ""})
     if untyped_errors != [
-            f"invalid source key (expected RepoPath key): {OWNER.spelling!r}"]:
+            "invalid source key (expected RepoPath key): "
+            f"{render_source_identity(OWNER.spelling)}"]:
         print("self-test accepted untyped source-map identity", file=sys.stderr)
         return 1
 
     forged_errors = check({RepoPath("/wyrelog/wyl-handle.c"): ""})
     if forged_errors != [
             "invalid source key (absolute or anchored path): "
-            "RepoPath(spelling='/wyrelog/wyl-handle.c')"]:
+            "\"/wyrelog/wyl-handle.c\""]:
         print("self-test accepted forged RepoPath identity", file=sys.stderr)
         return 1
 
@@ -632,7 +696,7 @@ def self_test() -> int:
     )})
     if case_errors != [
             "handle-owned engine aggregate accessed outside owner: "
-            "'Wyrelog/wyl-handle.c'"]:
+            "\"Wyrelog/wyl-handle.c\""]:
         print("self-test folded source path case", file=sys.stderr)
         return 1
 
@@ -698,6 +762,163 @@ def self_test() -> int:
     literal = 'const char *s = "wyl_handle_get_read_engine(h)"; /* h->read_engine */'
     if check({OWNER: "", RepoPath("wyrelog/literal.c"): literal}):
         print("self-test rejected comments/literals", file=sys.stderr)
+        return 1
+
+    # (A) Direct renderer unit checks: these cover the collect_sources()
+    # discovery/canonical diagnostic sites that check()-driven tests never
+    # reach, plus flavor disambiguation of same-byte spellings.
+    if render_source_identity("wyrelog/plain.c") != "\"wyrelog/plain.c\"":
+        print("self-test mis-rendered a plain identity", file=sys.stderr)
+        return 1
+    same_bytes = "wyrelog/fact\\compound.c"
+    posix_render = render_source_identity(
+        RawSourcePath(same_bytes, PathFlavor.POSIX))
+    windows_render = render_source_identity(
+        RawSourcePath(same_bytes, PathFlavor.WINDOWS))
+    if not posix_render.endswith(" [posix]"):
+        print("self-test dropped the posix flavor tag", file=sys.stderr)
+        return 1
+    if not windows_render.endswith(" [windows]"):
+        print("self-test dropped the windows flavor tag", file=sys.stderr)
+        return 1
+    posix_body = posix_render[:-len(" [posix]")]
+    windows_body = windows_render[:-len(" [windows]")]
+    if posix_body != windows_body or "\\\\" not in posix_body:
+        print("self-test failed same-byte flavor disambiguation",
+              file=sys.stderr)
+        return 1
+    pure_render = render_source_identity(PurePosixPath("wyrelog/x.c"))
+    if (not pure_render.endswith(" [posix]") or not pure_render.isascii()
+            or "\n" in pure_render or "\r" in pure_render):
+        print("self-test failed PurePath identity rendering", file=sys.stderr)
+        return 1
+
+    def decode_identity(entry: str) -> str:
+        body = entry
+        for tag in (" [posix]", " [windows]", " [unknown-flavor]"):
+            if body.endswith(tag):
+                body = body[:-len(tag)]
+                break
+        quoted = body[body.index("\""):]
+        if not (quoted.startswith("\"") and quoted.endswith("\"")):
+            raise ValueError("identity is not double-quoted")
+        inner = quoted[1:-1]
+        out = []
+        index = 0
+        while index < len(inner):
+            char = inner[index]
+            if char != "\\":
+                out.append(char)
+                index += 1
+                continue
+            marker = inner[index + 1]
+            if marker == "\\":
+                out.append("\\")
+                index += 2
+            elif marker == "\"":
+                out.append("\"")
+                index += 2
+            elif marker == "n":
+                out.append("\n")
+                index += 2
+            elif marker == "r":
+                out.append("\r")
+                index += 2
+            elif marker == "t":
+                out.append("\t")
+                index += 2
+            elif marker == "x":
+                out.append(chr(int(inner[index + 2:index + 4], 16)))
+                index += 4
+            elif marker == "u":
+                out.append(chr(int(inner[index + 2:index + 6], 16)))
+                index += 6
+            elif marker == "U":
+                out.append(chr(int(inner[index + 2:index + 10], 16)))
+                index += 10
+            else:
+                raise ValueError("unknown escape marker")
+        return "".join(out)
+
+    # (B) Hostile spellings through check().  Each forged key is a canonical
+    # posix spelling that is not the owner, so the aggregate-access body below
+    # yields exactly one diagnostic routed through render_source_identity.
+    aggregate_body = "static void f(WylHandle *h){ h->read_engine = 0; }"
+    hostile_spellings = (
+        "wyrelog/a\nb.c",
+        "wyrelog/a\rb.c",
+        "wyrelog/a\tb.c",
+        "wyrelog/a\x1bb.c",
+        "wyrelog/a\\b.c",
+        "wyrelog/a'b.c",
+        "wyrelog/a\"b.c",
+        "wyrelog/a‮b.c",
+        "wyrelog/а.c",
+    )
+    for spelling in hostile_spellings:
+        hostile_errors = check({RepoPath(spelling): aggregate_body})
+        if (len(hostile_errors) != 1 or "\n" in hostile_errors[0]
+                or "\r" in hostile_errors[0]):
+            print("self-test emitted an unsafe hostile diagnostic",
+                  file=sys.stderr)
+            return 1
+        if not hostile_errors[0].isascii():
+            print("self-test emitted a non-ASCII hostile diagnostic",
+                  file=sys.stderr)
+            return 1
+        if decode_identity(hostile_errors[0]) != spelling:
+            print("self-test lost the hostile spelling round-trip",
+                  file=sys.stderr)
+            return 1
+
+    # Distinct look-alike spellings must not merge under dedup.
+    newline_errors = check({RepoPath("wyrelog/a\nb.c"): aggregate_body})
+    literal_bsn_errors = check({RepoPath("wyrelog/a\\nb.c"): aggregate_body})
+    if newline_errors[0] == literal_bsn_errors[0]:
+        print("self-test merged newline and literal backslash-n spellings",
+              file=sys.stderr)
+        return 1
+
+    # A newline in a spelling must not fabricate an extra bullet: main() joins
+    # entries with newline-plus-indent, so an unescaped newline would forge one.
+    fabricated_errors = check(
+        {RepoPath("wyrelog/x.c\n  fabricated violation: y"): aggregate_body})
+    if len(fabricated_errors) != 1 or "\\n" not in fabricated_errors[0]:
+        print("self-test allowed a fabricated violation bullet",
+              file=sys.stderr)
+        return 1
+
+    # A hostile sibling must not suppress a genuine violation on a benign key.
+    benign_violation = (
+        "handle-owned engine aggregate accessed outside owner: "
+        "\"wyrelog/benign.c\"")
+    suppression_errors = check({
+        RepoPath("wyrelog/a\nb.c"): aggregate_body,
+        RepoPath("wyrelog/benign.c"): aggregate_body,
+    })
+    if (benign_violation not in suppression_errors
+            or len(suppression_errors) != 2
+            or len(set(suppression_errors)) != 2):
+        print("self-test let a hostile sibling suppress a violation",
+              file=sys.stderr)
+        return 1
+
+    # A bare str key and a forged RepoPath must stay distinguishable.
+    str_key_errors = check({OWNER.spelling: ""})
+    anchored_errors = check({RepoPath("/wyrelog/wyl-handle.c"): ""})
+    if str_key_errors != [
+            "invalid source key (expected RepoPath key): "
+            "\"wyrelog/wyl-handle.c\""]:
+        print("self-test mis-rendered a bare str key", file=sys.stderr)
+        return 1
+    if anchored_errors != [
+            "invalid source key (absolute or anchored path): "
+            "\"/wyrelog/wyl-handle.c\""]:
+        print("self-test mis-rendered a forged RepoPath key", file=sys.stderr)
+        return 1
+    if str_key_errors[0] == anchored_errors[0]:
+        print("self-test collapsed str-key and forged-RepoPath diagnostics",
+              file=sys.stderr)
         return 1
     return 0
 
