@@ -14,7 +14,11 @@ struct _WylSession
   gint64 created_at_us;
   gchar *username;
   gchar *tenant;
-  wyl_session_state_t state;
+  /* The session lifecycle word.  It is a plain atomic gint (not the bare
+   * enum) so that logout's store and every management liveness load share a
+   * single sequentially consistent modification order; the sanctioned
+   * accessors below are the ONLY code permitted to touch it. */
+  volatile gint state;
   /* Monotonic live-session proof provenance.  This is deliberately private:
    * neither public session ABI nor JWT claims may synthesize it. */
   volatile gint mfa_assured;
@@ -26,3 +30,21 @@ struct _WylSession
   gint64 service_issued_at_seconds;
   gint64 service_expires_at_seconds;
 };
+
+/* Sole sanctioned accessors for the atomic lifecycle word.  Every reader
+ * (liveness checks, the session FSM, the coordinator authorize gates) and
+ * every writer (login, logout/transition, detached construction, the test
+ * seams) must route through these so the load/store participate in one
+ * coherent modification order.  g_atomic_int_get/set are sequentially
+ * consistent; the load is the linearization point for management mutation. */
+static inline wyl_session_state_t
+wyl_session_state_load_private (const WylSession *session)
+{
+  return (wyl_session_state_t) g_atomic_int_get ((gint *) & session->state);
+}
+
+static inline void
+wyl_session_state_store_private (WylSession *session, wyl_session_state_t state)
+{
+  g_atomic_int_set ((gint *) & session->state, (gint) state);
+}

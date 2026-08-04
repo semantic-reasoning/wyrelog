@@ -2367,7 +2367,7 @@ wyl_daemon_http_seed_human_session_with_state_for_test (SoupServer *server,
   session->id = id;
   session->username = g_strdup (subject);
   session->tenant = g_strdup (tenant);
-  session->state = state;
+  wyl_session_state_store_private (session, state);
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
   return wyl_daemon_http_replace_session_for_test (server, session_id, session);
 }
@@ -2553,7 +2553,7 @@ wyl_daemon_http_mutate_service_session_for_test (SoupServer *server,
   }
   switch (field) {
     case WYL_DAEMON_SERVICE_SESSION_INACTIVE:
-      session->state = WYL_SESSION_STATE_CLOSED;
+      wyl_session_state_store_private (session, WYL_SESSION_STATE_CLOSED);
       break;
     case WYL_DAEMON_SERVICE_SESSION_AUTH_METHOD:
       session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
@@ -6691,17 +6691,11 @@ management_session_matches_live (WylSession *session,
     const gchar *session_id, const gchar *actor,
     const gchar *expected_session_tenant, gboolean require_mfa)
 {
-  if (session == NULL || !WYL_IS_SESSION (session)
-      || !wyl_session_is_active_human_private (session)
-      || (require_mfa && !wyl_session_is_mfa_assured_private (session)))
-    return FALSE;
-  g_autofree gchar *live_session_id = wyl_session_dup_id_string (session);
-  g_autofree gchar *live_actor = wyl_session_dup_username (session);
-  g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
-  return live_session_id != NULL && live_actor != NULL && live_tenant != NULL
-      && g_strcmp0 (live_session_id, session_id) == 0
-      && g_strcmp0 (live_actor, actor) == 0
-      && g_strcmp0 (live_tenant, expected_session_tenant) == 0;
+  /* Thin wrapper over the single coherent liveness primitive.  The decisive
+   * ACTIVE-human decision is one atomic load of the session-state word, so a
+   * logout that wins the race is observed fail-closed here. */
+  return wyl_session_liveness_check_private (session, session_id, actor,
+      expected_session_tenant, require_mfa);
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -6761,10 +6755,7 @@ management_reauthorize_inside_write (gpointer data,
 {
   WylManagementReauthorization *authorization = data;
   if (authorization == NULL || authorization->handle == NULL
-      || g_strcmp0 (actor_subject_id, authorization->actor) != 0
-      || !management_session_matches_live (authorization->session,
-          authorization->session_id, authorization->actor,
-          authorization->expected_session_tenant, authorization->require_mfa))
+      || g_strcmp0 (actor_subject_id, authorization->actor) != 0)
     return WYRELOG_E_AUTH;
 #ifdef WYL_TEST_DAEMON_HTTP
   if (authorization->ctx != NULL
@@ -6774,7 +6765,8 @@ management_reauthorize_inside_write (gpointer data,
     gpointer checkpoint_data =
         authorization->ctx->management_reauthorization_checkpoint_data;
     /* One-shot synchronous checkpoint: mutate authority state after the
-     * front-door ALLOW but immediately before the WRITE-lease decision. */
+     * front-door ALLOW but immediately before the decisive liveness load and
+     * the WRITE-lease decision. */
     authorization->ctx->management_reauthorization_checkpoint = NULL;
     authorization->ctx->management_reauthorization_checkpoint_data = NULL;
     wyrelog_error_t checkpoint_rc = checkpoint (authorization->handle,
@@ -6785,6 +6777,15 @@ management_reauthorize_inside_write (gpointer data,
       return checkpoint_rc;
   }
 #endif
+  /* Decisive liveness linearization point.  The atomic session-state load
+   * happens here, after any test checkpoint and before any durable authority
+   * work, so a logout that flips state to CLOSED first is observed and this
+   * fails closed with zero durable work.  In production the checkpoint above
+   * compiles out, leaving this identically ordered before the write. */
+  if (!management_session_matches_live (authorization->session,
+          authorization->session_id, authorization->actor,
+          authorization->expected_session_tenant, authorization->require_mfa))
+    return WYRELOG_E_AUTH;
   wyrelog_error_t rc = management_target_is_active
       (wyl_handle_get_policy_store (authorization->handle),
       authorization->target_tenant);

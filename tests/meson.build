@@ -444,6 +444,14 @@ if build_client
     ],
   )
 
+  test('session-state-atomic-accessor-structure', python3,
+    args : [
+      meson.current_source_dir()
+        / 'test-session-state-atomic-accessor-structure.py',
+      meson.project_source_root(),
+    ],
+  )
+
   check_daemon_http_route_registrations = find_program(
     '../tools/check-daemon-http-route-registrations.py',
   )
@@ -1756,6 +1764,16 @@ test_service_auth_coordination = executable('test-service-auth-coordination',
 test('service-auth-coordination', test_service_auth_coordination,
   is_parallel : host_machine.system() != 'windows',
   timeout : 30,
+)
+
+test_session_liveness_race = executable('test-session-liveness-race',
+  'test-session-liveness-race.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wirelog_dep, service_session_private_dep],
+)
+
+test('session-liveness-race', test_session_liveness_race,
+  timeout : 60,
 )
 
 test_service_exchange_intention_store = executable(

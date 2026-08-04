@@ -17068,12 +17068,14 @@ typedef enum
   MANAGEMENT_CHECKPOINT_NOOP,
   MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT,
   MANAGEMENT_CHECKPOINT_TARGET_SEALED,
+  MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT,
 } ManagementCheckpointMutation;
 
 typedef struct
 {
   ManagementCheckpointMutation mutation;
   guint calls;
+  SoupServer *server;           /* required for SESSION_LOGGED_OUT */
 } ManagementCheckpointProbe;
 
 static wyrelog_error_t
@@ -17088,6 +17090,16 @@ management_checkpoint_mutate_authority (WylHandle *handle,
   probe->calls++;
   if (probe->mutation == MANAGEMENT_CHECKPOINT_NOOP)
     return WYRELOG_E_OK;
+  if (probe->mutation == MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT) {
+    /* Drive a full logout of the acting session to completion between the
+     * front-door ALLOW and the decisive liveness load, flipping the atomic
+     * lifecycle word to CLOSED so the relocated gate must fail closed. */
+    if (probe->server == NULL
+        || !wyl_daemon_http_mutate_service_session_for_test (probe->server,
+            session_id, WYL_DAEMON_SERVICE_SESSION_INACTIVE, NULL, 0))
+      return WYRELOG_E_INVALID;
+    return WYRELOG_E_OK;
+  }
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (probe->mutation == MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT) {
     wyrelog_error_t rc = wyl_policy_store_set_permission_state (store, actor,
@@ -17432,6 +17444,112 @@ out:
   wyl_service_principal_clear (&principal);
   service_denial_env_clear (&tenant_env);
   service_denial_env_clear (&permission_env);
+  return rc;
+}
+
+/* Issue #758 deterministic barrier.  The one-shot reauthorization checkpoint
+ * fires between the front-door ALLOW and the relocated decisive liveness load.
+ * (a) logout-wins: the checkpoint drives a full logout of the acting session
+ * (atomic flip to CLOSED); the management request must fail closed with ZERO
+ * durable work, and a plain follow-up stays denied against the now-CLOSED word.
+ * (b) mutation-wins: the checkpoint is a no-op; the mutation commits exactly
+ * once.  (Post-commit re-authorization is a separate arming concern; #758's
+ * word-level consistency after logout is proven by (a) here and by the
+ * multithreaded session-liveness-race postcondition.) */
+static gint
+check_service_management_logout_liveness_barrier (void)
+{
+  ServiceDenialEnv logout_env = { 0 };
+  ServiceDenialEnv commit_env = { 0 };
+  g_autofree gchar *body = NULL;
+  guint principal_before = 0;
+  guint principal_after = 0;
+  guint status = 0;
+  wyl_policy_store_t *store = NULL;
+  ManagementCheckpointProbe logout_probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT,
+  };
+  ManagementCheckpointProbe commit_probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_NOOP,
+  };
+  gint rc = service_denial_env_init (&logout_env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+
+  /* (a) logout-wins. */
+  logout_probe.server = logout_env.http.server;
+  store = wyl_handle_get_policy_store (logout_env.handle);
+  if (wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+    rc = 2560;
+    goto out;
+  }
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+      (logout_env.http.server, management_checkpoint_mutate_authority,
+      &logout_probe);
+  if (send_raw_service_principal_bearer (logout_env.session, "POST",
+          logout_env.base_url, "/service-principals", logout_env.query,
+          logout_env.access_token,
+          "{\"subject_id\":\"svc:barrier:loser\","
+          "\"display_name\":\"LogoutWins\"}", &status, &body) != 0
+      || status != 403 || body == NULL || logout_probe.calls != 1
+      || wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      || principal_after != principal_before) {
+    rc = 2561;
+    goto out;
+  }
+
+  /* The seam is one-shot; a follow-up request now sees a genuinely CLOSED
+   * session and stays denied without any checkpoint at all. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (logout_env.session, "POST",
+          logout_env.base_url, "/service-principals", logout_env.query,
+          logout_env.access_token,
+          "{\"subject_id\":\"svc:barrier:loser2\","
+          "\"display_name\":\"StillOut\"}", &status, &body) != 0
+      || status == 200
+      || wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      || principal_after != principal_before) {
+    rc = 2562;
+    goto out;
+  }
+
+  /* (b) mutation-wins on a fresh env: the checkpoint no-ops, so the mutation
+   * commits exactly once. */
+  rc = service_denial_env_init (&commit_env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+  commit_probe.server = commit_env.http.server;
+  store = wyl_handle_get_policy_store (commit_env.handle);
+  if (wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+    rc = 2563;
+    goto out;
+  }
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+      (commit_env.http.server, management_checkpoint_mutate_authority,
+      &commit_probe);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_bearer (commit_env.session, "POST",
+          commit_env.base_url, "/service-principals", commit_env.query,
+          commit_env.access_token,
+          "{\"subject_id\":\"svc:barrier:winner\","
+          "\"display_name\":\"MutationWins\"}", &status, &body) != 0
+      || status != 200 || body == NULL || commit_probe.calls != 1
+      || strstr (body, "\"service_principal\":") == NULL
+      || strstr (body, "\"subject_id\":\"svc:barrier:winner\"") == NULL
+      || wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      || principal_after != principal_before + 1) {
+    rc = 2564;
+    goto out;
+  }
+  rc = 0;
+out:
+  service_denial_env_clear (&commit_env);
+  service_denial_env_clear (&logout_env);
   return rc;
 }
 
@@ -18819,6 +18937,12 @@ main (void)
       check_service_management_write_reauthorization_matrix ();
   if (write_reauthorization_rc != 0) {
     result = write_reauthorization_rc;
+    goto cleanup;
+  }
+  gint logout_liveness_barrier_rc =
+      check_service_management_logout_liveness_barrier ();
+  if (logout_liveness_barrier_rc != 0) {
+    result = logout_liveness_barrier_rc;
     goto cleanup;
   }
   gint route_alias_effect_rc = check_service_route_alias_no_effects ();

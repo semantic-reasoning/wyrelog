@@ -46,6 +46,17 @@ G_GNUC_INTERNAL gboolean wyl_session_is_active_human_private (const
  * Skip-MFA login, service sessions, and token refresh never set this bit. */
 G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
     WylSession * session);
+/* Single coherent management liveness primitive.  Returns TRUE only when
+ * |session| is an ACTIVE human session (decided by one atomic state load),
+ * optionally MFA-assured, whose immutable identity (session id, actor,
+ * tenant) matches the caller's expectation exactly.  This is the decisive
+ * linearization gate: a logout that flips state to CLOSED before this load
+ * makes it fail closed with zero durable work.  Fail-closed on any NULL or
+ * mismatch. */
+G_GNUC_INTERNAL gboolean wyl_session_liveness_check_private (const
+    WylSession * session, const gchar * expect_session_id,
+    const gchar * expect_actor, const gchar * expect_tenant,
+    gboolean require_mfa);
 G_GNUC_INTERNAL wyrelog_error_t wyl_session_copy_persistent_id_private (const
     WylSession * session, wyl_id_t * out_id);
 G_GNUC_INTERNAL gchar *wyl_session_dup_service_jti_private (const

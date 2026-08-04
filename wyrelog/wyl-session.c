@@ -38,7 +38,7 @@ wyl_session_class_init (WylSessionClass *klass)
 static void
 wyl_session_init (WylSession *self)
 {
-  self->state = WYL_SESSION_STATE_IDLE;
+  wyl_session_state_store_private (self, WYL_SESSION_STATE_IDLE);
   self->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
 }
 
@@ -620,7 +620,7 @@ transition_session_state (WylHandle *handle, WylSession *session,
   wyrelog_error_t rc = publish_session_mutation (&publication);
   if (rc != WYRELOG_E_OK)
     return rc;
-  session->state = new_state;
+  wyl_session_state_store_private (session, new_state);
   return WYRELOG_E_OK;
 }
 
@@ -700,8 +700,8 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
           wyl_login_req_get_request_id (req));
     g_autoptr (WylAuditEvent) session_ev =
         new_session_state_audit (session_id,
-        wyl_session_state_name (session->state), "active",
-        wyl_login_req_get_request_id (req));
+        wyl_session_state_name (wyl_session_state_load_private (session)),
+        "active", wyl_login_req_get_request_id (req));
 #else
     WylAuditEvent *principal_ev = NULL;
     WylAuditEvent *session_ev = NULL;
@@ -715,7 +715,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       g_object_unref (session);
       return rc;
     }
-    session->state = WYL_SESSION_STATE_ACTIVE;
+    wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
@@ -726,8 +726,8 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   }
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = new_session_state_audit (session_id,
-      wyl_session_state_name (session->state), "active",
-      req != NULL ? wyl_login_req_get_request_id (req) : NULL);
+      wyl_session_state_name (wyl_session_state_load_private (session)),
+      "active", req != NULL ? wyl_login_req_get_request_id (req) : NULL);
 #else
   WylAuditEvent *ev = NULL;
 #endif
@@ -740,7 +740,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     g_object_unref (session);
     return rc;
   }
-  session->state = WYL_SESSION_STATE_ACTIVE;
+  wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
 
   rc = wyl_handle_register_session (handle, session, &session->sid);
   if (rc != WYRELOG_E_OK) {
@@ -808,13 +808,14 @@ wyl_session_close_with_request_id (WylHandle *handle, WylSession *session,
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
+  wyl_session_state_t current = wyl_session_state_load_private (session);
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
   wyrelog_error_t rc =
-      wyl_fsm_session_step (session->state, WYL_SESSION_EVENT_LOGOUT, &state);
+      wyl_fsm_session_step (current, WYL_SESSION_EVENT_LOGOUT, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_CLOSED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, session->state,
+  return transition_session_state (handle, session, current,
       WYL_SESSION_EVENT_LOGOUT, state, request_id);
 }
 
@@ -832,13 +833,14 @@ wyl_session_elevate (WylHandle *handle, WylSession *session)
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
+  wyl_session_state_t current = wyl_session_state_load_private (session);
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (session->state,
+  wyrelog_error_t rc = wyl_fsm_session_step (current,
       WYL_SESSION_EVENT_ELEVATE_GRANT, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_ELEVATED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, session->state,
+  return transition_session_state (handle, session, current,
       WYL_SESSION_EVENT_ELEVATE_GRANT, state, NULL);
 }
 
@@ -850,13 +852,14 @@ wyl_session_drop_elevation (WylHandle *handle, WylSession *session)
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
+  wyl_session_state_t current = wyl_session_state_load_private (session);
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (session->state,
+  wyrelog_error_t rc = wyl_fsm_session_step (current,
       WYL_SESSION_EVENT_ELEVATE_DROP, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_ACTIVE)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, session->state,
+  return transition_session_state (handle, session, current,
       WYL_SESSION_EVENT_ELEVATE_DROP, state, NULL);
 }
 
@@ -868,13 +871,14 @@ wyl_session_idle_timeout (WylHandle *handle, WylSession *session)
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
+  wyl_session_state_t current = wyl_session_state_load_private (session);
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (session->state,
+  wyrelog_error_t rc = wyl_fsm_session_step (current,
       WYL_SESSION_EVENT_IDLE_TIMEOUT, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_IDLE)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, session->state,
+  return transition_session_state (handle, session, current,
       WYL_SESSION_EVENT_IDLE_TIMEOUT, state, NULL);
 }
 
@@ -886,13 +890,14 @@ wyl_session_expire (WylHandle *handle, WylSession *session)
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
+  wyl_session_state_t current = wyl_session_state_load_private (session);
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
   wyrelog_error_t rc =
-      wyl_fsm_session_step (session->state, WYL_SESSION_EVENT_EXPIRY, &state);
+      wyl_fsm_session_step (current, WYL_SESSION_EVENT_EXPIRY, &state);
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  return transition_session_state (handle, session, session->state,
+  return transition_session_state (handle, session, current,
       WYL_SESSION_EVENT_EXPIRY, state, NULL);
 }
 
@@ -939,7 +944,7 @@ wyl_session_logout_with_request_id (WylHandle *handle, wyl_session_id_t sid,
       break;
   }
 
-  if (live->state == WYL_SESSION_STATE_CLOSED) {
+  if (wyl_session_state_load_private (live) == WYL_SESSION_STATE_CLOSED) {
     (void) wyl_handle_tombstone_session (handle, sid);
     return WYRELOG_E_OK;
   }
