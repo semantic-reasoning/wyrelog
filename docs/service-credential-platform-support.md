@@ -92,14 +92,16 @@ disk and a restart-surviving, recoverable and revocable orphan credential.
 This test additionally requires the **`enable_fault_injection`** build option.
 When the option is off, the seam, its daemon flag, and this test do not compile
 at all, so a release daemon contains no fault-injection code and can never be
-armed. Honest CI status: the packaged service-credential e2e suite (this test and
-the other lifecycle units) is currently a **documented local/manual gate** — the
-CI `--suite wyrelog` job does not yet build with `enable_client` /
-`enable_fact_store` / `enable_fault_injection`, so none of the packaged SC e2e
-tests register in CI today. Wiring those options into a Linux CI job (so the
-matrix's runtime claim is actually exercised in CI) is a tracked follow-up; the
-matrix checker deliberately does NOT assert CI enables the option, so it stays
-honest. The per-boundary C-unit evidence still stands and DOES run in CI:
+armed. CI enforcement: a dedicated **`service-credential-e2e`** job in both
+`.github/workflows/ci-main.yml` and `.github/workflows/ci-pr.yml` builds a Linux
+runner with `-Denable_client=enabled -Denable_fact_store=enabled
+-Denable_audit=enabled -Denable_fault_injection=enabled` and runs the packaged
+suite (the five SC e2e drivers plus this matrix checker). It runs that specific
+subset rather than the whole `--suite wyrelog` so it is independent of unrelated
+pre-existing fact-store-config failures. So the matrix's Linux runtime claim is
+actually exercised on a runner — not a skip-as-pass — and the matrix checker
+asserts the job exists and runs the suite, so removing or defanging it fails the
+gate. The per-boundary C-unit evidence also runs in CI:
 
 - `tests/test-service-credential-operation-coordinator-execute.c`
   (registered as the `service-credential-operation-coordinator-execute` test)
