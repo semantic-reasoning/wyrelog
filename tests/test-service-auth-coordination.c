@@ -296,6 +296,11 @@ assert_terminal_fault_consumes (gboolean corrupt_serial)
   g_assert_cmpuint (snapshot.active_readers, ==, 0);
   g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
   g_assert_false (snapshot.writer_active);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
   g_assert_cmpint (wyl_service_auth_rank_enter (handle,
           WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_rank_leave (handle,
@@ -335,6 +340,168 @@ test_read_terminal_release_wrong_thread (void)
   g_assert_cmpint (wyl_service_auth_read_lease_release (lease), ==,
       WYRELOG_E_OK);
   wyl_service_auth_read_lease_free (lease);
+}
+
+/* A cleanup fault after the reader has already left the owner set (rank pop or
+   a checked-unpin store mismatch) must still consume the lease, release the
+   store pin, wake the queued writer to BUSY and latch the branch unavailable. */
+static void
+assert_read_terminal_cleanup_fault_consumes (gboolean rank_fault)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthReadLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  if (rank_fault)
+    wyl_service_auth_read_lease_test_fail_terminal_rank_after_pop (lease);
+  else
+    (void) wyl_service_auth_read_lease_test_swap_pinned_store (lease,
+        (wyl_policy_store_t *) handle);
+
+  LeaseThread writer = { 0 };
+  lease_thread_init (&writer, authority, handle);
+  GThread *writer_handle = g_thread_new ("read-terminal-cleanup-writer",
+      writer_thread, &writer);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&lease), ==,
+      rank_fault ? WYRELOG_E_INTERNAL : WYRELOG_E_INVALID);
+  g_assert_null (lease);
+  g_thread_join (writer_handle);
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_BUSY);
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_false (snapshot.writer_active);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+  g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
+  guint total_pins = G_MAXUINT;
+  guint thread_pins = G_MAXUINT;
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
+      &thread_pins);
+  g_assert_cmpuint (total_pins, ==, 0);
+  g_assert_cmpuint (thread_pins, ==, 0);
+  g_assert_cmpint (wyl_service_auth_rank_enter (handle,
+          WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_rank_leave (handle,
+          WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  lease_thread_clear (&writer);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+}
+
+static void
+test_read_terminal_cleanup_faults (void)
+{
+  assert_read_terminal_cleanup_fault_consumes (TRUE);
+  assert_read_terminal_cleanup_fault_consumes (FALSE);
+}
+
+/* The read lease owns its own destruction: freeing an unreleased lease drains
+   cleanly, and a terminal release that already consumed the lease leaves the
+   _free fallback a no-op (no double release, no double free). */
+static void
+test_read_terminal_release_fallback_destruction (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+
+  WylServiceAuthReadLease *unreleased = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &unreleased), ==, WYRELOG_E_OK);
+  wyl_service_auth_read_lease_free (unreleased);
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+  guint total_pins = G_MAXUINT;
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins, NULL);
+  g_assert_cmpuint (total_pins, ==, 0);
+
+  WylServiceAuthReadLease *consumed = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &consumed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&consumed), ==,
+      WYRELOG_E_OK);
+  g_assert_null (consumed);
+  /* The migrated owners drop the separate _free; prove it is a safe no-op on
+     the already-consumed (NULL) lease. */
+  wyl_service_auth_read_lease_free (consumed);
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins, NULL);
+  g_assert_cmpuint (total_pins, ==, 0);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+}
+
+typedef struct
+{
+  WylServiceAuthAuthority *authority;
+  WylHandle *handle;
+  wyrelog_error_t validate_rc;
+  WylServiceAuthUnavailableReason reason;
+} ReadTerminalBarrier;
+
+/* Fires on the releasing thread at terminal entry, before the in-lock cleanup
+   sets the latch: a queued owner is still permitted here (validate == OK). */
+static void
+read_terminal_barrier_checkpoint (gpointer data)
+{
+  ReadTerminalBarrier *barrier = data;
+  barrier->reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  barrier->validate_rc = wyl_service_auth_authority_validate_available
+      (barrier->authority, barrier->handle, &barrier->reason);
+}
+
+/* Cleanup barrier: with a queued writer parked throughout, a faulting terminal
+   release must latch the branch unavailable inside the same critical section
+   that wakes the writer. The writer therefore observes BUSY, never OK -- no
+   owner slips between cleanup uncertainty and the fail-closed latch. */
+static void
+test_read_terminal_cleanup_barrier (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthReadLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  wyl_service_auth_read_lease_test_fail_terminal_rank_after_pop (lease);
+  ReadTerminalBarrier barrier = {
+    authority, handle, WYRELOG_E_INTERNAL,
+    WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT,
+  };
+  wyl_service_auth_read_lease_test_set_terminal_checkpoint (lease,
+      read_terminal_barrier_checkpoint, &barrier);
+
+  LeaseThread writer = { 0 };
+  lease_thread_init (&writer, authority, handle);
+  GThread *writer_handle = g_thread_new ("read-terminal-barrier-writer",
+      writer_thread, &writer);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&lease), ==,
+      WYRELOG_E_INTERNAL);
+  g_assert_null (lease);
+  g_thread_join (writer_handle);
+  /* Before the latch, while the writer was already queued, the branch was
+     still available. */
+  g_assert_cmpint (barrier.validate_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (barrier.reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+  /* The queued writer only ever observed the fail-closed latch. */
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_BUSY);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  lease_thread_clear (&writer);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
 }
 
 static void
@@ -3525,6 +3692,12 @@ main (int argc, char **argv)
       test_read_terminal_release_faults);
   g_test_add_func ("/service-auth/lease/terminal-release-wrong-thread",
       test_read_terminal_release_wrong_thread);
+  g_test_add_func ("/service-auth/lease/terminal-cleanup-faults",
+      test_read_terminal_cleanup_faults);
+  g_test_add_func ("/service-auth/lease/terminal-fallback-destruction",
+      test_read_terminal_release_fallback_destruction);
+  g_test_add_func ("/service-auth/lease/terminal-cleanup-barrier",
+      test_read_terminal_cleanup_barrier);
   g_test_add_func ("/service-auth/lease/write-terminal-release",
       test_write_terminal_release_contract);
   g_test_add_func ("/service-auth/lease/write-terminal-release-faults",

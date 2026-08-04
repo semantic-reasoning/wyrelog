@@ -6999,22 +6999,43 @@ service_principal_management_authorize_session (SoupServer *server,
   if (decision_rc == WYRELOG_E_OK)
     decision_rc = management_target_is_active (store, target_tenant);
   if (decision_rc == WYRELOG_E_INVALID) {
-    if (lease != NULL)
-      (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
   if (decision_rc == WYRELOG_E_NOT_FOUND) {
-    if (lease != NULL)
-      (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, 404,
         principal_management ? WYL_DAEMON_ERR_SERVICE_PRINCIPAL_NOT_FOUND :
         WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
     return FALSE;
   }
   if (decision_rc != WYRELOG_E_OK) {
-    if (lease != NULL)
-      (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, decision_rc == WYRELOG_E_BUSY ? 503 : 500,
         failed_code);
     return FALSE;
@@ -7024,7 +7045,15 @@ service_principal_management_authorize_session (SoupServer *server,
       auth.session_id);
   if (!management_session_matches_live (session, auth.session_id, auth.actor,
           WYL_TENANT_DEFAULT, TRUE)) {
-    (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, 403, denied_code);
     return FALSE;
   }
@@ -7042,17 +7071,41 @@ service_principal_management_authorize_session (SoupServer *server,
       auth.service_authenticated);
   decision_rc = wyl_decide (ctx->handle, req, resp);
   if (decision_rc == WYRELOG_E_INVALID) {
-    (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
   if (decision_rc != WYRELOG_E_OK) {
-    (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, 500, failed_code);
     return FALSE;
   }
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
-    (void) wyl_service_auth_read_lease_release_terminal (&lease);
+    if (lease != NULL) {
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK) {
+        set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
+            failed_code);
+        return FALSE;
+      }
+    }
     set_json_error (msg, 403, denied_code);
     return FALSE;
   }

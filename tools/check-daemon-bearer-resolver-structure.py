@@ -162,6 +162,52 @@ def check(path: Path) -> list[str]:
                 "management authorization must acquire/get/check its pinned "
                 "READ store before any terminal release"
             )
+    # #759: the reviewed READ owners that acquire a service READ lease must
+    # migrate every error path to the checked terminal release and never
+    # discard its result, free an active lease, or read the pinned store after
+    # finishing. acquire_read is already restricted (above) to exactly these
+    # owners, so scoping the cleanup rules to them covers every acquire owner.
+    acquire_owner_bodies: list[tuple[str, str]] = []
+    if authorize_span is not None:
+        acquire_owner_bodies.append(
+            (
+                "service_principal_management_authorize_session",
+                source[authorize_span[0]:authorize_span[1]],
+            )
+        )
+    acquire_owner_bodies.append(("resolve_bearer_session", source[start:end]))
+    for owner_name, owner_body in acquire_owner_bodies:
+        if re.search(
+            r"\(\s*void\s*\)\s*wyl_service_auth_read_lease_release_terminal",
+            owner_body,
+        ):
+            errors.append(
+                f"{owner_name} must not discard the terminal READ release result"
+            )
+        if re.search(r"\bwyl_service_auth_read_lease_free\s*\(", owner_body):
+            errors.append(
+                f"{owner_name} must not free an acquired READ lease directly"
+            )
+        terminal_calls = list(
+            re.finditer(
+                r"\bwyl_service_auth_read_lease_release_terminal\s*\(", owner_body
+            )
+        )
+        if not terminal_calls and "out_read_lease" not in owner_body:
+            errors.append(
+                f"{owner_name} acquires a READ lease without a terminal release "
+                "or out_read_lease hand-off"
+            )
+        if terminal_calls:
+            last_release = terminal_calls[-1].start()
+            if re.search(
+                r"\bwyl_service_auth_read_lease_get_policy_store\s*\(",
+                owner_body[last_release:],
+            ):
+                errors.append(
+                    f"{owner_name} must not read its pinned store after the "
+                    "terminal release"
+                )
     for callee, expected_owners in management_edges.items():
         pattern = r"\b" + re.escape(callee) + r"\s*\("
         calls = len(re.findall(pattern, source))

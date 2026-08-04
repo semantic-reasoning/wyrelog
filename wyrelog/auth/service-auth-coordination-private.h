@@ -162,6 +162,9 @@ void wyl_service_auth_read_lease_test_corrupt_serial
     (WylServiceAuthReadLease * lease);
 void wyl_service_auth_read_lease_test_fail_terminal_prevalidation
     (WylServiceAuthReadLease * lease);
+/* Test-only: leave the rank correctly, then report a one-shot cleanup fault. */
+void wyl_service_auth_read_lease_test_fail_terminal_rank_after_pop
+    (WylServiceAuthReadLease * lease);
 void wyl_service_auth_read_lease_test_set_terminal_checkpoint
     (WylServiceAuthReadLease * lease, void (*checkpoint) (gpointer data),
     gpointer data);
