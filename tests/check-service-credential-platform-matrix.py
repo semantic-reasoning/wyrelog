@@ -288,6 +288,27 @@ def check_ci_workflow(path: Path, ci_text: str) -> None:
              "(`meson test ... --suite wyrelog`); a runtime platform with no "
              "packaged runner BLOCKS the gate")
 
+    # Dedicated packaged-SC-e2e job (#766): the SC e2e drivers are gated on
+    # build_client/enable_fact_store/enable_audit (+ enable_fault_injection),
+    # which the general --suite wyrelog job above does not set, so those tests
+    # never register there. A dedicated job MUST build with exactly those
+    # options and run the packaged suite, or the matrix's Linux runtime claim
+    # would be documented-but-unenforced (a skip-as-pass). Removing or defanging
+    # the job fails this gate.
+    if "service-credential-e2e" not in ci_text:
+        fail(f"{label}: no dedicated 'service-credential-e2e' job; the packaged "
+             "SC e2e suite must run in CI to enforce the Linux runtime claim")
+    for opt in ("enable_client", "enable_fact_store", FAULT_INJECTION_GATE):
+        # Require the actual build flag, not a bare substring (which could match
+        # a comment), so dropping the option from the meson setup fails the gate.
+        if f"-D{opt}=enabled" not in ci_text:
+            fail(f"{label}: the service-credential-e2e job must build with "
+                 f"-D{opt}=enabled so the packaged SC e2e suite registers")
+    for test_name in SC_E2E_TESTS + (FAULT_INJECTION_TEST,):
+        if test_name not in ci_text:
+            fail(f"{label}: the service-credential-e2e job must run "
+                 f"'{test_name}'; the packaged runtime gate must be exercised")
+
     # Build-only platform: macOS runner + its native gate present.
     if "macos-latest" not in ci_text:
         fail(f"{label}: no macOS (macos-latest) runner job for the build-only "
