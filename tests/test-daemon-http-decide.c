@@ -12208,6 +12208,9 @@ check_service_tenant_create_rejected (void)
   TestHttpServer http = { 0 };
   GThread *thread = NULL;
   gint result = 2280;
+  g_auto (ActualServiceTokens) tokens = { 0 };
+  g_autoptr (SoupSession) session = NULL;
+  g_autofree gchar *body = NULL;
 
   if (!service_credential_store_fixture_init (&credential_store))
     return result;
@@ -12257,16 +12260,14 @@ check_service_tenant_create_rejected (void)
   if (base_url == NULL)
     goto cleanup;
 
-  g_auto (ActualServiceTokens) tokens = { 0 };
   if (!actual_service_tokens_init (http.server,
           "svc:tenant-create-negative", WYL_TENANT_DEFAULT,
           credential_request_id, &tokens)) {
     result = 2282;
     goto cleanup;
   }
-  g_autoptr (SoupSession) session = soup_session_new ();
+  session = soup_session_new ();
   guint status = 0;
-  g_autofree gchar *body = NULL;
   if (send_raw_policy_mutation_bearer (session, "POST", base_url,
           "/tenants/create", "name=tenant-service-denied"
           "&tenant=__wr_default&guard_timestamp=123"
