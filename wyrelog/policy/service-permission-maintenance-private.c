@@ -981,10 +981,10 @@ wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
   if (maintenance_claimed)
     (void) wyl_service_auth_write_lease_unclaim_maintenance (lease, handle);
   if (lease != NULL) {
-    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release_terminal (&lease);
     if (rc == WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_write_lease_free (lease);
   }
   sodium_memzero (pre_digest, sizeof pre_digest);
   g_object_unref (handle);
@@ -1123,10 +1123,10 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   if (maintenance_claimed)
     (void) wyl_service_auth_write_lease_unclaim_maintenance (lease, handle);
   if (lease != NULL) {
-    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release_terminal (&lease);
     if (rc == WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_write_lease_free (lease);
   }
   sodium_memzero (pre_digest, sizeof pre_digest);
   sodium_memzero (post_digest, sizeof post_digest);

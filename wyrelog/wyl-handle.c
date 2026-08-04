@@ -4038,10 +4038,10 @@ wyl_handle_reload_engine_pair (WylHandle *self)
 
   wyrelog_error_t rc =
       wyl_handle_reload_engine_pair_with_service_auth_write (self, lease);
-  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  wyrelog_error_t release_rc =
+      wyl_service_auth_write_lease_release_terminal (&lease);
   if (rc == WYRELOG_E_OK)
     rc = release_rc;
-  wyl_service_auth_write_lease_free (lease);
   return rc;
 }
 

@@ -346,10 +346,10 @@ out:
   wyl_policy_service_handoff_retirement_result_clear (&replay);
   wyl_policy_service_handoff_retirement_result_clear (&receipt);
   if (lease != NULL) {
-    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release_terminal (&lease);
     if (rc == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_write_lease_free (lease);
   }
   if (locked)
     wyl_service_credential_operation_coordinator_lock_release (storage,
@@ -432,10 +432,10 @@ wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
 out:
   wyl_policy_service_handoff_retirement_result_clear (&receipt);
   if (lease != NULL) {
-    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release_terminal (&lease);
     if (rc == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
       rc = release_rc;
-    wyl_service_auth_write_lease_free (lease);
   }
   if (locked)
     wyl_service_credential_operation_coordinator_lock_release (storage,

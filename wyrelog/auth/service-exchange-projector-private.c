@@ -337,10 +337,9 @@ wyl_service_exchange_recover_committed (WylHandle *handle,
   g_clear_pointer (&txn, wyl_policy_store_service_authority_transaction_free);
   if (write_lease != NULL) {
     wyrelog_error_t release_rc =
-        wyl_service_auth_write_lease_release (write_lease);
+        wyl_service_auth_write_lease_release_terminal (&write_lease);
     if (rc == WYRELOG_E_OK)
       rc = release_rc;
-    g_clear_pointer (&write_lease, wyl_service_auth_write_lease_free);
   }
   if (rc == WYRELOG_E_OK)
     recovery_run_gap_checkpoint ();

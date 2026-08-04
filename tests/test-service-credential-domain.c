@@ -1297,6 +1297,129 @@ test_mutation_authorization_denial_inside_write_lease (void)
   g_free (probe.actor_subject_id);
 }
 
+typedef struct
+{
+  WylServiceAuthAuthority *authority;
+  WylHandle *handle;
+  wyrelog_error_t rc;
+} MutationFinishContender;
+
+/* A raw WRITE waiter that queues behind the mutation's lease.  It wakes only
+ * after the owner's terminal cleanup finishes; the coordination-invariant
+ * latch it left behind must turn the acquisition into WYRELOG_E_BUSY. */
+static gpointer
+mutation_finish_contender_thread (gpointer data)
+{
+  MutationFinishContender *contender = data;
+  WylServiceAuthWriteLease *lease = NULL;
+  contender->rc = wyl_service_auth_authority_acquire_write
+      (contender->authority, contender->handle, NULL, &lease);
+  if (contender->rc == WYRELOG_E_OK)
+    (void) wyl_service_auth_write_lease_release_terminal (&lease);
+  return NULL;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  MutationFinishContender contender;
+  GThread *thread;
+  gboolean queued;
+  gboolean armed;
+} MutationFinishFault;
+
+static void
+mutation_finish_queue_contender (gpointer data)
+{
+  MutationFinishFault *state = data;
+  state->contender.authority =
+      wyl_handle_get_service_auth_authority (state->handle);
+  state->contender.handle = state->handle;
+  state->contender.rc = WYRELOG_E_INTERNAL;
+  state->thread = g_thread_new ("mutation-finish-contender",
+      mutation_finish_contender_thread, &state->contender);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  for (;;) {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_service_auth_authority_snapshot
+        (wyl_handle_get_service_auth_authority (state->handle), &snapshot);
+    if (snapshot.waiting_writers == 1)
+      break;
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_thread_yield ();
+  }
+  state->queued = TRUE;
+}
+
+static void
+mutation_finish_arm_terminal_fault (WylServiceAuthWriteLease *lease,
+    gpointer data)
+{
+  MutationFinishFault *state = data;
+  state->armed = TRUE;
+  wyl_service_auth_write_lease_test_fail_terminal_rank_after_pop (lease);
+}
+
+/* Archetype owner coverage: drive service_mutation_finish to a clean commit
+ * whose sole failure is the terminal WRITE cleanup.  The terminal must still
+ * consume the lease, return accounting to zero, latch the coordination
+ * invariant so it is observable, and let the queued writer wake onto BUSY.
+ * The cleanup fault surfaces in rc because the primary operation succeeded. */
+static void
+test_service_mutation_finish_terminal_cleanup_fault (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:mutation-finish:worker");
+
+  AuthorizationProbe probe = {
+    .handle = handle,
+    .rc = WYRELOG_E_OK,
+  };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,
+    .data = &probe,
+  };
+  MutationFinishFault state = {.handle = handle };
+  wyl_service_principal_disable_runtime_t disable_runtime = {
+    .after_write_acquired = mutation_finish_queue_contender,
+    .before_write_release = mutation_finish_arm_terminal_fault,
+    .authorization = &authorization,
+    .data = &state,
+  };
+  wyl_service_principal_t disabled = { 0 };
+  g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
+          "svc:mutation-finish:worker", "admin", "000000000000000000000000760",
+          &disable_runtime, &disabled), ==, WYRELOG_E_INTERNAL);
+  g_assert_true (state.queued);
+  g_assert_true (state.armed);
+  g_assert_cmpuint (probe.calls, ==, 1);
+
+  /* The queued writer woke onto the latched authority and saw BUSY. */
+  g_thread_join (g_steal_pointer (&state.thread));
+  g_assert_cmpint (state.contender.rc, ==, WYRELOG_E_BUSY);
+
+  /* Accounting returns to zero even though the terminal cleanup faulted. */
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (handle), &snapshot);
+  g_assert_false (snapshot.writer_active);
+  g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+
+  /* The fault latched the coordination invariant, observable to any waiter. */
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+      WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+
+  wyl_service_principal_clear (&disabled);
+  g_free (probe.actor_subject_id);
+}
+
 static void
 test_handoff_issue_authorization_replay_and_no_plaintext (void)
 {
@@ -7319,6 +7442,8 @@ main (int argc, char **argv)
       test_id_collision_retry_and_wipe);
   g_test_add_func ("/auth/service-credential/mutation-authorization-denial",
       test_mutation_authorization_denial_inside_write_lease);
+  g_test_add_func ("/auth/service-credential/mutation-finish-terminal-fault",
+      test_service_mutation_finish_terminal_cleanup_fault);
   g_test_add_func ("/auth/service-credential/handoff-issue-replay-no-secret",
       test_handoff_issue_authorization_replay_and_no_plaintext);
   g_test_add_func ("/auth/service-credential/handoff-rotate-stale-replay",

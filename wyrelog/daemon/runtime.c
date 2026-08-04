@@ -583,10 +583,10 @@ run_bootstrap_publication (WylHandle *handle, WylBootstrapPublication *ctx)
             ctx,
             NULL, NULL, NULL);
   g_clear_pointer (&session, wyl_engine_session_release);
-  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  wyrelog_error_t release_rc =
+      wyl_service_auth_write_lease_release_terminal (&lease);
   if (rc == WYRELOG_E_OK)
     rc = release_rc;
-  wyl_service_auth_write_lease_free (lease);
   return rc;
 }
 
