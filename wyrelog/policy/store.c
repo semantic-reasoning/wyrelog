@@ -25960,7 +25960,8 @@ wyl_policy_store_get_principal_lock_info (wyl_policy_store_t *store,
 wyrelog_error_t
 wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
     const gchar *subject_id, gint64 threshold, gint64 now_secs,
-    gchar **out_state, gint64 *out_count, gint64 *out_locked_at)
+    gchar **out_state, gint64 *out_count, gint64 *out_locked_at,
+    gint64 *out_event_id)
 {
   if (store == NULL || store->db == NULL || subject_id == NULL
       || out_state == NULL || out_count == NULL || out_locked_at == NULL
@@ -26086,13 +26087,16 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
    * row for the lock transition so the audit ledger captures it.  The
    * insert is inside the same savepoint, so the event is durable iff
    * the state change is durable (no torn-state on crash). */
+  gint64 lock_event_id = -1;
   if (next_count >= threshold) {
     /* Event-name literal "lock" matches wyl_principal_event_name's
      * table entry for WYL_PRINCIPAL_EVENT_LOCK.  Inlined here so the
      * storage layer does not depend on the FSM private header for
-     * what is fundamentally a string column write. */
+     * what is fundamentally a string column write.  The rowid is
+     * captured so the auth layer can publish the exact immutable
+     * principal_fired event row to the live engine pair (#746). */
     rc = wyl_policy_store_append_principal_event (store, subject_id,
-        "lock", from_state, "locked", NULL);
+        "lock", from_state, "locked", &lock_event_id);
     if (rc != WYRELOG_E_OK)
       goto rollback;
   }
@@ -26104,6 +26108,11 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
   *out_state = g_strdup (next_state);
   *out_count = next_count;
   *out_locked_at = next_locked_at;
+  /* Only the threshold-crossing branch appends a lock event; leave
+   * *out_event_id untouched otherwise (the caller must not read it
+   * unless *out_state is "locked"). */
+  if (out_event_id != NULL && next_count >= threshold)
+    *out_event_id = lock_event_id;
   return WYRELOG_E_OK;
 
 rollback:
@@ -26152,10 +26161,12 @@ wyl_policy_store_reset_principal_failure_counter (wyl_policy_store_t *store,
  * mid-update cannot leave the row half-unlocked. */
 wyrelog_error_t
 wyl_policy_store_apply_principal_unlock (wyl_policy_store_t *store,
-    const gchar *subject_id)
+    const gchar *subject_id, gboolean *out_unlocked, gint64 *out_event_id)
 {
   if (store == NULL || store->db == NULL || subject_id == NULL)
     return WYRELOG_E_INVALID;
+  if (out_unlocked != NULL)
+    *out_unlocked = FALSE;
   if (wyl_policy_subject_has_service_prefix (subject_id))
     return WYRELOG_E_POLICY;
 
@@ -26170,12 +26181,17 @@ wyl_policy_store_apply_principal_unlock (wyl_policy_store_t *store,
     return rc;
 
   sqlite3_stmt *upd = NULL;
+  /* The state='locked' guard (#746) makes this a genuine LOCKED ->
+   * UNVERIFIED transition: a row that is not locked (e.g. a concurrent
+   * verify already unlocked it, or auto-unlock raced with a re-login)
+   * matches zero rows, so no fabricated unlock event is emitted. */
   rc = prepare_stmt (store->db,
       "UPDATE principal_states SET "
       "  state = 'unverified', "
       "  failed_attempt_count = 0, "
       "  locked_at = NULL, "
-      "  updated_at = unixepoch() " "WHERE subject_id = ?;", &upd);
+      "  updated_at = unixepoch() "
+      "WHERE subject_id = ? AND state = 'locked';", &upd);
   if (rc != WYRELOG_E_OK)
     goto rollback;
   if ((rc = bind_text (upd, 1, subject_id)) != WYRELOG_E_OK) {
@@ -26188,17 +26204,33 @@ wyl_policy_store_apply_principal_unlock (wyl_policy_store_t *store,
     goto rollback;
   }
   sqlite3_finalize (upd);
+  /* sqlite3_changes reflects the row count of the UPDATE just stepped;
+   * capture it before append_principal_event runs its own INSERT. */
+  gboolean unlocked = sqlite3_changes (store->db) > 0;
 
-  /* Event-name literal "unlock" matches wyl_principal_event_name's
-   * table entry for WYL_PRINCIPAL_EVENT_UNLOCK.  Inlined here so the
-   * storage layer does not pull in the FSM private header solely for
-   * a string column write. */
-  rc = wyl_policy_store_append_principal_event (store, subject_id,
-      "unlock", "locked", "unverified", NULL);
+  gint64 unlock_event_id = -1;
+  if (unlocked) {
+    /* Event-name literal "unlock" matches wyl_principal_event_name's
+     * table entry for WYL_PRINCIPAL_EVENT_UNLOCK.  Inlined here so the
+     * storage layer does not pull in the FSM private header solely for
+     * a string column write.  Only append when a row actually
+     * transitioned so the append-only ledger never records a phantom
+     * unlock. */
+    rc = wyl_policy_store_append_principal_event (store, subject_id,
+        "unlock", "locked", "unverified", &unlock_event_id);
+    if (rc != WYRELOG_E_OK)
+      goto rollback;
+  }
+
+  rc = wyl_policy_store_commit_mutation (store);
   if (rc != WYRELOG_E_OK)
     goto rollback;
 
-  return wyl_policy_store_commit_mutation (store);
+  if (out_unlocked != NULL)
+    *out_unlocked = unlocked;
+  if (out_event_id != NULL && unlocked)
+    *out_event_id = unlock_event_id;
+  return WYRELOG_E_OK;
 
 rollback:
   wyl_policy_store_rollback_mutation (store);

@@ -497,7 +497,7 @@ check_validator_locked_principal_rejects_without_hmac (void)
     gint64 c = 0, l = 0;
     if (wyl_policy_store_apply_principal_failure (store,
             "validator.locked-now", 5, (gint64) time (NULL),
-            &st, &c, &l) != WYRELOG_E_OK)
+            &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 234;
   }
 
@@ -562,7 +562,7 @@ check_validator_auto_unlocks_after_window (void)
     g_autofree gchar *st = NULL;
     gint64 c = 0, l = 0;
     if (wyl_policy_store_apply_principal_failure (store,
-            "validator.auto-unlock", 5, ago, &st, &c, &l) != WYRELOG_E_OK)
+            "validator.auto-unlock", 5, ago, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 254;
   }
   /* Confirm precondition: row is locked. */

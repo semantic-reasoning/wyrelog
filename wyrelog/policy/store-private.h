@@ -2331,20 +2331,33 @@ wyrelog_error_t wyl_policy_store_get_principal_lock_info
  * frees), counter in *out_count, and locked_at in *out_locked_at
  * (INT64_MIN when the row is not locked). The atomicity guarantee
  * defeats the read-modify-write race on parallel verify attempts
- * (commit-5 footgun). */
+ * (commit-5 footgun).
+ *
+ * When the counter crosses |threshold| and the `lock` event row is
+ * appended, its rowid is surfaced through *out_event_id (guarded for
+ * NULL). On non-crossing attempts *out_event_id is left untouched, so
+ * callers must only read it when *out_state is "locked". The rowid lets
+ * the auth layer publish the exact immutable principal_fired event row
+ * to the live engine pair (#746). */
 wyrelog_error_t wyl_policy_store_apply_principal_failure
     (wyl_policy_store_t * store, const gchar * subject_id,
     gint64 threshold, gint64 now_secs, gchar ** out_state,
-    gint64 * out_count, gint64 * out_locked_at);
+    gint64 * out_count, gint64 * out_locked_at, gint64 * out_event_id);
 /* Reset the failed_attempt_count to 0 and clear locked_at.  Called on a
  * successful TOTP verify and on auto-unlock. */
 wyrelog_error_t wyl_policy_store_reset_principal_failure_counter
     (wyl_policy_store_t * store, const gchar * subject_id);
 /* Atomic LOCKED -> UNVERIFIED transition: clears locked_at and the
  * counter, sets state='unverified', and appends an `unlock`
- * principal_event row in one savepoint. */
+ * principal_event row in one savepoint.  The UPDATE is guarded by
+ * state='locked' so only a genuinely-locked row transitions; whether a
+ * row actually moved is surfaced through *out_unlocked (guarded for
+ * NULL), and the `unlock` event rowid through *out_event_id (set only
+ * when a real transition occurred).  When no locked row matched, no
+ * unlock event is appended and *out_unlocked is FALSE. */
 wyrelog_error_t wyl_policy_store_apply_principal_unlock
-    (wyl_policy_store_t * store, const gchar * subject_id);
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    gboolean * out_unlocked, gint64 * out_event_id);
 wyrelog_error_t wyl_policy_store_append_principal_event (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * event,
     const gchar * from_state, const gchar * to_state, gint64 * out_event_id);

@@ -1506,6 +1506,24 @@ test_daemon_mfa_validator = executable('test-daemon-mfa-validator',
 
 test('daemon-mfa-validator', test_daemon_mfa_validator)
 
+# #746: seam-enabled coverage for the MFA lockout / auto-unlock publication
+# path. Links the full-source test-seams archive so the test can observe the
+# rebuilt engine projection, inspect pair readiness/poison, and inject a
+# deterministic post-commit rebuild fault. The always-on daemon-mfa-validator
+# target above stays free of WYL_TEST_HANDLE_SEAMS.
+test_daemon_mfa_validator_seams = executable('test-daemon-mfa-validator-seams',
+  'test-daemon-mfa-validator-seams.c',
+  c_args : [
+    '-DWYL_TEST_HANDLE_SEAMS',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, sqlite_dep,
+    sodium_dep],
+)
+
+test('daemon-mfa-validator-seams', test_daemon_mfa_validator_seams)
+
 test_daemon_options = executable('test-daemon-options',
   'test-daemon-options.c',
   '../wyrelog/daemon/options.c',
