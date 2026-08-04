@@ -677,6 +677,265 @@ published to that file.
 | 5 | Other remote failure (HTTP 500 or 503). |
 | 6 | Authentication required; missing or invalid token (HTTP 401). |
 
+### The identity and authorization model
+
+Service credentials introduce a second, deliberately weaker class of principal
+alongside the human admins that own the deployment. Keep the pieces distinct:
+
+- **Principal.** A service principal is a subject in a reserved, validated
+  namespace: its subject id always begins with `svc:` (for example
+  `svc:svc-app`). Human and service subjects cannot collide. Service principals
+  are created and disabled only by a human admin (see below); they never
+  bootstrap, enroll TOTP, or use the human login/refresh/skip-MFA paths.
+- **Credential.** A credential is a `wlc_<KSUID>` object bound to exactly one
+  principal and, through its own row, to exactly one tenant. The credential row
+  is the sole tenant authority during exchange; the exchange request itself
+  carries no tenant and has no default-tenant fallback. Only a versioned salted
+  verifier plus lifecycle metadata persist in the encrypted policy store — never
+  the 32-byte secret.
+- **Session and token.** Exchanging a credential (next section) creates an
+  ordinary live session and a short-TTL access token (a JWT) carrying the exact
+  service auth method, credential id/generation, subject, tenant, session id,
+  and `jti`. There is no workload refresh token in v1.
+- **Role.** A freshly issued credential holds no role. Its token authenticates
+  but is unauthorized for every protected operation until a human grants it a
+  workload-safe, tenant-scoped role. Roles carrying any direct, inherited, or
+  multi-hop **control-plane** authority are rejected atomically for service
+  subjects — a service principal can never be granted system, policy, tenant,
+  audit, security, key-management, or credential-management authority. The
+  data-plane allowlist is fixed and small (`wr.stream.read`, `wr.stream.list`,
+  `wr.svc.read_decision`); every other permission is control-plane by default
+  (`templates/access/bootstrap.dl`, `wyrelog/policy/store.c` —
+  `approved_data_plane_permissions[]`).
+- **Live authorization is `/decide`.** The authoritative, real-time answer to
+  "may this token do this now?" is the daemon's `/decide` endpoint, evaluated
+  against the current policy. It is not cached in the token; a role change flips
+  the same unexpired token immediately.
+
+Management authority is asymmetric by design:
+
+- **Human SYSTEM management authority.** Creating principals, issuing/rotating/
+  revoking credentials, and recovering operations is available only to a live,
+  MFA-assured human bearer authenticated in the management resolver tenant
+  `__wr_default` under the SYSTEM profile, holding `wr.service_principal.manage`
+  / `wr.service_credential.manage`. Those two permissions are not granted by any
+  role; the admin arms them for its own session with the self-arm call
+  documented under "Arming the service-management authority" above (the
+  `POST /service-management-authority/arm` route, #729), which requires the
+  `wr.system_admin` role's `wr.service.self_authorize` eligibility, a real
+  loopback transport, and a live human MFA-assured session. Service tokens can
+  never arm this authority.
+- **Data-plane-only `svc:` identity.** A service token is confined to the
+  data-plane allowlist. It cannot reach any control-plane action even
+  transitively — the decision engine only mirrors an approved data-plane
+  permission into a `svc:` principal's live authorization and never writes or
+  reads control-plane permission state for a `svc:` subject
+  (`wyrelog/wyl-decide.c`).
+
+### Exchanging a credential for a token
+
+A workload turns its escrow credential document into a bearer token with a
+single loopback call:
+
+```
+wyctl auth service-token \
+  --credential-file <escrow-doc-path> \
+  --token-output <token-output-path>
+```
+
+`wyctl auth service-token` (`wyrelog/wyctl/wyctl.c`, `run_auth_service_token`)
+reads the credential document, decodes the credential id and its one-time
+secret, and exchanges them at the daemon's `/auth/service-token` endpoint over
+the loopback listener only. The minted short-TTL JWT is written to the
+`--token-output` path; it is **never** printed to stdout, and the 32-byte
+secret is never placed on argv, stdout, or a query parameter. The daemon
+accepts the exchange only when the exact session/jti/credential-generation/
+principal/tenant registry entry is `ACTIVE`; a `PENDING`, `REVOKED`, absent, or
+mismatched entry fails closed. The bearer resolver used here
+(`resolve_bearer_session()`) is the same one that resolves human bearers — there
+is no alternate service-only resolver.
+
+### Live authorization and revocation
+
+Authorization is evaluated live at `/decide`, so a zero-role token is provably
+inert until a role is granted, and revoking that role makes the same token inert
+again immediately.
+
+```
+# Fresh service token, no role yet: DENY.
+POST /decide  { subject: svc:svc-app, action: wr.stream.read, tenant: tenant-a }
+  -> decision=0 (deny)
+
+# A human admin grants a workload-safe, tenant-scoped role.
+POST /policy/roles/grant  { subject: svc:svc-app, role: <workload-safe role>,
+                            scope: tenant-a }   (human __wr_default bearer,
+                                                 guard context)
+
+# Same unexpired token, re-evaluated: ALLOW.
+POST /decide  { subject: svc:svc-app, action: wr.stream.read, tenant: tenant-a }
+  -> decision=1 (allow)
+
+# The human revokes the grant.
+POST /policy/roles/revoke  { subject: svc:svc-app, role: <workload-safe role>,
+                            scope: tenant-a }   (human __wr_default bearer,
+                                                 guard context)
+
+# Same token again: DENY. No token reissue, no cache flush.
+POST /decide  ...  -> decision=0 (deny)
+```
+
+The grant/revoke flips the result of the *same* unexpired token because `/decide`
+reads current policy rather than a claim baked into the token.
+
+**Tenant isolation.** A token minted for one tenant is bound to that tenant.
+Presenting a `tenant-a`-bound token against `tenant-b` is refused at the tenant
+gate with HTTP 403 and error `tenant_denied` (`wyrelog/daemon/http.c`); the
+credential row — not any request field — is the tenant authority.
+
+### Incident revocation and zero-survivor
+
+Three independent controls each leave zero usable and zero pending tokens. None
+of them has a refresh path that could resurrect access.
+
+Revoke a single credential:
+
+```
+wyctl service-credential revoke \
+  --credential-id <wlc_KSUID> \
+  --tenant <tenant> \
+  [--request-id <id>] \
+  --access-token-file <path>
+# receipt: credential_id=<wlc_KSUID> state=revoked revoked_by=<actor> revoked_at_us=<ts>
+```
+
+Disable the whole principal (management is global; `--tenant` is omitted or
+`__wr_default`):
+
+```
+wyctl service-principal disable \
+  --subject <svc:subject-id> \
+  --tenant __wr_default \
+  [--request-id <id>] \
+  --access-token-file <path>
+```
+
+Seal the tenant (blocks the entire tenant surface):
+
+```
+POST /tenants/seal
+  Authorization: Bearer <token>
+  { "version": "1", "request_id": "<canonical-request-id>" }
+```
+
+After any of these, a fresh exchange for an affected credential fails, an
+already-minted token stops authenticating (HTTP 401 at the bearer gate), and a
+request that carries a sealed tenant is rejected with HTTP 400 and error
+`tenant_sealed` (`wyrelog/daemon/http.c`). This zero-survivor property is proven
+end to end by `service-credential-zero-survivor-e2e` (Linux packaged runtime).
+
+### Publication failure and orphan recovery (#383)
+
+Issuing or rotating a credential is two separable steps: the daemon **commits**
+the new credential in the authoritative store, and then **publishes** the
+secret to the local escrow document. These are deliberately not a single
+distributed transaction. If the daemon crashes or the publication fails *after*
+the server commit, the server-side credential exists but no escrow document was
+written — a durable, **secret-free** orphan recorded under `--operation-root`.
+No secret is ever on disk in this state.
+
+Recover it read-only. The recover verb inspects durable operation state; it
+mints no secret and writes no escrow document:
+
+```
+wyctl service-credential recover \
+  --request-id <R> \
+  --tenant <tenant> \
+  --access-token-file <path>
+# receipt: request_id=<R> operation=issue state=server_committed
+#          destination=<name> successor_credential_id=<wlc_KSUID> ...
+```
+
+A committed-but-unpublished orphan reports `state=server_committed` and names
+the `successor_credential_id`. This durable state **survives a daemon restart**:
+re-running `recover` after a restart returns the same `state=server_committed`
+and the same `successor_credential_id`. Because the escrow secret was never
+delivered and cannot be, the correct remediation is to revoke the successor
+through the ordinary public revoke path:
+
+```
+wyctl service-credential revoke \
+  --credential-id <successor_credential_id> \
+  --tenant <tenant> \
+  --access-token-file <path>
+# receipt: ... state=revoked
+```
+
+This end-to-end flow — post-commit publication fault, `recover` reporting
+`server_committed` with a successor, restart survival, revoke to
+`state=revoked`, and an escrow root that holds zero files throughout — is
+packaged-runtime-proven on Linux by
+`service-credential-publication-fault-e2e`
+(`tests/check-service-credential-publication-fault-e2e.sh`, #754).
+
+### File custody and local-only transport
+
+The service-credential surface is loopback-only and file-mediated:
+
+- **Escrow documents (`0600`).** The one-time secret is delivered out-of-band to
+  the owner-only escrow document named by `--destination` under
+  `--credential-publication-root`, never to stdout or argv. Treat that file as a
+  sealed secret with the same handling as the KeyProvider key file.
+
+  ```
+  $ ls -l /var/lib/wyrelog/system/publication/
+  -rw------- 1 wyrelog wyrelog  ...  <destination>
+  ```
+
+- **Owner-only roots (`0700`).** `--credential-publication-root`,
+  `--operation-root`, and the fact root are each created `0700` and must be
+  mutually disjoint (and disjoint from the policy DB, audit DB, and event spool);
+  overlap fails daemon startup closed.
+
+  ```
+  $ ls -ld /var/lib/wyrelog/system/publication /var/lib/wyrelog/system/operations
+  drwx------ 2 wyrelog wyrelog  ...  /var/lib/wyrelog/system/publication
+  drwx------ 2 wyrelog wyrelog  ...  /var/lib/wyrelog/system/operations
+  ```
+
+- **Loopback only.** Management (issue/rotate/revoke/list/status/recover,
+  principal create/disable) and the `/auth/service-token` exchange are validated
+  against the actual listener and peer address and accept a canonical literal
+  loopback URL only. There is no remote, proxy, TLS/mTLS, or Unix-socket
+  transport in v1, and the `Forwarded` / `X-Forwarded-*` headers are never
+  trusted to establish the caller's address.
+
+### Audit interpretation
+
+The durable audit sink records service-credential activity without ever
+recording secret material:
+
+- **Lifecycle allow rows.** A successful issue or rotate leaves a durable
+  authorization row for the `wr.service_credential.manage` decision, tagged with
+  the acting human actor, request id, credential id, and generation. Revoke and
+  the operation-handoff disposition/remediation steps are likewise recorded.
+- **`last_used_at`.** Each credential carries a best-effort `last_used_at_us`
+  timestamp, updated on exchange, that lets you spot dormant or still-live
+  credentials during an incident.
+- **Single-owner DENIED audit.** The exclusive service-authority WRITE lease is
+  single-owner; a denied acquisition is recorded best-effort so contention is
+  visible.
+- **`service_exchange_receipt_projections` is normally empty.** This DuckDB
+  table exists only as a crash-recovery projection for the exchange path
+  (`wyrelog/audit/conn.c`). On a cleanly acknowledged exchange it is
+  deliberately left empty — an empty projection table is the expected steady
+  state, not a missing-audit finding. Note also that even this projection stores
+  only a `session_fingerprint` and `jti_fingerprint`, never the raw session id
+  or `jti`.
+- **No secret ever appears.** No plaintext credential secret, plaintext CVK,
+  JWT, `Authorization` body, session id, or `jti` is present in any audit row,
+  log, error, CLI output, or recovery journal. This is proven end to end by
+  `service-credential-leak-scan-e2e` (Linux packaged runtime).
+
 ## Datalog Product Flow
 
 Wyrelog is a Datalog storage and inference engine. The packaged access-control
@@ -1011,6 +1270,71 @@ rewrites the store with the new provider through the encrypted store atomic
 write protocol, and leaves the previous store usable if rotation fails before
 the final rename.
 
+The offline `wyctl key rotate` above is packaged-runtime-proven: the rotation
+end-to-end suite drives it against a real packaged, encrypted store and asserts
+`status=rotated`, that the credential verifier bytes are byte-identical
+afterward, and that the sealed Credential Verification Key (CVK) is re-sealed
+unchanged so every service credential keeps working across the root change. A
+plain readiness probe of a single provider spec, `wyctl key status
+--keyprovider file:PATH`, is likewise packaged-proven.
+
+### Interrupted rotation recovery (#364)
+
+KeyProvider root rotation is crash-recoverable, but recovery is **explicit, not
+automatic**. A normal single-root store open never auto-recovers an interrupted
+rotation; an operator must run the recovery verbs below with both provider roots
+available. This crash-recovery classifier and its recovery actions are
+**unit/library-proven** (the `policy-store-service-cvk` rotation-recovery cases,
+`tests/test-policy-store-service-cvk.c`), not exercised by any packaged e2e
+driver — the packaged rotation e2e drives only `key rotate`.
+
+Classify an interrupted rotation with the recovery-status mode (selected by
+`--store`):
+
+```sh
+wyctl key status \
+  --store /var/lib/wyrelog/system/policy.sqlite \
+  --from-keyprovider file:/etc/wyrelog/system/policy.key \
+  --to-keyprovider file:/etc/wyrelog/system/policy.next.key
+# state=<...>  intent-state=<...>  safe-next-action=<none|old|new|...>
+# required-roots=<old|new|both>  retire-old-root=<yes|no>  ...
+```
+
+The report tells you the recovery `state`, the `intent-state`, the
+`safe-next-action`, and which `required-roots` you must have on hand. Perform
+the recovery with either spelling of the same verb:
+
+```sh
+wyctl key recover \
+  --store /var/lib/wyrelog/system/policy.sqlite \
+  --from-keyprovider file:/etc/wyrelog/system/policy.key \
+  --to-keyprovider file:/etc/wyrelog/system/policy.next.key
+# status=recovered store=/var/lib/wyrelog/system/policy.sqlite
+```
+
+`wyctl key resume` is an alias for the same recovery. Recovery either resumes an
+OLD-root store forward to the intended NEW generation or recognizes an
+already-committed NEW result and only completes durable cleanup. If the rotation
+state is **AMBIGUOUS** — neither or both roots authenticate — recovery
+deliberately **fails closed** without changing any canonical byte and **retains
+both roots** for operator investigation (`wyctl: key recovery fail-closed:
+ambiguous or contradictory rotation state; both provider roots retained`).
+
+Three statements are authoritative for rotation incidents:
+
+1. **Server rotation is authoritative.** The canonical rename is the
+   linearization point of the rotation. There is no rollback after it: once the
+   new canonical store is in place, recovery completes forward, it does not
+   revert.
+2. **Old file bytes may be revoked.** After a *credential* rotation the
+   predecessor credential is revoked and its escrow document no longer
+   exchanges. Destroy superseded escrow documents; do not keep them as a
+   fallback.
+3. **Replacement publication is not a distributed transaction.** Server commit
+   and local escrow publication are separate steps. A post-commit publication
+   failure is recovered through the operation journal, not by rolling back the
+   server — see "Publication failure and orphan recovery (#383)".
+
 ## Emergency Break-Glass
 
 Break-glass builds must be compiled with audit enabled. Before enabling
@@ -1072,6 +1396,8 @@ bootstrap_admin_allow_skip_mfa = false
 | `audit_db` | string | `--audit-db` | Runtime audit sink database path. |
 | `fact_root` | string | `--fact-root` | Root directory for the Datalog fact store. |
 | `fact_store_mode` | string | `--fact-store-mode` | Layout mode for the fact store. Currently only `per-tenant-graph`. |
+| `operation_root` | string | `--operation-root` | Root directory for the service-credential operation journal (the durable, secret-free intent state described under "Publication failure and orphan recovery"). Opt-in: never auto-defaulted. When set it is created `0700` owner-only and must be disjoint from every other daemon path. |
+| `credential_publication_root` | string | `--credential-publication-root` | Owner-only root under which the escrow credential documents (`--destination`) are published. Opt-in: never auto-defaulted. When set it is created `0700` owner-only and must be disjoint from every other daemon path. |
 | `event_spool_dir` | string | `--event-spool-dir` | Service-profile disk spool directory. |
 | `system_url` | string | `--system-url` | System-profile daemon URL the service-profile daemon forwards events to. |
 | `listen_port` | int | `--listen-port` | HTTP listen port. `0` selects an ephemeral port (used by integration tests). |
@@ -1079,6 +1405,16 @@ bootstrap_admin_allow_skip_mfa = false
 | `production` | bool | `--production` | Enables the fail-closed production startup gates. CLI and conf are OR-combined; see "Production Mode Precedence". |
 | `bootstrap_admin_subject` | string | `--bootstrap-admin-subject` | Grants the `wr.system_admin` role to this subject on a fresh policy store. One-shot bootstrap aid. |
 | `bootstrap_admin_allow_skip_mfa` | bool | `--bootstrap-admin-allow-skip-mfa` | Grants `wr.login.skip_mfa` to the bootstrap admin so it can mint a first bearer token. |
+
+`operation_root` and `credential_publication_root` are the two roots the
+escrow service-credential handoff needs. Both are opt-in — a deployment that
+leaves them unset simply reports the escrow handoff surface as unavailable and
+keeps running. When either is set the daemon creates it `0700` (owner-only) and
+validates at startup that it is distinct from — neither equal to nor nested
+under — every other configured path (policy DB, audit DB, fact root, service
+event spool) and from each other; any overlap fails startup closed. This keeps
+a delivered secret or a durable operation journal from ever sharing a directory
+with another store.
 
 ### Precedence
 
