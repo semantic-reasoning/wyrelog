@@ -83,6 +83,114 @@ parse_six_digits (const gchar *proof)
 #define WYL_MFA_AUTO_UNLOCK_SECONDS   (15 * 60)
 
 /*
+ * #746: a durable principal transition (MFA_REQUIRED -> LOCKED on the
+ * threshold crossing, LOCKED -> UNVERIFIED on auto-unlock) must be
+ * published to the live read/delta engine pair, otherwise authorization
+ * keeps evaluating against a stale projection that never observed the
+ * lockout.  We reuse the #745 committed-publication contract exactly the
+ * way service-credential-domain.c does: the durable mutation has already
+ * committed in its own savepoint (apply_principal_failure /
+ * apply_principal_unlock), so we drive
+ * wyl_engine_session_finish_external_publication with COMMIT_COMMITTED,
+ * which rebuilds the full engine pair from the current durable snapshot,
+ * runs the verifier against the rebuilt candidate, and poisons the pair
+ * on any post-commit uncertainty.
+ */
+typedef struct
+{
+  const gchar *subject_id;
+  wyl_principal_state_t from_state;
+  wyl_principal_event_t event;
+  wyl_principal_state_t to_state;
+  gint64 event_id;
+} WylMfaPrincipalPublication;
+
+/*
+ * Prove ONLY the immutable principal_fired event row keyed by event_id.
+ * The mutable principal_state row is deliberately NOT asserted: a
+ * legitimate superseding commit may have already moved it, whereas the
+ * append-only event row is always present after a correct rebuild from
+ * the durable snapshot - which is exactly what proves the freshly-built
+ * projection is not older than current durable authority.  The row
+ * shape mirrors wyl-session.c's principal event verifier: the
+ * principal_fired/5 column order is {event_id, subject, from, event, to}.
+ */
+static wyrelog_error_t
+verify_principal_event_row (WylEngineVerification *verification, gpointer data)
+{
+  WylMfaPrincipalPublication *ctx = data;
+  const gchar *from_name = wyl_principal_state_name (ctx->from_state);
+  const gchar *event_name = wyl_principal_event_name (ctx->event);
+  const gchar *to_name = wyl_principal_state_name (ctx->to_state);
+  if (from_name == NULL || event_name == NULL || to_name == NULL)
+    return WYRELOG_E_INTERNAL;
+  if (ctx->event_id <= 0)
+    return WYRELOG_E_POLICY;
+
+  gint64 row[5] = { ctx->event_id, 0, 0, 0, 0 };
+  const gchar *symbols[] = { ctx->subject_id, from_name, event_name, to_name };
+  for (guint i = 0; i < G_N_ELEMENTS (symbols); i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+        symbols[i], &row[i + 1]);
+    /* A missing symbol means the row cannot be present: fail closed. */
+    if (rc == WYRELOG_E_NOT_FOUND)
+      return WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean exact = FALSE;
+  wyrelog_error_t rc =
+      wyl_engine_verification_has_exact_keyed_row (verification,
+      "principal_fired", ctx->event_id, row, G_N_ELEMENTS (row), &exact);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+/*
+ * Publish a principal transition to the live engine pair by proving the
+ * immutable event row.  Fails closed on every uncertainty: a poisoned
+ * pair, an unacquirable session, a generation mismatch, or a verifier
+ * rejection all propagate a non-OK result (and, past commit,
+ * finish_external_publication poisons the pair before returning).  For a
+ * genuinely unopened engine (template_dir == NULL, no engines) the
+ * acquire still succeeds and finish_external_publication returns OK
+ * without poisoning, so unopened deployments stay valid.
+ */
+static wyrelog_error_t
+publish_principal_transition (WylHandle *handle, const gchar *subject_id,
+    wyl_principal_state_t from_state, wyl_principal_event_t event,
+    wyl_principal_state_t to_state, gint64 event_id)
+{
+  if (handle == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+  /* An already-poisoned pair means the projection is untrustworthy; never
+   * report OK (finish_external_publication would return E_INVALID without
+   * re-poisoning, but we short-circuit to keep the intent explicit). */
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return WYRELOG_E_INTERNAL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_INTERNAL;
+  WylEngineSession *session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_INTERNAL;
+  guint64 generation = 0;
+  wyrelog_error_t rc = wyl_handle_policy_store_capture_generation (handle,
+      store, &generation);
+  if (rc == WYRELOG_E_OK) {
+    WylMfaPrincipalPublication ctx = {
+      subject_id, from_state, event, to_state, event_id
+    };
+    rc = wyl_engine_session_finish_external_publication (session, store,
+        generation, WYL_DURABLE_COMMIT_COMMITTED, verify_principal_event_row,
+        &ctx);
+  }
+  wyl_engine_session_release (session);
+  return rc;
+}
+
+/*
  * Drive the principal FSM through a FAILED_ATTEMPT event from the
  * MFA_REQUIRED state, and persist the failure to the policy store.
  *
@@ -135,6 +243,7 @@ note_failed_attempt (WylHandle *handle, const gchar *subject_id)
   g_autofree gchar *new_state = NULL;
   gint64 new_count = 0;
   gint64 new_locked_at = 0;
+  gint64 event_id = 0;
   /* Fail closed (architect ratification, commit-5 iteration): an IO
    * error on the counter write means we cannot durably advance the
    * lockout state, so the validator MUST refuse the verify instead of
@@ -150,7 +259,7 @@ note_failed_attempt (WylHandle *handle, const gchar *subject_id)
    * successful verify. */
   wyrelog_error_t rc = wyl_policy_store_apply_principal_failure (store,
       subject_id, WYL_MFA_LOCKOUT_THRESHOLD, (gint64) time (NULL),
-      &new_state, &new_count, &new_locked_at);
+      &new_state, &new_count, &new_locked_at, &event_id);
   if (rc != WYRELOG_E_OK) {
     /* Operator-visibility on the IO fault.  Keyed on subject_id and the
      * error code; never includes the submitted code or the seed (F2). */
@@ -159,39 +268,78 @@ note_failed_attempt (WylHandle *handle, const gchar *subject_id)
         subject_id, (int) rc);
     return WYRELOG_E_INTERNAL;
   }
+
+  /* #746: a fresh threshold crossing (MFA_REQUIRED -> LOCKED) must be
+   * published to the live engine pair so authorization observes the
+   * lockout.  Attempts 1-4 leave new_state == "mfa_required" and publish
+   * nothing.  The totp caller routes already-locked principals away and
+   * the store refuses to re-lock, so "locked" here is always a genuine
+   * first crossing whose event_id was surfaced by apply_principal_failure.
+   * Any publication failure fails closed as E_INTERNAL. */
+  if (g_strcmp0 (new_state, "locked") == 0) {
+    wyrelog_error_t pub_rc = publish_principal_transition (handle, subject_id,
+        WYL_PRINCIPAL_STATE_MFA_REQUIRED, WYL_PRINCIPAL_EVENT_LOCK,
+        WYL_PRINCIPAL_STATE_LOCKED, event_id);
+    if (pub_rc != WYRELOG_E_OK) {
+      WYL_LOG_WARN (WYL_LOG_SECTION_POLICY,
+          "mfa: failed to publish lockout transition for subject_id=%s rc=%d",
+          subject_id, (int) pub_rc);
+      return WYRELOG_E_INTERNAL;
+    }
+  }
   return WYRELOG_E_OK;
 }
 
 /*
  * Auto-unlock check.  When the principal is in LOCKED state and the
  * 15-minute window has elapsed since locked_at, transition the row to
- * UNVERIFIED via the FSM UNLOCK edge and return TRUE so the caller can
- * treat the verify as "session no longer in mfa_required" (the FSM
- * design routes auto-unlock back to UNVERIFIED, not MFA_REQUIRED -
- * see issue #331 critic flag during commit-4 iteration).
+ * UNVERIFIED via the FSM UNLOCK edge (the FSM design routes auto-unlock
+ * back to UNVERIFIED, not MFA_REQUIRED - see issue #331 critic flag
+ * during commit-4 iteration) AND publish the transition to the live
+ * engine pair (#746).
  *
- * Returns TRUE iff the auto-unlock happened.  Returns FALSE when the
- * window has not elapsed, when the principal is not locked, or on a
- * store fault (fail-closed: the row stays as-is and the caller sees
- * the same E_POLICY surface).
+ * The result enum lets the caller separate the two benign "no unlock"
+ * outcomes (window not elapsed / not actually locked / raced) - which
+ * keep the existing E_POLICY bounce - from a store fault or a
+ * publication fault, both of which MUST fail closed as E_INTERNAL so an
+ * observably-stale projection can never be authorized against.
  */
-static gboolean
+typedef enum
+{
+  WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED = 0,
+  WYL_MFA_AUTO_UNLOCK_STORE_FAILURE,
+  WYL_MFA_AUTO_UNLOCK_PUBLICATION_FAILURE,
+  WYL_MFA_AUTO_UNLOCK_UNLOCKED,
+} wyl_mfa_auto_unlock_result_t;
+
+static wyl_mfa_auto_unlock_result_t
 maybe_auto_unlock (WylHandle *handle, const gchar *subject_id,
     const gchar *current_state, gint64 locked_at, gint64 now)
 {
   if (g_strcmp0 (current_state, "locked") != 0)
-    return FALSE;
+    return WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED;
   if (locked_at == G_MININT64)
-    return FALSE;
+    return WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED;
   if (now < locked_at + WYL_MFA_AUTO_UNLOCK_SECONDS)
-    return FALSE;
+    return WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
-    return FALSE;
-  if (wyl_policy_store_apply_principal_unlock (store, subject_id)
-      != WYRELOG_E_OK)
-    return FALSE;
-  return TRUE;
+    return WYL_MFA_AUTO_UNLOCK_STORE_FAILURE;
+  gboolean unlocked = FALSE;
+  gint64 event_id = 0;
+  if (wyl_policy_store_apply_principal_unlock (store, subject_id, &unlocked,
+          &event_id) != WYRELOG_E_OK)
+    return WYL_MFA_AUTO_UNLOCK_STORE_FAILURE;
+  if (!unlocked)
+    /* No row actually transitioned (a concurrent writer already moved it
+     * out of LOCKED): nothing to publish, treat as a benign no-op so the
+     * caller keeps the ordinary E_POLICY bounce. */
+    return WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED;
+  if (publish_principal_transition (handle, subject_id,
+          WYL_PRINCIPAL_STATE_LOCKED, WYL_PRINCIPAL_EVENT_UNLOCK,
+          WYL_PRINCIPAL_STATE_UNVERIFIED, event_id) != WYRELOG_E_OK)
+    return WYL_MFA_AUTO_UNLOCK_PUBLICATION_FAILURE;
+  return WYL_MFA_AUTO_UNLOCK_UNLOCKED;
 }
 
 wyrelog_error_t
@@ -235,19 +383,27 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
   if (rc != WYRELOG_E_OK)
     return rc;
   if (pfound && g_strcmp0 (pstate, "locked") == 0) {
-    if (maybe_auto_unlock (handle, subject_id, pstate, plocked_at, now)) {
-      /* Row is now UNVERIFIED.  The verify-with-proof contract bounces
-       * because the principal is no longer in mfa_required; HTTP layer
-       * will surface mfa_auth_required (uniform) on the next call. */
-      return WYRELOG_E_POLICY;
+    switch (maybe_auto_unlock (handle, subject_id, pstate, plocked_at, now)) {
+      case WYL_MFA_AUTO_UNLOCK_UNLOCKED:
+        /* Row is now UNVERIFIED and the transition is published.  The
+         * verify-with-proof contract bounces because the principal is no
+         * longer in mfa_required; HTTP layer will surface mfa_auth_required
+         * (uniform) on the next call. */
+      case WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED:
+        /* Still inside the lockout window (or a benign race): fail closed
+         * without consulting the TOTP enrollment.  F1 timing: the HMAC
+         * branch is skipped, which is faster than wrong-code/replay paths -
+         * but the LOCKED state is already publicly visible via the HTTP 429
+         * mfa_locked response (issue #331 spec), so the timing differential
+         * discloses nothing the spec does not. */
+        return WYRELOG_E_POLICY;
+      case WYL_MFA_AUTO_UNLOCK_STORE_FAILURE:
+      case WYL_MFA_AUTO_UNLOCK_PUBLICATION_FAILURE:
+        /* #746: could not durably-and-observably complete the auto-unlock;
+         * refuse rather than authorize against a stale projection. */
+        return WYRELOG_E_INTERNAL;
     }
-    /* Still inside the lockout window: fail closed without consulting
-     * the TOTP enrollment.  F1 timing: the HMAC branch is skipped,
-     * which is faster than wrong-code/replay paths - but the LOCKED
-     * state is already publicly visible via the HTTP 429 mfa_locked
-     * response (issue #331 spec), so the timing differential discloses
-     * nothing the spec does not. */
-    return WYRELOG_E_POLICY;
+    return WYRELOG_E_INTERNAL;
   }
 
   /*

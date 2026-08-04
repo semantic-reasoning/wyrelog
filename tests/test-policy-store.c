@@ -3391,7 +3391,7 @@ check_store_apply_principal_failure_increments_counter (void)
     gint64 count = -1;
     gint64 locked_at = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.below",
-            5, 100000, &st, &count, &locked_at) != WYRELOG_E_OK)
+            5, 100000, &st, &count, &locked_at, NULL) != WYRELOG_E_OK)
       return 1523;
     if (g_strcmp0 (st, "mfa_required") != 0)
       return 1524;
@@ -3423,7 +3423,7 @@ check_store_apply_principal_failure_transitions_to_locked (void)
     gint64 count = -1;
     gint64 locked_at = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.cross",
-            5, 200000 + i, &st, &count, &locked_at) != WYRELOG_E_OK)
+            5, 200000 + i, &st, &count, &locked_at, NULL) != WYRELOG_E_OK)
       return 1533;
     if (i < 5) {
       if (g_strcmp0 (st, "mfa_required") != 0)
@@ -3500,7 +3500,7 @@ check_store_apply_principal_failure_survives_reopen (void)
       gint64 count = -1;
       gint64 locked_at = 0;
       if (wyl_policy_store_apply_principal_failure (store, "lockout.persist",
-              5, 300000 + i, &st, &count, &locked_at) != WYRELOG_E_OK) {
+              5, 300000 + i, &st, &count, &locked_at, NULL) != WYRELOG_E_OK) {
         rc_inner = 1554;
         goto cleanup;
       }
@@ -3560,7 +3560,7 @@ check_store_reset_principal_failure_counter (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.reset",
-            5, 400000 + i, &st, &c, &l) != WYRELOG_E_OK)
+            5, 400000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1563;
   }
 
@@ -3583,7 +3583,7 @@ check_store_reset_principal_failure_counter (void)
   gint64 c2 = 0;
   gint64 l2 = 0;
   if (wyl_policy_store_apply_principal_failure (store, "lockout.reset", 5,
-          500000, &st2, &c2, &l2) != WYRELOG_E_OK)
+          500000, &st2, &c2, &l2, NULL) != WYRELOG_E_OK)
     return 1567;
   if (c2 != 1 || g_strcmp0 (st2, "mfa_required") != 0)
     return 1568;
@@ -3619,7 +3619,7 @@ check_store_apply_principal_failure_sequential_race (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.race",
-            5, 700000 + i, &st, &c, &l) != WYRELOG_E_OK)
+            5, 700000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1583;
   }
 
@@ -3630,7 +3630,7 @@ check_store_apply_principal_failure_sequential_race (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.race",
-            5, 700100, &st, &c, &l) != WYRELOG_E_POLICY)
+            5, 700100, &st, &c, &l, NULL) != WYRELOG_E_POLICY)
       return 1589;
   }
 
@@ -3673,11 +3673,11 @@ check_store_apply_principal_unlock (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.unlock",
-            5, 600000 + i, &st, &c, &l) != WYRELOG_E_OK)
+            5, 600000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1573;
   }
-  if (wyl_policy_store_apply_principal_unlock (store, "lockout.unlock")
-      != WYRELOG_E_OK)
+  if (wyl_policy_store_apply_principal_unlock (store, "lockout.unlock", NULL,
+          NULL) != WYRELOG_E_OK)
     return 1574;
   g_autofree gchar *st = NULL;
   gint64 count = -1;
@@ -3718,7 +3718,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.relock",
-            5, 700000 + i, &st, &c, &l) != WYRELOG_E_OK)
+            5, 700000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1583;
   }
 
@@ -3751,7 +3751,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   gint64 l_attempt = 0;
   wyrelog_error_t relock_rc =
       wyl_policy_store_apply_principal_failure (store, "lockout.relock", 5,
-      800000, &st_attempt, &c_attempt, &l_attempt);
+      800000, &st_attempt, &c_attempt, &l_attempt, NULL);
   if (relock_rc != WYRELOG_E_POLICY)
     return 1587;
   /* Out-params on the refuse path should not leak partial state. */
