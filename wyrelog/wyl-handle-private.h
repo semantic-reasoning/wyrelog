@@ -9,6 +9,7 @@
 #include "wyrelog/session.h"
 #include "policy/store-private.h"
 #include "auth/service-auth-coordination-private.h"
+#include "wyl-id-private.h"
 
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/replay-private.h"
@@ -129,9 +130,47 @@ WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
  * session. Production consumers must use these operations instead of carrying
  * raw symbol ids across independently locked handle calls. */
 typedef struct _WylEngineSession WylEngineSession;
+typedef enum
+{
+  WYL_ENGINE_TERMINAL_AVAILABLE = 0,
+  WYL_ENGINE_TERMINAL_PENDING,
+  WYL_ENGINE_TERMINAL_FAILED,
+  WYL_ENGINE_TERMINAL_RECOVERING,
+} WylEngineTerminalState;
+typedef struct
+{
+  wyl_id_t handle_id;
+  guint64 store_generation;
+  guint64 serial;
+} WylEngineTerminalToken;
+
 WylEngineSession *wyl_engine_session_acquire (WylHandle * self);
+/* The sole non-normal admission. It atomically claims FAILED -> RECOVERING
+ * after acquiring ENGINE and accepts only this handle's current exact token. */
+WylEngineSession *wyl_engine_session_acquire_terminal_recovery
+    (WylHandle * self, const WylEngineTerminalToken * token);
+guint wyl_engine_session_get_acquisition_depth (WylEngineSession * session);
+wyrelog_error_t wyl_engine_session_release_checked
+    (WylEngineSession ** inout_session);
 void wyl_engine_session_release (WylEngineSession * session);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylEngineSession, wyl_engine_session_release);
+
+/* Generic terminal fence for committed work whose outer owner has not yet
+ * reached a trustworthy terminal outcome. Tokens bind handle identity, the
+ * exact policy-store generation and a monotonic per-handle serial. */
+WylEngineTerminalState wyl_handle_engine_terminal_get_state (WylHandle * self);
+wyrelog_error_t wyl_handle_engine_terminal_begin
+    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+    guint64 expected_generation, WylEngineTerminalToken * out_token);
+wyrelog_error_t wyl_handle_engine_terminal_complete
+    (WylHandle * self, const WylEngineTerminalToken * token);
+wyrelog_error_t wyl_handle_engine_terminal_fail
+    (WylHandle * self, const WylEngineTerminalToken * token);
+/* Completes the exact claimed recovery. FALSE returns RECOVERING -> FAILED;
+ * abandoning a recovery session has the same fail-closed effect. */
+wyrelog_error_t wyl_engine_session_finish_terminal_recovery
+    (WylEngineSession * session, const WylEngineTerminalToken * token,
+    gboolean recovered);
 /*
  * Starts the sole service-authority transaction allowed below a retained,
  * outermost engine session. The session, store generation and WRITE lease
@@ -146,6 +185,13 @@ wyrelog_error_t wyl_engine_session_intern_symbol (WylEngineSession * session,
     const gchar * symbol, gint64 * out_id);
 wyrelog_error_t wyl_engine_session_lookup_symbol (WylEngineSession * session,
     const gchar * symbol, gint64 * out_id);
+/* Reads only host-accepted inputs, keyed by caller-supplied exact symbols.
+ * Callers must pass the frozen session id and intended actor/role/scope row;
+ * these APIs never substitute a tenant or ambient scope. */
+wyrelog_error_t wyl_engine_session_get_accepted_session_state
+    (WylEngineSession * session, gint64 session_id, gint64 * out_state);
+wyrelog_error_t wyl_engine_session_has_exact_accepted_member_of
+    (WylEngineSession * session, const gint64 row[3], gboolean * out_exact);
 gchar *wyl_engine_session_dup_symbol (WylEngineSession * session, gint64 id);
 wyrelog_error_t wyl_engine_session_insert (WylEngineSession * session,
     const gchar * relation, const gint64 * row, gsize ncols);
@@ -183,6 +229,9 @@ typedef enum
 void wyl_handle_set_engine_session_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (WylEngineSessionCheckpoint phase, gpointer data),
     gpointer data);
+void wyl_handle_engine_terminal_test_set_serial_max (WylHandle * self);
+void wyl_handle_engine_session_test_fail_release_rank_after_pop
+    (WylHandle * self);
 typedef enum
 {
   WYL_ENGINE_REPLACEMENT_WAITING,

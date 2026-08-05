@@ -10,6 +10,8 @@ import sys
 
 TEST_SEAMS = {
     "wyl_handle_set_engine_session_checkpoint_for_test",
+    "wyl_handle_engine_terminal_test_set_serial_max",
+    "wyl_handle_engine_session_test_fail_release_rank_after_pop",
     "wyl_handle_set_engine_replacement_checkpoint_for_test",
     "wyl_handle_set_engine_operation_checkpoint_for_test",
     "wyl_handle_set_engine_snapshot_checkpoint_for_test",
