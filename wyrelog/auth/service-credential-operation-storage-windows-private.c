@@ -119,6 +119,7 @@ wyl_win_set_delete_disposition (HANDLE handle)
   return WYRELOG_E_OK;
 }
 
+#ifdef WYL_ENABLE_SERVICE_CREDENTIAL_STORAGE_TEST_HOOKS
 static volatile LONG wyl_win_next_directory_flush_error = ERROR_SUCCESS;
 G_LOCK_DEFINE_STATIC (wyl_win_test_hooks);
 static WylWinChildBeforeRenameHookForTest wyl_win_before_rename_hook;
@@ -213,6 +214,7 @@ wyl_win_child_run_before_rename_hook_for_test (void)
   if (hook != NULL)
     hook (user_data);
 }
+#endif /* WYL_ENABLE_SERVICE_CREDENTIAL_STORAGE_TEST_HOOKS */
 
 static wyrelog_error_t
 wyl_win_directory_flush_error (DWORD error)
@@ -234,11 +236,18 @@ wyl_win_directory_flush_error (DWORD error)
 static wyrelog_error_t
 wyl_win_flush_directory (HANDLE root)
 {
-  DWORD forced = wyl_win_child_take_next_directory_flush_error_for_test ();
   if (root == NULL || root == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
-  if (forced != ERROR_SUCCESS)
-    return wyl_win_directory_flush_error (forced);
+#ifdef WYL_ENABLE_SERVICE_CREDENTIAL_STORAGE_TEST_HOOKS
+  /* Taken after the handle check, not before it: a rejected root never
+   * reaches a flush, so consuming an armed fault there would disarm it
+   * against an operation that never ran. */
+  {
+    DWORD forced = wyl_win_child_take_next_directory_flush_error_for_test ();
+    if (forced != ERROR_SUCCESS)
+      return wyl_win_directory_flush_error (forced);
+  }
+#endif
   return FlushFileBuffers (root) ? WYRELOG_E_OK
       : wyl_win_directory_flush_error (GetLastError ());
 }
@@ -605,7 +614,12 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
           anchor))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
+#ifdef WYL_ENABLE_SERVICE_CREDENTIAL_STORAGE_TEST_HOOKS
     wyl_win_child_run_before_rename_hook_for_test ();
+#endif
+    /* Deliberately outside the gate: an unhooked build already reached this
+     * re-check with no hook call between it and the identical check above, so
+     * leaving it keeps shipped control flow exactly as it is today. */
     if (!wyl_service_credential_operation_storage_anchor_matches (storage,
             anchor))
       rc = WYRELOG_E_POLICY;
@@ -774,7 +788,12 @@ wyrelog_error_t
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
           anchor))
     goto out;
+#ifdef WYL_ENABLE_SERVICE_CREDENTIAL_STORAGE_TEST_HOOKS
   wyl_win_child_run_before_exact_delete_hook_for_test ();
+#endif
+  /* Deliberately outside the gate: the re-read and its comparisons below are
+   * how an unhooked build already proves the object did not change between
+   * the checks above and the delete, so shipped control flow is unchanged. */
   if (!GetFileInformationByHandle (handle, &post_hook)) {
     rc = wyl_win_system_error (GetLastError ());
     goto out;
