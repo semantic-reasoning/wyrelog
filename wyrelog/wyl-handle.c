@@ -4722,6 +4722,12 @@ insert_policy_store_principal_state (const gchar *subject_id,
   WylHandle *self = user_data;
   gint64 row[2];
 
+  /* Defense-in-depth literal gate (validate_snapshot already rejects an
+   * unknown state pre-load; this mirrors the event projection's guard so
+   * a malformed literal can never reach the engine even off that path). */
+  if (wyl_principal_state_from_name (state) == WYL_PRINCIPAL_STATE_LAST_)
+    return WYRELOG_E_POLICY;
+
   wyrelog_error_t rc =
       wyl_handle_intern_engine_symbol_locked (self, subject_id, &row[0]);
   if (rc != WYRELOG_E_OK)
