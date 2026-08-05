@@ -16695,6 +16695,26 @@ check_service_management_self_arm_reauthorization_zero_write (void)
   if (rc != 0)
     return rc;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  guint64 baseline_direct_permissions = 0;
+  sqlite3_stmt *baseline_stmt = NULL;
+  sqlite3 *baseline_db = wyl_policy_store_get_db (store);
+  if (baseline_db == NULL
+      || sqlite3_prepare_v2 (baseline_db,
+          "SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?;",
+          -1, &baseline_stmt, NULL) != SQLITE_OK
+      || sqlite3_bind_text (baseline_stmt, 1, "human-principal-admin", -1,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_text (baseline_stmt, 2, env.session_token, -1,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_step (baseline_stmt) != SQLITE_ROW) {
+    if (baseline_stmt != NULL)
+      sqlite3_finalize (baseline_stmt);
+    service_denial_env_clear (&env);
+    return 2729;
+  }
+  baseline_direct_permissions = (guint64) sqlite3_column_int64
+      (baseline_stmt, 0);
+  sqlite3_finalize (baseline_stmt);
   probe.server = env.http.server;
   if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
           "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
@@ -16743,7 +16763,8 @@ check_service_management_self_arm_reauthorization_zero_write (void)
   }
   if (zero && sqlite3_step (stmt) == SQLITE_ROW) {
     for (guint i = 0; i < 6; i++)
-      zero = zero && sqlite3_column_int64 (stmt, (int) i) == 0;
+      zero = zero && sqlite3_column_int64 (stmt, (int) i)
+          == (i == 1 ? (gint64) baseline_direct_permissions : 0);
   } else {
     zero = FALSE;
   }
