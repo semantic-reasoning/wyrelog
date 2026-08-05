@@ -363,6 +363,160 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   return publish_principal_mutation (&publication);
 }
 
+/* Wraps the shared principal-publication ctx with the TOTP step the
+ * mutate must compare-and-advance inside the driver-owned transaction. */
+typedef struct
+{
+  WylPrincipalPublication publication;
+  gint64 matched_step;
+} WylTotpMfaOkPublication;
+
+/*
+ * mutate body for the atomic TOTP MFA_OK commit (issue #751).  Runs
+ * inside the committed-publication driver's owned transaction and gates
+ * on the durable pre-state before consuming the proof:
+ *   (a) the principal must still be exactly mfa_required (else a
+ *       superseded replay / concurrent loser -> E_POLICY, clean rollback)
+ *   (b) compare-and-advance the replay watermark; a concurrent winner
+ *       that already advanced it yields !advanced -> E_POLICY
+ *   (c) reset the failure counter (folds the locked_at clear)
+ *   (d) the same state+event(+audit) writes mutate_principal_publication
+ *       performs.
+ * A store fault surfaces as E_INTERNAL so the driver poisons/rolls back;
+ * an E_POLICY return rolls back cleanly without poisoning.
+ */
+static wyrelog_error_t
+totp_mutate_mfa_ok (wyl_policy_store_t *store, gpointer data)
+{
+  WylTotpMfaOkPublication *wrap = data;
+  WylPrincipalPublication *ctx = &wrap->publication;
+
+  gchar *state = NULL;
+  gint64 failed_count = 0;
+  gint64 locked_at = 0;
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
+      ctx->username, &state, &failed_count, &locked_at, &found);
+  if (rc != WYRELOG_E_OK) {
+    g_free (state);
+    return WYRELOG_E_INTERNAL;
+  }
+  gboolean is_mfa_required = found && g_strcmp0 (state,
+      wyl_principal_state_name (WYL_PRINCIPAL_STATE_MFA_REQUIRED)) == 0;
+  g_free (state);
+  if (!is_mfa_required)
+    return WYRELOG_E_POLICY;
+
+  gboolean advanced = FALSE;
+  rc = wyl_policy_store_totp_enrollment_advance_step (store, ctx->username,
+      wrap->matched_step, &advanced);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!advanced)
+    return WYRELOG_E_POLICY;
+
+  rc = wyl_policy_store_reset_principal_failure_counter (store, ctx->username);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+
+  const gchar *old_state = wyl_principal_state_name (ctx->old_state);
+  const gchar *event = wyl_principal_event_name (ctx->event);
+  const gchar *new_state = wyl_principal_state_name (ctx->new_state);
+  if (old_state == NULL || event == NULL || new_state == NULL)
+    return WYRELOG_E_INTERNAL;
+  rc = wyl_policy_store_set_principal_state (store, ctx->username, new_state);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_principal_event (store, ctx->username,
+        event, old_state, new_state, &ctx->event_id);
+  if (rc == WYRELOG_E_OK && ctx->audit_event != NULL) {
+    g_autofree gchar *audit_id =
+        wyl_audit_event_dup_id_string (ctx->audit_event);
+    if (audit_id == NULL)
+      rc = WYRELOG_E_INTERNAL;
+    else
+      rc = append_policy_audit_event (store, audit_id, ctx->audit_event);
+  }
+  return (rc == WYRELOG_E_OK) ? WYRELOG_E_OK : WYRELOG_E_INTERNAL;
+}
+
+wyrelog_error_t
+wyl_session_totp_commit_mfa_ok (WylHandle *handle, WylSession *session,
+    gint64 matched_step, WylMfaTotpReceipt *out_receipt)
+{
+  if (out_receipt != NULL)
+    *out_receipt = WYL_MFA_TOTP_RECEIPT_REPLAY_SUPERSEDED;
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session)
+      || session->username == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* Pure FSM shape check, identical to mark_session_mfa_verified: the
+   * MFA_REQUIRED --MFA_OK--> AUTHENTICATED edge must exist before we
+   * attempt the durable transition. */
+  wyl_principal_state_t new_state = WYL_PRINCIPAL_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_MFA_REQUIRED,
+      WYL_PRINCIPAL_EVENT_MFA_OK, &new_state);
+  if (rc != WYRELOG_E_OK || new_state != WYL_PRINCIPAL_STATE_AUTHENTICATED)
+    return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
+
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = new_principal_state_audit (session->username,
+      wyl_principal_state_name (WYL_PRINCIPAL_STATE_MFA_REQUIRED),
+      wyl_principal_state_name (new_state),
+      wyl_principal_event_name (WYL_PRINCIPAL_EVENT_MFA_OK), NULL);
+#else
+  WylAuditEvent *ev = NULL;
+#endif
+  WylTotpMfaOkPublication publication = {
+    {handle, session->username, WYL_PRINCIPAL_STATE_MFA_REQUIRED,
+        WYL_PRINCIPAL_EVENT_MFA_OK, new_state, ev, -1},
+    matched_step
+  };
+
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
+  if (engine_session == NULL)
+    return WYRELOG_E_BUSY;
+  WylCommittedPublicationStage stage =
+      WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+  rc = wyl_engine_session_run_committed_publication (engine_session,
+      totp_mutate_mfa_ok, &publication, verify_principal_publication,
+      &publication.publication, produce_principal_publication_delta,
+      &publication.publication, &stage);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+
+  if (rc == WYRELOG_E_OK && stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED) {
+    g_atomic_int_set ((gint *) & session->mfa_assured, 1);
+#ifdef WYL_HAS_AUDIT
+    if (publication.publication.audit_event != NULL)
+      (void) wyl_audit_mirror_event (handle,
+          publication.publication.audit_event);
+#endif
+    if (out_receipt != NULL)
+      *out_receipt = WYL_MFA_TOTP_RECEIPT_WON_COMMITTED;
+    return WYRELOG_E_OK;
+  }
+
+  if (out_receipt != NULL) {
+    switch (stage) {
+      case WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED:
+        *out_receipt = (rc == WYRELOG_E_POLICY)
+            ? WYL_MFA_TOTP_RECEIPT_REPLAY_SUPERSEDED
+            : WYL_MFA_TOTP_RECEIPT_PRECOMMIT_STORE_FAILURE;
+        break;
+      case WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS:
+        *out_receipt = WYL_MFA_TOTP_RECEIPT_COMMIT_UNCERTAIN;
+        break;
+      case WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED:
+        *out_receipt = WYL_MFA_TOTP_RECEIPT_POSTCOMMIT_PUBLICATION_FAILURE;
+        break;
+    }
+  }
+
+  return (rc == WYRELOG_E_POLICY) ? WYRELOG_E_POLICY : WYRELOG_E_INTERNAL;
+}
+
 #ifdef WYL_HAS_AUDIT
 static WylAuditEvent *
 new_session_state_audit (const gchar *session_id,
@@ -792,11 +946,14 @@ wyl_session_mfa_verify_with_proof (WylHandle *handle, WylSession *session,
   if (proof == NULL || proof[0] == '\0' || validator == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = validator (handle, session, proof, user_data);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  return mark_session_mfa_verified (handle, session);
+  /* The proof-path validator now performs the durable
+   * MFA_REQUIRED -> AUTHENTICATED transition atomically with consuming
+   * the proof (issue #751, wyl_session_totp_commit_mfa_ok).  Driving
+   * mark_session_mfa_verified again here would be a second, unconditional
+   * transition that re-appends the MFA_OK event and could authenticate a
+   * replayed/superseded attempt.  Return the validator result directly;
+   * it has already set mfa_assured on the winning commit. */
+  return validator (handle, session, proof, user_data);
 }
 
 wyrelog_error_t

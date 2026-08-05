@@ -28118,6 +28118,51 @@ wyl_policy_store_totp_enrollment_update_step (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_totp_enrollment_advance_step (wyl_policy_store_t *store,
+    const gchar *subject_id, gint64 new_step, gboolean *out_advanced)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || out_advanced == NULL)
+    return WYRELOG_E_INVALID;
+  *out_advanced = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
+
+  /* Compare-and-advance: the WHERE clause makes the write conditional on
+   * new_step strictly exceeding the persisted watermark, so a concurrent
+   * loser presenting the same step observes zero changed rows.  Like
+   * update_step this is a bare statement (no BEGIN/COMMIT) so it composes
+   * inside the committed-publication transaction owned by the driver in
+   * wyl-session.c (issue #751). */
+  static const gchar *sql =
+      "UPDATE totp_enrollments SET last_verified_step = ? "
+      "WHERE subject_id = ? AND last_verified_step < ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_bind_int64 (stmt, 1, new_step) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  if ((rc = bind_text (stmt, 2, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  if (sqlite3_bind_int64 (stmt, 3, new_step) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE)
+    *out_advanced = (sqlite3_changes (store->db) > 0);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
 wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *store,
     const gchar *subject_id)
 {

@@ -15,6 +15,7 @@
 
 #include "auth/totp.h"
 #include "wyl-fsm-principal-private.h"
+#include "wyl-session-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-log-private.h"
@@ -473,53 +474,26 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
   }
 
   /*
-   * Persist the new watermark BEFORE the caller drives the FSM
-   * (critic F3).  The two writes (totp_enrollments watermark, FSM
-   * principal_state mutation) live in different SQLite-row families
-   * inside the same encrypted policy store, but they are not joined
-   * by an outer BEGIN IMMEDIATE here because:
+   * Atomically consume the proof and publish MFA_OK (issue #751).  The
+   * replay-watermark compare-and-advance, the failure-counter reset
+   * (which folds the locked_at clear), and the principal
+   * MFA_REQUIRED -> AUTHENTICATED state+event transition now all land
+   * in ONE committed-publication transaction inside the orchestrator.
+   * That closes the earlier split-commit window where a concurrent
+   * duplicate could advance the watermark twice, or a crash between the
+   * watermark write and the FSM transition could consume the proof
+   * without producing the authenticated durable state.
    *
-   *   - mark_session_mfa_verified (the caller, in wyl-session.c) opens
-   *     its own BEGIN IMMEDIATE / COMMIT around the principal_state
-   *     update via apply_principal_state_mutation.  Nesting our
-   *     update_step inside that transaction would require either a
-   *     savepoint or a re-plumbing of the FSM mutation path that is
-   *     out of scope for commit 3.
+   * The strict > pre-check above is retained only as a cheap fail-fast:
+   * the authoritative gate is the in-transaction pre-state read plus the
+   * conditional CAS, which is the single point that decides the winner
+   * among concurrent verifiers.  A superseded/replayed attempt (or a
+   * principal no longer in mfa_required) resolves to E_POLICY with a
+   * clean rollback and no duplicate MFA_OK event.
    *
-   *   - The crash-safety contract we want here is fail-closed: if
-   *     the daemon crashes after this update_step COMMITs but before
-   *     the FSM mutation COMMITs, the next attempt with the SAME
-   *     code will be rejected because last_verified_step is already
-   *     advanced (matched_step <= persisted watermark).  The session
-   *     remains mfa_required (FSM state was not advanced), so the
-   *     client must obtain a fresh code at a later step.  This is
-   *     verified by the restart-simulation test in
-   *     tests/test-daemon-mfa-validator.c.
-   *
-   * F2: no log/audit emission below ever sees the seed or the code.
+   * F2: no log/audit emission ever sees the seed or the code.
    */
-  rc = wyl_policy_store_totp_enrollment_update_step (store, subject_id,
-      (gint64) matched_step);
   wyl_totp_enrollment_clear (&enr);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  /*
-   * Commit-5: a successful TOTP verify resets the lockout counter and
-   * clears any prior locked_at on the principal_states row.  This is
-   * idempotent when the counter is already zero, so the call is safe
-   * to make on every happy path regardless of prior history.
-   *
-   * Intentional asymmetry with note_failed_attempt (architect ratification,
-   * commit-5 iteration): the failure path is FAIL-CLOSED on a counter-
-   * write IO error (otherwise an attacker who induces IO pressure could
-   * brute-force without ever crossing the threshold), while this success-
-   * path counter reset is BEST-EFFORT - a transient IO blip after a
-   * verified seed must not DoS a user who has already proven possession,
-   * and the next successful verify will retry the reset.  Hence the
-   * (void) cast on the return value here is deliberate.
-   */
-  (void) wyl_policy_store_reset_principal_failure_counter (store, subject_id);
-
-  return WYRELOG_E_OK;
+  return wyl_session_totp_commit_mfa_ok (handle, session,
+      (gint64) matched_step, NULL);
 }
