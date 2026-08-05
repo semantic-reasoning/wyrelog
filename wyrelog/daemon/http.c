@@ -15334,6 +15334,8 @@ service_management_authority_arm_handler (SoupServer *server,
   }
   g_clear_pointer (&engine_session, wyl_engine_session_release);
   if (rc != WYRELOG_E_OK) {
+    if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+      (void) wyl_daemon_policy_write_finish_result (&write, rc);
     guint status = rc == WYRELOG_E_BUSY ? 503 :
         (rc == WYRELOG_E_AUTH ? 403 : 500);
     set_json_error (msg, status, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
