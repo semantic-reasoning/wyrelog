@@ -16201,6 +16201,100 @@ check_service_management_self_arm_reauthorization_zero_write (void)
   return zero ? 0 : 2732;
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static gint
+check_service_management_self_arm_commit_faults (void)
+{
+  static const WylCommittedPublicationFault faults[] = {
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT,
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR,
+  };
+  static const guint expected_status[] = { 500, 200 };
+  static const gint64 expected_receipts[] = { 0, 1 };
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    ServiceDenialEnv env = { 0 };
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+    if (rc != 0)
+      return rc;
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+    if (wyl_policy_store_grant_role_membership (store,
+            "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+        != WYRELOG_E_OK
+        || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+            "active") != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2740 + (gint) i;
+    }
+    wyl_handle_set_committed_publication_fault_once_for_test (env.handle,
+        faults[i]);
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+            "/service-management-authority/arm", env.query, env.access_token,
+            "{}", &status, &body) != 0 || status != expected_status[i]) {
+      service_denial_env_clear (&env);
+      return 2750 + (gint) i;
+    }
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    sqlite3_stmt *stmt = NULL;
+    static const gchar *sql =
+        "SELECT (SELECT count(*) FROM service_management_self_arm_receipts"
+        " WHERE tenant_id=? AND actor_subject_id=? AND session_id=?),"
+        "(SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM direct_permission_events WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM permission_states WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM permission_state_events WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM audit_events WHERE subject_id=? AND deny_origin=?);";
+    const gchar *args[] = {
+      WYL_TENANT_DEFAULT, "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+    };
+    gboolean queried = db != NULL
+        && sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) == SQLITE_OK;
+    if (queried) {
+      for (guint j = 0; j < G_N_ELEMENTS (args); j++)
+        if (sqlite3_bind_text (stmt, (int) j + 1, args[j], -1,
+                SQLITE_TRANSIENT) != SQLITE_OK)
+          queried = FALSE;
+    }
+    gboolean rows_ok = queried && sqlite3_step (stmt) == SQLITE_ROW;
+    if (rows_ok) {
+      for (guint j = 0; j < 6; j++) {
+        gint64 value = sqlite3_column_int64 (stmt, (int) j);
+        gint64 expected = j == 0 ? expected_receipts[i] :
+            expected_receipts[i] == 0 ? 0 : (j == 1 || j == 2 || j == 3
+            || j == 4 || j == 5 ? 2 : 0);
+        rows_ok = rows_ok && value == expected;
+      }
+    }
+    if (stmt != NULL)
+      sqlite3_finalize (stmt);
+    if (!rows_ok) {
+      service_denial_env_clear (&env);
+      return 2760 + (gint) i;
+    }
+    if (i == 1) {
+      WylServiceAuthUnavailableReason reason =
+          WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+      if (wyl_service_auth_authority_validate_available
+          (wyl_handle_get_service_auth_authority (env.handle), env.handle,
+              &reason) != WYRELOG_E_OK
+          || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
+        service_denial_env_clear (&env);
+        return 2770;
+      }
+    }
+    service_denial_env_clear (&env);
+  }
+  return 0;
+}
+#endif
+
 static gint
 check_service_management_self_arm_end_to_end (void)
 {
@@ -19060,6 +19154,13 @@ main (void)
     result = self_arm_race_rc;
     goto cleanup;
   }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gint self_arm_fault_rc = check_service_management_self_arm_commit_faults ();
+  if (self_arm_fault_rc != 0) {
+    result = self_arm_fault_rc;
+    goto cleanup;
+  }
+#endif
   gint self_arm_reject_rc = check_service_management_self_arm_rejections ();
   if (self_arm_reject_rc != 0) {
     result = self_arm_reject_rc;
