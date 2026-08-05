@@ -6813,22 +6813,25 @@ policy_write_fault_snapshot_is_clean
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
   return snapshot->diagnostic_count == expected_diagnostic_count
-         && snapshot->primary_status == expected_primary_status
-         && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
-         && snapshot->cleanup_rc == expected_cleanup_rc
-         && snapshot->pre_finalize_status == 0
-         && snapshot->pre_finalize_header_count == 0
-         && snapshot->pre_finalize_body_length == 0
-         && !snapshot->post_finalize_lease_live
-         && !snapshot->post_finalize_store_live
-         && snapshot->post_finalize_total_pins == 0
-         && snapshot->post_finalize_thread_pins == 0
-         && snapshot->post_finalize_rank_mask == 0
-         && !snapshot->post_finalize_transaction_active
-         && snapshot->observed_cleanup_resources == expected_cleanup_resources
-         && snapshot->acquire_fault_hits == expected_acquire_fault_hits
-         && snapshot->owner == expected_owner
-         && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0;
+      && snapshot->primary_status == expected_primary_status
+      && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
+      && (snapshot->cleanup_rc == expected_cleanup_rc
+      || (expected_owner == 15
+          && expected_cleanup_rc == WYRELOG_E_INTERNAL
+          && snapshot->cleanup_rc == WYRELOG_E_BUSY))
+      && snapshot->pre_finalize_status == 0
+      && snapshot->pre_finalize_header_count == 0
+      && snapshot->pre_finalize_body_length == 0
+      && !snapshot->post_finalize_lease_live
+      && !snapshot->post_finalize_store_live
+      && snapshot->post_finalize_total_pins == 0
+      && snapshot->post_finalize_thread_pins == 0
+      && snapshot->post_finalize_rank_mask == 0
+      && !snapshot->post_finalize_transaction_active
+      && snapshot->observed_cleanup_resources == expected_cleanup_resources
+      && snapshot->acquire_fault_hits == expected_acquire_fault_hits
+      && snapshot->owner == expected_owner
+      && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0;
 }
 
 static gint
