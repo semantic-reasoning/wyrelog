@@ -4,13 +4,26 @@
 This intentionally checks symbols and ownership, not C control flow.  The
 typed WylEngineSession capability is the proof that production consumers hold
 one interval; legacy handle operations exist only in test-seam preprocessing.
+
+Discovery is hardened so a lexical scan cannot prove properties about a
+different inventory than the one that is built: REJECT symlinks/reparse/
+junctions; every production source must be a contained regular file with
+exactly one physical identity; and compiled production TUs are reconciled
+against the scan and fail CLOSED if a compiled unit was never scanned.  POSIX
+detects aliases with S_ISLNK; Windows additionally sets
+FILE_ATTRIBUTE_REPARSE_POINT on junction directories.
 """
 
+import argparse
 from dataclasses import dataclass
 from enum import Enum
+import json
+import os
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
+import stat
 import sys
+import tempfile
 
 
 LEGACY_HANDLE_OPERATIONS = (
@@ -294,6 +307,48 @@ def invalid_repo_path_reason(path: RepoPath) -> str | None:
     return None
 
 
+def link_component_rejection(st_mode: int,
+                             st_file_attributes: int = 0) -> str | None:
+    """Reject a symlink or reparse-point path component from its lstat mode.
+
+    Pure over the stat fields so mocked tests can drive it without a real
+    filesystem.  POSIX uses S_ISLNK; Windows sets FILE_ATTRIBUTE_REPARSE_POINT
+    on junctions and other reparse points.
+    """
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(st_mode) or (st_file_attributes & reparse):
+        return "symlinked or reparse-point path component"
+    return None
+
+
+def nonregular_leaf_rejection(st_mode: int) -> str | None:
+    """Reject a non-regular leaf (fifo/device/socket) from its lstat mode.
+
+    Symlinks are already caught by link_component_rejection; this covers the
+    remaining non-regular kinds.
+    """
+    if not stat.S_ISREG(st_mode):
+        return "non-regular source file"
+    return None
+
+
+def duplicate_identity_rejection(
+        repo_path: RepoPath, identity: tuple[int, int],
+        identities: dict[tuple[int, int], "RepoPath"]) -> str | None:
+    """Reject a second repo key that aliases an already-seen physical identity.
+
+    Records the first key for a given (st_dev, st_ino) and rejects any later
+    key that maps to it.  Mutates @identities on acceptance so the caller and
+    mocked tests share one identity map.
+    """
+    prior = identities.get(identity)
+    if prior is not None:
+        return (f"duplicate physical identity: {repo_path.spelling} "
+                f"aliases {prior.spelling}")
+    identities[identity] = repo_path
+    return None
+
+
 def without_test_seams(source: str) -> str:
     """Blank WYL_TEST_HANDLE_SEAMS branches while retaining line layout."""
     output = []
@@ -441,13 +496,70 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
 
 
 def collect_sources(root: Path) -> tuple[dict[RepoPath, str], list[str]]:
-    """Discover, canonicalize, and inventory production source identities."""
+    """Discover, canonicalize, and inventory production source identities.
+
+    Every rglob hit is proven to be a contained regular file with a unique
+    physical identity BEFORE it is read, so the scan cannot silently follow a
+    filesystem alias to a different inventory.  For each hit, in order:
+      (a) reject any symlink/reparse-point path component (ancestor or leaf),
+          via lstat and BEFORE any resolve() -- resolve(strict=False) does not
+          raise on a dangling link, so the lstat walk is the real detector;
+      (b) reject a non-regular leaf (fifo/device/socket);
+      (c) reject a leaf that resolves outside the source root (defense in
+          depth against an escape a component walk missed);
+      (d) reject a second repo key that aliases an already-seen (dev, ino).
+    """
     sources = {}
     errors = []
     owner_occurrences = 0
-    for path in (root / "wyrelog").rglob("*"):
+    production = root / "wyrelog"
+    root_real = root.resolve()
+    identities: dict[tuple[int, int], RepoPath] = {}
+    for path in production.rglob("*"):
         if path.suffix not in {".c", ".cc", ".h", ".hh", ".hpp"}:
             continue
+
+        # (a) Ancestor + leaf symlink/reparse walk, before any resolve().
+        alias_error = None
+        leaf_stat = None
+        cumulative = production
+        for component in path.relative_to(production).parts:
+            cumulative = cumulative / component
+            try:
+                leaf_stat = os.lstat(cumulative)
+            except OSError as error:
+                alias_error = (
+                    "unreadable source path component "
+                    f"({error.strerror}): "
+                    f"{render_source_identity(cumulative)}")
+                break
+            reason = link_component_rejection(
+                leaf_stat.st_mode,
+                getattr(leaf_stat, "st_file_attributes", 0))
+            if reason is not None:
+                alias_error = (
+                    f"{reason}: {render_source_identity(cumulative)}")
+                break
+        if alias_error is not None:
+            errors.append(alias_error)
+            continue
+        assert leaf_stat is not None
+
+        # (b) The leaf must be a regular file.
+        leaf_reason = nonregular_leaf_rejection(leaf_stat.st_mode)
+        if leaf_reason is not None:
+            errors.append(
+                f"{leaf_reason}: {render_source_identity(path)}")
+            continue
+
+        # (c) Containment: the resolved leaf must stay within the source root.
+        real = path.resolve()
+        if not real.is_relative_to(root_real):
+            errors.append(
+                "source resolves outside root: "
+                f"{render_source_identity(path)}")
+            continue
+
         raw_path, discovery_error = discovered_source_path(path, root)
         if discovery_error is not None:
             errors.append(
@@ -462,19 +574,113 @@ def collect_sources(root: Path) -> tuple[dict[RepoPath, str], list[str]]:
                 f"{render_source_identity(raw_path)}")
             continue
         assert repo_path is not None
-        if repo_path == OWNER:
-            owner_occurrences += 1
         if repo_path in sources:
             errors.append(
                 "duplicate canonical source path: "
                 f"{render_source_identity(repo_path)}")
             continue
+
+        # (d) One physical identity per repo key.
+        identity_error = duplicate_identity_rejection(
+            repo_path, (leaf_stat.st_dev, leaf_stat.st_ino), identities)
+        if identity_error is not None:
+            errors.append(identity_error)
+            continue
+        # Count OWNER only once the source is accepted, so an alias that
+        # displaces the real owner (rejected by the duplicate-identity or
+        # duplicate-key checks above) leaves the count at zero and fails loud
+        # rather than silently reading one.
+        if repo_path == OWNER:
+            owner_occurrences += 1
         sources[repo_path] = path.read_text(encoding="utf-8")
     if owner_occurrences != 1:
         errors.append(
             "owner source must occur exactly once: "
             f"{render_source_identity(OWNER)} (found {owner_occurrences})")
     return sources, errors
+
+
+INVENTORY_ANCHORS = (ENGINE_OWNER, OWNER)
+
+
+def compiled_production_tus(
+        build_root: Path, root: Path) -> tuple[set[RepoPath], list[str]]:
+    """Map compiled production translation units to canonical repo keys.
+
+    Reads the authoritative compile_commands.json.  A missing/unreadable/
+    non-JSON database returns an error so the caller fails CLOSED rather than
+    silently reconciling against an empty set.  Only .c/.cc units resolving
+    under root/wyrelog are kept (auto-excluding subprojects, tests, and
+    builddir-generated sources).  Both sides are mapped through a RESOLVED root
+    so scanned and compiled keys are comparable.
+    """
+    errors: list[str] = []
+    database = build_root / "compile_commands.json"
+    try:
+        entries = json.loads(database.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return set(), [f"unreadable compile database ({database}): {error}"]
+    if not isinstance(entries, list):
+        return set(), [f"malformed compile database (not a list): {database}"]
+    resolved_root = root.resolve()
+    production = (resolved_root / "wyrelog").resolve()
+    compiled: set[RepoPath] = set()
+    for entry in entries:
+        try:
+            real = (Path(entry["directory"]) / entry["file"]).resolve()
+        except (KeyError, TypeError):
+            errors.append("malformed compile database entry")
+            continue
+        if not real.is_relative_to(production):
+            continue
+        if real.suffix not in {".c", ".cc"}:
+            continue
+        raw_path, discovery_error = discovered_source_path(real, resolved_root)
+        if discovery_error is not None:
+            errors.append(
+                "invalid compiled source path "
+                f"({discovery_error}): {str(real)!r}")
+            continue
+        assert raw_path is not None
+        repo_path, canonical_error = canonical_repo_path(raw_path)
+        if canonical_error is not None:
+            errors.append(
+                "invalid compiled source path "
+                f"({canonical_error}): {raw_path!r}")
+            continue
+        assert repo_path is not None
+        compiled.add(repo_path)
+    return compiled, errors
+
+
+def inventory_anchor_errors(compiled: set[RepoPath]) -> list[str]:
+    """Fail CLOSED when the compile inventory lacks an always-compiled anchor.
+
+    wyl-engine.c and wyl-handle.c are the only unconditionally compiled
+    production units; their absence means the database is empty or unusable,
+    not that the tree lacks them.
+    """
+    errors: list[str] = []
+    for anchor in INVENTORY_ANCHORS:
+        if anchor not in compiled:
+            errors.append(
+                "compile inventory unusable (missing anchor "
+                f"{anchor.spelling} or empty)")
+    return errors
+
+
+def reconcile(scanned_keys: set[RepoPath],
+              compiled: set[RepoPath]) -> list[str]:
+    """Fail CLOSED on any compiled production TU absent from the scan.
+
+    Scanned-but-not-compiled is ALLOWED (conditional sources) and not flagged.
+    """
+    errors: list[str] = []
+    for tu in sorted(compiled - scanned_keys, key=lambda key: key.spelling):
+        errors.append(
+            "compiled production TU not scanned: "
+            f"{render_source_identity(tu)}")
+    return errors
 
 
 def self_test() -> int:
@@ -920,19 +1126,215 @@ def self_test() -> int:
         print("self-test collapsed str-key and forged-RepoPath diagnostics",
               file=sys.stderr)
         return 1
+
+    if self_test_identity_and_inventory() or self_test_alias_integration():
+        return 1
+    return 0
+
+
+def self_test_identity_and_inventory() -> int:
+    """Mocked identity/reconciliation checks driven by synthetic stat data."""
+    regular = stat.S_IFREG | 0o644
+    if (link_component_rejection(regular, 0) is not None
+            or nonregular_leaf_rejection(regular) is not None):
+        print("self-test rejected a regular file", file=sys.stderr)
+        return 1
+    if link_component_rejection(stat.S_IFLNK | 0o777, 0) is None:
+        print("self-test accepted a symlink component", file=sys.stderr)
+        return 1
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if link_component_rejection(regular, reparse) is None:
+        print("self-test accepted a reparse-point component", file=sys.stderr)
+        return 1
+    for nonregular in (stat.S_IFIFO | 0o644, stat.S_IFCHR | 0o644,
+                       stat.S_IFSOCK | 0o644, stat.S_IFDIR | 0o755):
+        if nonregular_leaf_rejection(nonregular) is None:
+            print(f"self-test accepted non-regular leaf mode: {nonregular}",
+                  file=sys.stderr)
+            return 1
+
+    identities: dict[tuple[int, int], RepoPath] = {}
+    first = RepoPath("wyrelog/one.c")
+    second = RepoPath("wyrelog/two.c")
+    if duplicate_identity_rejection(first, (7, 11), identities) is not None:
+        print("self-test rejected a fresh physical identity", file=sys.stderr)
+        return 1
+    alias = duplicate_identity_rejection(second, (7, 11), identities)
+    if alias != ("duplicate physical identity: wyrelog/two.c "
+                 "aliases wyrelog/one.c"):
+        print("self-test missed a duplicate physical identity",
+              file=sys.stderr)
+        return 1
+
+    scanned = {RepoPath("wyrelog/wyl-engine.c"), RepoPath("wyrelog/wyl-handle.c")}
+    compiled = scanned | {RepoPath("wyrelog/fact/compound.c")}
+    if reconcile(scanned, compiled) != [
+            "compiled production TU not scanned: \"wyrelog/fact/compound.c\""]:
+        print("self-test missed a compiled-but-unscanned TU", file=sys.stderr)
+        return 1
+    if reconcile(compiled, scanned):
+        print("self-test flagged an allowed scanned-but-uncompiled TU",
+              file=sys.stderr)
+        return 1
+
+    if inventory_anchor_errors(set()) != [
+            "compile inventory unusable (missing anchor "
+            "wyrelog/wyl-engine.c or empty)",
+            "compile inventory unusable (missing anchor "
+            "wyrelog/wyl-handle.c or empty)"]:
+        print("self-test accepted an empty compile inventory", file=sys.stderr)
+        return 1
+    if inventory_anchor_errors({ENGINE_OWNER}) != [
+            "compile inventory unusable (missing anchor "
+            "wyrelog/wyl-handle.c or empty)"]:
+        print("self-test accepted an inventory missing the handle anchor",
+              file=sys.stderr)
+        return 1
+    if inventory_anchor_errors({ENGINE_OWNER, OWNER}):
+        print("self-test rejected a complete compile inventory",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def self_test_alias_integration() -> int:
+    """Exercise the real discovery hardening against a live filesystem tree."""
+    if os.name == "posix" and hasattr(os, "symlink"):
+        return self_test_posix_alias_integration()
+    if os.name == "nt":
+        return self_test_windows_junction_integration()
+    return 0
+
+
+def _seed_owner_tree(root: Path) -> None:
+    production = root / "wyrelog"
+    production.mkdir(parents=True, exist_ok=True)
+    (production / "wyl-handle.c").write_text(
+        "static void wyl_handle_init(WylHandle *h) { h->read_engine = 0; }\n",
+        encoding="utf-8")
+
+
+def self_test_posix_alias_integration() -> int:
+    with tempfile.TemporaryDirectory() as name:
+        root = Path(name)
+        _seed_owner_tree(root)
+        production = root / "wyrelog"
+        (production / "target.c").write_text(
+            "static void inner(void) {}\n", encoding="utf-8")
+        try:
+            os.symlink(production / "target.c", production / "alias.c")
+        except OSError as error:
+            print(f"self-test could not create a symlink: {error}",
+                  file=sys.stderr)
+            return 1
+        _sources, errors = collect_sources(root)
+        alias_errors = [e for e in errors
+                        if "symlinked or reparse-point path component" in e
+                        and "alias.c" in e]
+        if len(alias_errors) != 1:
+            print(f"self-test did not reject a leaf symlink: {errors}",
+                  file=sys.stderr)
+            return 1
+
+    with tempfile.TemporaryDirectory() as name:
+        root = Path(name)
+        _seed_owner_tree(root)
+        production = root / "wyrelog"
+        (production / "one.c").write_text(
+            "static void inner(void) {}\n", encoding="utf-8")
+        try:
+            os.link(production / "one.c", production / "two.c")
+        except OSError as error:
+            print(f"self-test could not create a hardlink: {error}",
+                  file=sys.stderr)
+            return 1
+        _sources, errors = collect_sources(root)
+        dup_errors = [e for e in errors
+                      if "duplicate physical identity" in e
+                      and "one.c" in e and "two.c" in e]
+        if len(dup_errors) != 1:
+            print(f"self-test did not reject hardlink aliases: {errors}",
+                  file=sys.stderr)
+            return 1
+
+    with tempfile.TemporaryDirectory() as name, \
+            tempfile.TemporaryDirectory() as outside_name:
+        root = Path(name)
+        _seed_owner_tree(root)
+        production = root / "wyrelog"
+        outside = Path(outside_name) / "external.c"
+        outside.write_text("static void outer(void) {}\n", encoding="utf-8")
+        try:
+            os.symlink(outside, production / "external.c")
+        except OSError as error:
+            print(f"self-test could not create an external symlink: {error}",
+                  file=sys.stderr)
+            return 1
+        _sources, errors = collect_sources(root)
+        external_errors = [e for e in errors if "external.c" in e]
+        if not external_errors or not all(
+                "symlinked or reparse-point path component" in e
+                for e in external_errors):
+            print(f"self-test did not reject an external symlink: {errors}",
+                  file=sys.stderr)
+            return 1
+    return 0
+
+
+def self_test_windows_junction_integration() -> int:
+    import subprocess
+    with tempfile.TemporaryDirectory() as outside_name, \
+            tempfile.TemporaryDirectory() as name:
+        root = Path(name)
+        _seed_owner_tree(root)
+        production = root / "wyrelog"
+        real_dir = Path(outside_name) / "real"
+        real_dir.mkdir()
+        (real_dir / "inner.c").write_text(
+            "static void inner(void) {}\n", encoding="utf-8")
+        junction = production / "linked"
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(real_dir)],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            # Creating the reparse point must not silently count as proof.
+            print("self-test could not create a junction: "
+                  + result.stderr.decode(errors="replace"), file=sys.stderr)
+            return 1
+        _sources, errors = collect_sources(root)
+        # rglob does not descend a reparse-point directory, so the junction's
+        # contents must never be admitted as clean scanned sources; if the
+        # leaf is walked at all, (a) must reject it.  Either outcome is safe;
+        # silently admitting the junction target is not.
+        if RepoPath("wyrelog/linked/inner.c") in _sources:
+            print(f"self-test admitted a junction target: {errors}",
+                  file=sys.stderr)
+            return 1
     return 0
 
 
 def main() -> int:
-    if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
+    if "--self-test" in sys.argv[1:]:
         return self_test()
-    if len(sys.argv) != 2:
-        print("usage: check-engine-session-boundary.py SOURCE_ROOT | --self-test",
-              file=sys.stderr)
-        return 2
-    root = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(
+        description="Check the handle-owned engine-session boundary.")
+    parser.add_argument("root", type=Path)
+    parser.add_argument("--build-root", type=Path)
+    parser.add_argument("--self-test", action="store_true",
+                        help="run the offline self-test and exit")
+    args = parser.parse_args()
+    root = args.root.resolve()
     sources, errors = collect_sources(root)
     errors.extend(check(sources))
+    if args.build_root is not None:
+        build_root = args.build_root.resolve()
+        compiled, compile_errors = compiled_production_tus(build_root, root)
+        errors.extend(compile_errors)
+        errors.extend(inventory_anchor_errors(compiled))
+        errors.extend(reconcile(set(sources.keys()), compiled))
+    else:
+        print("engine-session-boundary: reconciliation skipped "
+              "(no --build-root)", file=sys.stderr)
     errors = sorted(set(errors))
     if errors:
         print("engine-session boundary violations:", *errors, sep="\n  ",

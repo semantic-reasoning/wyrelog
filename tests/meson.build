@@ -45,6 +45,14 @@ test('engine-session-boundary', python3,
   ],
   env : python_strict_encoding_env,
 )
+test('engine-session-boundary-reconcile', python3,
+  args : [
+    files('../tools/check-engine-session-boundary.py'),
+    meson.project_source_root(),
+    '--build-root', meson.project_build_root(),
+  ],
+  env : python_strict_encoding_env,
+)
 test('engine-session-boundary-self-test', python3,
   args : [
     files('../tools/check-engine-session-boundary.py'),
