@@ -6808,6 +6808,8 @@ static gboolean
                   && g_strcmp0 (snapshot->primary_code, "non_http") == 0))
           && ((snapshot->primary_rc == WYRELOG_E_OK
                   && !snapshot->primary_rc_recorded)
+              || (snapshot->primary_rc == WYRELOG_E_OK
+                  && snapshot->primary_rc_recorded)
               || (snapshot->primary_rc == WYRELOG_E_BUSY
                   && snapshot->primary_rc_recorded))
           && snapshot->cleanup_rc == WYRELOG_E_BUSY))
