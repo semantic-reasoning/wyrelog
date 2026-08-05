@@ -93,11 +93,11 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
     return 2;
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 3;
   const gchar *request_id = soup_message_headers_get_one
-      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
   if (request_id == NULL || request_id[0] == '\0')
     return 4;
   gsize size = 0;
@@ -113,7 +113,7 @@ do_login (SoupSession *session, const gchar *base_url, const gchar *username,
 {
   *out_session_token = NULL;
   g_autofree gchar *path = g_strdup_printf ("/auth/login?username=%s",
-      username);
+          username);
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -147,7 +147,7 @@ compute_current_code (gchar out_proof[8])
   guint64 step = (guint64) (now / WYL_TOTP_STEP_SECONDS);
   guint code = 0;
   if (wyl_totp_code_at_step (MFA_TEST_SEED, sizeof MFA_TEST_SEED, step, &code,
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return -1;
   g_snprintf (out_proof, 8, "%06u", code);
   return 0;
@@ -163,7 +163,7 @@ check_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   g_autofree gchar *body = NULL;
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw (session, "POST", base_url,
-          "/auth/login/x?username=mfa.alias-login", &status, &body) != 0)
+      "/auth/login/x?username=mfa.alias-login", &status, &body) != 0)
     return 1300;
   if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 1301;
@@ -182,14 +182,16 @@ check_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   gboolean found_before = FALSE, found_after = FALSE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_totp_enrollment_lookup (store, "mfa.alias-verify",
-          &enrollment_before, &found_before) != WYRELOG_E_OK || !found_before)
+      &enrollment_before, &found_before) != WYRELOG_E_OK || !found_before)
     return 1305;
   g_autofree gchar *path = g_strdup_printf
-      ("/auth/mfa/verify/x?session_token=%s&code=%s", session_token, proof);
+        ("/auth/mfa/verify/x?session_token=%s&code=%s", session_token, proof);
   before = (WylDaemonExactRouteStateSnapshot) {
-  0};
+    0
+  };
   after = (WylDaemonExactRouteStateSnapshot) {
-  0};
+    0
+  };
   g_clear_pointer (&body, g_free);
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -199,13 +201,45 @@ check_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
       || memcmp (&before, &after, sizeof before) != 0
       || wyl_policy_store_totp_enrollment_lookup (store, "mfa.alias-verify",
-          &enrollment_after, &found_after) != WYRELOG_E_OK || !found_after
+      &enrollment_after, &found_after) != WYRELOG_E_OK || !found_after
       || enrollment_after.last_verified_step !=
       enrollment_before.last_verified_step)
     return 1308;
   wyl_totp_enrollment_clear (&enrollment_before);
   wyl_totp_enrollment_clear (&enrollment_after);
   return 0;
+}
+
+typedef struct
+{
+  const gchar *subject_id;
+  gint mfa_ok_count;
+} MfaOkEventCounter;
+
+static wyrelog_error_t
+count_mfa_ok_event_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  (void) event_id;
+  (void) from_state;
+  (void) to_state;
+  MfaOkEventCounter *ctr = user_data;
+  if (g_strcmp0 (subject_id, ctr->subject_id) == 0
+      && g_strcmp0 (event, "mfa_ok") == 0)
+    ctr->mfa_ok_count++;
+  return WYRELOG_E_OK;
+}
+
+static gint
+count_mfa_ok_events (WylHandle *handle, const gchar *subject_id)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  MfaOkEventCounter ctr = { subject_id, 0 };
+  if (wyl_policy_store_foreach_principal_event (store, count_mfa_ok_event_cb,
+      &ctr) != WYRELOG_E_OK)
+    return -1;
+  return ctr.mfa_ok_count;
 }
 
 static gint
@@ -223,7 +257,7 @@ check_happy_path (SoupServer *server, WylHandle *handle, const gchar *base_url)
 
   g_autofree gchar *path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-      session_token, proof);
+          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -239,6 +273,18 @@ check_happy_path (SoupServer *server, WylHandle *handle, const gchar *base_url)
   g_autofree gchar *body_session = extract_json_string (body, "session_token");
   if (body_session == NULL || g_strcmp0 (body_session, session_token) != 0)
     return 108;
+  /*
+   * #751: the route must publish EXACTLY ONE mfa_ok principal event.  The
+   * registered validator consumes the proof and publishes the transition in
+   * one transaction, so the boundary must not apply a second one.  Asserted
+   * here, at the HTTP route, because this is the only place that picks
+   * between the two boundaries: driving the public
+   * wyl_session_mfa_verify_with_proof instead would still return 200 with an
+   * authenticated body and every other assertion in this file would still
+   * pass, while silently appending a duplicate event.
+   */
+  if (count_mfa_ok_events (handle, "mfa.happy") != 1)
+    return 111;
   /* F2: the submitted code MUST NOT appear in the body. */
   if (strstr (body, proof) != NULL)
     return 109;
@@ -272,7 +318,7 @@ check_wrong_code_rejected (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-      session_token, proof);
+          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -300,7 +346,7 @@ check_no_enrollment_returns_enrollment_required (SoupServer *server,
   /* Intentionally do NOT seed an enrollment row. */
   g_autofree gchar *path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=000000",
-      session_token);
+          session_token);
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -321,14 +367,14 @@ check_missing_session_token (SoupServer *server, const gchar *base_url)
   g_autofree gchar *body = NULL;
 
   if (send_raw (session, "POST", base_url,
-          "/auth/mfa/verify?code=000000", &status, &body) != 0)
+      "/auth/mfa/verify?code=000000", &status, &body) != 0)
     return 400;
   if (status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
     return 401;
   g_clear_pointer (&body, g_free);
 
   if (send_raw (session, "POST", base_url,
-          "/auth/mfa/verify?session_token=&code=000000", &status, &body) != 0)
+      "/auth/mfa/verify?session_token=&code=000000", &status, &body) != 0)
     return 402;
   if (status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
     return 403;
@@ -344,8 +390,8 @@ check_unknown_session_token (SoupServer *server, const gchar *base_url)
   g_autofree gchar *body = NULL;
 
   if (send_raw (session, "POST", base_url,
-          "/auth/mfa/verify?session_token=bogus-token&code=000000",
-          &status, &body) != 0)
+      "/auth/mfa/verify?session_token=bogus-token&code=000000",
+      &status, &body) != 0)
     return 500;
   /* F5: same error code as missing-token; never leak existence. */
   if (status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
@@ -374,7 +420,7 @@ check_wrong_state_session (SoupServer *server, WylHandle *handle,
     return 601;
   }
   g_autofree gchar *session_token = extract_json_string (body,
-      "session_token");
+          "session_token");
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (session_token == NULL)
     return 602;
@@ -382,7 +428,7 @@ check_wrong_state_session (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *verify_path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=000000",
-      session_token);
+          session_token);
   if (send_raw (session, "POST", base_url, verify_path, &status, &body) != 0)
     return 603;
   /* F5: wrong-state session must return the same code as
@@ -412,7 +458,7 @@ check_missing_code (SoupServer *server, const gchar *base_url)
 
   g_autofree gchar *path_empty =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=",
-      session_token);
+          session_token);
   if (send_raw (session, "POST", base_url, path_empty, &status, &body) != 0)
     return 703;
   if (status != 400 || strstr (body, "\"invalid_mfa_request\"") == NULL)
@@ -444,7 +490,7 @@ check_malformed_codes (SoupServer *server, const gchar *base_url)
   for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
     g_autofree gchar *path =
         g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-        session_token, cases[i].code);
+            session_token, cases[i].code);
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -465,8 +511,8 @@ check_method_gate (SoupServer *server, const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw (session, methods[i], base_url,
-            "/auth/mfa/verify?session_token=t&code=123456", &status,
-            &body) != 0)
+        "/auth/mfa/verify?session_token=t&code=123456", &status,
+        &body) != 0)
       return 900 + (gint) i *10;
     if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
       return 901 + (gint) i *10;
@@ -491,7 +537,7 @@ check_replay_rejection (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-      session_token, proof);
+          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -539,7 +585,7 @@ check_tenant_sealed_between_login_and_verify (SoupServer *server,
   if (status != 200)
     return 1102;
   g_autofree gchar *session_token = extract_json_string (body,
-      "session_token");
+          "session_token");
   if (session_token == NULL)
     return 1103;
   g_clear_pointer (&body, g_free);
@@ -557,7 +603,7 @@ check_tenant_sealed_between_login_and_verify (SoupServer *server,
   }
   g_autofree gchar *path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-      session_token, proof);
+          session_token, proof);
   gint send_rc = send_raw (session, "POST", base_url, path, &status, &body);
   /* Unseal before asserting so a failure does not leave the harness
    * with a sealed tenant for any follow-up test. */
@@ -597,8 +643,8 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
   gint64 lock_locked_at = 0;
   gint64 lock_event_id = 0;
   if (wyl_policy_store_apply_principal_failure (store, "mfa.locked", 1,
-          (gint64) 1600000000, &lock_state, &lock_count, &lock_locked_at,
-          &lock_event_id) != WYRELOG_E_OK)
+      (gint64) 1600000000, &lock_state, &lock_count, &lock_locked_at,
+      &lock_event_id) != WYRELOG_E_OK)
     return 1202;
   if (g_strcmp0 (lock_state, "locked") != 0)
     return 1202;
@@ -608,7 +654,7 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
     return 1203;
   g_autofree gchar *path =
       g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-      session_token, proof);
+          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
@@ -629,8 +675,8 @@ main (void)
     return 1;
 
   /* Install the TOTP validator on the handle so the HTTP route can
-   * resolve it via wyl_handle_get_mfa_validator. The daemon init
-   * path wires this in production; the test wires it explicitly. */
+  * resolve it via wyl_handle_get_mfa_validator. The daemon init
+  * path wires this in production; the test wires it explicitly. */
   wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
 
   WylDaemonOptions opts = {
@@ -646,11 +692,11 @@ main (void)
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   if (http.server == NULL)
     return 3;
   GThread *thread = g_thread_new ("daemon-http-mfa",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
@@ -662,7 +708,7 @@ main (void)
   if ((rc = check_method_gate (http.server, base_url)) != 0)
     goto out;
   if ((rc = check_exact_auth_alias_canaries (http.server, handle,
-              base_url)) != 0)
+      base_url)) != 0)
     goto out;
   if ((rc = check_missing_session_token (http.server, base_url)) != 0)
     goto out;
@@ -673,7 +719,7 @@ main (void)
   if ((rc = check_malformed_codes (http.server, base_url)) != 0)
     goto out;
   if ((rc = check_no_enrollment_returns_enrollment_required (http.server,
-              handle, base_url)) != 0)
+      handle, base_url)) != 0)
     goto out;
   if ((rc = check_wrong_code_rejected (http.server, handle, base_url)) != 0)
     goto out;
@@ -684,10 +730,10 @@ main (void)
   if ((rc = check_replay_rejection (http.server, handle, base_url)) != 0)
     goto out;
   if ((rc = check_tenant_sealed_between_login_and_verify (http.server, handle,
-              base_url)) != 0)
+      base_url)) != 0)
     goto out;
   if ((rc = check_locked_principal_returns_locked (http.server, handle,
-              base_url)) != 0)
+      base_url)) != 0)
     goto out;
 
 out:

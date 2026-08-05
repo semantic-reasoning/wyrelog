@@ -81,7 +81,7 @@ wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
  * remediation lane.
  */
 wyrelog_error_t wyl_handle_adopt_offline_maintenance_store
-    (wyl_policy_store_t * store, WylHandle ** out_handle);
+  (wyl_policy_store_t * store, WylHandle ** out_handle);
 /* Accessed only while the handle's service-auth authority monitor is held. */
 WylServiceAuthUnavailableReason
 wyl_handle_service_auth_unavailable_reason_locked (WylHandle * self);
@@ -117,13 +117,13 @@ void wyl_handle_policy_store_test_set_generation_max (WylHandle * self);
 void wyl_handle_policy_store_set_pin_checkpoint (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_policy_store_set_shutdown_wait_checkpoint_for_test
-    (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
+  (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
     guint * out_total_pins, guint * out_current_thread_pins);
 
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
-    (WylHandle * self);
+  (WylHandle * self);
 
 /* Private typed capability proving that the caller owns one recursive engine
  * session. Production consumers must use these operations instead of carrying
@@ -138,8 +138,8 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylEngineSession, wyl_engine_session_release);
  * must prove one exact COORDINATION -> ENGINE parent chain.
  */
 wyrelog_error_t
-    wyl_engine_session_begin_external_service_authority_transaction
-    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+wyl_engine_session_begin_external_service_authority_transaction
+  (WylEngineSession * session, wyl_policy_store_t * expected_store,
     guint64 expected_generation, WylServiceAuthWriteLease * write_lease,
     WylServiceAuthorityTransaction ** out_transaction);
 wyrelog_error_t wyl_engine_session_intern_symbol (WylEngineSession * session,
@@ -158,9 +158,9 @@ wyrelog_error_t wyl_engine_session_decide (WylEngineSession * session,
     const gint64 row[3], gboolean * out_allowed);
 wyrelog_error_t wyl_engine_session_step_delta (WylEngineSession * session);
 wyrelog_error_t wyl_engine_session_set_delta_callback
-    (WylEngineSession * session, WylDeltaCallback cb, gpointer user_data);
+  (WylEngineSession * session, WylDeltaCallback cb, gpointer user_data);
 wyrelog_error_t wyl_engine_session_replay_delta_insert
-    (WylEngineSession * session, const gchar * relation, const gint64 * row,
+  (WylEngineSession * session, const gchar * relation, const gint64 * row,
     gsize ncols);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -172,7 +172,7 @@ typedef enum
   WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR,
 } WylCommittedPublicationFault;
 void wyl_handle_set_committed_publication_fault_once_for_test
-    (WylHandle * self, WylCommittedPublicationFault fault);
+  (WylHandle * self, WylCommittedPublicationFault fault);
 
 typedef enum
 {
@@ -238,7 +238,7 @@ void wyl_handle_set_engine_snapshot_checkpoint_for_test (WylHandle * self,
 void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_set_committed_publication_checkpoint_for_test
-    (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
+  (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);
 guint wyl_handle_engine_session_depth_for_test (WylHandle * self);
 guint wyl_handle_pending_delta_count_for_test (WylHandle * self);
@@ -338,6 +338,18 @@ gboolean wyl_handle_get_login_skip_mfa_allowed (WylHandle * self);
  * registry.  Callers that want a different validator (e.g. tests)
  * override with wyl_handle_set_mfa_validator before the route fires.
  *
+ * CONTRACT (issue #751): a validator registered here MUST publish the
+ * MFA_REQUIRED -> AUTHENTICATED principal transition itself, atomically
+ * with consuming the proof, the way wyl_mfa_validator_totp does.  The
+ * HTTP route drives it through
+ * wyl_session_mfa_verify_with_publishing_validator, which deliberately
+ * does NOT apply the transition afterwards -- a second unconditional
+ * transition would re-append the MFA_OK event.  A verify-only validator
+ * installed here would therefore mint authenticated tokens while the
+ * principal row stayed mfa_required.  Verify-only validators belong on
+ * the public wyl_session_mfa_verify_with_proof boundary instead, which
+ * applies the transition for the caller.
+ *
  * The setter is NULL-safe; passing a NULL |validator| clears the slot.
  * The getter returns the registered pointer (or NULL when unset) and,
  * if |out_user_data| is non-NULL, copies the registered user_data
@@ -394,7 +406,7 @@ gboolean wyl_handle_engine_pair_is_poisoned (WylHandle * self);
  */
 wyrelog_error_t wyl_handle_poison_engine_pair (WylHandle * self);
 wyrelog_error_t wyl_handle_fail_committed_engine_projection
-    (WylEngineSession * session, wyrelog_error_t failure);
+  (WylEngineSession * session, wyrelog_error_t failure);
 
 typedef wyrelog_error_t (*WylEnginePairVerifier) (WylHandle * handle,
     gpointer data);
@@ -413,15 +425,15 @@ typedef enum
   WYL_DURABLE_COMMIT_UNCERTAIN,
 } WylDurableCommitState;
 wyrelog_error_t wyl_engine_verification_lookup_symbol
-    (WylEngineVerification * verification, const gchar * symbol,
+  (WylEngineVerification * verification, const gchar * symbol,
     gint64 * out_id);
 wyrelog_error_t wyl_engine_verification_contains
-    (WylEngineVerification * verification, const gchar * relation,
+  (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, gboolean * out_contains);
 /* Proves that exactly one row whose first column is @key exists in the
  * unpublished read candidate and that row exactly equals @expected. */
 wyrelog_error_t wyl_engine_verification_has_exact_keyed_row
-    (WylEngineVerification * verification, const gchar * relation,
+  (WylEngineVerification * verification, const gchar * relation,
     gint64 key, const gint64 * expected, gsize ncols, gboolean * out_exact);
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
@@ -432,7 +444,7 @@ typedef enum
 /* Mutates only the unpublished verification candidate so exact-cardinality
  * rejection can be tested without weakening durable-store constraints. */
 wyrelog_error_t wyl_engine_verification_mutate_keyed_row_for_test
-    (WylEngineVerification * verification, const gchar * relation,
+  (WylEngineVerification * verification, const gchar * relation,
     const gint64 * expected, const gint64 * mutant, gsize ncols,
     WylEngineVerificationCandidateMutation mutation);
 #endif
@@ -440,14 +452,14 @@ wyrelog_error_t wyl_engine_verification_mutate_keyed_row_for_test
  * read candidate. Success requires exactly one accepted row for @scope and
  * returns that row's state symbol. Inline template facts are forbidden. */
 wyrelog_error_t wyl_engine_verification_get_accepted_session_state
-    (WylEngineVerification * verification, gint64 scope, gint64 * out_state);
+  (WylEngineVerification * verification, gint64 scope, gint64 * out_state);
 /* Proves that exactly one member_of/3 row with these symbols crossed the
  * owned insertion boundary into the unpublished read candidate. */
 wyrelog_error_t wyl_engine_verification_has_exact_accepted_member_of
-    (WylEngineVerification * verification, const gint64 row[3],
+  (WylEngineVerification * verification, const gint64 row[3],
     gboolean * out_exact);
 wyrelog_error_t wyl_engine_verification_enqueue_delta
-    (WylEngineVerification * verification, const gchar * relation,
+  (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, WylDeltaKind kind);
 
 /*
@@ -469,7 +481,7 @@ typedef enum
   WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED,
 } WylCommittedPublicationStage;
 wyrelog_error_t wyl_engine_session_run_committed_publication
-    (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
+  (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
     gpointer mutate_data, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data, WylCommittedPublicationStage * out_stage);
@@ -479,7 +491,7 @@ wyrelog_error_t wyl_engine_session_run_committed_publication
  * session. No transaction or delta callback may be active. The pair becomes
  * ready only after a complete rebuild and exact verification. */
 wyrelog_error_t wyl_engine_session_repair_committed_publication
-    (WylEngineSession * session, WylServiceAuthWriteLease * write_lease,
+  (WylEngineSession * session, WylServiceAuthWriteLease * write_lease,
     wyl_policy_store_t * expected_store, guint64 expected_generation,
     WylEnginePublicationVerifier verify, gpointer verify_data);
 
@@ -489,7 +501,7 @@ wyrelog_error_t wyl_engine_session_repair_committed_publication
  * the full pair. A known rollback preserves the published pair; uncertainty
  * poisons it immediately. */
 wyrelog_error_t wyl_engine_session_finish_external_publication
-    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+  (WylEngineSession * session, wyl_policy_store_t * expected_store,
     guint64 expected_generation, WylDurableCommitState commit_state,
     WylEnginePublicationVerifier verify, gpointer verify_data);
 
@@ -511,11 +523,11 @@ typedef struct
  * pair.  Unlike the general publication runner this lane may re-enter from a
  * detached delta callback and never replaces the pair or replays history. */
 wyrelog_error_t wyl_engine_session_run_committed_audit_publication
-    (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
+  (WylEngineSession * session, WylCommittedEngineMutationBody mutate,
     gpointer mutate_data, const WylCommittedAuditProjection * projection);
 #ifdef WYL_TEST_HANDLE_SEAMS
 wyrelog_error_t wyl_handle_classify_audit_projection_for_test
-    (WylHandle * self, const WylCommittedAuditProjection * projection,
+  (WylHandle * self, const WylCommittedAuditProjection * projection,
     gboolean * out_absent);
 #endif
 #endif
@@ -777,7 +789,7 @@ wyrelog_error_t wyl_handle_load_policy_store_permission_states (WylHandle *
  * Rejected unless both the store and engine pair are available.
  */
 wyrelog_error_t wyl_handle_load_policy_store_permission_state_events
-    (WylHandle * self);
+  (WylHandle * self);
 
 /*
  * Loads principal_state rows from the handle-owned policy authority store into

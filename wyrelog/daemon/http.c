@@ -13532,15 +13532,19 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   /*
-   * Drive the proof-bearing FSM primitive.  wyl_session_mfa_verify_with_proof
-   * binds the verify to THE session's subject (F5 cross-session
-   * takeover defense): we never accept a subject query parameter
-   * here, and the validator only sees the session-derived username.
-   * On success, the FSM is advanced to AUTHENTICATED before we
-   * return, mirroring login_handler's order.
+   * Drive the proof-bearing FSM primitive.  The boundary binds the verify
+   * to THE session's subject (F5 cross-session takeover defense): we never
+   * accept a subject query parameter here, and the validator only sees the
+   * session-derived username.  On success, the FSM is advanced to
+   * AUTHENTICATED before we return, mirroring login_handler's order.
+   *
+   * The PUBLISHING boundary, not the public wyl_session_mfa_verify_with_proof:
+   * the registered validator consumes the proof and publishes the principal
+   * transition in one transaction (issue #751), so the boundary must not
+   * drive a second transition afterwards.
    */
-  wyrelog_error_t rc = wyl_session_mfa_verify_with_proof (ctx->handle, session,
-          code, validator, validator_user_data);
+  wyrelog_error_t rc = wyl_session_mfa_verify_with_publishing_validator
+        (ctx->handle, session, code, validator, validator_user_data);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_mfa_request");
     return;

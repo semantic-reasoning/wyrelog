@@ -82,4 +82,61 @@ G_GNUC_INTERNAL gboolean wyl_session_matches_service_tuple_private (const
     const gchar * credential_id, guint64 credential_generation,
     gint64 issued_at_seconds, gint64 expires_at_seconds);
 
+/*
+ * Typed receipt describing how a TOTP MFA_OK commit attempt resolved.
+ * Derived from the committed-publication stage and return code so tests
+ * can distinguish the exactly-one winner from a superseded replay and
+ * the durable-uncertainty paths.  The public entry point still collapses
+ * these to E_OK / E_POLICY / E_INTERNAL.
+ */
+typedef enum wyl_mfa_totp_receipt_t
+{
+  WYL_MFA_TOTP_RECEIPT_WON_COMMITTED = 0,
+  WYL_MFA_TOTP_RECEIPT_REPLAY_SUPERSEDED,
+  WYL_MFA_TOTP_RECEIPT_PRECOMMIT_STORE_FAILURE,
+  WYL_MFA_TOTP_RECEIPT_COMMIT_UNCERTAIN,
+  WYL_MFA_TOTP_RECEIPT_POSTCOMMIT_PUBLICATION_FAILURE,
+} WylMfaTotpReceipt;
+
+/*
+ * Atomically consume a verified TOTP proof and publish the principal's
+ * MFA_REQUIRED -> AUTHENTICATED transition (issue #751).  A single
+ * committed-publication transaction performs the pre-state gate, the
+ * compare-and-advance of the replay watermark, the failure-counter
+ * reset, and the principal state+event mutation; concurrent callers
+ * presenting the same matched_step therefore produce exactly one winner.
+ * On the winning commit the session's mfa_assured bit is set.  @matched_step
+ * is the TOTP step the validator already matched.  @out_receipt is
+ * optional (pass NULL); when supplied it receives the typed resolution.
+ * Returns E_OK on the winning commit, E_POLICY on a superseded/replayed
+ * or non-mfa_required principal, E_INTERNAL on a store or durability
+ * failure, E_BUSY if the engine session cannot be acquired.
+ *
+ * Exported (not G_GNUC_INTERNAL) so the dedicated concurrency test can
+ * drive it directly, mirroring the policy/store-private.h helpers.
+ */
+wyrelog_error_t wyl_session_totp_commit_mfa_ok (WylHandle * handle,
+    WylSession * session, gint64 matched_step, WylMfaTotpReceipt * out_receipt);
+
+/*
+ * Proof-bearing boundary for validators that publish the principal
+ * transition THEMSELVES, atomically with consuming the proof (issue
+ * #751).  Same guards as the public wyl_session_mfa_verify_with_proof,
+ * but it does not drive mark_session_mfa_verified afterwards -- doing so
+ * would re-append the MFA_OK event and could authenticate a superseded
+ * attempt.
+ *
+ * Kept separate from the public entry point, which documents the
+ * opposite contract (it applies the transition for the caller).  A
+ * distinct typedef cannot express the split: in C a typedef is a
+ * synonym, so both validator contracts share one type and the compiler
+ * cannot tell them apart.  The boundary the caller picks is the contract.
+ *
+ * Exported (not G_GNUC_INTERNAL) so wyrelogd, which links libwyrelog as
+ * a separate executable, can call it -- same reason as above.
+ */
+wyrelog_error_t wyl_session_mfa_verify_with_publishing_validator (WylHandle *
+    handle, WylSession * session, const gchar * proof,
+    WylMfaValidator validator, gpointer user_data);
+
 G_END_DECLS;

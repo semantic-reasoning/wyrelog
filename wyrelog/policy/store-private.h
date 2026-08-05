@@ -2551,6 +2551,21 @@ wyrelog_error_t wyl_policy_store_totp_enrollment_update_step
   (wyl_policy_store_t * store, const gchar * subject_id, gint64 new_step);
 
 /*
+ * Compare-and-advance the replay watermark for subject_id.  The UPDATE
+ * only fires when new_step is strictly greater than the persisted
+ * last_verified_step, so two concurrent verifiers presenting the same
+ * matched step can never both succeed.  On success *out_advanced is
+ * TRUE iff a row was actually advanced (sqlite3_changes > 0); an equal
+ * or lesser new_step is a clean no-op with *out_advanced FALSE.  The
+ * statement carries no internal transaction: it is meant to compose
+ * inside a caller-owned committed-publication transaction alongside the
+ * principal-state mutation (issue #751).
+ */
+wyrelog_error_t wyl_policy_store_totp_enrollment_advance_step
+  (wyl_policy_store_t * store, const gchar * subject_id, gint64 new_step,
+    gboolean * out_advanced);
+
+/*
  * Remove the TOTP enrollment row for subject_id.  Idempotent: deleting
  * an absent row returns WYRELOG_E_OK.  Returns WYRELOG_E_INVALID for
  * NULL inputs.

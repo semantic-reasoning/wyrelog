@@ -4,7 +4,8 @@
  * (wyrelog/auth/mfa-validator.{c,h}).
  *
  * The validator implements the WylMfaValidator callback shape
- * (wyrelog/session.h) used by wyl_session_mfa_verify_with_proof. It
+ * (wyrelog/session.h), driven through the publishing boundary
+ * wyl_session_mfa_verify_with_publishing_validator. It
  * resolves the per-subject TOTP enrollment in the handle-owned policy
  * store, evaluates the submitted 6-digit code against the seed at the
  * current step (with the +/-1 skew already encoded by the commit-1
@@ -720,6 +721,205 @@ check_handle_default_validator_is_wired (void)
   return 0;
 }
 
+typedef struct
+{
+  const gchar *subject_id;
+  gint mfa_ok_count;
+} MfaOkEventCounter;
+
+static wyrelog_error_t
+count_mfa_ok_event_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  (void) event_id;
+  (void) from_state;
+  (void) to_state;
+  MfaOkEventCounter *ctr = user_data;
+  if (g_strcmp0 (subject_id, ctr->subject_id) == 0
+      && g_strcmp0 (event, "mfa_ok") == 0)
+    ctr->mfa_ok_count++;
+  return WYRELOG_E_OK;
+}
+
+static gint
+count_mfa_ok_events (WylHandle *handle, const gchar *subject_id)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  MfaOkEventCounter ctr = { subject_id, 0 };
+  if (wyl_policy_store_foreach_principal_event (store, count_mfa_ok_event_cb,
+      &ctr) != WYRELOG_E_OK)
+    return -1;
+  return ctr.mfa_ok_count;
+}
+
+/* Asserts the full #751 durable invariant for a subject whose proof has
+ * just been consumed: watermark advanced to |step|, principal
+ * authenticated, failure counter and locked_at cleared, and EXACTLY one
+ * mfa_ok principal event.  Returns 0 on success or |base|+offset. */
+static gint
+assert_mfa_ok_durable_invariant (WylHandle *handle, const gchar *subject_id,
+    gint64 step, gint base)
+{
+  gint64 wm = 0;
+  if (load_last_verified_step (handle, subject_id, &wm) != 0)
+    return base + 1;
+  if (wm != step)
+    return base + 2;
+
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = 0;
+  if (read_principal_state (handle, subject_id, &st, &count, &locked_at) != 0)
+    return base + 3;
+  if (g_strcmp0 (st, "authenticated") != 0)
+    return base + 4;
+  if (count != 0)
+    return base + 5;
+  if (locked_at != G_MININT64)
+    return base + 6;
+
+  if (count_mfa_ok_events (handle, subject_id) != 1)
+    return base + 7;
+  return 0;
+}
+
+static gint
+check_validator_durable_invariant_after_success (void)
+{
+  /* Issue #751: a single accepted verify must leave a consistent durable
+   * boundary - the watermark, the authenticated principal state, the
+   * cleared counter, and exactly one mfa_ok event are all part of the
+   * same committed publication. */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 290;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.durable", &session) != 0)
+    return 291;
+  if (seed_enrollment (handle, "validator.durable") != 0)
+    return 292;
+
+  guint code = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&code, &now, &step) != 0)
+    return 293;
+  gchar proof[8];
+  g_snprintf (proof, sizeof proof, "%06u", code);
+
+  if (wyl_mfa_validator_totp (handle, session, proof, NULL) != WYRELOG_E_OK)
+    return 294;
+
+  return assert_mfa_ok_durable_invariant (handle, "validator.durable",
+             (gint64) step, 295);
+}
+
+static gint
+check_validator_durable_invariant_survives_reload (void)
+{
+  /* Reconstruction: after a successful verify, rebuilding the engine pair
+   * from the durable store must preserve the exact same watermark, state,
+   * counter, and single mfa_ok event.  This stands in for a daemon
+   * restart that reloads its read model from the committed policy store. */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 310;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.reload", &session) != 0)
+    return 311;
+  if (seed_enrollment (handle, "validator.reload") != 0)
+    return 312;
+
+  guint code = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&code, &now, &step) != 0)
+    return 313;
+  gchar proof[8];
+  g_snprintf (proof, sizeof proof, "%06u", code);
+
+  if (wyl_mfa_validator_totp (handle, session, proof, NULL) != WYRELOG_E_OK)
+    return 314;
+  if (assert_mfa_ok_durable_invariant (handle, "validator.reload",
+      (gint64) step, 315) != 0)
+    return 315;
+
+  /* Rebuild the read model from the durable snapshot and re-assert. */
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 323;
+  return assert_mfa_ok_durable_invariant (handle, "validator.reload",
+             (gint64) step, 324);
+}
+
+static gint
+check_validator_already_authenticated_rejects (void)
+{
+  /* BEHAVIOR CHANGE (issue #751): before this fix the proof-path verify
+   * drove an UNCONDITIONAL mark_session_mfa_verified after the validator
+   * returned, so a second accepted code on an ALREADY-AUTHENTICATED
+   * principal returned WYRELOG_E_OK and appended a DUPLICATE mfa_ok
+   * event.  Now the atomic orchestrator gates on the durable pre-state:
+   * an already-authenticated principal fails closed with WYRELOG_E_POLICY
+   * and NO second mfa_ok event is written. */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 330;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.already-auth",
+      &session) != 0)
+    return 331;
+  if (seed_enrollment (handle, "validator.already-auth") != 0)
+    return 332;
+
+  guint code = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&code, &now, &step) != 0)
+    return 333;
+  gchar proof[8];
+  g_snprintf (proof, sizeof proof, "%06u", code);
+
+  /* First verify wins: principal becomes authenticated. */
+  if (wyl_mfa_validator_totp (handle, session, proof, NULL) != WYRELOG_E_OK)
+    return 334;
+
+  /* Roll the watermark back below the matched step so the cheap
+   * fail-fast pre-check (strict >) passes and control reaches the
+   * in-transaction pre-state gate, which is the authoritative reject for
+   * an already-authenticated principal. */
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_totp_enrollment_update_step (store,
+      "validator.already-auth", (gint64) step - 1) != WYRELOG_E_OK)
+    return 335;
+
+  /* Second verify with the same (now strictly-newer-than-watermark) code
+   * must fail closed: the principal is no longer mfa_required. */
+  if (wyl_mfa_validator_totp (handle, session, proof, NULL)
+      != WYRELOG_E_POLICY)
+    return 336;
+
+  /* No duplicate transition: still authenticated, still exactly one
+   * mfa_ok event, and the pre-state gate rolled back cleanly so the
+   * watermark was NOT re-advanced by the losing attempt. */
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = 0;
+  if (read_principal_state (handle, "validator.already-auth", &st, &count,
+      &locked_at) != 0)
+    return 337;
+  if (g_strcmp0 (st, "authenticated") != 0)
+    return 338;
+  if (count_mfa_ok_events (handle, "validator.already-auth") != 1)
+    return 339;
+  gint64 wm = 0;
+  if (load_last_verified_step (handle, "validator.already-auth", &wm) != 0)
+    return 340;
+  if (wm != (gint64) step - 1)
+    return 341;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -752,6 +952,12 @@ main (void)
   if ((rc = check_validator_auto_unlocks_after_window ()) != 0)
     return rc;
   if ((rc = check_validator_resets_counter_on_success ()) != 0)
+    return rc;
+  if ((rc = check_validator_durable_invariant_after_success ()) != 0)
+    return rc;
+  if ((rc = check_validator_durable_invariant_survives_reload ()) != 0)
+    return rc;
+  if ((rc = check_validator_already_authenticated_rejects ()) != 0)
     return rc;
   if ((rc = check_validator_rejects_null_handle_or_session ()) != 0)
     return rc;
