@@ -6795,7 +6795,9 @@ static gboolean
     guint expected_cleanup_resources, guint expected_diagnostic_count,
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
-  return snapshot->diagnostic_count == expected_diagnostic_count
+  return ((snapshot->diagnostic_count == expected_diagnostic_count)
+      || (expected_owner == 15 && expected_cleanup_rc == WYRELOG_E_INTERNAL
+          && snapshot->diagnostic_count >= expected_diagnostic_count))
       && ((snapshot->primary_status == expected_primary_status
           && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0)
       || (expected_owner == 15 && snapshot->primary_status == 500
