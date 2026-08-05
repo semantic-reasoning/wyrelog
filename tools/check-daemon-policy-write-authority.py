@@ -861,9 +861,11 @@ def validate_terminal_write_contract(defs):
     if helper_values["wyl_daemon_policy_write_finish"].count(
             "wyl_daemon_policy_write_record_primary")!=1:
         raise GuardError("WRITE finish must preserve primary exactly once")
-    if helper_values["wyl_daemon_policy_write_finish_result"].count(
-            "wyl_daemon_policy_write_finalize")!=1:
-        raise GuardError("non-HTTP WRITE result must finalize exactly once")
+    finish_result_finalize_count = helper_values[
+        "wyl_daemon_policy_write_finish_result"].count(
+            "wyl_daemon_policy_write_finalize")
+    if finish_result_finalize_count < 1 or finish_result_finalize_count > 2:
+        raise GuardError("non-HTTP WRITE result must finalize once plus bounded retry")
     if helper_values["wyl_daemon_policy_write_finish_result"].count(
             "wyl_daemon_policy_write_record_primary")!=1:
         raise GuardError("non-HTTP WRITE result must preserve primary exactly once")
