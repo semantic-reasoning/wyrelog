@@ -1585,6 +1585,71 @@ BEGIN
 END;
 
 -- ---------------------------------------------------------------------------
+-- Table: service_management_self_arm_receipts
+-- Immutable evidence for one exact atomic service-management self-arm bundle.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS service_management_self_arm_receipts (
+    server_operation_id TEXT NOT NULL PRIMARY KEY CHECK (
+        typeof(server_operation_id) = 'text' AND length(server_operation_id) = 36
+        AND instr(server_operation_id, char(0)) = 0),
+    tenant_id TEXT NOT NULL CHECK (typeof(tenant_id) = 'text'
+        AND length(tenant_id) BETWEEN 1 AND 255
+        AND instr(tenant_id, char(0)) = 0),
+    operation_kind TEXT NOT NULL CHECK (
+        operation_kind = 'service_management_self_arm'),
+    receipt_version INTEGER NOT NULL CHECK (
+        typeof(receipt_version) = 'integer' AND receipt_version = 1),
+    actor_subject_id TEXT NOT NULL CHECK (typeof(actor_subject_id) = 'text'
+        AND length(actor_subject_id) BETWEEN 1 AND 128
+        AND instr(actor_subject_id, char(0)) = 0),
+    session_id TEXT NOT NULL CHECK (typeof(session_id) = 'text'
+        AND length(session_id) BETWEEN 1 AND 255
+        AND instr(session_id, char(0)) = 0),
+    bundle_digest BLOB NOT NULL CHECK (
+        typeof(bundle_digest) = 'blob' AND length(bundle_digest) = 32),
+    principal_permission_id TEXT NOT NULL CHECK (
+        principal_permission_id = 'wr.service_principal.manage'),
+    credential_permission_id TEXT NOT NULL CHECK (
+        credential_permission_id = 'wr.service_credential.manage'),
+    principal_direct_event_id INTEGER NOT NULL CHECK (
+        typeof(principal_direct_event_id) = 'integer'
+        AND principal_direct_event_id > 0),
+    credential_direct_event_id INTEGER NOT NULL CHECK (
+        typeof(credential_direct_event_id) = 'integer'
+        AND credential_direct_event_id > 0),
+    principal_state_event_id INTEGER NOT NULL CHECK (
+        typeof(principal_state_event_id) = 'integer'
+        AND principal_state_event_id > 0),
+    credential_state_event_id INTEGER NOT NULL CHECK (
+        typeof(credential_state_event_id) = 'integer'
+        AND credential_state_event_id > 0),
+    principal_audit_id TEXT NOT NULL CHECK (typeof(principal_audit_id) = 'text'
+        AND length(principal_audit_id) = 36
+        AND instr(principal_audit_id, char(0)) = 0),
+    credential_audit_id TEXT NOT NULL CHECK (typeof(credential_audit_id) = 'text'
+        AND length(credential_audit_id) = 36
+        AND instr(credential_audit_id, char(0)) = 0),
+    created_at_us INTEGER NOT NULL CHECK (
+        typeof(created_at_us) = 'integer' AND created_at_us > 0),
+    UNIQUE (tenant_id, operation_kind, actor_subject_id, session_id),
+    CHECK (principal_direct_event_id <> credential_direct_event_id),
+    CHECK (principal_state_event_id <> credential_state_event_id),
+    CHECK (principal_audit_id <> credential_audit_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_service_self_arm_receipt_no_update
+BEFORE UPDATE ON service_management_self_arm_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service management self-arm receipts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_self_arm_receipt_no_delete
+BEFORE DELETE ON service_management_self_arm_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service management self-arm receipts are immutable');
+END;
+
+-- ---------------------------------------------------------------------------
 -- Table: service_permission_remediation_receipts
 -- Durable, immutable receipt for each applied #618 service-permission
 -- remediation. Written once inside the apply transaction and never mutated;

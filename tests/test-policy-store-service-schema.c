@@ -25,6 +25,7 @@ static const gchar *const service_tables[] = {
   "service_credential_handoff_retirement_receipts",
   "service_permission_remediation_receipts",
   "service_retirement_receipts",
+  "service_management_self_arm_receipts",
 };
 
 static void
@@ -121,7 +122,8 @@ service_object_count (sqlite3 *db)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
-      "'service_retirement_receipts');");
+      "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts');");
 }
 
 static gchar *
@@ -151,7 +153,8 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
-      "'service_retirement_receipts') " "ORDER BY type,name;";
+      "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts') " "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
@@ -179,7 +182,8 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
-      "'service_retirement_receipts') ORDER BY name;";
+      "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts') ORDER BY name;";
   g_assert_cmpint (sqlite3_prepare_v2 (db, index_sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW) {
@@ -1421,6 +1425,27 @@ test_corruption_matrix (void)
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
     exec_ok (wyl_policy_store_get_db (store),
         "DROP TRIGGER trg_service_credential_events_no_delete;");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "DROP TRIGGER trg_service_self_arm_receipt_no_update;");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "DROP TRIGGER trg_service_self_arm_receipt_no_delete;"
+        "CREATE TRIGGER trg_service_self_arm_receipt_no_delete"
+        " BEFORE DELETE ON service_management_self_arm_receipts"
+        " BEGIN SELECT 1; END;");
     g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
         WYRELOG_E_POLICY);
   }
