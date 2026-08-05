@@ -2110,6 +2110,14 @@ if get_option('enable_audit').allowed()
   )
 endif
 
+# The storage test fault hooks (#775) are compiled here and nowhere else. This
+# target builds the two storage translation units itself and calls
+# wyl_win_child_* directly, so arming a hook and running the operation under
+# test both resolve to this target's own copy. Defining the macro as a
+# per-target c_arg rather than a project argument means libwyrelog is never
+# given it in any configuration, so a shipped library cannot contain the hooks
+# at all -- two of which would otherwise be a call-arbitrary-function-pointer
+# site inside the credential publication path.
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
   [
     'test-service-credential-operation-storage.c',
@@ -2117,6 +2125,7 @@ test_service_credential_operation_storage = executable('test-service-credential-
     '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
   ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  c_args : ['-DWYL_ENABLE_SERVICE_CREDENTIAL_STORAGE_TEST_HOOKS'],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )
 
@@ -2744,6 +2753,11 @@ test('duckdb-test-seam-wiring', python3,
 # tree, so a POSIX-only build must fail on a Windows hook that escapes it.
 test('windows-artifact-test-hook-wiring', python3,
   args : [files('test-windows-artifact-test-hook-wiring.py'),
+    meson.project_source_root()])
+
+# Unconditional for the same reason.
+test('service-credential-storage-test-hook-wiring', python3,
+  args : [files('test-service-credential-storage-test-hook-wiring.py'),
     meson.project_source_root()])
 
 test('duckdb-fixed-wal-lifecycle-boundary', python3,
