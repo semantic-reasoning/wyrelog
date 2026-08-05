@@ -29,7 +29,7 @@ import tempfile
 
 
 MIN_UNIT_COUNT = 55
-REQUIRED_UNIT = Path("tools/gst-indent")
+REQUIRED_UNIT = Path("tools/format-c")
 
 PYTHON_SHEBANG = re.compile(
     rb"^#![^\r\n]*(?:^|[/ ])(?:python(?:3(?:\.[0-9]+)?)?)(?:[ \r\n]|$)"
@@ -2775,8 +2775,8 @@ HISTORICAL_SHELL_UNITS = (
     "tools/check-private-headers-not-installed.sh",
     "tools/check-public-headers-no-novelty-tokens.sh",
     "tools/check-supply-chain-pins.sh",
-    "tools/gst-indent",
-    "tools/install-gnu-indent.sh",
+    "tools/format-c",
+    "tools/install-uncrustify.sh",
     "tools/run-sanitizer-suite.sh",
     "tools/run-valgrind-gate.sh",
     "tools/setup-git-hooks.sh",

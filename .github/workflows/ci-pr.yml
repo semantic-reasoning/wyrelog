@@ -23,17 +23,23 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          # check-format.sh --changed diffs against the pull request base, so
+          # the base commit has to be present rather than a depth-1 tip.
+          fetch-depth: 0
 
-      - name: Install pinned GNU indent
+      - name: Install pinned Uncrustify
         run: |
-          python3 --version
-          format_prefix="$RUNNER_TEMP/gnu-indent"
-          ./tools/install-gnu-indent.sh "$format_prefix"
+          format_prefix="$RUNNER_TEMP/uncrustify"
+          ./tools/install-uncrustify.sh "$format_prefix"
           echo "$format_prefix/bin" >> "$GITHUB_PATH"
 
-      - name: Check tracked C formatting
+      # --changed re-verifies every migrated file in tools/formatted-files.txt
+      # and additionally requires each C file this pull request touches to be
+      # migrated, so the ledger only ever grows.
+      - name: Check C formatting
         run: |
-          ./tools/check-format.sh --all
+          ./tools/check-format.sh --changed "origin/${{ github.base_ref }}"
           ./tools/test-format-tooling.sh
 
   build-posix:

@@ -24,16 +24,17 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v5
 
-      - name: Install pinned GNU indent
+      - name: Install pinned Uncrustify
         run: |
-          python3 --version
-          format_prefix="$RUNNER_TEMP/gnu-indent"
-          ./tools/install-gnu-indent.sh "$format_prefix"
+          format_prefix="$RUNNER_TEMP/uncrustify"
+          ./tools/install-uncrustify.sh "$format_prefix"
           echo "$format_prefix/bin" >> "$GITHUB_PATH"
 
-      - name: Check tracked C formatting
+      # On main there is no pull request base to diff against, so verify the
+      # whole migrated set instead.
+      - name: Check C formatting
         run: |
-          ./tools/check-format.sh --all
+          ./tools/check-format.sh --ledger
           ./tools/test-format-tooling.sh
 
   build-posix:

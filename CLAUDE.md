@@ -27,12 +27,18 @@ Commit messages should be professional and emoji-free.
 - Before committing:
   1. Verify `git diff` shows only logical changes (no formatting-only changes)
   2. Run full test suite: `meson test -C builddir`
-  3. Run `./tools/gst-indent` on changed C files, then stage only the intended
-     formatting hunks (for example, with `git add -p`)
+  3. Run `./tools/format-c` on changed C files, add each one to
+     `tools/formatted-files.txt`, then stage only the intended formatting
+     hunks (for example, with `git add -p`)
 
 **Code Style:**
-- GNU indent 2.2.13 is the authoritative formatter.
-- Run `./tools/gst-indent <file>` to format, then stage only the intended
+- Uncrustify 0.83.0 is the authoritative formatter, configured by
+  `tools/uncrustify.cfg` and installed by `tools/install-uncrustify.sh`.
+- The tree is mid-migration from GNU indent. `tools/formatted-files.txt` lists
+  the files already migrated; every one of them must stay an exact fixed point.
+  Any C file you touch must be formatted and added to that ledger, so the
+  migrated set only grows.
+- Run `./tools/format-c <file>` to format, then stage only the intended
   formatting hunks (for example, with `git add -p`).
 - 2-space indentation, no tabs, 80-char line limit
 - The committed hook is activated automatically by `meson setup`.

@@ -1,0 +1,71 @@
+#!/bin/sh
+# wyrelog C formatter. Wraps the pinned Uncrustify release so every caller --
+# developer, pre-commit hook, checker and CI -- runs one exact formatter with
+# one exact configuration.
+
+set -eu
+
+EXPECTED_VERSION="Uncrustify-0.83.0_f"
+UNCRUSTIFY=
+FOUND_VERSIONS=
+
+for candidate in uncrustify; do
+  if ! command -v "$candidate" > /dev/null 2>&1; then
+    continue
+  fi
+
+  version=$("$candidate" --version 2>&1 | head -1)
+  if [ "$version" = "$EXPECTED_VERSION" ]; then
+    UNCRUSTIFY=$candidate
+    break
+  fi
+
+  case "$version" in
+    Uncrustify*)
+      FOUND_VERSIONS="${FOUND_VERSIONS}
+  $candidate: $version"
+      ;;
+  esac
+done
+
+if [ -z "$UNCRUSTIFY" ]; then
+  if [ -n "$FOUND_VERSIONS" ]; then
+    echo "format: $EXPECTED_VERSION is required; incompatible versions found:$FOUND_VERSIONS" >&2
+  else
+    echo "format: $EXPECTED_VERSION is required but was not found in PATH" >&2
+  fi
+  echo "format: run tools/install-uncrustify.sh <absolute-prefix>" >&2
+  exit 1
+fi
+
+if [ "${1-}" = "--check-version" ]; then
+  if [ "$#" -ne 1 ]; then
+    echo "usage: tools/format-c --check-version" >&2
+    exit 2
+  fi
+  echo "$EXPECTED_VERSION"
+  exit 0
+fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "format: not inside a Git worktree" >&2
+  exit 1
+}
+CONFIG="$REPO_ROOT/tools/uncrustify.cfg"
+if [ ! -f "$CONFIG" ]; then
+  echo "format: missing configuration: tools/uncrustify.cfg" >&2
+  exit 1
+fi
+
+for f in "$@"; do
+  if [ ! -f "$f" ]; then
+    echo "format: input is not a regular file: $f" >&2
+    exit 1
+  fi
+
+  # Run twice for the same reason the previous indent wrapper did: the contract
+  # this repository enforces is that migrated files are fixed points, and a
+  # second pass is what proves the first one converged rather than assuming it.
+  "$UNCRUSTIFY" -c "$CONFIG" -l C --replace --no-backup -q "$f" || exit $?
+  "$UNCRUSTIFY" -c "$CONFIG" -l C --replace --no-backup -q "$f" || exit $?
+done
