@@ -1,5 +1,9 @@
 {
+<<<<<<< HEAD
   "aggregate": "31adddae0afef53cc46d5ac2270e9b593b54e95f29c4687924449de1dc17ed8f",
+=======
+  "aggregate": "25f1e75e6934fd4b1360810a74094c0de7743da281c712c1d1e570216996d6b2",
+>>>>>>> 9e0ad9c (test: refresh daemon write authority freeze)
   "directives": {
     "count": 471,
     "sha256": "5a0b9a51a73fa4b7038f5ddfa7bf19e39416f1b1ebce8aea349ae3bc5af90109"
@@ -27,7 +31,7 @@
     "schema_register_handler": "cca2dcf77243a09eb507e04101679eb0bed4f2bf0c343cf0226726ab600734e8",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
     "service_credential_operation_recover_execute": "1395b3874bcb04c6c69203b4bf19e8b23ef43829e31b998a3763286dc32936ca",
-    "service_management_authority_arm_handler": "cb3075ddcba3ec5c120b7c1abb4e66173b91f1102d3ddac18a98905eb50c0998",
+    "service_management_authority_arm_handler": "098247065091217e651e444855745e117462780e909569695679901777478065",
     "set_fact_op_json": "5f16d82dcc774aaa8ffd55e2c7f7b3615a8613057e845260d621aec96371c2e3",
     "set_graph_mutation_json": "2998f2e32e7e0c62f5fee43854b7e88402141e32ddabe5e1969e25b55cd86ecd",
     "set_json_error": "c07b4fa386e9cb51e5a41f1a53b126f02d89b326862d2dc66f63804f41858c34",
