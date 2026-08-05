@@ -14488,7 +14488,9 @@ verify_self_arm_publication (WylEngineVerification *verification, gpointer data)
     if (rc != WYRELOG_E_OK
         || (durable != WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
             && durable != WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT)
-        || (publication->bundle_state != WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN
+        || ((publication->bundle_state == WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
+                || publication->bundle_state ==
+                WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT)
             && durable != publication->bundle_state))
       return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
   }
