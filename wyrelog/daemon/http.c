@@ -15021,13 +15021,24 @@ typedef struct
   gchar actor_subject_id[129];
   gchar session_id[256];
   gchar original_request_id[WYL_REQUEST_ID_STRING_BUF];
-  gchar server_operation_id[WYL_REQUEST_ID_STRING_BUF];
-  gchar principal_audit_id[WYL_REQUEST_ID_STRING_BUF];
-  gchar credential_audit_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar reauthorization_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar server_operation_id[WYL_ID_STRING_BUF];
+  gchar principal_audit_id[WYL_ID_STRING_BUF];
+  gchar credential_audit_id[WYL_ID_STRING_BUF];
   WylPolicySelfArmBundleState bundle_state;
   gboolean durable_preexisting;
   wyl_policy_store_t *store;
 } WylSelfArmPublication;
+
+static wyrelog_error_t
+self_arm_new_uuid (gchar *out, gsize out_len)
+{
+  wyl_id_t id;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_id_format (&id, out, out_len);
+}
 
 static wyrelog_error_t
 mutate_self_arm_publication (wyl_policy_store_t *store, gpointer data)
@@ -15223,11 +15234,13 @@ service_management_authority_arm_handler (SoupServer *server,
       sizeof publication.session_id);
   g_strlcpy (publication.original_request_id, frozen_request_id,
       sizeof publication.original_request_id);
-  if (wyl_request_id_new (publication.server_operation_id,
+  if (wyl_request_id_new (publication.reauthorization_request_id,
+          sizeof publication.reauthorization_request_id) != WYRELOG_E_OK
+      || self_arm_new_uuid (publication.server_operation_id,
           sizeof publication.server_operation_id) != WYRELOG_E_OK
-      || wyl_request_id_new (publication.principal_audit_id,
+      || self_arm_new_uuid (publication.principal_audit_id,
           sizeof publication.principal_audit_id) != WYRELOG_E_OK
-      || wyl_request_id_new (publication.credential_audit_id,
+      || self_arm_new_uuid (publication.credential_audit_id,
           sizeof publication.credential_audit_id) != WYRELOG_E_OK) {
     set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
     return;
@@ -15273,7 +15286,9 @@ service_management_authority_arm_handler (SoupServer *server,
           publication.actor_subject_id,
       .expected_session_tenant = WYL_TENANT_DEFAULT,
       .action = "wr.service.self_authorize",.resource_id = WYL_TENANT_DEFAULT,
-      .decision_request_id = frozen_request_id,.require_mfa = TRUE,
+      .target_tenant = NULL,
+      .decision_request_id = publication.reauthorization_request_id,
+      .require_mfa = TRUE,
       .guard_timestamp = guard_timestamp,.guard_loc_class = guard_loc_class,
       .guard_risk = guard_risk,
     };
