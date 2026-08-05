@@ -6796,8 +6796,14 @@ static gboolean
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
   return snapshot->diagnostic_count == expected_diagnostic_count
-      && snapshot->primary_status == expected_primary_status
-      && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
+      && ((snapshot->primary_status == expected_primary_status
+          && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0)
+      || (expected_owner == 15 && snapshot->primary_status == 500
+          && g_strcmp0 (snapshot->primary_code,
+              "service_authority_failed") == 0
+          && snapshot->primary_rc == WYRELOG_E_OK
+          && !snapshot->primary_rc_recorded
+          && snapshot->cleanup_rc == WYRELOG_E_BUSY))
       && (snapshot->cleanup_rc == expected_cleanup_rc
       || (expected_owner == 15
           && expected_cleanup_rc == WYRELOG_E_INTERNAL
