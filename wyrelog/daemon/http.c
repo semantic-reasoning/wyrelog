@@ -7,8 +7,11 @@
 #include <string.h>
 #ifdef G_OS_WIN32
 #include <io.h>
+#include <winsock2.h>
 #else
 #include <unistd.h>
+#include <sys/socket.h>
+#include <glib-unix.h>
 #endif
 
 #include "daemon/auth-registry-private.h"
@@ -66,6 +69,11 @@
 #define WYL_DAEMON_REQUEST_ID_DATA "wyl-daemon-request-id"
 #define WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA "wyl-daemon-request-id-attempted"
 #define WYL_DAEMON_POLICY_WRITE_DATA "wyl-daemon-policy-write"
+/* One-shot qdata stamped on a SoupServerMessage when its policy WRITE
+ * acquisition was cancelled (client disconnect or daemon shutdown) rather than
+ * granted.  set_json_error() consumes it to map the abandoned request onto the
+ * correct terminal disposition. */
+#define WYL_DAEMON_POLICY_WRITE_CANCEL_DATA "wyl-daemon-policy-write-cancel"
 
 /*
  * Stable HTTP wire-format error codes for the tenant gate. They are
@@ -442,6 +450,26 @@ typedef struct _WylDaemonHttpContext
   /* Wall-clock seconds, clamped monotonically for service JWT lifetime. */
   gint64 service_auth_clock_floor;
   gboolean shutting_down;
+  /* Registry of the request cancellables of policy WRITEs that may currently be
+   * parked in the coordination acquire.  wyl_daemon_http_context_terminalize()
+   * walks it and cancels each directly so a daemon shutdown never strands a
+   * parked writer.  A direct per-request cancel (the same operation the
+   * disconnect watcher performs) avoids g_cancellable_connect() on a shared
+   * cancellable, whose signal emission races the per-request disconnect.
+   * Protected by ctx->lock; holds no reference to the stack-owned writes, which
+   * insert on acquire and remove under the lock before their frame unwinds. */
+  GHashTable *policy_write_active;
+  /* Single daemon-owned off-thread watcher that detects client disconnects on
+   * parked policy WRITE requests.  A parked acquire freezes the server main
+   * loop, so the socket-HUP watch has to run on a private context/thread.
+   * Created eagerly in context-new, quit+joined in the final unref. */
+  GThread *policy_write_watcher_thread;
+  GMainContext *policy_write_watcher_context;
+  GMainLoop *policy_write_watcher_loop;
+  /* Completion signal for a marshaled arm/disarm op, waited on under ctx->lock.
+   * ctx->lock's GMutex is the one synchronization primitive ThreadSanitizer
+   * models here, so the handshake it anchors is provably race-free. */
+  GCond policy_write_watch_changed;
 #ifdef WYL_TEST_DAEMON_HTTP
   guint service_auth_retirement_ticks;
   gboolean service_auth_clock_injected;
@@ -460,6 +488,10 @@ typedef struct _WylDaemonHttpContext
   WylDaemonPolicyWriteFinalizeFault policy_write_finalize_fault;
   WylDaemonPolicyWriteAcquireFault policy_write_acquire_fault;
   guint policy_write_acquire_fault_hits;
+  /* Latches the reason (WylDaemonPolicyWriteCancel) of the most recent
+  * cancelled policy WRITE acquisition so lifecycle tests can observe the
+  * disconnect/shutdown path without depending on response delivery. */
+  gint policy_write_last_cancel_reason;
   guint policy_write_terminal_entries;
   WylDaemonPolicyWriteFinalizeSnapshot policy_write_finalize_snapshot;
   gboolean fail_next_retirement_latch;
@@ -604,6 +636,16 @@ typedef enum
   WYL_DAEMON_POLICY_WRITE_FINALIZED,
 } WylDaemonPolicyWriteState;
 
+/* Why a policy WRITE acquisition was cancelled.  Written by the off-thread
+ * disconnect watcher and by the shutdown-cancellable callback, read on the
+ * request thread; always accessed through g_atomic_int_{get,set}. */
+typedef enum
+{
+  WYL_DAEMON_POLICY_WRITE_CANCEL_NONE = 0,
+  WYL_DAEMON_POLICY_WRITE_CANCEL_CLIENT_DISCONNECT = 1,
+  WYL_DAEMON_POLICY_WRITE_CANCEL_SHUTDOWN = 2,
+} WylDaemonPolicyWriteCancel;
+
 #define WYL_DAEMON_POLICY_WRITE_OWNER_TABLE(X) \
   X (KEY_ROTATION, key_rotation) \
   X (TEST_CONFIGURE, test_configure) \
@@ -655,6 +697,12 @@ enum
   WYL_DAEMON_POLICY_WRITE_OBSERVED_REGISTRY = 1u << 7,
 };
 
+/* Heap-allocated, refcounted watch state shared between the request handler
+* thread and the off-thread disconnect watcher.  It owns its own refs on the
+* cancellable and the client socket, so the watcher operates entirely on this
+* object and never dereferences the handler's stack WylDaemonPolicyWrite. */
+typedef struct _PolicyWriteWatch PolicyWriteWatch;
+
 typedef struct
 {
   WylServiceAuthWriteLease *lease;
@@ -666,6 +714,17 @@ typedef struct
   wyrelog_error_t primary_rc;
   gboolean primary_rc_recorded;
   WylDaemonPolicyWriteOwner owner;
+  /* Request-scoped cancellation.  ctx is borrowed for the whole acquisition so
+   * the auto-cleanup teardown can reach the active-write registry and the
+   * shared watcher context.  cancellable is passed to the coordination acquire
+   * so a disconnect/shutdown removes this request from the writer wait queue.
+   * The disconnect watcher NEVER touches this stack struct: all state it shares
+   * with the off-thread watcher lives in the refcounted heap PolicyWriteWatch,
+   * so neither thread can dereference the other's freed memory. */
+  WylDaemonHttpContext *ctx;    /* borrowed with the daemon context */
+  GCancellable *cancellable;    /* +1 ref; the watch holds its own ref */
+  PolicyWriteWatch *watch;      /* +1 ref; NULL for message-less writers */
+  gboolean watch_disarmed;      /* handler-thread only: source already removed */
 #ifdef WYL_TEST_DAEMON_HTTP
   WylDaemonHttpContext *test_ctx;       /* borrowed with the daemon context */
   guint observed_cleanup_resources;
@@ -709,12 +768,367 @@ wyl_daemon_policy_write_detach_message (WylDaemonPolicyWrite *write)
   write->message = NULL;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Request-cancellable policy WRITE plumbing (#761).                          */
+/*                                                                            */
+/* LOAD-BEARING INVARIANT: client-disconnect detection is valid ONLY while an  */
+/* acquire blocks the server main loop.  libsoup-3.6 dispatches handlers       */
+/* synchronously on the single main-loop thread, so a request parked in the    */
+/* coordination writer wait (g_cond_wait) freezes that thread and the watcher  */
+/* below is the SOLE reader of the connection socket.  A 1-byte MSG_PEEK then   */
+/* unambiguously distinguishes an orderly client EOF from a pipelined byte.     */
+/* If the acquire is ever moved OFF the main loop, this peek races libsoup's    */
+/* own reads and MUST be redesigned.                                           */
+
+/* Register/deregister a request's cancellable in the shutdown-reachable set.
+ * The set stores the GCancellable (a refcounted, thread-safe object), NEVER the
+ * stack-owned write, so terminalize can wake a parked writer without ever
+ * touching a handler thread's live struct.  Both run under ctx->lock so a
+ * shutdown snapshot and a request's teardown are mutually ordered.
+ * Registration returns FALSE if the daemon is already shutting down, in which
+ * case the caller self-cancels on its own thread. */
+static gboolean
+policy_write_register_active (WylDaemonPolicyWrite *write)
+{
+  WylDaemonHttpContext *ctx = write->ctx;
+  if (ctx == NULL || ctx->policy_write_active == NULL)
+    return TRUE;
+  gboolean registered = FALSE;
+  g_mutex_lock (&ctx->lock);
+  if (!ctx->shutting_down) {
+    g_hash_table_add (ctx->policy_write_active,
+        g_object_ref (write->cancellable));
+    registered = TRUE;
+  }
+  g_mutex_unlock (&ctx->lock);
+  return registered;
+}
+
+static void
+policy_write_deregister_active (WylDaemonPolicyWrite *write)
+{
+  WylDaemonHttpContext *ctx = write->ctx;
+  if (ctx == NULL || ctx->policy_write_active == NULL
+      || write->cancellable == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_remove (ctx->policy_write_active, write->cancellable);
+  g_mutex_unlock (&ctx->lock);
+}
+
+/* Cancel every currently-parked policy WRITE for shutdown.  Snapshot the
+ * registered cancellables under ctx->lock (reffing each so it survives a racing
+ * teardown), then cancel outside the lock so the coordination wakeup (which
+ * takes the authority mutex) never nests under ctx->lock.  Only GCancellables
+ * are touched -- no write struct -- so there is no race with the handler
+ * threads that own those structs.  The woken writer infers the SHUTDOWN reason
+ * from its already-cancelled cancellable plus ctx->shutting_down. */
+static void
+policy_write_cancel_all_for_shutdown (WylDaemonHttpContext *ctx)
+{
+  if (ctx->policy_write_active == NULL)
+    return;
+  g_autoptr (GPtrArray) pending = g_ptr_array_new_with_free_func
+        (g_object_unref);
+  g_mutex_lock (&ctx->lock);
+  GHashTableIter iter;
+  gpointer key;
+  g_hash_table_iter_init (&iter, ctx->policy_write_active);
+  while (g_hash_table_iter_next (&iter, &key, NULL))
+    g_ptr_array_add (pending, g_object_ref (key));
+  g_mutex_unlock (&ctx->lock);
+  for (guint i = 0; i < pending->len; i++)
+    g_cancellable_cancel (g_ptr_array_index (pending, i));
+}
+
+/* TRUE when the peer has closed the connection (orderly EOF or hard error);
+ * FALSE for a spurious readable wake or a live/pipelined byte still buffered.
+ * Operates on a plain fd (a dup of the client fd) via recv(MSG_PEEK) only, so
+ * it never touches libsoup's GSocket object -- MSG_PEEK is non-destructive and
+ * concurrent recv on the shared kernel socket is safe. */
+static gboolean
+policy_write_socket_peer_gone (gint fd)
+{
+  gchar byte = 0;
+  int flags = MSG_PEEK;
+#ifdef MSG_DONTWAIT
+  flags |= MSG_DONTWAIT;
+#endif
+  ssize_t n = recv (fd, &byte, 1, flags);
+  if (n == 0)
+    return TRUE;
+  if (n < 0)
+    return !(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
+  return FALSE;
+}
+
+struct _PolicyWriteWatch
+{
+  gint refcount;                /* atomic */
+  GCancellable *cancellable;    /* +1 ref, owned */
+  gint fd;                      /* a DUP of the client fd, owned (closed at
+                                * unref); the watcher polls/peeks this fd only,
+                                * never libsoup's live GSocket, so it never
+                                * touches GSocket state libsoup mutates. */
+  gint cancel_reason;           /* atomic WylDaemonPolicyWriteCancel */
+  GSource *source;              /* accessed ONLY on the watcher thread */
+};
+
+static PolicyWriteWatch *
+policy_write_watch_new (GCancellable *cancellable, gint fd)
+{
+  PolicyWriteWatch *watch = g_new0 (PolicyWriteWatch, 1);
+  watch->refcount = 1;
+  watch->cancellable = g_object_ref (cancellable);
+  watch->fd = fd;               /* owned dup; closed at unref */
+  watch->cancel_reason = WYL_DAEMON_POLICY_WRITE_CANCEL_NONE;
+  return watch;
+}
+
+static PolicyWriteWatch *
+policy_write_watch_ref (PolicyWriteWatch *watch)
+{
+  g_atomic_int_inc (&watch->refcount);
+  return watch;
+}
+
+static void
+policy_write_watch_unref (gpointer data)
+{
+  PolicyWriteWatch *watch = data;
+  if (watch == NULL || !g_atomic_int_dec_and_test (&watch->refcount))
+    return;
+  g_clear_object (&watch->cancellable);
+#ifndef G_OS_WIN32
+  if (watch->fd >= 0)
+    close (watch->fd);
+#endif
+  g_free (watch);
+}
+
+static gboolean
+policy_write_socket_event (gint fd, GIOCondition condition, gpointer data)
+{
+  PolicyWriteWatch *watch = data;
+  (void) fd;
+  (void) condition;
+  /* Runs on the shared watcher thread and touches ONLY the refcounted heap
+   * watch (never the handler's stack write, never libsoup's GSocket), so the
+   * cancellable and dup fd stay valid under our ref no matter when the handler
+   * unwinds.  If the acquire was already cancelled (e.g. shutdown), drop the
+   * watch -- nothing to detect. */
+  if (g_cancellable_is_cancelled (watch->cancellable))
+    return G_SOURCE_REMOVE;
+  if (!policy_write_socket_peer_gone (watch->fd))
+    return G_SOURCE_CONTINUE;
+  g_atomic_int_set (&watch->cancel_reason,
+      WYL_DAEMON_POLICY_WRITE_CANCEL_CLIENT_DISCONNECT);
+  g_cancellable_cancel (watch->cancellable);
+  return G_SOURCE_REMOVE;
+}
+
+static gpointer
+policy_write_watcher_run (gpointer data)
+{
+  WylDaemonHttpContext *ctx = data;
+  g_main_context_push_thread_default (ctx->policy_write_watcher_context);
+  g_main_loop_run (ctx->policy_write_watcher_loop);
+  g_main_context_pop_thread_default (ctx->policy_write_watcher_context);
+  return NULL;
+}
+
+static void
+wyl_daemon_policy_write_watcher_start (WylDaemonHttpContext *ctx)
+{
+  ctx->policy_write_watcher_context = g_main_context_new ();
+  ctx->policy_write_watcher_loop = g_main_loop_new
+        (ctx->policy_write_watcher_context, FALSE);
+  ctx->policy_write_watcher_thread = g_thread_new
+        ("policy-write-watcher", policy_write_watcher_run, ctx);
+}
+
+static void
+wyl_daemon_policy_write_watcher_stop (WylDaemonHttpContext *ctx)
+{
+  if (ctx->policy_write_watcher_loop != NULL)
+    g_main_loop_quit (ctx->policy_write_watcher_loop);
+  if (ctx->policy_write_watcher_thread != NULL) {
+    g_thread_join (ctx->policy_write_watcher_thread);
+    ctx->policy_write_watcher_thread = NULL;
+  }
+  g_clear_pointer (&ctx->policy_write_watcher_loop, g_main_loop_unref);
+  g_clear_pointer (&ctx->policy_write_watcher_context, g_main_context_unref);
+}
+
+/* Marshal one GSource lifecycle op onto the watcher thread and BLOCK until it
+ * completes.  GLib requires a GSource be created, attached AND destroyed on the
+ * thread that owns its GMainContext; doing it on the handler thread corrupts
+ * the source's internal poll/child-source state while the watcher is mid-poll.
+ * The op is a heap object carrying only the refcounted heap watch (never the
+ * handler's stack write).  g_main_context_invoke establishes no happens-before
+ * ThreadSanitizer can see, so the op is published/consumed through g_atomic
+ * flags (which it does model): the handler sets `ready` (release) after writing
+ * the fields, the callback reads it (acquire); the callback sets `done`
+ * (release) under ctx->lock, the handler reads it (acquire) before freeing.
+ * ctx->lock + GCond only provide efficient blocking; the atomics carry the
+ * ordering.  The GSource work runs OUTSIDE ctx->lock so it never nests with the
+ * watcher-context mutex. */
+typedef struct
+{
+  WylDaemonHttpContext *ctx;    /* borrowed; provides lock + completion cond */
+  PolicyWriteWatch *watch;      /* borrowed; the handler holds a ref */
+  GMainContext *context;        /* the watcher context (arm only) */
+  gint ready;                   /* atomic: handler published the op fields */
+  gint done;                    /* atomic: callback finished (under ctx->lock) */
+} PolicyWriteWatchOp;
+
+static void
+policy_write_watch_op_complete (WylDaemonHttpContext *ctx,
+    PolicyWriteWatchOp *op)
+{
+  /* Publish done under ctx->lock so the waiting handler cannot miss the wakeup;
+   * the atomic set is the release edge ThreadSanitizer follows.  Read ctx into
+   * a local first: once done is set the handler may free op. */
+  g_mutex_lock (&ctx->lock);
+  g_atomic_int_set (&op->done, 1);
+  g_cond_broadcast (&ctx->policy_write_watch_changed);
+  g_mutex_unlock (&ctx->lock);
+}
+
+/* Runs on the watcher thread: create+attach the disconnect source. */
+static gboolean
+policy_write_watch_arm_cb (gpointer data)
+{
+  PolicyWriteWatchOp *op = data;
+  (void) g_atomic_int_get (&op->ready); /* acquire: observe op fields */
+  WylDaemonHttpContext *ctx = op->ctx;
+  PolicyWriteWatch *watch = op->watch;
+#ifndef G_OS_WIN32
+  /* A plain fd source over the dup fd -- NOT a GSocketSource -- so the watcher's
+   * poll/check never reads libsoup's GSocket condition state (which libsoup
+   * mutates from the main-loop thread).  It fires only on the dup fd's kernel
+   * conditions and is removed explicitly at disarm. */
+  watch->source = g_unix_fd_source_new (watch->fd,
+          G_IO_IN | G_IO_HUP | G_IO_ERR);
+  g_source_set_callback (watch->source,
+      G_SOURCE_FUNC (policy_write_socket_event),
+      policy_write_watch_ref (watch), policy_write_watch_unref);
+  g_source_attach (watch->source, op->context);
+#else
+  (void) watch;
+#endif
+  policy_write_watch_op_complete (ctx, op);
+  return G_SOURCE_REMOVE;
+}
+
+/* Runs on the watcher thread: destroy the disconnect source.  Because the same
+ * thread dispatches the socket source, no socket_event can be in flight here,
+ * and after this the source can never dispatch again. */
+static gboolean
+policy_write_watch_disarm_cb (gpointer data)
+{
+  PolicyWriteWatchOp *op = data;
+  (void) g_atomic_int_get (&op->ready); /* acquire: observe op fields */
+  WylDaemonHttpContext *ctx = op->ctx;
+  PolicyWriteWatch *watch = op->watch;
+  if (watch->source != NULL) {
+    g_source_destroy (watch->source);
+    g_clear_pointer (&watch->source, g_source_unref);
+  }
+  policy_write_watch_op_complete (ctx, op);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+policy_write_watch_run_on_watcher (WylDaemonHttpContext *ctx, GSourceFunc cb,
+    PolicyWriteWatch *watch, GMainContext *context)
+{
+  PolicyWriteWatchOp *op = g_new0 (PolicyWriteWatchOp, 1);
+  op->ctx = ctx;
+  op->watch = watch;
+  op->context = context;
+  g_atomic_int_set (&op->ready, 1);     /* release: publish op fields */
+  g_main_context_invoke_full (ctx->policy_write_watcher_context,
+      G_PRIORITY_DEFAULT, cb, op, NULL);
+  g_mutex_lock (&ctx->lock);
+  while (!g_atomic_int_get (&op->done)) /* acquire: op settled */
+    g_cond_wait (&ctx->policy_write_watch_changed, &ctx->lock);
+  g_mutex_unlock (&ctx->lock);
+  g_free (op);
+}
+
+/* Arm a client-disconnect watch for a request about to park.  The create+attach
+ * runs synchronously on the watcher thread so the source is live before the
+ * acquire parks.  The heap watch holds a ref for the handler (write->watch) and
+ * a ref for the source (dropped by the destroy-notify at disarm). */
+static void
+wyl_daemon_policy_write_arm_socket_watch (WylDaemonPolicyWrite *write,
+    SoupServerMessage *message)
+{
+  if (write->ctx == NULL || write->ctx->policy_write_watcher_context == NULL)
+    return;
+#ifndef G_OS_WIN32
+  GSocket *socket = soup_server_message_get_socket (message);
+  if (socket == NULL)           /* O4: never dereference a NULL socket */
+    return;
+  /* Dup the client fd on the handler thread (g_socket_get_fd reads the socket's
+   * immutable fd; dup is a syscall) so the watcher owns an independent fd and
+   * never touches libsoup's GSocket.  The dup shares the kernel socket, so EOF
+   * and a MSG_PEEK are still visible. */
+  gint fd = dup (g_socket_get_fd (socket));
+  if (fd < 0)
+    return;
+  write->watch = policy_write_watch_new (write->cancellable, fd);
+  policy_write_watch_run_on_watcher (write->ctx, policy_write_watch_arm_cb,
+      write->watch, write->ctx->policy_write_watcher_context);
+#else
+  (void) message;               /* disconnect watch is POSIX-only */
+#endif
+}
+
+/* Idempotent: destroy the client-disconnect source ON THE WATCHER THREAD.  Runs
+ * the instant the coordination acquire returns so the watcher stops peeking
+ * once the main loop unfreezes.  Blocking on the marshaled destroy restores the
+ * quiesce guarantee correctly (on the owner thread) -- after this returns the
+ * source is provably gone and no dispatch can be in flight. */
+static void
+wyl_daemon_policy_write_disarm_socket_watch (WylDaemonPolicyWrite *write)
+{
+  if (write->watch == NULL || write->watch_disarmed || write->ctx == NULL
+      || write->ctx->policy_write_watcher_context == NULL)
+    return;
+  write->watch_disarmed = TRUE;
+  policy_write_watch_run_on_watcher (write->ctx, policy_write_watch_disarm_cb,
+      write->watch, NULL);
+}
+
+/* O1: unconditional cancellable/watcher teardown.  Invoked at the TOP of the
+ * auto-cleanup, BEFORE the state guard, because a cancel-wins acquire leaves
+ * state == EMPTY yet still owns the registry slot and cancellable.  The socket
+ * watch is normally already disarmed at acquire-return; the disarm here is the
+ * idempotent safety net (e.g. an early return before the acquire).  Deregister
+ * under ctx->lock BEFORE dropping the cancellable so a concurrent shutdown
+ * snapshot can never observe this write once its frame is unwinding. */
+static void
+wyl_daemon_policy_write_teardown_cancellable (WylDaemonPolicyWrite *write)
+{
+  wyl_daemon_policy_write_disarm_socket_watch (write);
+  policy_write_deregister_active (write);
+  /* The source (destroyed above) has dropped its watch ref; drop the handler's
+   * ref last so the watch, and the socket/cancellable it owns, live until no
+   * thread can touch them. */
+  g_clear_pointer (&write->watch, policy_write_watch_unref);
+  g_clear_object (&write->cancellable);
+}
+
 static void
 wyl_daemon_policy_write_clear (WylDaemonPolicyWrite *write)
 {
+  if (write == NULL)
+    return;
+  wyl_daemon_policy_write_teardown_cancellable (write);
   wyl_daemon_policy_write_detach_message (write);
-  if (write == NULL || write->state != WYL_DAEMON_POLICY_WRITE_ACTIVE
-      || write->lease == NULL)
+  if (write->state != WYL_DAEMON_POLICY_WRITE_ACTIVE || write->lease == NULL)
     return;
 
   /* Emergency abnormal-unwind fallback.  Production owners must call the
@@ -887,9 +1301,30 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
       || owner < WYL_DAEMON_POLICY_WRITE_OWNER_KEY_ROTATION
       || owner >= WYL_DAEMON_POLICY_WRITE_OWNER_COUNT)
     return WYRELOG_E_INVALID;
+
+  /* Bind an owned request cancellable to the shutdown lifecycle, and (for a
+   * real client request) to a disconnect watch, BEFORE parking in the
+   * coordination acquire.  The coordination layer already honours the
+   * cancellable in its writer wait loop, so a disconnect or shutdown now
+   * removes this request from the queue instead of stranding it.  Registering
+   * in the active set (or self-cancelling if shutdown already began) closes the
+   * race where terminalize runs between here and the park. */
+  write->ctx = ctx;
+  write->cancellable = g_cancellable_new ();
+  if (!policy_write_register_active (write))
+    g_cancellable_cancel (write->cancellable);  /* shutdown inferred later */
+  if (message != NULL)
+    wyl_daemon_policy_write_arm_socket_watch (write, message);
+
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
-        (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
-          &write->lease);
+        (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle,
+          write->cancellable, &write->lease);
+  /* Bound the socket watch strictly to the parked-wait window: the main loop
+   * has now unfrozen, so disarm before the handler proceeds into the ACTIVE
+   * mutation/response with libsoup owning the socket again.  Idempotent, so the
+   * auto-cleanup teardown becomes a no-op for the socket source.  The registry
+   * slot + cancellable stay live across ACTIVE (they never touch the socket). */
+  wyl_daemon_policy_write_disarm_socket_watch (write);
   if (rc == WYRELOG_E_OK) {
     write->state = WYL_DAEMON_POLICY_WRITE_ACTIVE;
     write->handle = ctx->handle;
@@ -943,6 +1378,31 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
       rc = wyl_daemon_policy_write_finish (write, rc);
     else
       rc = wyl_daemon_policy_write_finish_result (write, rc);
+  }
+  /* Cancel-wins path: the acquire returned BUSY because the request was
+   * cancelled while parked (state stays EMPTY, no lease).  Record the reason so
+   * the terminal response reflects a disconnect/shutdown rather than a generic
+   * BUSY, and (for a real request) stamp the message so set_json_error() maps
+   * it centrally.  The disconnect watcher latches CLIENT_DISCONNECT directly;
+   * a shutdown cancel touches only the cancellable, so it is inferred here from
+   * an already-cancelled cancellable that no disconnect claimed.  The
+   * watcher/cancellable are torn down by the auto-cleanup. */
+  if (rc != WYRELOG_E_OK) {
+    gint reason = write->watch != NULL
+        ? g_atomic_int_get (&write->watch->cancel_reason)
+        : WYL_DAEMON_POLICY_WRITE_CANCEL_NONE;
+    if (reason == WYL_DAEMON_POLICY_WRITE_CANCEL_NONE
+        && write->cancellable != NULL
+        && g_cancellable_is_cancelled (write->cancellable))
+      reason = WYL_DAEMON_POLICY_WRITE_CANCEL_SHUTDOWN;
+    if (reason != WYL_DAEMON_POLICY_WRITE_CANCEL_NONE) {
+#ifdef WYL_TEST_DAEMON_HTTP
+      g_atomic_int_set (&ctx->policy_write_last_cancel_reason, reason);
+#endif
+      if (message != NULL)
+        g_object_set_data (G_OBJECT (message),
+            WYL_DAEMON_POLICY_WRITE_CANCEL_DATA, GINT_TO_POINTER (reason));
+    }
   }
   return rc;
 }
@@ -1258,7 +1718,13 @@ wyl_daemon_http_context_unref (gpointer data)
     g_source_destroy (ctx->service_auth_retirement_source);
     g_source_unref (ctx->service_auth_retirement_source);
   }
+  /* All handlers have quit by the final unref, so every armed watch has already
+   * been torn down through the auto-cleanup and the active-write registry is
+   * empty; stop the watcher and drop the registry last. */
+  wyl_daemon_policy_write_watcher_stop (ctx);
+  g_clear_pointer (&ctx->policy_write_active, g_hash_table_unref);
   g_cond_clear (&ctx->service_auth_maintenance_changed);
+  g_cond_clear (&ctx->policy_write_watch_changed);
   g_free (ctx->access_token_key_id);
 #ifdef WYL_HAS_AUDIT
   sodium_memzero (ctx->service_token_limiter_key,
@@ -1329,6 +1795,10 @@ wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
       ctx->auth_epoch++;
     }
     g_mutex_unlock (&ctx->lock);
+    /* Release every policy WRITE request currently parked behind an active
+     * writer.  shutting_down is already latched above, so any acquire racing
+     * this either self-cancels (registration refused) or is snapshotted here. */
+    policy_write_cancel_all_for_shutdown (ctx);
     wyl_daemon_http_context_suspend_service_auth_maintenance (ctx);
   }
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -1623,6 +2093,10 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
           g_free, NULL);
   g_mutex_init (&ctx->lock);
   g_cond_init (&ctx->service_auth_maintenance_changed);
+  g_cond_init (&ctx->policy_write_watch_changed);
+  ctx->policy_write_active = g_hash_table_new_full (g_direct_hash,
+          g_direct_equal, g_object_unref, NULL);
+  wyl_daemon_policy_write_watcher_start (ctx);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_init (&ctx->refresh_latch.mutex);
   g_cond_init (&ctx->refresh_latch.changed);
@@ -3214,6 +3688,15 @@ wyl_daemon_http_policy_write_finalize_snapshot_for_test (SoupServer *server,
     return FALSE;
   *out_snapshot = ctx->policy_write_finalize_snapshot;
   return TRUE;
+}
+
+gint
+wyl_daemon_http_policy_write_last_cancel_reason_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYL_DAEMON_POLICY_WRITE_CANCEL_NONE;
+  return g_atomic_int_get (&ctx->policy_write_last_cancel_reason);
 }
 
 void
@@ -5810,6 +6293,20 @@ wyl_daemon_policy_write_finalize_for_response (SoupServerMessage *msg,
 static void
 set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
 {
+  /* #761 central mapping for a policy WRITE that was cancelled while parked.
+   * A client disconnect leaves nothing to answer; a shutdown gets the canonical
+   * 503.  The stamp is one-shot so ordinary errors are untouched. */
+  gpointer cancel = g_object_steal_data (G_OBJECT (msg),
+          WYL_DAEMON_POLICY_WRITE_CANCEL_DATA);
+  if (cancel != NULL) {
+    gint reason = GPOINTER_TO_INT (cancel);
+    if (reason == WYL_DAEMON_POLICY_WRITE_CANCEL_CLIENT_DISCONNECT)
+      return;
+    if (reason == WYL_DAEMON_POLICY_WRITE_CANCEL_SHUTDOWN) {
+      status = 503;
+      code = "server_shutting_down";
+    }
+  }
   wyrelog_error_t cleanup_rc = wyl_daemon_policy_write_finalize_for_response
         (msg, status, code);
   if (cleanup_rc != WYRELOG_E_OK) {
