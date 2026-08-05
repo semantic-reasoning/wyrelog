@@ -88,6 +88,16 @@ assert_state (wyl_policy_store_t *store, WylPolicySelfArmBundleState expected)
 }
 
 static void
+assert_verify (wyl_policy_store_t *store, const WylPolicySelfArmBundle *value,
+    wyrelog_error_t expected_rc, WylPolicySelfArmBundleState expected_state)
+{
+  WylPolicySelfArmBundleState state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  g_assert_cmpint (wyl_policy_store_verify_self_arm_bundle (store, value,
+          &state), ==, expected_rc);
+  g_assert_cmpint (state, ==, expected_state);
+}
+
+static void
 assert_unknown_publish_no_write (wyl_policy_store_t *store)
 {
   assert_state (store, WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
@@ -546,6 +556,8 @@ test_tamper_extra_and_read_error_are_unknown (void)
 {
   g_autoptr (wyl_policy_store_t) digest = new_store ();
   publish_and_commit (digest);
+  assert_verify (digest, &bundle, WYRELOG_E_OK,
+      WYL_POLICY_SELF_ARM_BUNDLE_PRESENT);
   exec_ok (digest,
       "DROP TRIGGER trg_service_self_arm_receipt_no_update;"
       "PRAGMA ignore_check_constraints=ON;"
@@ -553,6 +565,8 @@ test_tamper_extra_and_read_error_are_unknown (void)
       " SET bundle_digest=zeroblob(32);"
       "PRAGMA ignore_check_constraints=OFF;");
   assert_state (digest, WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+  assert_verify (digest, &bundle, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
 
   g_autoptr (wyl_policy_store_t) malformed = new_store ();
   publish_and_commit (malformed);
@@ -580,6 +594,8 @@ test_tamper_extra_and_read_error_are_unknown (void)
       "UPDATE audit_events SET request_id="
       "'000000000000000000000000002' WHERE id='" AUDIT_P "';");
   assert_state (request_tamper, WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+  assert_verify (request_tamper, &bundle, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
 
   g_autoptr (wyl_policy_store_t) extra = new_store ();
   publish_and_commit (extra);
@@ -595,6 +611,32 @@ test_tamper_extra_and_read_error_are_unknown (void)
       "UPDATE permission_states SET state='dormant'"
       " WHERE perm_id='wr.service_principal.manage';");
   assert_state (dormant, WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+
+  /* A PRESENT receipt proves only the exact operation metadata frozen by the
+   * caller. Any caller-side substitution must be rejected. */
+  g_autoptr (wyl_policy_store_t) exact = new_store ();
+  publish_and_commit (exact);
+  WylPolicySelfArmBundle changed = bundle;
+  changed.identity.original_request_id = "000000000000000000000000002";
+  assert_verify (exact, &changed, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+  changed = bundle;
+  changed.server_operation_id = SERVER_ID_2;
+  assert_verify (exact, &changed, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+  changed = bundle;
+  changed.principal_audit_id = SERVER_ID_2;
+  assert_verify (exact, &changed, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+  changed = bundle;
+  changed.created_at_us++;
+  assert_verify (exact, &changed, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+
+  g_autoptr (wyl_policy_store_t) legacy_verify = new_store ();
+  insert_legacy_bundle (legacy_verify);
+  assert_verify (legacy_verify, &bundle, WYRELOG_E_OK,
+      WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT);
 
   g_autoptr (wyl_policy_store_t) read_error = new_store ();
   sqlite3 *db = wyl_policy_store_get_db (read_error);
@@ -633,6 +675,8 @@ test_multiple_receipts_and_identity_isolation (void)
       " principal_state_event_id,credential_state_event_id,principal_audit_id,"
       " credential_audit_id,created_at_us FROM old_self_arm_receipts;");
   assert_state (store, WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
+  assert_verify (store, &bundle, WYRELOG_E_POLICY,
+      WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN);
 
   WylPolicySelfArmIdentity other = bundle.identity;
   other.actor_subject_id = "other-admin";
