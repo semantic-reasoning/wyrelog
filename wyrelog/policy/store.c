@@ -11432,6 +11432,14 @@ wyl_policy_store_classify_self_arm_bundle (wyl_policy_store_t *store,
         && sqlite3_column_int64 (stmt, 9) == 0
         && sqlite3_column_int64 (stmt, 12) == 0
         && sqlite3_column_int64 (stmt, 16) == 0;
+    gboolean direct_only = sqlite3_column_int64 (stmt, 0) == 0
+        && sqlite3_column_int64 (stmt, 2) == 2
+        && sqlite3_column_int64 (stmt, 3) == 1
+        && sqlite3_column_int64 (stmt, 4) == 1
+        && sqlite3_column_int64 (stmt, 5) == 0
+        && sqlite3_column_int64 (stmt, 9) == 0
+        && sqlite3_column_int64 (stmt, 12) == 0
+        && sqlite3_column_int64 (stmt, 16) == 0;
     const gchar *principal_request =
         (const gchar *) sqlite3_column_text (stmt, 38);
     const gchar *credential_request =
@@ -11507,6 +11515,8 @@ wyl_policy_store_classify_self_arm_bundle (wyl_policy_store_t *store,
       *out_state = WYL_POLICY_SELF_ARM_BUNDLE_PRESENT;
     else if (rc == WYRELOG_E_OK && is_legacy)
       *out_state = WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT;
+    else if (rc == WYRELOG_E_OK && direct_only)
+      *out_state = WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY;
     else if (rc == WYRELOG_E_OK && is_absent)
       *out_state = WYL_POLICY_SELF_ARM_BUNDLE_ALL_ABSENT;
   } else if (rc == WYRELOG_E_OK) {
@@ -11826,7 +11836,8 @@ wyl_policy_store_publish_self_arm_bundle (wyl_policy_store_t *store,
     *out_state = state;
     return WYRELOG_E_OK;
   }
-  if (state != WYL_POLICY_SELF_ARM_BUNDLE_ALL_ABSENT)
+  if (state != WYL_POLICY_SELF_ARM_BUNDLE_ALL_ABSENT
+      && state != WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY)
     return WYRELOG_E_POLICY;
 
   gint64 principal_direct_event_id = -1;
@@ -11834,7 +11845,7 @@ wyl_policy_store_publish_self_arm_bundle (wyl_policy_store_t *store,
   gint64 principal_state_event_id = -1;
   gint64 credential_state_event_id = -1;
   rc = self_arm_insert_three_text (store,
-      "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+      "INSERT OR IGNORE INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
       " VALUES(?,?,?,?);", bundle,
       WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, NULL);
   if (rc == WYRELOG_E_OK)
@@ -11844,7 +11855,7 @@ wyl_policy_store_publish_self_arm_bundle (wyl_policy_store_t *store,
         WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, &principal_direct_event_id);
   if (rc == WYRELOG_E_OK)
     rc = self_arm_insert_three_text (store,
-        "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+        "INSERT OR IGNORE INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
         " VALUES(?,?,?,?);", bundle,
         WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION, NULL);
   if (rc == WYRELOG_E_OK)
