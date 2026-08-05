@@ -11806,8 +11806,9 @@ wyl_policy_store_publish_self_arm_bundle (wyl_policy_store_t *store,
   gint64 credential_direct_event_id = -1;
   gint64 principal_state_event_id = -1;
   gint64 credential_state_event_id = -1;
-  rc = self_arm_insert_three_text (store,
-      "INSERT OR IGNORE INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+  rc = state == WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY ? WYRELOG_E_OK :
+      self_arm_insert_three_text (store,
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
       " VALUES(?,?,?,?);", bundle,
       WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, NULL);
   if (rc == WYRELOG_E_OK)
@@ -11816,8 +11817,9 @@ wyl_policy_store_publish_self_arm_bundle (wyl_policy_store_t *store,
         "operation,created_at) VALUES(?,?,?,'grant',?);", bundle,
         WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, &principal_direct_event_id);
   if (rc == WYRELOG_E_OK)
-    rc = self_arm_insert_three_text (store,
-        "INSERT OR IGNORE INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+    rc = state == WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY ? WYRELOG_E_OK :
+        self_arm_insert_three_text (store,
+        "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
         " VALUES(?,?,?,?);", bundle,
         WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION, NULL);
   if (rc == WYRELOG_E_OK)

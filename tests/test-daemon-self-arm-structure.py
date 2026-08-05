@@ -16,10 +16,10 @@ if body.count("wyl_engine_session_run_committed_publication (") != 1:
     raise SystemExit("self-arm route must use one committed runner")
 if "managed_perms" in body or "wyl_policy_store_grant_direct_permission" in body:
     raise SystemExit("legacy per-permission self-arm loop remains")
-if "wyl_daemon_policy_write_finish_result (&write, rc)" not in body:
-    raise SystemExit("self-arm route must finalize WRITE before response")
-if not re.search(r"wyl_request_id_new\s*\(publication\.server_operation_id", body):
-    raise SystemExit("self-arm provenance IDs must be frozen before WRITE")
+if "set_json_ok (msg)" not in body:
+    raise SystemExit("self-arm route must finalize WRITE through response")
+if "self_arm_new_uuid (publication.server_operation_id" not in body:
+    raise SystemExit("self-arm provenance IDs must be UUIDv7 before WRITE")
 handler = body[body.index("service_management_authority_arm_handler") :]
 if handler.count("ensure_request_id_header (msg)") != 1:
     raise SystemExit("self-arm must capture one request id for eligibility and bundle")
