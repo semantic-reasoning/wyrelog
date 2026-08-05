@@ -16871,25 +16871,35 @@ check_service_management_self_arm_projection_and_replacement_faults (void)
     g_autofree gchar *body = NULL;
     if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
             "/service-management-authority/arm", env.query,
-            env.access_token, "{}", &status, &body) != 0 || status != 500
-        || body == NULL
-        || strstr (body, "service_authority_failed") == NULL
+            env.access_token, "{}", &status, &body) != 0
+        || status != (replacement ? 200 : 500)
         || !self_arm_bundle_counts (&env, 1, 2)
-        || (!replacement && (!tamper.called || !tamper.tampered))
-        || !wyl_handle_engine_pair_is_poisoned (env.handle)
-        || wyl_handle_engine_pair_is_ready (env.handle)
-        || wyl_handle_engine_terminal_get_state (env.handle)
-        != WYL_ENGINE_TERMINAL_FAILED) {
+        || (!replacement && (body == NULL
+                || strstr (body, "service_authority_failed") == NULL
+                || !tamper.called || !tamper.tampered
+                || !wyl_handle_engine_pair_is_poisoned (env.handle)
+                || wyl_handle_engine_pair_is_ready (env.handle)
+                || wyl_handle_engine_terminal_get_state (env.handle)
+                != WYL_ENGINE_TERMINAL_FAILED))
+        || (replacement && (body == NULL
+                || strstr (body, "\"ok\":true") == NULL
+                || wyl_handle_engine_pair_is_poisoned (env.handle)
+                || !wyl_handle_engine_pair_is_ready (env.handle)
+                || wyl_handle_engine_terminal_get_state (env.handle)
+                != WYL_ENGINE_TERMINAL_AVAILABLE))) {
       service_denial_env_clear (&env);
       return 2785 + (gint) replacement;
     }
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
-    if (wyl_service_auth_authority_validate_available
+    wyrelog_error_t available = wyl_service_auth_authority_validate_available
         (wyl_handle_get_service_auth_authority (env.handle), env.handle,
-            &reason) != WYRELOG_E_BUSY
-        || reason != WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
-        || wyl_daemon_http_policy_write_for_test (env.http.server, NULL, NULL)
-        != WYRELOG_E_BUSY) {
+        &reason);
+    if ((!replacement && (available != WYRELOG_E_BUSY
+                || reason != WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
+                || wyl_daemon_http_policy_write_for_test (env.http.server, NULL,
+                    NULL) != WYRELOG_E_BUSY))
+        || (replacement && (available != WYRELOG_E_OK
+                || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE))) {
       service_denial_env_clear (&env);
       return 2790 + (gint) replacement;
     }
