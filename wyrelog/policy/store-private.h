@@ -2201,6 +2201,9 @@ wyrelog_error_t wyl_policy_store_self_arm_bundle_digest
 wyrelog_error_t wyl_policy_store_classify_self_arm_bundle
     (wyl_policy_store_t * store, const WylPolicySelfArmIdentity * identity,
     WylPolicySelfArmBundleState * out_state);
+wyrelog_error_t wyl_policy_store_verify_self_arm_bundle
+    (wyl_policy_store_t * store, const WylPolicySelfArmBundle * bundle,
+    WylPolicySelfArmBundleState * out_state);
 /* The only self-arm mutation surface. The caller must own an active
  * publication transaction. ALL_ABSENT publishes all eleven rows with the
  * receipt last; PRESENT and LEGACY_PRESENT are no-ops; UNKNOWN fails closed. */

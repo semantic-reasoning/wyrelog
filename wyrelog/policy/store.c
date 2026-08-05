@@ -11516,6 +11516,157 @@ wyl_policy_store_classify_self_arm_bundle (wyl_policy_store_t *store,
   return rc;
 }
 
+wyrelog_error_t
+wyl_policy_store_verify_self_arm_bundle (wyl_policy_store_t *store,
+    const WylPolicySelfArmBundle *bundle,
+    WylPolicySelfArmBundleState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  if (store == NULL || store->db == NULL || out_state == NULL
+      || !self_arm_bundle_is_valid (bundle))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (bundle->identity.tenant_id, WYL_POLICY_SELF_ARM_TENANT) != 0
+      || wyl_policy_subject_has_service_prefix (bundle->
+          identity.actor_subject_id))
+    return WYRELOG_E_POLICY;
+
+  /* First classify the complete identity-owned durable set.  In particular,
+   * LEGACY_PRESENT is an intentional terminal result: old rows are never
+   * upgraded or interpreted as a receipt-backed proof. */
+  wyrelog_error_t rc = wyl_policy_store_classify_self_arm_bundle (store,
+      &bundle->identity, out_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (*out_state == WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT)
+    return WYRELOG_E_OK;
+  if (*out_state != WYL_POLICY_SELF_ARM_BUNDLE_PRESENT) {
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    return WYRELOG_E_POLICY;
+  }
+
+  /* A PRESENT classification proves the row cardinality and all authority
+   * facts, but the caller still needs proof that this exact operation's
+   * provenance is the one it requested.  Read the immutable receipt again and
+   * compare every bundle-owned field; never trust a classifier's aggregate
+   * counts as a substitute for this exact readback. */
+  static const gchar *receipt_sql =
+      "SELECT server_operation_id,tenant_id,actor_subject_id,session_id,"
+      " bundle_digest,principal_direct_event_id,credential_direct_event_id,"
+      " principal_state_event_id,credential_state_event_id,"
+      " principal_audit_id,credential_audit_id,created_at_us"
+      " FROM service_management_self_arm_receipts"
+      " WHERE tenant_id=? AND actor_subject_id=? AND session_id=?"
+      " AND operation_kind='service_management_self_arm';";
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db, receipt_sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, bundle->identity.tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, bundle->identity.actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, bundle->identity.session_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  gboolean exact = FALSE;
+  gint64 event_ids[4] = { 0 };
+  const gchar *server_id = NULL;
+  const gchar *principal_audit_id = NULL;
+  const gchar *credential_audit_id = NULL;
+  guint8 actual_digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES] = { 0 };
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *actor_id = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *session_id = (const gchar *) sqlite3_column_text (stmt, 3);
+    server_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    principal_audit_id = (const gchar *) sqlite3_column_text (stmt, 9);
+    credential_audit_id = (const gchar *) sqlite3_column_text (stmt, 10);
+    const guint8 *digest = sqlite3_column_blob (stmt, 4);
+    gboolean typed = sqlite3_column_type (stmt, 4) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 4) == WYL_POLICY_SELF_ARM_DIGEST_BYTES
+        && sqlite3_column_type (stmt, 5) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 6) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 7) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 8) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 11) == SQLITE_INTEGER;
+    if (typed) {
+      memcpy (actual_digest, digest, sizeof actual_digest);
+      for (guint i = 0; i < G_N_ELEMENTS (event_ids); i++)
+        event_ids[i] = sqlite3_column_int64 (stmt, (int) i + 5);
+      exact = server_id != NULL && principal_audit_id != NULL
+          && credential_audit_id != NULL && tenant_id != NULL
+          && actor_id != NULL && session_id != NULL
+          && g_str_equal (tenant_id, bundle->identity.tenant_id)
+          && g_str_equal (actor_id, bundle->identity.actor_subject_id)
+          && g_str_equal (session_id, bundle->identity.session_id)
+          && g_str_equal (server_id, bundle->server_operation_id)
+          && g_str_equal (principal_audit_id, bundle->principal_audit_id)
+          && g_str_equal (credential_audit_id, bundle->credential_audit_id)
+          && sqlite3_column_int64 (stmt, 11) == bundle->created_at_us
+          && event_ids[0] > 0 && event_ids[1] > 0 && event_ids[2] > 0
+          && event_ids[3] > 0 && event_ids[0] != event_ids[1]
+          && event_ids[2] != event_ids[3];
+    }
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+  }
+  int final_step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && final_step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && exact) {
+    guint8 expected_digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES] = { 0 };
+    wyrelog_error_t digest_rc =
+        wyl_policy_store_self_arm_bundle_digest (bundle, event_ids[0],
+        event_ids[1], event_ids[2], event_ids[3],
+        expected_digest);
+    exact = digest_rc == WYRELOG_E_OK
+        && sodium_memcmp (actual_digest, expected_digest,
+        sizeof expected_digest) == 0;
+    sodium_memzero (expected_digest, sizeof expected_digest);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || !exact) {
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
+  }
+
+  /* Both audit rows must preserve the request ID frozen before the write /
+   * engine critical section.  This check is deliberately ID-addressed, so a
+   * matching aggregate row cannot hide a swapped or duplicated provenance. */
+  static const gchar *audit_sql =
+      "SELECT (SELECT count(*) FROM audit_events WHERE id=?"
+      " AND request_id=?),(SELECT count(*) FROM audit_events WHERE id=?"
+      " AND request_id=?);";
+  stmt = NULL;
+  rc = prepare_stmt (store->db, audit_sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, bundle->principal_audit_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, bundle->identity.original_request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, bundle->credential_audit_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 4, bundle->identity.original_request_id);
+  step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  gboolean audit_exact = FALSE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    audit_exact = sqlite3_column_type (stmt, 0) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 1) == SQLITE_INTEGER
+        && sqlite3_column_int64 (stmt, 0) == 1
+        && sqlite3_column_int64 (stmt, 1) == 1;
+  else if (rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  final_step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && final_step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || !audit_exact) {
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 self_arm_step (wyl_policy_store_t *store, sqlite3_stmt *stmt,
     gint64 *out_row_id)

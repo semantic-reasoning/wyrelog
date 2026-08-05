@@ -1179,6 +1179,13 @@ test('policy-store-self-arm-structure', self_arm_python,
   ],
 )
 
+test('daemon-self-arm-structure', self_arm_python,
+  args : [
+    files('test-daemon-self-arm-structure.py'),
+    meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c',
+  ],
+)
+
 test_policy_graph_authority = executable('test-policy-graph-authority',
   'test-policy-graph-authority.c',
   include_directories : include_directories('../wyrelog'),
