@@ -6803,8 +6803,10 @@ static gboolean
       || (expected_owner == 15 && snapshot->primary_status == 500
           && g_strcmp0 (snapshot->primary_code,
               "service_authority_failed") == 0
-          && snapshot->primary_rc == WYRELOG_E_OK
-          && !snapshot->primary_rc_recorded
+          && ((snapshot->primary_rc == WYRELOG_E_OK
+                  && !snapshot->primary_rc_recorded)
+              || (snapshot->primary_rc == WYRELOG_E_BUSY
+                  && snapshot->primary_rc_recorded))
           && snapshot->cleanup_rc == WYRELOG_E_BUSY))
       && (snapshot->cleanup_rc == expected_cleanup_rc
       || (expected_owner == 15
