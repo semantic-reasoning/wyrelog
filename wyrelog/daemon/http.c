@@ -14711,8 +14711,9 @@ service_management_authority_arm_handler (SoupServer *server,
   if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
     rc = wyl_daemon_policy_write_finish_result (&write, rc);
   if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
-        WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    guint status = rc == WYRELOG_E_BUSY ? 503 :
+        (rc == WYRELOG_E_AUTH || rc == WYRELOG_E_POLICY ? 403 : 500);
+    set_json_error (msg, status, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
     return;
   }
   set_json_ok (msg);
