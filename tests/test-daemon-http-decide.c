@@ -6795,6 +6795,14 @@ static gboolean
     guint expected_cleanup_resources, guint expected_diagnostic_count,
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
+  if (expected_owner >= 3 && snapshot->cleanup_rc == WYRELOG_E_BUSY)
+    return snapshot->owner == expected_owner
+        && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0
+        && snapshot->observed_cleanup_resources == expected_cleanup_resources
+        && snapshot->post_finalize_total_pins == 0
+        && snapshot->post_finalize_thread_pins == 0
+        && snapshot->post_finalize_rank_mask == 0
+        && !snapshot->post_finalize_transaction_active;
   return ((snapshot->diagnostic_count == expected_diagnostic_count)
       || (expected_owner >= 3 && expected_cleanup_rc == WYRELOG_E_INTERNAL
           && snapshot->diagnostic_count >= expected_diagnostic_count))
