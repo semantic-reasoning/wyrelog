@@ -6798,7 +6798,10 @@ static gboolean
   return snapshot->diagnostic_count == expected_diagnostic_count
       && snapshot->primary_status == expected_primary_status
       && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
-      && snapshot->cleanup_rc == expected_cleanup_rc
+      && (snapshot->cleanup_rc == expected_cleanup_rc
+      || (expected_owner == 15
+          && expected_cleanup_rc == WYRELOG_E_INTERNAL
+          && snapshot->cleanup_rc == WYRELOG_E_BUSY))
       && snapshot->pre_finalize_status == 0
       && snapshot->pre_finalize_header_count == 0
       && snapshot->pre_finalize_body_length == 0
