@@ -1278,6 +1278,11 @@ wyl_daemon_policy_write_finish_result (WylDaemonPolicyWrite *write,
 {
   (void) wyl_daemon_policy_write_record_primary (write, primary_rc);
   wyrelog_error_t cleanup_rc = wyl_daemon_policy_write_finalize (write);
+  for (guint attempt = 0;
+      cleanup_rc == WYRELOG_E_BUSY && attempt < 100; attempt++) {
+    g_thread_yield ();
+    cleanup_rc = wyl_daemon_policy_write_finalize (write);
+  }
 #ifdef WYL_TEST_DAEMON_HTTP
   policy_write_record_non_http_finalize_snapshot (write, primary_rc,
       cleanup_rc);
