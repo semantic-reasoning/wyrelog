@@ -3884,6 +3884,254 @@ check_store_principal_states_legacy_schema_migration (void)
   return 0;
 }
 
+/* Issue #753: forward-only validation of the durable human-principal
+ * domain (principal_states, principal_events).  Table-driven coverage
+ * of the reject/accept surface.  The single most important row is the
+ * NON-LOCKED-with-stale-nonzero-count ACCEPT case: the state writer
+ * wyl_policy_store_set_principal_state rewrites only `state`, leaving
+ * a prior lockout's failed_attempt_count/locked_at behind, so a login
+ * after a lockout re-arm legitimately produces such a row.  A reverse
+ * biconditional would reject it and regress every post-lockout login. */
+static gint
+check_store_validate_principal_domain (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1620;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1621;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+
+  static const struct
+  {
+    const gchar *insert;
+    wyrelog_error_t expect;
+  } state_cases[] = {
+    /* REJECT: unknown state literal. */
+    {"INSERT INTO principal_states VALUES('s','bogus',1,0,NULL);",
+        WYRELOG_E_POLICY},
+    /* REJECT: negative/corrupt counter. */
+    {"INSERT INTO principal_states VALUES('s','mfa_required',1,-1,NULL);",
+        WYRELOG_E_POLICY},
+    /* REJECT: counter at G_MAXINT64 would overflow on a later +1. */
+    {"INSERT INTO principal_states "
+          "VALUES('s','mfa_required',1,9223372036854775807,NULL);",
+        WYRELOG_E_POLICY},
+    /* REJECT: locked row with count=0 (forward lock invariant). */
+    {"INSERT INTO principal_states VALUES('s','locked',1,0,100);",
+        WYRELOG_E_POLICY},
+    /* REJECT: locked row with NULL locked_at (forward lock invariant). */
+    {"INSERT INTO principal_states VALUES('s','locked',1,3,NULL);",
+        WYRELOG_E_POLICY},
+    /* ACCEPT: every valid state literal. */
+    {"INSERT INTO principal_states VALUES('s','unverified',1,0,NULL);",
+        WYRELOG_E_OK},
+    {"INSERT INTO principal_states VALUES('s','mfa_required',1,0,NULL);",
+        WYRELOG_E_OK},
+    {"INSERT INTO principal_states VALUES('s','authenticated',1,0,NULL);",
+        WYRELOG_E_OK},
+    {"INSERT INTO principal_states VALUES('s','locked',1,1,100);",
+        WYRELOG_E_OK},
+    {"INSERT INTO principal_states VALUES('s','revoked',1,0,NULL);",
+        WYRELOG_E_OK},
+    /* ACCEPT (forward-only key case): NON-LOCKED rows carrying a stale
+     * nonzero counter and a stale locked_at MUST be accepted. */
+    {"INSERT INTO principal_states VALUES('s','mfa_required',1,5,12345);",
+        WYRELOG_E_OK},
+    {"INSERT INTO principal_states VALUES('s','authenticated',1,4,999);",
+        WYRELOG_E_OK},
+    {"INSERT INTO principal_states VALUES('s','unverified',1,2,777);",
+        WYRELOG_E_OK},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (state_cases); i++) {
+    if (sqlite3_exec (db, "DELETE FROM principal_states;", NULL, NULL, NULL)
+        != SQLITE_OK)
+      return 1622;
+    if (sqlite3_exec (db, state_cases[i].insert, NULL, NULL, NULL) != SQLITE_OK)
+      return 1623;
+    if (wyl_policy_store_validate_principal_domain (store)
+        != state_cases[i].expect)
+      return 1700 + (gint) i;
+  }
+  if (sqlite3_exec (db, "DELETE FROM principal_states;", NULL, NULL, NULL)
+      != SQLITE_OK)
+    return 1624;
+
+  /* All eight defined transitions land together and must be accepted. */
+  if (sqlite3_exec (db,
+          "INSERT INTO principal_events"
+          "(subject_id,event,from_state,to_state,created_at) VALUES"
+          "('s','login_ok','unverified','mfa_required',1),"
+          "('s','login_skip_mfa','unverified','authenticated',1),"
+          "('s','mfa_ok','mfa_required','authenticated',1),"
+          "('s','failed_attempt','mfa_required','mfa_required',1),"
+          "('s','lock','mfa_required','locked',1),"
+          "('s','lock','authenticated','locked',1),"
+          "('s','revoke','authenticated','revoked',1),"
+          "('s','unlock','locked','unverified',1);", NULL, NULL, NULL)
+      != SQLITE_OK)
+    return 1625;
+  if (wyl_policy_store_validate_principal_domain (store) != WYRELOG_E_OK)
+    return 1626;
+
+  static const char *const bad_events[] = {
+    /* undefined (from,event,to) tuple - event valid but no such edge */
+    "INSERT INTO principal_events"
+        "(subject_id,event,from_state,to_state,created_at) "
+        "VALUES('s','mfa_ok','unverified','authenticated',1);",
+    /* defined edge but wrong to_state */
+    "INSERT INTO principal_events"
+        "(subject_id,event,from_state,to_state,created_at) "
+        "VALUES('s','lock','mfa_required','revoked',1);",
+    /* unknown event literal */
+    "INSERT INTO principal_events"
+        "(subject_id,event,from_state,to_state,created_at) "
+        "VALUES('s','explode','mfa_required','locked',1);",
+    /* unknown from_state literal */
+    "INSERT INTO principal_events"
+        "(subject_id,event,from_state,to_state,created_at) "
+        "VALUES('s','lock','bogus','locked',1);",
+    /* unknown to_state literal */
+    "INSERT INTO principal_events"
+        "(subject_id,event,from_state,to_state,created_at) "
+        "VALUES('s','lock','mfa_required','bogus',1);",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_events); i++) {
+    if (sqlite3_exec (db, "DELETE FROM principal_events;", NULL, NULL, NULL)
+        != SQLITE_OK)
+      return 1627;
+    if (sqlite3_exec (db, bad_events[i], NULL, NULL, NULL) != SQLITE_OK)
+      return 1628;
+    if (wyl_policy_store_validate_principal_domain (store) != WYRELOG_E_POLICY)
+      return 1720 + (gint) i;
+  }
+
+  return 0;
+}
+
+/* Issue #753: a pre-lockout store (valid rows, three-column
+ * principal_states) round-trips through the open-time migration:
+ * create_schema back-fills the lockout columns and the principal-domain
+ * validator accepts every migrated row with no drift. */
+static gint
+check_store_validate_principal_domain_legacy_roundtrip (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *tmpdir =
+      g_dir_make_tmp ("wyl-policy-pd-legacy-XXXXXX", &error);
+  if (tmpdir == NULL)
+    return 1640;
+  g_autofree gchar *store_path =
+      g_build_filename (tmpdir, "policy.store", NULL);
+  g_autofree gchar *key_path = g_build_filename (tmpdir, "policy.key", NULL);
+  if (!write_policy_key (key_path, 23))
+    return 1641;
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 1642;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 1643;
+    /* Model a pre-lockout binary: three-column principal_states with a
+     * spread of valid states, no lockout columns. */
+    if (sqlite3_exec (wyl_policy_store_get_db (store),
+            "DROP TABLE principal_states;"
+            "CREATE TABLE principal_states ("
+            "  subject_id TEXT PRIMARY KEY,"
+            "  state TEXT NOT NULL,"
+            "  updated_at INTEGER"
+            ");"
+            "INSERT INTO principal_states VALUES('legacy.a','unverified',10);"
+            "INSERT INTO principal_states VALUES('legacy.b','mfa_required',11);"
+            "INSERT INTO principal_states"
+            "  VALUES('legacy.c','authenticated',12);",
+            NULL, NULL, NULL) != SQLITE_OK)
+      return 1644;
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 1645;
+    /* create_schema migrates and (via validate_snapshot at the tail)
+     * would reject any invalid row; a clean legacy store succeeds. */
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 1646;
+    if (wyl_policy_store_validate_principal_domain (store) != WYRELOG_E_OK)
+      return 1647;
+    /* No drift: the three rows survive with their states intact and the
+     * back-filled columns default to (0, NULL). */
+    g_autofree gchar *st = NULL;
+    gint64 count = -1;
+    gint64 locked_at = -1;
+    gboolean found = FALSE;
+    if (wyl_policy_store_get_principal_lock_info (store, "legacy.b",
+            &st, &count, &locked_at, &found) != WYRELOG_E_OK)
+      return 1648;
+    if (!found || g_strcmp0 (st, "mfa_required") != 0 || count != 0
+        || locked_at != G_MININT64)
+      return 1649;
+  }
+
+  (void) g_remove (store_path);
+  (void) g_remove (key_path);
+  (void) g_rmdir (tmpdir);
+  return 0;
+}
+
+/* Issue #753: a legacy store carrying an invalid principal row fails
+ * closed at open time (create_schema returns E_POLICY); the store never
+ * repairs the row or invents authority for it. */
+static gint
+check_store_validate_principal_domain_open_time_reject (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *tmpdir =
+      g_dir_make_tmp ("wyl-policy-pd-reject-XXXXXX", &error);
+  if (tmpdir == NULL)
+    return 1660;
+  g_autofree gchar *store_path =
+      g_build_filename (tmpdir, "policy.store", NULL);
+  g_autofree gchar *key_path = g_build_filename (tmpdir, "policy.key", NULL);
+  if (!write_policy_key (key_path, 29))
+    return 1661;
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 1662;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 1663;
+    /* Seed a durable row that violates the forward lock invariant:
+     * LOCKED with counter=0 and NULL locked_at. */
+    if (sqlite3_exec (wyl_policy_store_get_db (store),
+            "INSERT INTO principal_states "
+            "VALUES('corrupt.user','locked',7,0,NULL);",
+            NULL, NULL, NULL) != SQLITE_OK)
+      return 1664;
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 1665;
+    /* Fail-closed at open: create_schema runs the principal-domain
+     * validation and refuses to bring the invalid store online. */
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+      return 1666;
+  }
+
+  (void) g_remove (store_path);
+  (void) g_remove (key_path);
+  (void) g_rmdir (tmpdir);
+  return 0;
+}
+
 static gint
 check_store_sets_session_state (void)
 {
@@ -5366,6 +5614,12 @@ main (void)
   if ((rc = check_store_apply_principal_failure_refuses_already_locked ()) != 0)
     return rc;
   if ((rc = check_store_principal_states_legacy_schema_migration ()) != 0)
+    return rc;
+  if ((rc = check_store_validate_principal_domain ()) != 0)
+    return rc;
+  if ((rc = check_store_validate_principal_domain_legacy_roundtrip ()) != 0)
+    return rc;
+  if ((rc = check_store_validate_principal_domain_open_time_reject ()) != 0)
     return rc;
   if ((rc = check_store_sets_session_state ()) != 0)
     return rc;

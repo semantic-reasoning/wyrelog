@@ -663,6 +663,76 @@ check_totp_enrollment_update_step_absent_subject_is_noop (void)
   return 0;
 }
 
+/* Issue #753: apply_principal_failure's overflow guard.  A durable
+ * counter already at G_MAXINT64 (or negative/corrupt) must not be
+ * incremented into signed-overflow territory: the helper returns
+ * E_POLICY, rolls the savepoint back, and emits no principal_event
+ * row.  The honest 0..threshold progression is exercised by the
+ * apply_principal_failure tests in test-policy-store.c and stays
+ * unaffected because the guard fires only at the extreme edges. */
+static gint
+check_apply_principal_failure_counter_overflow_guard (void)
+{
+  static const gint64 seeds[] = { G_MAXINT64, -1 };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (seeds); i++) {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+      return 900;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 901;
+    sqlite3 *db = wyl_policy_store_get_db (store);
+
+    g_autofree gchar *insert = g_strdup_printf ("INSERT INTO principal_states "
+        "(subject_id, state, updated_at, failed_attempt_count, locked_at) "
+        "VALUES ('edge.user', 'mfa_required', 1, %" G_GINT64_FORMAT ", NULL);",
+        seeds[i]);
+    if (sqlite3_exec (db, insert, NULL, NULL, NULL) != SQLITE_OK)
+      return 902;
+
+    g_autofree gchar *out_state = NULL;
+    gint64 out_count = -1;
+    gint64 out_locked_at = -1;
+    gint64 out_event_id = -1;
+    if (wyl_policy_store_apply_principal_failure (store, "edge.user", 5,
+            1600000000, &out_state, &out_count, &out_locked_at,
+            &out_event_id) != WYRELOG_E_POLICY)
+      return 903;
+
+    /* Rollback: the durable counter is untouched (still the seed). */
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2 (db,
+            "SELECT failed_attempt_count FROM principal_states "
+            "WHERE subject_id = 'edge.user';", -1, &stmt, NULL) != SQLITE_OK)
+      return 904;
+    if (sqlite3_step (stmt) != SQLITE_ROW) {
+      sqlite3_finalize (stmt);
+      return 905;
+    }
+    gint64 persisted = sqlite3_column_int64 (stmt, 0);
+    sqlite3_finalize (stmt);
+    if (persisted != seeds[i])
+      return 906;
+
+    /* No principal_event row was emitted. */
+    sqlite3_stmt *ev = NULL;
+    if (sqlite3_prepare_v2 (db,
+            "SELECT COUNT(*) FROM principal_events "
+            "WHERE subject_id = 'edge.user';", -1, &ev, NULL) != SQLITE_OK)
+      return 907;
+    if (sqlite3_step (ev) != SQLITE_ROW) {
+      sqlite3_finalize (ev);
+      return 908;
+    }
+    gint64 events = sqlite3_column_int64 (ev, 0);
+    sqlite3_finalize (ev);
+    if (events != 0)
+      return 909;
+  }
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -691,6 +761,8 @@ main (void)
   if ((rc = check_totp_enrollment_insert_replaces_existing ()) != 0)
     return rc;
   if ((rc = check_totp_enrollment_update_step_absent_subject_is_noop ()) != 0)
+    return rc;
+  if ((rc = check_apply_principal_failure_counter_overflow_guard ()) != 0)
     return rc;
   return 0;
 }

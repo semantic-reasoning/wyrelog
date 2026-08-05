@@ -577,9 +577,13 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
 {
   (void) server;
   /* Structural coverage of the "principal LOCKED -> 429 mfa_locked"
-   * branch. Commit 5 introduces the FSM-driven lockout; here we
-   * directly write principal_state=locked for the subject AFTER login
-   * so the handler observes a locked principal at verify time. */
+   * branch. Commit 5 introduces the FSM-driven lockout; here we drive
+   * one threshold-crossing failure for the subject AFTER login so the
+   * handler observes a locked principal at verify time. A raw
+   * set_principal_state("locked") would leave failed_attempt_count=0
+   * and locked_at NULL, which violates the forward lock invariant the
+   * principal-domain validator now enforces; driving the failure yields
+   * a legitimately-written locked row (count>=1, locked_at set). */
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autofree gchar *session_token = NULL;
   if (do_login (session, base_url, "mfa.locked", &session_token) != 0)
@@ -588,8 +592,15 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
     return 1201;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_set_principal_state (store, "mfa.locked",
-          "locked") != WYRELOG_E_OK)
+  g_autofree gchar *lock_state = NULL;
+  gint64 lock_count = 0;
+  gint64 lock_locked_at = 0;
+  gint64 lock_event_id = 0;
+  if (wyl_policy_store_apply_principal_failure (store, "mfa.locked", 1,
+          (gint64) 1600000000, &lock_state, &lock_count, &lock_locked_at,
+          &lock_event_id) != WYRELOG_E_OK)
+    return 1202;
+  if (g_strcmp0 (lock_state, "locked") != 0)
     return 1202;
 
   gchar proof[8];

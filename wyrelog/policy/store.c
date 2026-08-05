@@ -50,6 +50,7 @@
 #include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
+#include "wyrelog/wyl-fsm-principal-private.h"
 #include "wyrelog/wyl-log-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "store-lease-private.h"
@@ -10438,6 +10439,16 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
     if (rc != WYRELOG_E_OK)
       return rc;
   }
+  /* Open-time fail-closed gate for the durable human-principal domain.
+   * A fresh/empty principal_states passes trivially; a legacy store that
+   * carries an invalid row (bad state literal, corrupt/overflowing
+   * counter, a LOCKED row that never had its counter/timestamp written,
+   * or an undefined event transition) fails closed here rather than
+   * projecting the row into a live engine pair.  No repair: the store
+   * never invents authority for a malformed row. */
+  rc = wyl_policy_store_validate_principal_domain (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_policy_store_ensure_default_tenant (store);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -14395,6 +14406,109 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
   return found ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+}
+
+/*
+ * Validates the durable human-principal domain tables (principal_states,
+ * principal_events) against the forward-only invariants that every writer
+ * upholds, before any row is projected into a live engine pair.
+ *
+ * FORWARD-ONLY: the checks only assert what a legitimate writer must have
+ * established.  In particular we do NOT enforce the reverse biconditionals
+ * (e.g. "count==threshold IFF locked", "non-locked IFF count==0").  A
+ * stale-relogin row - where wyl_policy_store_set_principal_state rewrites
+ * only `state` and leaves a nonzero failed_attempt_count/locked_at behind -
+ * is a legitimately-written row and MUST be accepted, or every login after a
+ * lockout re-arm would fail closed and regress into a DoS.
+ *
+ * Diagnostics are NON-SECRET: subject_id is a subject-safe locator; no TOTP
+ * seed/code, key, or credential byte is ever logged.  Fails closed on the
+ * first violation with WYRELOG_E_POLICY; never repairs a row (that would
+ * invent authority).
+ */
+wyrelog_error_t
+wyl_policy_store_validate_principal_domain (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT subject_id, state, failed_attempt_count, locked_at "
+      "FROM principal_states;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *state = (const gchar *) sqlite3_column_text (stmt, 1);
+    gint64 cnt = sqlite3_column_int64 (stmt, 2);
+    gboolean locked_at_is_null = sqlite3_column_type (stmt, 3) == SQLITE_NULL;
+    wyl_principal_state_t st = wyl_principal_state_from_name (state);
+    gboolean bad = FALSE;
+
+    if (st == WYL_PRINCIPAL_STATE_LAST_)
+      bad = TRUE;               /* unknown state literal */
+    else if (cnt < 0)
+      bad = TRUE;               /* negative/corrupt counter */
+    else if (cnt == G_MAXINT64)
+      bad = TRUE;               /* would overflow on a later +1 */
+    else if (st == WYL_PRINCIPAL_STATE_LOCKED && (cnt < 1 || locked_at_is_null))
+      bad = TRUE;               /* forward lock invariant */
+
+    if (bad) {
+      WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+          "principal_states row rejected: subject=%s state=%s count=%lld "
+          "locked_at=%s", subject_id != NULL ? subject_id : "(null)",
+          state != NULL ? state : "(null)", (long long) cnt,
+          locked_at_is_null ? "null" : "set");
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+
+  stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT from_state, event, to_state FROM principal_events;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *from_state = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *event = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *to_state = (const gchar *) sqlite3_column_text (stmt, 2);
+    wyl_principal_state_t from = wyl_principal_state_from_name (from_state);
+    wyl_principal_event_t ev = wyl_principal_event_from_name (event);
+    wyl_principal_state_t to = wyl_principal_state_from_name (to_state);
+    gboolean bad = FALSE;
+
+    if (from == WYL_PRINCIPAL_STATE_LAST_ || ev == WYL_PRINCIPAL_EVENT_LAST_
+        || to == WYL_PRINCIPAL_STATE_LAST_) {
+      bad = TRUE;               /* unknown state/event literal */
+    } else {
+      wyl_principal_state_t validated = WYL_PRINCIPAL_STATE_LAST_;
+      wyrelog_error_t step = wyl_fsm_principal_step (from, ev, &validated);
+      if (step != WYRELOG_E_OK || validated != to)
+        bad = TRUE;             /* not one of the defined transitions */
+    }
+
+    if (bad) {
+      WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+          "principal_events row rejected: from=%s event=%s to=%s",
+          from_state != NULL ? from_state : "(null)",
+          event != NULL ? event : "(null)",
+          to_state != NULL ? to_state : "(null)");
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+
+  return WYRELOG_E_OK;
 }
 
 static gboolean
@@ -24825,6 +24939,10 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  rc = wyl_policy_store_validate_principal_domain (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   gboolean found = FALSE;
   static const gchar *cycle_sql =
       "WITH RECURSIVE walk(root, node, depth, path) AS ("
@@ -25999,7 +26117,18 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
     const gchar *cur_state = (const gchar *) sqlite3_column_text (sel, 0);
     if (g_strcmp0 (cur_state, "locked") == 0)
       already_locked = TRUE;
-    next_count = sqlite3_column_int64 (sel, 1) + 1;
+    /* Overflow-only guard: reject a negative (corrupt) counter and a
+     * counter already at G_MAXINT64 that the +1 below would overflow.
+     * This must NOT reject the honest 4->5 threshold crossing (cur=4)
+     * nor the stale count-5 re-login row (cur=5 != G_MAXINT64), so
+     * login-after-lockout behaviour is unchanged. */
+    gint64 cur = sqlite3_column_int64 (sel, 1);
+    if (cur < 0 || cur == G_MAXINT64) {
+      sqlite3_finalize (sel);
+      rc = WYRELOG_E_POLICY;
+      goto rollback;
+    }
+    next_count = cur + 1;
   } else if (step_rc == SQLITE_DONE) {
     next_count = 1;
   } else {
