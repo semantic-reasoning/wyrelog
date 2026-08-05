@@ -1540,6 +1540,20 @@ test_daemon_mfa_validator_seams = executable('test-daemon-mfa-validator-seams',
 
 test('daemon-mfa-validator-seams', test_daemon_mfa_validator_seams)
 
+# #751: shared-handle multi-threaded barrier race proving exactly-once TOTP
+# proof consumption + MFA_OK publication under N concurrent same-step requests.
+test_daemon_mfa_validator_race = executable('test-daemon-mfa-validator-race',
+  'test-daemon-mfa-validator-race.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sqlite_dep, sodium_dep, dependency('threads')],
+)
+
+test('daemon-mfa-validator-race', test_daemon_mfa_validator_race,
+  timeout : 120)
+
 test_daemon_options = executable('test-daemon-options',
   'test-daemon-options.c',
   '../wyrelog/daemon/options.c',

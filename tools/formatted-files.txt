@@ -2,6 +2,8 @@ tests/fact-test-support.h
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
 tests/test-daemon-http-decide.c
+tests/test-daemon-http-mfa.c
+tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
@@ -81,6 +83,7 @@ wyrelog/wyl-fsm-permission-scope.c
 wyrelog/wyl-fsm-principal-private.h
 wyrelog/wyl-fsm-session-private.h
 wyrelog/wyl-guard-expr-private.h
+wyrelog/wyl-handle-private.h
 wyrelog/wyl-handle.c
 wyrelog/wyl-id-private.h
 wyrelog/wyl-keyprovider-dev-private.h

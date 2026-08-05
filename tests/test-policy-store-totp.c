@@ -729,7 +729,105 @@ check_apply_principal_failure_counter_overflow_guard (void)
     if (events != 0)
       return 909;
   }
+  return 0;
+}
 
+static gint
+check_totp_enrollment_advance_step_compare_and_advance (void)
+{
+  /* Issue #751 CAS primitive: advance_step only fires when new_step is
+   * strictly greater than the persisted watermark.  A strictly-greater
+   * step advances and reports out_advanced TRUE; an equal or lesser step
+   * is a clean no-op reporting FALSE with the watermark unchanged.  A
+   * svc: subject is rejected with E_POLICY. */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 190;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 191;
+
+  WylTotpEnrollment enr = { 0 };
+  enr.subject_id = g_strdup ("cas.subject");
+  fill_seed (enr.secret, 0x40);
+  enr.last_verified_step = 100;
+  enr.enrolled_at = 1700000000;
+  wyrelog_error_t irc = wyl_policy_store_totp_enrollment_insert (store, &enr);
+  wyl_totp_enrollment_clear (&enr);
+  if (irc != WYRELOG_E_OK)
+    return 192;
+
+  /* Strictly greater: advances, out_advanced TRUE, watermark == new. */
+  gboolean advanced = FALSE;
+  if (wyl_policy_store_totp_enrollment_advance_step (store, "cas.subject", 150,
+      &advanced) != WYRELOG_E_OK)
+    return 193;
+  if (!advanced)
+    return 194;
+  WylTotpEnrollment out = { 0 };
+  gboolean found = FALSE;
+  if (wyl_policy_store_totp_enrollment_lookup (store, "cas.subject", &out,
+      &found) != WYRELOG_E_OK || !found) {
+    wyl_totp_enrollment_clear (&out);
+    return 195;
+  }
+  if (out.last_verified_step != 150) {
+    wyl_totp_enrollment_clear (&out);
+    return 196;
+  }
+  wyl_totp_enrollment_clear (&out);
+
+  /* Equal step: no-op, out_advanced FALSE, watermark unchanged. */
+  advanced = TRUE;
+  if (wyl_policy_store_totp_enrollment_advance_step (store, "cas.subject", 150,
+      &advanced) != WYRELOG_E_OK)
+    return 197;
+  if (advanced)
+    return 198;
+
+  /* Lesser step: no-op, out_advanced FALSE, watermark unchanged. */
+  advanced = TRUE;
+  if (wyl_policy_store_totp_enrollment_advance_step (store, "cas.subject", 10,
+      &advanced) != WYRELOG_E_OK)
+    return 199;
+  if (advanced)
+    return 200;
+
+  WylTotpEnrollment out2 = { 0 };
+  found = FALSE;
+  if (wyl_policy_store_totp_enrollment_lookup (store, "cas.subject", &out2,
+      &found) != WYRELOG_E_OK || !found) {
+    wyl_totp_enrollment_clear (&out2);
+    return 201;
+  }
+  if (out2.last_verified_step != 150) {
+    wyl_totp_enrollment_clear (&out2);
+    return 202;
+  }
+  wyl_totp_enrollment_clear (&out2);
+
+  /* svc: subject is rejected with E_POLICY and out_advanced FALSE. */
+  advanced = TRUE;
+  if (wyl_policy_store_totp_enrollment_advance_step (store, "svc:robot", 5,
+      &advanced) != WYRELOG_E_POLICY)
+    return 203;
+  if (advanced)
+    return 204;
+
+  /* NULL args are rejected with E_INVALID. */
+  if (wyl_policy_store_totp_enrollment_advance_step (store, "cas.subject", 5,
+      NULL) != WYRELOG_E_INVALID)
+    return 205;
+  if (wyl_policy_store_totp_enrollment_advance_step (NULL, "cas.subject", 5,
+      &advanced) != WYRELOG_E_INVALID)
+    return 206;
+
+  /* Absent subject: clean no-op (SQLITE_DONE, zero changes). */
+  advanced = TRUE;
+  if (wyl_policy_store_totp_enrollment_advance_step (store, "cas.absent", 5,
+      &advanced) != WYRELOG_E_OK)
+    return 207;
+  if (advanced)
+    return 208;
   return 0;
 }
 
@@ -763,6 +861,8 @@ main (void)
   if ((rc = check_totp_enrollment_update_step_absent_subject_is_noop ()) != 0)
     return rc;
   if ((rc = check_apply_principal_failure_counter_overflow_guard ()) != 0)
+    return rc;
+  if ((rc = check_totp_enrollment_advance_step_compare_and_advance ()) != 0)
     return rc;
   return 0;
 }

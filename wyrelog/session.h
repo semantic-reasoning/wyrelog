@@ -99,6 +99,11 @@ wyrelog_error_t wyl_session_mfa_verify (WylHandle * handle,
  * Proof-bearing MFA boundary. The principal transition is applied only after
  * |validator| accepts |proof|. Missing or empty proof and missing validator
  * fail before any Policy DB, audit, or read-engine mutation is attempted.
+ *
+ * |validator| must ONLY verify the proof. This function applies the
+ * MFA_REQUIRED -> AUTHENTICATED transition itself on success; a validator that
+ * also publishes it would produce a second transition and a duplicate MFA_OK
+ * event.
  */
 wyrelog_error_t wyl_session_mfa_verify_with_proof (WylHandle * handle,
     WylSession * session, const gchar * proof, WylMfaValidator validator,
