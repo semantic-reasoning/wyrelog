@@ -1,8 +1,8 @@
 {
-  "aggregate": "744cca7177842f361b75737078b6ce06d51a27c659cea8a6e070eddb964bafc4",
+  "aggregate": "4a05ef4630e5ac84b99798e2046bd604c983aad6dcd851bbc25c38a85ee3597d",
   "directives": {
-    "count": 444,
-    "sha256": "3bec2d7e78138750579386b79f7d6ebdf2c75ad9b8ddbc49fe7307a7a71d2435"
+    "count": 460,
+    "sha256": "777ce388548ef9b30c9229b9391b8727238ede826563376928c4baca800cb5cd"
   },
   "functions": {
     "direct_permission_mutation_handler": "a92ce39084b189af1cc8a3fa09412338b774397d870852ad20fb3c08ec5a4656",
@@ -27,7 +27,7 @@
     "schema_register_handler": "cca2dcf77243a09eb507e04101679eb0bed4f2bf0c343cf0226726ab600734e8",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
     "service_credential_operation_recover_execute": "1395b3874bcb04c6c69203b4bf19e8b23ef43829e31b998a3763286dc32936ca",
-    "service_management_authority_arm_handler": "cb3075ddcba3ec5c120b7c1abb4e66173b91f1102d3ddac18a98905eb50c0998",
+    "service_management_authority_arm_handler": "e51d112211908cda03d6b6f5b34b47f58b91311ad1e96dcf460c016bb29da69a",
     "set_fact_op_json": "5f16d82dcc774aaa8ffd55e2c7f7b3615a8613057e845260d621aec96371c2e3",
     "set_graph_mutation_json": "2998f2e32e7e0c62f5fee43854b7e88402141e32ddabe5e1969e25b55cd86ecd",
     "set_json_error": "1e066e8be5ee97aa6ec41f0ed6293cc1378d64ed06495a55cbebb54ae1066d65",

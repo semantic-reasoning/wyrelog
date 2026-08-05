@@ -529,6 +529,24 @@ void wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
 void wyl_daemon_http_tenant_create_publication_snapshot_for_test
     (SoupServer * server, guint * out_attempts,
     guint * out_noop_fault_discards);
+/* Per-row precommit fault points in the self-arm publication bundle. */
+typedef enum
+{
+  WYL_DAEMON_SELF_ARM_ROW_FAULT_NONE = 0,
+  WYL_DAEMON_SELF_ARM_ROW_FAULT_GRANT,
+  WYL_DAEMON_SELF_ARM_ROW_FAULT_DIRECT_EVENT,
+  WYL_DAEMON_SELF_ARM_ROW_FAULT_SET_STATE,
+  WYL_DAEMON_SELF_ARM_ROW_FAULT_STATE_EVENT,
+  WYL_DAEMON_SELF_ARM_ROW_FAULT_AUDIT,
+} WylDaemonSelfArmRowFault;
+/* One-shot: fail the mutation of self-arm perm @perm_index (0 or 1) at @row so
+ * the whole bundle rolls back cleanly before commit. */
+void wyl_daemon_http_fail_next_self_arm_row_for_test (SoupServer * server,
+    guint perm_index, WylDaemonSelfArmRowFault row);
+/* One-shot: force the post-commit self-arm verify to fail.  When @persistent
+ * the repair verify fails too, so the pair stays poisoned. */
+void wyl_daemon_http_fail_next_self_arm_verify_for_test (SoupServer * server,
+    gboolean persistent);
 typedef enum
 {
   WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN = 0,

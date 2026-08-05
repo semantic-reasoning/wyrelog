@@ -470,6 +470,10 @@ typedef struct _WylDaemonHttpContext
   gboolean fail_next_tenant_creator_event;
   gboolean fail_next_tenant_creator_receipt_verification;
   gboolean fail_next_tenant_lifecycle_verification;
+  guint fail_next_self_arm_fault_perm;
+  WylDaemonSelfArmRowFault fail_next_self_arm_row_fault;
+  gboolean fail_next_self_arm_verify;
+  gboolean fail_next_self_arm_verify_persistent;
   guint tenant_create_publication_attempts;
   guint tenant_create_noop_fault_discards;
   gboolean fail_next_tenant_seal_verification;
@@ -3078,6 +3082,32 @@ void wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test
     return;
   g_mutex_lock (&ctx->lock);
   ctx->fail_next_tenant_lifecycle_verification = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_fail_next_self_arm_row_for_test (SoupServer *server,
+    guint perm_index, WylDaemonSelfArmRowFault row)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_self_arm_fault_perm = perm_index;
+  ctx->fail_next_self_arm_row_fault = row;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_fail_next_self_arm_verify_for_test (SoupServer *server,
+    gboolean persistent)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_self_arm_verify = TRUE;
+  ctx->fail_next_self_arm_verify_persistent = persistent;
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -14408,6 +14438,224 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
+/* The two service-management permissions armed by the self-arm route, in a
+ * fixed order so the deterministic audit ids and the bundle slots are stable
+ * across retries. */
+static const gchar *const self_arm_managed_perms[] = {
+  "wr.service_principal.manage",
+  "wr.service_credential.manage",
+};
+
+typedef enum
+{
+  SELF_ARM_OUTCOME_OK = 0,
+  SELF_ARM_OUTCOME_CONTRADICTION,
+} SelfArmOutcome;
+
+typedef enum
+{
+  SELF_ARM_CLASS_COMPLETE = 0,  /* armed + grant present: verify only */
+  SELF_ARM_CLASS_REPAIR,        /* dormant/NULL + grant present: arm only */
+  SELF_ARM_CLASS_FULL,          /* dormant/NULL + grant absent: grant + arm */
+  SELF_ARM_CLASS_CONTRADICTORY, /* armed w/o grant, or firing/cooldown/other */
+} SelfArmPermClass;
+
+typedef struct
+{
+  const gchar *perm;
+  const WylAuditEvent *audit_event;
+  const gchar *audit_id;
+  gint64 event_id;
+} SelfArmPerm;
+
+typedef struct
+{
+  const gchar *actor;
+  const gchar *scope;
+  SelfArmPerm perms[G_N_ELEMENTS (self_arm_managed_perms)];
+  SelfArmOutcome outcome;
+#ifdef WYL_TEST_DAEMON_HTTP
+  guint fault_perm;
+  WylDaemonSelfArmRowFault fault_row;
+  gboolean verify_fail;
+#endif
+} SelfArmBundle;
+
+/* Derives a stable UUIDv7-shaped audit id from (actor, perm, scope, action).
+ * A response-loss retry re-derives the SAME id, so the store's id-keyed audit
+ * append dedups the authoritative evidence instead of minting a duplicate.
+ * new_from_fields requires an id that wyl_id_parse accepts, so the version and
+ * variant nibbles are forced onto the SHA-256 digest of the stable key. */
+static gboolean
+self_arm_derive_audit_id (const gchar *actor, const gchar *perm,
+    const gchar *scope, gchar out[WYL_ID_STRING_BUF])
+{
+  g_autofree gchar *key = g_strdup_printf ("%s|%s|%s|permission_state.grant",
+      actor, perm, scope);
+  g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      key, -1);
+  if (digest == NULL || strlen (digest) < 32)
+    return FALSE;
+  gchar hex[33];
+  memcpy (hex, digest, 32);
+  hex[32] = '\0';
+  hex[12] = '7';                /* RFC 9562 version 7 */
+  hex[16] = '8';                /* RFC 9562 variant 10xx */
+  g_snprintf (out, WYL_ID_STRING_BUF, "%.8s-%.4s-%.4s-%.4s-%.12s", hex,
+      hex + 8, hex + 12, hex + 16, hex + 20);
+  return TRUE;
+}
+
+static wyrelog_error_t
+self_arm_append_audit (wyl_policy_store_t *store, const SelfArmPerm *perm)
+{
+  if (perm->audit_event == NULL || perm->audit_id == NULL)
+    return WYRELOG_E_OK;
+  gboolean inserted = FALSE;
+  return wyl_policy_store_append_audit_event_full (store, perm->audit_id,
+      wyl_audit_event_get_created_at_us (perm->audit_event),
+      wyl_audit_event_get_subject_id (perm->audit_event),
+      wyl_audit_event_get_action (perm->audit_event),
+      wyl_audit_event_get_resource_id (perm->audit_event),
+      wyl_audit_event_get_deny_reason (perm->audit_event),
+      wyl_audit_event_get_deny_origin (perm->audit_event),
+      wyl_audit_event_get_request_id (perm->audit_event),
+      wyl_audit_event_get_decision (perm->audit_event), &inserted);
+}
+
+/* Classifies (actor, perm, scope) from durable state so the bundle can decide
+ * exactly which rows to write.  NULL/"dormant" perm_state is treated as
+ * dormant (matching the permission-scope FSM). */
+static wyrelog_error_t
+self_arm_classify_perm (wyl_policy_store_t *store, const gchar *actor,
+    const gchar *perm, const gchar *scope, SelfArmPermClass *out_class)
+{
+  gboolean has_grant = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_direct_permission_exists (store, actor,
+      perm, scope, &has_grant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *state = NULL;
+  rc = wyl_policy_store_get_permission_state_for_publication (store, actor,
+      perm, scope, &state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean armed = state != NULL && g_strcmp0 (state, "armed") == 0;
+  gboolean dormant = state == NULL || g_strcmp0 (state, "dormant") == 0;
+  if (armed)
+    *out_class =
+        has_grant ? SELF_ARM_CLASS_COMPLETE : SELF_ARM_CLASS_CONTRADICTORY;
+  else if (dormant)
+    *out_class = has_grant ? SELF_ARM_CLASS_REPAIR : SELF_ARM_CLASS_FULL;
+  else
+    *out_class = SELF_ARM_CLASS_CONTRADICTORY;  /* firing / cooldown / other */
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+self_arm_mutate_one (wyl_policy_store_t *store, SelfArmBundle *bundle,
+    guint index, SelfArmPermClass klass)
+{
+  SelfArmPerm *perm = &bundle->perms[index];
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef WYL_TEST_DAEMON_HTTP
+#define SELF_ARM_ROW_FAULT(row) \
+  (bundle->fault_row == (row) && bundle->fault_perm == (index))
+#else
+#define SELF_ARM_ROW_FAULT(row) (FALSE)
+#endif
+  if (klass == SELF_ARM_CLASS_COMPLETE)
+    return WYRELOG_E_OK;        /* verify-only: both tuples already durable */
+  if (klass == SELF_ARM_CLASS_FULL) {
+    if (SELF_ARM_ROW_FAULT (WYL_DAEMON_SELF_ARM_ROW_FAULT_GRANT))
+      return WYRELOG_E_IO;
+    rc = wyl_policy_store_grant_direct_permission (store, bundle->actor,
+        perm->perm, bundle->scope);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (SELF_ARM_ROW_FAULT (WYL_DAEMON_SELF_ARM_ROW_FAULT_DIRECT_EVENT))
+      return WYRELOG_E_IO;
+    rc = wyl_policy_store_append_direct_permission_event (store, bundle->actor,
+        perm->perm, bundle->scope, "grant");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  /* REPAIR and FULL both arm dormant --grant--> armed. */
+  if (SELF_ARM_ROW_FAULT (WYL_DAEMON_SELF_ARM_ROW_FAULT_SET_STATE))
+    return WYRELOG_E_IO;
+  rc = wyl_policy_store_set_permission_state (store, bundle->actor, perm->perm,
+      bundle->scope, "armed");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (SELF_ARM_ROW_FAULT (WYL_DAEMON_SELF_ARM_ROW_FAULT_STATE_EVENT))
+    return WYRELOG_E_IO;
+  rc = wyl_policy_store_append_permission_state_event (store, bundle->actor,
+      perm->perm, bundle->scope, "grant", "dormant", "armed", &perm->event_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (SELF_ARM_ROW_FAULT (WYL_DAEMON_SELF_ARM_ROW_FAULT_AUDIT))
+    return WYRELOG_E_IO;
+  rc = self_arm_append_audit (store, perm);
+#undef SELF_ARM_ROW_FAULT
+  return rc;
+}
+
+/* Single crash-safe publication body: classify BOTH perms first, reject any
+ * illegal partial as a contradiction (clean precommit rollback), otherwise
+ * write the union of the rows both perms need in this one transaction. */
+static wyrelog_error_t
+mutate_self_arm_bundle (wyl_policy_store_t *store, gpointer data)
+{
+  SelfArmBundle *bundle = data;
+  SelfArmPermClass klass[G_N_ELEMENTS (bundle->perms)];
+  for (guint i = 0; i < G_N_ELEMENTS (bundle->perms); i++) {
+    bundle->perms[i].event_id = -1;
+    wyrelog_error_t rc = self_arm_classify_perm (store, bundle->actor,
+        bundle->perms[i].perm, bundle->scope, &klass[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  for (guint i = 0; i < G_N_ELEMENTS (bundle->perms); i++) {
+    if (klass[i] == SELF_ARM_CLASS_CONTRADICTORY) {
+      bundle->outcome = SELF_ARM_OUTCOME_CONTRADICTION;
+      return WYRELOG_E_POLICY;  /* write nothing; caller poisons after rollback */
+    }
+  }
+  for (guint i = 0; i < G_N_ELEMENTS (bundle->perms); i++) {
+    wyrelog_error_t rc = self_arm_mutate_one (store, bundle, i, klass[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+/* Verifies BOTH authority tuples (has_permission/3 and perm_state/4 armed) for
+ * both perms, regardless of noop/repair/full, so an idempotent no-op verifies
+ * identically to a fresh arm. */
+static wyrelog_error_t
+verify_self_arm_bundle (WylEngineVerification *verification, gpointer data)
+{
+  SelfArmBundle *bundle = data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (bundle->verify_fail)
+    return WYRELOG_E_POLICY;
+#endif
+  for (guint i = 0; i < G_N_ELEMENTS (bundle->perms); i++) {
+    const gchar *perm = bundle->perms[i].perm;
+    const gchar *has_syms[] = { bundle->actor, perm, bundle->scope };
+    wyrelog_error_t rc = verify_tenant_lifecycle_symbol_row (verification,
+        "has_permission", has_syms, G_N_ELEMENTS (has_syms), TRUE);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    const gchar *state_syms[] = { bundle->actor, perm, bundle->scope, "armed" };
+    rc = verify_tenant_lifecycle_symbol_row (verification, "perm_state",
+        state_syms, G_N_ELEMENTS (state_syms), TRUE);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
 /* POST /service-management-authority/arm
  *
  * Lets an already-verified, live-MFA SYSTEM admin self-arm the
@@ -14489,7 +14737,10 @@ service_management_authority_arm_handler (SoupServer *server,
     }
   }
 
-  /* One WRITE lease held across BOTH perms' grant + transition + reload. */
+  const gchar *const scope = auth.session_id;
+  const gchar *const request_id = ensure_request_id_header (msg);
+
+  /* One WRITE lease held across BOTH perms as a single atomic publication. */
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
       WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM, &write);
@@ -14499,55 +14750,137 @@ service_management_authority_arm_handler (SoupServer *server,
     return;
   }
 
-  static const gchar *const managed_perms[] = {
-    "wr.service_principal.manage",
-    "wr.service_credential.manage",
-  };
-  const gchar *const scope = auth.session_id;
-  const gchar *const request_id = ensure_request_id_header (msg);
-  for (gsize i = 0; i < G_N_ELEMENTS (managed_perms); i++) {
-    const gchar *perm = managed_perms[i];
-    gboolean already_armed = FALSE;
-    rc = wyl_policy_store_permission_state_is (write.store, auth.actor, perm,
-        scope, "armed", &already_armed);
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
-    if (already_armed)
-      continue;
-
-    rc = wyl_policy_store_grant_direct_permission (write.store, auth.actor,
-        perm, scope);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_policy_store_append_direct_permission_event (write.store,
-          auth.actor, perm, scope, "grant");
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
-
-    /* Durable audit per perm (never NULL): modelled on the permission-state
-     * transition handler. */
-    g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
-    wyl_audit_event_set_subject_id (audit_event, auth.actor);
-    wyl_audit_event_set_action (audit_event, "permission_state.grant");
-    wyl_audit_event_set_resource_id (audit_event, perm);
-    wyl_audit_event_set_deny_reason (audit_event, "grant");
-    wyl_audit_event_set_deny_origin (audit_event, scope);
-    wyl_audit_event_set_request_id (audit_event, request_id);
-    wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
-
-    rc = wyl_handle_apply_permission_state_transition (ctx->handle, auth.actor,
-        perm, scope, "grant", audit_event, NULL);
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
-    wyl_daemon_policy_write_observe_cleanup_resource (&write,
-        WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+  /* Fail-closed if the pair is already poisoned: a partial-authority pair must
+   * be reconciled, never extended with more authority. */
+  if (wyl_handle_engine_pair_is_poisoned (ctx->handle)) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
   }
 
+  /* Decisive per-session liveness INSIDE the write section, before any durable
+   * work: the atomic WylSession accessor + durable tenant session_state + the
+   * eligibility decide, composed by the shared reauthorization primitive. A
+   * logout that wins the race is observed here fail-closed with zero writes. */
+  WylManagementReauthorization reauth = {
+    .ctx = ctx,
+    .handle = ctx->handle,
+    .session = session,
+    .session_id = auth.session_id,
+    .actor = auth.actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
+    .action = "wr.service.self_authorize",
+    .resource_id = WYL_TENANT_DEFAULT,
+    .target_tenant = NULL,
+    .decision_request_id = request_id,
+    .require_mfa = TRUE,
+    .guard_timestamp = guard_timestamp,
+    .guard_loc_class = guard_loc_class,
+    .guard_risk = guard_risk,
+  };
+  if (management_reauthorize_inside_write (&reauth, auth.actor)
+      != WYRELOG_E_OK) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_AUTHORITY_DENIED);
+    return;
+  }
+
+  /* Deterministic per-perm audit ids so a response-loss retry re-derives the
+   * same authoritative audit evidence rather than duplicating it. */
+  WylAuditEvent *audit_events[G_N_ELEMENTS (self_arm_managed_perms)] = { NULL };
+  gchar audit_ids[G_N_ELEMENTS (self_arm_managed_perms)][WYL_ID_STRING_BUF] =
+      { {0}
+  };
+  SelfArmBundle bundle = {
+    .actor = auth.actor,
+    .scope = scope,
+    .outcome = SELF_ARM_OUTCOME_OK,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (self_arm_managed_perms); i++) {
+    bundle.perms[i].perm = self_arm_managed_perms[i];
+    bundle.perms[i].event_id = -1;
+    if (!self_arm_derive_audit_id (auth.actor, self_arm_managed_perms[i], scope,
+            audit_ids[i])
+        || wyl_audit_event_new_from_fields (audit_ids[i], g_get_real_time (),
+            auth.actor, "permission_state.grant", self_arm_managed_perms[i],
+            "grant", scope, request_id, WYL_DECISION_ALLOW, &audit_events[i])
+        != WYRELOG_E_OK) {
+      for (guint j = 0; j < i; j++)
+        g_clear_object (&audit_events[j]);
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+    bundle.perms[i].audit_event = audit_events[i];
+    bundle.perms[i].audit_id = audit_ids[i];
+  }
+#ifdef WYL_TEST_DAEMON_HTTP
+  gboolean verify_fail_persistent = FALSE;
+  g_mutex_lock (&ctx->lock);
+  bundle.fault_perm = ctx->fail_next_self_arm_fault_perm;
+  bundle.fault_row = ctx->fail_next_self_arm_row_fault;
+  bundle.verify_fail = ctx->fail_next_self_arm_verify;
+  verify_fail_persistent = ctx->fail_next_self_arm_verify_persistent;
+  ctx->fail_next_self_arm_fault_perm = 0;
+  ctx->fail_next_self_arm_row_fault = WYL_DAEMON_SELF_ARM_ROW_FAULT_NONE;
+  ctx->fail_next_self_arm_verify = FALSE;
+  ctx->fail_next_self_arm_verify_persistent = FALSE;
+  g_mutex_unlock (&ctx->lock);
+#endif
+
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (ctx->handle);
+  if (engine_session == NULL) {
+    rc = WYRELOG_E_BUSY;
+  } else {
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+    WylCommittedPublicationStage stage =
+        WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+    rc = wyl_engine_session_run_committed_publication (engine_session,
+        mutate_self_arm_bundle, &bundle, verify_self_arm_bundle, &bundle, NULL,
+        NULL, &stage);
+    if (bundle.outcome == SELF_ARM_OUTCOME_CONTRADICTION) {
+      /* mutate found a lone/illegal partial and forced a clean precommit
+       * rollback (pair preserved, not poisoned).  Poison the retained pair so
+       * no one-permission authority can be evaluated until an exact reconcile
+       * republishes both tuples.  Never repair a contradiction. */
+      rc = wyl_handle_fail_committed_engine_projection (engine_session,
+          WYRELOG_E_POLICY);
+    } else if (rc != WYRELOG_E_OK
+        && (stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
+            || stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS)) {
+      /* Post-commit reconcile/verify uncertainty: the durable bundle IS
+       * committed but the projection is poisoned.  Repair re-verifies BOTH
+       * tuples against durable; a repair fault leaves the pair poisoned so
+       * neither permission authorizes (never exactly-one-usable). */
+      guint64 generation = 0;
+      SelfArmBundle repair_bundle = bundle;
+#ifdef WYL_TEST_DAEMON_HTTP
+      repair_bundle.verify_fail = verify_fail_persistent;
+#endif
+      wyrelog_error_t repair_rc = wyl_handle_policy_store_capture_generation
+          (ctx->handle, write.store, &generation);
+      if (repair_rc == WYRELOG_E_OK)
+        repair_rc = wyl_engine_session_repair_committed_publication
+            (engine_session, write.lease, write.store, generation,
+            verify_self_arm_bundle, &repair_bundle);
+      rc = repair_rc;
+    }
+  }
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+#ifdef WYL_HAS_AUDIT
+  if (rc == WYRELOG_E_OK)
+    for (guint i = 0; i < G_N_ELEMENTS (audit_events); i++)
+      (void) wyl_audit_mirror_event (ctx->handle, audit_events[i]);
+#endif
+  for (guint i = 0; i < G_N_ELEMENTS (audit_events); i++)
+    g_clear_object (&audit_events[i]);
+
+  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+    rc = wyl_daemon_policy_write_record_primary (&write, rc);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
+  }
   set_json_ok (msg);
 }
 
