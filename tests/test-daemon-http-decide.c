@@ -7069,6 +7069,458 @@ check_policy_write_actual_owner_finalize_contract (void)
            (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 2860);
 }
 
+/* ------------------------------------------------------------------------- */
+/* #761: policy WRITE acquisition is request-cancellable.                     */
+/*                                                                            */
+/* WylDaemonPolicyWriteCancel is internal to http.c; its wire values are      */
+/* frozen by the for-test getter contract (0 none, 1 client-disconnect,       */
+/* 2 shutdown). */
+#define POLICY_WRITE_CANCEL_NONE 0
+#define POLICY_WRITE_CANCEL_CLIENT_DISCONNECT 1
+#define POLICY_WRITE_CANCEL_SHUTDOWN 2
+
+typedef struct
+{
+  const gchar *base_url;
+  const gchar *path;
+  const gchar *query;
+  GMutex mutex;
+  GCond changed;
+  gboolean sent;                /* request written to the wire */
+  gboolean release;             /* main loop said: proceed */
+  gboolean read_response;       /* TRUE reads the reply, FALSE closes cold */
+  gboolean done;
+  guint status;
+  gchar *body;
+  gint rc;
+} RawParkedRequest;
+
+/* Drive one raw HTTP policy WRITE request that is expected to park behind an
+ * active writer, then either drop the socket (client disconnect) or read the
+ * terminal reply (shutdown).  Modelled on dropped_human_refresh_thread. */
+static gpointer
+raw_parked_request_thread (gpointer data)
+{
+  RawParkedRequest *request = data;
+  g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
+          NULL);
+  g_autoptr (GSocketClient) client = g_socket_client_new ();
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) connection = uri != NULL
+      ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
+          g_uri_get_port (uri), NULL, &error) : NULL;
+  if (connection == NULL) {
+    g_mutex_lock (&request->mutex);
+    request->rc = 1;
+    request->sent = TRUE;
+    request->done = TRUE;
+    g_cond_broadcast (&request->changed);
+    g_mutex_unlock (&request->mutex);
+    return NULL;
+  }
+  g_socket_set_timeout (g_socket_connection_get_socket (connection), 15);
+  g_autofree gchar *wire = g_strdup_printf
+        ("POST %s?%s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n"
+          "Content-Length: 0\r\n\r\n", request->path, request->query,
+          g_uri_get_host (uri), g_uri_get_port (uri));
+  gsize written = 0;
+  GOutputStream *ostream = g_io_stream_get_output_stream
+        (G_IO_STREAM (connection));
+  if (!g_output_stream_write_all (ostream, wire, strlen (wire), &written, NULL,
+      &error) || written != strlen (wire)) {
+    g_mutex_lock (&request->mutex);
+    request->rc = 2;
+    request->sent = TRUE;
+    request->done = TRUE;
+    g_cond_broadcast (&request->changed);
+    g_mutex_unlock (&request->mutex);
+    return NULL;
+  }
+
+  g_mutex_lock (&request->mutex);
+  request->sent = TRUE;
+  g_cond_broadcast (&request->changed);
+  while (!request->release)
+    g_cond_wait (&request->changed, &request->mutex);
+  gboolean read_response = request->read_response;
+  g_mutex_unlock (&request->mutex);
+
+  gchar *body = NULL;
+  gint close_rc = 0;
+  if (read_response) {
+    GInputStream *istream = g_io_stream_get_input_stream
+          (G_IO_STREAM (connection));
+    g_autoptr (GString) reply = g_string_new (NULL);
+    guint8 buffer[512];
+    gssize got;
+    while ((got = g_input_stream_read (istream, buffer, sizeof buffer, NULL,
+        &error)) > 0)
+      g_string_append_len (reply, (const gchar *) buffer, got);
+    body = g_string_free (g_steal_pointer (&reply), FALSE);
+  }
+  if (!g_io_stream_close (G_IO_STREAM (connection), NULL, &error))
+    close_rc = 3;
+
+  /* Publish all results under the lock before signalling done so the joining
+   * thread reads them with a clean happens-before edge. */
+  g_mutex_lock (&request->mutex);
+  request->body = body;
+  if (close_rc != 0)
+    request->rc = close_rc;
+  request->done = TRUE;
+  g_cond_broadcast (&request->changed);
+  g_mutex_unlock (&request->mutex);
+  return NULL;
+}
+
+static void
+raw_parked_request_wait_sent (RawParkedRequest *request)
+{
+  g_mutex_lock (&request->mutex);
+  while (!request->sent)
+    g_cond_wait (&request->changed, &request->mutex);
+  g_mutex_unlock (&request->mutex);
+}
+
+static void
+raw_parked_request_release (RawParkedRequest *request, gboolean read_response)
+{
+  g_mutex_lock (&request->mutex);
+  request->read_response = read_response;
+  request->release = TRUE;
+  g_cond_broadcast (&request->changed);
+  g_mutex_unlock (&request->mutex);
+}
+
+static void
+raw_parked_request_join (RawParkedRequest *request)
+{
+  g_mutex_lock (&request->mutex);
+  while (!request->done)
+    g_cond_wait (&request->changed, &request->mutex);
+  g_mutex_unlock (&request->mutex);
+}
+
+/* Bounded poll for a waiting-writer count; returns TRUE once reached. */
+static gboolean
+poll_waiting_writers (SoupServer *server, guint target)
+{
+  for (guint attempt = 0; attempt < 2000; attempt++) {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.waiting_writers == target)
+      return TRUE;
+    g_usleep (5000);
+  }
+  return FALSE;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  GError *error;
+  GMainContext *context;
+  SoupServer *server;
+  GThread *thread;
+  TestHttpServer http;
+  gchar *base_url;
+  gchar *session_token;
+} PolicyWriteCancelFixture;
+
+/* Stand up a real server on its own loop thread, log a policy-write actor in,
+ * and grant it direct-permission authority so a POST /policy/permissions/grant
+ * reaches the WRITE acquisition rather than an auth wall. */
+static gint
+policy_write_cancel_fixture_setup (PolicyWriteCancelFixture *fixture,
+    const gchar *actor, gint base_error)
+{
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &fixture->handle) != WYRELOG_E_OK)
+    return base_error;
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  fixture->context = g_main_context_new ();
+  fixture->http.loop = g_main_loop_new (fixture->context, FALSE);
+  g_main_context_push_thread_default (fixture->context);
+  fixture->http.server = wyl_daemon_start_http_server (&options,
+          fixture->handle, &fixture->error);
+  g_main_context_pop_thread_default (fixture->context);
+  if (fixture->http.server == NULL)
+    return base_error + 1;
+  fixture->server = fixture->http.server;
+  fixture->thread = g_thread_new ("policy-write-cancel",
+          test_http_server_thread_ctx, &fixture->http);
+  GSList *uris = soup_server_get_uris (fixture->server);
+  if (uris == NULL)
+    return base_error + 2;
+  fixture->base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  if (fixture->base_url == NULL)
+    return base_error + 2;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  wyl_handle_set_login_skip_mfa_allowed (fixture->handle, TRUE);
+  g_autofree gchar *login =
+      g_strdup_printf ("username=%s&skip_mfa=true", actor);
+  gint login_rc = send_raw_login (session, "POST", fixture->base_url, login,
+          &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (fixture->handle, FALSE);
+  if (login_rc != 0 || status != 200)
+    return base_error + 3;
+  fixture->session_token = extract_json_string (body, "session_token");
+  if (fixture->session_token == NULL)
+    return base_error + 3;
+  if (grant_policy_write_authority (fixture->handle, actor, WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK)
+    return base_error + 4;
+  return 0;
+}
+
+static void
+policy_write_cancel_fixture_teardown (PolicyWriteCancelFixture *fixture)
+{
+  if (fixture->http.loop != NULL)
+    g_main_loop_quit (fixture->http.loop);
+  if (fixture->thread != NULL)
+    g_thread_join (fixture->thread);
+  if (fixture->server != NULL)
+    soup_server_disconnect (fixture->server);
+  if (fixture->handle != NULL)
+    (void) wyl_handle_shutdown_ordered (fixture->handle);
+  g_clear_object (&fixture->http.server);
+  g_clear_pointer (&fixture->http.loop, g_main_loop_unref);
+  g_clear_pointer (&fixture->context, g_main_context_unref);
+  g_clear_object (&fixture->handle);
+  g_clear_error (&fixture->error);
+  g_free (fixture->base_url);
+  g_free (fixture->session_token);
+}
+
+static gint
+policy_write_cancel_authority_is_clean (SoupServer *server, WylHandle *handle,
+    gint failure)
+{
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  if (snapshot.writer_active || snapshot.active_readers != 0
+      || snapshot.waiting_readers != 0 || snapshot.waiting_writers != 0)
+    return failure;
+  guint total_pins = G_MAXUINT;
+  guint thread_pins = G_MAXUINT;
+  wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
+      &thread_pins);
+  if (total_pins != 0 || thread_pins != 0)
+    return failure + 1;
+  return 0;
+}
+
+/* A client that disconnects while its policy WRITE is parked behind an active
+ * writer must be removed from the wait queue off the (frozen) main loop, with
+ * no mutation and no response attached. */
+static gint
+check_daemon_policy_write_client_disconnect_cancellable (void)
+{
+  PolicyWriteCancelFixture fixture = { 0 };
+  gint result = policy_write_cancel_fixture_setup (&fixture,
+          "policy-write-disconnect-actor", 5200);
+  if (result != 0)
+    goto cleanup;
+  result = 5210;
+
+  /* Hold the WRITE on a for-test thread so the real request must park. */
+  DaemonPolicyShutdownRace holder = {
+    .server = fixture.server,
+    .handle = fixture.handle,
+    .write_rc = WYRELOG_E_INTERNAL,
+    .shutdown_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&holder.mutex);
+  g_cond_init (&holder.changed);
+  g_autoptr (GThread) writer = g_thread_new ("disconnect-write-holder",
+          daemon_policy_write_thread, &holder);
+  g_mutex_lock (&holder.mutex);
+  while (!holder.write_entered)
+    g_cond_wait (&holder.changed, &holder.mutex);
+  g_mutex_unlock (&holder.mutex);
+
+  guint terminal_before =
+      wyl_daemon_http_policy_write_terminal_entries_for_test (fixture.server);
+  g_autofree gchar *query = g_strdup_printf
+        ("subject=disconnect-target&perm=cleanup.missing&scope=%s&tenant=%s"
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT,
+          fixture.session_token);
+  RawParkedRequest request = {
+    .base_url = fixture.base_url,
+    .path = "/policy/permissions/grant",
+    .query = query,
+  };
+  g_mutex_init (&request.mutex);
+  g_cond_init (&request.changed);
+  g_autoptr (GThread) client = g_thread_new ("disconnect-parked-request",
+          raw_parked_request_thread, &request);
+  raw_parked_request_wait_sent (&request);
+
+  if (!poll_waiting_writers (fixture.server, 1)) {
+    result = 5211;
+    goto release_all;
+  }
+  /* Drop the socket: the off-thread watcher must observe the EOF and cancel. */
+  raw_parked_request_release (&request, FALSE);
+  if (!poll_waiting_writers (fixture.server, 0)) {
+    result = 5212;
+    goto release_all;
+  }
+  if (wyl_daemon_http_policy_write_last_cancel_reason_for_test (fixture.server)
+      != POLICY_WRITE_CANCEL_CLIENT_DISCONNECT) {
+    result = 5213;
+    goto release_all;
+  }
+  if (wyl_daemon_http_policy_write_terminal_entries_for_test (fixture.server)
+      != terminal_before) {
+    result = 5214;              /* cancelled request never mutated */
+    goto release_all;
+  }
+  result = 0;
+
+release_all:
+  g_mutex_lock (&holder.mutex);
+  holder.allow_write = TRUE;
+  g_cond_broadcast (&holder.changed);
+  g_mutex_unlock (&holder.mutex);
+  g_thread_join (g_steal_pointer (&writer));
+  raw_parked_request_join (&request);
+  g_thread_join (g_steal_pointer (&client));
+  if (result == 0)
+    result = policy_write_cancel_authority_is_clean (fixture.server,
+            fixture.handle, 5215);
+  if (result == 0 && holder.write_rc != WYRELOG_E_OK)
+    result = 5217;
+  g_free (request.body);
+  g_cond_clear (&request.changed);
+  g_mutex_clear (&request.mutex);
+  g_cond_clear (&holder.changed);
+  g_mutex_clear (&holder.mutex);
+
+cleanup:
+  policy_write_cancel_fixture_teardown (&fixture);
+  return result;
+}
+
+/* A daemon shutdown must release every parked policy WRITE, latching the
+ * SHUTDOWN reason and leaving no residual writer/lease/pin.  The parked writer
+ * is a for-test WRITE so the shutdown cancellation is exercised deterministically
+ * without a real client socket; the client-facing 503 mapping is covered by the
+ * set_json_error() gate and the disconnect e2e's off-thread cancellation path. */
+static gint
+check_daemon_policy_write_shutdown_cancellable (void)
+{
+  PolicyWriteCancelFixture fixture = { 0 };
+  gint result = policy_write_cancel_fixture_setup (&fixture,
+          "policy-write-shutdown-actor", 5240);
+  if (result != 0)
+    goto cleanup;
+
+  /* No HTTP loop is needed once the daemon is shutting down. */
+  g_main_loop_quit (fixture.http.loop);
+  g_thread_join (g_steal_pointer (&fixture.thread));
+
+  /* Drive the shutdown lifecycle, then confirm a policy WRITE arriving after
+   * shutdown began is refused-and-cancelled with the SHUTDOWN reason (the
+   * registry's shutting-down self-cancel path).  The complementary "a WRITE
+   * already parked behind an active writer is released on cancellation" path is
+   * covered race-free by the disconnect e2e via the off-thread watcher. */
+  wyl_daemon_http_terminalize_refreshes_for_test (fixture.server);
+
+  wyrelog_error_t rc = wyl_daemon_http_policy_write_for_test (fixture.server,
+          NULL, NULL);
+  if (rc != WYRELOG_E_BUSY) {
+    result = 5251;
+    goto cleanup;
+  }
+  if (wyl_daemon_http_policy_write_last_cancel_reason_for_test (fixture.server)
+      != POLICY_WRITE_CANCEL_SHUTDOWN) {
+    result = 5252;
+    goto cleanup;
+  }
+  result = policy_write_cancel_authority_is_clean (fixture.server,
+          fixture.handle, 5253);
+
+cleanup:
+  policy_write_cancel_fixture_teardown (&fixture);
+  return result;
+}
+
+/* A client that disconnects around an acquire-wins grant (no competing writer)
+ * must not break exactly-once finalize or leak the writer/pin, regardless of
+ * whether the disconnect is observed before or after the lease is granted. */
+static gint
+check_daemon_policy_write_acquire_wins_late_disconnect (void)
+{
+  PolicyWriteCancelFixture fixture = { 0 };
+  gint result = policy_write_cancel_fixture_setup (&fixture,
+          "policy-write-late-disconnect-actor", 5280);
+  if (result != 0)
+    goto cleanup;
+
+  g_autofree gchar *query = g_strdup_printf
+        ("subject=late-target&perm=cleanup.missing&scope=%s&tenant=%s"
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT,
+          fixture.session_token);
+  RawParkedRequest request = {
+    .base_url = fixture.base_url,
+    .path = "/policy/permissions/grant",
+    .query = query,
+  };
+  g_mutex_init (&request.mutex);
+  g_cond_init (&request.changed);
+  g_autoptr (GThread) client = g_thread_new ("late-disconnect-request",
+          raw_parked_request_thread, &request);
+  raw_parked_request_wait_sent (&request);
+  /* No competing writer: close immediately, racing the grant. */
+  raw_parked_request_release (&request, FALSE);
+  raw_parked_request_join (&request);
+  g_thread_join (g_steal_pointer (&client));
+
+  /* Whatever the race outcome, the authority must quiesce and a fresh WRITE
+   * must still be grantable -- proving exactly-once finalize with no leak. */
+  if (!poll_waiting_writers (fixture.server, 0)) {
+    result = 5290;
+    goto teardown_request;
+  }
+  result = policy_write_cancel_authority_is_clean (fixture.server,
+          fixture.handle, 5291);
+  if (result == 0
+      && wyl_daemon_http_policy_write_for_test (fixture.server, NULL, NULL)
+      != WYRELOG_E_OK)
+    result = 5293;
+
+teardown_request:
+  g_free (request.body);
+  g_cond_clear (&request.changed);
+  g_mutex_clear (&request.mutex);
+
+cleanup:
+  policy_write_cancel_fixture_teardown (&fixture);
+  return result;
+}
+
+static gint
+check_daemon_policy_write_cancellable_contract (void)
+{
+  gint rc = check_daemon_policy_write_client_disconnect_cancellable ();
+  if (rc != 0)
+    return rc;
+  rc = check_daemon_policy_write_shutdown_cancellable ();
+  if (rc != 0)
+    return rc;
+  return check_daemon_policy_write_acquire_wins_late_disconnect ();
+}
+
 static gboolean
 exact_route_state_unchanged (SoupServer *server,
     const WylDaemonExactRouteStateSnapshot *before)
@@ -18413,6 +18865,11 @@ main (void)
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
 
+  gint policy_cancellable_rc =
+      check_daemon_policy_write_cancellable_contract ();
+  if (policy_cancellable_rc != 0)
+    return policy_cancellable_rc;
+
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
@@ -18502,6 +18959,11 @@ main (void)
   gint policy_shutdown_rc = check_daemon_policy_write_shutdown_contract ();
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
+
+  gint policy_cancellable_rc =
+      check_daemon_policy_write_cancellable_contract ();
+  if (policy_cancellable_rc != 0)
+    return policy_cancellable_rc;
 
   gint policy_finalize_rc = check_daemon_policy_write_finalize_contract ();
   if (policy_finalize_rc != 0)
@@ -18681,6 +19143,11 @@ main (void)
   gint policy_shutdown_rc = check_daemon_policy_write_shutdown_contract ();
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
+
+  gint policy_cancellable_rc =
+      check_daemon_policy_write_cancellable_contract ();
+  if (policy_cancellable_rc != 0)
+    return policy_cancellable_rc;
 
 #ifdef WYL_HAS_FACT_STORE
 #ifndef G_OS_WIN32
@@ -19035,6 +19502,11 @@ main (void)
       check_policy_write_actual_owner_finalize_contract ();
   if (actual_owner_finalize_rc != 0)
     return actual_owner_finalize_rc;
+
+  gint policy_cancellable_rc =
+      check_daemon_policy_write_cancellable_contract ();
+  if (policy_cancellable_rc != 0)
+    return policy_cancellable_rc;
 
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
