@@ -52,6 +52,13 @@
 #define CONTRACT_FUTURE_EXPIRES_AT_US G_GUINT64_CONSTANT (4102444800000000)
 #define CONTRACT_FUTURE_EXPIRES_AT_US_STR "4102444800000000"
 
+static gboolean policy_write_fault_snapshot_is_clean
+    (const WylDaemonPolicyWriteFinalizeSnapshot * snapshot,
+    guint expected_primary_status, const gchar * expected_primary_code,
+    guint expected_owner, const gchar * expected_owner_name,
+    guint expected_cleanup_resources, guint expected_diagnostic_count,
+    wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits);
+
 typedef struct
 {
   GMutex mutex;
@@ -16202,6 +16209,202 @@ check_service_management_self_arm_reauthorization_zero_write (void)
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  wyl_policy_store_t *store;
+  const gchar *actor;
+  const gchar *session_id;
+  gboolean called;
+  gboolean tampered;
+} SelfArmProjectionTamper;
+
+static void
+self_arm_projection_tamper_checkpoint (gpointer data)
+{
+  SelfArmProjectionTamper *tamper = data;
+  sqlite3_stmt *stmt = NULL;
+  sqlite3 *db = tamper != NULL && tamper->store != NULL
+      ? wyl_policy_store_get_db (tamper->store) : NULL;
+  if (tamper == NULL || db == NULL)
+    return;
+  tamper->called = TRUE;
+  if (sqlite3_prepare_v2 (db,
+          "UPDATE permission_states SET state='tampered' "
+          "WHERE subject_id=? AND perm_id=? AND scope=?", -1, &stmt,
+          NULL) != SQLITE_OK)
+    return;
+  sqlite3_bind_text (stmt, 1, tamper->actor, -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, "wr.service_credential.manage", -1,
+      SQLITE_STATIC);
+  sqlite3_bind_text (stmt, 3, tamper->session_id, -1, SQLITE_TRANSIENT);
+  tamper->tampered = sqlite3_step (stmt) == SQLITE_DONE
+      && sqlite3_changes (db) == 1;
+  sqlite3_finalize (stmt);
+}
+
+static gboolean
+self_arm_bundle_counts (ServiceDenialEnv *env, guint64 expected_receipt,
+    guint64 expected_rows)
+{
+  static const gchar *sql =
+      "SELECT (SELECT count(*) FROM service_management_self_arm_receipts "
+      "WHERE tenant_id=? AND actor_subject_id=? AND session_id=?),"
+      "(SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM direct_permission_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_states WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_state_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM audit_events WHERE subject_id=? AND deny_origin=?);";
+  const gchar *args[] = {
+    WYL_TENANT_DEFAULT, "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+  };
+  sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store
+      (env->handle));
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok = db != NULL && sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL)
+      == SQLITE_OK;
+  if (ok) {
+    for (guint i = 0; i < G_N_ELEMENTS (args); i++)
+      if (sqlite3_bind_text (stmt, (int) i + 1, args[i], -1,
+              SQLITE_TRANSIENT) != SQLITE_OK)
+        ok = FALSE;
+  }
+  if (ok && sqlite3_step (stmt) == SQLITE_ROW) {
+    for (guint i = 0; i < 6; i++) {
+      guint64 expected = i == 0 ? expected_receipt : expected_rows;
+      ok = ok && (guint64) sqlite3_column_int64 (stmt, (int) i) == expected;
+    }
+  } else {
+    ok = FALSE;
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gint
+check_service_management_self_arm_projection_and_replacement_faults (void)
+{
+  for (guint replacement = 0; replacement < 2; replacement++) {
+    ServiceDenialEnv env = { 0 };
+    gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+    if (rc != 0) {
+      service_denial_env_clear (&env);
+      return 2780 + (gint) replacement;
+    }
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+    if (wyl_policy_store_grant_role_membership (store,
+            "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+        != WYRELOG_E_OK
+        || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+            "active") != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2782 + (gint) replacement;
+    }
+
+    SelfArmProjectionTamper tamper = {
+      .store = store,
+      .actor = "human-principal-admin",
+      .session_id = env.session_token,
+    };
+    if (!replacement)
+      wyl_handle_set_committed_publication_checkpoint_for_test (env.handle,
+          self_arm_projection_tamper_checkpoint, &tamper);
+    else {
+      wyl_handle_set_engine_replacement_fault_once_for_test (env.handle,
+          WYL_ENGINE_REPLACEMENT_FAULT_READBACK);
+      wyl_handle_set_committed_publication_fault_once_for_test (env.handle,
+          WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR);
+    }
+
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+            "/service-management-authority/arm", env.query,
+            env.access_token, "{}", &status, &body) != 0 || status != 500
+        || body == NULL
+        || strstr (body, "service_authority_failed") == NULL
+        || !self_arm_bundle_counts (&env, 1, 2)
+        || (!replacement && (!tamper.called || !tamper.tampered))
+        || !wyl_handle_engine_pair_is_poisoned (env.handle)
+        || wyl_handle_engine_pair_is_ready (env.handle)
+        || wyl_handle_engine_terminal_get_state (env.handle)
+        != WYL_ENGINE_TERMINAL_FAILED) {
+      service_denial_env_clear (&env);
+      return 2785 + (gint) replacement;
+    }
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    if (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (env.handle), env.handle,
+            &reason) != WYRELOG_E_BUSY
+        || reason != WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
+        || wyl_daemon_http_policy_write_for_test (env.http.server, NULL, NULL)
+        != WYRELOG_E_BUSY) {
+      service_denial_env_clear (&env);
+      return 2790 + (gint) replacement;
+    }
+    service_denial_env_clear (&env);
+  }
+  return 0;
+}
+
+static gint
+check_service_management_self_arm_finalize_snapshot (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return 2800;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_grant_role_membership (store,
+          "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2801;
+  }
+  guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
+      (env.http.server);
+  wyl_daemon_http_fail_next_policy_write_finalize_for_test (env.http.server,
+      WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          "{}", &status, &body) != 0 || status != 500 || body == NULL
+      || g_strcmp0 (body, "{\"error\":\"policy_write_cleanup_failed\"}") != 0
+      || wyl_daemon_http_policy_write_terminal_entries_for_test
+      (env.http.server) != before + 1 || !self_arm_bundle_counts (&env, 1, 2)) {
+    service_denial_env_clear (&env);
+    return 2802;
+  }
+  WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
+  if (!wyl_daemon_http_policy_write_finalize_snapshot_for_test (env.http.server,
+          &snapshot)
+      || !policy_write_fault_snapshot_is_clean (&snapshot, 200, "success",
+          15, "self_arm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE, 1,
+          WYRELOG_E_INTERNAL, 0)
+      || wyl_handle_engine_pair_is_poisoned (env.handle)
+      || !wyl_handle_engine_pair_is_ready (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2803;
+  }
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+#endif
+
+#ifdef WYL_TEST_HANDLE_SEAMS
 static gint
 check_service_management_self_arm_commit_faults (void)
 {
@@ -19158,6 +19361,18 @@ main (void)
   gint self_arm_fault_rc = check_service_management_self_arm_commit_faults ();
   if (self_arm_fault_rc != 0) {
     result = self_arm_fault_rc;
+    goto cleanup;
+  }
+  gint self_arm_projection_rc =
+      check_service_management_self_arm_projection_and_replacement_faults ();
+  if (self_arm_projection_rc != 0) {
+    result = self_arm_projection_rc;
+    goto cleanup;
+  }
+  gint self_arm_finalize_rc =
+      check_service_management_self_arm_finalize_snapshot ();
+  if (self_arm_finalize_rc != 0) {
+    result = self_arm_finalize_rc;
     goto cleanup;
   }
 #endif
