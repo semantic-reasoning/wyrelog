@@ -59,8 +59,48 @@ AGGREGATE_FIELDS = (
     "engine_pair_poisoned",
     "engine_pair_replacement_building",
     "engine_session_depth",
+    "engine_terminal_state",
+    "engine_terminal_generation",
+    "engine_terminal_serial",
 )
-OWNER_ONLY_FIELDS = ("template_dir", "engine_session_mutex")
+OWNER_ONLY_FIELDS = (
+    "template_dir",
+    "engine_session_mutex",
+    "engine_terminal_mutex",
+)
+TERMINAL_FIELDS = (
+    "engine_terminal_state",
+    "engine_terminal_generation",
+    "engine_terminal_serial",
+)
+LOCKED_REPLACEMENT_LOADERS = (
+    "load_policy_store_audit_facts_locked",
+    "load_policy_store_role_permissions_locked",
+    "load_policy_store_role_memberships_locked",
+    "load_policy_store_direct_permissions_locked",
+    "load_policy_store_permission_states_locked",
+    "load_policy_store_permission_state_events_locked",
+    "load_policy_store_principal_states_locked",
+    "load_policy_store_principal_events_locked",
+    "load_policy_store_session_states_locked",
+    "load_policy_store_session_events_locked",
+)
+PUBLIC_REPLACEMENT_LOADERS = tuple(
+    name.removesuffix("_locked").replace("load_policy_store_",
+                                           "wyl_handle_load_policy_store_")
+    for name in LOCKED_REPLACEMENT_LOADERS
+)
+# These exact transition owners may inspect terminal fields, but must acquire
+# and release the terminal mutex in their own body.  The narrow inventory is a
+# capability list: similarly named helpers gain no authority.
+TERMINAL_MUTEX_OWNERS = {
+    "engine_terminal_admit_after_engine_lock",
+    "engine_terminal_abandon_recovery",
+    "engine_terminal_finish_pending",
+    "wyl_engine_session_finish_terminal_recovery",
+    "wyl_handle_engine_terminal_begin",
+    "wyl_handle_engine_terminal_get_state",
+}
 
 
 OWNER = RepoPath("wyrelog/wyl-handle.c")
@@ -77,6 +117,14 @@ OWNER_FUNCTION_ALLOWLIST = {
     "classify_audit_projection",
     "clear_pending_deltas",
     "engine_pair_unavailable",
+    # Recovery-owner cleanup: RECOVERING -> FAILED on abandoned release.
+    "engine_terminal_abandon_recovery",
+    "engine_terminal_admit_after_engine_lock",
+    # Exact pending-token completion/failure transition owner.
+    "engine_terminal_finish_pending",
+    # Caller-held terminal-mutex token comparison helper.
+    "engine_terminal_token_matches_locked",
+    "engine_session_acquire_full",
     "reconcile_committed_engine_pair_in_session",
     "reconcile_guarded_engine_pair_in_session",
     "fail_partial_engine_pair_mutation_locked",
@@ -90,8 +138,12 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_engine_session_lookup_symbol",
     "wyl_engine_session_acquire",
     "wyl_engine_session_begin_external_service_authority_transaction",
+    "wyl_engine_session_finish_terminal_recovery",
+    "wyl_engine_session_get_accepted_session_state",
+    "wyl_engine_session_has_exact_accepted_member_of",
     "wyl_engine_session_finish_external_publication",
     "wyl_engine_session_release",
+    "wyl_engine_session_release_checked",
     "wyl_engine_session_repair_committed_publication",
     "wyl_engine_session_run_committed_audit_publication",
     "wyl_engine_session_run_committed_publication",
@@ -103,6 +155,9 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_handle_complete_shutdown",
     "wyl_handle_dup_engine_symbol_locked",
     "wyl_handle_engine_contains_locked",
+    "wyl_handle_engine_terminal_begin",
+    # Mutex-synchronized, read-only terminal-state snapshot.
+    "wyl_handle_engine_terminal_get_state",
     "wyl_handle_engine_insert_locked",
     "wyl_handle_engine_pair_is_poisoned",
     "wyl_handle_engine_remove_locked",
@@ -352,7 +407,8 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
     member = (r"(?:->|\(\s*\*\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*\."
               r"|\b[A-Za-z_][A-Za-z0-9_]*\s*\[[^\]]+\]\s*\.)\s*(?:")
     fields = re.compile(member + "|".join(map(re.escape,
-                        AGGREGATE_FIELDS + ("engine_session_mutex",))) + r")\b")
+                        AGGREGATE_FIELDS + ("engine_session_mutex",
+                                            "engine_terminal_mutex"))) + r")\b")
     owner_fields = re.compile(member + "|".join(map(re.escape,
                               AGGREGATE_FIELDS + OWNER_ONLY_FIELDS)) + r")\b")
     owned = re.compile(r"\bwyl_engine_owned_[A-Za-z0-9_]*\s*\(")
@@ -403,11 +459,93 @@ def check(sources: dict[RepoPath, str]) -> list[str]:
                 "raw external transaction begin outside owner/store: "
                 f"{render_source_identity(path)}")
         if path == OWNER:
-            for name, body in top_level_functions(source):
+            functions = dict(top_level_functions(source))
+            for name, body in functions.items():
                 if (owner_fields.search(body) or owned.search(body)
                         or raw_lock.search(body)) and name not in OWNER_FUNCTION_ALLOWLIST:
                     errors.append(
                         f"owner aggregate access outside function allowlist: {name}")
+
+            terminal_field = re.compile(
+                member + "|".join(map(re.escape, TERMINAL_FIELDS)) + r")\b")
+            terminal_lock = re.compile(
+                r"\bg_mutex_lock\s*\(\s*&\s*"
+                r"[A-Za-z_][A-Za-z0-9_]*\s*->\s*"
+                r"engine_terminal_mutex\s*\)")
+            terminal_unlock = re.compile(
+                r"\bg_mutex_unlock\s*\(\s*&\s*"
+                r"[A-Za-z_][A-Za-z0-9_]*\s*->\s*"
+                r"engine_terminal_mutex\s*\)")
+            for name in TERMINAL_MUTEX_OWNERS:
+                body = functions.get(name)
+                if (body is not None and terminal_field.search(body)
+                        and (not terminal_lock.search(body)
+                             or not terminal_unlock.search(body))):
+                    errors.append(
+                        "terminal field access without owned mutex interval: "
+                        f"{name}")
+
+            acquire = re.compile(
+                r"\bwyl_engine_session_acquire"
+                r"(?:_terminal_recovery)?\s*\(")
+            rank = re.compile(r"\bwyl_service_auth_rank_[A-Za-z0-9_]*\s*\(")
+            terminal_access = re.compile(
+                member + "|".join(map(re.escape,
+                    TERMINAL_FIELDS + ("engine_terminal_mutex",))) + r")\b")
+            terminal_call = re.compile(
+                r"\b(?:engine_terminal_|wyl_handle_engine_terminal_|"
+                r"wyl_engine_session_finish_terminal_recovery)"
+                r"[A-Za-z0-9_]*\s*\(")
+            for name in LOCKED_REPLACEMENT_LOADERS:
+                body = functions.get(name)
+                if body is None:
+                    continue
+                if (acquire.search(body) or rank.search(body)
+                        or terminal_access.search(body)
+                        or terminal_call.search(body)):
+                    errors.append(
+                        "locked replacement loader crosses session boundary: "
+                        f"{name}")
+
+            audit_callback = functions.get("insert_policy_store_audit_fact")
+            public_audit_insert = re.compile(
+                r"\bwyl_handle_insert_audit_fact\s*\(")
+            locked_audit_insert = re.compile(
+                r"\bwyl_handle_insert_audit_fact_locked\s*\(")
+            if audit_callback is not None and (
+                    public_audit_insert.search(audit_callback)
+                    or not locked_audit_insert.search(audit_callback)):
+                errors.append(
+                    "audit replay callback must use locked insertion")
+
+            load_body = functions.get("load_current_engine_pair")
+            if load_body is not None:
+                for name in LOCKED_REPLACEMENT_LOADERS:
+                    if not re.search(rf"\b{re.escape(name)}\s*\(", load_body):
+                        errors.append(
+                            "replacement load chain missing locked core: "
+                            f"{name}")
+                if acquire.search(load_body):
+                    errors.append(
+                        "replacement load chain reacquires engine session")
+                for name in PUBLIC_REPLACEMENT_LOADERS:
+                    if re.search(rf"\b{re.escape(name)}\s*\(", load_body):
+                        errors.append(
+                            "replacement load chain calls public loader: "
+                            f"{name}")
+
+            replace_body = functions.get("replace_engine_pair")
+            if replace_body is not None:
+                explicit_candidate = re.compile(
+                    r"\bload_current_engine_pair\s*\(\s*session\s*,\s*"
+                    r"wyl_engine_session_state_capability\s*\(\s*"
+                    r"new_read_engine\s*\)\s*\)")
+                if not explicit_candidate.search(replace_body):
+                    errors.append(
+                        "replacement must pass candidate session capability")
+                if acquire.search(replace_body):
+                    errors.append(
+                        "replacement path reacquires engine session")
         if path == ENGINE_OWNER:
             for name, body in top_level_functions(source):
                 if (direct_substrate.search(body)
@@ -843,10 +981,14 @@ def self_test() -> int:
         "void bad(WylHandle *h) { (void) h->delta_engine; }",
         "void bad(WylHandle *h) { (void) (*h).read_engine; }",
         "void bad(WylHandle *h) { (void) h[0].engine_pair_poisoned; }",
+        "void bad(WylHandle *h) { (void) h->engine_terminal_state; }",
+        "void bad(WylHandle *h) { (void) (*h).engine_terminal_generation; }",
+        "void bad(WylHandle *h) { (void) h[0].engine_terminal_serial; }",
         "void bad(WylEngine *e) { wyl_engine_owned_insert(e, 0, 0, 0); }",
         "void bad(WylHandle *h) { wyl_handle_lock_engine_session(h); }",
         "void bad(WylHandle *h) { g_rec_mutex_lock(&(*h).engine_session_mutex); }",
         "void bad(WylHandle *h) { g_rec_mutex_unlock(&h[0].engine_session_mutex); }",
+        "void bad(WylHandle *h) { g_mutex_lock(&h->engine_terminal_mutex); }",
     )
     for mutant in mutants:
         if not check({OWNER: "", RepoPath("wyrelog/bad.c"): mutant}):
@@ -886,6 +1028,123 @@ def self_test() -> int:
             "owner aggregate access outside function allowlist: "
             "wyl_engine_session_repair_other_publication"]:
         print("self-test accepted aggregate access in another repair helper",
+              file=sys.stderr)
+        return 1
+
+    exact_terminal_owners = (
+        "static int engine_terminal_token_matches_locked(WylHandle *h) { "
+        "return h->engine_terminal_serial != 0; } "
+        "static void engine_terminal_abandon_recovery(WylHandle *h) { "
+        "g_mutex_lock(&h->engine_terminal_mutex); "
+        "h->engine_terminal_state = 0; "
+        "g_mutex_unlock(&h->engine_terminal_mutex); } "
+        "static void engine_terminal_finish_pending(WylHandle *h) { "
+        "g_mutex_lock(&h->engine_terminal_mutex); "
+        "h->engine_terminal_generation = 0; "
+        "g_mutex_unlock(&h->engine_terminal_mutex); } "
+        "static int wyl_handle_engine_terminal_get_state(WylHandle *h) { "
+        "g_mutex_lock(&h->engine_terminal_mutex); "
+        "int state = h->engine_terminal_state; "
+        "g_mutex_unlock(&h->engine_terminal_mutex); return state; }"
+    )
+    if check({OWNER: exact_terminal_owners}):
+        print("self-test rejected exact terminal capability owners",
+              file=sys.stderr)
+        return 1
+    renamed_terminal_owner = exact_terminal_owners.replace(
+        "engine_terminal_abandon_recovery",
+        "engine_terminal_abandon_recovery_renamed", 1)
+    renamed_errors = check({OWNER: renamed_terminal_owner})
+    renamed_required = (
+        "owner aggregate access outside function allowlist: "
+        "engine_terminal_abandon_recovery_renamed")
+    if not renamed_errors or renamed_required not in renamed_errors:
+        print("self-test accepted renamed terminal capability owner",
+              file=sys.stderr)
+        return 1
+    unlocked_terminal_owner = (
+        "static int wyl_handle_engine_terminal_get_state(WylHandle *h) { "
+        "return h->engine_terminal_state; }")
+    unlocked_errors = check({OWNER: unlocked_terminal_owner})
+    unlocked_required = (
+        "terminal field access without owned mutex interval: "
+        "wyl_handle_engine_terminal_get_state")
+    if not unlocked_errors or unlocked_required not in unlocked_errors:
+        print("self-test accepted terminal field access without mutex",
+              file=sys.stderr)
+        return 1
+    unauthorized_terminal_owner = (
+        "static void unrelated_terminal_writer(WylHandle *h) { "
+        "g_mutex_lock(&h->engine_terminal_mutex); "
+        "h->engine_terminal_state = 0; "
+        "g_mutex_unlock(&h->engine_terminal_mutex); }")
+    unauthorized_errors = check({OWNER: unauthorized_terminal_owner})
+    unauthorized_required = (
+        "owner aggregate access outside function allowlist: "
+        "unrelated_terminal_writer")
+    if (not unauthorized_errors
+            or unauthorized_required not in unauthorized_errors):
+        print("self-test accepted terminal calls in unauthorized owner",
+              file=sys.stderr)
+        return 1
+
+    locked_calls = " ".join(
+        f"rc |= {name}(h);" for name in LOCKED_REPLACEMENT_LOADERS)
+    valid_replacement_chain = (
+        "static int load_current_engine_pair(void *session, int capability) { "
+        f"void *h = session; int rc = capability; {locked_calls} return rc; }} "
+        "static int replace_engine_pair(void *session) { "
+        "void *new_read_engine = session; "
+        "return load_current_engine_pair(session, "
+        "wyl_engine_session_state_capability(new_read_engine)); }")
+    if check({OWNER: valid_replacement_chain}):
+        print("self-test rejected locked replacement load chain",
+              file=sys.stderr)
+        return 1
+    public_loader_chain = valid_replacement_chain.replace(
+        LOCKED_REPLACEMENT_LOADERS[0], PUBLIC_REPLACEMENT_LOADERS[0], 1)
+    public_loader_errors = check({OWNER: public_loader_chain})
+    if ("replacement load chain calls public loader: "
+            f"{PUBLIC_REPLACEMENT_LOADERS[0]}" not in public_loader_errors
+            or "replacement load chain missing locked core: "
+            f"{LOCKED_REPLACEMENT_LOADERS[0]}" not in public_loader_errors):
+        print("self-test accepted public loader in replacement chain",
+              file=sys.stderr)
+        return 1
+    stale_capability_chain = valid_replacement_chain.replace(
+        "new_read_engine));", "old_read_engine));")
+    stale_capability_errors = check({OWNER: stale_capability_chain})
+    if (not stale_capability_errors
+            or "replacement must pass candidate session capability"
+            not in stale_capability_errors):
+        print("self-test accepted non-candidate replacement capability",
+              file=sys.stderr)
+        return 1
+
+    locked_core_mutants = (
+        "wyl_engine_session_acquire(h);",
+        "wyl_service_auth_rank_enter(h, 1);",
+        "h->engine_terminal_state = 0;",
+    )
+    for mutation in locked_core_mutants:
+        locked_core = (
+            f"static void {LOCKED_REPLACEMENT_LOADERS[0]}"
+            f"(WylHandle *h) {{ {mutation} }}")
+        required_error = (
+            "locked replacement loader crosses session boundary: "
+            f"{LOCKED_REPLACEMENT_LOADERS[0]}")
+        if required_error not in check({OWNER: locked_core}):
+            print(f"self-test accepted locked-core mutation: {mutation}",
+                  file=sys.stderr)
+            return 1
+    public_audit_callback = (
+        "static void insert_policy_store_audit_fact(WylHandle *h) { "
+        "wyl_handle_insert_audit_fact(h, 0, 0, 0, 0, 0, 0, 0, 0, 0); }")
+    public_audit_errors = check({OWNER: public_audit_callback})
+    if (not public_audit_errors
+            or "audit replay callback must use locked insertion"
+            not in public_audit_errors):
+        print("self-test accepted public insertion in audit callback",
               file=sys.stderr)
         return 1
     literal = 'const char *s = "wyl_handle_get_read_engine(h)"; /* h->read_engine */'

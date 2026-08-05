@@ -73,7 +73,12 @@ struct _WylHandle
   WylEngine *read_engine;
   WylEngine *delta_engine;
   GRecMutex engine_session_mutex;
+  GMutex engine_terminal_mutex;
+  WylEngineTerminalState engine_terminal_state;
+  guint64 engine_terminal_generation;
+  guint64 engine_terminal_serial;
 #ifdef WYL_TEST_HANDLE_SEAMS
+  gboolean engine_session_release_rank_fail_once;
   WylCommittedPublicationFault committed_publication_fault_once;
   void (*engine_session_checkpoint) (WylEngineSessionCheckpoint phase,
       gpointer data);
@@ -177,6 +182,8 @@ struct _WylEngineSession
   WylEngineSessionStateCapability session_state_capability;
   gboolean active;
   gboolean rank_active;
+  gboolean terminal_recovery;
+  WylEngineTerminalToken terminal_token;
   guint acquisition_depth;
   GRecMutexLocker *locker;
 };
@@ -241,6 +248,25 @@ static wyrelog_error_t wyl_handle_insert_audit_fact_locked (WylHandle * self,
     const gchar * action, const gchar * resource_id,
     const gchar * deny_reason, const gchar * deny_origin,
     const gchar * request_id, wyl_decision_t decision);
+static wyrelog_error_t load_policy_store_audit_facts_locked (WylHandle * self);
+static wyrelog_error_t load_policy_store_role_permissions_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_role_memberships_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_direct_permissions_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_permission_states_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_permission_state_events_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_principal_states_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_principal_events_locked
+    (WylHandle * self);
+static wyrelog_error_t load_policy_store_session_states_locked
+    (WylHandle * self, WylEngineSessionStateCapability capability);
+static wyrelog_error_t load_policy_store_session_events_locked
+    (WylHandle * self);
 #ifdef WYL_HAS_AUDIT
 typedef enum
 {
@@ -304,57 +330,311 @@ engine_session_lock_owner (WylHandle *self)
   return locker;
 }
 
-WylEngineSession *
-wyl_engine_session_acquire (WylHandle *self)
+static gboolean
+engine_terminal_token_is_well_formed (const WylEngineTerminalToken *token)
 {
-  if (!WYL_IS_HANDLE (self))
+  return token != NULL && !wyl_id_equal (&token->handle_id, &WYL_ID_NIL)
+      && token->store_generation != 0 && token->serial != 0;
+}
+
+static gboolean
+engine_terminal_tokens_equal (const WylEngineTerminalToken *left,
+    const WylEngineTerminalToken *right)
+{
+  return engine_terminal_token_is_well_formed (left)
+      && engine_terminal_token_is_well_formed (right)
+      && wyl_id_equal (&left->handle_id, &right->handle_id)
+      && left->store_generation == right->store_generation
+      && left->serial == right->serial;
+}
+
+/* engine_terminal_mutex must be held. */
+static gboolean
+engine_terminal_token_matches_locked (WylHandle *self,
+    const WylEngineTerminalToken *token)
+{
+  return engine_terminal_token_is_well_formed (token)
+      && wyl_id_equal (&self->id, &token->handle_id)
+      && self->engine_terminal_generation == token->store_generation
+      && self->engine_terminal_serial == token->serial;
+}
+
+/* policy_store_lifecycle_mutex must be held. */
+static gboolean
+engine_terminal_generation_is_current_locked (WylHandle *self,
+    guint64 generation)
+{
+  return generation != 0 && self->policy_store != NULL
+      && !self->policy_store_generation_exhausted
+      && self->policy_store_generation == generation
+      && !self->policy_store_shutdown_pending
+      && !self->policy_store_shutdown_completing
+      && !self->policy_store_shutdown_completed;
+}
+
+/* The ENGINE mutex is already owned. This is the linearization point for a
+ * waiter that may have queued while another owner changed the terminal gate. */
+static gboolean
+engine_terminal_admit_after_engine_lock (WylHandle *self,
+    const WylEngineTerminalToken *recovery_token)
+{
+  if (recovery_token == NULL) {
+    g_mutex_lock (&self->engine_terminal_mutex);
+    gboolean admitted = self->engine_terminal_state ==
+        WYL_ENGINE_TERMINAL_AVAILABLE;
+    g_mutex_unlock (&self->engine_terminal_mutex);
+    return admitted;
+  }
+
+  /* Recovery is always an outermost claim. A recursive normal/public wrapper
+   * cannot turn thread-local ENGINE ownership into a recovery capability. */
+  if (self->engine_session_depth != 0)
+    return FALSE;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  g_mutex_lock (&self->engine_terminal_mutex);
+  gboolean admitted = engine_terminal_generation_is_current_locked (self,
+      recovery_token->store_generation)
+      && engine_terminal_token_matches_locked (self, recovery_token)
+      && self->engine_terminal_state == WYL_ENGINE_TERMINAL_FAILED;
+  if (admitted)
+    self->engine_terminal_state = WYL_ENGINE_TERMINAL_RECOVERING;
+  g_mutex_unlock (&self->engine_terminal_mutex);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return admitted;
+}
+
+static WylEngineSession *
+engine_session_acquire_full (WylHandle *self,
+    const WylEngineTerminalToken *recovery_token)
+{
+  if (!WYL_IS_HANDLE (self)
+      || (recovery_token != NULL
+          && !engine_terminal_token_is_well_formed (recovery_token)))
     return NULL;
   if (wyl_service_auth_rank_enter (self, WYL_SERVICE_AUTH_RANK_ENGINE)
       != WYRELOG_E_OK)
     return NULL;
-  WylEngineSession *session = g_new0 (WylEngineSession, 1);
-  session->rank_active = TRUE;
-  session->locker = engine_session_lock_owner (self);
-  if (session->locker == NULL) {
+  GRecMutexLocker *locker = engine_session_lock_owner (self);
+  if (locker == NULL) {
     (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_ENGINE);
-    g_free (session);
     return NULL;
   }
+  if (!engine_terminal_admit_after_engine_lock (self, recovery_token)) {
+    g_rec_mutex_locker_free (locker);
+    (void) wyl_service_auth_rank_leave (self, WYL_SERVICE_AUTH_RANK_ENGINE);
+    return NULL;
+  }
+
+  WylEngineSession *session = g_new0 (WylEngineSession, 1);
+  session->rank_active = TRUE;
+  session->locker = locker;
   session->handle = g_object_ref (self);
   session->owner = g_thread_self ();
   session->session_state_capability =
       wyl_engine_session_state_capability (self->read_engine);
+  if (recovery_token != NULL) {
+    session->terminal_recovery = TRUE;
+    session->terminal_token = *recovery_token;
+  }
   session->acquisition_depth = ++self->engine_session_depth;
   session->active = TRUE;
   return session;
 }
 
+WylEngineSession *
+wyl_engine_session_acquire (WylHandle *self)
+{
+  return engine_session_acquire_full (self, NULL);
+}
+
+WylEngineSession *
+wyl_engine_session_acquire_terminal_recovery (WylHandle *self,
+    const WylEngineTerminalToken *token)
+{
+  return engine_session_acquire_full (self, token);
+}
+
+guint
+wyl_engine_session_get_acquisition_depth (WylEngineSession *session)
+{
+  return engine_session_is_valid (session) ? session->acquisition_depth : 0;
+}
+
+/* ENGINE is held, so no second recovery owner can race this fallback. */
+static void
+engine_terminal_abandon_recovery (WylEngineSession *session)
+{
+  if (!session->terminal_recovery)
+    return;
+  WylHandle *self = session->handle;
+  g_mutex_lock (&self->engine_terminal_mutex);
+  if (engine_terminal_token_matches_locked (self, &session->terminal_token)
+      && self->engine_terminal_state == WYL_ENGINE_TERMINAL_RECOVERING)
+    self->engine_terminal_state = WYL_ENGINE_TERMINAL_FAILED;
+  g_mutex_unlock (&self->engine_terminal_mutex);
+  session->terminal_recovery = FALSE;
+}
+
+wyrelog_error_t
+wyl_engine_session_release_checked (WylEngineSession **inout_session)
+{
+  if (inout_session == NULL)
+    return WYRELOG_E_INVALID;
+  WylEngineSession *session = *inout_session;
+  if (session == NULL)
+    return WYRELOG_E_OK;
+  if (!engine_session_is_valid (session))
+    return WYRELOG_E_INVALID;
+  if (session->handle->engine_session_depth != session->acquisition_depth)
+    return WYRELOG_E_BUSY;
+
+  WylHandle *self = session->handle;
+  engine_terminal_abandon_recovery (session);
+  self->engine_session_depth--;
+  session->active = FALSE;
+  g_clear_pointer (&session->locker, g_rec_mutex_locker_free);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (session->rank_active) {
+    rc = wyl_service_auth_rank_leave_expected (self,
+        WYL_SERVICE_AUTH_RANK_ENGINE);
+    session->rank_active = FALSE;
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK && self->engine_session_release_rank_fail_once) {
+    self->engine_session_release_rank_fail_once = FALSE;
+    rc = WYRELOG_E_INTERNAL;
+  }
+#endif
+  g_clear_object (&session->handle);
+  g_free (session);
+  *inout_session = NULL;
+  return rc;
+}
+
 void
 wyl_engine_session_release (WylEngineSession *session)
 {
-  if (session == NULL)
-    return;
-  if (!engine_session_is_valid (session)) {
-    g_critical ("engine session released by a non-owner or after release");
-    return;
+  wyrelog_error_t rc = wyl_engine_session_release_checked (&session);
+  if (rc != WYRELOG_E_OK)
+    g_critical ("engine session release invariant failed: %d", rc);
+}
+
+WylEngineTerminalState
+wyl_handle_engine_terminal_get_state (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), WYL_ENGINE_TERMINAL_FAILED);
+  g_mutex_lock (&self->engine_terminal_mutex);
+  WylEngineTerminalState state = self->engine_terminal_state;
+  g_mutex_unlock (&self->engine_terminal_mutex);
+  return state;
+}
+
+wyrelog_error_t
+wyl_handle_engine_terminal_begin (WylEngineSession *session,
+    wyl_policy_store_t *expected_store, guint64 expected_generation,
+    WylEngineTerminalToken *out_token)
+{
+  if (out_token != NULL)
+    memset (out_token, 0, sizeof *out_token);
+  if (!engine_session_is_valid (session) || expected_store == NULL
+      || expected_generation == 0 || out_token == NULL)
+    return WYRELOG_E_INVALID;
+  WylHandle *self = session->handle;
+  if (session->terminal_recovery || session->acquisition_depth != 1
+      || self->engine_session_depth != 1)
+    return WYRELOG_E_BUSY;
+
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  gboolean generation_matches = self->policy_store == expected_store
+      && engine_terminal_generation_is_current_locked (self,
+      expected_generation);
+  g_mutex_lock (&self->engine_terminal_mutex);
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  if (generation_matches) {
+    if (self->engine_terminal_state != WYL_ENGINE_TERMINAL_AVAILABLE
+        || self->engine_terminal_serial == G_MAXUINT64) {
+      rc = WYRELOG_E_BUSY;
+    } else {
+      self->engine_terminal_serial++;
+      self->engine_terminal_generation = expected_generation;
+      self->engine_terminal_state = WYL_ENGINE_TERMINAL_PENDING;
+      *out_token = (WylEngineTerminalToken) {
+      .handle_id = self->id,.store_generation = expected_generation,.serial =
+            self->engine_terminal_serial,};
+      rc = WYRELOG_E_OK;
+    }
   }
-  if (session->handle->engine_session_depth != session->acquisition_depth) {
-    g_critical
-      ("engine sessions must be released in reverse acquisition order");
-    return;
+  g_mutex_unlock (&self->engine_terminal_mutex);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return rc;
+}
+
+static wyrelog_error_t
+engine_terminal_finish_pending (WylHandle *self,
+    const WylEngineTerminalToken *token, gboolean succeeded)
+{
+  if (!WYL_IS_HANDLE (self) || !engine_terminal_token_is_well_formed (token))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  g_mutex_lock (&self->engine_terminal_mutex);
+  gboolean exact = engine_terminal_generation_is_current_locked (self,
+      token->store_generation)
+      && engine_terminal_token_matches_locked (self, token)
+      && self->engine_terminal_state == WYL_ENGINE_TERMINAL_PENDING;
+  if (exact) {
+    self->engine_terminal_state = succeeded ? WYL_ENGINE_TERMINAL_AVAILABLE :
+        WYL_ENGINE_TERMINAL_FAILED;
+    if (succeeded)
+      self->engine_terminal_generation = 0;
   }
-  session->handle->engine_session_depth--;
-  session->active = FALSE;
-  g_clear_pointer (&session->locker, g_rec_mutex_locker_free);
-  if (session->rank_active) {
-    wyrelog_error_t rank_rc = wyl_service_auth_rank_leave (session->handle,
-            WYL_SERVICE_AUTH_RANK_ENGINE);
-    if (rank_rc != WYRELOG_E_OK)
-      g_critical ("engine session rank release invariant failed");
-    session->rank_active = FALSE;
+  g_mutex_unlock (&self->engine_terminal_mutex);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return exact ? WYRELOG_E_OK : WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_handle_engine_terminal_complete (WylHandle *self,
+    const WylEngineTerminalToken *token)
+{
+  return engine_terminal_finish_pending (self, token, TRUE);
+}
+
+wyrelog_error_t
+wyl_handle_engine_terminal_fail (WylHandle *self,
+    const WylEngineTerminalToken *token)
+{
+  return engine_terminal_finish_pending (self, token, FALSE);
+}
+
+wyrelog_error_t
+wyl_engine_session_finish_terminal_recovery (WylEngineSession *session,
+    const WylEngineTerminalToken *token, gboolean recovered)
+{
+  if (!engine_session_is_valid (session) || !session->terminal_recovery
+      || !engine_terminal_token_is_well_formed (token)
+      || !engine_terminal_tokens_equal (&session->terminal_token, token))
+    return WYRELOG_E_INVALID;
+  WylHandle *self = session->handle;
+  if (session->acquisition_depth != 1 || self->engine_session_depth != 1)
+    return WYRELOG_E_BUSY;
+
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  g_mutex_lock (&self->engine_terminal_mutex);
+  gboolean exact = engine_terminal_generation_is_current_locked (self,
+      token->store_generation)
+      && engine_terminal_token_matches_locked (self, token)
+      && self->engine_terminal_state == WYL_ENGINE_TERMINAL_RECOVERING;
+  if (exact) {
+    self->engine_terminal_state = recovered ? WYL_ENGINE_TERMINAL_AVAILABLE :
+        WYL_ENGINE_TERMINAL_FAILED;
+    if (recovered)
+      self->engine_terminal_generation = 0;
+    session->terminal_recovery = FALSE;
+>>>>>>> 2d3dec9 (policy: enforce terminal engine recovery boundary)
   }
-  g_clear_object (&session->handle);
-  g_free (session);
+  g_mutex_unlock (&self->engine_terminal_mutex);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return exact ? WYRELOG_E_OK : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -423,6 +703,33 @@ wyl_engine_session_lookup_symbol (WylEngineSession *session,
   return engine_session_is_valid (session) ?
          wyl_handle_lookup_engine_symbol_locked (session->handle, symbol,
              out_id) : WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_engine_session_get_accepted_session_state (WylEngineSession *session,
+    gint64 session_id, gint64 *out_state)
+{
+  if (out_state != NULL)
+    *out_state = 0;
+  if (!engine_session_is_valid (session) || session_id < 0
+      || out_state == NULL || session->handle->engine_pair_poisoned)
+    return WYRELOG_E_INVALID;
+  return wyl_engine_owned_get_accepted_session_state
+      (session->handle->read_engine, "session_state", session_id, out_state);
+}
+
+wyrelog_error_t
+wyl_engine_session_has_exact_accepted_member_of (WylEngineSession *session,
+    const gint64 row[3], gboolean *out_exact)
+{
+  if (out_exact != NULL)
+    *out_exact = FALSE;
+  if (!engine_session_is_valid (session) || row == NULL || out_exact == NULL
+      || row[0] < 0 || row[1] < 0 || row[2] < 0
+      || session->handle->engine_pair_poisoned)
+    return WYRELOG_E_INVALID;
+  return wyl_engine_owned_has_exact_accepted_member_of
+      (session->handle->read_engine, "member_of", row, out_exact);
 }
 
 wyrelog_error_t
@@ -806,6 +1113,24 @@ wyl_handle_set_engine_session_checkpoint_for_test (WylHandle *self,
 }
 
 void
+wyl_handle_engine_terminal_test_set_serial_max (WylHandle *self)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_mutex_lock (&self->engine_terminal_mutex);
+  g_assert_cmpint (self->engine_terminal_state, ==,
+      WYL_ENGINE_TERMINAL_AVAILABLE);
+  self->engine_terminal_serial = G_MAXUINT64;
+  g_mutex_unlock (&self->engine_terminal_mutex);
+}
+
+void
+wyl_handle_engine_session_test_fail_release_rank_after_pop (WylHandle *self)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->engine_session_release_rank_fail_once = TRUE;
+}
+
+void
 wyl_handle_set_engine_partial_fault_once_for_test (WylHandle *self,
     WylEnginePartialFault fault)
 {
@@ -1068,6 +1393,7 @@ wyl_handle_finalize (GObject *object)
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
   g_rec_mutex_clear (&self->engine_session_mutex);
+  g_mutex_clear (&self->engine_terminal_mutex);
 #ifdef WYL_TEST_HANDLE_SEAMS
   g_clear_pointer (&self->engine_operation_checkpoint_relation, g_free);
 #endif
@@ -1122,6 +1448,8 @@ wyl_handle_init (WylHandle *self)
     g_error ("wyl_handle_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
   g_rec_mutex_init (&self->engine_session_mutex);
+  g_mutex_init (&self->engine_terminal_mutex);
+  self->engine_terminal_state = WYL_ENGINE_TERMINAL_AVAILABLE;
   self->service_auth_authority = wyl_service_auth_authority_new (self);
   g_mutex_init (&self->policy_store_lifecycle_mutex);
   g_cond_init (&self->policy_store_lifecycle_changed);
@@ -2034,7 +2362,8 @@ reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
   }
 
   WylAuditProjectionState projection = WYL_AUDIT_PROJECTION_ABSENT;
-  /* wyl_handle_insert_audit_fact() rolls back every input it inserted when
+  /* wyl_handle_insert_audit_fact_locked() rolls back every input it inserted
+   * when
    * any later input fails. A non-empty partial or contradictory projection
    * therefore represents corruption, not a normal retry checkpoint. */
   rc = classify_audit_projection (self, id, created_at_us, subject_id,
@@ -2043,9 +2372,9 @@ reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
   if (rc == WYRELOG_E_OK && projection == WYL_AUDIT_PROJECTION_INCONSISTENT)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && projection == WYL_AUDIT_PROJECTION_ABSENT)
-    rc = wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
-            action, resource_id, deny_reason, deny_origin, request_id,
-            decision);
+    rc = wyl_handle_insert_audit_fact_locked (self, id, created_at_us,
+        subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+        decision);
   if (rc != WYRELOG_E_OK) {
     if (inserted) {
       wyrelog_error_t cleanup_rc =
@@ -3059,16 +3388,19 @@ take_engine_replacement_fault (WylHandle *self, WylEngineReplacementFault fault)
 
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
 static wyrelog_error_t
-load_current_engine_pair (WylHandle *self,
+load_current_engine_pair (WylEngineSession *session,
     WylEngineSessionStateCapability session_state_capability)
 {
+  if (!engine_session_is_valid (session))
+    return WYRELOG_E_INVALID;
+  WylHandle *self = session->handle;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_INTERN);
   wyrelog_error_t rc =
       preintern_policy_store_symbols (self, session_state_capability);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_AUDIT_FACTS);
-  rc = wyl_handle_load_policy_store_audit_facts (self);
+  rc = load_policy_store_audit_facts_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_ARM_RULES);
@@ -3080,7 +3412,7 @@ load_current_engine_pair (WylHandle *self,
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_ROLE_PERMISSIONS);
-  rc = wyl_handle_load_policy_store_role_permissions (self);
+  rc = load_policy_store_role_permissions_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -3092,35 +3424,35 @@ load_current_engine_pair (WylHandle *self,
   }
 #endif
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_ROLE_MEMBERSHIPS);
-  rc = wyl_handle_load_policy_store_role_memberships (self);
+  rc = load_policy_store_role_memberships_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_DIRECT_PERMISSIONS);
-  rc = wyl_handle_load_policy_store_direct_permissions (self);
+  rc = load_policy_store_direct_permissions_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_STATES);
-  rc = wyl_handle_load_policy_store_permission_states (self);
+  rc = load_policy_store_permission_states_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_EVENTS);
-  rc = wyl_handle_load_policy_store_permission_state_events (self);
+  rc = load_policy_store_permission_state_events_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_STATES);
-  rc = wyl_handle_load_policy_store_principal_states (self);
+  rc = load_policy_store_principal_states_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_EVENTS);
-  rc = wyl_handle_load_policy_store_principal_events (self);
+  rc = load_policy_store_principal_events_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_SESSION_STATES);
-  rc = wyl_handle_load_policy_store_session_states (self);
+  rc = load_policy_store_session_states_locked (self, session_state_capability);
   if (rc != WYRELOG_E_OK)
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_SESSION_EVENTS);
-  rc = wyl_handle_load_policy_store_session_events (self);
+  rc = load_policy_store_session_events_locked (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   return WYRELOG_E_OK;
@@ -3161,8 +3493,11 @@ preintern_published_engine_symbols (WylHandle *self,
 
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
 static wyrelog_error_t
-replace_engine_pair (WylHandle *self, const gchar *template_dir)
+replace_engine_pair (WylEngineSession *session, const gchar *template_dir)
 {
+  if (!engine_session_is_valid (session) || template_dir == NULL)
+    return WYRELOG_E_INVALID;
+  WylHandle *self = session->handle;
   WylPolicyStoreReadSnapshot snapshot = { 0 };
   WylEngine *new_read_engine = NULL;
   WylEngine *new_delta_engine = NULL;
@@ -3229,8 +3564,8 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   self->engine_pair_replacement_building = TRUE;
   rc = preintern_published_engine_symbols (self, old_symbols);
   if (rc == WYRELOG_E_OK)
-    rc = load_current_engine_pair (self,
-            wyl_engine_session_state_capability (new_read_engine));
+    rc = load_current_engine_pair (session,
+        wyl_engine_session_state_capability (new_read_engine));
   self->engine_pair_replacement_building = FALSE;
   if (rc != WYRELOG_E_OK)
     goto fail_after_install;
@@ -3408,7 +3743,7 @@ reconcile_committed_engine_pair_in_session (WylEngineSession *session,
   }
 
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (session, template_dir);
   if (rc != WYRELOG_E_OK) {
     poison_engine_pair_locked (self);
     return rc;
@@ -3439,7 +3774,7 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
     return WYRELOG_E_INVALID;
   }
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (session, template_dir);
   if (rc != WYRELOG_E_OK) {
     poison_engine_pair_locked (self);
     return rc;
@@ -3663,7 +3998,7 @@ wyl_engine_session_repair_committed_publication (WylEngineSession *session,
     return rc;
 
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  rc = replace_engine_pair (self, template_dir);
+  rc = replace_engine_pair (session, template_dir);
   if (rc != WYRELOG_E_OK)
     goto fail;
   self->engine_pair_poisoned = FALSE;
@@ -3895,7 +4230,7 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   if (self->read_engine != NULL || self->delta_engine != NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (engine_session, template_dir);
   if (rc == WYRELOG_E_OK)
     self->engine_pair_poisoned = FALSE;
   return rc;
@@ -3958,7 +4293,7 @@ replace_live_engine_pair_serialized (WylHandle *self,
     clear_pending_deltas (self);
   gboolean was_poisoned = self->engine_pair_poisoned;
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (engine_session, template_dir);
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (rc == WYRELOG_E_OK && self->engine_replacement_checkpoint != NULL)
     self->engine_replacement_checkpoint (WYL_ENGINE_REPLACEMENT_CANDIDATE_READY,
@@ -4519,6 +4854,16 @@ insert_policy_store_role_permission (const gchar *role_id,
   return wyl_handle_engine_insert_locked (self, "role_permission", row, 2);
 }
 
+static wyrelog_error_t
+load_policy_store_role_permissions_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_role_permission (self->policy_store,
+      insert_policy_store_role_permission, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_role_permissions (WylHandle *self)
 {
@@ -4526,13 +4871,8 @@ wyl_handle_load_policy_store_role_permissions (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_role_permission (self->policy_store,
-             insert_policy_store_role_permission, self);
+  return engine_session != NULL ?
+      load_policy_store_role_permissions_locked (self) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4559,6 +4899,16 @@ insert_policy_store_role_membership (const gchar *subject_id,
   return insert_login_skip_mfa_authz_if_allowed (self, subject_id, scope);
 }
 
+static wyrelog_error_t
+load_policy_store_role_memberships_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_role_membership (self->policy_store,
+      insert_policy_store_role_membership, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_role_memberships (WylHandle *self)
 {
@@ -4566,13 +4916,8 @@ wyl_handle_load_policy_store_role_memberships (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_role_membership (self->policy_store,
-             insert_policy_store_role_membership, self);
+  return engine_session != NULL ?
+      load_policy_store_role_memberships_locked (self) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4604,6 +4949,16 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+load_policy_store_direct_permissions_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_direct_permission (self->policy_store,
+      insert_policy_store_direct_permission, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_direct_permissions (WylHandle *self)
 {
@@ -4611,13 +4966,8 @@ wyl_handle_load_policy_store_direct_permissions (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_direct_permission (self->policy_store,
-             insert_policy_store_direct_permission, self);
+  return engine_session != NULL ?
+      load_policy_store_direct_permissions_locked (self) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4651,6 +5001,16 @@ insert_policy_store_permission_state (const gchar *subject_id,
   return wyl_handle_engine_insert_locked (self, "perm_state_replayed", row, 4);
 }
 
+static wyrelog_error_t
+load_policy_store_permission_states_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_permission_state (self->policy_store,
+      insert_policy_store_permission_state, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_permission_states (WylHandle *self)
 {
@@ -4658,13 +5018,8 @@ wyl_handle_load_policy_store_permission_states (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_permission_state (self->policy_store,
-             insert_policy_store_permission_state, self);
+  return engine_session != NULL ?
+      load_policy_store_permission_states_locked (self) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4714,6 +5069,16 @@ insert_policy_store_permission_state_event (gint64 event_id,
   return wyl_handle_engine_insert_locked (self, "perm_state_event", row, 7);
 }
 
+static wyrelog_error_t
+load_policy_store_permission_state_events_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_permission_state_event (self->policy_store,
+      insert_policy_store_permission_state_event, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_permission_state_events (WylHandle *self)
 {
@@ -4721,13 +5086,9 @@ wyl_handle_load_policy_store_permission_state_events (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_permission_state_event (self->policy_store,
-             insert_policy_store_permission_state_event, self);
+  return engine_session != NULL ?
+      load_policy_store_permission_state_events_locked (self) :
+      WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4754,6 +5115,16 @@ insert_policy_store_principal_state (const gchar *subject_id,
   return wyl_handle_engine_insert_locked (self, "principal_state", row, 2);
 }
 
+static wyrelog_error_t
+load_policy_store_principal_states_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_principal_state (self->policy_store,
+      insert_policy_store_principal_state, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_principal_states (WylHandle *self)
 {
@@ -4761,13 +5132,8 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_principal_state (self->policy_store,
-             insert_policy_store_principal_state, self);
+  return engine_session != NULL ?
+      load_policy_store_principal_states_locked (self) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4808,6 +5174,16 @@ insert_policy_store_principal_event (gint64 event_id, const gchar *subject_id,
   return wyl_handle_engine_insert_locked (self, "principal_event", row, 5);
 }
 
+static wyrelog_error_t
+load_policy_store_principal_events_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_principal_event (self->policy_store,
+      insert_policy_store_principal_event, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_principal_events (WylHandle *self)
 {
@@ -4815,13 +5191,8 @@ wyl_handle_load_policy_store_principal_events (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_principal_event (self->policy_store,
-             insert_policy_store_principal_event, self);
+  return engine_session != NULL ?
+      load_policy_store_principal_events_locked (self) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4842,6 +5213,20 @@ insert_policy_store_session_state (const gchar *session_id,
   return wyl_handle_engine_insert_locked (self, "session_state", row, 2);
 }
 
+static wyrelog_error_t
+load_policy_store_session_states_locked (WylHandle *self,
+    WylEngineSessionStateCapability capability)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+  if (capability == WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
+    return WYRELOG_E_POLICY;
+  return capability == WYL_ENGINE_SESSION_STATE_ABSENT ?
+      validate_projectionless_store (self) :
+      wyl_policy_store_foreach_effective_scope_state (self->policy_store,
+      insert_policy_store_session_state, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_session_states (WylHandle *self)
 {
@@ -4849,19 +5234,9 @@ wyl_handle_load_policy_store_session_states (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  WylEngineSessionStateCapability capability =
-      engine_session->session_state_capability;
-  if (capability == WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
-    return WYRELOG_E_POLICY;
-  return capability == WYL_ENGINE_SESSION_STATE_ABSENT ?
-         validate_projectionless_store (self) :
-         wyl_policy_store_foreach_effective_scope_state (self->policy_store,
-             insert_policy_store_session_state, self);
+  return engine_session != NULL ?
+      load_policy_store_session_states_locked (self,
+      engine_session->session_state_capability) : WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4902,6 +5277,16 @@ insert_policy_store_session_event (gint64 event_id, const gchar *session_id,
   return wyl_handle_engine_insert_locked (self, "session_event", row, 5);
 }
 
+static wyrelog_error_t
+load_policy_store_session_events_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_session_event (self->policy_store,
+      insert_policy_store_session_event, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_session_events (WylHandle *self)
 {
@@ -4909,13 +5294,8 @@ wyl_handle_load_policy_store_session_events (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_session_event (self->policy_store,
-             insert_policy_store_session_event, self);
+  return engine_session != NULL ?
+      load_policy_store_session_events_locked (self) : WYRELOG_E_INVALID;
 }
 
 static const gchar *
@@ -4986,9 +5366,9 @@ insert_policy_store_audit_fact (const gchar *id, gint64 created_at_us,
     wyl_decision_t decision, gpointer user_data)
 {
   WylHandle *self = user_data;
-  return wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
-             action, resource_id, deny_reason, deny_origin, request_id,
-             decision);
+  return wyl_handle_insert_audit_fact_locked (self, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+      decision);
 }
 
 wyrelog_error_t
@@ -5075,6 +5455,16 @@ wyl_handle_insert_audit_fact_locked (WylHandle *self, const gchar *id,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+load_policy_store_audit_facts_locked (WylHandle *self)
+{
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_audit_event (self->policy_store,
+      insert_policy_store_audit_fact, self);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_audit_facts (WylHandle *self)
 {
@@ -5082,13 +5472,8 @@ wyl_handle_load_policy_store_audit_facts (WylHandle *self)
     return WYRELOG_E_INVALID;
   g_autoptr (WylEngineSession) engine_session =
       wyl_engine_session_acquire (self);
-  if (engine_session == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || engine_pair_unavailable (self))
-    return WYRELOG_E_INVALID;
-
-  return wyl_policy_store_foreach_audit_event (self->policy_store,
-             insert_policy_store_audit_fact, self);
+  return engine_session != NULL ?
+      load_policy_store_audit_facts_locked (self) : WYRELOG_E_INVALID;
 }
 
 typedef struct
