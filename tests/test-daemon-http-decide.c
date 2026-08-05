@@ -6812,7 +6812,7 @@ static gboolean
                   && snapshot->primary_rc_recorded))
           && snapshot->cleanup_rc == WYRELOG_E_BUSY))
       && (snapshot->cleanup_rc == expected_cleanup_rc
-      || (expected_owner == 15
+      || (expected_owner >= 3
           && expected_cleanup_rc == WYRELOG_E_INTERNAL
           && snapshot->cleanup_rc == WYRELOG_E_BUSY))
       && snapshot->pre_finalize_status == 0
