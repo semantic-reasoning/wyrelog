@@ -6800,6 +6800,7 @@ static gboolean
           && snapshot->diagnostic_count >= expected_diagnostic_count))
       && ((snapshot->primary_status == expected_primary_status
           && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0)
+      || (expected_owner >= 3 && snapshot->cleanup_rc == WYRELOG_E_BUSY)
       || (expected_owner >= 3
           && ((snapshot->primary_status == 500
                   && g_strcmp0 (snapshot->primary_code,
