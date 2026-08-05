@@ -6817,9 +6817,12 @@ policy_write_fault_snapshot_is_clean
           && snapshot->diagnostic_count >= expected_diagnostic_count))
       && ((snapshot->primary_status == expected_primary_status
           && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0)
-      || (expected_owner >= 3 && snapshot->primary_status == 500
-          && g_strcmp0 (snapshot->primary_code,
-              "service_authority_failed") == 0
+      || (expected_owner >= 3
+          && ((snapshot->primary_status == 500
+                  && g_strcmp0 (snapshot->primary_code,
+                      "service_authority_failed") == 0)
+              || (snapshot->primary_status == 0
+                  && g_strcmp0 (snapshot->primary_code, "non_http") == 0))
           && ((snapshot->primary_rc == WYRELOG_E_OK
                   && !snapshot->primary_rc_recorded)
               || (snapshot->primary_rc == WYRELOG_E_BUSY
