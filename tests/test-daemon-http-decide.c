@@ -19710,18 +19710,6 @@ main (void)
       check_daemon_policy_write_cancellable_contract ();
   if (policy_cancellable_rc != 0)
     return policy_cancellable_rc;
-
-#ifdef WYL_HAS_FACT_STORE
-#ifndef G_OS_WIN32
-  /* This matrix provisions POSIX owner-mode fact roots.  Windows fact roots
-  * require the separate fixed-volume, owner-only ACL fixture contract; #757
-  * deliberately validates the complete 16x2 owner matrix on POSIX lanes. */
-  gint all_owner_fault_rc = check_policy_write_all_owner_faults ();
-  if (all_owner_fault_rc != 0)
-    return all_owner_fault_rc;
-#endif
-#endif
-
 #if defined(WYL_HAS_FACT_STORE) || defined(WYL_HAS_AUDIT)
   g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
   g_autoptr (WylHandle) handle = NULL;
@@ -20067,6 +20055,14 @@ main (void)
   }
 #endif
 cleanup:
+#ifdef WYL_HAS_FACT_STORE
+#ifndef G_OS_WIN32
+  /* Run deliberate owner finalize faults last so they cannot poison later
+   * process-global authority fixtures. */
+  if (result == 0)
+    result = check_policy_write_all_owner_faults ();
+#endif
+#endif
   wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
