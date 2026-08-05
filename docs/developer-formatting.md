@@ -1,61 +1,88 @@
 # C formatting
 
-Wyrelog's authoritative C formatter is GNU indent 2.2.13 through
-`tools/gst-indent`. The exact version matters: older GNU indent releases do
-not produce the same output for this tree.
+Wyrelog's authoritative C formatter is Uncrustify 0.83.0 through
+`tools/format-c`, configured by `tools/uncrustify.cfg`. The exact version
+matters: formatter releases change their output, and this repository's contract
+is that migrated files are exact fixed points.
+
+## Migration state
+
+The tree is part-way through a migration from GNU indent 2.2.13 to Uncrustify.
+Uncrustify cannot reproduce GNU indent's continuation-indent model for wrapped
+declarations, so the two formatters disagree about roughly 80% of the tracked C
+files. Rather than rewrite them all at once, the migration is incremental:
+
+- `tools/formatted-files.txt` is the ledger of files already migrated.
+- Every ledger entry must be an exact fixed point of the pinned formatter.
+- Any C file a change touches must be formatted and added to the ledger.
+
+The migrated set therefore only grows, and touching a file is what migrates it.
+Files nobody edits stay in their old formatting until someone does.
 
 ## Install the formatter
 
-If the system package supplies exactly version 2.2.13, install it normally.
-Homebrew currently provides it as `gnu-indent`, with the executable named
-`gindent`.
-
-The repository also provides a source installer for POSIX development hosts.
-It downloads the GNU 2.2.13 release archive, verifies the pinned SHA-256
-digest, builds it, and installs beneath an explicit absolute prefix:
+The repository provides a source installer for POSIX development hosts. It
+downloads the pinned release archive, verifies its SHA-256 digest, builds it
+with CMake, and installs beneath an explicit absolute prefix:
 
 ```sh
-./tools/install-gnu-indent.sh /absolute/path/to/format-tools
+./tools/install-uncrustify.sh /absolute/path/to/format-tools
 export PATH="/absolute/path/to/format-tools/bin:$PATH"
-./tools/gst-indent --check-version
+./tools/format-c --check-version
 ```
 
-The installer requires Python 3, creates the requested prefix, resolves it with
-physical filesystem semantics, rejects a canonical prefix of `/`, and uses
-only that canonical path for configure, installation, and version
-verification. A symlink at the requested prefix itself is rejected, including
-a non-root symlink and one written with trailing `/`. Symlinks in ancestor
-components are allowed so conventional paths such as macOS `/tmp` remain
-usable; their physical target is reflected in the canonical installation path.
+The installer requires `curl`, `cmake`, and `tar`. It rejects a relative
+prefix and a symlink at the requested prefix itself, including one written with
+a trailing `/`, and it validates the prefix before running any download or
+build command so a rejected prefix leaves no side effects. Symlinks in ancestor
+components remain allowed so conventional paths such as macOS `/tmp` stay
+usable.
 
-GNU indent 2.2.13's upstream Autoconf and Make recipes do not safely preserve
-shell metacharacters in an installation prefix. Both the requested path and
-its physical canonical path must therefore contain only ASCII letters, digits,
-`/`, `.`, `_`, `+`, and `-`. This also excludes all whitespace.
+On Windows, the upstream project publishes a prebuilt binary
+(`uncrustify-0.83.0_f-win64.zip`) which avoids needing a toolchain locally.
 
 The expected output is:
 
 ```text
-GNU indent 2.2.13
+Uncrustify-0.83.0_f
 ```
 
 ## Format and check
 
-Format a file in place:
+Format a file in place, then record it in the ledger:
 
 ```sh
-./tools/gst-indent path/to/file.c
+./tools/format-c path/to/file.c
+# add path/to/file.c to tools/formatted-files.txt, keeping the file sorted
 ```
 
-Check every tracked C source and header without changing the worktree:
+Check the files a change touches, plus every migrated file:
 
 ```sh
-./tools/check-format.sh --all
+./tools/check-format.sh --changed origin/main
 ```
 
-The formatter runs twice because the inherited GStreamer-style GNU indent
-contract requires two passes. The checked-in tree must be unchanged after
-that complete formatting operation.
+Check only the migrated set:
+
+```sh
+./tools/check-format.sh --ledger
+```
+
+Check the prospective index, as the pre-commit hook does:
+
+```sh
+./tools/check-format.sh --staged
+```
+
+The formatter runs twice per file. Uncrustify is single-pass, but the contract
+being enforced is that a file is a fixed point, and a second pass is what
+demonstrates the first converged rather than assuming it.
+
+`--ledger` and `--changed` re-verify the whole migrated set, which is what
+catches a formatter or configuration change: altering `tools/uncrustify.cfg`
+without reformatting the ledger fails CI. `--staged` deliberately does not scan
+the whole ledger, because it runs on every commit and that cost grows with the
+ledger; CI carries the exhaustive check instead.
 
 ## Committed pre-commit hook
 
@@ -92,11 +119,8 @@ readable; the exceptional case of an embedded newline is rendered as
 The hook materializes the checker and formatter from index blobs, so unstaged
 source, checker, and formatter changes cannot affect its result. Git chooses
 the worktree hook before the script can inspect the index, so the committed
-hook intentionally remains a small launcher and is covered by a behavior
-test. Ordinarily the checker examines staged C and header files. When the
-formatter, checker, pinned installer, or hook itself changes, it checks every
-C and header blob in the prospective index to prevent a tooling-only commit
-from invalidating the rest of the tree.
+hook intentionally remains a small launcher and is covered by a behavior test.
 
-Failures distinguish a missing formatter, an incompatible version, an
-unformatted tracked tree, and unformatted staged content.
+Failures distinguish a missing formatter, an incompatible version, a changed
+file that has not been migrated, an invalid ledger, and content that is not a
+fixed point.
