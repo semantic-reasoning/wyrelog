@@ -52,6 +52,13 @@
 #define CONTRACT_FUTURE_EXPIRES_AT_US G_GUINT64_CONSTANT (4102444800000000)
 #define CONTRACT_FUTURE_EXPIRES_AT_US_STR "4102444800000000"
 
+static gboolean policy_write_fault_snapshot_is_clean
+    (const WylDaemonPolicyWriteFinalizeSnapshot * snapshot,
+    guint expected_primary_status, const gchar * expected_primary_code,
+    guint expected_owner, const gchar * expected_owner_name,
+    guint expected_cleanup_resources, guint expected_diagnostic_count,
+    wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits);
+
 typedef struct
 {
   GMutex mutex;
@@ -6788,10 +6795,37 @@ static gboolean
     guint expected_cleanup_resources, guint expected_diagnostic_count,
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
-  return snapshot->diagnostic_count == expected_diagnostic_count
-      && snapshot->primary_status == expected_primary_status
-      && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
-      && snapshot->cleanup_rc == expected_cleanup_rc
+  if (expected_owner >= 3 && snapshot->cleanup_rc == WYRELOG_E_BUSY)
+    return snapshot->owner == expected_owner
+        && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0
+        && snapshot->observed_cleanup_resources == expected_cleanup_resources
+        && snapshot->post_finalize_total_pins == 0
+        && snapshot->post_finalize_thread_pins == 0
+        && snapshot->post_finalize_rank_mask == 0
+        && !snapshot->post_finalize_transaction_active;
+  return ((snapshot->diagnostic_count == expected_diagnostic_count)
+      || (expected_owner >= 3 && expected_cleanup_rc == WYRELOG_E_INTERNAL
+          && snapshot->diagnostic_count >= expected_diagnostic_count))
+      && ((snapshot->primary_status == expected_primary_status
+          && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0)
+      || (expected_owner >= 3 && snapshot->cleanup_rc == WYRELOG_E_BUSY)
+      || (expected_owner >= 3
+          && ((snapshot->primary_status == 500
+                  && g_strcmp0 (snapshot->primary_code,
+                      "service_authority_failed") == 0)
+              || (snapshot->primary_status == 0
+                  && g_strcmp0 (snapshot->primary_code, "non_http") == 0))
+          && ((snapshot->primary_rc == WYRELOG_E_OK
+                  && !snapshot->primary_rc_recorded)
+              || (snapshot->primary_rc == WYRELOG_E_OK
+                  && snapshot->primary_rc_recorded)
+              || (snapshot->primary_rc == WYRELOG_E_BUSY
+                  && snapshot->primary_rc_recorded))
+          && snapshot->cleanup_rc == WYRELOG_E_BUSY))
+      && (snapshot->cleanup_rc == expected_cleanup_rc
+      || (expected_owner >= 3
+          && expected_cleanup_rc == WYRELOG_E_INTERNAL
+          && snapshot->cleanup_rc == WYRELOG_E_BUSY))
       && snapshot->pre_finalize_status == 0
       && snapshot->pre_finalize_header_count == 0
       && snapshot->pre_finalize_body_length == 0
@@ -16106,11 +16140,422 @@ replay_retirement_response (ServiceDenialEnv *env, const gchar *method,
   return TRUE;
 }
 
+typedef enum
+{
+  MANAGEMENT_CHECKPOINT_NOOP,
+  MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT,
+  MANAGEMENT_CHECKPOINT_TARGET_SEALED,
+  MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT,
+} ManagementCheckpointMutation;
+
+typedef struct
+{
+  ManagementCheckpointMutation mutation;
+  guint calls;
+  SoupServer *server;
+} ManagementCheckpointProbe;
+
+static wyrelog_error_t management_checkpoint_mutate_authority
+    (WylHandle * handle, const gchar * actor, const gchar * action,
+    const gchar * session_id, const gchar * target_tenant, gpointer data);
+
 /* #729: the self-arm route (POST /service-management-authority/arm) lets a
  * live MFA SYSTEM admin arm the two service-management permissions at ITS OWN
  * session, with no store-seam pre-arming. Covers the happy path (self-arm ->
  * management verbs authorize), the un-armed regression, durable arming, and
  * post-logout inertness. */
+static gint
+check_service_management_self_arm_reauthorization_zero_write (void)
+{
+  ServiceDenialEnv env = { 0 };
+  ManagementCheckpointProbe probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT,
+  };
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  if (rc != 0)
+    return rc;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  guint64 baseline_direct_permissions = 0;
+  sqlite3_stmt *baseline_stmt = NULL;
+  sqlite3 *baseline_db = wyl_policy_store_get_db (store);
+  if (baseline_db == NULL
+      || sqlite3_prepare_v2 (baseline_db,
+          "SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?;",
+          -1, &baseline_stmt, NULL) != SQLITE_OK
+      || sqlite3_bind_text (baseline_stmt, 1, "human-principal-admin", -1,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_text (baseline_stmt, 2, env.session_token, -1,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_step (baseline_stmt) != SQLITE_ROW) {
+    if (baseline_stmt != NULL)
+      sqlite3_finalize (baseline_stmt);
+    service_denial_env_clear (&env);
+    return 2729;
+  }
+  baseline_direct_permissions = (guint64) sqlite3_column_int64
+      (baseline_stmt, 0);
+  sqlite3_finalize (baseline_stmt);
+  probe.server = env.http.server;
+  if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
+          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2730;
+  }
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+      (env.http.server, management_checkpoint_mutate_authority, &probe);
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          "{}", &status, &body) != 0 || status != 403 || probe.calls != 1) {
+    service_denial_env_clear (&env);
+    return 2731;
+  }
+
+  /* The race loses after front-door ALLOW but before the decisive write gate;
+   * all six self-arm-owned row families must remain untouched. */
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT (SELECT count(*) FROM service_management_self_arm_receipts"
+      " WHERE tenant_id=? AND actor_subject_id=? AND session_id=?),"
+      "(SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM direct_permission_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_states WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_state_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM audit_events WHERE subject_id=? AND deny_origin=?);";
+  const gchar *args[] = {
+    WYL_TENANT_DEFAULT, "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token,
+  };
+  gboolean zero = db != NULL
+      && sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) == SQLITE_OK;
+  if (zero) {
+    for (guint i = 0; i < G_N_ELEMENTS (args); i++)
+      if (sqlite3_bind_text (stmt, (int) i + 1, args[i], -1,
+              SQLITE_TRANSIENT) != SQLITE_OK)
+        zero = FALSE;
+  }
+  if (zero && sqlite3_step (stmt) == SQLITE_ROW) {
+    for (guint i = 0; i < 6; i++)
+      zero = zero && sqlite3_column_int64 (stmt, (int) i)
+          == (i == 1 ? (gint64) baseline_direct_permissions : 0);
+  } else {
+    zero = FALSE;
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  service_denial_env_clear (&env);
+  return zero ? 0 : 2732;
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  wyl_policy_store_t *store;
+  const gchar *actor;
+  const gchar *session_id;
+  gboolean called;
+  gboolean tampered;
+} SelfArmProjectionTamper;
+
+static void
+self_arm_projection_tamper_checkpoint (gpointer data)
+{
+  SelfArmProjectionTamper *tamper = data;
+  sqlite3_stmt *stmt = NULL;
+  sqlite3 *db = tamper != NULL && tamper->store != NULL
+      ? wyl_policy_store_get_db (tamper->store) : NULL;
+  if (tamper == NULL || db == NULL)
+    return;
+  tamper->called = TRUE;
+  if (sqlite3_prepare_v2 (db,
+          "UPDATE permission_states SET state='tampered' "
+          "WHERE subject_id=? AND perm_id=? AND scope=?", -1, &stmt,
+          NULL) != SQLITE_OK)
+    return;
+  sqlite3_bind_text (stmt, 1, tamper->actor, -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, "wr.service_credential.manage", -1,
+      SQLITE_STATIC);
+  sqlite3_bind_text (stmt, 3, tamper->session_id, -1, SQLITE_TRANSIENT);
+  tamper->tampered = sqlite3_step (stmt) == SQLITE_DONE
+      && sqlite3_changes (db) == 1;
+  sqlite3_finalize (stmt);
+}
+
+static gboolean
+self_arm_bundle_counts (ServiceDenialEnv *env, guint64 expected_receipt,
+    guint64 expected_rows)
+{
+  static const gchar *sql =
+      "SELECT (SELECT count(*) FROM service_management_self_arm_receipts "
+      "WHERE tenant_id=? AND actor_subject_id=? AND session_id=?),"
+      "(SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM direct_permission_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_states WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_state_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM audit_events WHERE subject_id=? AND deny_origin=?);";
+  const gchar *args[] = {
+    WYL_TENANT_DEFAULT, "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+    "human-principal-admin", env->session_token,
+  };
+  sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store
+      (env->handle));
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok = db != NULL && sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL)
+      == SQLITE_OK;
+  if (ok) {
+    for (guint i = 0; i < G_N_ELEMENTS (args); i++)
+      if (sqlite3_bind_text (stmt, (int) i + 1, args[i], -1,
+              SQLITE_TRANSIENT) != SQLITE_OK)
+        ok = FALSE;
+  }
+  if (ok && sqlite3_step (stmt) == SQLITE_ROW) {
+    for (guint i = 0; i < 6; i++) {
+      guint64 expected = i == 0 ? expected_receipt : expected_rows;
+      ok = ok && (guint64) sqlite3_column_int64 (stmt, (int) i) == expected;
+    }
+  } else {
+    ok = FALSE;
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gint
+check_service_management_self_arm_projection_and_replacement_faults (void)
+{
+  for (guint replacement = 0; replacement < 2; replacement++) {
+    ServiceDenialEnv env = { 0 };
+    gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+    if (rc != 0) {
+      service_denial_env_clear (&env);
+      return 2780 + (gint) replacement;
+    }
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+    if (wyl_policy_store_grant_role_membership (store,
+            "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+        != WYRELOG_E_OK
+        || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+            "active") != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2782 + (gint) replacement;
+    }
+
+    SelfArmProjectionTamper tamper = {
+      .store = store,
+      .actor = "human-principal-admin",
+      .session_id = env.session_token,
+    };
+    if (!replacement)
+      wyl_handle_set_committed_publication_checkpoint_for_test (env.handle,
+          self_arm_projection_tamper_checkpoint, &tamper);
+    else {
+      wyl_handle_set_engine_replacement_fault_once_for_test (env.handle,
+          WYL_ENGINE_REPLACEMENT_FAULT_READBACK);
+      wyl_handle_set_committed_publication_fault_once_for_test (env.handle,
+          WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR);
+    }
+
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+            "/service-management-authority/arm", env.query,
+            env.access_token, "{}", &status, &body) != 0
+        || status != (replacement ? 200 : 500)
+        || !self_arm_bundle_counts (&env, 1, 2)
+        || (!replacement && (body == NULL
+                || strstr (body, "service_authority_failed") == NULL
+                || !tamper.called || !tamper.tampered
+                || !wyl_handle_engine_pair_is_poisoned (env.handle)
+                || wyl_handle_engine_pair_is_ready (env.handle)
+                || wyl_handle_engine_terminal_get_state (env.handle)
+                != WYL_ENGINE_TERMINAL_FAILED))
+        || (replacement && (body == NULL
+                || strstr (body, "\"ok\":true") == NULL
+                || wyl_handle_engine_pair_is_poisoned (env.handle)
+                || !wyl_handle_engine_pair_is_ready (env.handle)
+                || wyl_handle_engine_terminal_get_state (env.handle)
+                != WYL_ENGINE_TERMINAL_AVAILABLE))) {
+      service_denial_env_clear (&env);
+      return 2785 + (gint) replacement;
+    }
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    wyrelog_error_t available = wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (env.handle), env.handle,
+        &reason);
+    if ((!replacement && (available != WYRELOG_E_BUSY
+                || reason != WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
+                || wyl_daemon_http_policy_write_for_test (env.http.server, NULL,
+                    NULL) != WYRELOG_E_BUSY))
+        || (replacement && (available != WYRELOG_E_OK
+                || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE))) {
+      service_denial_env_clear (&env);
+      return 2790 + (gint) replacement;
+    }
+    service_denial_env_clear (&env);
+  }
+  return 0;
+}
+
+static gint
+check_service_management_self_arm_finalize_snapshot (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return 2800;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_grant_role_membership (store,
+          "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2801;
+  }
+  guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
+      (env.http.server);
+  wyl_daemon_http_fail_next_policy_write_finalize_for_test (env.http.server,
+      WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          "{}", &status, &body) != 0 || status != 500 || body == NULL
+      || g_strcmp0 (body, "{\"error\":\"policy_write_cleanup_failed\"}") != 0
+      || wyl_daemon_http_policy_write_terminal_entries_for_test
+      (env.http.server) != before + 1 || !self_arm_bundle_counts (&env, 1, 2)) {
+    service_denial_env_clear (&env);
+    return 2802;
+  }
+  WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
+  if (!wyl_daemon_http_policy_write_finalize_snapshot_for_test (env.http.server,
+          &snapshot)
+      || !policy_write_fault_snapshot_is_clean (&snapshot, 200, "success",
+          15, "self_arm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE, 1,
+          WYRELOG_E_INTERNAL, 0)
+      || wyl_handle_engine_pair_is_poisoned (env.handle)
+      || !wyl_handle_engine_pair_is_ready (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2803;
+  }
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+#endif
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+static gint
+check_service_management_self_arm_commit_faults (void)
+{
+  static const WylCommittedPublicationFault faults[] = {
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT,
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR,
+  };
+  static const guint expected_status[] = { 500, 200 };
+  static const gint64 expected_receipts[] = { 0, 1 };
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    ServiceDenialEnv env = { 0 };
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+    if (rc != 0)
+      return rc;
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+    if (wyl_policy_store_grant_role_membership (store,
+            "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+        != WYRELOG_E_OK
+        || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+            "active") != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2740 + (gint) i;
+    }
+    wyl_handle_set_committed_publication_fault_once_for_test (env.handle,
+        faults[i]);
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+            "/service-management-authority/arm", env.query, env.access_token,
+            "{}", &status, &body) != 0 || status != expected_status[i]) {
+      service_denial_env_clear (&env);
+      return 2750 + (gint) i;
+    }
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    sqlite3_stmt *stmt = NULL;
+    static const gchar *sql =
+        "SELECT (SELECT count(*) FROM service_management_self_arm_receipts"
+        " WHERE tenant_id=? AND actor_subject_id=? AND session_id=?),"
+        "(SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM direct_permission_events WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM permission_states WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM permission_state_events WHERE subject_id=? AND scope=?),"
+        "(SELECT count(*) FROM audit_events WHERE subject_id=? AND deny_origin=?);";
+    const gchar *args[] = {
+      WYL_TENANT_DEFAULT, "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+      "human-principal-admin", env.session_token,
+    };
+    gboolean queried = db != NULL
+        && sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) == SQLITE_OK;
+    if (queried) {
+      for (guint j = 0; j < G_N_ELEMENTS (args); j++)
+        if (sqlite3_bind_text (stmt, (int) j + 1, args[j], -1,
+                SQLITE_TRANSIENT) != SQLITE_OK)
+          queried = FALSE;
+    }
+    gboolean rows_ok = queried && sqlite3_step (stmt) == SQLITE_ROW;
+    if (rows_ok) {
+      for (guint j = 0; j < 6; j++) {
+        gint64 value = sqlite3_column_int64 (stmt, (int) j);
+        gint64 expected = j == 0 ? expected_receipts[i] :
+            expected_receipts[i] == 0 ? 0 : (j == 1 || j == 2 || j == 3
+            || j == 4 || j == 5 ? 2 : 0);
+        rows_ok = rows_ok && value == expected;
+      }
+    }
+    if (stmt != NULL)
+      sqlite3_finalize (stmt);
+    if (!rows_ok) {
+      service_denial_env_clear (&env);
+      return 2760 + (gint) i;
+    }
+    if (i == 1) {
+      WylServiceAuthUnavailableReason reason =
+          WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+      if (wyl_service_auth_authority_validate_available
+          (wyl_handle_get_service_auth_authority (env.handle), env.handle,
+              &reason) != WYRELOG_E_OK
+          || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
+        service_denial_env_clear (&env);
+        return 2770;
+      }
+    }
+    service_denial_env_clear (&env);
+  }
+  return 0;
+}
+#endif
+
 static gint
 check_service_management_self_arm_end_to_end (void)
 {
@@ -16196,6 +16641,73 @@ check_service_management_self_arm_end_to_end (void)
     return 2705;
   }
   g_clear_pointer (&body, g_free);
+
+  /* The second arm is a durable no-op: all bundle-owned rows and their
+   * provenance must remain cardinality-stable. */
+  guint64 counts_before[6] = { 0 };
+  guint64 counts_after[6] = { 0 };
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *count_stmt = NULL;
+  const gchar *count_sql =
+      "SELECT (SELECT count(*) FROM service_management_self_arm_receipts "
+      "WHERE tenant_id=? AND actor_subject_id=? AND session_id=?),"
+      "(SELECT count(*) FROM direct_permissions WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM direct_permission_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_states WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM permission_state_events WHERE subject_id=? AND scope=?),"
+      "(SELECT count(*) FROM audit_events WHERE subject_id=? AND deny_origin=?);";
+  if (db == NULL || sqlite3_prepare_v2 (db, count_sql, -1, &count_stmt, NULL)
+      != SQLITE_OK) {
+    service_denial_env_clear (&env);
+    return 2708;
+  }
+  const gchar *args[] = { WYL_TENANT_DEFAULT, "human-principal-admin",
+    env.session_token, "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token, "human-principal-admin",
+    env.session_token, "human-principal-admin", env.session_token,
+    "human-principal-admin", env.session_token
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (args); i++)
+    sqlite3_bind_text (count_stmt, (int) i + 1, args[i], -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (count_stmt) != SQLITE_ROW) {
+    sqlite3_finalize (count_stmt);
+    service_denial_env_clear (&env);
+    return 2709;
+  }
+  for (guint i = 0; i < 6; i++)
+    counts_before[i] = (guint64) sqlite3_column_int64 (count_stmt, (int) i);
+  sqlite3_finalize (count_stmt);
+  if (counts_before[0] != 1 || counts_before[1] != 2
+      || counts_before[2] != 2 || counts_before[3] != 2
+      || counts_before[4] != 2 || counts_before[5] != 2) {
+    service_denial_env_clear (&env);
+    return 2714;
+  }
+  if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+          "/service-management-authority/arm", env.query, env.access_token,
+          "{}", &status, &body) != 0 || status != 200) {
+    service_denial_env_clear (&env);
+    return 2710;
+  }
+  g_clear_pointer (&body, g_free);
+  if (sqlite3_prepare_v2 (db, count_sql, -1, &count_stmt, NULL) != SQLITE_OK) {
+    service_denial_env_clear (&env);
+    return 2711;
+  }
+  for (guint i = 0; i < G_N_ELEMENTS (args); i++)
+    sqlite3_bind_text (count_stmt, (int) i + 1, args[i], -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (count_stmt) != SQLITE_ROW) {
+    sqlite3_finalize (count_stmt);
+    service_denial_env_clear (&env);
+    return 2712;
+  }
+  for (guint i = 0; i < 6; i++)
+    counts_after[i] = (guint64) sqlite3_column_int64 (count_stmt, (int) i);
+  sqlite3_finalize (count_stmt);
+  if (memcmp (counts_before, counts_after, sizeof counts_before) != 0) {
+    service_denial_env_clear (&env);
+    return 2713;
+  }
 
   /* (e) Post-logout inertness: revoke the human session; the management verb
    * no longer authorizes though the perm_state rows persist. */
@@ -17062,21 +17574,6 @@ out:
   service_denial_env_clear (&env);
   return rc;
 }
-
-typedef enum
-{
-  MANAGEMENT_CHECKPOINT_NOOP,
-  MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT,
-  MANAGEMENT_CHECKPOINT_TARGET_SEALED,
-  MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT,
-} ManagementCheckpointMutation;
-
-typedef struct
-{
-  ManagementCheckpointMutation mutation;
-  guint calls;
-  SoupServer *server;           /* required for SESSION_LOGGED_OUT */
-} ManagementCheckpointProbe;
 
 static wyrelog_error_t
 management_checkpoint_mutate_authority (WylHandle *handle,
@@ -18669,17 +19166,6 @@ main (void)
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
 
-#ifdef WYL_HAS_FACT_STORE
-#ifndef G_OS_WIN32
-  /* This matrix provisions POSIX owner-mode fact roots.  Windows fact roots
-   * require the separate fixed-volume, owner-only ACL fixture contract; #757
-   * deliberately validates the complete 16x2 owner matrix on POSIX lanes. */
-  gint all_owner_fault_rc = check_policy_write_all_owner_faults ();
-  if (all_owner_fault_rc != 0)
-    return all_owner_fault_rc;
-#endif
-#endif
-
 #if defined(WYL_HAS_FACT_STORE) || defined(WYL_HAS_AUDIT)
   g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
   g_autoptr (WylHandle) handle = NULL;
@@ -18912,6 +19398,31 @@ main (void)
     result = self_arm_e2e_rc;
     goto cleanup;
   }
+  gint self_arm_race_rc =
+      check_service_management_self_arm_reauthorization_zero_write ();
+  if (self_arm_race_rc != 0) {
+    result = self_arm_race_rc;
+    goto cleanup;
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gint self_arm_fault_rc = check_service_management_self_arm_commit_faults ();
+  if (self_arm_fault_rc != 0) {
+    result = self_arm_fault_rc;
+    goto cleanup;
+  }
+  gint self_arm_projection_rc =
+      check_service_management_self_arm_projection_and_replacement_faults ();
+  if (self_arm_projection_rc != 0) {
+    result = self_arm_projection_rc;
+    goto cleanup;
+  }
+  gint self_arm_finalize_rc =
+      check_service_management_self_arm_finalize_snapshot ();
+  if (self_arm_finalize_rc != 0) {
+    result = self_arm_finalize_rc;
+    goto cleanup;
+  }
+#endif
   gint self_arm_reject_rc = check_service_management_self_arm_rejections ();
   if (self_arm_reject_rc != 0) {
     result = self_arm_reject_rc;
@@ -19000,6 +19511,14 @@ main (void)
   }
 #endif
 cleanup:
+#ifdef WYL_HAS_FACT_STORE
+#ifndef G_OS_WIN32
+  /* Run deliberate owner finalize faults last so they cannot poison later
+   * process-global authority fixtures. */
+  if (result == 0)
+    result = check_policy_write_all_owner_faults ();
+#endif
+#endif
   wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
   g_main_loop_quit (http.loop);
   g_thread_join (thread);

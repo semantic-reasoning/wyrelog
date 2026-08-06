@@ -5444,6 +5444,784 @@ check_concurrent_retained_session_state_verification (void)
     return 913;
   return 0;
 }
+
+typedef struct
+{
+  WylHandle *handle;
+  GMutex mutex;
+  GCond changed;
+  gboolean waiting;
+  WylEngineSession *result;
+} EngineTerminalWaiter;
+
+typedef struct
+{
+  WylHandle *handle;
+  guint calls;
+  guint depth;
+  gboolean normal_acquire_rejected;
+  gboolean readiness_rejected;
+  wyrelog_error_t public_loader_rc;
+} EngineTerminalBuildProbe;
+
+static void
+probe_engine_terminal_candidate_build (gpointer data)
+{
+  EngineTerminalBuildProbe *probe = data;
+  probe->calls++;
+  probe->depth = wyl_handle_engine_session_depth_for_test (probe->handle);
+  WylEngineSession *normal = wyl_engine_session_acquire (probe->handle);
+  probe->normal_acquire_rejected = normal == NULL;
+  if (normal != NULL)
+    (void) wyl_engine_session_release_checked (&normal);
+  probe->public_loader_rc =
+      wyl_handle_load_policy_store_session_states (probe->handle);
+  probe->readiness_rejected = !wyl_handle_engine_pair_is_ready (probe->handle);
+}
+
+static void
+observe_engine_terminal_waiter (WylEngineSessionCheckpoint phase, gpointer data)
+{
+  EngineTerminalWaiter *waiter = data;
+  if (phase != WYL_ENGINE_SESSION_WAITING)
+    return;
+  g_mutex_lock (&waiter->mutex);
+  waiter->waiting = TRUE;
+  g_cond_broadcast (&waiter->changed);
+  g_mutex_unlock (&waiter->mutex);
+}
+
+static gpointer
+run_engine_terminal_waiter (gpointer data)
+{
+  EngineTerminalWaiter *waiter = data;
+  waiter->result = wyl_engine_session_acquire (waiter->handle);
+  return NULL;
+}
+
+static gint
+check_engine_terminal_rechecks_queued_waiter (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 960;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK)
+    return 961;
+
+  WylEngineSession *owner = wyl_engine_session_acquire (handle);
+  if (owner == NULL)
+    return 962;
+  EngineTerminalWaiter waiter = {.handle = handle };
+  g_mutex_init (&waiter.mutex);
+  g_cond_init (&waiter.changed);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle,
+      observe_engine_terminal_waiter, &waiter);
+  GThread *thread = g_thread_new ("engine-terminal-waiter",
+      run_engine_terminal_waiter, &waiter);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&waiter.mutex);
+  while (!waiter.waiting
+      && g_cond_wait_until (&waiter.changed, &waiter.mutex, deadline));
+  gboolean waiting = waiter.waiting;
+  g_mutex_unlock (&waiter.mutex);
+
+  WylEngineTerminalToken token = { 0 };
+  gboolean begun = waiting
+      && wyl_handle_engine_terminal_begin (owner, store, generation, &token)
+      == WYRELOG_E_OK;
+  wyrelog_error_t release_rc = wyl_engine_session_release_checked (&owner);
+  g_thread_join (thread);
+  wyl_handle_set_engine_session_checkpoint_for_test (handle, NULL, NULL);
+  gboolean rejected_after_lock = waiter.result == NULL;
+  wyrelog_error_t complete_rc = begun ?
+      wyl_handle_engine_terminal_complete (handle, &token) : WYRELOG_E_INTERNAL;
+
+  g_cond_clear (&waiter.changed);
+  g_mutex_clear (&waiter.mutex);
+  return begun && release_rc == WYRELOG_E_OK && rejected_after_lock
+      && complete_rc == WYRELOG_E_OK
+      && wyl_handle_engine_terminal_get_state (handle) ==
+      WYL_ENGINE_TERMINAL_AVAILABLE ? 0 : 963;
+}
+
+static gint
+check_engine_terminal_state_machine_and_admission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (WylHandle) other = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK
+      || wyl_init (WYL_TEST_TEMPLATE_DIR, &other) != WYRELOG_E_OK)
+    return 964;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_AVAILABLE || !wyl_handle_engine_pair_is_ready (handle)
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 965;
+
+  WylEngineSession *outer = wyl_engine_session_acquire (handle);
+  WylEngineSession *inner = wyl_engine_session_acquire (handle);
+  WylEngineTerminalToken rejected = { 0 };
+  if (outer == NULL || inner == NULL
+      || wyl_engine_session_get_acquisition_depth (outer) != 1
+      || wyl_engine_session_get_acquisition_depth (inner) != 2
+      || wyl_handle_engine_terminal_begin (outer, store, generation,
+          &rejected) != WYRELOG_E_BUSY
+      || !wyl_id_equal (&rejected.handle_id, &WYL_ID_NIL)
+      || wyl_engine_session_release_checked (&inner) != WYRELOG_E_OK
+      || inner != NULL)
+    return 966;
+  if (wyl_handle_engine_terminal_begin (outer,
+          wyl_handle_get_policy_store (other), generation, &rejected)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_begin (outer, store, generation + 1,
+          &rejected) != WYRELOG_E_INVALID)
+    return 967;
+
+  WylEngineTerminalToken first = { 0 };
+  if (wyl_handle_engine_terminal_begin (outer, store, generation, &first)
+      != WYRELOG_E_OK || first.serial == 0
+      || first.store_generation != generation
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_PENDING
+      || wyl_engine_session_acquire (handle) != NULL
+      || wyl_engine_session_acquire_terminal_recovery (handle, &first) != NULL)
+    return 968;
+  gint64 symbol = 0;
+  if (wyl_handle_intern_engine_symbol (handle, "terminal-recursive", &symbol)
+      != WYRELOG_E_INVALID
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_OK
+      || outer != NULL)
+    return 969;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "terminal-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "terminal-scope");
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  if (wyl_handle_engine_pair_is_ready (handle)
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_decide (handle, req, resp) != WYRELOG_E_INVALID
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_INVALID)
+    return 970;
+
+  WylEngineTerminalToken wrong_handle = first;
+  WylEngineTerminalToken wrong_generation = first;
+  WylEngineTerminalToken wrong_serial = first;
+  if (wyl_id_new (&wrong_handle.handle_id) != WYRELOG_E_OK)
+    return 971;
+  wrong_generation.store_generation++;
+  wrong_serial.serial++;
+  if (wyl_handle_engine_terminal_complete (handle, &wrong_handle)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_fail (handle, &wrong_generation)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_complete (handle, &wrong_serial)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_PENDING
+      || wyl_handle_engine_terminal_complete (handle, &first)
+      != WYRELOG_E_OK || wyl_handle_engine_terminal_complete (handle, &first)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_AVAILABLE)
+    return 972;
+
+  outer = wyl_engine_session_acquire (handle);
+  WylEngineTerminalToken second = { 0 };
+  if (outer == NULL
+      || wyl_handle_engine_terminal_begin (outer, store, generation, &second)
+      != WYRELOG_E_OK || second.serial != first.serial + 1
+      || wyl_handle_engine_terminal_complete (handle, &first)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_fail (handle, &second) != WYRELOG_E_OK
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_OK
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_FAILED)
+    return 973;
+  wrong_handle = second;
+  wrong_generation = second;
+  wrong_serial = second;
+  if (wyl_id_new (&wrong_handle.handle_id) != WYRELOG_E_OK)
+    return 974;
+  wrong_generation.store_generation++;
+  wrong_serial.serial++;
+  if (wyl_engine_session_acquire_terminal_recovery (handle, &wrong_handle)
+      != NULL
+      || wyl_engine_session_acquire_terminal_recovery (handle,
+          &wrong_generation) != NULL
+      || wyl_engine_session_acquire_terminal_recovery (handle, &wrong_serial)
+      != NULL)
+    return 975;
+
+  WylEngineSession *recovery =
+      wyl_engine_session_acquire_terminal_recovery (handle, &second);
+  if (recovery == NULL
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_RECOVERING
+      || wyl_engine_session_acquire (handle) != NULL
+      || wyl_engine_session_acquire_terminal_recovery (handle, &second) != NULL
+      || wyl_handle_intern_engine_symbol (handle, "terminal-bypass", &symbol)
+      != WYRELOG_E_INVALID
+      || wyl_engine_session_lookup_symbol (recovery, "active", &symbol)
+      != WYRELOG_E_OK
+      || wyl_engine_session_finish_terminal_recovery (recovery, &second,
+          FALSE) != WYRELOG_E_OK
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_FAILED
+      || wyl_engine_session_release_checked (&recovery) != WYRELOG_E_OK)
+    return 976;
+
+  recovery = wyl_engine_session_acquire_terminal_recovery (handle, &second);
+  if (recovery == NULL
+      || wyl_engine_session_finish_terminal_recovery (recovery, &second,
+          TRUE) != WYRELOG_E_OK
+      || wyl_engine_session_finish_terminal_recovery (recovery, &second,
+          TRUE) != WYRELOG_E_INVALID
+      || wyl_engine_session_release_checked (&recovery) != WYRELOG_E_OK
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_AVAILABLE
+      || !wyl_handle_engine_pair_is_ready (handle))
+    return 977;
+
+  outer = wyl_engine_session_acquire (handle);
+  WylEngineTerminalToken third = { 0 };
+  if (outer == NULL
+      || wyl_handle_engine_terminal_begin (outer, store, generation, &third)
+      != WYRELOG_E_OK
+      || wyl_handle_engine_terminal_fail (handle, &third) != WYRELOG_E_OK
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_OK)
+    return 978;
+  recovery = wyl_engine_session_acquire_terminal_recovery (handle, &third);
+  if (recovery == NULL
+      || wyl_engine_session_release_checked (&recovery) != WYRELOG_E_OK
+      || wyl_handle_engine_terminal_get_state (handle) !=
+      WYL_ENGINE_TERMINAL_FAILED)
+    return 979;
+  recovery = wyl_engine_session_acquire_terminal_recovery (handle, &third);
+  if (recovery == NULL
+      || wyl_engine_session_finish_terminal_recovery (recovery, &third, TRUE)
+      != WYRELOG_E_OK
+      || wyl_engine_session_release_checked (&recovery) != WYRELOG_E_OK)
+    return 980;
+
+  g_autoptr (WylHandle) stale = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &stale) != WYRELOG_E_OK)
+    return 980;
+  wyl_policy_store_t *stale_store = wyl_handle_get_policy_store (stale);
+  guint64 stale_generation = 0;
+  if (wyl_handle_policy_store_capture_generation (stale, stale_store,
+          &stale_generation) != WYRELOG_E_OK)
+    return 981;
+  outer = wyl_engine_session_acquire (stale);
+  WylEngineTerminalToken stale_token = { 0 };
+  if (outer == NULL
+      || wyl_handle_engine_terminal_begin (outer, stale_store,
+          stale_generation, &stale_token) != WYRELOG_E_OK
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_OK)
+    return 982;
+  wyl_handle_policy_store_test_advance_generation (stale);
+  if (wyl_handle_engine_terminal_complete (stale, &stale_token)
+      != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_fail (stale, &stale_token)
+      != WYRELOG_E_INVALID
+      || wyl_engine_session_acquire_terminal_recovery (stale, &stale_token)
+      != NULL
+      || wyl_handle_engine_terminal_get_state (stale) !=
+      WYL_ENGINE_TERMINAL_PENDING)
+    return 983;
+  return 0;
+}
+
+static gint
+check_engine_terminal_checked_release_and_serial_overflow (void)
+{
+  WylEngineSession *none = NULL;
+  if (wyl_engine_session_release_checked (NULL) != WYRELOG_E_INVALID
+      || wyl_engine_session_release_checked (&none) != WYRELOG_E_OK)
+    return 984;
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 985;
+  WylEngineSession *outer = wyl_engine_session_acquire (handle);
+  WylEngineSession *inner = wyl_engine_session_acquire (handle);
+  if (outer == NULL || inner == NULL
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_BUSY
+      || outer == NULL || wyl_engine_session_get_acquisition_depth (outer) != 1
+      || wyl_engine_session_release_checked (&inner) != WYRELOG_E_OK
+      || inner != NULL)
+    return 986;
+  wyl_handle_engine_session_test_fail_release_rank_after_pop (handle);
+  if (wyl_engine_session_release_checked (&outer) != WYRELOG_E_INTERNAL
+      || outer != NULL)
+    return 987;
+  outer = wyl_engine_session_acquire (handle);
+  if (outer == NULL || wyl_engine_session_get_acquisition_depth (outer) != 1
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_OK)
+    return 988;
+
+  g_autoptr (WylHandle) overflow = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &overflow) != WYRELOG_E_OK)
+    return 989;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (overflow);
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (overflow, store,
+          &generation) != WYRELOG_E_OK)
+    return 990;
+  wyl_handle_engine_terminal_test_set_serial_max (overflow);
+  outer = wyl_engine_session_acquire (overflow);
+  WylEngineTerminalToken token = { 0 };
+  if (outer == NULL
+      || wyl_handle_engine_terminal_begin (outer, store, generation, &token)
+      != WYRELOG_E_BUSY || !wyl_id_equal (&token.handle_id, &WYL_ID_NIL)
+      || wyl_handle_engine_terminal_get_state (overflow) !=
+      WYL_ENGINE_TERMINAL_AVAILABLE
+      || wyl_engine_session_release_checked (&outer) != WYRELOG_E_OK
+      || !wyl_handle_engine_pair_is_ready (overflow))
+    return 991;
+  return 0;
+}
+
+static gint
+check_engine_terminal_accepted_witnesses_and_repair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (WylHandle) other = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK
+      || wyl_init (WYL_TEST_TEMPLATE_DIR, &other) != WYRELOG_E_OK)
+    return 992;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean audit_inserted = FALSE;
+  if (wyl_policy_store_set_session_state (store, "frozen-actual-session",
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, "ambient-other-session",
+          "closed") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, "intended-scope",
+          "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "exact-actor",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_principal_state (store, "other-actor",
+          "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "exact-actor",
+          "wr.system_admin", "intended-scope") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "exact-actor",
+          "wr.policy.read", "intended-scope", "armed") != WYRELOG_E_OK
+      || wyl_policy_store_append_audit_event_full (store,
+          "00000000-0000-7000-8000-000000000747", 747,
+          "terminal-audit-subject", "terminal.audit.action",
+          "terminal-audit-resource", "terminal-deny-reason",
+          "terminal-deny-origin", "terminal-audit-request",
+          WYL_DECISION_DENY, &audit_inserted) != WYRELOG_E_OK
+      || !audit_inserted
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 993;
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK)
+    return 994;
+
+  WylEngineSession *owner = wyl_engine_session_acquire (handle);
+  gint64 actual_session = 0;
+  gint64 other_session = 0;
+  gint64 active = 0;
+  gint64 closed = 0;
+  gint64 actor = 0;
+  gint64 other_actor = 0;
+  gint64 role = 0;
+  gint64 intended_scope = 0;
+  gint64 other_scope = 0;
+  if (owner == NULL
+      || wyl_engine_session_lookup_symbol (owner, "frozen-actual-session",
+          &actual_session) != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "ambient-other-session",
+          &other_session) != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "active", &active)
+      != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "closed", &closed)
+      != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "exact-actor", &actor)
+      != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "other-actor", &other_actor)
+      != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "wr.system_admin", &role)
+      != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (owner, "intended-scope",
+          &intended_scope) != WYRELOG_E_OK
+      || wyl_engine_session_intern_symbol (owner, "wrong-intended-scope",
+          &other_scope) != WYRELOG_E_OK)
+    return 995;
+  gint64 accepted = 0;
+  gboolean exact = FALSE;
+  gint64 exact_member[] = { actor, role, intended_scope };
+  gint64 wrong_actor_member[] = { other_actor, role, intended_scope };
+  gint64 wrong_scope_member[] = { actor, role, other_scope };
+  if (wyl_engine_session_get_accepted_session_state (owner, actual_session,
+          &accepted) != WYRELOG_E_OK || accepted != active
+      || wyl_engine_session_get_accepted_session_state (owner, other_session,
+          &accepted) != WYRELOG_E_OK || accepted != closed
+      || wyl_engine_session_has_exact_accepted_member_of (owner, exact_member,
+          &exact) != WYRELOG_E_OK || !exact
+      || wyl_engine_session_has_exact_accepted_member_of (owner,
+          wrong_actor_member, &exact) != WYRELOG_E_OK || exact
+      || wyl_engine_session_has_exact_accepted_member_of (owner,
+          wrong_scope_member, &exact) != WYRELOG_E_OK || exact)
+    return 996;
+
+  WylEngineTerminalToken token = { 0 };
+  if (wyl_handle_engine_terminal_begin (owner, store, generation, &token)
+      != WYRELOG_E_OK
+      || wyl_handle_fail_committed_engine_projection (owner, WYRELOG_E_IO)
+      != WYRELOG_E_IO
+      || wyl_engine_session_get_accepted_session_state (owner, actual_session,
+          &accepted) != WYRELOG_E_INVALID
+      || wyl_handle_engine_terminal_fail (handle, &token) != WYRELOG_E_OK
+      || wyl_engine_session_release_checked (&owner) != WYRELOG_E_OK)
+    return 997;
+
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthWriteLease *wrong_lease = NULL;
+  if (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (other), other, NULL,
+          &wrong_lease) != WYRELOG_E_OK || wrong_lease == NULL
+      || wyl_service_auth_write_lease_release (wrong_lease) != WYRELOG_E_OK)
+    return 998;
+  if (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease)
+      != WYRELOG_E_OK || lease == NULL)
+    return 998;
+  wyl_policy_store_t *leased_store = NULL;
+  if (wyl_service_auth_write_lease_get_policy_store (lease, handle,
+          &leased_store) != WYRELOG_E_OK || leased_store != store)
+    return 999;
+  WylEngineSession *recovery =
+      wyl_engine_session_acquire_terminal_recovery (handle, &token);
+  ExternalPublicationVerify verify = {
+    .scope = WYL_TENANT_DEFAULT,
+    .state = "active",
+  };
+  if (recovery == NULL) {
+    (void) wyl_service_auth_write_lease_release (lease);
+    wyl_service_auth_write_lease_free (lease);
+    return 1000;
+  }
+  EngineTerminalBuildProbe build_probe = {
+    .handle = handle,
+    .public_loader_rc = WYRELOG_E_INTERNAL,
+  };
+  wyl_handle_set_engine_snapshot_checkpoint_for_test (handle,
+      probe_engine_terminal_candidate_build, &build_probe);
+  wyrelog_error_t wrong_lease_rc =
+      wyl_engine_session_repair_committed_publication (recovery, wrong_lease,
+      store, generation, verify_external_scope_publication, &verify);
+  wyrelog_error_t wrong_store_rc =
+      wyl_engine_session_repair_committed_publication (recovery, lease,
+      wyl_handle_get_policy_store (other), generation,
+      verify_external_scope_publication, &verify);
+  wyrelog_error_t wrong_generation_rc =
+      wyl_engine_session_repair_committed_publication (recovery, lease, store,
+      generation + 1, verify_external_scope_publication, &verify);
+  wyl_service_auth_write_lease_free (wrong_lease);
+  wyrelog_error_t repair_rc =
+      wyl_engine_session_repair_committed_publication (recovery, lease, store,
+      generation, verify_external_scope_publication, &verify);
+  gint64 repaired_session = -1;
+  gint64 repaired_active = -1;
+  gint64 repaired_actor = -1;
+  gint64 repaired_other_actor = -1;
+  gint64 repaired_role = -1;
+  gint64 repaired_scope = -1;
+  gint64 repaired_other_scope = -1;
+  wyrelog_error_t lookup_rc = repair_rc == WYRELOG_E_OK ?
+      wyl_engine_session_lookup_symbol (recovery, "frozen-actual-session",
+      &repaired_session) : repair_rc;
+  if (lookup_rc == WYRELOG_E_OK)
+    lookup_rc = wyl_engine_session_lookup_symbol (recovery, "active",
+        &repaired_active);
+  if (lookup_rc == WYRELOG_E_OK)
+    lookup_rc = wyl_engine_session_lookup_symbol (recovery, "exact-actor",
+        &repaired_actor);
+  if (lookup_rc == WYRELOG_E_OK)
+    lookup_rc = wyl_engine_session_lookup_symbol (recovery, "other-actor",
+        &repaired_other_actor);
+  if (lookup_rc == WYRELOG_E_OK)
+    lookup_rc = wyl_engine_session_lookup_symbol (recovery,
+        "wr.system_admin", &repaired_role);
+  if (lookup_rc == WYRELOG_E_OK)
+    lookup_rc = wyl_engine_session_lookup_symbol (recovery, "intended-scope",
+        &repaired_scope);
+  if (lookup_rc == WYRELOG_E_OK)
+    lookup_rc = wyl_engine_session_intern_symbol (recovery,
+        "wrong-intended-scope", &repaired_other_scope);
+  gint64 repaired_exact_member[] = {
+    repaired_actor, repaired_role, repaired_scope,
+  };
+  gint64 repaired_wrong_actor[] = {
+    repaired_other_actor, repaired_role, repaired_scope,
+  };
+  gint64 repaired_wrong_scope[] = {
+    repaired_actor, repaired_role, repaired_other_scope,
+  };
+  wyrelog_error_t witness_rc = lookup_rc == WYRELOG_E_OK ?
+      wyl_engine_session_get_accepted_session_state (recovery,
+      repaired_session, &accepted) : lookup_rc;
+  gboolean repaired_exact = FALSE;
+  gboolean repaired_wrong_actor_exact = TRUE;
+  gboolean repaired_wrong_scope_exact = TRUE;
+  if (witness_rc == WYRELOG_E_OK)
+    witness_rc = wyl_engine_session_has_exact_accepted_member_of (recovery,
+        repaired_exact_member, &repaired_exact);
+  if (witness_rc == WYRELOG_E_OK)
+    witness_rc = wyl_engine_session_has_exact_accepted_member_of (recovery,
+        repaired_wrong_actor, &repaired_wrong_actor_exact);
+  if (witness_rc == WYRELOG_E_OK)
+    witness_rc = wyl_engine_session_has_exact_accepted_member_of (recovery,
+        repaired_wrong_scope, &repaired_wrong_scope_exact);
+  g_autofree gchar *roundtrip = lookup_rc == WYRELOG_E_OK ?
+      wyl_engine_session_dup_symbol (recovery, repaired_session) : NULL;
+  wyrelog_error_t facts_rc = WYRELOG_E_OK;
+  gboolean audit_facts_complete = FALSE;
+  gint64 audit_id = -1;
+  gint64 audit_decision = -1;
+  if (lookup_rc == WYRELOG_E_OK)
+    facts_rc = wyl_engine_session_lookup_symbol (recovery,
+        "00000000-0000-7000-8000-000000000747", &audit_id);
+  if (facts_rc == WYRELOG_E_OK)
+    facts_rc = wyl_engine_session_lookup_symbol (recovery, "deny",
+        &audit_decision);
+  gint64 audit_event[] = { audit_id, 747, audit_decision };
+  if (facts_rc == WYRELOG_E_OK)
+    facts_rc = wyl_engine_session_contains (recovery, "audit_event",
+        audit_event, G_N_ELEMENTS (audit_event), &audit_facts_complete);
+  static const gchar *audit_relations[] = {
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+    "audit_event_request_id",
+  };
+  static const gchar *audit_values[] = {
+    "terminal-audit-subject",
+    "terminal.audit.action",
+    "terminal-audit-resource",
+    "terminal-deny-reason",
+    "terminal-deny-origin",
+    "terminal-audit-request",
+  };
+  for (guint i = 0;
+      i < G_N_ELEMENTS (audit_relations) && facts_rc == WYRELOG_E_OK
+      && audit_facts_complete; i++) {
+    gint64 value_id = -1;
+    facts_rc = wyl_engine_session_lookup_symbol (recovery, audit_values[i],
+        &value_id);
+    gint64 attr[] = { audit_id, value_id };
+    gboolean present = FALSE;
+    if (facts_rc == WYRELOG_E_OK)
+      facts_rc = wyl_engine_session_contains (recovery, audit_relations[i],
+          attr, G_N_ELEMENTS (attr), &present);
+    audit_facts_complete = facts_rc == WYRELOG_E_OK && present;
+  }
+  wyrelog_error_t finish_rc = wyl_engine_session_finish_terminal_recovery
+      (recovery, &token, repair_rc == WYRELOG_E_OK);
+  wyrelog_error_t session_release_rc =
+      wyl_engine_session_release_checked (&recovery);
+  wyrelog_error_t lease_release_rc =
+      wyl_service_auth_write_lease_release (lease);
+  wyl_service_auth_write_lease_free (lease);
+  WylEngineTerminalState state = wyl_handle_engine_terminal_get_state (handle);
+  if (wrong_lease_rc != WYRELOG_E_INVALID
+      || wrong_store_rc != WYRELOG_E_INVALID
+      || wrong_generation_rc != WYRELOG_E_INVALID
+      || repair_rc != WYRELOG_E_OK || verify.calls != 1
+      || build_probe.calls != 1 || build_probe.depth != 1
+      || !build_probe.normal_acquire_rejected
+      || build_probe.public_loader_rc != WYRELOG_E_INVALID
+      || !build_probe.readiness_rejected
+      || lookup_rc != WYRELOG_E_OK
+      || witness_rc != WYRELOG_E_OK || accepted != repaired_active
+      || !repaired_exact
+      || repaired_wrong_actor_exact || repaired_wrong_scope_exact
+      || g_strcmp0 (roundtrip, "frozen-actual-session") != 0
+      || facts_rc != WYRELOG_E_OK || !audit_facts_complete
+      || finish_rc != WYRELOG_E_OK || session_release_rc != WYRELOG_E_OK
+      || lease_release_rc != WYRELOG_E_OK) {
+    g_printerr ("terminal-repair repair=%d verify=%u witness=%d "
+        "lookup=%d session=%" G_GINT64_FORMAT "/%" G_GINT64_FORMAT
+        " active=%" G_GINT64_FORMAT "/%" G_GINT64_FORMAT
+        " accepted=%" G_GINT64_FORMAT
+        " finish=%d session-release=%d lease-release=%d state=%d\n",
+        repair_rc, verify.calls, witness_rc, lookup_rc, repaired_session,
+        actual_session, repaired_active, active, accepted, finish_rc,
+        session_release_rc, lease_release_rc, state);
+    return 1000;
+  }
+  if (state != WYL_ENGINE_TERMINAL_AVAILABLE
+      || !wyl_handle_engine_pair_is_ready (handle)
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 1001;
+
+  WylEngineSession *normal = wyl_engine_session_acquire (handle);
+  gint64 normal_session = -1;
+  gint64 normal_active = -1;
+  if (normal == NULL
+      || wyl_engine_session_lookup_symbol (normal, "frozen-actual-session",
+          &normal_session) != WYRELOG_E_OK
+      || wyl_engine_session_lookup_symbol (normal, "active", &normal_active)
+      != WYRELOG_E_OK
+      || wyl_engine_session_get_accepted_session_state (normal,
+          normal_session, &accepted) != WYRELOG_E_OK
+      || accepted != normal_active
+      || wyl_engine_session_release_checked (&normal) != WYRELOG_E_OK)
+    return 1002;
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) decision = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (decide, "exact-actor");
+  wyl_decide_req_set_action (decide, "wr.policy.read");
+  wyl_decide_req_set_resource_id (decide, "intended-scope");
+  if (wyl_decide (handle, decide, decision) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (decision) != WYL_DECISION_ALLOW)
+    return 1003;
+  return 0;
+}
+
+static gint
+check_normal_replacement_preserves_published_symbol_ids (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1004;
+  gint64 before = -1;
+  gint64 after = -1;
+  if (wyl_handle_intern_engine_symbol (handle, "normal-stable-symbol",
+          &before) != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 1005;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_engine_session_lookup_symbol (session, "normal-stable-symbol",
+          &after) != WYRELOG_E_OK || after != before)
+    return 1006;
+  return 0;
+}
+
+static gint
+check_engine_terminal_recovery_retries_every_replacement_fault (void)
+{
+  static const WylEngineReplacementFault faults[] = {
+    WYL_ENGINE_REPLACEMENT_FAULT_VALIDATE,
+    WYL_ENGINE_REPLACEMENT_FAULT_OPEN_READ,
+    WYL_ENGINE_REPLACEMENT_FAULT_OPEN_DELTA,
+    WYL_ENGINE_REPLACEMENT_FAULT_INTERN,
+    WYL_ENGINE_REPLACEMENT_FAULT_AUDIT_FACTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_ARM_RULES,
+    WYL_ENGINE_REPLACEMENT_FAULT_SESSION_ACTIVE,
+    WYL_ENGINE_REPLACEMENT_FAULT_ROLE_PERMISSIONS,
+    WYL_ENGINE_REPLACEMENT_FAULT_ROLE_MEMBERSHIPS,
+    WYL_ENGINE_REPLACEMENT_FAULT_DIRECT_PERMISSIONS,
+    WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_STATES,
+    WYL_ENGINE_REPLACEMENT_FAULT_PERMISSION_EVENTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_STATES,
+    WYL_ENGINE_REPLACEMENT_FAULT_PRINCIPAL_EVENTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_SESSION_STATES,
+    WYL_ENGINE_REPLACEMENT_FAULT_SESSION_EVENTS,
+    WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK,
+    WYL_ENGINE_REPLACEMENT_FAULT_READBACK,
+    WYL_ENGINE_REPLACEMENT_FAULT_SWAP,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 1007;
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    guint64 generation = 0;
+    WylEngineSession *owner = wyl_engine_session_acquire (handle);
+    WylEngineTerminalToken token = { 0 };
+    if (owner == NULL
+        || wyl_handle_policy_store_capture_generation (handle, store,
+            &generation) != WYRELOG_E_OK
+        || wyl_handle_engine_terminal_begin (owner, store, generation, &token)
+        != WYRELOG_E_OK
+        || wyl_handle_fail_committed_engine_projection (owner, WYRELOG_E_IO)
+        != WYRELOG_E_IO
+        || wyl_handle_engine_terminal_fail (handle, &token) != WYRELOG_E_OK
+        || wyl_engine_session_release_checked (&owner) != WYRELOG_E_OK)
+      return 1008;
+
+    WylServiceAuthWriteLease *lease = NULL;
+    if (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease)
+        != WYRELOG_E_OK || lease == NULL)
+      return 1009;
+    wyl_handle_set_engine_replacement_fault_once_for_test (handle, faults[i]);
+    WylEngineSession *recovery =
+        wyl_engine_session_acquire_terminal_recovery (handle, &token);
+    ExternalPublicationVerify failed_verify = {
+      .scope = WYL_TENANT_DEFAULT,
+      .state = "active",
+    };
+    wyrelog_error_t repair_rc = recovery != NULL ?
+        wyl_engine_session_repair_committed_publication (recovery, lease,
+        store, generation, verify_external_scope_publication,
+        &failed_verify) : WYRELOG_E_INTERNAL;
+    wyrelog_error_t finish_rc = recovery != NULL ?
+        wyl_engine_session_finish_terminal_recovery (recovery, &token, FALSE) :
+        WYRELOG_E_INTERNAL;
+    wyrelog_error_t session_release_rc = recovery != NULL ?
+        wyl_engine_session_release_checked (&recovery) : WYRELOG_E_INTERNAL;
+    wyrelog_error_t lease_release_rc =
+        wyl_service_auth_write_lease_release (lease);
+    wyl_service_auth_write_lease_free (lease);
+    if (repair_rc != WYRELOG_E_IO || failed_verify.calls != 0
+        || finish_rc != WYRELOG_E_OK
+        || session_release_rc != WYRELOG_E_OK
+        || lease_release_rc != WYRELOG_E_OK
+        || wyl_handle_engine_terminal_get_state (handle) !=
+        WYL_ENGINE_TERMINAL_FAILED || wyl_handle_engine_pair_is_ready (handle)
+        || !wyl_handle_engine_pair_is_poisoned (handle))
+      return 1010 + (gint) i;
+
+    lease = NULL;
+    if (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease)
+        != WYRELOG_E_OK || lease == NULL)
+      return 1030 + (gint) i;
+    recovery = wyl_engine_session_acquire_terminal_recovery (handle, &token);
+    ExternalPublicationVerify retry_verify = {
+      .scope = WYL_TENANT_DEFAULT,
+      .state = "active",
+    };
+    repair_rc = recovery != NULL ?
+        wyl_engine_session_repair_committed_publication (recovery, lease,
+        store, generation, verify_external_scope_publication, &retry_verify) :
+        WYRELOG_E_INTERNAL;
+    finish_rc = recovery != NULL ?
+        wyl_engine_session_finish_terminal_recovery (recovery, &token,
+        repair_rc == WYRELOG_E_OK) : WYRELOG_E_INTERNAL;
+    session_release_rc = recovery != NULL ?
+        wyl_engine_session_release_checked (&recovery) : WYRELOG_E_INTERNAL;
+    lease_release_rc = wyl_service_auth_write_lease_release (lease);
+    wyl_service_auth_write_lease_free (lease);
+    if (repair_rc != WYRELOG_E_OK || retry_verify.calls != 1
+        || finish_rc != WYRELOG_E_OK
+        || session_release_rc != WYRELOG_E_OK
+        || lease_release_rc != WYRELOG_E_OK
+        || wyl_handle_engine_terminal_get_state (handle) !=
+        WYL_ENGINE_TERMINAL_AVAILABLE
+        || !wyl_handle_engine_pair_is_ready (handle)
+        || wyl_handle_engine_pair_is_poisoned (handle))
+      return 1050 + (gint) i;
+  }
+  return 0;
+}
 #endif
 
 static gint
@@ -7726,6 +8504,20 @@ main (int argc, char **argv)
       != 0)
     return rc;
   if ((rc = check_concurrent_retained_session_state_verification ()) != 0)
+    return rc;
+  if ((rc = check_engine_terminal_rechecks_queued_waiter ()) != 0)
+    return rc;
+  if ((rc = check_engine_terminal_state_machine_and_admission ()) != 0)
+    return rc;
+  if ((rc = check_engine_terminal_checked_release_and_serial_overflow ())
+      != 0)
+    return rc;
+  if ((rc = check_engine_terminal_accepted_witnesses_and_repair ()) != 0)
+    return rc;
+  if ((rc = check_normal_replacement_preserves_published_symbol_ids ()) != 0)
+    return rc;
+  if ((rc = check_engine_terminal_recovery_retries_every_replacement_fault ())
+      != 0)
     return rc;
 #endif
   if ((rc =

@@ -803,6 +803,11 @@ wyl_daemon_policy_write_finish_result (WylDaemonPolicyWrite *write,
 {
   (void) wyl_daemon_policy_write_record_primary (write, primary_rc);
   wyrelog_error_t cleanup_rc = wyl_daemon_policy_write_finalize (write);
+  for (guint attempt = 0;
+      cleanup_rc == WYRELOG_E_BUSY && attempt < 100; attempt++) {
+    g_thread_yield ();
+    cleanup_rc = wyl_daemon_policy_write_finalize (write);
+  }
 #ifdef WYL_TEST_DAEMON_HTTP
   policy_write_record_non_http_finalize_snapshot (write, primary_rc,
       cleanup_rc);
@@ -13247,6 +13252,13 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, status, error);
     return;
   }
+  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE) {
+    rc = wyl_daemon_policy_write_finish_result (&write, rc);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+      return;
+    }
+  }
   set_json_ok (msg);
 }
 
@@ -14408,6 +14420,128 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
+typedef struct
+{
+  WylPolicySelfArmBundle bundle;
+  gchar tenant_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar actor_subject_id[129];
+  gchar session_id[256];
+  gchar original_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar reauthorization_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar server_operation_id[WYL_ID_STRING_BUF];
+  gchar principal_audit_id[WYL_ID_STRING_BUF];
+  gchar credential_audit_id[WYL_ID_STRING_BUF];
+  WylPolicySelfArmBundleState bundle_state;
+  gboolean durable_preexisting;
+  wyl_policy_store_t *store;
+} WylSelfArmPublication;
+
+static wyrelog_error_t
+self_arm_new_uuid (gchar *out, gsize out_len)
+{
+  wyl_id_t id;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_id_format (&id, out, out_len);
+}
+
+static wyrelog_error_t
+mutate_self_arm_publication (wyl_policy_store_t *store, gpointer data)
+{
+  WylSelfArmPublication *publication = data;
+  WylPolicySelfArmBundleState before = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  wyrelog_error_t rc = wyl_policy_store_classify_self_arm_bundle (store,
+      &publication->bundle.identity, &before);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  publication->durable_preexisting =
+      before == WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
+      || before == WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT;
+  WylPolicySelfArmBundleState state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  rc = wyl_policy_store_publish_self_arm_bundle (store,
+      &publication->bundle, &state);
+  if (rc == WYRELOG_E_OK)
+    publication->bundle_state = state;
+  return rc;
+}
+
+static wyrelog_error_t
+verify_self_arm_publication (WylEngineVerification *verification, gpointer data)
+{
+  WylSelfArmPublication *publication = data;
+  gint64 session = 0, active = 0, accepted = 0;
+  wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+      publication->bundle.identity.session_id, &session);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_lookup_symbol (verification, "active",
+        &active);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_engine_verification_get_accepted_session_state (verification,
+        session, &accepted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (accepted != active)
+    return WYRELOG_E_POLICY;
+  if (publication->store != NULL) {
+    WylPolicySelfArmBundleState durable = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    /* A retry intentionally carries fresh transport provenance. Once the
+     * mutation layer classified the identity as an existing durable bundle,
+     * prove the persisted canonical projection by identity rather than
+     * comparing those fresh operation/audit IDs to the original receipt. A
+     * first publication (and any ambiguous repair of it) retains strict
+     * receipt readback against the frozen bundle. */
+    if (publication->durable_preexisting)
+      rc = wyl_policy_store_classify_self_arm_bundle (publication->store,
+          &publication->bundle.identity, &durable);
+    else
+      rc = wyl_policy_store_verify_self_arm_bundle (publication->store,
+          &publication->bundle, &durable);
+    if (rc != WYRELOG_E_OK
+        || (durable != WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
+            && durable != WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT)
+        || ((publication->bundle_state == WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
+                || publication->bundle_state ==
+                WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT)
+            && durable != publication->bundle_state))
+      return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  }
+  gint64 expected[3] = { 0, 0, 0 };
+  const gchar *permissions[] = {
+    WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION,
+    WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (permissions); i++) {
+    const gchar *values[] = { publication->bundle.identity.actor_subject_id,
+      permissions[i], publication->bundle.identity.session_id
+    };
+    for (gsize j = 0; j < G_N_ELEMENTS (values); j++) {
+      rc = wyl_engine_verification_lookup_symbol (verification, values[j],
+          &expected[j]);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+    gboolean found = FALSE;
+    rc = wyl_engine_verification_contains (verification, "has_permission",
+        expected, G_N_ELEMENTS (expected), &found);
+    if (rc != WYRELOG_E_OK || !found)
+      return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+    const gchar *state_values[] = { values[0], values[1], values[2], "armed" };
+    gint64 state_expected[G_N_ELEMENTS (state_values)] = { 0 };
+    for (gsize j = 0; j < G_N_ELEMENTS (state_values); j++) {
+      rc = wyl_engine_verification_lookup_symbol (verification, state_values[j],
+          &state_expected[j]);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+    rc = wyl_engine_verification_contains (verification, "perm_state",
+        state_expected, G_N_ELEMENTS (state_expected), &found);
+    if (rc != WYRELOG_E_OK || !found)
+      return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  }
+  return WYRELOG_E_OK;
+}
+
 /* POST /service-management-authority/arm
  *
  * Lets an already-verified, live-MFA SYSTEM admin self-arm the
@@ -14434,6 +14568,7 @@ service_management_authority_arm_handler (SoupServer *server,
     return;
   }
   WylDaemonHttpContext *ctx = user_data;
+  const gchar *const frozen_request_id = ensure_request_id_header (msg);
 
   g_auto (WylDaemonAuthContext) auth = { 0 };
   gint64 guard_timestamp = 0;
@@ -14473,7 +14608,7 @@ service_management_authority_arm_handler (SoupServer *server,
     wyl_decide_req_set_resource_id (req, WYL_TENANT_DEFAULT);
     wyl_decide_req_set_guard_context (req, guard_timestamp, guard_loc_class,
         guard_risk);
-    wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+    wyl_decide_req_set_request_id (req, frozen_request_id);
     wyrelog_error_t decide_rc = wyl_decide (ctx->handle, req, resp);
     if (decide_rc == WYRELOG_E_INVALID) {
       set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_AUTHORITY_INVALID);
@@ -14489,7 +14624,53 @@ service_management_authority_arm_handler (SoupServer *server,
     }
   }
 
-  /* One WRITE lease held across BOTH perms' grant + transition + reload. */
+  /* Freeze all provenance before entering the WRITE/ENGINE interval. */
+  WylSelfArmPublication publication = { 0 };
+  if (auth.actor == NULL || auth.session_id == NULL
+      || frozen_request_id == NULL
+      || strlen (auth.actor) >= sizeof publication.actor_subject_id
+      || strlen (auth.session_id) >= sizeof publication.session_id
+      || strlen (frozen_request_id) >= sizeof publication.original_request_id) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
+  }
+  g_strlcpy (publication.tenant_id, WYL_POLICY_SELF_ARM_TENANT,
+      sizeof publication.tenant_id);
+  g_strlcpy (publication.actor_subject_id, auth.actor,
+      sizeof publication.actor_subject_id);
+  g_strlcpy (publication.session_id, auth.session_id,
+      sizeof publication.session_id);
+  g_strlcpy (publication.original_request_id, frozen_request_id,
+      sizeof publication.original_request_id);
+  if (wyl_request_id_new (publication.reauthorization_request_id,
+          sizeof publication.reauthorization_request_id) != WYRELOG_E_OK
+      || self_arm_new_uuid (publication.server_operation_id,
+          sizeof publication.server_operation_id) != WYRELOG_E_OK
+      || self_arm_new_uuid (publication.principal_audit_id,
+          sizeof publication.principal_audit_id) != WYRELOG_E_OK
+      || self_arm_new_uuid (publication.credential_audit_id,
+          sizeof publication.credential_audit_id) != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
+  }
+  publication.bundle.identity.tenant_id = publication.tenant_id;
+  publication.bundle.identity.actor_subject_id = publication.actor_subject_id;
+  publication.bundle.identity.session_id = publication.session_id;
+  publication.bundle.identity.original_request_id =
+      publication.original_request_id;
+  publication.bundle.server_operation_id = publication.server_operation_id;
+  publication.bundle.principal_audit_id = publication.principal_audit_id;
+  publication.bundle.credential_audit_id = publication.credential_audit_id;
+  publication.bundle.created_at_us = g_get_real_time ();
+  if (publication.actor_subject_id[0] == '\0'
+      || publication.session_id[0] == '\0'
+      || publication.original_request_id[0] == '\0'
+      || publication.bundle.created_at_us <= 0) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
+  }
+
+  /* One WRITE lease and one ENGINE session surround one bounded publication. */
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
       WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM, &write);
@@ -14499,55 +14680,71 @@ service_management_authority_arm_handler (SoupServer *server,
     return;
   }
 
-  static const gchar *const managed_perms[] = {
-    "wr.service_principal.manage",
-    "wr.service_credential.manage",
-  };
-  const gchar *const scope = auth.session_id;
-  const gchar *const request_id = ensure_request_id_header (msg);
-  for (gsize i = 0; i < G_N_ELEMENTS (managed_perms); i++) {
-    const gchar *perm = managed_perms[i];
-    gboolean already_armed = FALSE;
-    rc = wyl_policy_store_permission_state_is (write.store, auth.actor, perm,
-        scope, "armed", &already_armed);
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
-    if (already_armed)
-      continue;
-
-    rc = wyl_policy_store_grant_direct_permission (write.store, auth.actor,
-        perm, scope);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_policy_store_append_direct_permission_event (write.store,
-          auth.actor, perm, scope, "grant");
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
-
-    /* Durable audit per perm (never NULL): modelled on the permission-state
-     * transition handler. */
-    g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
-    wyl_audit_event_set_subject_id (audit_event, auth.actor);
-    wyl_audit_event_set_action (audit_event, "permission_state.grant");
-    wyl_audit_event_set_resource_id (audit_event, perm);
-    wyl_audit_event_set_deny_reason (audit_event, "grant");
-    wyl_audit_event_set_deny_origin (audit_event, scope);
-    wyl_audit_event_set_request_id (audit_event, request_id);
-    wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
-
-    rc = wyl_handle_apply_permission_state_transition (ctx->handle, auth.actor,
-        perm, scope, "grant", audit_event, NULL);
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (ctx->handle);
+  if (engine_session == NULL) {
+    rc = WYRELOG_E_BUSY;
+  } else {
+    publication.store = write.store;
     wyl_daemon_policy_write_observe_cleanup_resource (&write,
         WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+    WylManagementReauthorization reauthorization = {
+      .ctx = ctx,.handle = ctx->handle,.session = session,
+      .session_id = publication.session_id,.actor =
+          publication.actor_subject_id,
+      .expected_session_tenant = WYL_TENANT_DEFAULT,
+      .action = "wr.service.self_authorize",.resource_id = WYL_TENANT_DEFAULT,
+      .target_tenant = NULL,
+      .decision_request_id = publication.reauthorization_request_id,
+      .require_mfa = TRUE,
+      .guard_timestamp = guard_timestamp,.guard_loc_class = guard_loc_class,
+      .guard_risk = guard_risk,
+    };
+    rc = management_reauthorize_inside_write (&reauthorization,
+        publication.actor_subject_id);
+    WylCommittedPublicationStage stage =
+        WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_engine_session_run_committed_publication (engine_session,
+          mutate_self_arm_publication, &publication,
+          verify_self_arm_publication, &publication, NULL, NULL, &stage);
+    if (rc != WYRELOG_E_OK
+        && (stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
+            || stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS)) {
+      WylPolicySelfArmBundleState state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+      wyrelog_error_t classify_rc =
+          wyl_policy_store_classify_self_arm_bundle (write.store,
+          &publication.bundle.identity, &state);
+      gboolean repair_admitted = classify_rc == WYRELOG_E_OK
+          && (state == WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
+          || state == WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT);
+      if (repair_admitted) {
+        guint64 generation = 0;
+        classify_rc = wyl_handle_policy_store_capture_generation (ctx->handle,
+            write.store, &generation);
+        if (classify_rc == WYRELOG_E_OK)
+          classify_rc =
+              wyl_engine_session_repair_committed_publication (engine_session,
+              write.lease, write.store, generation, verify_self_arm_publication,
+              &publication);
+      }
+      if (repair_admitted && classify_rc == WYRELOG_E_OK)
+        rc = WYRELOG_E_OK;
+      else if (classify_rc == WYRELOG_E_OK)
+        rc = WYRELOG_E_POLICY;
+      else
+        rc = classify_rc;
+    }
   }
-
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+  if (rc != WYRELOG_E_OK) {
+    if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+      (void) wyl_daemon_policy_write_finish_result (&write, rc);
+    guint status = rc == WYRELOG_E_BUSY ? 503 :
+        (rc == WYRELOG_E_AUTH ? 403 : 500);
+    set_json_error (msg, status, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
+    return;
+  }
   set_json_ok (msg);
 }
 

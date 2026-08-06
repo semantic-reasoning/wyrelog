@@ -319,6 +319,9 @@ static wyrelog_error_t prepare_stmt (sqlite3 * db, const gchar * sql,
     sqlite3_stmt ** out_stmt);
 static wyrelog_error_t bind_text (sqlite3_stmt * stmt, int index,
     const gchar * value);
+static wyrelog_error_t graph_authority_sqlite_error (int sqlite_rc);
+static wyrelog_error_t service_authorization_subject_check (wyl_policy_store_t *
+    store, const gchar * subject_id, gboolean human_only);
 static wyrelog_error_t query_single_text (sqlite3 * db, const gchar * sql,
     const gchar * id, gchar ** out_value);
 static wyrelog_error_t service_domain_claim_request (wyl_policy_store_t * store,
@@ -729,6 +732,7 @@ static const gchar *const required_tables[] = {
   "service_credential_handoff_retirement_receipts",
   "service_permission_remediation_receipts",
   "service_retirement_receipts",
+  "service_management_self_arm_receipts",
 };
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
@@ -1429,6 +1433,63 @@ static const gchar service_schema_ddl[] =
     "CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_delete"
     " BEFORE DELETE ON service_domain_requests"
     " BEGIN SELECT RAISE(ABORT, 'service domain requests are append-only'); END;"
+    "CREATE TABLE IF NOT EXISTS service_management_self_arm_receipts ("
+    " server_operation_id TEXT NOT NULL PRIMARY KEY CHECK("
+    "   typeof(server_operation_id)='text' AND length(server_operation_id)=36"
+    "   AND instr(server_operation_id,char(0))=0),"
+    " tenant_id TEXT NOT NULL CHECK(typeof(tenant_id)='text'"
+    "   AND length(tenant_id) BETWEEN 1 AND 255"
+    "   AND instr(tenant_id,char(0))=0),"
+    " operation_kind TEXT NOT NULL CHECK("
+    "   operation_kind='service_management_self_arm'),"
+    " receipt_version INTEGER NOT NULL CHECK(typeof(receipt_version)='integer'"
+    "   AND receipt_version=1),"
+    " actor_subject_id TEXT NOT NULL CHECK(typeof(actor_subject_id)='text'"
+    "   AND length(actor_subject_id) BETWEEN 1 AND 128"
+    "   AND instr(actor_subject_id,char(0))=0),"
+    " session_id TEXT NOT NULL CHECK(typeof(session_id)='text'"
+    "   AND length(session_id) BETWEEN 1 AND 255"
+    "   AND instr(session_id,char(0))=0),"
+    " bundle_digest BLOB NOT NULL CHECK(typeof(bundle_digest)='blob'"
+    "   AND length(bundle_digest)=32),"
+    " principal_permission_id TEXT NOT NULL CHECK("
+    "   principal_permission_id='wr.service_principal.manage'),"
+    " credential_permission_id TEXT NOT NULL CHECK("
+    "   credential_permission_id='wr.service_credential.manage'),"
+    " principal_direct_event_id INTEGER NOT NULL CHECK("
+    "   typeof(principal_direct_event_id)='integer'"
+    "   AND principal_direct_event_id>0),"
+    " credential_direct_event_id INTEGER NOT NULL CHECK("
+    "   typeof(credential_direct_event_id)='integer'"
+    "   AND credential_direct_event_id>0),"
+    " principal_state_event_id INTEGER NOT NULL CHECK("
+    "   typeof(principal_state_event_id)='integer'"
+    "   AND principal_state_event_id>0),"
+    " credential_state_event_id INTEGER NOT NULL CHECK("
+    "   typeof(credential_state_event_id)='integer'"
+    "   AND credential_state_event_id>0),"
+    " principal_audit_id TEXT NOT NULL CHECK(typeof(principal_audit_id)='text'"
+    "   AND length(principal_audit_id)=36"
+    "   AND instr(principal_audit_id,char(0))=0),"
+    " credential_audit_id TEXT NOT NULL CHECK("
+    "   typeof(credential_audit_id)='text'"
+    "   AND length(credential_audit_id)=36"
+    "   AND instr(credential_audit_id,char(0))=0),"
+    " created_at_us INTEGER NOT NULL CHECK(typeof(created_at_us)='integer'"
+    "   AND created_at_us>0),"
+    " UNIQUE(tenant_id,operation_kind,actor_subject_id,session_id),"
+    " CHECK(principal_direct_event_id<>credential_direct_event_id),"
+    " CHECK(principal_state_event_id<>credential_state_event_id),"
+    " CHECK(principal_audit_id<>credential_audit_id)"
+    ");"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_self_arm_receipt_no_update"
+    " BEFORE UPDATE ON service_management_self_arm_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service management self-arm receipts are immutable'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_self_arm_receipt_no_delete"
+    " BEFORE DELETE ON service_management_self_arm_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service management self-arm receipts are immutable'); END;"
     "CREATE TABLE IF NOT EXISTS service_permission_remediation_receipts ("
     " request_id TEXT PRIMARY KEY CHECK (length(request_id) BETWEEN 1 AND 64"
     "   AND instr(request_id, char(0)) = 0),"
@@ -1887,6 +1948,40 @@ static const gchar *const service_retirement_receipt_needles[] = {
   NULL,
 };
 
+static const gchar *const service_management_self_arm_receipt_needles[] = {
+  "check(typeof(server_operation_id)='text'andlength(server_operation_id)="
+      "36andinstr(server_operation_id,char(0))=0)",
+  "check(typeof(tenant_id)='text'andlength(tenant_id)between1and255andinstr("
+      "tenant_id,char(0))=0)",
+  "check(operation_kind='service_management_self_arm')",
+  "check(typeof(receipt_version)='integer'andreceipt_version=1)",
+  "check(typeof(actor_subject_id)='text'andlength(actor_subject_id)"
+      "between1and128andinstr(actor_subject_id,char(0))=0)",
+  "check(typeof(session_id)='text'andlength(session_id)"
+      "between1and255andinstr(session_id,char(0))=0)",
+  "check(typeof(bundle_digest)='blob'andlength(bundle_digest)=32)",
+  "check(principal_permission_id='wr.service_principal.manage')",
+  "check(credential_permission_id='wr.service_credential.manage')",
+  "check(typeof(principal_direct_event_id)='integer'andprincipal_direct_"
+      "event_id>0)",
+  "check(typeof(credential_direct_event_id)='integer'andcredential_direct_"
+      "event_id>0)",
+  "check(typeof(principal_state_event_id)='integer'andprincipal_state_event_"
+      "id>0)",
+  "check(typeof(credential_state_event_id)='integer'andcredential_state_"
+      "event_id>0)",
+  "check(typeof(principal_audit_id)='text'andlength(principal_audit_id)="
+      "36andinstr(principal_audit_id,char(0))=0)",
+  "check(typeof(credential_audit_id)='text'andlength(credential_audit_id)="
+      "36andinstr(credential_audit_id,char(0))=0)",
+  "check(typeof(created_at_us)='integer'andcreated_at_us>0)",
+  "unique(tenant_id,operation_kind,actor_subject_id,session_id)",
+  "check(principal_direct_event_id<>credential_direct_event_id)",
+  "check(principal_state_event_id<>credential_state_event_id)",
+  "check(principal_audit_id<>credential_audit_id)",
+  NULL,
+};
+
 static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_principals",
         "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
@@ -1956,6 +2051,20 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         service_retirement_receipt_needles, 18,
         "0:0:audit_events:audit_id:id:RESTRICT:RESTRICT:NONE",
       "idx_service_retirement_diagnostic:0:c:0:0:2:operation:0:BINARY:1,1:3:resource_id:0:BINARY:1,2:14:created_at_us:0:BINARY:1,3:0:request_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_retirement_event:1:c:1:0:2:operation:0:BINARY:1,1:12:event_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_2:1:u:0:0:13:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_management_self_arm_receipts",
+        "server_operation_id:TEXT:1::1,tenant_id:TEXT:1::0,operation_kind:TEXT:1::"
+        "0,receipt_version:INTEGER:1::0,actor_subject_id:TEXT:1::0,session_id:"
+        "TEXT:1::0,bundle_digest:BLOB:1::0,principal_permission_id:TEXT:1::0,"
+        "credential_permission_id:TEXT:1::0,principal_direct_event_id:INTEGER:1::"
+        "0,credential_direct_event_id:INTEGER:1::0,principal_state_event_id:"
+        "INTEGER:1::0,credential_state_event_id:INTEGER:1::0,principal_audit_id:"
+        "TEXT:1::0,credential_audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
+        service_management_self_arm_receipt_needles, 19, "",
+      "sqlite_autoindex_service_management_self_arm_receipts_1:1:pk:0:0:0:"
+        "server_operation_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_"
+        "management_self_arm_receipts_2:1:u:0:0:1:tenant_id:0:BINARY:1,1:2:"
+        "operation_kind:0:BINARY:1,2:4:actor_subject_id:0:BINARY:1,3:5:session_id:"
+        "0:BINARY:1,4:-1::0:BINARY:0"},
 };
 
 static const ServiceIndexDescriptor service_index_descriptors[] = {
@@ -1990,6 +2099,12 @@ static const ServiceIndexDescriptor service_index_descriptors[] = {
 };
 
 static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
+  {"trg_service_self_arm_receipt_no_update",
+        "service_management_self_arm_receipts",
+      "createtriggertrg_service_self_arm_receipt_no_updatebeforeupdateonservice_management_self_arm_receiptsbeginselectraise(abort,'servicemanagementself-armreceiptsareimmutable');end"},
+  {"trg_service_self_arm_receipt_no_delete",
+        "service_management_self_arm_receipts",
+      "createtriggertrg_service_self_arm_receipt_no_deletebeforedeleteonservice_management_self_arm_receiptsbeginselectraise(abort,'servicemanagementself-armreceiptsareimmutable');end"},
   {"trg_service_principals_identity_immutable", "service_principals",
       "createtriggertrg_service_principals_identity_immutablebeforeupdateonservice_principalswhenold.subject_idisnotnew.subject_idorold.created_byisnotnew.created_byorold.created_at_usisnotnew.created_at_usbeginselectraise(abort,'serviceprincipalidentityisimmutable');end"},
   {"trg_service_credentials_identity_immutable", "service_credentials",
@@ -10953,6 +11068,821 @@ wyl_policy_store_classify_tenant_create_bundle (wyl_policy_store_t *store,
   return rc;
 }
 
+static gboolean
+self_arm_identity_is_valid (const WylPolicySelfArmIdentity *identity)
+{
+  return identity != NULL
+      && wyl_policy_store_tenant_id_is_valid (identity->tenant_id)
+      && identity->actor_subject_id != NULL
+      && identity->actor_subject_id[0] != '\0'
+      && strlen (identity->actor_subject_id) <= 128
+      && identity->session_id != NULL && identity->session_id[0] != '\0'
+      && strlen (identity->session_id) <= 255
+      && wyl_request_id_is_canonical (identity->original_request_id);
+}
+
+static gboolean
+self_arm_canonical_authority_time (gint64 created_at_us, gint64 *out_created_at)
+{
+  if (out_created_at == NULL || created_at_us < G_USEC_PER_SEC)
+    return FALSE;
+  *out_created_at = created_at_us / G_USEC_PER_SEC;
+  return *out_created_at > 0;
+}
+
+static gboolean
+self_arm_bundle_is_valid (const WylPolicySelfArmBundle *bundle)
+{
+  wyl_id_t parsed;
+  gint64 authority_created_at = 0;
+  return bundle != NULL && self_arm_identity_is_valid (&bundle->identity)
+      && bundle->server_operation_id != NULL
+      && wyl_id_parse (bundle->server_operation_id, &parsed) == WYRELOG_E_OK
+      && bundle->principal_audit_id != NULL
+      && wyl_id_parse (bundle->principal_audit_id, &parsed) == WYRELOG_E_OK
+      && bundle->credential_audit_id != NULL
+      && wyl_id_parse (bundle->credential_audit_id, &parsed) == WYRELOG_E_OK
+      && g_strcmp0 (bundle->principal_audit_id,
+      bundle->credential_audit_id) != 0
+      && self_arm_canonical_authority_time (bundle->created_at_us,
+      &authority_created_at);
+}
+
+static int
+self_arm_digest_update (crypto_hash_sha256_state *state, const guint8 *value,
+    gsize value_len)
+{
+  return crypto_hash_sha256_update (state, value,
+      (unsigned long long) value_len);
+}
+
+static int
+self_arm_digest_u32 (crypto_hash_sha256_state *state, guint32 value)
+{
+  const guint8 encoded[4] = {
+    (guint8) (value >> 24), (guint8) (value >> 16),
+    (guint8) (value >> 8), (guint8) value
+  };
+  return self_arm_digest_update (state, encoded, sizeof encoded);
+}
+
+static int
+self_arm_digest_u64 (crypto_hash_sha256_state *state, guint64 value)
+{
+  guint8 encoded[8];
+  for (guint i = 0; i < G_N_ELEMENTS (encoded); i++)
+    encoded[i] = (guint8) (value >> (56 - (i * 8)));
+  return self_arm_digest_update (state, encoded, sizeof encoded);
+}
+
+static int
+self_arm_digest_text (crypto_hash_sha256_state *state, const gchar *value)
+{
+  gsize len = strlen (value);
+  if (len > G_MAXUINT32 || self_arm_digest_u32 (state, (guint32) len) != 0)
+    return -1;
+  return self_arm_digest_update (state, (const guint8 *) value, len);
+}
+
+wyrelog_error_t
+wyl_policy_store_self_arm_bundle_digest (const WylPolicySelfArmBundle *bundle,
+    gint64 principal_direct_event_id, gint64 credential_direct_event_id,
+    gint64 principal_state_event_id, gint64 credential_state_event_id,
+    guint8 out_digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES])
+{
+  static const gchar domain[] = "wyrelog.service-management-self-arm.bundle";
+  if (!self_arm_bundle_is_valid (bundle) || out_digest == NULL
+      || principal_direct_event_id <= 0 || credential_direct_event_id <= 0
+      || principal_state_event_id <= 0 || credential_state_event_id <= 0
+      || principal_direct_event_id == credential_direct_event_id
+      || principal_state_event_id == credential_state_event_id)
+    return WYRELOG_E_INVALID;
+
+  crypto_hash_sha256_state state;
+  gboolean failed = crypto_hash_sha256_init (&state) != 0
+      || self_arm_digest_text (&state, domain) != 0
+      || self_arm_digest_u32 (&state, 1) != 0
+      || self_arm_digest_text (&state, bundle->server_operation_id) != 0
+      || self_arm_digest_text (&state, bundle->identity.tenant_id) != 0
+      || self_arm_digest_text (&state, bundle->identity.actor_subject_id) != 0
+      || self_arm_digest_text (&state, bundle->identity.session_id) != 0
+      || self_arm_digest_text (&state,
+      bundle->identity.original_request_id) != 0
+      || self_arm_digest_text (&state,
+      WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION) != 0
+      || self_arm_digest_text (&state,
+      WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION) != 0
+      || self_arm_digest_u64 (&state,
+      (guint64) principal_direct_event_id) != 0 || self_arm_digest_u64 (&state,
+      (guint64) credential_direct_event_id) != 0 || self_arm_digest_u64 (&state,
+      (guint64) principal_state_event_id) != 0 || self_arm_digest_u64 (&state,
+      (guint64) credential_state_event_id) != 0
+      || self_arm_digest_text (&state, bundle->principal_audit_id) != 0
+      || self_arm_digest_text (&state, bundle->credential_audit_id) != 0
+      || self_arm_digest_u64 (&state, (guint64) bundle->created_at_us) != 0
+      || crypto_hash_sha256_final (&state, out_digest) != 0;
+  sodium_memzero (&state, sizeof state);
+  if (failed) {
+    sodium_memzero (out_digest, WYL_POLICY_SELF_ARM_DIGEST_BYTES);
+    return WYRELOG_E_CRYPTO;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_classify_self_arm_bundle (wyl_policy_store_t *store,
+    const WylPolicySelfArmIdentity *identity,
+    WylPolicySelfArmBundleState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  if (store == NULL || store->db == NULL || out_state == NULL
+      || !self_arm_identity_is_valid (identity))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (identity->tenant_id, WYL_POLICY_SELF_ARM_TENANT) != 0
+      || wyl_policy_subject_has_service_prefix (identity->actor_subject_id))
+    return WYRELOG_E_POLICY;
+
+  static const gchar *sql =
+      "WITH owned_receipts AS (SELECT * FROM"
+      " service_management_self_arm_receipts WHERE tenant_id=:tenant"
+      " AND actor_subject_id=:actor AND session_id=:session),"
+      " receipt AS (SELECT * FROM owned_receipts"
+      " WHERE operation_kind='service_management_self_arm'"
+      " AND typeof(receipt_version)='integer' AND receipt_version=1"
+      " AND principal_permission_id='wr.service_principal.manage'"
+      " AND credential_permission_id='wr.service_credential.manage'"
+      " AND typeof(principal_direct_event_id)='integer'"
+      " AND principal_direct_event_id>0"
+      " AND typeof(credential_direct_event_id)='integer'"
+      " AND credential_direct_event_id>0"
+      " AND typeof(principal_state_event_id)='integer'"
+      " AND principal_state_event_id>0"
+      " AND typeof(credential_state_event_id)='integer'"
+      " AND credential_state_event_id>0"
+      " AND typeof(created_at_us)='integer'"
+      " AND created_at_us>=1000000) SELECT"
+      " (SELECT count(*) FROM owned_receipts),"
+      " (SELECT count(*) FROM receipt),"
+      " (SELECT count(*) FROM direct_permissions WHERE subject_id=:actor"
+      "  AND scope=:session),"
+      " (SELECT count(*) FROM direct_permissions WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_principal.manage'"
+      "  AND typeof(granted_at)='integer' AND granted_at>0),"
+      " (SELECT count(*) FROM direct_permissions WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_credential.manage'"
+      "  AND typeof(granted_at)='integer' AND granted_at>0),"
+      " (SELECT count(*) FROM direct_permission_events WHERE subject_id=:actor"
+      "  AND scope=:session),"
+      " (SELECT count(*) FROM direct_permission_events WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_principal.manage'"
+      "  AND operation='grant' AND typeof(created_at)='integer'"
+      "  AND created_at>0),"
+      " (SELECT count(*) FROM direct_permission_events WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_credential.manage'"
+      "  AND operation='grant' AND typeof(created_at)='integer'"
+      "  AND created_at>0),"
+      " coalesce((SELECT min(event_id) FROM direct_permission_events"
+      "  WHERE subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_principal.manage') <"
+      " (SELECT min(event_id) FROM direct_permission_events"
+      "  WHERE subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_credential.manage'),0),"
+      " (SELECT count(*) FROM permission_states WHERE subject_id=:actor"
+      "  AND scope=:session),"
+      " (SELECT count(*) FROM permission_states WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_principal.manage'"
+      "  AND state='armed' AND typeof(updated_at)='integer'"
+      "  AND updated_at>0),"
+      " (SELECT count(*) FROM permission_states WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_credential.manage'"
+      "  AND state='armed' AND typeof(updated_at)='integer'"
+      "  AND updated_at>0),"
+      " (SELECT count(*) FROM permission_state_events WHERE subject_id=:actor"
+      "  AND scope=:session),"
+      " (SELECT count(*) FROM permission_state_events WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_principal.manage'"
+      "  AND event='grant' AND from_state='dormant' AND to_state='armed'"
+      "  AND typeof(created_at)='integer' AND created_at>0),"
+      " (SELECT count(*) FROM permission_state_events WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_credential.manage'"
+      "  AND event='grant' AND from_state='dormant' AND to_state='armed'"
+      "  AND typeof(created_at)='integer' AND created_at>0),"
+      " coalesce((SELECT min(event_id) FROM permission_state_events"
+      "  WHERE subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_principal.manage') <"
+      " (SELECT min(event_id) FROM permission_state_events"
+      "  WHERE subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_credential.manage'),0),"
+      " (SELECT count(*) FROM audit_events WHERE subject_id=:actor"
+      "  AND deny_origin=:session AND resource_id IN"
+      "  ('wr.service_principal.manage','wr.service_credential.manage')),"
+      " (SELECT count(*) FROM audit_events WHERE subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_principal.manage'"
+      "  AND deny_reason='grant' AND decision=1"
+      "  AND typeof(created_at_us)='integer' AND created_at_us>0),"
+      " (SELECT count(*) FROM audit_events WHERE subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_credential.manage'"
+      "  AND deny_reason='grant' AND decision=1"
+      "  AND typeof(created_at_us)='integer' AND created_at_us>0),"
+      " (SELECT count(*) FROM direct_permission_events WHERE event_id="
+      "  (SELECT principal_direct_event_id FROM receipt)"
+      "  AND subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_principal.manage' AND operation='grant'"
+      "  AND typeof(created_at)='integer' AND created_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM direct_permission_events WHERE event_id="
+      "  (SELECT credential_direct_event_id FROM receipt)"
+      "  AND subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_credential.manage' AND operation='grant'"
+      "  AND typeof(created_at)='integer' AND created_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM permission_state_events WHERE event_id="
+      "  (SELECT principal_state_event_id FROM receipt)"
+      "  AND subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_principal.manage' AND event='grant'"
+      "  AND from_state='dormant' AND to_state='armed'"
+      "  AND typeof(created_at)='integer' AND created_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM permission_state_events WHERE event_id="
+      "  (SELECT credential_state_event_id FROM receipt)"
+      "  AND subject_id=:actor AND scope=:session"
+      "  AND perm_id='wr.service_credential.manage' AND event='grant'"
+      "  AND from_state='dormant' AND to_state='armed'"
+      "  AND typeof(created_at)='integer' AND created_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM audit_events WHERE id="
+      "  (SELECT principal_audit_id FROM receipt) AND subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_principal.manage'"
+      "  AND deny_reason='grant' AND decision=1"
+      "  AND typeof(created_at_us)='integer' AND created_at_us>0"
+      "  AND created_at_us=(SELECT created_at_us FROM receipt)),"
+      " (SELECT count(*) FROM audit_events WHERE id="
+      "  (SELECT credential_audit_id FROM receipt) AND subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_credential.manage'"
+      "  AND deny_reason='grant' AND decision=1"
+      "  AND typeof(created_at_us)='integer' AND created_at_us>0"
+      "  AND created_at_us=(SELECT created_at_us FROM receipt)),"
+      " (SELECT count(*) FROM direct_permissions WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_principal.manage'"
+      "  AND typeof(granted_at)='integer' AND granted_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM direct_permissions WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_credential.manage'"
+      "  AND typeof(granted_at)='integer' AND granted_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM permission_states WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_principal.manage'"
+      "  AND typeof(updated_at)='integer' AND updated_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT count(*) FROM permission_states WHERE subject_id=:actor"
+      "  AND scope=:session AND perm_id='wr.service_credential.manage'"
+      "  AND typeof(updated_at)='integer' AND updated_at="
+      "  (SELECT created_at_us/1000000 FROM receipt)),"
+      " (SELECT server_operation_id FROM receipt),"
+      " (SELECT principal_audit_id FROM receipt),"
+      " (SELECT credential_audit_id FROM receipt),"
+      " (SELECT bundle_digest FROM receipt),"
+      " (SELECT created_at_us FROM receipt),"
+      " (SELECT principal_direct_event_id FROM receipt),"
+      " (SELECT credential_direct_event_id FROM receipt),"
+      " (SELECT principal_state_event_id FROM receipt),"
+      " (SELECT credential_state_event_id FROM receipt),"
+      " (SELECT min(request_id) FROM audit_events WHERE subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_principal.manage'"
+      "  AND deny_reason='grant' AND decision=1),"
+      " (SELECT min(request_id) FROM audit_events WHERE subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_credential.manage'"
+      "  AND deny_reason='grant' AND decision=1),"
+      " (SELECT min(id) FROM audit_events WHERE subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_principal.manage'"
+      "  AND deny_reason='grant' AND decision=1),"
+      " (SELECT min(id) FROM audit_events WHERE subject_id=:actor"
+      "  AND action='permission_state.grant' AND deny_origin=:session"
+      "  AND resource_id='wr.service_credential.manage'"
+      "  AND deny_reason='grant' AND decision=1);";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, sqlite3_bind_parameter_index (stmt, ":tenant"),
+        identity->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, sqlite3_bind_parameter_index (stmt, ":actor"),
+        identity->actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, sqlite3_bind_parameter_index (stmt, ":session"),
+        identity->session_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    static const gint64 present[29] = {
+      1, 1, 2, 1, 1, 2, 1, 1, 1, 2, 1, 1, 2, 1, 1, 1, 2, 1, 1,
+      1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    };
+    static const gint64 legacy[29] = {
+      0, 0, 2, 1, 1, 2, 1, 1, 1, 2, 1, 1, 2, 1, 1, 1, 2, 1, 1,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+    gboolean is_present = TRUE, is_legacy = TRUE;
+    for (guint i = 0; i < G_N_ELEMENTS (present); i++) {
+      if (sqlite3_column_type (stmt, (int) i) != SQLITE_INTEGER) {
+        is_present = is_legacy = FALSE;
+        break;
+      }
+      gint64 value = sqlite3_column_int64 (stmt, (int) i);
+      is_present = is_present && value == present[i];
+      is_legacy = is_legacy && value == legacy[i];
+    }
+    gboolean is_absent = sqlite3_column_int64 (stmt, 0) == 0
+        && sqlite3_column_int64 (stmt, 2) == 0
+        && sqlite3_column_int64 (stmt, 5) == 0
+        && sqlite3_column_int64 (stmt, 9) == 0
+        && sqlite3_column_int64 (stmt, 12) == 0
+        && sqlite3_column_int64 (stmt, 16) == 0;
+    gboolean direct_only = sqlite3_column_int64 (stmt, 0) == 0
+        && sqlite3_column_int64 (stmt, 2) == 2
+        && sqlite3_column_int64 (stmt, 3) == 1
+        && sqlite3_column_int64 (stmt, 4) == 1
+        && sqlite3_column_int64 (stmt, 5) == 0
+        && sqlite3_column_int64 (stmt, 9) == 0
+        && sqlite3_column_int64 (stmt, 12) == 0
+        && sqlite3_column_int64 (stmt, 16) == 0;
+    const gchar *principal_request =
+        (const gchar *) sqlite3_column_text (stmt, 38);
+    const gchar *credential_request =
+        (const gchar *) sqlite3_column_text (stmt, 39);
+    gboolean requests_are_exact = principal_request != NULL
+        && credential_request != NULL
+        && wyl_request_id_is_canonical (principal_request)
+        && wyl_request_id_is_canonical (credential_request)
+        && g_str_equal (principal_request, credential_request);
+    if (is_present) {
+      const gchar *server_id = (const gchar *) sqlite3_column_text (stmt, 29);
+      const gchar *principal_audit_id =
+          (const gchar *) sqlite3_column_text (stmt, 30);
+      const gchar *credential_audit_id =
+          (const gchar *) sqlite3_column_text (stmt, 31);
+      wyl_id_t parsed;
+      if (!requests_are_exact || server_id == NULL
+          || principal_audit_id == NULL || credential_audit_id == NULL
+          || g_str_equal (principal_audit_id, credential_audit_id)
+          || wyl_id_parse (server_id, &parsed) != WYRELOG_E_OK
+          || wyl_id_parse (principal_audit_id, &parsed) != WYRELOG_E_OK
+          || wyl_id_parse (credential_audit_id, &parsed) != WYRELOG_E_OK
+          || sqlite3_column_type (stmt, 32) != SQLITE_BLOB
+          || sqlite3_column_bytes (stmt,
+              32) != WYL_POLICY_SELF_ARM_DIGEST_BYTES
+          || sqlite3_column_type (stmt, 33) != SQLITE_INTEGER
+          || sqlite3_column_int64 (stmt, 33) < G_USEC_PER_SEC
+          || sqlite3_column_type (stmt, 34) != SQLITE_INTEGER
+          || sqlite3_column_type (stmt, 35) != SQLITE_INTEGER
+          || sqlite3_column_type (stmt, 36) != SQLITE_INTEGER
+          || sqlite3_column_type (stmt, 37) != SQLITE_INTEGER)
+        is_present = FALSE;
+      if (is_present) {
+        WylPolicySelfArmBundle durable = {
+          .identity = {
+                identity->tenant_id, identity->actor_subject_id,
+              identity->session_id, principal_request},
+          .server_operation_id = server_id,
+          .principal_audit_id = principal_audit_id,
+          .credential_audit_id = credential_audit_id,
+          .created_at_us = sqlite3_column_int64 (stmt, 33),
+        };
+        guint8 expected[WYL_POLICY_SELF_ARM_DIGEST_BYTES] = { 0 };
+        const guint8 *actual = sqlite3_column_blob (stmt, 32);
+        wyrelog_error_t digest_rc =
+            wyl_policy_store_self_arm_bundle_digest (&durable,
+            sqlite3_column_int64 (stmt, 34),
+            sqlite3_column_int64 (stmt, 35),
+            sqlite3_column_int64 (stmt, 36),
+            sqlite3_column_int64 (stmt, 37), expected);
+        if (digest_rc != WYRELOG_E_OK
+            || sodium_memcmp (actual, expected, sizeof expected) != 0)
+          is_present = FALSE;
+        sodium_memzero (expected, sizeof expected);
+      }
+    }
+    if (is_legacy) {
+      const gchar *principal_id =
+          (const gchar *) sqlite3_column_text (stmt, 40);
+      const gchar *credential_id =
+          (const gchar *) sqlite3_column_text (stmt, 41);
+      wyl_id_t parsed;
+      if (!requests_are_exact || principal_id == NULL || credential_id == NULL
+          || g_str_equal (principal_id, credential_id)
+          || wyl_id_parse (principal_id, &parsed) != WYRELOG_E_OK
+          || wyl_id_parse (credential_id, &parsed) != WYRELOG_E_OK)
+        is_legacy = FALSE;
+    }
+    int final_step = sqlite3_step (stmt);
+    if (final_step != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    else if (rc == WYRELOG_E_OK && is_present)
+      *out_state = WYL_POLICY_SELF_ARM_BUNDLE_PRESENT;
+    else if (rc == WYRELOG_E_OK && is_legacy)
+      *out_state = WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT;
+    else if (rc == WYRELOG_E_OK && direct_only)
+      *out_state = WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY;
+    else if (rc == WYRELOG_E_OK && is_absent)
+      *out_state = WYL_POLICY_SELF_ARM_BUNDLE_ALL_ABSENT;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_verify_self_arm_bundle (wyl_policy_store_t *store,
+    const WylPolicySelfArmBundle *bundle,
+    WylPolicySelfArmBundleState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  if (store == NULL || store->db == NULL || out_state == NULL
+      || !self_arm_bundle_is_valid (bundle))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (bundle->identity.tenant_id, WYL_POLICY_SELF_ARM_TENANT) != 0
+      || wyl_policy_subject_has_service_prefix (bundle->
+          identity.actor_subject_id))
+    return WYRELOG_E_POLICY;
+
+  /* First classify the complete identity-owned durable set.  In particular,
+   * LEGACY_PRESENT is an intentional terminal result: old rows are never
+   * upgraded or interpreted as a receipt-backed proof. */
+  wyrelog_error_t rc = wyl_policy_store_classify_self_arm_bundle (store,
+      &bundle->identity, out_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (*out_state == WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT)
+    return WYRELOG_E_OK;
+  if (*out_state != WYL_POLICY_SELF_ARM_BUNDLE_PRESENT) {
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    return WYRELOG_E_POLICY;
+  }
+
+  /* A PRESENT classification proves the row cardinality and all authority
+   * facts, but the caller still needs proof that this exact operation's
+   * provenance is the one it requested.  Read the immutable receipt again and
+   * compare every bundle-owned field; never trust a classifier's aggregate
+   * counts as a substitute for this exact readback. */
+  static const gchar *receipt_sql =
+      "SELECT server_operation_id,tenant_id,actor_subject_id,session_id,"
+      " bundle_digest,principal_direct_event_id,credential_direct_event_id,"
+      " principal_state_event_id,credential_state_event_id,"
+      " principal_audit_id,credential_audit_id,created_at_us"
+      " FROM service_management_self_arm_receipts"
+      " WHERE tenant_id=? AND actor_subject_id=? AND session_id=?"
+      " AND operation_kind='service_management_self_arm';";
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db, receipt_sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, bundle->identity.tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, bundle->identity.actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, bundle->identity.session_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  gboolean exact = FALSE;
+  gint64 event_ids[4] = { 0 };
+  const gchar *server_id = NULL;
+  const gchar *principal_audit_id = NULL;
+  const gchar *credential_audit_id = NULL;
+  guint8 actual_digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES] = { 0 };
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *actor_id = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *session_id = (const gchar *) sqlite3_column_text (stmt, 3);
+    server_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    principal_audit_id = (const gchar *) sqlite3_column_text (stmt, 9);
+    credential_audit_id = (const gchar *) sqlite3_column_text (stmt, 10);
+    const guint8 *digest = sqlite3_column_blob (stmt, 4);
+    gboolean typed = sqlite3_column_type (stmt, 4) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 4) == WYL_POLICY_SELF_ARM_DIGEST_BYTES
+        && sqlite3_column_type (stmt, 5) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 6) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 7) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 8) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 11) == SQLITE_INTEGER;
+    if (typed) {
+      memcpy (actual_digest, digest, sizeof actual_digest);
+      for (guint i = 0; i < G_N_ELEMENTS (event_ids); i++)
+        event_ids[i] = sqlite3_column_int64 (stmt, (int) i + 5);
+      exact = server_id != NULL && principal_audit_id != NULL
+          && credential_audit_id != NULL && tenant_id != NULL
+          && actor_id != NULL && session_id != NULL
+          && g_str_equal (tenant_id, bundle->identity.tenant_id)
+          && g_str_equal (actor_id, bundle->identity.actor_subject_id)
+          && g_str_equal (session_id, bundle->identity.session_id)
+          && g_str_equal (server_id, bundle->server_operation_id)
+          && g_str_equal (principal_audit_id, bundle->principal_audit_id)
+          && g_str_equal (credential_audit_id, bundle->credential_audit_id)
+          && sqlite3_column_int64 (stmt, 11) == bundle->created_at_us
+          && event_ids[0] > 0 && event_ids[1] > 0 && event_ids[2] > 0
+          && event_ids[3] > 0 && event_ids[0] != event_ids[1]
+          && event_ids[2] != event_ids[3];
+    }
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+  }
+  int final_step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && final_step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && exact) {
+    guint8 expected_digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES] = { 0 };
+    wyrelog_error_t digest_rc =
+        wyl_policy_store_self_arm_bundle_digest (bundle, event_ids[0],
+        event_ids[1], event_ids[2], event_ids[3],
+        expected_digest);
+    exact = digest_rc == WYRELOG_E_OK
+        && sodium_memcmp (actual_digest, expected_digest,
+        sizeof expected_digest) == 0;
+    sodium_memzero (expected_digest, sizeof expected_digest);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || !exact) {
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
+  }
+
+  /* Both audit rows must preserve the request ID frozen before the write /
+   * engine critical section.  This check is deliberately ID-addressed, so a
+   * matching aggregate row cannot hide a swapped or duplicated provenance. */
+  static const gchar *audit_sql =
+      "SELECT (SELECT count(*) FROM audit_events WHERE id=?"
+      " AND request_id=?),(SELECT count(*) FROM audit_events WHERE id=?"
+      " AND request_id=?);";
+  stmt = NULL;
+  rc = prepare_stmt (store->db, audit_sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, bundle->principal_audit_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, bundle->identity.original_request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, bundle->credential_audit_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 4, bundle->identity.original_request_id);
+  step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  gboolean audit_exact = FALSE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    audit_exact = sqlite3_column_type (stmt, 0) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 1) == SQLITE_INTEGER
+        && sqlite3_column_int64 (stmt, 0) == 1
+        && sqlite3_column_int64 (stmt, 1) == 1;
+  else if (rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  final_step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && final_step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || !audit_exact) {
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+self_arm_step (wyl_policy_store_t *store, sqlite3_stmt *stmt,
+    gint64 *out_row_id)
+{
+  int step = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_DONE)
+    return graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  if (out_row_id != NULL) {
+    *out_row_id = sqlite3_last_insert_rowid (store->db);
+    if (*out_row_id <= 0)
+      return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+self_arm_insert_three_text (wyl_policy_store_t *store, const gchar *sql,
+    const WylPolicySelfArmBundle *bundle, const gchar *permission_id,
+    gint64 *out_row_id)
+{
+  sqlite3_stmt *stmt = NULL;
+  gint64 authority_created_at = 0;
+  if (!self_arm_canonical_authority_time (bundle->created_at_us,
+          &authority_created_at))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, bundle->identity.actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, permission_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, bundle->identity.session_id);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 4, authority_created_at) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  return self_arm_step (store, stmt, out_row_id);
+}
+
+static wyrelog_error_t
+self_arm_insert_audit (wyl_policy_store_t *store,
+    const WylPolicySelfArmBundle *bundle, const gchar *audit_id,
+    const gchar *permission_id)
+{
+  static const gchar *sql =
+      "INSERT INTO audit_events(id,created_at_us,subject_id,action,resource_id,"
+      "deny_reason,deny_origin,request_id,decision)"
+      " VALUES(?, ?, ?,'permission_state.grant',?,'grant',?,?,1);";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, audit_id);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 2, bundle->created_at_us) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, bundle->identity.actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 4, permission_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 5, bundle->identity.session_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 6, bundle->identity.original_request_id);
+  if (rc != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  return self_arm_step (store, stmt, NULL);
+}
+
+static wyrelog_error_t
+self_arm_insert_receipt (wyl_policy_store_t *store,
+    const WylPolicySelfArmBundle *bundle, gint64 principal_direct_event_id,
+    gint64 credential_direct_event_id, gint64 principal_state_event_id,
+    gint64 credential_state_event_id)
+{
+  guint8 digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES] = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_self_arm_bundle_digest (bundle,
+      principal_direct_event_id, credential_direct_event_id,
+      principal_state_event_id, credential_state_event_id, digest);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  static const gchar *sql =
+      "INSERT INTO service_management_self_arm_receipts("
+      "server_operation_id,tenant_id,operation_kind,receipt_version,"
+      "actor_subject_id,session_id,bundle_digest,principal_permission_id,"
+      "credential_permission_id,principal_direct_event_id,"
+      "credential_direct_event_id,principal_state_event_id,"
+      "credential_state_event_id,principal_audit_id,credential_audit_id,"
+      "created_at_us) VALUES(?,?,'service_management_self_arm',1,?,?,?,"
+      "'wr.service_principal.manage','wr.service_credential.manage',"
+      "?,?,?,?,?,?,?);";
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db, sql, &stmt);
+  const gchar *texts[] = {
+    bundle->server_operation_id, bundle->identity.tenant_id,
+    bundle->identity.actor_subject_id, bundle->identity.session_id
+  };
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (texts); i++)
+    rc = bind_text (stmt, (int) i + 1, texts[i]);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_blob (stmt, 5, digest, sizeof digest,
+          SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  const gint64 ids[] = {
+    principal_direct_event_id, credential_direct_event_id,
+    principal_state_event_id, credential_state_event_id
+  };
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (ids); i++)
+    if (sqlite3_bind_int64 (stmt, (int) i + 6, ids[i]) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 10, bundle->principal_audit_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 11, bundle->credential_audit_id);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 12, bundle->created_at_us) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  sodium_memzero (digest, sizeof digest);
+  if (rc != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  return self_arm_step (store, stmt, NULL);
+}
+
+wyrelog_error_t
+wyl_policy_store_publish_self_arm_bundle (wyl_policy_store_t *store,
+    const WylPolicySelfArmBundle *bundle,
+    WylPolicySelfArmBundleState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  if (store == NULL || store->db == NULL || out_state == NULL
+      || !self_arm_bundle_is_valid (bundle))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (bundle->identity.tenant_id, WYL_POLICY_SELF_ARM_TENANT) != 0)
+    return WYRELOG_E_POLICY;
+  if (wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = service_authorization_subject_check (store,
+      bundle->identity.actor_subject_id, TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylPolicySelfArmBundleState state = WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN;
+  rc = wyl_policy_store_classify_self_arm_bundle (store, &bundle->identity,
+      &state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (state == WYL_POLICY_SELF_ARM_BUNDLE_PRESENT
+      || state == WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT) {
+    *out_state = state;
+    return WYRELOG_E_OK;
+  }
+  if (state != WYL_POLICY_SELF_ARM_BUNDLE_ALL_ABSENT
+      && state != WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY)
+    return WYRELOG_E_POLICY;
+
+  gint64 principal_direct_event_id = -1;
+  gint64 credential_direct_event_id = -1;
+  gint64 principal_state_event_id = -1;
+  gint64 credential_state_event_id = -1;
+  rc = state == WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY ? WYRELOG_E_OK :
+      self_arm_insert_three_text (store,
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+      " VALUES(?,?,?,?);", bundle,
+      WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_three_text (store,
+        "INSERT INTO direct_permission_events(subject_id,perm_id,scope,"
+        "operation,created_at) VALUES(?,?,?,'grant',?);", bundle,
+        WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, &principal_direct_event_id);
+  if (rc == WYRELOG_E_OK)
+    rc = state == WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY ? WYRELOG_E_OK :
+        self_arm_insert_three_text (store,
+        "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+        " VALUES(?,?,?,?);", bundle,
+        WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION, NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_three_text (store,
+        "INSERT INTO direct_permission_events(subject_id,perm_id,scope,"
+        "operation,created_at) VALUES(?,?,?,'grant',?);", bundle,
+        WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION, &credential_direct_event_id);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_three_text (store,
+        "INSERT INTO permission_states(subject_id,perm_id,scope,state,"
+        "updated_at) VALUES(?,?,?,'armed',?);", bundle,
+        WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_three_text (store,
+        "INSERT INTO permission_state_events(subject_id,perm_id,scope,event,"
+        "from_state,to_state,created_at)"
+        " VALUES(?,?,?,'grant','dormant','armed',?);", bundle,
+        WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION, &principal_state_event_id);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_three_text (store,
+        "INSERT INTO permission_states(subject_id,perm_id,scope,state,"
+        "updated_at) VALUES(?,?,?,'armed',?);", bundle,
+        WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION, NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_three_text (store,
+        "INSERT INTO permission_state_events(subject_id,perm_id,scope,event,"
+        "from_state,to_state,created_at)"
+        " VALUES(?,?,?,'grant','dormant','armed',?);", bundle,
+        WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION, &credential_state_event_id);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_audit (store, bundle, bundle->principal_audit_id,
+        WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_audit (store, bundle, bundle->credential_audit_id,
+        WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION);
+  if (rc == WYRELOG_E_OK)
+    rc = self_arm_insert_receipt (store, bundle, principal_direct_event_id,
+        credential_direct_event_id, principal_state_event_id,
+        credential_state_event_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_policy_store_classify_self_arm_bundle (store, &bundle->identity,
+      &state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (state != WYL_POLICY_SELF_ARM_BUNDLE_PRESENT)
+    return WYRELOG_E_POLICY;
+  *out_state = state;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_policy_store_foreach_tenant (wyl_policy_store_t *store,
     wyl_policy_tenant_cb cb, gpointer user_data)
@@ -14269,6 +15199,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
       "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts',"
       "'service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
@@ -14299,6 +15230,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_exchange_audit_no_delete',"
       "'trg_service_permission_receipt_no_update',"
       "'trg_service_permission_receipt_no_delete',"
+      "'trg_service_self_arm_receipt_no_update',"
+      "'trg_service_self_arm_receipt_no_delete',"
       "'trg_service_retirement_no_update',"
       "'trg_service_retirement_no_delete',"
       "'trg_service_retirement_no_claim_collision',"
@@ -14329,6 +15262,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
       "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
@@ -14342,6 +15276,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
       "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate')) LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
@@ -14380,7 +15315,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_remediation_actions',"
       "'service_credential_handoff_retirement_receipts',"
       "'service_permission_remediation_receipts',"
-      "'service_retirement_receipts') LIMIT 1;", &found);
+      "'service_retirement_receipts',"
+      "'service_management_self_arm_receipts') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)

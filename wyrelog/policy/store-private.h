@@ -2153,6 +2153,63 @@ typedef struct
 wyrelog_error_t wyl_policy_store_classify_tenant_create_bundle
     (wyl_policy_store_t * store, const WylPolicyTenantCreateBundle * bundle,
     WylPolicyTenantCreateBundleState * out_state);
+
+#define WYL_POLICY_SELF_ARM_DIGEST_BYTES 32
+#define WYL_POLICY_SELF_ARM_TENANT "__wr_default"
+#define WYL_POLICY_SELF_ARM_PRINCIPAL_PERMISSION "wr.service_principal.manage"
+#define WYL_POLICY_SELF_ARM_CREDENTIAL_PERMISSION "wr.service_credential.manage"
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *actor_subject_id;
+  const gchar *session_id;
+  const gchar *original_request_id;
+} WylPolicySelfArmIdentity;
+
+typedef struct
+{
+  WylPolicySelfArmIdentity identity;
+  const gchar *server_operation_id;
+  const gchar *principal_audit_id;
+  const gchar *credential_audit_id;
+  /* Digest-bound microseconds; floor division by G_USEC_PER_SEC is the
+   * canonical positive INTEGER timestamp for all eight authority rows. */
+  gint64 created_at_us;
+} WylPolicySelfArmBundle;
+
+typedef enum
+{
+  WYL_POLICY_SELF_ARM_BUNDLE_UNKNOWN = 0,
+  WYL_POLICY_SELF_ARM_BUNDLE_ALL_ABSENT,
+  WYL_POLICY_SELF_ARM_BUNDLE_DIRECT_ONLY,
+  WYL_POLICY_SELF_ARM_BUNDLE_PRESENT,
+  WYL_POLICY_SELF_ARM_BUNDLE_LEGACY_PRESENT,
+} WylPolicySelfArmBundleState;
+
+/* Compute the v1 canonical digest used by the immutable receipt. The event
+ * IDs are the four SQLite row IDs generated while publishing @bundle. */
+wyrelog_error_t wyl_policy_store_self_arm_bundle_digest
+    (const WylPolicySelfArmBundle * bundle,
+    gint64 principal_direct_event_id,
+    gint64 credential_direct_event_id,
+    gint64 principal_state_event_id,
+    gint64 credential_state_event_id,
+    guint8 out_digest[WYL_POLICY_SELF_ARM_DIGEST_BYTES]);
+/* Exact, read-only durable-state classifier. This is legal both in autocommit
+ * mode and inside the caller's active publication transaction. */
+wyrelog_error_t wyl_policy_store_classify_self_arm_bundle
+    (wyl_policy_store_t * store, const WylPolicySelfArmIdentity * identity,
+    WylPolicySelfArmBundleState * out_state);
+wyrelog_error_t wyl_policy_store_verify_self_arm_bundle
+    (wyl_policy_store_t * store, const WylPolicySelfArmBundle * bundle,
+    WylPolicySelfArmBundleState * out_state);
+/* The only self-arm mutation surface. The caller must own an active
+ * publication transaction. ALL_ABSENT publishes all eleven rows with the
+ * receipt last; PRESENT and LEGACY_PRESENT are no-ops; UNKNOWN fails closed. */
+wyrelog_error_t wyl_policy_store_publish_self_arm_bundle
+    (wyl_policy_store_t * store, const WylPolicySelfArmBundle * bundle,
+    WylPolicySelfArmBundleState * out_state);
 wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
     wyl_policy_tenant_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
