@@ -53,7 +53,7 @@ static gboolean
 field_is_valid (const gchar *value)
 {
   return value != NULL && value[0] != '\0' && strlen (value) <= 1024
-      && g_utf8_validate (value, -1, NULL);
+         && g_utf8_validate (value, -1, NULL);
 }
 
 static WylPolicyPermissionClosureRemoval *
@@ -68,7 +68,8 @@ removal_copy (const WylPolicyPermissionClosureRemoval *source)
   copy->subject_id = g_strdup (source->subject_id);
   copy->right_id = g_strdup (source->right_id);
   copy->scope = g_strdup (source->scope);
-  if (copy->subject_id == NULL || copy->right_id == NULL || copy->scope == NULL) {
+  if (copy->subject_id == NULL || copy->right_id == NULL ||
+      copy->scope == NULL) {
     wyl_policy_permission_closure_removal_free (copy);
     return NULL;
   }
@@ -86,8 +87,8 @@ wyl_service_permission_manifest_clear (WylServicePermissionManifest *manifest)
 }
 
 wyrelog_error_t
-    wyl_service_permission_manifest_from_analysis
-    (const WylPolicyPermissionClosureAnalysis * analysis,
+wyl_service_permission_manifest_from_analysis
+  (const WylPolicyPermissionClosureAnalysis * analysis,
     const gchar * request_id, WylServicePermissionManifest * out_manifest)
 {
   if (analysis == NULL || analysis->removals == NULL
@@ -102,7 +103,7 @@ wyrelog_error_t
   out_manifest->store_generation = analysis->generation;
   memcpy (out_manifest->store_digest, analysis->digest, 32);
   out_manifest->operations = g_ptr_array_new_with_free_func
-      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
   for (guint i = 0; i < analysis->removals->len; i++) {
     WylPolicyPermissionClosureRemoval *copy =
         removal_copy (g_ptr_array_index (analysis->removals, i));
@@ -175,8 +176,8 @@ manifest_shape_valid (const WylServicePermissionManifest *manifest)
 }
 
 wyrelog_error_t
-    wyl_service_permission_manifest_encode
-    (const WylServicePermissionManifest * manifest, gchar ** out_document,
+wyl_service_permission_manifest_encode
+  (const WylServicePermissionManifest * manifest, gchar ** out_document,
     gsize * out_len)
 {
   if (out_document == NULL || out_len == NULL)
@@ -309,8 +310,8 @@ parse_u64 (Cursor *cursor, guint64 *out)
 }
 
 wyrelog_error_t
-    wyl_service_permission_manifest_decode
-    (const gchar * document, gsize len,
+wyl_service_permission_manifest_decode
+  (const gchar * document, gsize len,
     WylServicePermissionManifest * out_manifest)
 {
   if (document == NULL || len == 0
@@ -344,7 +345,7 @@ wyrelog_error_t
     goto invalid;
   out_manifest->version = 1;
   out_manifest->operations = g_ptr_array_new_with_free_func
-      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
   do {
     if (out_manifest->operations->len >=
         WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_OPERATIONS
@@ -366,8 +367,8 @@ wyrelog_error_t
     }
     if (!parse_json_string (&cursor, &operation->subject_id)
         || !take (&cursor, operation->action ==
-            WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
-            ",\"permission_id\":" : ",\"role_id\":")
+        WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
+        ",\"permission_id\":" : ",\"role_id\":")
         || !parse_json_string (&cursor, &operation->right_id)
         || !take (&cursor, ",\"scope\":")
         || !parse_json_string (&cursor, &operation->scope)
@@ -384,7 +385,7 @@ wyrelog_error_t
       || !manifest_shape_valid (out_manifest))
     goto invalid;
   if (wyl_service_permission_manifest_encode (out_manifest, &canonical,
-          &canonical_len) != WYRELOG_E_OK || canonical_len != len
+      &canonical_len) != WYRELOG_E_OK || canonical_len != len
       || memcmp (canonical, document, len) != 0)
     goto invalid;
   return WYRELOG_E_OK;
@@ -395,8 +396,8 @@ invalid:
 }
 
 wyrelog_error_t
-    wyl_service_permission_manifest_matches_analysis
-    (const WylServicePermissionManifest * manifest,
+wyl_service_permission_manifest_matches_analysis
+  (const WylServicePermissionManifest * manifest,
     const WylPolicyPermissionClosureAnalysis * analysis)
 {
   if (!manifest_shape_valid (manifest) || analysis == NULL
@@ -443,15 +444,15 @@ write_new_owner_only_document (const gchar *path, const gchar *document,
     goto win_io;
   user = g_malloc (needed);
   if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
-          &needed) || !ConvertSidToStringSidW (user->User.Sid, &sid_text))
+      &needed) || !ConvertSidToStringSidW (user->User.Sid, &sid_text))
     goto win_io;
   gsize sid_len = wcslen (sid_text);
   sddl = g_new (wchar_t, 32 + sid_len * 2);
   if (sddl == NULL
       || swprintf (sddl, 32 + sid_len * 2, L"O:%lsD:P(A;;FA;;;%ls)",
-          sid_text, sid_text) < 0
+      sid_text, sid_text) < 0
       || !ConvertStringSecurityDescriptorToSecurityDescriptorW (sddl,
-          SDDL_REVISION_1, &descriptor, NULL))
+      SDDL_REVISION_1, &descriptor, NULL))
     goto win_io;
   SECURITY_ATTRIBUTES attrs = {
     sizeof attrs, descriptor, FALSE
@@ -460,7 +461,7 @@ write_new_owner_only_document (const gchar *path, const gchar *document,
   if (wide_path == NULL)
     goto win_invalid;
   file = CreateFileW (wide_path, GENERIC_WRITE, 0, &attrs, CREATE_NEW,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   if (file == INVALID_HANDLE_VALUE) {
     rc = GetLastError () == ERROR_FILE_EXISTS
         || GetLastError () == ERROR_ALREADY_EXISTS ?
@@ -470,7 +471,7 @@ write_new_owner_only_document (const gchar *path, const gchar *document,
   BY_HANDLE_FILE_INFORMATION info;
   if (!GetFileInformationByHandle (file, &info)
       || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
-              | FILE_ATTRIBUTE_DIRECTORY)) || info.nNumberOfLinks != 1) {
+      | FILE_ATTRIBUTE_DIRECTORY)) || info.nNumberOfLinks != 1) {
     rc = WYRELOG_E_POLICY;
     goto win_cleanup;
   }
@@ -535,12 +536,12 @@ win_out:
     return WYRELOG_E_POLICY;
   }
   int fd = openat (dirfd, basename,
-      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (fd < 0) {
     int open_errno = errno;
     close (dirfd);
     return open_errno == EEXIST || open_errno == ELOOP ?
-        WYRELOG_E_POLICY : WYRELOG_E_IO;
+           WYRELOG_E_POLICY : WYRELOG_E_IO;
   }
   struct stat file_stat;
   if (fstat (fd, &file_stat) != 0 || !S_ISREG (file_stat.st_mode)
@@ -571,15 +572,15 @@ win_out:
 }
 
 wyrelog_error_t
-    wyl_service_permission_manifest_write_new_owner_only
-    (const gchar * path, const WylServicePermissionManifest * manifest)
+wyl_service_permission_manifest_write_new_owner_only
+  (const gchar * path, const WylServicePermissionManifest * manifest)
 {
   g_autofree gchar *document = NULL;
   gsize len = 0;
   wyrelog_error_t rc =
       wyl_service_permission_manifest_encode (manifest, &document, &len);
   return rc == WYRELOG_E_OK ?
-      write_new_owner_only_document (path, document, len) : rc;
+         write_new_owner_only_document (path, document, len) : rc;
 }
 
 wyrelog_error_t
@@ -603,8 +604,8 @@ wyl_service_permission_manifest_read_owner_only (const gchar *path,
   }
   HANDLE file =
       CreateFileW (wide_path, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ,
-      NULL, OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+          NULL, OPEN_EXISTING,
+          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   if (file == INVALID_HANDLE_VALUE) {
     rc = GetLastError () == ERROR_FILE_NOT_FOUND ? WYRELOG_E_NOT_FOUND :
         WYRELOG_E_IO;
@@ -619,11 +620,11 @@ wyl_service_permission_manifest_read_owner_only (const gchar *path,
   TOKEN_USER *user = NULL;
   if (!GetFileInformationByHandle (file, &info)
       || (info.dwFileAttributes &
-          (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+      (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
       || info.nNumberOfLinks != 1
       || GetSecurityInfo (file, SE_FILE_OBJECT,
-          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-          &owner, NULL, &dacl, NULL, &descriptor) != ERROR_SUCCESS
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+      &owner, NULL, &dacl, NULL, &descriptor) != ERROR_SUCCESS
       || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token)) {
     rc = WYRELOG_E_POLICY;
     goto win_out;
@@ -644,7 +645,7 @@ wyl_service_permission_manifest_read_owner_only (const gchar *path,
       || !GetSecurityDescriptorControl (descriptor, &control, &revision)
       || (control & SE_DACL_PROTECTED) == 0 || dacl == NULL
       || !GetAclInformation (dacl, &acl_info, sizeof acl_info,
-          AclSizeInformation) || acl_info.AceCount != 1
+      AclSizeInformation) || acl_info.AceCount != 1
       || !GetAce (dacl, 0, &ace)
       || ((ACE_HEADER *) ace)->AceType != ACCESS_ALLOWED_ACE_TYPE
       || !EqualSid (&((ACCESS_ALLOWED_ACE *) ace)->SidStart, owner)) {
@@ -654,7 +655,7 @@ wyl_service_permission_manifest_read_owner_only (const gchar *path,
   while (len <= WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES) {
     DWORD got = 0;
     DWORD capacity = (DWORD) MIN ((gsize) 0x10000,
-        WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1 - len);
+            WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1 - len);
     if (!ReadFile (file, document + len, capacity, &got, NULL)) {
       rc = WYRELOG_E_IO;
       goto win_out;
@@ -710,7 +711,7 @@ win_out:
   }
   while (len <= WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES) {
     ssize_t got = read (fd, document + len,
-        WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1 - len);
+            WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1 - len);
     if (got < 0 && errno == EINTR)
       continue;
     if (got < 0) {
@@ -735,8 +736,8 @@ out:
 }
 
 wyrelog_error_t
-    wyl_service_permission_receipt_encode
-    (const wyl_policy_service_permission_receipt_t * receipt,
+wyl_service_permission_receipt_encode
+  (const wyl_policy_service_permission_receipt_t * receipt,
     gchar ** out_document, gsize * out_len)
 {
   if (out_document == NULL || out_len == NULL)
@@ -774,8 +775,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_permission_receipt_write_new_owner_only
-    (const gchar * path,
+wyl_service_permission_receipt_write_new_owner_only
+  (const gchar * path,
     const wyl_policy_service_permission_receipt_t * receipt)
 {
   g_autofree gchar *document = NULL;
@@ -783,12 +784,12 @@ wyrelog_error_t
   wyrelog_error_t rc =
       wyl_service_permission_receipt_encode (receipt, &document, &len);
   return rc == WYRELOG_E_OK ?
-      write_new_owner_only_document (path, document, len) : rc;
+         write_new_owner_only_document (path, document, len) : rc;
 }
 
 /* Audit action recorded for a durable #618 remediation apply. */
 #define WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION \
-  "service.permission_closure.remediate"
+        "service.permission_closure.remediate"
 
 static void
 digest_to_hex (const guint8 digest[32], gchar out_hex[65])
@@ -812,7 +813,7 @@ manifest_fingerprint_hex (const WylServicePermissionManifest *manifest,
     return rc;
   guint8 digest[32];
   if (crypto_generichash (digest, sizeof digest, (const guint8 *) document,
-          len, NULL, 0) != 0)
+      len, NULL, 0) != 0)
     rc = WYRELOG_E_CRYPTO;
   else
     digest_to_hex (digest, out_hex);
@@ -839,7 +840,7 @@ maintenance_actor_identity (gchar **out_actor)
   }
   user = g_malloc (needed);
   if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
-          &needed)) {
+      &needed)) {
     g_free (user);
     CloseHandle (token);
     return WYRELOG_E_IO;
@@ -847,7 +848,7 @@ maintenance_actor_identity (gchar **out_actor)
   DWORD sid_len = GetLengthSid (user->User.Sid);
   guint8 digest[32];
   gboolean ok = sid_len > 0 && crypto_generichash (digest, sizeof digest,
-      user->User.Sid, sid_len, NULL, 0) == 0;
+          user->User.Sid, sid_len, NULL, 0) == 0;
   g_free (user);
   CloseHandle (token);
   if (!ok)
@@ -858,7 +859,7 @@ maintenance_actor_identity (gchar **out_actor)
   *out_actor = g_strdup_printf ("windows-sid-sha256:%s", hex);
 #else
   *out_actor = g_strdup_printf ("posix-uid:%" G_GUINT64_FORMAT,
-      (guint64) geteuid ());
+          (guint64) geteuid ());
 #endif
   return *out_actor == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
 }
@@ -884,10 +885,10 @@ verify_manifest_pre_state (wyl_policy_store_t *store,
   guint8 digest[32] = { 0 };
   wyrelog_error_t rc =
       wyl_policy_store_service_permission_authority_snapshot (store,
-      &generation, digest);
+          &generation, digest);
   if (rc == WYRELOG_E_OK
       && (generation != manifest->store_generation
-          || memcmp (digest, manifest->store_digest, 32) != 0))
+      || memcmp (digest, manifest->store_digest, 32) != 0))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
     *out_generation = generation;
@@ -910,9 +911,9 @@ apply_manifest_removals (wyl_policy_store_t *store,
         g_ptr_array_index (manifest->operations, i);
     rc = op->action == WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
         wyl_policy_store_revoke_direct_permission (store, op->subject_id,
-        op->right_id, op->scope) :
+            op->right_id, op->scope) :
         wyl_policy_store_revoke_role_membership (store, op->subject_id,
-        op->right_id, op->scope);
+            op->right_id, op->scope);
   }
   return rc;
 }
@@ -939,21 +940,21 @@ wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
   guint8 pre_digest[32] = { 0 };
 
   rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
   if (rc == WYRELOG_E_OK) {
     rc = wyl_service_auth_write_lease_claim_maintenance (lease, handle);
     maintenance_claimed = rc == WYRELOG_E_OK;
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_transaction_begin (store, handle,
-        lease, &transaction);
+            lease, &transaction);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_transaction_enter_participant
-        (transaction, store);
+          (transaction, store);
   /* Reject a stale manifest before touching any row. */
   if (rc == WYRELOG_E_OK)
     rc = verify_manifest_pre_state (store, manifest, &pre_generation,
-        pre_digest);
+            pre_digest);
   if (rc == WYRELOG_E_OK)
     rc = apply_manifest_removals (store, manifest);
   /* A valid manifest fully cleans the closure; re-analyze to assert it. */
@@ -962,9 +963,9 @@ wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
     rc = wyl_policy_store_analyze_service_permission_closure (store, &post);
     if (rc == WYRELOG_E_OK
         && (post.removals == NULL || post.removals->len != 0
-            || post.unsafe_permission_count != 0
-            || post.dangling_subject_count != 0
-            || post.dangling_role_count != 0))
+        || post.unsafe_permission_count != 0
+        || post.dangling_subject_count != 0
+        || post.dangling_role_count != 0))
       rc = WYRELOG_E_POLICY;
     wyl_policy_permission_closure_analysis_clear (&post);
   }
@@ -1030,21 +1031,22 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
     rc = maintenance_actor_identity (&actor);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_authority_acquire_write
-        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+            &lease);
   if (rc == WYRELOG_E_OK) {
     rc = wyl_service_auth_write_lease_claim_maintenance (lease, handle);
     maintenance_claimed = rc == WYRELOG_E_OK;
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_transaction_begin (store, handle,
-        lease, &transaction);
+            lease, &transaction);
 
   /* Idempotency first: a receipt already frozen under this request id replays
    * verbatim when the manifest fingerprint matches (apply nothing), and is a
    * hard conflict when the same request id carries a different manifest. */
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_permission_receipt_lookup (store,
-        manifest->request_id, &found, out_receipt);
+            manifest->request_id, &found, out_receipt);
   if (rc == WYRELOG_E_OK && found) {
     if (g_strcmp0 (out_receipt->manifest_fingerprint, fingerprint) == 0)
       replay = TRUE;
@@ -1057,27 +1059,27 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
    * commit re-runs the #614 validator at the choke point. */
   if (rc == WYRELOG_E_OK && !replay)
     rc = verify_manifest_pre_state (store, manifest, &pre_generation,
-        pre_digest);
+            pre_digest);
   if (rc == WYRELOG_E_OK && !replay)
     rc = wyl_policy_store_service_authority_prepare_commit_evidence
-        (transaction, store, &evidence);
+          (transaction, store, &evidence);
   if (rc == WYRELOG_E_OK && !replay)
     rc = wyl_policy_store_service_authority_transaction_acquire_write_intent
-        (transaction, store, NULL, &intent);
+          (transaction, store, NULL, &intent);
   if (rc == WYRELOG_E_OK && !replay)
     rc = apply_manifest_removals (store, manifest);
   if (rc == WYRELOG_E_OK && !replay)
     rc = wyl_policy_store_service_permission_authority_snapshot (store,
-        &post_generation, post_digest);
+            &post_generation, post_digest);
   gint64 applied_at = g_get_real_time ();
   if (rc == WYRELOG_E_OK && !replay)
     rc = new_audit_id (receipt_audit_id);
   gboolean audit_inserted = FALSE;
   if (rc == WYRELOG_E_OK && !replay)
     rc = wyl_policy_store_append_audit_event_full (store, receipt_audit_id,
-        applied_at, actor, WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION,
-        manifest->request_id, fingerprint, NULL, manifest->request_id,
-        WYL_DECISION_ALLOW, &audit_inserted);
+            applied_at, actor, WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION,
+            manifest->request_id, fingerprint, NULL, manifest->request_id,
+            WYL_DECISION_ALLOW, &audit_inserted);
   if (rc == WYRELOG_E_OK && !replay && !audit_inserted)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && !replay) {
@@ -1103,16 +1105,16 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   }
   if (rc == WYRELOG_E_OK && !replay)
     rc = wyl_policy_store_service_permission_receipt_insert (store,
-        out_receipt);
+            out_receipt);
 
   /* Commit runs the #614 closure re-validation at the choke point: a manifest
-   * that fails to fully clean the closure fails here and the whole transaction
-   * rolls back with no receipt. A replay or any earlier failure rolls back. */
+  * that fails to fully clean the closure fails here and the whole transaction
+  * rolls back with no receipt. A replay or any earlier failure rolls back. */
   if (rc == WYRELOG_E_OK && !replay)
     rc = wyl_policy_store_service_authority_transaction_commit (transaction);
   else if (transaction != NULL)
     (void) wyl_policy_store_service_authority_transaction_rollback
-        (transaction);
+      (transaction);
 
   if (evidence != NULL)
     wyl_policy_store_service_authority_commit_evidence_unref (evidence);

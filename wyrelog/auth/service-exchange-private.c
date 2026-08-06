@@ -41,9 +41,9 @@ service_exchange_authority_dispose (WylServiceExchangeAuthority *authority)
   wyl_policy_service_credential_info_clear (&authority->credential);
   if (authority->transaction != NULL) {
     (void) wyl_policy_store_service_authority_transaction_rollback
-        (authority->transaction);
+      (authority->transaction);
     wyl_policy_store_service_authority_transaction_free
-        (authority->transaction);
+      (authority->transaction);
     authority->transaction = NULL;
   }
   if (authority->lease != NULL) {
@@ -62,9 +62,9 @@ credential_is_active_now (const wyl_policy_service_credential_info_t *info,
     gint64 now_us)
 {
   return info != NULL && info->credential_id != NULL && info->subject_id != NULL
-      && info->tenant_id != NULL && info->generation > 0
-      && g_strcmp0 (info->state, "active") == 0
-      && (info->expires_at_us == 0 || info->expires_at_us > now_us);
+         && info->tenant_id != NULL && info->generation > 0
+         && g_strcmp0 (info->state, "active") == 0
+         && (info->expires_at_us == 0 || info->expires_at_us > now_us);
 }
 
 void
@@ -127,28 +127,28 @@ publication_ticket_validate (WylServiceExchangePublicationTicket *ticket)
       != WYRELOG_E_OK
       || g_strcmp0 (session_id, ticket->reservation.session_id) != 0
       || g_strcmp0 (ticket->session->service_jti,
-          ticket->reservation.jti) != 0
+      ticket->reservation.jti) != 0
       || g_strcmp0 (ticket->session->service_credential_id,
-          ticket->reservation.credential_id) != 0
+      ticket->reservation.credential_id) != 0
       || ticket->session->service_credential_generation
       != ticket->reservation.generation
       || g_strcmp0 (ticket->session->service_subject_id,
-          ticket->reservation.principal) != 0
+      ticket->reservation.principal) != 0
       || g_strcmp0 (ticket->session->tenant, ticket->reservation.tenant) != 0
       || ticket->session->service_issued_at_seconds != ticket->issued_at
       || ticket->session->service_expires_at_seconds != ticket->expires_at)
     return WYRELOG_E_POLICY;
   guint64 serial = 0;
   wyrelog_error_t rc = wyl_service_auth_write_lease_get_serial (ticket->lease,
-      ticket->handle, &serial);
+          ticket->handle, &serial);
   if (rc == WYRELOG_E_OK && serial != ticket->lease_serial)
     rc = WYRELOG_E_INVALID;
   return rc;
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_new_take
-    (WylServiceExchangeAuthority * authority,
+wyl_service_exchange_publication_ticket_new_take
+  (WylServiceExchangeAuthority * authority,
     WylServiceAuthRegistry * registry, gpointer publication_context,
     const gchar * key_id, WylServiceExchangePrepared * prepared,
     WylServiceExchangePublicationTicket ** out_ticket)
@@ -204,10 +204,10 @@ wyrelog_error_t
     return WYRELOG_E_INVALID;
   }
   wyrelog_error_t rc = wyl_service_auth_write_lease_get_serial
-      (authority->lease, authority->handle, &ticket->lease_serial);
+        (authority->lease, authority->handle, &ticket->lease_serial);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_registry_session_participant_new_for_write
-        (registry, authority->handle, authority->lease, &ticket->participant);
+          (registry, authority->handle, authority->lease, &ticket->participant);
   if (rc != WYRELOG_E_OK) {
     publication_ticket_clear_owned (ticket);
     g_free (ticket);
@@ -223,8 +223,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_view
-    (WylServiceExchangePublicationTicket * ticket, WylHandle * handle,
+wyl_service_exchange_publication_ticket_view
+  (WylServiceExchangePublicationTicket * ticket, WylHandle * handle,
     WylServiceAuthRegistry * registry, gpointer publication_context,
     WylServiceExchangePublicationView * out_view) {
   if (out_view != NULL)
@@ -237,35 +237,36 @@ wyrelog_error_t
   if (rc != WYRELOG_E_OK)
     return rc;
   *out_view = (WylServiceExchangePublicationView) {
-  .session_id = ticket->reservation.session_id,.jti =
+    .session_id = ticket->reservation.session_id,.jti =
         ticket->reservation.jti,.credential_id =
         ticket->reservation.credential_id,.generation =
         ticket->reservation.generation,.principal =
         ticket->reservation.principal,.tenant =
         ticket->reservation.tenant,.key_id = ticket->key_id,.issued_at =
         ticket->issued_at,.expires_at = ticket->expires_at,.session =
-        ticket->session,.access_token = ticket->access_token,};
+        ticket->session,.access_token = ticket->access_token,
+  };
   return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_reserve
-    (WylServiceExchangePublicationTicket * ticket) {
+wyl_service_exchange_publication_ticket_reserve
+  (WylServiceExchangePublicationTicket * ticket) {
   wyrelog_error_t rc = publication_ticket_validate (ticket);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (ticket->state != WYL_SERVICE_EXCHANGE_TICKET_NEW)
     return WYRELOG_E_POLICY;
   rc = wyl_service_auth_registry_session_participant_reserve
-      (ticket->participant, &ticket->reservation);
+        (ticket->participant, &ticket->reservation);
   if (rc == WYRELOG_E_OK)
     ticket->state = WYL_SERVICE_EXCHANGE_TICKET_PENDING;
   return rc;
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_mark_live
-    (WylServiceExchangePublicationTicket * ticket) {
+wyl_service_exchange_publication_ticket_mark_live
+  (WylServiceExchangePublicationTicket * ticket) {
   wyrelog_error_t rc = publication_ticket_validate (ticket);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -276,8 +277,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_activate
-    (WylServiceExchangePublicationTicket * ticket) {
+wyl_service_exchange_publication_ticket_activate
+  (WylServiceExchangePublicationTicket * ticket) {
   wyrelog_error_t rc = publication_ticket_validate (ticket);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -285,7 +286,7 @@ wyrelog_error_t
     return WYRELOG_E_POLICY;
   gboolean changed = FALSE;
   rc = wyl_service_auth_registry_session_participant_activate
-      (ticket->participant, &ticket->reservation, &changed);
+        (ticket->participant, &ticket->reservation, &changed);
   if (rc == WYRELOG_E_OK && !changed)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
@@ -294,8 +295,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_release_terminal
-    (WylServiceExchangePublicationTicket * ticket) {
+wyl_service_exchange_publication_ticket_release_terminal
+  (WylServiceExchangePublicationTicket * ticket) {
   if (ticket == NULL || ticket->state != WYL_SERVICE_EXCHANGE_TICKET_ACTIVE)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc =
@@ -306,8 +307,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_abort_fail_stop
-    (WylServiceExchangePublicationTicket * ticket,
+wyl_service_exchange_publication_ticket_abort_fail_stop
+  (WylServiceExchangePublicationTicket * ticket,
     WylServiceAuthUnavailableReason reason) {
   if (ticket == NULL || ticket->lease == NULL
       || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ACTIVE
@@ -322,7 +323,7 @@ wyrelog_error_t
     gboolean removed = FALSE;
     wyrelog_error_t remove_rc =
         wyl_service_auth_registry_session_participant_remove_exact
-        (ticket->participant, &ticket->reservation, &removed);
+          (ticket->participant, &ticket->reservation, &removed);
     if (remove_rc != WYRELOG_E_OK || !removed) {
       if (rc == WYRELOG_E_OK)
         rc = remove_rc != WYRELOG_E_OK ? remove_rc : WYRELOG_E_POLICY;
@@ -332,7 +333,7 @@ wyrelog_error_t
   }
   if (reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
     wyrelog_error_t latch_rc = wyl_service_auth_write_lease_mark_unavailable
-        (ticket->lease, ticket->handle, reason);
+          (ticket->lease, ticket->handle, reason);
     if (rc == WYRELOG_E_OK)
       rc = latch_rc;
   }
@@ -346,36 +347,36 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_abort
-    (WylServiceExchangePublicationTicket * ticket) {
+wyl_service_exchange_publication_ticket_abort
+  (WylServiceExchangePublicationTicket * ticket) {
   return wyl_service_exchange_publication_ticket_abort_fail_stop (ticket,
-      WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+             WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
 }
 
 WylServiceExchangeTicketState
-    wyl_service_exchange_publication_ticket_get_state
-    (const WylServiceExchangePublicationTicket * ticket)
+wyl_service_exchange_publication_ticket_get_state
+  (const WylServiceExchangePublicationTicket * ticket)
 {
   return ticket != NULL ? ticket->state : WYL_SERVICE_EXCHANGE_TICKET_ABORTED;
 }
 
 void wyl_service_exchange_publication_ticket_test_corrupt_lease_serial
-    (WylServiceExchangePublicationTicket * ticket)
+  (WylServiceExchangePublicationTicket * ticket)
 {
   if (ticket != NULL)
     wyl_service_auth_write_lease_test_corrupt_serial (ticket->lease);
 }
 
 void wyl_service_exchange_publication_ticket_test_fail_terminal_release
-    (WylServiceExchangePublicationTicket * ticket)
+  (WylServiceExchangePublicationTicket * ticket)
 {
   if (ticket != NULL)
     wyl_service_auth_write_lease_test_fail_terminal_prevalidation
-        (ticket->lease);
+      (ticket->lease);
 }
 
 void wyl_service_exchange_publication_ticket_free
-    (WylServiceExchangePublicationTicket * ticket)
+  (WylServiceExchangePublicationTicket * ticket)
 {
   if (ticket == NULL)
     return;
@@ -408,18 +409,18 @@ exchange_authenticate_credential (WylServiceAuthorityTransaction *txn,
 
   wyrelog_error_t rc =
       wyl_policy_store_service_authority_transaction_enter_participant (txn,
-      store);
+          store);
   if (rc != WYRELOG_E_OK)
     return rc;
   wyl_policy_service_credential_info_t credential = { 0 };
   rc = wyl_policy_store_lookup_service_credential_by_id (store,
-      credential_id, &credential);
+          credential_id, &credential);
   if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_AUTH;
   if (rc == WYRELOG_E_OK) {
     wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
     rc = wyl_policy_store_get_principal_kind (store, credential.subject_id,
-        &kind);
+            &kind);
     if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID)
       rc = WYRELOG_E_AUTH;
     if (rc == WYRELOG_E_OK && kind != WYL_POLICY_PRINCIPAL_KIND_SERVICE)
@@ -428,12 +429,12 @@ exchange_authenticate_credential (WylServiceAuthorityTransaction *txn,
   if (rc == WYRELOG_E_OK) {
     wyl_policy_service_principal_info_t principal = { 0 };
     rc = wyl_policy_store_lookup_service_principal (store,
-        credential.subject_id, &principal);
+            credential.subject_id, &principal);
     if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID)
       rc = WYRELOG_E_AUTH;
     if (rc == WYRELOG_E_OK
         && (principal.state == NULL
-            || !g_str_equal (principal.state, "active")))
+        || !g_str_equal (principal.state, "active")))
       rc = WYRELOG_E_AUTH;
     wyl_policy_service_principal_info_clear (&principal);
   }
@@ -441,7 +442,7 @@ exchange_authenticate_credential (WylServiceAuthorityTransaction *txn,
   gboolean tenant_active = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_tenant_is_active (store, credential.tenant_id,
-        &tenant_active);
+            &tenant_active);
   if (rc == WYRELOG_E_NOT_FOUND || rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_AUTH;
   if (rc == WYRELOG_E_OK && !tenant_active)
@@ -453,14 +454,16 @@ exchange_authenticate_credential (WylServiceAuthorityTransaction *txn,
       rc = WYRELOG_E_AUTH;
     else
       rc = wyl_service_credential_verify
-          (credential.credential_format_version,
-          credential.verifier_version, cvk, cvk_len, credential.credential_id,
-          strlen (credential.credential_id), credential.tenant_id,
-          strlen (credential.tenant_id), credential.subject_id,
-          strlen (credential.subject_id), credential.salt,
-          sizeof credential.salt, credential.verifier,
-          sizeof credential.verifier, presented_secret, presented_secret_len,
-          &secret_match);
+            (credential.credential_format_version,
+              credential.verifier_version, cvk, cvk_len,
+              credential.credential_id,
+              strlen (credential.credential_id), credential.tenant_id,
+              strlen (credential.tenant_id), credential.subject_id,
+              strlen (credential.subject_id), credential.salt,
+              sizeof credential.salt, credential.verifier,
+              sizeof credential.verifier, presented_secret,
+              presented_secret_len,
+              &secret_match);
     if (rc == WYRELOG_E_INVALID)
       rc = WYRELOG_E_AUTH;
   }
@@ -491,21 +494,22 @@ wyl_service_exchange_authority_begin (WylHandle *handle,
   WylServiceExchangeAuthority authority = { 0 };
   authority.handle = handle;
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-      &authority.lease);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &authority.lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_write_lease_get_policy_store (authority.lease,
-        handle, &authority.store);
+            handle, &authority.store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_materialize_service_cvk_existing (authority.store,
-        &authority.cvk, &authority.cvk_len);
+            &authority.cvk, &authority.cvk_len);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_transaction_begin
-        (authority.store, handle, authority.lease, &authority.transaction);
+          (authority.store, handle, authority.lease, &authority.transaction);
   if (rc == WYRELOG_E_OK)
     rc = exchange_authenticate_credential (authority.transaction,
-        authority.store, authority.cvk, authority.cvk_len, credential_id,
-        presented_secret, presented_secret_len, now_us, &authority.credential);
+            authority.store, authority.cvk, authority.cvk_len, credential_id,
+            presented_secret, presented_secret_len, now_us,
+            &authority.credential);
 
   if (rc == WYRELOG_E_OK) {
     authority.denial = WYL_SERVICE_EXCHANGE_DENIAL_NONE;
@@ -535,9 +539,9 @@ wyl_service_exchange_authority_rollback (WylServiceExchangeAuthority *authority)
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (authority->transaction != NULL) {
     rc = wyl_policy_store_service_authority_transaction_rollback
-        (authority->transaction);
+          (authority->transaction);
     wyl_policy_store_service_authority_transaction_free
-        (authority->transaction);
+      (authority->transaction);
     authority->transaction = NULL;
   }
   if (authority->lease != NULL) {
@@ -617,7 +621,7 @@ exchange_sign_service_token (const gchar *key_id, const WylSession *session,
 
   GString *payload = g_string_new ("{\"jti\":");
 #define APPEND_STRING_CLAIM(name, value) G_STMT_START { \
-  g_string_append (payload, name); append_json_string (payload, value); \
+          g_string_append (payload, name); append_json_string (payload, value); \
 } G_STMT_END
   append_json_string (payload, session->service_jti);
   APPEND_STRING_CLAIM (",\"sub\":", session->service_subject_id);
@@ -640,16 +644,16 @@ exchange_sign_service_token (const gchar *key_id, const WylSession *session,
   g_autofree gchar *header_segment = NULL;
   g_autofree gchar *payload_segment = NULL;
   rc = wyl_jwt_base64url_encode ((const guint8 *) header, strlen (header),
-      &header_segment);
+          &header_segment);
   if (rc == WYRELOG_E_OK)
     rc = wyl_jwt_base64url_encode ((const guint8 *) payload->str,
-        payload->len, &payload_segment);
+            payload->len, &payload_segment);
   g_string_free (payload, TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
-      header_segment, payload_segment);
+          header_segment, payload_segment);
   if (sodium_init () < 0)
     return WYRELOG_E_INTERNAL;
 
@@ -662,7 +666,7 @@ exchange_sign_service_token (const gchar *key_id, const WylSession *session,
 
   g_autofree gchar *signature_segment = NULL;
   rc = wyl_jwt_base64url_encode (signature, sizeof signature,
-      &signature_segment);
+          &signature_segment);
   if (rc == WYRELOG_E_OK)
     *out_token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
   return rc;
@@ -681,7 +685,7 @@ exchange_build_prepared (const WylServiceExchangeAuthority *authority,
       || session_text == NULL || jti_text == NULL || key_id == NULL
       || issuer == NULL || audience == NULL || issued_at_seconds < 0
       || out_prepared == NULL || !credential_secret_is_sane (token_secret,
-          token_secret_len))
+      token_secret_len))
     return WYRELOG_E_INVALID;
   if (authority->credential.credential_id == NULL
       || authority->credential.subject_id == NULL
@@ -717,14 +721,16 @@ exchange_build_prepared (const WylServiceExchangeAuthority *authority,
 
   gchar *token = NULL;
   wyrelog_error_t rc = exchange_sign_service_token (key_id, session,
-      session_text, issuer, audience, token_secret, token_secret_len, &token);
+          session_text, issuer, audience, token_secret, token_secret_len,
+          &token);
   if (rc != WYRELOG_E_OK) {
     g_clear_object (&session);
     return rc;
   }
 
   *out_prepared = (WylServiceExchangePrepared) {
-  .session = session,.access_token = token,};
+    .session = session,.access_token = token,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -762,6 +768,7 @@ wyl_service_exchange_authority_prepare_token (WylServiceExchangeAuthority
   if (wyl_id_format (&jti, jti_text, sizeof jti_text) != WYRELOG_E_OK)
     return WYRELOG_E_INTERNAL;
   return exchange_build_prepared (authority, session_text, jti_text, key_id,
-      issuer, audience, issued_at_seconds, token_secret, token_secret_len,
-      out_prepared);
+             issuer, audience, issued_at_seconds, token_secret,
+             token_secret_len,
+             out_prepared);
 }
