@@ -2387,6 +2387,56 @@ wyrelog_error_t wyl_policy_store_apply_principal_transition
     wyl_principal_event_t event, gint64 lock_threshold, gint64 now_secs,
     wyl_principal_state_t * out_from, wyl_principal_state_t * out_to,
     gboolean * out_transitioned, gint64 * out_event_id);
+/* Ratified single-active login precedence outcome (issue #752).  Reported by
+ * wyl_policy_store_apply_principal_login so the session layer can act on the
+ * durable observed precedence without re-reading the row. */
+typedef enum
+{
+  /* Fresh login from unverified: one authenticating transition (login_ok ->
+   * mfa_required, or login_skip_mfa -> authenticated).  One event. */
+  WYL_PRINCIPAL_LOGIN_STARTED = 0,
+  /* Time-based auto-unlock folded into the login: locked --unlock-->
+   * unverified --login_ok/login_skip_mfa--> next, atomically.  Two events. */
+  WYL_PRINCIPAL_LOGIN_UNLOCKED_STARTED,
+  /* Observed mfa_required: an in-flight ceremony already exists, so this
+   * login attaches to it with no durable write.  Zero events. */
+  WYL_PRINCIPAL_LOGIN_ATTACHED_MFA_PENDING,
+  /* Observed authenticated (single-active): idempotent success, no durable
+   * write; the new session is non-authoritative.  Zero events. */
+  WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED,
+  /* Observed locked and the auto-unlock window has not elapsed: typed reject.
+   * Zero events. */
+  WYL_PRINCIPAL_LOGIN_LOCKED,
+  /* Observed revoked (terminal): typed reject.  Zero events. */
+  WYL_PRINCIPAL_LOGIN_REVOKED,
+} wyl_principal_login_outcome_t;
+/* Subject-global login precedence + folded auto-unlock CAS (issue #752).  In
+ * one savepoint it observes the durable (state, failed_attempt_count,
+ * locked_at) - a missing row is UNVERIFIED - and resolves the ratified
+ * single-active precedence:
+ *   unverified   -> STARTED (login_ok/login_skip_mfa per |skip_mfa|), 1 event
+ *   mfa_required -> ATTACHED_MFA_PENDING, 0 events
+ *   authenticated-> ALREADY_AUTHENTICATED, 0 events
+ *   locked       -> if locked_at + |auto_unlock_seconds| <= |now_secs|,
+ *                   UNLOCKED_STARTED (unlock then login, 2 events); else LOCKED
+ *   revoked      -> REVOKED, 0 events
+ * Each transition reuses wyl_policy_store_apply_principal_transition, so the
+ * CAS phantom-guard, the #753 lock invariant, and exact one-event-per-edge
+ * appends all hold; the folded unlock is atomic (both events or neither).  A
+ * login CAS that races away from unverified re-observes the winner's state
+ * and reports the corresponding attach/idempotent/reject outcome with zero
+ * events (the loser appends nothing).  |out_event_ids| (caller-provided
+ * length-2) receives the appended rowids in order and |out_event_count| their
+ * number (0, 1, or 2).  |out_from| is the originally observed state; |out_to|
+ * the final durable state.  All out-params are NULL-guarded.  Illegal/
+ * idempotent/reject is WYRELOG_E_OK with the outcome; only a real store fault
+ * fails closed. */
+wyrelog_error_t wyl_policy_store_apply_principal_login
+  (wyl_policy_store_t * store, const gchar * subject_id, gboolean skip_mfa,
+    gint64 auto_unlock_seconds, gint64 now_secs,
+    wyl_principal_login_outcome_t * out_outcome,
+    wyl_principal_state_t * out_from, wyl_principal_state_t * out_to,
+    gint64 out_event_ids[2], gint * out_event_count);
 /* Derived subject-global authentication epoch (issue #752): the greatest
  * principal_events.event_id whose to_state='authenticated'.  This is the
  * monotonic supersession watermark - a token minted against an older epoch
