@@ -557,25 +557,25 @@ test_publication_ticket_fail_stop_terminal_consumes_once (void)
       "exchange-failstop", g_get_real_time () + 60 * G_USEC_PER_SEC, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   WylServiceExchangeAuthority authority = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-          issued.credential.credential_id, secret, secret_len,
-          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+      issued.credential.credential_id, secret, secret_len,
+      g_get_real_time (), &authority), ==, WYRELOG_E_OK);
   WylServiceExchangePrepared prepared = { 0 };
   guint8 token_secret[32] = "0123456789abcdef0123456789abcde";
   g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
-          "failstop-key", "wyrelogd", "wyrelog",
-          g_get_real_time () / G_USEC_PER_SEC, token_secret,
-          sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
+      "failstop-key", "wyrelogd", "wyrelog",
+      g_get_real_time () / G_USEC_PER_SEC, token_secret,
+      sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
   gint publication_context = 1;
   g_autoptr (WylServiceExchangePublicationTicket) ticket = NULL;
   g_assert_cmpint (wyl_service_exchange_publication_ticket_new_take
-      (&authority, registry, &publication_context, "failstop-key", &prepared,
-          &ticket), ==, WYRELOG_E_OK);
+        (&authority, registry, &publication_context, "failstop-key", &prepared,
+      &ticket), ==, WYRELOG_E_OK);
   WylServiceExchangePublicationView view = { 0 };
   g_assert_cmpint (wyl_service_exchange_publication_ticket_view (ticket,
-          handle, registry, &publication_context, &view), ==, WYRELOG_E_OK);
+      handle, registry, &publication_context, &view), ==, WYRELOG_E_OK);
   g_autofree gchar *session_id = g_strdup (view.session_id);
   g_autofree gchar *jti = g_strdup (view.jti);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_reserve (ticket),
@@ -584,7 +584,7 @@ test_publication_ticket_fail_stop_terminal_consumes_once (void)
       WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_service_exchange_publication_ticket_abort_fail_stop
-      (ticket, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+        (ticket, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_get_state (ticket),
       ==, WYL_SERVICE_EXCHANGE_TICKET_ABORTED);
@@ -594,15 +594,15 @@ test_publication_ticket_fail_stop_terminal_consumes_once (void)
   WylServiceAuthState registry_state = WYL_SERVICE_AUTH_ACTIVE;
   gboolean found = TRUE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry, session_id,
-          jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
+      jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
   g_assert_false (found);
   reservation_clear_stack (&snapshot);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_release_terminal
-      (ticket), ==, WYRELOG_E_INVALID);
+        (ticket), ==, WYRELOG_E_INVALID);
 
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
   g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
