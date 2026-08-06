@@ -10089,6 +10089,12 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON principal_events (subject_id);"
       "CREATE INDEX IF NOT EXISTS idx_principal_events_event "
       "  ON principal_events (event);"
+      /* Issue #752: reverse max-seek for the derived authentication epoch
+       * (SELECT MAX(event_id) WHERE subject_id=? AND to_state='authenticated').
+       * Column order is exactly (subject_id, to_state, event_id) so the
+       * seek terminates on the first index row.  Additive DDL only. */
+      "CREATE INDEX IF NOT EXISTS idx_principal_events_authn "
+      "  ON principal_events (subject_id, to_state, event_id);"
       "CREATE TABLE IF NOT EXISTS session_states ("
       "  session_id TEXT PRIMARY KEY,"
       "  state TEXT NOT NULL,"
@@ -26116,10 +26122,10 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  /* Phase 1: load current row inside the savepoint.  If no row exists,
-   * we materialise mfa_required with counter=1 below.  If a row exists
-   * we increment from the durable counter; the savepoint serialises
-   * concurrent failures so we never miss an increment. */
+  /* Phase 1: load current row inside the savepoint.  The mfa_required gate
+   * below refuses any observed state other than mfa_required (including no
+   * row); on the accepted path we increment from the durable counter, and
+   * the savepoint serialises concurrent failures so we never miss one. */
   sqlite3_stmt *sel = NULL;
   rc = prepare_stmt (store->db,
           "SELECT state, failed_attempt_count FROM principal_states "
@@ -26132,12 +26138,11 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
   }
 
   gint64 next_count = 0;
-  gboolean already_locked = FALSE;
+  gboolean is_mfa_required = FALSE;
   int step_rc = sqlite3_step (sel);
   if (step_rc == SQLITE_ROW) {
     const gchar *cur_state = (const gchar *) sqlite3_column_text (sel, 0);
-    if (g_strcmp0 (cur_state, "locked") == 0)
-      already_locked = TRUE;
+    is_mfa_required = g_strcmp0 (cur_state, "mfa_required") == 0;
     /* Overflow-only guard: reject a negative (corrupt) counter and a
      * counter already at G_MAXINT64 that the +1 below would overflow.
      * This must NOT reject the honest 4->5 threshold crossing (cur=4)
@@ -26159,14 +26164,15 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
   }
   sqlite3_finalize (sel);
 
-  /* Defensive: refuse to extend a lockout that is already in place.
-   * The validator gates this in production (callers only invoke after
-   * observing state=mfa_required), but this helper is library-internal
-   * and future callers - notably the wyctl tooling in commit 6 - must
-   * not be able to bump locked_at or the counter by repeatedly
-   * driving FAILED_ATTEMPT against a LOCKED row.  Return WYRELOG_E_POLICY
-   * and roll the savepoint back; no event row is emitted. */
-  if (already_locked) {
+  /* #752 hardening: FAILED_ATTEMPT is a self-loop that is only legal from
+   * MFA_REQUIRED (the FSM has no AUTHENTICATED--failed_attempt edge, and a
+   * LOCKED row must not have its counter/locked_at extended).  Gate on the
+   * observed state and refuse anything else - no row (UNVERIFIED),
+   * AUTHENTICATED, LOCKED, or REVOKED - so a blind counter bump can never
+   * fabricate a lockout from a non-mfa_required principal or re-lock an
+   * already-locked one.  Roll the savepoint back with WYRELOG_E_POLICY; no
+   * state write and no event row are emitted. */
+  if (!is_mfa_required) {
     rc = WYRELOG_E_POLICY;
     goto rollback;
   }
@@ -26176,9 +26182,8 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
    * to the caller-supplied wallclock seconds.  The threshold-cross is
    * a one-way transition until reset_counter or apply_unlock fires.
    *
-   * No-row materialises into mfa_required (the validator's gate ensures
-   * we never reach this helper from any other principal state), so the
-   * from_state is uniform across both the had_row and no-row branches. */
+   * The mfa_required gate above guarantees the observed row exists and is
+   * exactly mfa_required, so from_state is uniformly mfa_required. */
   const gchar *next_state =
       (next_count >= threshold) ? "locked" : "mfa_required";
   gint64 next_locked_at = (next_count >= threshold) ? now_secs : G_MININT64;
@@ -26385,6 +26390,239 @@ wyl_policy_store_apply_principal_unlock (wyl_policy_store_t *store,
 rollback:
   wyl_policy_store_rollback_mutation (store);
   return rc;
+}
+
+/* Subject-global expected-from-state CAS transition (issue #752).  See the
+ * store-private.h contract.  The savepoint serialises the read-modify-write
+ * so a concurrent superseding transition (already committed by a prior
+ * engine-lock holder) is re-observed here and collapses to a legal no-op
+ * rather than a blind overwrite of durable authority. */
+wyrelog_error_t
+wyl_policy_store_apply_principal_transition (wyl_policy_store_t *store,
+    const gchar *subject_id, wyl_principal_event_t event,
+    gint64 lock_threshold, gint64 now_secs, wyl_principal_state_t *out_from,
+    wyl_principal_state_t *out_to, gboolean *out_transitioned,
+    gint64 *out_event_id)
+{
+  (void) lock_threshold;        /* reserved; see header contract */
+  if (out_transitioned != NULL)
+    *out_transitioned = FALSE;
+  if (store == NULL || store->db == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+  /* FAILED_ATTEMPT carries counter/threshold semantics that live in
+   * wyl_policy_store_apply_principal_failure; refuse it here so a caller
+   * cannot silently drop the lockout accounting. */
+  if (event == WYL_PRINCIPAL_EVENT_FAILED_ATTEMPT)
+    return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Phase 1: observe the current row inside the savepoint.  A missing row
+   * is the UNVERIFIED origin (a subject that has never logged in). */
+  sqlite3_stmt *sel = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT state, failed_attempt_count FROM principal_states "
+          "WHERE subject_id = ?;", &sel);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  if ((rc = bind_text (sel, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (sel);
+    goto rollback;
+  }
+  wyl_principal_state_t observed = WYL_PRINCIPAL_STATE_UNVERIFIED;
+  gint64 observed_count = 0;
+  gint64 observed_locked_at = G_MININT64;
+  int step_rc = sqlite3_step (sel);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *cur = (const gchar *) sqlite3_column_text (sel, 0);
+    observed = wyl_principal_state_from_name (cur);
+    observed_count = sqlite3_column_int64 (sel, 1);
+    if (observed == WYL_PRINCIPAL_STATE_LAST_) {
+      sqlite3_finalize (sel);
+      rc = WYRELOG_E_INTERNAL;
+      goto rollback;
+    }
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (sel);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  sqlite3_finalize (sel);
+
+  /* Phase 2: pure FSM edge check.  An undefined (observed, event) pair is
+   * a clean idempotent/illegal no-op, not an IO error - the caller decides
+   * precedence (idempotent success vs typed reject). */
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  wyrelog_error_t step = wyl_fsm_principal_step (observed, event, &to);
+  if (step == WYRELOG_E_POLICY) {
+    wyl_policy_store_rollback_mutation (store);
+    if (out_from != NULL)
+      *out_from = observed;
+    if (out_to != NULL)
+      *out_to = observed;
+    if (out_transitioned != NULL)
+      *out_transitioned = FALSE;
+    return WYRELOG_E_OK;
+  }
+  if (step != WYRELOG_E_OK) {
+    rc = step;
+    goto rollback;
+  }
+
+  /* Phase 3: per-event durable side effects, folded into the CAS upsert.
+   * A LOCKED row always keeps count>=1 and a non-NULL locked_at (#753). */
+  const gchar *to_name = wyl_principal_state_name (to);
+  const gchar *observed_name = wyl_principal_state_name (observed);
+  const gchar *event_name = wyl_principal_event_name (event);
+  if (to_name == NULL || observed_name == NULL || event_name == NULL) {
+    rc = WYRELOG_E_INTERNAL;
+    goto rollback;
+  }
+  gint64 target_count = 0;
+  gint64 target_locked_at = G_MININT64;
+  switch (event) {
+    case WYL_PRINCIPAL_EVENT_LOGIN_OK:
+    case WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA:
+    case WYL_PRINCIPAL_EVENT_MFA_OK:
+    case WYL_PRINCIPAL_EVENT_UNLOCK:
+      target_count = 0;
+      target_locked_at = G_MININT64;
+      break;
+    case WYL_PRINCIPAL_EVENT_LOCK:
+      target_count = (observed_count >= 1) ? observed_count : 1;
+      target_locked_at = now_secs;
+      break;
+    case WYL_PRINCIPAL_EVENT_REVOKE:
+      target_count = observed_count;
+      target_locked_at = observed_locked_at;
+      break;
+    default:
+      rc = WYRELOG_E_INTERNAL;
+      goto rollback;
+  }
+
+  /* One CAS upsert: INSERT materialises a first-login row; ON CONFLICT the
+   * DO UPDATE only fires when the durable state still equals the observed
+   * origin (phantom-guard, #746).  sqlite3_changes()>0 proves the row
+   * actually moved. */
+  sqlite3_stmt *upsert = NULL;
+  rc = prepare_stmt (store->db,
+          "INSERT INTO principal_states "
+          "  (subject_id, state, updated_at, failed_attempt_count, locked_at) "
+          "VALUES (?, ?, unixepoch(), ?, ?) "
+          "ON CONFLICT(subject_id) DO UPDATE SET "
+          "  state = excluded.state, "
+          "  updated_at = excluded.updated_at, "
+          "  failed_attempt_count = excluded.failed_attempt_count, "
+          "  locked_at = excluded.locked_at "
+          "WHERE principal_states.state = ?;", &upsert);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  if ((rc = bind_text (upsert, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (upsert, 2, to_name)) != WYRELOG_E_OK) {
+    sqlite3_finalize (upsert);
+    goto rollback;
+  }
+  if (sqlite3_bind_int64 (upsert, 3, target_count) != SQLITE_OK) {
+    sqlite3_finalize (upsert);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  if (target_locked_at == G_MININT64) {
+    if (sqlite3_bind_null (upsert, 4) != SQLITE_OK) {
+      sqlite3_finalize (upsert);
+      rc = WYRELOG_E_IO;
+      goto rollback;
+    }
+  } else if (sqlite3_bind_int64 (upsert, 4, target_locked_at) != SQLITE_OK) {
+    sqlite3_finalize (upsert);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  if ((rc = bind_text (upsert, 5, observed_name)) != WYRELOG_E_OK) {
+    sqlite3_finalize (upsert);
+    goto rollback;
+  }
+  if (sqlite3_step (upsert) != SQLITE_DONE) {
+    sqlite3_finalize (upsert);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  sqlite3_finalize (upsert);
+  gboolean transitioned = sqlite3_changes (store->db) > 0;
+
+  /* Phase 4: append exactly one immutable event only on a real transition,
+   * inside the same savepoint so the event is durable iff the state is. */
+  gint64 event_id = -1;
+  if (transitioned) {
+    rc = wyl_policy_store_append_principal_event (store, subject_id,
+            event_name, observed_name, to_name, &event_id);
+    if (rc != WYRELOG_E_OK)
+      goto rollback;
+  }
+
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+
+  if (out_from != NULL)
+    *out_from = observed;
+  if (out_to != NULL)
+    *out_to = transitioned ? to : observed;
+  if (out_transitioned != NULL)
+    *out_transitioned = transitioned;
+  if (out_event_id != NULL && transitioned)
+    *out_event_id = event_id;
+  return WYRELOG_E_OK;
+
+rollback:
+  wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+/* Derived subject-global authentication epoch (issue #752). */
+wyrelog_error_t
+wyl_policy_store_get_principal_authn_epoch (wyl_policy_store_t *store,
+    const gchar *subject_id, gint64 *out_epoch, gboolean *out_found)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || out_epoch == NULL || out_found == NULL)
+    return WYRELOG_E_INVALID;
+  *out_epoch = 0;
+  *out_found = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
+
+  static const gchar *sql =
+      "SELECT MAX(event_id) FROM principal_events "
+      "WHERE subject_id = ? AND to_state = 'authenticated';";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  }
+  /* MAX() over zero matching rows yields SQL NULL: the subject has never
+   * reached authenticated, so leave *out_found FALSE. */
+  if (sqlite3_column_type (stmt, 0) != SQLITE_NULL) {
+    *out_epoch = sqlite3_column_int64 (stmt, 0);
+    *out_found = TRUE;
+  }
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

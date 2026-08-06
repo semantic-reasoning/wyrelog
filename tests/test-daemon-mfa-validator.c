@@ -609,8 +609,12 @@ check_validator_auto_unlocks_after_window (void)
 static gint
 check_validator_resets_counter_on_success (void)
 {
-  /* 4 failures then 1 success: the counter resets to 0 on success, so
-   * a subsequent failure starts the counter at 1, not 5. */
+  /* 4 failures then 1 success: the counter resets to 0 on success.  After
+   * success the principal is AUTHENTICATED; under the #752 single-active
+   * FSM a further failed verify is refused by the failed_attempt gate
+   * (no authenticated--failed_attempt edge), so it neither re-arms the
+   * counter nor downgrades the durable state - the verify is still
+   * rejected with E_POLICY but authority is preserved. */
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 270;
@@ -656,10 +660,12 @@ check_validator_resets_counter_on_success (void)
   if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
       &locked_at) != 0)
     return 278;
-  if (count != 0)
+  if (count != 0 || g_strcmp0 (st, "authenticated") != 0)
     return 279;
 
-  /* Next failure: counter starts at 1. */
+  /* Stray failure against the now-AUTHENTICATED principal: still rejected
+   * (E_POLICY), but the failed_attempt gate refuses to count it or to
+   * downgrade the durable state - it stays authenticated with counter 0. */
   if (wyl_mfa_validator_totp (handle, session, wrong_proof, NULL)
       != WYRELOG_E_POLICY)
     return 280;
@@ -667,7 +673,7 @@ check_validator_resets_counter_on_success (void)
   if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
       &locked_at) != 0)
     return 281;
-  if (count != 1)
+  if (count != 0 || g_strcmp0 (st, "authenticated") != 0)
     return 282;
   return 0;
 }

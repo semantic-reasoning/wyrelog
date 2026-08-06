@@ -261,6 +261,16 @@ note_failed_attempt (WylHandle *handle, const gchar *subject_id)
   wyrelog_error_t rc = wyl_policy_store_apply_principal_failure (store,
           subject_id, WYL_MFA_LOCKOUT_THRESHOLD, (gint64) time (NULL),
           &new_state, &new_count, &new_locked_at, &event_id);
+  /* #752: WYRELOG_E_POLICY here means the principal is no longer in
+   * mfa_required - a concurrent winning verify already authenticated it,
+   * or a race unlocked/locked it (apply_principal_failure now gates on
+   * state=mfa_required).  There is simply no failed-attempt to count and
+   * no lockout to publish; this is benign, not a store fault.  Report
+   * success so the caller still rejects the verify with WYRELOG_E_POLICY
+   * instead of surfacing a spurious 500.  Only a genuine store fault
+   * (E_IO/E_INTERNAL) fails closed below. */
+  if (rc == WYRELOG_E_POLICY)
+    return WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK) {
     /* Operator-visibility on the IO fault.  Keyed on subject_id and the
     * error code; never includes the submitted code or the seed (F2). */
