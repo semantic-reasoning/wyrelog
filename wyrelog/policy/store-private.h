@@ -13,6 +13,7 @@
 #include "wyrelog/wyl-traits-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
+#include "wyrelog/wyl-fsm-principal-private.h"
 
 G_BEGIN_DECLS;
 
@@ -2324,7 +2325,10 @@ wyrelog_error_t wyl_policy_store_get_principal_lock_info
     gboolean * out_found);
 /* Atomic mutation for a FAILED_ATTEMPT.  Inside a single savepoint:
  *   - reads the current row (state + counter)
- *   - if the row is missing, materialises mfa_required + counter=1
+ *   - refuses (WYRELOG_E_POLICY, clean rollback) unless the observed state
+ *     is exactly mfa_required - the only state with a legal failed_attempt
+ *     self-loop (#752); a missing row, authenticated, locked, or revoked
+ *     principal is rejected without any write or event
  *   - else increments the counter
  *   - if the resulting counter is >= |threshold|, transitions the row
  *     to LOCKED with locked_at = |now_secs| and appends a `lock`
@@ -2360,6 +2364,37 @@ wyrelog_error_t wyl_policy_store_reset_principal_failure_counter
 wyrelog_error_t wyl_policy_store_apply_principal_unlock
   (wyl_policy_store_t * store, const gchar * subject_id,
     gboolean * out_unlocked, gint64 * out_event_id);
+/* Subject-global principal FSM transition with an expected-from-state CAS
+ * (issue #752).  Generalises apply_principal_unlock: in one savepoint it
+ * reads the current durable (state, failed_attempt_count) - a missing row
+ * is observed as UNVERIFIED - drives wyl_fsm_principal_step(observed,
+ * |event|), and, only for a legal edge, applies the transition guarded by
+ * WHERE state=<observed>.  When sqlite3_changes()>0 (the row actually
+ * moved) it appends exactly one principal_fired event and reports
+ * *out_transitioned=TRUE with the new rowid in *out_event_id.  An illegal
+ * edge or a raced-away row is *out_transitioned=FALSE with a clean
+ * rollback and WYRELOG_E_OK - illegal/idempotent is a caller precedence
+ * decision, not an IO error.  |event| must not be FAILED_ATTEMPT (its
+ * counter/threshold semantics live in apply_principal_failure); passing it
+ * returns WYRELOG_E_INVALID.  |now_secs| stamps locked_at on a LOCK edge;
+ * a resulting LOCKED row always keeps failed_attempt_count>=1 and a
+ * non-NULL locked_at (issue #753 invariant).  |lock_threshold| is reserved
+ * for signature symmetry with apply_principal_failure and is unused here.
+ * *out_from / *out_to (guarded for NULL) report the observed and resulting
+ * FSM states. */
+wyrelog_error_t wyl_policy_store_apply_principal_transition
+  (wyl_policy_store_t * store, const gchar * subject_id,
+    wyl_principal_event_t event, gint64 lock_threshold, gint64 now_secs,
+    wyl_principal_state_t * out_from, wyl_principal_state_t * out_to,
+    gboolean * out_transitioned, gint64 * out_event_id);
+/* Derived subject-global authentication epoch (issue #752): the greatest
+ * principal_events.event_id whose to_state='authenticated'.  This is the
+ * monotonic supersession watermark - a token minted against an older epoch
+ * is stale once a newer authenticating transition lands.  *out_found is
+ * FALSE (and *out_epoch is 0) when the subject has never authenticated. */
+wyrelog_error_t wyl_policy_store_get_principal_authn_epoch
+  (wyl_policy_store_t * store, const gchar * subject_id,
+    gint64 * out_epoch, gboolean * out_found);
 wyrelog_error_t wyl_policy_store_append_principal_event (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * event,
     const gchar * from_state, const gchar * to_state, gint64 * out_event_id);

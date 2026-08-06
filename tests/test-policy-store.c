@@ -3786,6 +3786,286 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   return 0;
 }
 
+/* Issue #752: apply_principal_failure refuses to run against any observed
+ * state other than mfa_required (no row, or authenticated). */
+static gint
+check_store_apply_principal_failure_requires_mfa_required (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1594;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1595;
+
+  /* No row at all: refuse, no materialisation. */
+  g_autofree gchar *st = NULL;
+  gint64 c = 0, l = 0;
+  if (wyl_policy_store_apply_principal_failure (store, "fail.norow", 5, 100,
+      &st, &c, &l, NULL) != WYRELOG_E_POLICY)
+    return 1596;
+  gboolean found = TRUE;
+  g_autofree gchar *probe = NULL;
+  if (wyl_policy_store_get_principal_state (store, "fail.norow", &probe,
+      &found) != WYRELOG_E_OK || found)
+    return 1597;
+
+  /* Authenticated row: refuse, leave it authenticated. */
+  if (wyl_policy_store_set_principal_state (store, "fail.auth",
+      "authenticated") != WYRELOG_E_OK)
+    return 1598;
+  g_autofree gchar *st2 = NULL;
+  gint64 c2 = 0, l2 = 0;
+  if (wyl_policy_store_apply_principal_failure (store, "fail.auth", 5, 100,
+      &st2, &c2, &l2, NULL) != WYRELOG_E_POLICY)
+    return 1599;
+  g_autofree gchar *after = NULL;
+  gboolean f2 = FALSE;
+  if (wyl_policy_store_get_principal_state (store, "fail.auth", &after, &f2)
+      != WYRELOG_E_OK || !f2 || g_strcmp0 (after, "authenticated") != 0)
+    return 1590;
+  return 0;
+}
+
+/* Issue #752: the subject-global CAS transition drives each legal FSM edge,
+ * appends exactly one principal_fired event, and reports from/to/rowid. */
+static gint
+check_store_apply_principal_transition_legal_edges (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1600;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1601;
+
+  /* No row: login_ok materialises mfa_required (observed UNVERIFIED). */
+  wyl_principal_state_t from = WYL_PRINCIPAL_STATE_LAST_;
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gboolean moved = FALSE;
+  gint64 ev1 = -1;
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.user",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 1000, &from, &to, &moved, &ev1)
+      != WYRELOG_E_OK)
+    return 1602;
+  if (!moved || from != WYL_PRINCIPAL_STATE_UNVERIFIED
+      || to != WYL_PRINCIPAL_STATE_MFA_REQUIRED || ev1 <= 0)
+    return 1603;
+
+  /* mfa_required --mfa_ok--> authenticated, resetting the counter. */
+  gint64 ev2 = -1;
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.user",
+      WYL_PRINCIPAL_EVENT_MFA_OK, 5, 1001, &from, &to, &moved, &ev2)
+      != WYRELOG_E_OK)
+    return 1604;
+  if (!moved || from != WYL_PRINCIPAL_STATE_MFA_REQUIRED
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED || ev2 <= ev1)
+    return 1605;
+
+  /* authenticated --revoke--> revoked (terminal). */
+  gint64 ev3 = -1;
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.user",
+      WYL_PRINCIPAL_EVENT_REVOKE, 5, 1002, &from, &to, &moved, &ev3)
+      != WYRELOG_E_OK)
+    return 1606;
+  if (!moved || from != WYL_PRINCIPAL_STATE_AUTHENTICATED
+      || to != WYL_PRINCIPAL_STATE_REVOKED)
+    return 1607;
+
+  /* Exactly three principal_fired rows for this subject. */
+  gint events = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM principal_events "
+      "WHERE subject_id = 'fsm.user';", &events) != 0)
+    return 1608;
+  if (events != 3)
+    return 1609;
+
+  /* login_skip_mfa from a fresh subject with no row lands authenticated. */
+  gint64 ev4 = -1;
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.skip",
+      WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 5, 1003, &from, &to, &moved,
+      &ev4) != WYRELOG_E_OK)
+    return 1610;
+  if (!moved || from != WYL_PRINCIPAL_STATE_UNVERIFIED
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED)
+    return 1611;
+  return 0;
+}
+
+/* Issue #752: an illegal edge and a raced-away wrong-from-state are both
+ * clean no-ops (E_OK, transitioned=FALSE) that append no phantom event. */
+static gint
+check_store_apply_principal_transition_illegal_noop (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1620;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1621;
+
+  /* mfa_ok with no row: observed UNVERIFIED has no MFA_OK edge -> no-op. */
+  wyl_principal_state_t from = WYL_PRINCIPAL_STATE_LAST_;
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gboolean moved = TRUE;
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.illegal",
+      WYL_PRINCIPAL_EVENT_MFA_OK, 5, 2000, &from, &to, &moved, NULL)
+      != WYRELOG_E_OK)
+    return 1622;
+  if (moved || from != WYL_PRINCIPAL_STATE_UNVERIFIED
+      || to != WYL_PRINCIPAL_STATE_UNVERIFIED)
+    return 1623;
+
+  /* Drive to authenticated, then a second login_ok is illegal from there
+   * (single-active): a no-op that appends nothing. */
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.illegal",
+      WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 5, 2001, NULL, NULL, &moved,
+      NULL) != WYRELOG_E_OK || !moved)
+    return 1624;
+  moved = TRUE;
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.illegal",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 2002, &from, &to, &moved, NULL)
+      != WYRELOG_E_OK)
+    return 1625;
+  if (moved || from != WYL_PRINCIPAL_STATE_AUTHENTICATED
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED)
+    return 1626;
+
+  /* Only the one authenticating transition emitted an event. */
+  gint events = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM principal_events "
+      "WHERE subject_id = 'fsm.illegal';", &events) != 0)
+    return 1627;
+  if (events != 1)
+    return 1628;
+
+  /* FAILED_ATTEMPT is refused here (counter logic lives elsewhere). */
+  if (wyl_policy_store_apply_principal_transition (store, "fsm.illegal",
+      WYL_PRINCIPAL_EVENT_FAILED_ATTEMPT, 5, 2003, NULL, NULL, &moved,
+      NULL) != WYRELOG_E_INVALID)
+    return 1629;
+  return 0;
+}
+
+/* Issue #752: LOCK reaches locked from both mfa_required and authenticated,
+ * and the resulting row always satisfies the #753 invariant
+ * (count>=1 && locked_at NOT NULL). */
+static gint
+check_store_apply_principal_transition_lock_invariant (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1640;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1641;
+
+  /* Lock from mfa_required (counter already >=1). */
+  gboolean moved = FALSE;
+  if (wyl_policy_store_apply_principal_transition (store, "lock.mfa",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 3000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1642;
+  if (wyl_policy_store_apply_principal_transition (store, "lock.mfa",
+      WYL_PRINCIPAL_EVENT_LOCK, 5, 3001, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1643;
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = -1;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lock.mfa", &st,
+      &count, &locked_at, &found) != WYRELOG_E_OK)
+    return 1644;
+  if (!found || g_strcmp0 (st, "locked") != 0 || count < 1 || locked_at != 3001)
+    return 1645;
+
+  /* Lock from authenticated (counter is 0 there): the invariant must still
+   * hold - count is floored to 1 and locked_at is set. */
+  if (wyl_policy_store_apply_principal_transition (store, "lock.auth",
+      WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 5, 3010, NULL, NULL, &moved,
+      NULL) != WYRELOG_E_OK || !moved)
+    return 1646;
+  if (wyl_policy_store_apply_principal_transition (store, "lock.auth",
+      WYL_PRINCIPAL_EVENT_LOCK, 5, 3011, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1647;
+  g_autofree gchar *st2 = NULL;
+  gint64 count2 = -1;
+  gint64 locked_at2 = -1;
+  gboolean found2 = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lock.auth", &st2,
+      &count2, &locked_at2, &found2) != WYRELOG_E_OK)
+    return 1648;
+  if (!found2 || g_strcmp0 (st2, "locked") != 0 || count2 < 1
+      || locked_at2 != 3011)
+    return 1649;
+  return 0;
+}
+
+/* Issue #752: the derived authentication epoch is the greatest event_id
+ * with to_state='authenticated', and it strictly increases across a full
+ * auth -> lock -> unlock -> re-auth cycle so post-re-auth authority is
+ * distinguishable from pre-lock authority. */
+static gint
+check_store_principal_authn_epoch_monotonic (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1660;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1661;
+
+  /* Never authenticated: no epoch. */
+  gint64 epoch = -1;
+  gboolean found = TRUE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, "epoch.user", &epoch,
+      &found) != WYRELOG_E_OK)
+    return 1662;
+  if (found || epoch != 0)
+    return 1663;
+
+  /* login_ok -> mfa_ok: first authenticated epoch. */
+  gboolean moved = FALSE;
+  if (wyl_policy_store_apply_principal_transition (store, "epoch.user",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 4000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1664;
+  gint64 first_auth_ev = -1;
+  if (wyl_policy_store_apply_principal_transition (store, "epoch.user",
+      WYL_PRINCIPAL_EVENT_MFA_OK, 5, 4001, NULL, NULL, &moved,
+      &first_auth_ev) != WYRELOG_E_OK || !moved)
+    return 1665;
+  if (wyl_policy_store_get_principal_authn_epoch (store, "epoch.user", &epoch,
+      &found) != WYRELOG_E_OK)
+    return 1666;
+  if (!found || epoch != first_auth_ev)
+    return 1667;
+
+  /* lock -> unlock -> login_ok -> mfa_ok: a new, strictly greater epoch. */
+  if (wyl_policy_store_apply_principal_transition (store, "epoch.user",
+      WYL_PRINCIPAL_EVENT_LOCK, 5, 4002, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1668;
+  if (wyl_policy_store_apply_principal_transition (store, "epoch.user",
+      WYL_PRINCIPAL_EVENT_UNLOCK, 5, 4003, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1669;
+  if (wyl_policy_store_apply_principal_transition (store, "epoch.user",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 4004, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1670;
+  gint64 second_auth_ev = -1;
+  if (wyl_policy_store_apply_principal_transition (store, "epoch.user",
+      WYL_PRINCIPAL_EVENT_MFA_OK, 5, 4005, NULL, NULL, &moved,
+      &second_auth_ev) != WYRELOG_E_OK || !moved)
+    return 1671;
+  if (wyl_policy_store_get_principal_authn_epoch (store, "epoch.user", &epoch,
+      &found) != WYRELOG_E_OK)
+    return 1672;
+  if (!found || epoch != second_auth_ev || second_auth_ev <= first_auth_ev)
+    return 1673;
+  return 0;
+}
+
 /* Issue #331 commit 5 iteration (LOW #4): legacy-schema migration.
  * A pre-#331-commit-5 store has principal_states with three columns
  * (subject_id, state, updated_at) - no failed_attempt_count, no
@@ -5614,6 +5894,16 @@ main (void)
   if ((rc = check_store_apply_principal_unlock ()) != 0)
     return rc;
   if ((rc = check_store_apply_principal_failure_refuses_already_locked ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_failure_requires_mfa_required ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_transition_legal_edges ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_transition_illegal_noop ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_transition_lock_invariant ()) != 0)
+    return rc;
+  if ((rc = check_store_principal_authn_epoch_monotonic ()) != 0)
     return rc;
   if ((rc = check_store_principal_states_legacy_schema_migration ()) != 0)
     return rc;

@@ -270,16 +270,26 @@ static wyrelog_error_t
 mutate_principal_publication (wyl_policy_store_t *store, gpointer data)
 {
   WylPrincipalPublication *ctx = data;
-  const gchar *old_state = wyl_principal_state_name (ctx->old_state);
-  const gchar *event = wyl_principal_event_name (ctx->event);
-  const gchar *new_state = wyl_principal_state_name (ctx->new_state);
-  if (old_state == NULL || event == NULL || new_state == NULL)
-    return WYRELOG_E_INTERNAL;
-  wyrelog_error_t rc = wyl_policy_store_set_principal_state (store,
-          ctx->username, new_state);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_append_principal_event (store, ctx->username,
-            event, old_state, new_state, &ctx->event_id);
+  /* Issue #752: subject-global expected-from-state CAS.  The transition is
+   * gated on the durable observed state re-read inside this savepoint, so a
+   * concurrent superseding commit collapses to a clean no-op rather than a
+   * blind overwrite.  The caller-supplied old_state is treated as a hint;
+   * the real observed origin is reflected back into the ctx so the verifier
+   * and delta producer assert the exact committed edge. */
+  wyl_principal_state_t from = WYL_PRINCIPAL_STATE_LAST_;
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gboolean transitioned = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_apply_principal_transition (store,
+          ctx->username, ctx->event, 0, 0, &from, &to, &transitioned,
+          &ctx->event_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* No legal edge from the observed state (already superseded / idempotent):
+   * precommit-reject cleanly so no duplicate or illegal event is published. */
+  if (!transitioned)
+    return WYRELOG_E_POLICY;
+  ctx->old_state = from;
+  ctx->new_state = to;
   if (rc == WYRELOG_E_OK && ctx->audit_event != NULL) {
     g_autofree gchar *audit_id =
         wyl_audit_event_dup_id_string (ctx->audit_event);
