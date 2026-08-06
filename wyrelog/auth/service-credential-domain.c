@@ -457,14 +457,24 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
         /* A live claim is stuck (fault-injection only): a bare terminal does
          * not latch on the WYRELOG_E_BUSY non-consume branch, so latch the
          * coordination invariant explicitly, then finalize the lease through
-         * the terminal boundary so it is not leaked. */
-        (void) wyl_service_auth_write_lease_terminalize_cleanup
-            (mutation->lease, mutation->handle);
-        release_rc = wyl_service_auth_write_lease_release_terminal
+         * the terminal boundary so it is not leaked. Recovering that cleanly
+         * still failed to release on the first attempt, so it reports
+         * WYRELOG_E_BUSY for the caller to retry rather than success;
+         * anything the recovery could not settle stays WYRELOG_E_INTERNAL. */
+        wyrelog_error_t cleanup_rc =
+            wyl_service_auth_write_lease_terminalize_cleanup (mutation->lease,
+            mutation->handle);
+        wyrelog_error_t retry_rc = wyl_service_auth_write_lease_release_terminal
             (&mutation->lease);
-      }
-      if (result == WYRELOG_E_OK)
+        result = cleanup_rc == WYRELOG_E_OK && retry_rc == WYRELOG_E_OK
+            && result != WYRELOG_E_INTERNAL
+            ? WYRELOG_E_BUSY : WYRELOG_E_INTERNAL;
+      } else if (result == WYRELOG_E_OK) {
+        /* The terminal consumed the lease and latched the coordination
+         * invariant on its way out. Nothing is left to retry, so the failure
+         * surfaces verbatim rather than as the retryable WYRELOG_E_BUSY. */
         result = release_rc;
+      }
       if (mutation->recovery_installed
           && mutation->discard_publication_recovery != NULL) {
         mutation->discard_publication_recovery (mutation->fault_data);
