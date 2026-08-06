@@ -964,6 +964,19 @@ wyl_service_auth_write_lease_release_terminal (WylServiceAuthWriteLease
   g_mutex_lock (&authority->mutex);
   wyrelog_error_t rc = lease->test_fail_terminal_prevalidation
       ? WYRELOG_E_INTERNAL : validate_write_locked (lease, lease->handle);
+  /* Honoured here as well as in the non-terminal release, and at the same
+   * point in the sequence. Owners migrating to the terminal boundary would
+   * otherwise stop observing an armed release fault entirely, so every test
+   * that injects one would pass without exercising the failure it names.
+   * The non-terminal release performs no release work once this fires, so the
+   * lease must survive here too: the caller's recovery is what the injected
+   * failure exists to exercise, and consuming the lease would skip it. */
+  gboolean injected_release_failure = FALSE;
+  if (rc == WYRELOG_E_OK && lease->test_fail_release_once) {
+    lease->test_fail_release_once = FALSE;
+    rc = WYRELOG_E_INTERNAL;
+    injected_release_failure = TRUE;
+  }
   gboolean canonical_identity = authority->handle == lease->handle
       && lease->owner == g_thread_self ()
       && lease->state == WYL_SERVICE_AUTH_LEASE_ACTIVE
@@ -972,7 +985,8 @@ wyl_service_auth_write_lease_release_terminal (WylServiceAuthWriteLease
   if (rc == WYRELOG_E_OK && canonical_identity
       && (lease->transaction_claimed || lease->maintenance_claimed))
     rc = WYRELOG_E_BUSY;
-  gboolean cleanup_identity = authority->handle == lease->handle
+  gboolean cleanup_identity = !injected_release_failure
+      && authority->handle == lease->handle
       && lease->owner == g_thread_self ()
       && lease->state == WYL_SERVICE_AUTH_LEASE_ACTIVE
       && !lease->transaction_claimed && !lease->maintenance_claimed
