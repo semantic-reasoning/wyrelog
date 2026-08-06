@@ -1313,7 +1313,7 @@ mutation_finish_contender_thread (gpointer data)
   MutationFinishContender *contender = data;
   WylServiceAuthWriteLease *lease = NULL;
   contender->rc = wyl_service_auth_authority_acquire_write
-      (contender->authority, contender->handle, NULL, &lease);
+        (contender->authority, contender->handle, NULL, &lease);
   if (contender->rc == WYRELOG_E_OK)
     (void) wyl_service_auth_write_lease_release_terminal (&lease);
   return NULL;
@@ -1337,12 +1337,12 @@ mutation_finish_queue_contender (gpointer data)
   state->contender.handle = state->handle;
   state->contender.rc = WYRELOG_E_INTERNAL;
   state->thread = g_thread_new ("mutation-finish-contender",
-      mutation_finish_contender_thread, &state->contender);
+          mutation_finish_contender_thread, &state->contender);
   gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
   for (;;) {
     WylServiceAuthAuthoritySnapshot snapshot = { 0 };
     wyl_service_auth_authority_snapshot
-        (wyl_handle_get_service_auth_authority (state->handle), &snapshot);
+      (wyl_handle_get_service_auth_authority (state->handle), &snapshot);
     if (snapshot.waiting_writers == 1)
       break;
     g_assert_cmpint (g_get_monotonic_time (), <, deadline);
@@ -1390,8 +1390,8 @@ test_service_mutation_finish_terminal_cleanup_fault (void)
   };
   wyl_service_principal_t disabled = { 0 };
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          "svc:mutation-finish:worker", "admin", "000000000000000000000000760",
-          &disable_runtime, &disabled), ==, WYRELOG_E_INTERNAL);
+      "svc:mutation-finish:worker", "admin", "000000000000000000000000760",
+      &disable_runtime, &disabled), ==, WYRELOG_E_INTERNAL);
   g_assert_true (state.queued);
   g_assert_true (state.armed);
   g_assert_cmpuint (probe.calls, ==, 1);
@@ -1403,7 +1403,7 @@ test_service_mutation_finish_terminal_cleanup_fault (void)
   /* Accounting returns to zero even though the terminal cleanup faulted. */
   WylServiceAuthAuthoritySnapshot snapshot = { 0 };
   wyl_service_auth_authority_snapshot
-      (wyl_handle_get_service_auth_authority (handle), &snapshot);
+    (wyl_handle_get_service_auth_authority (handle), &snapshot);
   g_assert_false (snapshot.writer_active);
   g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
   g_assert_cmpuint (snapshot.active_readers, ==, 0);
@@ -1411,7 +1411,7 @@ test_service_mutation_finish_terminal_cleanup_fault (void)
   /* The fault latched the coordination invariant, observable to any waiter. */
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==,
       WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
