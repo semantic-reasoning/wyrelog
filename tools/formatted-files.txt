@@ -9,7 +9,9 @@ tests/test-lobac-partial-delta.c
 tests/test-login-req.c
 tests/test-revoke-req.c
 tests/test-secure-duckdb-bridge.c
+tests/test-service-credential-domain.c
 tests/test-service-credential-operation-root.h
+tests/test-service-exchange-private.c
 tests/test-session-id.c
 tests/test-session-logout.c
 tests/test-session-registry.c
@@ -24,12 +26,21 @@ wyrelog/audit/iter-private.h
 wyrelog/auth/jwt-private.h
 wyrelog/auth/mfa-enrollment-private.h
 wyrelog/auth/mfa-validator.h
+wyrelog/auth/service-auth-coordination.c
+wyrelog/auth/service-credential-domain.c
+wyrelog/auth/service-credential-operation-coordinator-execute-private.c
+wyrelog/auth/service-credential-operation-coordinator-maintenance-private.c
+wyrelog/auth/service-credential-operation-coordinator-remediate-private.c
+wyrelog/auth/service-credential-operation-coordinator-retirement-private.c
+wyrelog/auth/service-exchange-private.c
+wyrelog/auth/service-exchange-projector-private.c
 wyrelog/auth/totp.h
 wyrelog/break-glass.h
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c
 wyrelog/daemon/fact-status.h
 wyrelog/daemon/options.h
+wyrelog/daemon/runtime.c
 wyrelog/daemon/runtime.h
 wyrelog/daemon/service-credential-handoff-private.h
 wyrelog/daemon/signals.c
@@ -45,6 +56,7 @@ wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
 wyrelog/handle.h
 wyrelog/perm.h
+wyrelog/policy/service-permission-maintenance-private.c
 wyrelog/policy/store-lease-private.h
 wyrelog/session.h
 wyrelog/version.h
@@ -61,6 +73,7 @@ wyrelog/wyl-fsm-permission-scope.c
 wyrelog/wyl-fsm-principal-private.h
 wyrelog/wyl-fsm-session-private.h
 wyrelog/wyl-guard-expr-private.h
+wyrelog/wyl-handle.c
 wyrelog/wyl-id-private.h
 wyrelog/wyl-keyprovider-dev-private.h
 wyrelog/wyl-keyprovider-dev.c

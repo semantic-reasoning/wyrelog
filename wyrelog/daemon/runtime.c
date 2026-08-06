@@ -94,10 +94,10 @@ static gboolean
 prepare_credential_handoff_roots (const WylDaemonOptions *opts, GError **error)
 {
   if (!prepare_owner_only_root (opts->operation_root,
-          "credential operation root", error))
+      "credential operation root", error))
     return FALSE;
   return prepare_owner_only_root (opts->credential_publication_root,
-      "credential publication root", error);
+             "credential publication root", error);
 }
 
 static gboolean
@@ -181,15 +181,15 @@ static gboolean
 service_profile_forwarding_enabled (const WylDaemonOptions *opts)
 {
   return opts->profile == WYL_DAEMON_PROFILE_SERVICE &&
-      opts->system_url != NULL && opts->system_url[0] != '\0';
+         opts->system_url != NULL && opts->system_url[0] != '\0';
 }
 
 static gchar *
 service_profile_events_url (const WylDaemonOptions *opts)
 {
   return g_strconcat (opts->system_url,
-      g_str_has_suffix (opts->system_url, "/") ? "profile/events" :
-      "/profile/events", NULL);
+             g_str_has_suffix (opts->system_url, "/") ? "profile/events" :
+             "/profile/events", NULL);
 }
 
 static gboolean
@@ -235,7 +235,7 @@ list_service_profile_spool_events (const WylDaemonOptions *opts, GError **error)
   while ((name = g_dir_read_name (dir)) != NULL) {
     if (g_str_has_suffix (name, ".event"))
       g_ptr_array_add (paths, g_build_filename (opts->event_spool_dir, name,
-              NULL));
+          NULL));
   }
   return paths;
 }
@@ -292,7 +292,7 @@ spool_service_profile_event (const WylDaemonOptions *opts,
 
   g_autofree gchar *uuid = g_uuid_string_random ();
   g_autofree gchar *name = g_strdup_printf ("%020" G_GINT64_FORMAT "-%s.event",
-      g_get_real_time (), uuid);
+          g_get_real_time (), uuid);
   g_autofree gchar *path = g_build_filename (opts->event_spool_dir, name, NULL);
   g_autofree gchar *tmp_path = g_strdup_printf ("%s.tmp", path);
   if (!g_file_set_contents (tmp_path, contents, -1, error))
@@ -318,9 +318,9 @@ emit_service_profile_forwarding_event (const WylDaemonOptions *opts,
 
   g_autofree gchar *contents =
       g_strdup_printf
-      ("{\"profile\":\"service\",\"event\":\"%s\",\"timestamp_us\":%"
-      G_GINT64_FORMAT "}",
-      event, g_get_real_time ());
+        ("{\"profile\":\"service\",\"event\":\"%s\",\"timestamp_us\":%"
+          G_GINT64_FORMAT "}",
+          event, g_get_real_time ());
   g_autoptr (GError) post_error = NULL;
   if (post_service_profile_event (opts, contents, &post_error))
     return TRUE;
@@ -437,12 +437,12 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
   if (opts->production_mode) {
     wyrelog_error_t rc =
         make_readiness_store_path ("wyrelog-readiness-policy-XXXXXX.sqlite",
-        &scratch_policy_store);
+            &scratch_policy_store);
     if (rc != WYRELOG_E_OK)
       return rc;
 #ifdef WYL_HAS_AUDIT
     rc = make_readiness_store_path ("wyrelog-readiness-audit-XXXXXX.duckdb",
-        &scratch_audit_store);
+            &scratch_audit_store);
     if (rc != WYRELOG_E_OK)
       return rc;
 #endif
@@ -503,7 +503,7 @@ static gboolean
 bootstrap_admin_requested (const WylDaemonOptions *opts)
 {
   return opts->bootstrap_admin_subject != NULL &&
-      opts->bootstrap_admin_subject[0] != '\0';
+         opts->bootstrap_admin_subject[0] != '\0';
 }
 
 typedef struct
@@ -521,7 +521,7 @@ mutate_bootstrap_publication (wyl_policy_store_t *store, gpointer data)
   g_clear_pointer (&ctx->existing_subject, g_free);
   ctx->applied = FALSE;
   return wyl_policy_store_apply_bootstrap_admin_body (store, ctx->subject,
-      ctx->allow_skip_mfa, &ctx->applied, &ctx->existing_subject);
+             ctx->allow_skip_mfa, &ctx->applied, &ctx->existing_subject);
 }
 
 static wyrelog_error_t
@@ -533,13 +533,13 @@ verify_bootstrap_row (WylEngineVerification *verification,
     return WYRELOG_E_INVALID;
   for (guint i = 0; i < ncols; i++) {
     wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-        symbols[i], &row[i]);
+            symbols[i], &row[i]);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
   gboolean found = FALSE;
   wyrelog_error_t rc = wyl_engine_verification_contains (verification,
-      relation, row, ncols, &found);
+          relation, row, ncols, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
@@ -558,12 +558,12 @@ verify_bootstrap_publication (WylEngineVerification *verification,
     WYL_TENANT_DEFAULT,
   };
   wyrelog_error_t rc = verify_bootstrap_row (verification,
-      "effective_member", membership, G_N_ELEMENTS (membership));
+          "effective_member", membership, G_N_ELEMENTS (membership));
   if (rc != WYRELOG_E_OK || !ctx->allow_skip_mfa)
     return rc;
   const gchar *skip_mfa[] = { ctx->subject };
   return verify_bootstrap_row (verification, "login_skip_mfa_authz", skip_mfa,
-      G_N_ELEMENTS (skip_mfa));
+             G_N_ELEMENTS (skip_mfa));
 }
 
 static wyrelog_error_t
@@ -571,7 +571,7 @@ run_bootstrap_publication (WylHandle *handle, WylBootstrapPublication *ctx)
 {
   WylServiceAuthWriteLease *lease = NULL;
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
@@ -579,8 +579,9 @@ run_bootstrap_publication (WylHandle *handle, WylBootstrapPublication *ctx)
     rc = WYRELOG_E_BUSY;
   else
     rc = wyl_engine_session_run_committed_publication (session,
-        mutate_bootstrap_publication, ctx, verify_bootstrap_publication, ctx,
-        NULL, NULL, NULL);
+            mutate_bootstrap_publication, ctx, verify_bootstrap_publication,
+            ctx,
+            NULL, NULL, NULL);
   g_clear_pointer (&session, wyl_engine_session_release);
   wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
   if (rc == WYRELOG_E_OK)
@@ -655,7 +656,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   g_autoptr (WylHandle) handle = NULL;
   wyrelog_error_t rc = opts->check_only ?
       open_readiness_handle (opts, &handle) : open_runtime_handle (opts,
-      &handle);
+          &handle);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: init failed: %s\n", wyrelog_error_string (rc));
     return 1;
@@ -684,7 +685,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
       .allow_skip_mfa = opts->bootstrap_admin_allow_skip_mfa,
     };
     wyrelog_error_t bootstrap_rc = run_bootstrap_publication (handle,
-        &publication);
+            &publication);
     if (bootstrap_rc == WYRELOG_E_POLICY) {
       g_printerr ("wyrelogd: bootstrap_admin: store already sealed for %s\n",
           publication.existing_subject != NULL ?
@@ -701,7 +702,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
     g_free (publication.existing_subject);
 
     wyrelog_error_t audit_rc = wyl_daemon_emit_bootstrap_admin_audit (handle,
-        opts->bootstrap_admin_subject, publication.applied);
+            opts->bootstrap_admin_subject, publication.applied);
     if (audit_rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: bootstrap_admin: audit emit failed: %s\n",
           wyrelog_error_string (audit_rc));
@@ -743,7 +744,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 #ifdef WYL_HAS_DAEMON_HTTP
   g_autoptr (SoupServer) server =
       wyl_daemon_start_http_server_with_runtime (opts, handle, &runtime,
-      &error);
+          &error);
   if (server == NULL) {
     g_printerr ("wyrelogd: listen failed: %s\n", error->message);
     return 1;
@@ -757,7 +758,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 #ifdef WYL_HAS_DAEMON_HTTP
   if (service_profile_forwarding_enabled (opts))
     service_drain_id = g_timeout_add_seconds (5,
-        drain_service_profile_spool_tick, (gpointer) opts);
+            drain_service_profile_spool_tick, (gpointer) opts);
 #endif
   guint early_signal_poll_id =
       g_timeout_add (100, quit_loop_on_early_signal, loop);

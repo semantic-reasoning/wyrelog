@@ -30,9 +30,9 @@ fixture_clear (Fixture *fixture)
   if (fixture->db_path != NULL) {
     (void) g_remove (fixture->db_path);
     g_autofree gchar *clear = g_strdup_printf ("%s.wyrelog-clear",
-        fixture->db_path);
+            fixture->db_path);
     g_autofree gchar *lock = g_strdup_printf ("%s.wyrelog-lock",
-        fixture->db_path);
+            fixture->db_path);
     (void) g_remove (clear);
     (void) g_remove (lock);
   }
@@ -64,7 +64,7 @@ fixture_init (Fixture *fixture)
   for (guint i = 0; i < sizeof key; i++)
     key[i] = (guint8) (i + 1);
   g_assert_true (g_file_set_contents (fixture->key_path,
-          (const gchar *) key, sizeof key, NULL));
+      (const gchar *) key, sizeof key, NULL));
   fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
   WylHandleOpenOptions options = {
     .policy_store_path = fixture->db_path,
@@ -81,16 +81,16 @@ prepare_authority (WylHandle *handle, const gchar *subject_id)
 {
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, subject_id,
-          subject_id, "admin", "principal-create", &principal), ==,
+      subject_id, "admin", "principal-create", &principal), ==,
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-      (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_create_tenant
-      (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
       WYRELOG_E_OK);
 }
 
@@ -100,7 +100,7 @@ issue_service_credential (WylHandle *handle, const gchar *subject_id,
     wyl_service_credential_issue_result_t *out)
 {
   g_assert_cmpint (wyl_service_credential_issue (handle, subject_id,
-          tenant_id, "admin", request_id, expires_at_us, out), ==,
+      tenant_id, "admin", request_id, expires_at_us, out), ==,
       WYRELOG_E_OK);
 }
 
@@ -117,7 +117,7 @@ assert_reacquire_write (WylHandle *handle)
 {
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
       WYRELOG_E_OK);
@@ -138,12 +138,12 @@ test_begin_success_and_rollback (void)
       "exchange-issue-a", expiry, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
 
   WylServiceExchangeAuthority authority = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-          issued.credential.credential_id, secret, secret_len,
-          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+      issued.credential.credential_id, secret, secret_len,
+      g_get_real_time (), &authority), ==, WYRELOG_E_OK);
   g_assert_true (authority.verified);
   g_assert_cmpint (authority.denial, ==, WYL_SERVICE_EXCHANGE_DENIAL_NONE);
   g_assert_nonnull (authority.transaction);
@@ -152,7 +152,7 @@ test_begin_success_and_rollback (void)
   g_assert_cmpstr (authority.credential.tenant_id, ==, "tenant-a");
   g_assert_cmpstr (authority.credential.state, ==, "active");
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_get_state
-      (authority.transaction), ==, WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
+        (authority.transaction), ==, WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
 
   g_assert_cmpint (wyl_service_exchange_authority_rollback (&authority), ==,
       WYRELOG_E_OK);
@@ -169,8 +169,8 @@ assert_denied_case (WylHandle *handle, const gchar *credential_id,
 {
   WylServiceExchangeAuthority authority = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-          credential_id, presented_secret, presented_secret_len, now_us,
-          &authority), ==, WYRELOG_E_AUTH);
+      credential_id, presented_secret, presented_secret_len, now_us,
+      &authority), ==, WYRELOG_E_AUTH);
   g_assert_false (authority.verified);
   g_assert_cmpint (authority.denial, ==, WYL_SERVICE_EXCHANGE_DENIAL_AUTH);
   g_assert_null (authority.transaction);
@@ -195,7 +195,7 @@ test_denials_share_one_category (void)
       "exchange-issue-a", expiry, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
 
   g_autofree gchar *wrong_secret = g_strndup (secret, secret_len);
   wrong_secret[0] = wrong_secret[0] == 'A' ? 'B' : 'A';
@@ -206,8 +206,8 @@ test_denials_share_one_category (void)
 
   wyl_service_credential_t revoked = { 0 };
   g_assert_cmpint (wyl_service_credential_revoke (handle,
-          issued.credential.credential_id, "admin", revoke_request_id,
-          &revoked), ==, WYRELOG_E_OK);
+      issued.credential.credential_id, "admin", revoke_request_id,
+      &revoked), ==, WYRELOG_E_OK);
   wyl_service_credential_clear (&revoked);
   assert_denied_case (handle, issued.credential.credential_id, secret,
       secret_len, g_get_real_time ());
@@ -216,25 +216,25 @@ test_denials_share_one_category (void)
   issue_service_credential (handle, "svc:exchange:worker", "tenant-b",
       "exchange-issue-b", g_get_real_time () + G_USEC_PER_SEC, &issued);
   secret = wyl_service_credential_secret_peek_encoded (issued.secret,
-      &secret_len);
+          &secret_len);
   assert_denied_case (handle, issued.credential.credential_id, secret,
       secret_len, g_get_real_time () + 5 * G_USEC_PER_SEC);
 
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable (handle,
-          "svc:exchange:worker", "admin", disable_request_id, &principal),
+      "svc:exchange:worker", "admin", disable_request_id, &principal),
       ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   assert_denied_case (handle, issued.credential.credential_id, secret,
       secret_len, g_get_real_time ());
 
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed
-      (wyl_handle_get_policy_store (handle), "tenant-b", TRUE), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-b", TRUE), ==,
       WYRELOG_E_OK);
   assert_denied_case (handle, issued.credential.credential_id, secret,
       secret_len, g_get_real_time ());
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed
-      (wyl_handle_get_policy_store (handle), "tenant-b", FALSE), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-b", FALSE), ==,
       WYRELOG_E_OK);
 
   wyl_service_credential_issue_result_clear (&issued);
@@ -254,19 +254,19 @@ test_prepare_token_success (void)
       "exchange-issue-a", expiry, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
 
   WylServiceExchangeAuthority authority = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-          issued.credential.credential_id, secret, secret_len,
-          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+      issued.credential.credential_id, secret, secret_len,
+      g_get_real_time (), &authority), ==, WYRELOG_E_OK);
 
   WylServiceExchangePrepared prepared = { 0 };
   g_autofree guint8 *token_secret = g_memdup2 ("0123456789abcdef"
-      "0123456789abcdef", 32);
+          "0123456789abcdef", 32);
   g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
-          "test-key", "wyrelogd", "wyrelog",
-          g_get_real_time () / G_USEC_PER_SEC, token_secret, 32, &prepared), ==,
+      "test-key", "wyrelogd", "wyrelog",
+      g_get_real_time () / G_USEC_PER_SEC, token_secret, 32, &prepared), ==,
       WYRELOG_E_OK);
   g_assert_nonnull (prepared.session);
   g_assert_nonnull (prepared.access_token);
@@ -275,17 +275,17 @@ test_prepare_token_success (void)
   g_assert_true (active);
   g_assert_cmpint (auth_method, ==, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL);
   g_autofree gchar *subject = wyl_session_dup_service_subject_private
-      (prepared.session);
+        (prepared.session);
   g_autofree gchar *tenant = wyl_session_dup_service_tenant_private
-      (prepared.session);
+        (prepared.session);
   g_autofree gchar *credential_id =
       wyl_session_dup_service_credential_id_private (prepared.session);
   guint64 generation = wyl_session_get_service_credential_generation_private
-      (prepared.session);
+        (prepared.session);
   gint64 issued_at = wyl_session_get_service_issued_at_seconds_private
-      (prepared.session);
+        (prepared.session);
   gint64 expires_at = wyl_session_get_service_expires_at_seconds_private
-      (prepared.session);
+        (prepared.session);
   g_assert_cmpstr (subject, ==, "svc:exchange:worker");
   g_assert_cmpstr (tenant, ==, "tenant-a");
   g_assert_cmpstr (credential_id, ==, issued.credential.credential_id);
@@ -294,7 +294,7 @@ test_prepare_token_success (void)
 
   g_autoptr (GBytes) payload = NULL;
   g_assert_cmpint (wyl_jwt_verify_hs256_signature (prepared.access_token,
-          token_secret, 32, "test-key", &payload), ==, WYRELOG_E_OK);
+      token_secret, 32, "test-key", &payload), ==, WYRELOG_E_OK);
   wyl_jwt_access_claims_t claims = { 0 };
   g_assert_cmpint (wyl_jwt_parse_access_claims_json (payload, &claims), ==,
       WYRELOG_E_OK);
@@ -319,8 +319,8 @@ test_prepare_token_rejects_invalid_inputs (void)
   WylServiceExchangePrepared prepared = { 0 };
   guint8 secret[32] = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
-          "test-key", "wyrelogd", "wyrelog", 1, secret, sizeof secret,
-          &prepared), ==, WYRELOG_E_INVALID);
+      "test-key", "wyrelogd", "wyrelog", 1, secret, sizeof secret,
+      &prepared), ==, WYRELOG_E_INVALID);
   g_assert_null (prepared.session);
   g_assert_null (prepared.access_token);
 }
@@ -343,23 +343,23 @@ test_publication_ticket_lifecycle_and_exact_binding (void)
       "exchange-ticket", g_get_real_time () + 60 * G_USEC_PER_SEC, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   WylServiceExchangeAuthority authority = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-          issued.credential.credential_id, secret, secret_len,
-          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+      issued.credential.credential_id, secret, secret_len,
+      g_get_real_time (), &authority), ==, WYRELOG_E_OK);
   WylServiceExchangePrepared prepared = { 0 };
   guint8 token_secret[32] = "0123456789abcdef0123456789abcde";
   g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
-          "ticket-key", "wyrelogd", "wyrelog",
-          g_get_real_time () / G_USEC_PER_SEC, token_secret,
-          sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
+      "ticket-key", "wyrelogd", "wyrelog",
+      g_get_real_time () / G_USEC_PER_SEC, token_secret,
+      sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
   gint publication_context = 1;
   gint other_context = 2;
   g_autoptr (WylServiceExchangePublicationTicket) ticket = NULL;
   g_assert_cmpint (wyl_service_exchange_publication_ticket_new_take
-      (&authority, registry, &publication_context, "ticket-key", &prepared,
-          &ticket), ==, WYRELOG_E_OK);
+        (&authority, registry, &publication_context, "ticket-key", &prepared,
+      &ticket), ==, WYRELOG_E_OK);
   g_assert_null (authority.lease);
   g_assert_null (prepared.session);
   g_assert_null (prepared.access_token);
@@ -368,12 +368,12 @@ test_publication_ticket_lifecycle_and_exact_binding (void)
 
   WylServiceExchangePublicationView view = { 0 };
   g_assert_cmpint (wyl_service_exchange_publication_ticket_view (ticket,
-          handle, registry, &other_context, &view), ==, WYRELOG_E_INVALID);
+      handle, registry, &other_context, &view), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_view (ticket,
-          handle, other_registry, &publication_context, &view), ==,
+      handle, other_registry, &publication_context, &view), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_view (ticket,
-          handle, registry, &publication_context, &view), ==, WYRELOG_E_OK);
+      handle, registry, &publication_context, &view), ==, WYRELOG_E_OK);
   g_assert_cmpstr (view.credential_id, ==, issued.credential.credential_id);
   g_assert_cmpuint (view.generation, ==, issued.credential.generation);
   g_assert_cmpstr (view.principal, ==, "svc:exchange:ticket");
@@ -399,7 +399,7 @@ test_publication_ticket_lifecycle_and_exact_binding (void)
   WylServiceAuthState registry_state = WYL_SERVICE_AUTH_ACTIVE;
   gboolean found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry, view.session_id,
-          view.jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
+      view.jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpint (registry_state, ==, WYL_SERVICE_AUTH_PENDING);
   reservation_clear_stack (&snapshot);
@@ -413,16 +413,16 @@ test_publication_ticket_lifecycle_and_exact_binding (void)
   g_assert_cmpint (wyl_service_exchange_publication_ticket_get_state (ticket),
       ==, WYL_SERVICE_EXCHANGE_TICKET_ACTIVE);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_release_terminal
-      (ticket), ==, WYRELOG_E_OK);
+        (ticket), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_get_state (ticket),
       ==, WYL_SERVICE_EXCHANGE_TICKET_TERMINAL);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_release_terminal
-      (ticket), ==, WYRELOG_E_INVALID);
+        (ticket), ==, WYRELOG_E_INVALID);
 
   registry_state = WYL_SERVICE_AUTH_PENDING;
   found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry, view.session_id,
-          view.jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
+      view.jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpint (registry_state, ==, WYL_SERVICE_AUTH_ACTIVE);
   reservation_clear_stack (&snapshot);
@@ -447,46 +447,46 @@ test_publication_ticket_abort_and_anomaly (void)
         "exchange-abort", g_get_real_time () + 60 * G_USEC_PER_SEC, &issued);
     gsize secret_len = 0;
     const gchar *secret = wyl_service_credential_secret_peek_encoded
-        (issued.secret, &secret_len);
+          (issued.secret, &secret_len);
     WylServiceExchangeAuthority authority = { 0 };
     g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-            issued.credential.credential_id, secret, secret_len,
-            g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+        issued.credential.credential_id, secret, secret_len,
+        g_get_real_time (), &authority), ==, WYRELOG_E_OK);
     WylServiceExchangePrepared prepared = { 0 };
     guint8 token_secret[32] = "0123456789abcdef0123456789abcde";
     g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
-            "abort-key", "wyrelogd", "wyrelog",
-            g_get_real_time () / G_USEC_PER_SEC, token_secret,
-            sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
+        "abort-key", "wyrelogd", "wyrelog",
+        g_get_real_time () / G_USEC_PER_SEC, token_secret,
+        sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
     gint publication_context = 1;
     g_autoptr (WylServiceExchangePublicationTicket) ticket = NULL;
     g_assert_cmpint (wyl_service_exchange_publication_ticket_new_take
-        (&authority, registry, &publication_context, "abort-key", &prepared,
-            &ticket), ==, WYRELOG_E_OK);
+          (&authority, registry, &publication_context, "abort-key", &prepared,
+        &ticket), ==, WYRELOG_E_OK);
     WylServiceExchangePublicationView view = { 0 };
     g_assert_cmpint (wyl_service_exchange_publication_ticket_view (ticket,
-            handle, registry, &publication_context, &view), ==, WYRELOG_E_OK);
+        handle, registry, &publication_context, &view), ==, WYRELOG_E_OK);
     g_autofree gchar *session_id = g_strdup (view.session_id);
     g_autofree gchar *jti = g_strdup (view.jti);
     if (target >= WYL_SERVICE_EXCHANGE_TICKET_PENDING)
       g_assert_cmpint (wyl_service_exchange_publication_ticket_reserve
-          (ticket), ==, WYRELOG_E_OK);
+            (ticket), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_service_exchange_authority_rollback (&authority), ==,
         WYRELOG_E_OK);
     if (target >= WYL_SERVICE_EXCHANGE_TICKET_LIVE)
       g_assert_cmpint (wyl_service_exchange_publication_ticket_mark_live
-          (ticket), ==, WYRELOG_E_OK);
+            (ticket), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_service_exchange_publication_ticket_abort (ticket),
         ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_service_exchange_publication_ticket_get_state
-        (ticket), ==, WYL_SERVICE_EXCHANGE_TICKET_ABORTED);
+          (ticket), ==, WYL_SERVICE_EXCHANGE_TICKET_ABORTED);
     g_assert_cmpint (wyl_service_exchange_publication_ticket_abort (ticket),
         ==, WYRELOG_E_INVALID);
     WylServiceAuthReservation snapshot = { 0 };
     WylServiceAuthState registry_state = WYL_SERVICE_AUTH_ACTIVE;
     gboolean found = TRUE;
     g_assert_cmpint (wyl_service_auth_registry_lookup (registry, session_id,
-            jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
+        jti, &snapshot, &registry_state, &found), ==, WYRELOG_E_OK);
     g_assert_false (found);
     reservation_clear_stack (&snapshot);
     assert_reacquire_write (handle);
@@ -504,22 +504,22 @@ test_publication_ticket_abort_and_anomaly (void)
       "exchange-anomaly", g_get_real_time () + 60 * G_USEC_PER_SEC, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   WylServiceExchangeAuthority authority = { 0 };
   g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
-          issued.credential.credential_id, secret, secret_len,
-          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+      issued.credential.credential_id, secret, secret_len,
+      g_get_real_time (), &authority), ==, WYRELOG_E_OK);
   WylServiceExchangePrepared prepared = { 0 };
   guint8 token_secret[32] = "0123456789abcdef0123456789abcde";
   g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
-          "anomaly-key", "wyrelogd", "wyrelog",
-          g_get_real_time () / G_USEC_PER_SEC, token_secret,
-          sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
+      "anomaly-key", "wyrelogd", "wyrelog",
+      g_get_real_time () / G_USEC_PER_SEC, token_secret,
+      sizeof token_secret, &prepared), ==, WYRELOG_E_OK);
   gint publication_context = 1;
   g_autoptr (WylServiceExchangePublicationTicket) ticket = NULL;
   g_assert_cmpint (wyl_service_exchange_publication_ticket_new_take
-      (&authority, registry, &publication_context, "anomaly-key", &prepared,
-          &ticket), ==, WYRELOG_E_OK);
+        (&authority, registry, &publication_context, "anomaly-key", &prepared,
+      &ticket), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_publication_ticket_reserve (ticket),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_authority_rollback (&authority), ==,
@@ -531,7 +531,7 @@ test_publication_ticket_abort_and_anomaly (void)
       ==, WYL_SERVICE_EXCHANGE_TICKET_ABORTED);
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==,
       WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);

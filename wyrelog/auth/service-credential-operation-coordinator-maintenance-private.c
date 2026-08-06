@@ -31,8 +31,8 @@ authority_transaction_finish (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
-    delivery_proof_from_record
-    (const WylServiceCredentialOperationRecord * record,
+delivery_proof_from_record
+  (const WylServiceCredentialOperationRecord * record,
     const WylPolicyServiceHandoffMaintenanceProof * maintenance,
     WylServiceCredentialHandoffDeliveryProof * out)
 {
@@ -45,7 +45,7 @@ static wyrelog_error_t
   else
     return WYRELOG_E_INVALID;
   *out = (WylServiceCredentialHandoffDeliveryProof) {
-  .source = source,.tuple = maintenance->tuple,.actor_subject_id =
+    .source = source,.tuple = maintenance->tuple,.actor_subject_id =
         record->actor_subject_id,.operation =
         record->kind ==
         WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE ? "issue" :
@@ -56,7 +56,8 @@ static wyrelog_error_t
         record->parent_identity,.stage_basename =
         record->stage_basename,.stage_identity =
         record->stage_identity,.publication_receipt_id =
-        record->publication_receipt_id,};
+        record->publication_receipt_id,
+  };
   memcpy (out->target_digest, maintenance->target_digest,
       sizeof out->target_digest);
   return WYRELOG_E_OK;
@@ -71,14 +72,14 @@ maintain_prepared_authority (WylHandle *handle,
   WylServiceAuthorityTransaction *transaction = NULL;
   WylServiceAuthorityCommitEvidence *evidence = NULL;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction);
+        (store, handle, lease, &transaction);
 
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_prepare_commit_evidence
-        (transaction, store, &evidence);
+          (transaction, store, &evidence);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_handoff_maintain_prepared_core (transaction, store,
-        proof, out);
+            proof, out);
   if (rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_POLICY;
   if (transaction != NULL)
@@ -97,11 +98,11 @@ maintain_committed_authority (WylHandle *handle,
 {
   WylServiceAuthorityTransaction *transaction = NULL;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction);
+        (store, handle, lease, &transaction);
 
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_handoff_maintain_committed_core (transaction, store,
-        proof, out);
+            proof, out);
   if (rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_POLICY;
   if (transaction != NULL)
@@ -120,11 +121,11 @@ lookup_delivery_authority (WylHandle *handle,
 {
   WylServiceAuthorityTransaction *transaction = NULL;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction);
+        (store, handle, lease, &transaction);
 
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_handoff_lookup_delivery_core (transaction,
-        store, proof, out_found, out_disposition);
+            store, proof, out_found, out_disposition);
   if (transaction != NULL)
     rc = authority_transaction_finish (store, transaction, rc);
   if (rc != WYRELOG_E_OK) {
@@ -144,11 +145,11 @@ backfill_legacy_delivery_authority (WylHandle *handle,
   WylServiceCredentialHandoffDeliveryPreflight *preflight = NULL;
   WylServiceCredentialHandoffDeliveryOutcome outcome = 0;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction);
+        (store, handle, lease, &transaction);
 
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_handoff_prepare_delivery_core (transaction,
-        store, proof, &outcome, &preflight, out_disposition);
+            store, proof, &outcome, &preflight, out_disposition);
   if (rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_POLICY;
   if (transaction != NULL)
@@ -184,8 +185,8 @@ return_record (WylServiceCredentialOperationRecord *source,
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_maintain_expired_locked
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_maintain_expired_locked
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, GCancellable * cancellable,
@@ -214,25 +215,25 @@ wyrelog_error_t
   if (handle == NULL || storage == NULL || anchor == NULL
       || out_outcome == NULL || out_record == NULL
       || !wyl_service_credential_operation_coordinator_request_id_is_valid
-      (request_id)
+        (request_id)
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
-          anchor)
+      anchor)
       || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
     return WYRELOG_E_INVALID;
 
   rc = wyl_service_credential_operation_coordinator_load_snapshot (storage,
-      anchor, request_id, snapshot_digest, &record);
+          anchor, request_id, snapshot_digest, &record);
   if (rc != WYRELOG_E_OK)
     goto out;
 
   rc = wyl_service_credential_handoff_resolve_remediation_incident (handle,
-      request_id, snapshot_digest, &remediation);
+          request_id, snapshot_digest, &remediation);
   if (rc == WYRELOG_E_NOT_FOUND
       && record.last_remediation_action !=
       WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE)
     rc = wyl_service_credential_handoff_resolve_remediation_incident (handle,
-        request_id, record.last_remediation_source_snapshot_digest,
-        &remediation);
+            request_id, record.last_remediation_source_snapshot_digest,
+            &remediation);
   if (rc == WYRELOG_E_NOT_FOUND) {
     if (record.last_remediation_action !=
         WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE) {
@@ -244,12 +245,20 @@ wyrelog_error_t
     goto out;
   } else {
     wyl_service_credential_operation_remediation_proof_from_result
-        (&remediation, &remediation_proof);
+      (&remediation, &remediation_proof);
     if (remediation.action == WYL_SERVICE_HANDOFF_REMEDIATION_RESUME)
-      rc = wyl_service_credential_operation_coordinator_checkpoint_operator_resume (storage, anchor, request_id, &remediation_proof, checkpoint_time (&record, remediation.created_at_us), &replayed, &next);
+      rc =
+          wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+            (storage, anchor, request_id, &remediation_proof,
+              checkpoint_time (&record, remediation.created_at_us), &replayed,
+              &next);
     else if (remediation.action ==
         WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE)
-      rc = wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe (storage, anchor, request_id, &remediation_proof, checkpoint_time (&record, remediation.created_at_us), &replayed, &next);
+      rc =
+          wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+            (storage, anchor, request_id, &remediation_proof,
+              checkpoint_time (&record, remediation.created_at_us), &replayed,
+              &next);
     else
       rc = WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
@@ -267,7 +276,8 @@ wyrelog_error_t
     }
   }
 
-  if (record.state == WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
+  if (record.state ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
     return_record (&record,
         WYL_SERVICE_CREDENTIAL_OPERATION_MAINTENANCE_UNCHANGED, out_outcome,
         out_record);
@@ -277,16 +287,16 @@ wyrelog_error_t
   if (record.state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL) {
     WylServiceCredentialOperationTerminalKind terminal_kind = 0;
     if (!wyl_service_credential_operation_terminal_reason_parse
-        (record.terminal_reason, &terminal_kind, NULL)) {
+          (record.terminal_reason, &terminal_kind, NULL)) {
       rc = WYRELOG_E_POLICY;
       goto out;
     }
     if (terminal_kind ==
         WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
         && (record.version !=
-            WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
-            || record.last_remediation_action !=
-            WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE)) {
+        WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+        || record.last_remediation_action !=
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE)) {
       rc = WYRELOG_E_POLICY;
       goto out;
     }
@@ -311,12 +321,12 @@ wyrelog_error_t
   }
 
   rc = wyl_service_credential_operation_maintenance_proof_from_record
-      (&record, &escrow_id, &proof);
+        (&record, &escrow_id, &proof);
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
-      &lease);
+        (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
+          &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_write_lease_get_policy_store (lease, handle, &store);
   if (rc != WYRELOG_E_OK)
@@ -328,13 +338,17 @@ wyrelog_error_t
     if (rc != WYRELOG_E_OK)
       goto out;
     rc = lookup_delivery_authority (handle, lease, store, &delivery_proof,
-        &delivery_found, &delivery_disposition);
+            &delivery_found, &delivery_disposition);
     if (rc == WYRELOG_E_INVALID)
       rc = WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
       goto out;
     if (delivery_found) {
-      rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published (storage, anchor, request_id, checkpoint_time (&record, delivery_disposition.created_at_us), &replayed, &next);
+      rc =
+          wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+            (storage, anchor, request_id,
+              checkpoint_time (&record, delivery_disposition.created_at_us),
+              &replayed, &next);
       if (rc != WYRELOG_E_OK)
         goto out;
       return_record (&next,
@@ -373,7 +387,11 @@ wyrelog_error_t
     }
     if (prepared.outcome ==
         WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_NOT_COMMITTED) {
-      rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed (storage, anchor, request_id, checkpoint_time (&record, prepared.created_at_us), &replayed, &next);
+      rc =
+          wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
+            (storage, anchor, request_id,
+              checkpoint_time (&record, prepared.created_at_us), &replayed,
+              &next);
       if (rc != WYRELOG_E_OK)
         goto out;
       return_record (&next,
@@ -386,7 +404,12 @@ wyrelog_error_t
       rc = WYRELOG_E_POLICY;
       goto out;
     }
-    rc = wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound (storage, anchor, request_id, prepared.successor_credential_id, prepared.successor_generation, prepared.binding_digest, checkpoint_time (&record, prepared.created_at_us), &replayed, &next);
+    rc =
+        wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+          (storage, anchor, request_id, prepared.successor_credential_id,
+            prepared.successor_generation, prepared.binding_digest,
+            checkpoint_time (&record, prepared.created_at_us), &replayed,
+            &next);
     if (rc != WYRELOG_E_OK)
       goto out;
     wyl_service_credential_operation_record_clear (&record);
@@ -395,7 +418,7 @@ wyrelog_error_t
         WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
     wyl_policy_service_handoff_prepared_maintenance_result_clear (&prepared);
     rc = wyl_service_credential_operation_maintenance_proof_from_record
-        (&record, &escrow_id, &proof);
+          (&record, &escrow_id, &proof);
     if (rc != WYRELOG_E_OK)
       goto out;
   }
@@ -415,12 +438,16 @@ wyrelog_error_t
           WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_ESCROW_MISSING
           && record.state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
         rc = backfill_legacy_delivery_authority (handle, lease, store,
-            &delivery_proof, &delivery_disposition);
+                &delivery_proof, &delivery_disposition);
         if (rc == WYRELOG_E_INVALID)
           rc = WYRELOG_E_POLICY;
         if (rc != WYRELOG_E_OK)
           goto out;
-        rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published (storage, anchor, request_id, checkpoint_time (&record, delivery_disposition.created_at_us), &replayed, &next);
+        rc =
+            wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+              (storage, anchor, request_id,
+                checkpoint_time (&record, delivery_disposition.created_at_us),
+                &replayed, &next);
         if (rc != WYRELOG_E_OK)
           goto out;
         return_record (&next,
@@ -429,12 +456,13 @@ wyrelog_error_t
         break;
       }
       rc = wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
-          (storage, anchor, request_id,
-          committed.outcome ==
-          WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_ESCROW_MISSING ?
-          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING :
-          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_FOREIGN,
-          checkpoint_time (&record, committed.created_at_us), &replayed, &next);
+            (storage, anchor, request_id,
+              committed.outcome ==
+              WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_ESCROW_MISSING ?
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING :
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_FOREIGN,
+              checkpoint_time (&record, committed.created_at_us), &replayed,
+              &next);
       if (rc != WYRELOG_E_OK)
         goto out;
       return_record (&next,
@@ -443,7 +471,15 @@ wyrelog_error_t
       break;
     case WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_SUCCESSOR_EXPIRED:
     case WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_SUCCESSOR_REVOKED:
-      rc = wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar (storage, anchor, request_id, committed.outcome == WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_SUCCESSOR_EXPIRED ? WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED : WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED, checkpoint_time (&record, committed.created_at_us), &replayed, &next);
+      rc =
+          wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+            (storage, anchor, request_id,
+              committed.outcome ==
+              WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_SUCCESSOR_EXPIRED ?
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED :
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED,
+              checkpoint_time (&record, committed.created_at_us), &replayed,
+              &next);
       if (rc != WYRELOG_E_OK)
         goto out;
       return_record (&next,
@@ -484,8 +520,8 @@ out:
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_maintain_expired
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_maintain_expired
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, GCancellable * cancellable,
@@ -499,17 +535,17 @@ wyrelog_error_t
   if (handle == NULL || storage == NULL || anchor == NULL
       || out_outcome == NULL || out_record == NULL
       || !wyl_service_credential_operation_coordinator_request_id_is_valid
-      (request_id)
+        (request_id)
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
-          anchor)
+      anchor)
       || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
     return WYRELOG_E_INVALID;
   rc = wyl_service_credential_operation_coordinator_lock_acquire (storage,
-      anchor, request_id, &lifecycle_lock);
+          anchor, request_id, &lifecycle_lock);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_operation_coordinator_maintain_expired_locked
-        (handle, storage, anchor, request_id, cancellable, out_outcome,
-        out_record);
+          (handle, storage, anchor, request_id, cancellable, out_outcome,
+            out_record);
   wyl_service_credential_operation_coordinator_lock_release (storage, anchor,
       &lifecycle_lock);
   return rc;

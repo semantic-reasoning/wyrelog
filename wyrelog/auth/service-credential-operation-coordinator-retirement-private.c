@@ -14,7 +14,7 @@ static void (*before_delete_hook_for_test) (gpointer data);
 static gpointer before_delete_hook_data_for_test;
 
 void wyl_service_credential_operation_retirement_set_before_delete_hook_for_test
-    (void (*hook) (gpointer data), gpointer data)
+  (void (*hook) (gpointer data), gpointer data)
 {
   before_delete_hook_for_test = hook;
   before_delete_hook_data_for_test = data;
@@ -55,16 +55,16 @@ retirement_lookup_authority (WylHandle *handle,
 {
   WylServiceAuthorityTransaction *transaction = NULL;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction);
+        (store, handle, lease, &transaction);
 
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_handoff_retirement_lookup_core (transaction, store,
-        request_id, out);
+            request_id, out);
   if (rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_POLICY;
   if (transaction != NULL)
     rc = authority_transaction_finish (store, transaction, rc,
-        rc == WYRELOG_E_OK);
+            rc == WYRELOG_E_OK);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_handoff_retirement_result_clear (out);
   return rc;
@@ -78,16 +78,16 @@ retirement_record_authority (WylHandle *handle,
 {
   WylServiceAuthorityTransaction *transaction = NULL;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction);
+        (store, handle, lease, &transaction);
 
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_handoff_retirement_record_core (transaction, store,
-        input, out);
+            input, out);
   if (rc == WYRELOG_E_INVALID)
     rc = WYRELOG_E_POLICY;
   if (transaction != NULL)
     rc = authority_transaction_finish (store, transaction, rc,
-        rc == WYRELOG_E_OK);
+            rc == WYRELOG_E_OK);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_handoff_retirement_result_clear (out);
   return rc;
@@ -101,11 +101,12 @@ delete_expectation_from_receipt (const gchar *request_id,
   if (receipt == NULL || out == NULL
       || g_strcmp0 (request_id, receipt->original_request_id) != 0
       || sodium_is_zero (receipt->raw_journal_snapshot_digest,
-          sizeof receipt->raw_journal_snapshot_digest))
+      sizeof receipt->raw_journal_snapshot_digest))
     return WYRELOG_E_POLICY;
   *out = (WylServiceCredentialOperationExactDeleteExpectation) {
-  .request_id = request_id,.expected_journal_version =
-        WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,};
+    .request_id = request_id,.expected_journal_version =
+        WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,
+  };
   memcpy (out->raw_snapshot_digest, receipt->raw_journal_snapshot_digest,
       sizeof out->raw_snapshot_digest);
   if (receipt->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED) {
@@ -145,13 +146,13 @@ retirement_input_from_snapshot (const gchar *request_id,
       || g_strcmp0 (record->request_id, request_id) != 0
       || g_strcmp0 (record->operation_id, request_id) != 0
       || record->updated_at_us <= 0 || sodium_is_zero (raw_digest,
-          WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES)
+      WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES)
       || !wyl_service_credential_operation_terminal_reason_parse
-      (record->terminal_reason, &terminal_kind, &terminal_remediation))
+        (record->terminal_reason, &terminal_kind, &terminal_remediation))
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc =
       wyl_service_credential_operation_maintenance_proof_from_record (record,
-      escrow_id, &maintenance);
+          escrow_id, &maintenance);
   if (rc != WYRELOG_E_OK)
     return rc == WYRELOG_E_INVALID ? WYRELOG_E_POLICY : rc;
   memset (out, 0, sizeof *out);
@@ -162,18 +163,19 @@ retirement_input_from_snapshot (const gchar *request_id,
   memcpy (out->raw_journal_snapshot_digest, raw_digest,
       sizeof out->raw_journal_snapshot_digest);
 
-  if (terminal_kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED) {
+  if (terminal_kind ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED) {
     if (terminal_remediation != NULL
         || (record->last_remediation_action !=
-            WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE
-            && record->last_remediation_action !=
-            WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME))
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE
+        && record->last_remediation_action !=
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME))
       return WYRELOG_E_POLICY;
     out->terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED;
     out->delivery_actor_subject_id = record->actor_subject_id;
     rc = wyl_service_credential_handoff_delivery_retirement_proof_digest
-        (record, &out->tuple, maintenance.target_digest,
-        out->delivery_proof_digest);
+          (record, &out->tuple, maintenance.target_digest,
+            out->delivery_proof_digest);
     if (rc != WYRELOG_E_OK)
       return rc == WYRELOG_E_INVALID ? WYRELOG_E_POLICY : rc;
     if (record->last_remediation_action ==
@@ -185,7 +187,7 @@ retirement_input_from_snapshot (const gchar *request_id,
         WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE
         || terminal_remediation == NULL
         || g_strcmp0 (terminal_remediation,
-            record->last_remediation_request_id) != 0
+        record->last_remediation_request_id) != 0
         || record->last_remediation_applied_target_state !=
         WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL)
       return WYRELOG_E_POLICY;
@@ -206,14 +208,14 @@ retirement_input_from_snapshot (const gchar *request_id,
 }
 
 void wyl_service_credential_operation_retirement_result_clear
-    (WylServiceCredentialOperationRetirementResult * result)
+  (WylServiceCredentialOperationRetirementResult * result)
 {
   if (result != NULL)
     sodium_memzero (result, sizeof *result);
 }
 
 void wyl_service_credential_operation_guarded_begin_result_clear
-    (WylServiceCredentialOperationGuardedBeginResult * result)
+  (WylServiceCredentialOperationGuardedBeginResult * result)
 {
   if (result == NULL)
     return;
@@ -222,8 +224,8 @@ void wyl_service_credential_operation_guarded_begin_result_clear
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_purge_retired
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_purge_retired
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, GCancellable * cancellable,
@@ -250,15 +252,15 @@ wyrelog_error_t
     wyl_service_credential_operation_retirement_result_clear (out_result);
   if (handle == NULL || storage == NULL || anchor == NULL || out_result == NULL
       || !wyl_service_credential_operation_coordinator_request_id_is_valid
-      (request_id)
+        (request_id)
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
-          anchor)
+      anchor)
       || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
     return WYRELOG_E_INVALID;
   if (retirement_cancelled (cancellable))
     return WYRELOG_E_BUSY;
   rc = wyl_service_credential_operation_coordinator_lock_acquire (storage,
-      anchor, request_id, &lifecycle_lock);
+          anchor, request_id, &lifecycle_lock);
   if (rc != WYRELOG_E_OK)
     goto out;
   locked = TRUE;
@@ -267,8 +269,8 @@ wyrelog_error_t
     goto out;
   }
   rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
-      &lease);
+        (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
+          &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_write_lease_get_policy_store (lease, handle, &store);
   if (rc == WYRELOG_E_OK && store != wyl_handle_get_policy_store (handle))
@@ -281,13 +283,13 @@ wyrelog_error_t
     receipt_replayed = TRUE;
   } else if (rc == WYRELOG_E_NOT_FOUND) {
     rc = wyl_service_credential_operation_coordinator_load_snapshot (storage,
-        anchor, request_id, raw_digest, &record);
+            anchor, request_id, raw_digest, &record);
     if (rc == WYRELOG_E_INVALID)
       rc = WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
       goto out;
     rc = retirement_input_from_snapshot (request_id, &record, raw_digest,
-        &escrow_id, &input);
+            &escrow_id, &input);
     if (rc == WYRELOG_E_INVALID)
       rc = WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
@@ -326,14 +328,17 @@ wyrelog_error_t
     rc = WYRELOG_E_BUSY;
     goto out;
   }
-  rc = wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot (storage, anchor, &lifecycle_lock, &expectation);
+  rc =
+      wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+        (storage, anchor, &lifecycle_lock, &expectation);
   gboolean deleted = rc == WYRELOG_E_OK;
   if (rc == WYRELOG_E_NOT_FOUND)
     rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK) {
     *out_result = (WylServiceCredentialOperationRetirementResult) {
-    .receipt_replayed = receipt_replayed,.snapshot_deleted = deleted,.kind =
-          receipt.terminal_kind,.retired_at_us = receipt.retired_at_us,};
+      .receipt_replayed = receipt_replayed,.snapshot_deleted = deleted,.kind =
+          receipt.terminal_kind,.retired_at_us = receipt.retired_at_us,
+    };
   }
 out:
   sodium_memzero (raw_digest, sizeof raw_digest);
@@ -355,8 +360,8 @@ out:
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
@@ -377,15 +382,15 @@ wyrelog_error_t
   if (handle == NULL || storage == NULL || anchor == NULL || request == NULL
       || out_result == NULL
       || !wyl_service_credential_operation_coordinator_request_is_valid
-      (request)
+        (request)
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
-          anchor)
+      anchor)
       || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
     return WYRELOG_E_INVALID;
   if (retirement_cancelled (cancellable))
     return WYRELOG_E_BUSY;
   rc = wyl_service_credential_operation_coordinator_lock_acquire (storage,
-      anchor, request->request_id, &lifecycle_lock);
+          anchor, request->request_id, &lifecycle_lock);
   if (rc != WYRELOG_E_OK)
     goto out;
   locked = TRUE;
@@ -394,8 +399,8 @@ wyrelog_error_t
     goto out;
   }
   rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
-      &lease);
+        (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
+          &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_write_lease_get_policy_store (lease, handle, &store);
   if (rc == WYRELOG_E_OK && store != wyl_handle_get_policy_store (handle))
@@ -403,7 +408,7 @@ wyrelog_error_t
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = retirement_lookup_authority (handle, lease, store,
-      request->request_id, &receipt);
+          request->request_id, &receipt);
   if (rc == WYRELOG_E_OK) {
     rc = WYRELOG_E_POLICY;
     goto out;
@@ -420,8 +425,8 @@ wyrelog_error_t
     goto out;
   }
   rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked
-      (storage, anchor, &lifecycle_lock, request, now_us, &replayed,
-      &out_result->record);
+        (storage, anchor, &lifecycle_lock, request, now_us, &replayed,
+          &out_result->record);
   if (rc == WYRELOG_E_OK)
     out_result->replayed = replayed;
 out:

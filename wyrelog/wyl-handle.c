@@ -197,7 +197,7 @@ typedef wyrelog_error_t (*WylEngineSessionVerifier)
 static GRecMutexLocker *engine_session_lock_owner (WylHandle * self);
 
 static wyrelog_error_t wyl_handle_intern_engine_symbol_locked
-    (WylHandle * self, const gchar * symbol, gint64 * out_id);
+  (WylHandle * self, const gchar * symbol, gint64 * out_id);
 static gchar *wyl_handle_dup_engine_symbol_locked (WylHandle * self, gint64 id);
 static wyrelog_error_t wyl_handle_engine_insert_locked (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
@@ -210,30 +210,30 @@ static wyrelog_error_t wyl_handle_engine_decide_locked (WylHandle * self,
     const gint64 row[3], gboolean * out_allowed);
 static wyrelog_error_t wyl_handle_engine_step_delta_locked (WylHandle * self);
 static wyrelog_error_t wyl_handle_engine_set_delta_callback_locked
-    (WylHandle * self, WylDeltaCallback cb, gpointer user_data);
+  (WylHandle * self, WylDeltaCallback cb, gpointer user_data);
 static wyrelog_error_t wyl_handle_replay_delta_insert_locked
-    (WylHandle * self, const gchar * relation, const gint64 * row, gsize ncols);
+  (WylHandle * self, const gchar * relation, const gint64 * row, gsize ncols);
 static wyrelog_error_t wyl_handle_make_engine_compound_locked
-    (WylHandle * self, const gchar * functor,
+  (WylHandle * self, const gchar * functor,
     const wirelog_compound_arg_t * args, gsize nargs, gint64 * out_id);
 static wyrelog_error_t wyl_handle_make_read_engine_compound_locked
-    (WylHandle * self, const gchar * functor,
+  (WylHandle * self, const gchar * functor,
     const wirelog_compound_arg_t * args, gsize nargs, gint64 * out_id);
 static wyrelog_error_t wyl_handle_make_guard_context_compound_locked
-    (WylHandle * self, gint64 timestamp, gint64 loc_class_id, gint64 risk,
+  (WylHandle * self, gint64 timestamp, gint64 loc_class_id, gint64 risk,
     gint64 scope_id, gint64 * out_id);
 static void poison_engine_pair_locked (WylHandle * self);
 static wyrelog_error_t fail_partial_engine_pair_mutation_locked
-    (WylHandle * self, wyrelog_error_t failure);
+  (WylHandle * self, wyrelog_error_t failure);
 static gboolean engine_pair_unavailable (WylHandle * self);
 static void wyl_handle_buffer_delta_cb (const gchar * relation,
     const gint64 * row, guint ncols, WylDeltaKind kind, gpointer user_data);
 static wyrelog_error_t flush_pending_deltas (WylHandle * self);
 static wyrelog_error_t reconcile_committed_engine_pair_in_session
-    (WylEngineSession * session, WylEngineSessionVerifier verify,
+  (WylEngineSession * session, WylEngineSessionVerifier verify,
     gpointer data);
 static wyrelog_error_t reconcile_guarded_engine_pair_in_session
-    (WylEngineSession * session, WylEnginePublicationVerifier verify,
+  (WylEngineSession * session, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data);
 static wyrelog_error_t wyl_handle_insert_audit_fact_locked (WylHandle * self,
@@ -273,8 +273,8 @@ static gboolean
 engine_session_is_valid (WylEngineSession *session)
 {
   return session != NULL && session->active && session->locker != NULL
-      && WYL_IS_HANDLE (session->handle)
-      && session->owner == g_thread_self ();
+         && WYL_IS_HANDLE (session->handle)
+         && session->owner == g_thread_self ();
 }
 
 WylServiceAuthAuthority *
@@ -340,7 +340,7 @@ wyl_engine_session_release (WylEngineSession *session)
   }
   if (session->handle->engine_session_depth != session->acquisition_depth) {
     g_critical
-        ("engine sessions must be released in reverse acquisition order");
+      ("engine sessions must be released in reverse acquisition order");
     return;
   }
   session->handle->engine_session_depth--;
@@ -348,7 +348,7 @@ wyl_engine_session_release (WylEngineSession *session)
   g_clear_pointer (&session->locker, g_rec_mutex_locker_free);
   if (session->rank_active) {
     wyrelog_error_t rank_rc = wyl_service_auth_rank_leave (session->handle,
-        WYL_SERVICE_AUTH_RANK_ENGINE);
+            WYL_SERVICE_AUTH_RANK_ENGINE);
     if (rank_rc != WYRELOG_E_OK)
       g_critical ("engine session rank release invariant failed");
     session->rank_active = FALSE;
@@ -358,8 +358,8 @@ wyl_engine_session_release (WylEngineSession *session)
 }
 
 wyrelog_error_t
-    wyl_engine_session_begin_external_service_authority_transaction
-    (WylEngineSession * session, wyl_policy_store_t * expected_store,
+wyl_engine_session_begin_external_service_authority_transaction
+  (WylEngineSession * session, wyl_policy_store_t * expected_store,
     guint64 expected_generation, WylServiceAuthWriteLease * write_lease,
     WylServiceAuthorityTransaction ** out_transaction) {
   if (out_transaction != NULL)
@@ -376,11 +376,11 @@ wyrelog_error_t
   if (!wyl_service_auth_rank_has_external_publication_prefix (self))
     return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_handle_policy_store_validate_generation (self,
-      expected_store, expected_generation);
+          expected_store, expected_generation);
   if (rc != WYRELOG_E_OK)
     return rc;
   return
-      wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
+    wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
       (expected_store, self, write_lease, out_transaction);
 }
 
@@ -389,8 +389,9 @@ wyl_engine_session_intern_symbol (WylEngineSession *session,
     const gchar *symbol, gint64 *out_id)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_intern_engine_symbol_locked (session->handle, symbol, out_id) :
-      WYRELOG_E_INVALID;
+         wyl_handle_intern_engine_symbol_locked (session->handle, symbol,
+             out_id) :
+         WYRELOG_E_INVALID;
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: read-only symbol-map lookup. */
@@ -420,8 +421,8 @@ wyl_engine_session_lookup_symbol (WylEngineSession *session,
     const gchar *symbol, gint64 *out_id)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_lookup_engine_symbol_locked (session->handle, symbol,
-      out_id) : WYRELOG_E_INVALID;
+         wyl_handle_lookup_engine_symbol_locked (session->handle, symbol,
+             out_id) : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -431,7 +432,7 @@ wyl_engine_verification_lookup_symbol (WylEngineVerification *verification,
   if (verification == NULL || !verification->active)
     return WYRELOG_E_INVALID;
   return wyl_engine_session_lookup_symbol (verification->session, symbol,
-      out_id);
+             out_id);
 }
 
 wyrelog_error_t
@@ -442,7 +443,7 @@ wyl_engine_verification_contains (WylEngineVerification *verification,
   if (verification == NULL || !verification->active)
     return WYRELOG_E_INVALID;
   return wyl_engine_session_contains (verification->session, relation, row,
-      ncols, out_contains);
+             ncols, out_contains);
 }
 
 typedef struct
@@ -475,8 +476,8 @@ exact_keyed_row_probe_cb (const gchar *relation, const gint64 *row,
 }
 
 wyrelog_error_t
-    wyl_engine_verification_has_exact_keyed_row
-    (WylEngineVerification * verification, const gchar * relation,
+wyl_engine_verification_has_exact_keyed_row
+  (WylEngineVerification * verification, const gchar * relation,
     gint64 key, const gint64 * expected, gsize ncols, gboolean * out_exact)
 {
   if (out_exact != NULL)
@@ -501,7 +502,7 @@ wyrelog_error_t
     .expected_ncols = (guint) ncols,
   };
   wyrelog_error_t rc = wyl_engine_snapshot (verification->read_engine,
-      relation, exact_keyed_row_probe_cb, &probe);
+          relation, exact_keyed_row_probe_cb, &probe);
   if (rc == WYRELOG_E_OK)
     *out_exact = probe.count == 1 && probe.exact_count == 1;
   return rc;
@@ -509,8 +510,8 @@ wyrelog_error_t
 
 #ifdef WYL_TEST_HANDLE_SEAMS
 wyrelog_error_t
-    wyl_engine_verification_mutate_keyed_row_for_test
-    (WylEngineVerification * verification, const gchar * relation,
+wyl_engine_verification_mutate_keyed_row_for_test
+  (WylEngineVerification * verification, const gchar * relation,
     const gint64 * expected, const gint64 * mutant, gsize ncols,
     WylEngineVerificationCandidateMutation mutation)
 {
@@ -519,7 +520,7 @@ wyrelog_error_t
       || expected[0] != mutant[0]
       || memcmp (expected, mutant, ncols * sizeof (*expected)) == 0
       || (mutation != WYL_ENGINE_VERIFICATION_CANDIDATE_EXTRA
-          && mutation != WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG))
+      && mutation != WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG))
     return WYRELOG_E_INVALID;
   WylEngineSession *session = verification->session;
   if (!engine_session_is_valid (session) || session->acquisition_depth != 1
@@ -532,18 +533,18 @@ wyrelog_error_t
 
   if (mutation == WYL_ENGINE_VERIFICATION_CANDIDATE_WRONG) {
     wyrelog_error_t rc = wyl_engine_owned_remove (verification->read_engine,
-        relation, expected, ncols);
+            relation, expected, ncols);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
   return wyl_engine_owned_insert (verification->read_engine, relation, mutant,
-      ncols);
+             ncols);
 }
 #endif
 
 wyrelog_error_t
-    wyl_engine_verification_get_accepted_session_state
-    (WylEngineVerification * verification, gint64 scope, gint64 * out_state) {
+wyl_engine_verification_get_accepted_session_state
+  (WylEngineVerification * verification, gint64 scope, gint64 * out_state) {
   if (out_state != NULL)
     *out_state = 0;
   if (verification == NULL || !verification->active || out_state == NULL)
@@ -557,12 +558,12 @@ wyrelog_error_t
       || session->handle->engine_symbols_by_id != verification->symbols)
     return WYRELOG_E_INVALID;
   return wyl_engine_owned_get_accepted_session_state
-      (verification->read_engine, "session_state", scope, out_state);
+           (verification->read_engine, "session_state", scope, out_state);
 }
 
 wyrelog_error_t
-    wyl_engine_verification_has_exact_accepted_member_of
-    (WylEngineVerification * verification, const gint64 row[3],
+wyl_engine_verification_has_exact_accepted_member_of
+  (WylEngineVerification * verification, const gint64 row[3],
     gboolean * out_exact)
 {
   if (out_exact != NULL)
@@ -579,7 +580,7 @@ wyrelog_error_t
       || session->handle->engine_symbols_by_id != verification->symbols)
     return WYRELOG_E_INVALID;
   return wyl_engine_owned_has_exact_accepted_member_of
-      (verification->read_engine, "member_of", row, out_exact);
+           (verification->read_engine, "member_of", row, out_exact);
 }
 
 wyrelog_error_t
@@ -605,7 +606,7 @@ gchar *
 wyl_engine_session_dup_symbol (WylEngineSession *session, gint64 id)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_dup_engine_symbol_locked (session->handle, id) : NULL;
+         wyl_handle_dup_engine_symbol_locked (session->handle, id) : NULL;
 }
 
 wyrelog_error_t
@@ -613,8 +614,9 @@ wyl_engine_session_insert (WylEngineSession *session, const gchar *relation,
     const gint64 *row, gsize ncols)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_engine_insert_locked (session->handle, relation, row, ncols) :
-      WYRELOG_E_INVALID;
+         wyl_handle_engine_insert_locked (session->handle, relation, row,
+             ncols) :
+         WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -622,8 +624,9 @@ wyl_engine_session_remove (WylEngineSession *session, const gchar *relation,
     const gint64 *row, gsize ncols)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_engine_remove_locked (session->handle, relation, row, ncols) :
-      WYRELOG_E_INVALID;
+         wyl_handle_engine_remove_locked (session->handle, relation, row,
+             ncols) :
+         WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -631,8 +634,9 @@ wyl_engine_session_contains (WylEngineSession *session, const gchar *relation,
     const gint64 *row, gsize ncols, gboolean *out_contains)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_engine_contains_locked (session->handle, relation, row, ncols,
-      out_contains) : WYRELOG_E_INVALID;
+         wyl_handle_engine_contains_locked (session->handle, relation, row,
+             ncols,
+             out_contains) : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -640,8 +644,8 @@ wyl_engine_session_decide (WylEngineSession *session, const gint64 row[3],
     gboolean *out_allowed)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_engine_decide_locked (session->handle, row, out_allowed) :
-      WYRELOG_E_INVALID;
+         wyl_handle_engine_decide_locked (session->handle, row, out_allowed) :
+         WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -650,15 +654,17 @@ wyl_engine_session_make_guard_context_compound (WylEngineSession *session,
     gint64 *out_id)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_make_guard_context_compound_locked (session->handle,
-      timestamp, loc_class_id, risk, scope_id, out_id) : WYRELOG_E_INVALID;
+         wyl_handle_make_guard_context_compound_locked (session->handle,
+             timestamp, loc_class_id, risk, scope_id,
+             out_id) : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
 wyl_engine_session_step_delta (WylEngineSession *session)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_engine_step_delta_locked (session->handle) : WYRELOG_E_INVALID;
+         wyl_handle_engine_step_delta_locked (session->handle) :
+         WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -666,8 +672,8 @@ wyl_engine_session_set_delta_callback (WylEngineSession *session,
     WylDeltaCallback cb, gpointer user_data)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_engine_set_delta_callback_locked (session->handle, cb,
-      user_data) : WYRELOG_E_INVALID;
+         wyl_handle_engine_set_delta_callback_locked (session->handle, cb,
+             user_data) : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -675,8 +681,8 @@ wyl_engine_session_replay_delta_insert (WylEngineSession *session,
     const gchar *relation, const gint64 *row, gsize ncols)
 {
   return engine_session_is_valid (session) ?
-      wyl_handle_replay_delta_insert_locked (session->handle, relation, row,
-      ncols) : WYRELOG_E_INVALID;
+         wyl_handle_replay_delta_insert_locked (session->handle, relation, row,
+             ncols) : WYRELOG_E_INVALID;
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -688,8 +694,8 @@ wyl_handle_make_engine_compound (WylHandle *self, const gchar *functor,
     *out_id = 0;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (self);
   return engine_session_is_valid (session) ?
-      wyl_handle_make_engine_compound_locked (self, functor, args, nargs,
-      out_id) : WYRELOG_E_INVALID;
+         wyl_handle_make_engine_compound_locked (self, functor, args, nargs,
+             out_id) : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -700,8 +706,9 @@ wyl_handle_make_read_engine_compound (WylHandle *self, const gchar *functor,
     *out_id = 0;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (self);
   return engine_session_is_valid (session) ?
-      wyl_handle_make_read_engine_compound_locked (self, functor, args, nargs,
-      out_id) : WYRELOG_E_INVALID;
+         wyl_handle_make_read_engine_compound_locked (self, functor, args,
+             nargs,
+             out_id) : WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
@@ -712,7 +719,7 @@ wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
     *out_id = 0;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (self);
   return wyl_engine_session_make_guard_context_compound (session, timestamp,
-      loc_class_id, risk, scope_id, out_id);
+             loc_class_id, risk, scope_id, out_id);
 }
 
 wyrelog_error_t
@@ -752,7 +759,7 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
 {
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (self);
   return wyl_engine_session_contains (session, relation, row, ncols,
-      out_contains);
+             out_contains);
 }
 
 wyrelog_error_t
@@ -1119,7 +1126,7 @@ wyl_handle_init (WylHandle *self)
   g_mutex_init (&self->policy_store_lifecycle_mutex);
   g_cond_init (&self->policy_store_lifecycle_changed);
   self->policy_store_pin_owners = g_hash_table_new (g_direct_hash,
-      g_direct_equal);
+          g_direct_equal);
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 #ifdef WYL_HAS_FACT_STORE
@@ -1137,7 +1144,7 @@ wyl_handle_init (WylHandle *self)
    */
   g_mutex_init (&self->sessions_lock);
   self->sessions_by_id = g_hash_table_new_full (g_int64_hash, g_int64_equal,
-      g_free, wyl_session_registry_entry_free);
+          g_free, wyl_session_registry_entry_free);
   self->next_session_id = 1;
 #ifdef WYL_HAS_BREAK_GLASS
   g_mutex_init (&self->break_glass_lock);
@@ -1272,7 +1279,7 @@ wyl_handle_intern_guard_symbol (WylHandle *self, const gchar *symbol,
   if (symbol == NULL)
     return WYRELOG_E_INVALID;
   return wyl_handle_intern_symbol_on_engine (self, engine, symbol,
-      engine == self->read_engine, out_id);
+             engine == self->read_engine, out_id);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: called only by locked compound builders. */
@@ -1282,19 +1289,19 @@ wyl_handle_make_guard_cmp_compound (WylHandle *self,
 {
   gint64 field_id = 0;
   wyrelog_error_t rc = wyl_handle_intern_guard_symbol (self,
-      wyl_guard_field_name (expr->u.cmp.field), engine, &field_id);
+          wyl_guard_field_name (expr->u.cmp.field), engine, &field_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 op_id = 0;
   rc = wyl_handle_intern_guard_symbol (self,
-      wyl_guard_op_name (expr->u.cmp.op), engine, &op_id);
+          wyl_guard_op_name (expr->u.cmp.op), engine, &op_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 value_id = 0;
   rc = wyl_handle_intern_guard_symbol (self, expr->u.cmp.value, engine,
-      &value_id);
+          &value_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1304,7 +1311,7 @@ wyl_handle_make_guard_cmp_compound (WylHandle *self,
     {WIRELOG_TYPE_STRING, value_id},
   };
   return wyl_engine_owned_make_compound (engine, "guard_cmp", args,
-      G_N_ELEMENTS (args), out_id);
+             G_N_ELEMENTS (args), out_id);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: called only by locked compound builders. */
@@ -1314,7 +1321,7 @@ wyl_handle_make_guard_tag_compound (WylHandle *self,
 {
   gint64 atom_id = 0;
   wyrelog_error_t rc = wyl_handle_intern_guard_symbol (self,
-      expr->u.tag.atom, engine, &atom_id);
+          expr->u.tag.atom, engine, &atom_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1322,7 +1329,7 @@ wyl_handle_make_guard_tag_compound (WylHandle *self,
     {WIRELOG_TYPE_STRING, atom_id},
   };
   return wyl_engine_owned_make_compound (engine, "guard_tag", args,
-      G_N_ELEMENTS (args), out_id);
+             G_N_ELEMENTS (args), out_id);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: called only by locked compound builders. */
@@ -1333,7 +1340,7 @@ wyl_handle_make_guard_unary_compound (WylHandle *self, WylEngine *engine,
   gint64 child_id = 0;
   wyrelog_error_t rc =
       wyl_handle_make_guard_expr_node_compound (self, engine, child,
-      &child_id);
+          &child_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1341,7 +1348,7 @@ wyl_handle_make_guard_unary_compound (WylHandle *self, WylEngine *engine,
     {WIRELOG_TYPE_INT64, child_id},
   };
   return wyl_engine_owned_make_compound (engine, functor, args,
-      G_N_ELEMENTS (args), out_id);
+             G_N_ELEMENTS (args), out_id);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: called only by locked compound builders. */
@@ -1358,7 +1365,7 @@ wyl_handle_make_guard_binary_compound (WylHandle *self, WylEngine *engine,
 
   gint64 right_id = 0;
   rc = wyl_handle_make_guard_expr_node_compound (self, engine, right,
-      &right_id);
+          &right_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1367,7 +1374,7 @@ wyl_handle_make_guard_binary_compound (WylHandle *self, WylEngine *engine,
     {WIRELOG_TYPE_INT64, right_id},
   };
   return wyl_engine_owned_make_compound (engine, functor, args,
-      G_N_ELEMENTS (args), out_id);
+             G_N_ELEMENTS (args), out_id);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: called only by locked compound builders. */
@@ -1387,13 +1394,13 @@ wyl_handle_make_guard_expr_node_compound (WylHandle *self, WylEngine *engine,
       return wyl_handle_make_guard_tag_compound (self, engine, expr, out_id);
     case WYL_GUARD_KIND_NOT:
       return wyl_handle_make_guard_unary_compound (self, engine, "guard_not",
-          expr->u.unary.child, out_id);
+                 expr->u.unary.child, out_id);
     case WYL_GUARD_KIND_AND:
       return wyl_handle_make_guard_binary_compound (self, engine, "guard_and",
-          expr->u.binop.left, expr->u.binop.right, out_id);
+                 expr->u.binop.left, expr->u.binop.right, out_id);
     case WYL_GUARD_KIND_OR:
       return wyl_handle_make_guard_binary_compound (self, engine, "guard_or",
-          expr->u.binop.left, expr->u.binop.right, out_id);
+                 expr->u.binop.left, expr->u.binop.right, out_id);
     case WYL_GUARD_KIND_LAST_:
     default:
       return WYRELOG_E_INVALID;
@@ -1415,7 +1422,7 @@ wyl_handle_make_guard_expr_compound (WylHandle *self, WylEngine *engine,
     {WIRELOG_TYPE_INT64, root_id},
   };
   return wyl_engine_owned_make_compound (engine, "guard", args,
-      G_N_ELEMENTS (args), out_id);
+             G_N_ELEMENTS (args), out_id);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: locked candidate seeding callback. */
@@ -1425,7 +1432,7 @@ wyl_handle_seed_perm_arm_rule_on_engine (WylHandle *self, WylEngine *engine,
 {
   gint64 row[2];
   wyrelog_error_t rc = wyl_handle_intern_symbol_on_engine (self, engine,
-      perm_id, engine == self->read_engine, &row[0]);
+          perm_id, engine == self->read_engine, &row[0]);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1449,11 +1456,11 @@ wyl_handle_seed_perm_arm_rules (WylHandle *self)
     const wyl_guard_expr_t *guard = wyl_perm_arm_rule_expr (i);
     const gchar *perm_id = wyl_perm_arm_rule_perm_id (i);
     wyrelog_error_t rc = wyl_handle_seed_perm_arm_rule_on_engine (self,
-        self->read_engine, perm_id, guard);
+            self->read_engine, perm_id, guard);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_handle_seed_perm_arm_rule_on_engine (self, self->delta_engine,
-        perm_id, guard);
+            perm_id, guard);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -1513,14 +1520,14 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   self->fact_root = g_strdup (opts->fact_root);
   if (self->fact_root != NULL && self->fact_root[0] != '\0') {
     wyrelog_error_t lease_rc = wyl_fact_root_writer_lease_acquire
-        (self->fact_root, &self->fact_root_writer_lease);
+          (self->fact_root, &self->fact_root_writer_lease);
     if (lease_rc != WYRELOG_E_OK) {
       g_object_unref (self);
       return lease_rc;
     }
     if (opts->fact_root_lease_acquired_checkpoint != NULL)
       opts->fact_root_lease_acquired_checkpoint
-          (opts->fact_root_lease_acquired_checkpoint_data);
+        (opts->fact_root_lease_acquired_checkpoint_data);
   }
 #endif
   self->require_template_manifest = opts->require_template_manifest
@@ -1554,7 +1561,7 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   }
 
   wyrelog_error_t rc = wyl_policy_store_open_with_options (&store_open_opts,
-      &self->policy_store);
+          &self->policy_store);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
     return rc;
@@ -1562,7 +1569,7 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
 #ifdef WYL_HAS_FACT_STORE
   if (self->fact_root != NULL && self->fact_root[0] != '\0') {
     rc = wyl_policy_store_bind_fact_root_authorized (self->policy_store,
-        self->fact_root, self->fact_root_writer_lease);
+            self->fact_root, self->fact_root_writer_lease);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (self);
       return rc;
@@ -1662,7 +1669,7 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
     return WYRELOG_E_OK;
   }
   if (GPOINTER_TO_UINT (g_hash_table_lookup
-          (handle->policy_store_pin_owners, g_thread_self ())) > 0) {
+        (handle->policy_store_pin_owners, g_thread_self ())) > 0) {
     g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
     return WYRELOG_E_BUSY;
   }
@@ -1677,7 +1684,7 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
     }
     while (!handle->policy_store_shutdown_completed
         && (handle->policy_store_shutdown_pending
-            || handle->policy_store_shutdown_completing))
+        || handle->policy_store_shutdown_completing))
       g_cond_wait (&handle->policy_store_lifecycle_changed,
           &handle->policy_store_lifecycle_mutex);
     wyrelog_error_t rc = handle->policy_store_shutdown_completed
@@ -1689,7 +1696,7 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
   g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
 
   wyrelog_error_t rc = wyl_service_auth_authority_close
-      (handle->service_auth_authority);
+        (handle->service_auth_authority);
   if (rc != WYRELOG_E_OK) {
     g_mutex_lock (&handle->policy_store_lifecycle_mutex);
     handle->policy_store_shutdown_pending = FALSE;
@@ -1821,8 +1828,9 @@ insert_policy_store_audit_event (const gchar *id, gint64 created_at_us,
   gboolean inserted = FALSE;
 
   return wyl_audit_conn_insert_event_full (self->audit_conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
-      decision, &inserted);
+             subject_id, action, resource_id, deny_reason, deny_origin,
+             request_id,
+             decision, &inserted);
 }
 
 typedef struct
@@ -1876,7 +1884,7 @@ probe_audit_projection_relation (WylHandle *self, const gchar *relation,
     .expected_ncols = expected_ncols,
   };
   wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine, relation,
-      audit_projection_probe_cb, &probe);
+          audit_projection_probe_cb, &probe);
   if (rc != WYRELOG_E_OK)
     return rc;
   *out_count = probe.count;
@@ -1908,7 +1916,7 @@ classify_audit_projection (WylHandle *self, const gchar *id,
     return WYRELOG_E_POLICY;
   gint64 event[3] = { 0 };
   wyrelog_error_t rc = wyl_handle_lookup_engine_symbol_locked (self, id,
-      &event[0]);
+          &event[0]);
   if (rc == WYRELOG_E_NOT_FOUND)
     return WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK)
@@ -1923,7 +1931,7 @@ classify_audit_projection (WylHandle *self, const gchar *id,
    * corresponding *_input relations. Filter the callback by relation and
    * audit ID so unrelated derived rows cannot affect cardinality. */
   rc = probe_audit_projection_relation (self, "audit_event", event[0], event,
-      G_N_ELEMENTS (event), &base_count, &base_exact_count);
+          G_N_ELEMENTS (event), &base_count, &base_exact_count);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1956,7 +1964,7 @@ classify_audit_projection (WylHandle *self, const gchar *id,
     }
     guint count = 0, exact_count = 0;
     rc = probe_audit_projection_relation (self, relations[i], event[0], attr,
-        G_N_ELEMENTS (attr), &count, &exact_count);
+            G_N_ELEMENTS (attr), &count, &exact_count);
     if (rc != WYRELOG_E_OK)
       return rc;
     total_count += count;
@@ -1988,10 +1996,10 @@ wyl_handle_classify_audit_projection_for_test (WylHandle *self,
     return WYRELOG_E_BUSY;
   WylAuditProjectionState state = WYL_AUDIT_PROJECTION_INCONSISTENT;
   wyrelog_error_t rc = classify_audit_projection (self, projection->id,
-      projection->created_at_us, projection->subject_id, projection->action,
-      projection->resource_id, projection->deny_reason,
-      projection->deny_origin, projection->request_id, projection->decision,
-      &state);
+          projection->created_at_us, projection->subject_id, projection->action,
+          projection->resource_id, projection->deny_reason,
+          projection->deny_origin, projection->request_id, projection->decision,
+          &state);
   if (rc == WYRELOG_E_OK)
     *out_absent = state == WYL_AUDIT_PROJECTION_ABSENT;
   return rc;
@@ -2016,8 +2024,9 @@ reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
 
   wyrelog_error_t rc =
       wyl_policy_store_append_audit_event_full (self->policy_store, id,
-      created_at_us, subject_id, action, resource_id, deny_reason, deny_origin,
-      request_id, decision, &inserted);
+          created_at_us, subject_id, action, resource_id, deny_reason,
+          deny_origin,
+          request_id, decision, &inserted);
   if (rc != WYRELOG_E_OK) {
     (void) wyl_policy_store_mark_audit_intention_failed (self->policy_store,
         id, "sqlite audit append failed");
@@ -2029,13 +2038,14 @@ reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
    * any later input fails. A non-empty partial or contradictory projection
    * therefore represents corruption, not a normal retry checkpoint. */
   rc = classify_audit_projection (self, id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin, request_id, decision,
-      &projection);
+          action, resource_id, deny_reason, deny_origin, request_id, decision,
+          &projection);
   if (rc == WYRELOG_E_OK && projection == WYL_AUDIT_PROJECTION_INCONSISTENT)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && projection == WYL_AUDIT_PROJECTION_ABSENT)
     rc = wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
-        action, resource_id, deny_reason, deny_origin, request_id, decision);
+            action, resource_id, deny_reason, deny_origin, request_id,
+            decision);
   if (rc != WYRELOG_E_OK) {
     if (inserted) {
       wyrelog_error_t cleanup_rc =
@@ -2049,7 +2059,7 @@ reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
   }
 
   rc = insert_policy_store_audit_event (id, created_at_us, subject_id, action,
-      resource_id, deny_reason, deny_origin, request_id, decision, self);
+          resource_id, deny_reason, deny_origin, request_id, decision, self);
   if (rc != WYRELOG_E_OK) {
     (void) wyl_policy_store_mark_audit_intention_failed (self->policy_store,
         id, "duckdb append failed");
@@ -2071,11 +2081,11 @@ reconcile_policy_store_audit_intentions (WylHandle *self,
   };
   wyrelog_error_t rc =
       wyl_policy_store_foreach_audit_intention (self->policy_store, "pending",
-      reconcile_policy_store_audit_intention, &ctx);
+          reconcile_policy_store_audit_intention, &ctx);
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_policy_store_foreach_audit_intention (self->policy_store,
-      "failed", reconcile_policy_store_audit_intention, &ctx);
+             "failed", reconcile_policy_store_audit_intention, &ctx);
 }
 
 wyrelog_error_t
@@ -2125,7 +2135,7 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
   }
 
   rc = wyl_policy_store_foreach_audit_event (self->policy_store,
-      insert_policy_store_audit_event, self);
+          insert_policy_store_audit_event, self);
   if (rc != WYRELOG_E_OK) {
     memset (&result, 0, sizeof (result));
     duckdb_query (conn, "ROLLBACK;", &result);
@@ -2145,7 +2155,7 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
   for (guint i = 0; i < committed_ids->len; i++) {
     const gchar *id = g_ptr_array_index (committed_ids, i);
     rc = wyl_policy_store_mark_audit_intention_committed (self->policy_store,
-        id);
+            id);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -2211,7 +2221,7 @@ wyl_handle_policy_store_pin_current (WylHandle *self,
     } else {
       GThread *owner = g_thread_self ();
       guint owner_pins = GPOINTER_TO_UINT (g_hash_table_lookup
-          (self->policy_store_pin_owners, owner));
+                (self->policy_store_pin_owners, owner));
       if (owner_pins == G_MAXUINT) {
         rc = WYRELOG_E_INTERNAL;
       } else {
@@ -2236,7 +2246,7 @@ wyl_handle_policy_store_unpin (WylHandle *self,
   g_assert_cmpuint (self->policy_store_active_operations, >, 0);
   GThread *owner = g_thread_self ();
   guint owner_pins = GPOINTER_TO_UINT (g_hash_table_lookup
-      (self->policy_store_pin_owners, owner));
+            (self->policy_store_pin_owners, owner));
   g_assert_cmpuint (owner_pins, >, 0);
   if (owner_pins == 1)
     g_hash_table_remove (self->policy_store_pin_owners, owner);
@@ -2258,7 +2268,7 @@ wyl_handle_policy_store_unpin_terminal (WylHandle *self,
   g_mutex_lock (&self->policy_store_lifecycle_mutex);
   GThread *owner = g_thread_self ();
   guint owner_pins = GPOINTER_TO_UINT (g_hash_table_lookup
-      (self->policy_store_pin_owners, owner));
+            (self->policy_store_pin_owners, owner));
   if (self->policy_store_active_operations == 0 || owner_pins == 0) {
     g_mutex_unlock (&self->policy_store_lifecycle_mutex);
     return WYRELOG_E_INVALID;
@@ -2374,7 +2384,7 @@ wyl_handle_policy_store_pin_snapshot_for_test (WylHandle *self,
     *out_total_pins = self->policy_store_active_operations;
   if (out_current_thread_pins != NULL)
     *out_current_thread_pins = GPOINTER_TO_UINT (g_hash_table_lookup
-        (self->policy_store_pin_owners, g_thread_self ()));
+              (self->policy_store_pin_owners, g_thread_self ()));
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
 }
 
@@ -2405,7 +2415,7 @@ wyl_handle_replay_fact_graphs (WylHandle *self,
     return rc;
   }
   rc = wyl_fact_replay_policy_graphs (policy, self->fact_root,
-      self->fact_graph_runtime, out_summary);
+          self->fact_graph_runtime, out_summary);
   wyl_handle_policy_store_unpin (self, policy);
   g_mutex_unlock (&self->fact_replay_coordinator_lock);
   return rc;
@@ -2433,7 +2443,7 @@ fact_graph_snapshot_use (WylEngine *engine, gpointer user_data)
   FactGraphSnapshotCtx *ctx = user_data;
   ctx->engine = engine;
   return wyl_engine_snapshot (engine, ctx->relation,
-      fact_graph_snapshot_tuple_trampoline, ctx);
+             fact_graph_snapshot_tuple_trampoline, ctx);
 }
 
 wyrelog_error_t
@@ -2451,7 +2461,7 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
   WylFactGraphRuntimeStatus status = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_runtime_manager_get_status
-        (self->fact_graph_runtime, &key, &status);
+          (self->fact_graph_runtime, &key, &status);
   if (rc == WYRELOG_E_OK && !status.queryable) {
     rc = status.state == WYL_FACT_GRAPH_RUNTIME_DEGRADED
         ? WYRELOG_E_POLICY : WYRELOG_E_NOT_FOUND;
@@ -2460,7 +2470,7 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
   g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_runtime_manager_acquire_snapshot
-        (self->fact_graph_runtime, &key, &snapshot);
+          (self->fact_graph_runtime, &key, &snapshot);
   wyl_fact_graph_key_clear (&key);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -2484,8 +2494,8 @@ legacy_fact_graph_state (const WylFactGraphRuntimeStatus *status)
 {
   if (status->state == WYL_FACT_GRAPH_RUNTIME_READY
       || (status->state == WYL_FACT_GRAPH_RUNTIME_BUILDING
-          && status->queryable
-          && status->last_replay_class == WYL_FACT_GRAPH_REPLAY_NONE))
+      && status->queryable
+      && status->last_replay_class == WYL_FACT_GRAPH_REPLAY_NONE))
     return WYL_FACT_GRAPH_STATE_READY;
   switch (status->last_replay_class) {
     case WYL_FACT_GRAPH_REPLAY_STORE_UNAVAILABLE:
@@ -2531,7 +2541,7 @@ wyl_handle_foreach_fact_graph_status (WylHandle *self,
     return WYRELOG_E_INVALID;
   FactGraphStatusCtx ctx = { cb, user_data };
   return wyl_fact_graph_runtime_manager_foreach_status
-      (self->fact_graph_runtime, fact_graph_runtime_status_cb, &ctx);
+           (self->fact_graph_runtime, fact_graph_runtime_status_cb, &ctx);
 }
 #endif
 
@@ -2558,7 +2568,7 @@ wyl_handle_get_login_skip_mfa_allowed (WylHandle *self)
 
   g_autofree gchar *deployment_mode = NULL;
   if (wyl_policy_store_get_deployment_mode (self->policy_store,
-          &deployment_mode) != WYRELOG_E_OK)
+      &deployment_mode) != WYRELOG_E_OK)
     return FALSE;
   return g_strcmp0 (deployment_mode, "production") != 0;
 }
@@ -2827,7 +2837,7 @@ preintern_policy_store_permission_state_symbols (const gchar *subject_id,
   WylHandle *self = user_data;
 
   wyrelog_error_t rc = preintern_policy_store_direct_permission_symbols
-      (subject_id, perm_id, scope, user_data);
+        (subject_id, perm_id, scope, user_data);
   if (rc != WYRELOG_E_OK)
     return rc;
   return preintern_policy_store_symbol (self, state);
@@ -2844,7 +2854,7 @@ preintern_policy_store_permission_event_symbols (gint64 event_id,
   (void) event_id;
 
   wyrelog_error_t rc = preintern_policy_store_direct_permission_symbols
-      (subject_id, perm_id, scope, user_data);
+        (subject_id, perm_id, scope, user_data);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = preintern_policy_store_symbol (self, event);
@@ -2930,7 +2940,7 @@ validate_implicit_default_tenant (const gchar *tenant_id, gboolean sealed,
 {
   (void) user_data;
   return !sealed && g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0 ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
+         WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t
@@ -2947,10 +2957,10 @@ static wyrelog_error_t
 validate_projectionless_store (WylHandle *self)
 {
   wyrelog_error_t rc = wyl_policy_store_foreach_tenant (self->policy_store,
-      validate_implicit_default_tenant, self);
+          validate_implicit_default_tenant, self);
   return rc == WYRELOG_E_OK ?
-      wyl_policy_store_foreach_session_state (self->policy_store,
-      reject_projectionless_session_state, self) : rc;
+         wyl_policy_store_foreach_session_state (self->policy_store,
+             reject_projectionless_session_state, self) : rc;
 }
 
 static wyrelog_error_t
@@ -2960,9 +2970,9 @@ preintern_effective_scope_symbols (WylHandle *self,
   if (capability == WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
     return WYRELOG_E_POLICY;
   return capability == WYL_ENGINE_SESSION_STATE_ABSENT ?
-      validate_projectionless_store (self) :
-      wyl_policy_store_foreach_effective_scope_state (self->policy_store,
-      preintern_policy_store_session_state_symbols, self);
+         validate_projectionless_store (self) :
+         wyl_policy_store_foreach_effective_scope_state (self->policy_store,
+             preintern_policy_store_session_state_symbols, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: locked candidate-build callback chain. */
@@ -2994,39 +3004,39 @@ preintern_policy_store_symbols (WylHandle *self,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_role_permission
-      (self->policy_store, preintern_policy_store_role_permission_symbols,
-      self);
+        (self->policy_store, preintern_policy_store_role_permission_symbols,
+          self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_role_membership (self->policy_store,
-      preintern_policy_store_role_membership_symbols, self);
+          preintern_policy_store_role_membership_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_direct_permission (self->policy_store,
-      preintern_policy_store_direct_permission_symbols, self);
+          preintern_policy_store_direct_permission_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_permission_state (self->policy_store,
-      preintern_policy_store_permission_state_symbols, self);
+          preintern_policy_store_permission_state_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_permission_state_event (self->policy_store,
-      preintern_policy_store_permission_event_symbols, self);
+          preintern_policy_store_permission_event_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_principal_state (self->policy_store,
-      preintern_policy_store_principal_state_symbols, self);
+          preintern_policy_store_principal_state_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_principal_event (self->policy_store,
-      preintern_policy_store_principal_event_symbols, self);
+          preintern_policy_store_principal_event_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = preintern_effective_scope_symbols (self, session_state_capability);
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_policy_store_foreach_session_event (self->policy_store,
-      preintern_policy_store_session_event_symbols, self);
+             preintern_policy_store_session_event_symbols, self);
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -3040,8 +3050,8 @@ take_engine_replacement_fault (WylHandle *self, WylEngineReplacementFault fault)
 }
 
 #define RETURN_REPLACEMENT_FAULT(stage) G_STMT_START { \
-  if (take_engine_replacement_fault (self, (stage))) \
-    return WYRELOG_E_IO; \
+          if (take_engine_replacement_fault (self, (stage))) \
+          return WYRELOG_E_IO; \
 } G_STMT_END
 #else
 #define RETURN_REPLACEMENT_FAULT(stage) G_STMT_START { } G_STMT_END
@@ -3158,7 +3168,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   WylEngine *new_delta_engine = NULL;
   gboolean snapshot_finish_failed = FALSE;
   wyrelog_error_t rc = wyl_policy_store_read_snapshot_begin
-      (self->policy_store, &snapshot);
+        (self->policy_store, &snapshot);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_validate_snapshot (self->policy_store);
@@ -3166,7 +3176,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
     goto fail_before_install;
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (take_engine_replacement_fault (self,
-          WYL_ENGINE_REPLACEMENT_FAULT_VALIDATE)) {
+      WYL_ENGINE_REPLACEMENT_FAULT_VALIDATE)) {
     rc = WYRELOG_E_IO;
     goto fail_before_install;
   }
@@ -3180,25 +3190,25 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
 
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (take_engine_replacement_fault (self,
-          WYL_ENGINE_REPLACEMENT_FAULT_OPEN_READ)) {
+      WYL_ENGINE_REPLACEMENT_FAULT_OPEN_READ)) {
     rc = WYRELOG_E_IO;
     goto fail_before_install;
   }
 #endif
   rc = wyl_engine_open_with_options (template_dir, 1,
-      self->require_template_manifest, &new_read_engine);
+          self->require_template_manifest, &new_read_engine);
   if (rc != WYRELOG_E_OK)
     goto fail_before_install;
 
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (take_engine_replacement_fault (self,
-          WYL_ENGINE_REPLACEMENT_FAULT_OPEN_DELTA)) {
+      WYL_ENGINE_REPLACEMENT_FAULT_OPEN_DELTA)) {
     rc = WYRELOG_E_IO;
     goto fail_before_install;
   }
 #endif
   rc = wyl_engine_open_with_options (template_dir, 1,
-      self->require_template_manifest, &new_delta_engine);
+          self->require_template_manifest, &new_delta_engine);
   if (rc != WYRELOG_E_OK)
     goto fail_before_install;
   if (wyl_engine_session_state_capability (new_read_engine)
@@ -3220,26 +3230,26 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   rc = preintern_published_engine_symbols (self, old_symbols);
   if (rc == WYRELOG_E_OK)
     rc = load_current_engine_pair (self,
-        wyl_engine_session_state_capability (new_read_engine));
+            wyl_engine_session_state_capability (new_read_engine));
   self->engine_pair_replacement_building = FALSE;
   if (rc != WYRELOG_E_OK)
     goto fail_after_install;
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (take_engine_replacement_fault (self,
-          WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK)) {
+      WYL_ENGINE_REPLACEMENT_FAULT_CALLBACK)) {
     rc = WYRELOG_E_IO;
     goto fail_after_install;
   }
 #endif
   if (self->delta_callback != NULL) {
     rc = wyl_engine_owned_set_delta_callback (self->delta_engine,
-        wyl_handle_buffer_delta_cb, self);
+            wyl_handle_buffer_delta_cb, self);
     if (rc != WYRELOG_E_OK)
       goto fail_after_install;
   }
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (take_engine_replacement_fault (self,
-          WYL_ENGINE_REPLACEMENT_FAULT_READBACK)) {
+      WYL_ENGINE_REPLACEMENT_FAULT_READBACK)) {
     rc = WYRELOG_E_IO;
     goto fail_after_install;
   }
@@ -3330,8 +3340,9 @@ static gboolean
 engine_pair_unavailable (WylHandle *self)
 {
   return (self->engine_pair_poisoned
-      && !self->engine_pair_replacement_building) || self->read_engine == NULL
-      || self->delta_engine == NULL;
+         && !self->engine_pair_replacement_building) ||
+         self->read_engine == NULL
+         || self->delta_engine == NULL;
 }
 
 gboolean
@@ -3443,10 +3454,10 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
   };
   rc = verify (&verification, verify_data);
   if (rc == WYRELOG_E_OK && (self->engine_pair_poisoned
-          || self->read_engine == NULL || self->delta_engine == NULL
-          || self->read_engine != verification.read_engine
-          || self->delta_engine != verification.delta_engine
-          || self->engine_symbols_by_id != verification.symbols))
+      || self->read_engine == NULL || self->delta_engine == NULL
+      || self->read_engine != verification.read_engine
+      || self->delta_engine != verification.delta_engine
+      || self->engine_symbols_by_id != verification.symbols))
     rc = WYRELOG_E_INTERNAL;
   if (rc == WYRELOG_E_OK && produce_deltas != NULL) {
     verification.producing_deltas = TRUE;
@@ -3492,7 +3503,7 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   wyl_policy_store_t *store = NULL;
   guint64 generation = 0;
   wyrelog_error_t rc = wyl_service_auth_rank_enter (self,
-      WYL_SERVICE_AUTH_RANK_STORE);
+          WYL_SERVICE_AUTH_RANK_STORE);
   if (rc != WYRELOG_E_OK)
     return rc;
   gboolean store_rank_active = TRUE;
@@ -3559,7 +3570,7 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
       rc = WYRELOG_E_IO;
   } else
 #endif
-    rc = wyl_policy_store_publication_transaction_commit (store);
+  rc = wyl_policy_store_publication_transaction_commit (store);
   if (rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store)) {
     /* RELEASE ambiguity is committed-state uncertainty even if a recovery
      * rollback succeeds. */
@@ -3568,7 +3579,7 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
 #ifdef WYL_TEST_HANDLE_SEAMS
     if (!commit_rejected_cleanly)
 #endif
-      poison_engine_pair_locked (self);
+    poison_engine_pair_locked (self);
 #ifdef WYL_TEST_HANDLE_SEAMS
     if (!commit_rejected_cleanly && out_stage != NULL)
 #else
@@ -3606,7 +3617,7 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     goto out;
   }
   rc = reconcile_guarded_engine_pair_in_session (session, verify,
-      verify_data, produce_deltas, delta_data);
+          verify_data, produce_deltas, delta_data);
   if (rc == WYRELOG_E_OK)
     rc = flush_pending_deltas (self);
   if (rc == WYRELOG_E_OK)
@@ -3642,10 +3653,10 @@ wyl_engine_session_repair_committed_publication (WylEngineSession *session,
 
   wyrelog_error_t rc =
       wyl_service_auth_write_lease_validate_retained_engine_repair
-      (write_lease, self, expected_store);
+        (write_lease, self, expected_store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_policy_store_validate_generation (self, expected_store,
-        expected_generation);
+            expected_generation);
   if (rc == WYRELOG_E_OK && !wyl_policy_store_is_autocommit (expected_store))
     rc = WYRELOG_E_BUSY;
   if (rc != WYRELOG_E_OK)
@@ -3657,7 +3668,7 @@ wyl_engine_session_repair_committed_publication (WylEngineSession *session,
     goto fail;
   self->engine_pair_poisoned = FALSE;
   rc = wyl_handle_policy_store_validate_generation (self, expected_store,
-      expected_generation);
+          expected_generation);
 
   WylEngineVerification verification = {
     .session = session,
@@ -3669,10 +3680,10 @@ wyl_engine_session_repair_committed_publication (WylEngineSession *session,
   if (rc == WYRELOG_E_OK)
     rc = verify (&verification, verify_data);
   if (rc == WYRELOG_E_OK && (self->engine_pair_poisoned
-          || self->read_engine == NULL || self->delta_engine == NULL
-          || self->read_engine != verification.read_engine
-          || self->delta_engine != verification.delta_engine
-          || self->engine_symbols_by_id != verification.symbols))
+      || self->read_engine == NULL || self->delta_engine == NULL
+      || self->read_engine != verification.read_engine
+      || self->delta_engine != verification.delta_engine
+      || self->engine_symbols_by_id != verification.symbols))
     rc = WYRELOG_E_INTERNAL;
   verification.active = FALSE;
   if (rc == WYRELOG_E_OK)
@@ -3713,10 +3724,10 @@ wyl_engine_session_finish_external_publication (WylEngineSession *session,
     return WYRELOG_E_INVALID;
 
   wyrelog_error_t rc = wyl_handle_policy_store_validate_generation (self,
-      expected_store, expected_generation);
+          expected_store, expected_generation);
   if (rc == WYRELOG_E_OK)
     rc = reconcile_guarded_engine_pair_in_session (session, verify,
-        verify_data, NULL, NULL);
+            verify_data, NULL, NULL);
   if (rc == WYRELOG_E_OK)
     rc = flush_pending_deltas (self);
   if (rc != WYRELOG_E_OK) {
@@ -3755,7 +3766,7 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
   WylEngine *delta_engine = self->delta_engine;
   GHashTable *symbols = self->engine_symbols_by_id;
   wyrelog_error_t rc = wyl_service_auth_rank_enter (self,
-      WYL_SERVICE_AUTH_RANK_STORE);
+          WYL_SERVICE_AUTH_RANK_STORE);
   if (rc != WYRELOG_E_OK)
     return rc;
   gboolean store_rank_active = TRUE;
@@ -3778,9 +3789,11 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_audit_publication (store, projection->id,
-        projection->created_at_us, projection->subject_id,
-        projection->action, projection->resource_id, projection->deny_reason,
-        projection->deny_origin, projection->request_id, projection->decision);
+            projection->created_at_us, projection->subject_id,
+            projection->action, projection->resource_id,
+            projection->deny_reason,
+            projection->deny_origin, projection->request_id,
+            projection->decision);
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t rollback_rc = begun ?
         wyl_policy_store_publication_transaction_rollback_checked (store) :
@@ -3829,24 +3842,27 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
 
   WylAuditProjectionState projection_state = WYL_AUDIT_PROJECTION_ABSENT;
   rc = classify_audit_projection (self, projection->id,
-      projection->created_at_us, projection->subject_id, projection->action,
-      projection->resource_id, projection->deny_reason,
-      projection->deny_origin, projection->request_id, projection->decision,
-      &projection_state);
+          projection->created_at_us, projection->subject_id, projection->action,
+          projection->resource_id, projection->deny_reason,
+          projection->deny_origin, projection->request_id, projection->decision,
+          &projection_state);
   if (rc == WYRELOG_E_OK
       && projection_state == WYL_AUDIT_PROJECTION_INCONSISTENT)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && projection_state == WYL_AUDIT_PROJECTION_ABSENT)
     rc = wyl_handle_insert_audit_fact_locked (self, projection->id,
-        projection->created_at_us, projection->subject_id, projection->action,
-        projection->resource_id, projection->deny_reason,
-        projection->deny_origin, projection->request_id, projection->decision);
+            projection->created_at_us, projection->subject_id,
+            projection->action,
+            projection->resource_id, projection->deny_reason,
+            projection->deny_origin, projection->request_id,
+            projection->decision);
   if (rc == WYRELOG_E_OK)
     rc = classify_audit_projection (self, projection->id,
-        projection->created_at_us, projection->subject_id,
-        projection->action, projection->resource_id, projection->deny_reason,
-        projection->deny_origin, projection->request_id,
-        projection->decision, &projection_state);
+            projection->created_at_us, projection->subject_id,
+            projection->action, projection->resource_id,
+            projection->deny_reason,
+            projection->deny_origin, projection->request_id,
+            projection->decision, &projection_state);
   if (rc == WYRELOG_E_OK && projection_state != WYL_AUDIT_PROJECTION_EXACT)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
@@ -3902,7 +3918,7 @@ wyl_handle_validate_service_permission_closure (WylHandle *self,
 
   wyl_policy_store_t *store = NULL;
   wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store
-      (write_lease, self, &store);
+        (write_lease, self, &store);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -3910,7 +3926,7 @@ wyl_handle_validate_service_permission_closure (WylHandle *self,
   if (rc != WYRELOG_E_POLICY)
     return rc;
   return wyl_service_auth_write_lease_mark_unavailable (write_lease, self,
-      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
+             WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
 }
 
 /* The caller owns any required service-auth lease before entering here. */
@@ -3974,7 +3990,7 @@ wyl_handle_reconcile_committed_engine_pair (WylHandle *self,
 
   WylPublicEnginePairVerify public_verify = { verify, data };
   return reconcile_committed_engine_pair_in_session (session,
-      verify_public_engine_pair, &public_verify);
+             verify_public_engine_pair, &public_verify);
 }
 
 /*
@@ -4014,7 +4030,7 @@ wyl_handle_reload_engine_pair (WylHandle *self)
    */
   WylServiceAuthWriteLease *lease = NULL;
   wyrelog_error_t acquire_rc = wyl_service_auth_authority_acquire_write
-      (self->service_auth_authority, self, NULL, &lease);
+        (self->service_auth_authority, self, NULL, &lease);
   if (acquire_rc == WYRELOG_E_BUSY)
     return replace_live_engine_pair_serialized (self, FALSE);
   if (acquire_rc != WYRELOG_E_OK)
@@ -4107,7 +4123,7 @@ wyl_handle_make_engine_compound_locked (WylHandle *self, const gchar *functor,
 
   gint64 read_id = 0;
   wyrelog_error_t rc = wyl_engine_owned_make_compound (self->read_engine,
-      functor, args, nargs, &read_id);
+          functor, args, nargs, &read_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -4120,7 +4136,7 @@ wyl_handle_make_engine_compound_locked (WylHandle *self, const gchar *functor,
   }
 #endif
   rc = wyl_engine_owned_make_compound (self->delta_engine, functor, args, nargs,
-      &delta_id);
+          &delta_id);
   if (rc != WYRELOG_E_OK)
     return fail_partial_engine_pair_mutation_locked (self, rc);
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -4155,12 +4171,12 @@ wyl_handle_make_read_engine_compound_locked (WylHandle *self,
 
   gint64 functor_id = 0;
   wyrelog_error_t rc = wyl_handle_intern_engine_symbol_locked (self, functor,
-      &functor_id);
+          &functor_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   rc = wyl_engine_owned_make_compound (self->read_engine, functor, args, nargs,
-      out_id);
+          out_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -4168,7 +4184,7 @@ wyl_handle_make_read_engine_compound_locked (WylHandle *self,
    * The returned handle remains read-engine-local and request-scoped. */
   gint64 delta_id = 0;
   rc = wyl_engine_owned_make_compound (self->delta_engine, functor, args,
-      nargs, &delta_id);
+          nargs, &delta_id);
   if (rc != WYRELOG_E_OK)
     return fail_partial_engine_pair_mutation_locked (self, rc);
   if (*out_id != delta_id)
@@ -4205,13 +4221,13 @@ wyl_handle_make_guard_context_compound_locked (WylHandle *self,
 
   gint64 read_metadata_id = 0;
   rc = wyl_engine_owned_make_compound (self->read_engine, "metadata",
-      metadata_args, G_N_ELEMENTS (metadata_args), &read_metadata_id);
+          metadata_args, G_N_ELEMENTS (metadata_args), &read_metadata_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 delta_metadata_id = 0;
   rc = wyl_engine_owned_make_compound (self->delta_engine, "metadata",
-      metadata_args, G_N_ELEMENTS (metadata_args), &delta_metadata_id);
+          metadata_args, G_N_ELEMENTS (metadata_args), &delta_metadata_id);
   if (rc != WYRELOG_E_OK)
     return fail_partial_engine_pair_mutation_locked (self, rc);
   if (read_metadata_id != delta_metadata_id)
@@ -4222,7 +4238,7 @@ wyl_handle_make_guard_context_compound_locked (WylHandle *self,
     {WIRELOG_TYPE_STRING, scope_id},
   };
   rc = wyl_engine_owned_make_compound (self->read_engine, "scope",
-      read_scope_args, G_N_ELEMENTS (read_scope_args), out_id);
+          read_scope_args, G_N_ELEMENTS (read_scope_args), out_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -4232,7 +4248,7 @@ wyl_handle_make_guard_context_compound_locked (WylHandle *self,
   };
   gint64 delta_scope_id = 0;
   rc = wyl_engine_owned_make_compound (self->delta_engine, "scope",
-      delta_scope_args, G_N_ELEMENTS (delta_scope_args), &delta_scope_id);
+          delta_scope_args, G_N_ELEMENTS (delta_scope_args), &delta_scope_id);
   if (rc != WYRELOG_E_OK)
     return fail_partial_engine_pair_mutation_locked (self, rc);
   if (*out_id != delta_scope_id)
@@ -4244,12 +4260,12 @@ static gboolean
 relation_fans_out_to_delta (const gchar *relation)
 {
   return g_strcmp0 (relation, "member_of") == 0
-      || g_strcmp0 (relation, "principal_transition") == 0
-      || g_strcmp0 (relation, "session_transition") == 0
-      || g_strcmp0 (relation, "perm_state_transition") == 0
-      || g_strcmp0 (relation, "perm_state_event") == 0
-      || g_strcmp0 (relation, "principal_event") == 0
-      || g_strcmp0 (relation, "session_event") == 0;
+         || g_strcmp0 (relation, "principal_transition") == 0
+         || g_strcmp0 (relation, "session_transition") == 0
+         || g_strcmp0 (relation, "perm_state_transition") == 0
+         || g_strcmp0 (relation, "perm_state_event") == 0
+         || g_strcmp0 (relation, "principal_event") == 0
+         || g_strcmp0 (relation, "session_event") == 0;
 }
 
 static gboolean
@@ -4305,7 +4321,7 @@ wyl_handle_engine_insert_locked (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   WylHandleEngineInsertFaultOnce *fault = g_object_get_qdata (G_OBJECT (self),
-      wyl_handle_engine_insert_fault_once_quark ());
+          wyl_handle_engine_insert_fault_once_quark ());
   if (fault != NULL && g_strcmp0 (fault->relation, relation) == 0) {
     wyrelog_error_t fault_rc = fault->rc;
     g_object_steal_qdata (G_OBJECT (self),
@@ -4323,8 +4339,8 @@ wyl_handle_engine_insert_locked (WylHandle *self, const gchar *relation,
     return WYRELOG_E_OK;
   wyrelog_error_t fault_rc = WYRELOG_E_OK;
   if (take_engine_fault_once (self,
-          wyl_handle_engine_delta_insert_fault_once_quark (), relation,
-          &fault_rc)) {
+      wyl_handle_engine_delta_insert_fault_once_quark (), relation,
+      &fault_rc)) {
     wyrelog_error_t repair_rc =
         repair_engine_pair_after_projection_failure (self);
     return repair_rc == WYRELOG_E_OK ? fault_rc : repair_rc;
@@ -4336,8 +4352,8 @@ wyl_handle_engine_insert_locked (WylHandle *self, const gchar *relation,
     return repair_rc == WYRELOG_E_OK ? rc : repair_rc;
   }
   if (take_engine_fault_once (self,
-          wyl_handle_engine_delta_step_fault_once_quark (), relation,
-          &fault_rc)) {
+      wyl_handle_engine_delta_step_fault_once_quark (), relation,
+      &fault_rc)) {
     wyl_handle_buffer_delta_cb (relation, row, (guint) ncols,
         WYL_DELTA_INSERT, self);
     wyrelog_error_t repair_rc =
@@ -4366,7 +4382,7 @@ wyl_handle_engine_remove_locked (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   WylHandleEngineRemoveFaultOnce *fault = g_object_get_qdata (G_OBJECT (self),
-      wyl_handle_engine_remove_fault_once_quark ());
+          wyl_handle_engine_remove_fault_once_quark ());
   gboolean fault_matches =
       fault != NULL && g_strcmp0 (fault->relation, relation) == 0;
   wyrelog_error_t fault_rc = fault != NULL ? fault->rc : WYRELOG_E_OK;
@@ -4385,8 +4401,8 @@ wyl_handle_engine_remove_locked (WylHandle *self, const gchar *relation,
     return fault_matches ? fault_rc : WYRELOG_E_OK;
   wyrelog_error_t delta_fault_rc = WYRELOG_E_OK;
   if (take_engine_fault_once (self,
-          wyl_handle_engine_delta_remove_fault_once_quark (), relation,
-          &delta_fault_rc)) {
+      wyl_handle_engine_delta_remove_fault_once_quark (), relation,
+      &delta_fault_rc)) {
     wyrelog_error_t repair_rc =
         repair_engine_pair_after_projection_failure (self);
     return repair_rc == WYRELOG_E_OK ? delta_fault_rc : repair_rc;
@@ -4398,8 +4414,8 @@ wyl_handle_engine_remove_locked (WylHandle *self, const gchar *relation,
     return repair_rc == WYRELOG_E_OK ? rc : repair_rc;
   }
   if (take_engine_fault_once (self,
-          wyl_handle_engine_delta_step_fault_once_quark (), relation,
-          &delta_fault_rc)) {
+      wyl_handle_engine_delta_step_fault_once_quark (), relation,
+      &delta_fault_rc)) {
     wyl_handle_buffer_delta_cb (relation, row, (guint) ncols,
         WYL_DELTA_REMOVE, self);
     wyrelog_error_t repair_rc =
@@ -4428,7 +4444,7 @@ wyl_handle_engine_step_delta_locked (WylHandle *self)
 
   wyrelog_error_t rc = step_delta_engine_and_flush (self);
   return rc == WYRELOG_E_OK ? rc :
-      fail_partial_engine_pair_mutation_locked (self, rc);
+         fail_partial_engine_pair_mutation_locked (self, rc);
 }
 
 static wyrelog_error_t
@@ -4446,7 +4462,7 @@ wyl_handle_engine_set_delta_callback_locked (WylHandle *self,
   WylDeltaCallback engine_cb = cb == NULL ? NULL : wyl_handle_buffer_delta_cb;
   gpointer engine_user_data = cb == NULL ? NULL : self;
   wyrelog_error_t rc = wyl_engine_owned_set_delta_callback (self->delta_engine,
-      engine_cb, engine_user_data);
+          engine_cb, engine_user_data);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -4467,14 +4483,14 @@ insert_login_skip_mfa_authz_if_allowed (WylHandle *self,
 
   gboolean allowed = FALSE;
   wyrelog_error_t rc = wyl_policy_store_subject_has_permission
-      (self->policy_store, subject_id, WYL_LOGIN_SKIP_MFA_PERMISSION,
-      WYL_LOGIN_SKIP_MFA_SCOPE, &allowed);
+        (self->policy_store, subject_id, WYL_LOGIN_SKIP_MFA_PERMISSION,
+          WYL_LOGIN_SKIP_MFA_SCOPE, &allowed);
   if (rc != WYRELOG_E_OK || !allowed)
     return rc;
 
   rc = wyl_policy_store_permission_state_is (self->policy_store, subject_id,
-      WYL_LOGIN_SKIP_MFA_PERMISSION, WYL_LOGIN_SKIP_MFA_SCOPE, "armed",
-      &allowed);
+          WYL_LOGIN_SKIP_MFA_PERMISSION, WYL_LOGIN_SKIP_MFA_SCOPE, "armed",
+          &allowed);
   if (rc != WYRELOG_E_OK || !allowed)
     return rc;
 
@@ -4516,7 +4532,7 @@ wyl_handle_load_policy_store_role_permissions (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_role_permission (self->policy_store,
-      insert_policy_store_role_permission, self);
+             insert_policy_store_role_permission, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4556,7 +4572,7 @@ wyl_handle_load_policy_store_role_memberships (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_role_membership (self->policy_store,
-      insert_policy_store_role_membership, self);
+             insert_policy_store_role_membership, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4601,7 +4617,7 @@ wyl_handle_load_policy_store_direct_permissions (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_direct_permission (self->policy_store,
-      insert_policy_store_direct_permission, self);
+             insert_policy_store_direct_permission, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4648,7 +4664,7 @@ wyl_handle_load_policy_store_permission_states (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_permission_state (self->policy_store,
-      insert_policy_store_permission_state, self);
+             insert_policy_store_permission_state, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4711,7 +4727,7 @@ wyl_handle_load_policy_store_permission_state_events (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_permission_state_event (self->policy_store,
-      insert_policy_store_permission_state_event, self);
+             insert_policy_store_permission_state_event, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4751,7 +4767,7 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_principal_state (self->policy_store,
-      insert_policy_store_principal_state, self);
+             insert_policy_store_principal_state, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4805,7 +4821,7 @@ wyl_handle_load_policy_store_principal_events (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_principal_event (self->policy_store,
-      insert_policy_store_principal_event, self);
+             insert_policy_store_principal_event, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4843,9 +4859,9 @@ wyl_handle_load_policy_store_session_states (WylHandle *self)
   if (capability == WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
     return WYRELOG_E_POLICY;
   return capability == WYL_ENGINE_SESSION_STATE_ABSENT ?
-      validate_projectionless_store (self) :
-      wyl_policy_store_foreach_effective_scope_state (self->policy_store,
-      insert_policy_store_session_state, self);
+         validate_projectionless_store (self) :
+         wyl_policy_store_foreach_effective_scope_state (self->policy_store,
+             insert_policy_store_session_state, self);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
@@ -4899,7 +4915,7 @@ wyl_handle_load_policy_store_session_events (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_session_event (self->policy_store,
-      insert_policy_store_session_event, self);
+             insert_policy_store_session_event, self);
 }
 
 static const gchar *
@@ -4938,7 +4954,7 @@ rollback_audit_fact_inputs (WylHandle *self, const gint64 audit_event[3],
   }
   if (rc == WYRELOG_E_OK && audit_event_inserted)
     rc = wyl_handle_engine_remove_locked (self, "audit_event_input",
-        audit_event, 3);
+            audit_event, 3);
   if (rc != WYRELOG_E_OK)
     return fail_partial_engine_pair_mutation_locked (self, rc);
   return WYRELOG_E_OK;
@@ -4971,7 +4987,8 @@ insert_policy_store_audit_fact (const gchar *id, gint64 created_at_us,
 {
   WylHandle *self = user_data;
   return wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin, request_id, decision);
+             action, resource_id, deny_reason, deny_origin, request_id,
+             decision);
 }
 
 wyrelog_error_t
@@ -4989,8 +5006,9 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
   if (engine_session == NULL)
     return WYRELOG_E_INVALID;
   return wyl_handle_insert_audit_fact_locked (self, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
-      decision);
+             subject_id, action, resource_id, deny_reason, deny_origin,
+             request_id,
+             decision);
 }
 
 /* WYL_ENGINE_SESSION_REQUIRES: same-session incremental audit publication. */
@@ -5028,11 +5046,11 @@ wyl_handle_insert_audit_fact_locked (WylHandle *self, const gchar *id,
     return rc;
   audit_event[1] = created_at_us;
   rc = wyl_handle_intern_engine_symbol_locked (self, decision_name,
-      &audit_event[2]);
+          &audit_event[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_engine_insert_locked (self, "audit_event_input", audit_event,
-      3);
+          3);
   if (rc != WYRELOG_E_OK)
     return rc;
   audit_event_inserted = TRUE;
@@ -5049,7 +5067,7 @@ wyl_handle_insert_audit_fact_locked (WylHandle *self, const gchar *id,
     rc = insert_audit_attr_fact (self, &attrs[i], audit_event[0], values[i]);
     if (rc != WYRELOG_E_OK) {
       wyrelog_error_t rollback_rc = rollback_audit_fact_inputs (self,
-          audit_event, audit_event_inserted, attrs, G_N_ELEMENTS (attrs));
+              audit_event, audit_event_inserted, attrs, G_N_ELEMENTS (attrs));
       return rollback_rc == WYRELOG_E_OK ? rc : rollback_rc;
     }
   }
@@ -5070,7 +5088,7 @@ wyl_handle_load_policy_store_audit_facts (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_audit_event (self->policy_store,
-      insert_policy_store_audit_fact, self);
+             insert_policy_store_audit_fact, self);
 }
 
 typedef struct
@@ -5126,7 +5144,7 @@ wyl_handle_engine_contains_locked (WylHandle *self, const gchar *relation,
 
   WylRowProbe probe = { relation, snapshot_relation, row, ncols, FALSE };
   wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine,
-      snapshot_relation, wyl_handle_row_snapshot_cb, &probe);
+          snapshot_relation, wyl_handle_row_snapshot_cb, &probe);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -5146,7 +5164,7 @@ wyl_handle_engine_decide_locked (WylHandle *self, const gint64 row[3],
     return WYRELOG_E_INVALID;
 
   return wyl_handle_engine_contains_locked (self, "allow_bool", row, 3,
-      out_allowed);
+             out_allowed);
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
