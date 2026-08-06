@@ -4749,6 +4749,12 @@ issue_access_token (WylDaemonHttpContext *ctx, WylSession *session,
     .tenant = tenant,
     .principal_state_at_issue = principal_state,
     .session_id = session_token,
+    /* Issue #752: bind the token to the live session's authentication epoch
+     * (the winning transition's rowid).  Read from the session, not a fresh
+     * durable query, so the token carries exactly the epoch this session
+     * won; authorization later rejects it if the durable watermark advances
+     * past this value. */
+    .authn_epoch = wyl_session_authn_epoch_load_private (session),
     .issued_at = issued_at,
     .ttl_seconds = ttl,
   };
@@ -5462,6 +5468,27 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
   if (g_strcmp0 (live_username, claims.subject) != 0 ||
       g_strcmp0 (live_tenant, claims.tenant) != 0) {
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
+
+  /*
+   * Issue #752 supersession gate.  principal_state is subject-global, so a
+   * principal can be 'authenticated' again after a lock/unlock/re-auth cycle
+   * driven by a different session - an ABA that the plain state check above
+   * cannot see.  Compare the token's bound authentication epoch against the
+   * live durable watermark (the greatest 'authenticated' principal event):
+   * a token minted against an older epoch is stale even though the state
+   * once again reads 'authenticated', and is rejected here.  A durable read
+   * fault fails closed.  A subject with no authenticated event yields a
+   * watermark of 0, which only a (test-seam) epoch-0 token can match.
+   */
+  gint64 current_epoch = 0;
+  gboolean epoch_found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch
+        (wyl_handle_get_policy_store (ctx->handle), claims.subject,
+      &current_epoch, &epoch_found) != WYRELOG_E_OK
+      || claims.authn_epoch != current_epoch) {
     wyl_jwt_access_claims_clear (&claims);
     return WYRELOG_E_POLICY;
   }
@@ -13707,6 +13734,13 @@ prepare_human_access_candidate (WylHumanRefreshClaim *claim,
     .tenant = claim->tenant,
     .principal_state_at_issue = "authenticated",
     .session_id = claim->session_id,
+    /* Issue #752: the rotated access token inherits the same live-session
+     * authentication epoch.  claim->session is the session the refresh flow
+     * already matched (human_session_matches).  If the principal was
+     * superseded by a newer authentication, this stamped epoch is now behind
+     * the durable watermark, so the rotated token is rejected fail-closed at
+     * the decision-time epoch gate (resolve_bearer_session). */
+    .authn_epoch = wyl_session_authn_epoch_load_private (claim->session),
     .issued_at = issued_at,
     .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
   };

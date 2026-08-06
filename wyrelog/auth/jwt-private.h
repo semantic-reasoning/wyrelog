@@ -20,6 +20,14 @@ typedef struct
   const gchar *tenant;
   const gchar *principal_state_at_issue;
   const gchar *session_id;
+  /* Issue #752: the subject-global authentication epoch this human token is
+   * bound to - the principal_events rowid of the authenticating transition
+   * the minting session won.  A later authenticating transition (after a
+   * lock/unlock re-auth) raises the durable epoch, so a token carrying an
+   * older value is superseded and must be rejected even when the principal
+   * is once again 'authenticated'.  Human tokens only; service tokens never
+   * carry it. */
+  gint64 authn_epoch;
   gint64 issued_at;
   gint64 ttl_seconds;
 } wyl_jwt_issue_input_t;
@@ -53,6 +61,11 @@ typedef struct
   gint64 issued_at;
   gint64 not_before;
   gint64 expires_at;
+  /* Issue #752: the human-token authentication epoch (see the issue-input
+   * field).  Present and required on human tokens; absent on service tokens.
+   * Zero-initialized before parsing; validity is tracked by the seen mask
+   * (CLAIM_AUTHN_EPOCH), not by the value, so a real epoch of 0 is legal. */
+  gint64 authn_epoch;
 } wyl_jwt_access_claims_t;
 
 void wyl_jwt_access_claims_clear (wyl_jwt_access_claims_t * claims);
