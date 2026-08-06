@@ -26563,6 +26563,246 @@ rollback:
   return rc;
 }
 
+/* Re-read (state, locked_at) after a login CAS lost its race, so the loser
+ * reports the winner's durable precedence.  A missing row reads UNVERIFIED
+ * with a NULL (G_MININT64) locked_at.  Runs inside the caller's savepoint. */
+static wyrelog_error_t
+principal_login_reobserve (wyl_policy_store_t *store, const gchar *subject_id,
+    wyl_principal_state_t *out_state, gint64 *out_locked_at)
+{
+  *out_state = WYL_PRINCIPAL_STATE_UNVERIFIED;
+  *out_locked_at = G_MININT64;
+  sqlite3_stmt *sel = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT state, locked_at FROM principal_states "
+      "WHERE subject_id = ?;", &sel);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (sel, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (sel);
+    return rc;
+  }
+  int step_rc = sqlite3_step (sel);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *cur = (const gchar *) sqlite3_column_text (sel, 0);
+    wyl_principal_state_t st = wyl_principal_state_from_name (cur);
+    if (st == WYL_PRINCIPAL_STATE_LAST_) {
+      sqlite3_finalize (sel);
+      return WYRELOG_E_INTERNAL;
+    }
+    *out_state = st;
+    if (sqlite3_column_type (sel, 1) != SQLITE_NULL)
+      *out_locked_at = sqlite3_column_int64 (sel, 1);
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (sel);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (sel);
+  return WYRELOG_E_OK;
+}
+
+/* Classify a no-write observed state into its zero-event login outcome.
+ * Shared by the initial observation and the raced-away re-observation so a
+ * login that loses the unverified CAS reports exactly what the winner left. */
+static wyl_principal_login_outcome_t
+principal_login_noop_outcome (wyl_principal_state_t observed,
+    gint64 locked_at, gint64 auto_unlock_seconds, gint64 now_secs)
+{
+  switch (observed) {
+    case WYL_PRINCIPAL_STATE_MFA_REQUIRED:
+      return WYL_PRINCIPAL_LOGIN_ATTACHED_MFA_PENDING;
+    case WYL_PRINCIPAL_STATE_AUTHENTICATED:
+      return WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED;
+    case WYL_PRINCIPAL_STATE_LOCKED:
+      /* Elapsed-but-unhandled here means the caller must fold the unlock;
+       * this classifier only names the not-elapsed reject.  A NULL locked_at
+       * (G_MININT64 sentinel) is treated as not-yet-elapsed, never a 1970
+       * auto-unlock. */
+      (void) auto_unlock_seconds;
+      (void) now_secs;
+      (void) locked_at;
+      return WYL_PRINCIPAL_LOGIN_LOCKED;
+    case WYL_PRINCIPAL_STATE_REVOKED:
+      return WYL_PRINCIPAL_LOGIN_REVOKED;
+    default:
+      /* UNVERIFIED here is a lost race with nothing durable yet; attaching to
+       * a not-yet-existent ceremony is the safe, event-free interpretation. */
+      return WYL_PRINCIPAL_LOGIN_ATTACHED_MFA_PENDING;
+  }
+}
+
+/* Subject-global login precedence + folded auto-unlock (issue #752).  See the
+ * store-private.h contract. */
+wyrelog_error_t
+wyl_policy_store_apply_principal_login (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean skip_mfa, gint64 auto_unlock_seconds,
+    gint64 now_secs, wyl_principal_login_outcome_t *out_outcome,
+    wyl_principal_state_t *out_from, wyl_principal_state_t *out_to,
+    gint64 out_event_ids[2], gint *out_event_count)
+{
+  if (out_event_count != NULL)
+    *out_event_count = 0;
+  if (store == NULL || store->db == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
+
+  const wyl_principal_event_t login_event = skip_mfa
+      ? WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA : WYL_PRINCIPAL_EVENT_LOGIN_OK;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Observe (state, locked_at) inside the outer savepoint.  A missing row is
+   * UNVERIFIED with no lockout.  locked_at is read here (unlike the plain
+   * transition CAS) because the folded auto-unlock decision needs it. */
+  sqlite3_stmt *sel = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT state, locked_at FROM principal_states "
+      "WHERE subject_id = ?;", &sel);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  if ((rc = bind_text (sel, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (sel);
+    goto rollback;
+  }
+  wyl_principal_state_t observed = WYL_PRINCIPAL_STATE_UNVERIFIED;
+  gint64 observed_locked_at = G_MININT64;
+  int step_rc = sqlite3_step (sel);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *cur = (const gchar *) sqlite3_column_text (sel, 0);
+    observed = wyl_principal_state_from_name (cur);
+    if (sqlite3_column_type (sel, 1) != SQLITE_NULL)
+      observed_locked_at = sqlite3_column_int64 (sel, 1);
+    if (observed == WYL_PRINCIPAL_STATE_LAST_) {
+      sqlite3_finalize (sel);
+      rc = WYRELOG_E_INTERNAL;
+      goto rollback;
+    }
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (sel);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  sqlite3_finalize (sel);
+
+  wyl_principal_login_outcome_t outcome = WYL_PRINCIPAL_LOGIN_STARTED;
+  wyl_principal_state_t final_state = observed;
+  gint64 events[2] = { -1, -1 };
+  gint event_count = 0;
+
+  /* Decide whether the locked row's auto-unlock window has elapsed.  A NULL
+   * locked_at (G_MININT64 sentinel) can never be elapsed. */
+  gboolean unlock_elapsed = observed == WYL_PRINCIPAL_STATE_LOCKED
+      && observed_locked_at != G_MININT64
+      && auto_unlock_seconds >= 0
+      && now_secs >= observed_locked_at + auto_unlock_seconds;
+
+  if (observed == WYL_PRINCIPAL_STATE_UNVERIFIED) {
+    wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+    gboolean moved = FALSE;
+    gint64 ev = -1;
+    rc = wyl_policy_store_apply_principal_transition (store, subject_id,
+        login_event, 0, now_secs, NULL, &to, &moved, &ev);
+    if (rc != WYRELOG_E_OK)
+      goto rollback;
+    if (moved) {
+      outcome = WYL_PRINCIPAL_LOGIN_STARTED;
+      final_state = to;
+      events[event_count++] = ev;
+    } else {
+      /* Raced away from unverified: re-observe and report the winner's
+       * precedence with no event of our own. */
+      wyl_principal_state_t raced = WYL_PRINCIPAL_STATE_UNVERIFIED;
+      gint64 raced_locked_at = G_MININT64;
+      rc = principal_login_reobserve (store, subject_id, &raced,
+          &raced_locked_at);
+      if (rc != WYRELOG_E_OK)
+        goto rollback;
+      outcome = principal_login_noop_outcome (raced, raced_locked_at,
+          auto_unlock_seconds, now_secs);
+      final_state = raced;
+    }
+  } else if (unlock_elapsed) {
+    /* Fold the auto-unlock and the login into one atomic pair of edges. */
+    wyl_principal_state_t after_unlock = WYL_PRINCIPAL_STATE_LAST_;
+    gboolean unlocked = FALSE;
+    gint64 unlock_ev = -1;
+    rc = wyl_policy_store_apply_principal_transition (store, subject_id,
+        WYL_PRINCIPAL_EVENT_UNLOCK, 0, now_secs, NULL, &after_unlock,
+        &unlocked, &unlock_ev);
+    if (rc != WYRELOG_E_OK)
+      goto rollback;
+    if (!unlocked) {
+      /* Raced: someone else already moved the locked row.  Re-observe. */
+      wyl_principal_state_t raced = WYL_PRINCIPAL_STATE_UNVERIFIED;
+      gint64 raced_locked_at = G_MININT64;
+      rc = principal_login_reobserve (store, subject_id, &raced,
+          &raced_locked_at);
+      if (rc != WYRELOG_E_OK)
+        goto rollback;
+      outcome = principal_login_noop_outcome (raced, raced_locked_at,
+          auto_unlock_seconds, now_secs);
+      final_state = raced;
+    } else {
+      wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+      gboolean moved = FALSE;
+      gint64 login_ev = -1;
+      rc = wyl_policy_store_apply_principal_transition (store, subject_id,
+          login_event, 0, now_secs, NULL, &to, &moved, &login_ev);
+      if (rc != WYRELOG_E_OK)
+        goto rollback;
+      if (!moved) {
+        /* Unlock committed but the login CAS lost to a concurrent login on
+         * the now-unverified row; report the winner's precedence but still
+         * surface the unlock we durably performed. */
+        events[event_count++] = unlock_ev;
+        wyl_principal_state_t raced = WYL_PRINCIPAL_STATE_UNVERIFIED;
+        gint64 raced_locked_at = G_MININT64;
+        rc = principal_login_reobserve (store, subject_id, &raced,
+            &raced_locked_at);
+        if (rc != WYRELOG_E_OK)
+          goto rollback;
+        outcome = principal_login_noop_outcome (raced, raced_locked_at,
+            auto_unlock_seconds, now_secs);
+        final_state = raced;
+      } else {
+        outcome = WYL_PRINCIPAL_LOGIN_UNLOCKED_STARTED;
+        final_state = to;
+        events[event_count++] = unlock_ev;
+        events[event_count++] = login_ev;
+      }
+    }
+  } else {
+    outcome = principal_login_noop_outcome (observed, observed_locked_at,
+        auto_unlock_seconds, now_secs);
+    final_state = observed;
+  }
+
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+
+  if (out_outcome != NULL)
+    *out_outcome = outcome;
+  if (out_from != NULL)
+    *out_from = observed;
+  if (out_to != NULL)
+    *out_to = final_state;
+  if (out_event_count != NULL)
+    *out_event_count = event_count;
+  if (out_event_ids != NULL) {
+    out_event_ids[0] = events[0];
+    out_event_ids[1] = events[1];
+  }
+  return WYRELOG_E_OK;
+
+rollback:
+  wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
 /* Derived subject-global authentication epoch (issue #752). */
 wyrelog_error_t
 wyl_policy_store_get_principal_authn_epoch (wyl_policy_store_t *store,

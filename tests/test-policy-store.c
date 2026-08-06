@@ -4064,6 +4064,175 @@ check_store_principal_authn_epoch_monotonic (void)
   return 0;
 }
 
+/* Issue #752: the login precedence CAS resolves the ratified single-active
+ * table - unverified => STARTED (1 event), mfa_required => attach (0),
+ * authenticated => idempotent (0), revoked => reject (0). */
+static gint
+check_store_apply_principal_login_precedence (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1700;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1701;
+
+  /* Fresh subject, normal login: STARTED -> mfa_required, one event. */
+  wyl_principal_login_outcome_t outcome = WYL_PRINCIPAL_LOGIN_REVOKED;
+  wyl_principal_state_t from = WYL_PRINCIPAL_STATE_LAST_;
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gint64 evs[2] = { -1, -1 };
+  gint n = -1;
+  if (wyl_policy_store_apply_principal_login (store, "login.user", FALSE, 900,
+          1000, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1702;
+  if (outcome != WYL_PRINCIPAL_LOGIN_STARTED
+      || from != WYL_PRINCIPAL_STATE_UNVERIFIED
+      || to != WYL_PRINCIPAL_STATE_MFA_REQUIRED || n != 1 || evs[0] <= 0)
+    return 1703;
+
+  /* Second login on the mfa_required subject: attach, no event. */
+  if (wyl_policy_store_apply_principal_login (store, "login.user", FALSE, 900,
+          1001, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1704;
+  if (outcome != WYL_PRINCIPAL_LOGIN_ATTACHED_MFA_PENDING
+      || from != WYL_PRINCIPAL_STATE_MFA_REQUIRED
+      || to != WYL_PRINCIPAL_STATE_MFA_REQUIRED || n != 0)
+    return 1705;
+
+  /* Drive to authenticated; a login is then idempotent, no event. */
+  gboolean moved = FALSE;
+  if (wyl_policy_store_apply_principal_transition (store, "login.user",
+          WYL_PRINCIPAL_EVENT_MFA_OK, 5, 1002, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1706;
+  if (wyl_policy_store_apply_principal_login (store, "login.user", FALSE, 900,
+          1003, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1707;
+  if (outcome != WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED
+      || from != WYL_PRINCIPAL_STATE_AUTHENTICATED
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED || n != 0)
+    return 1708;
+
+  /* Exactly two principal events for the subject (login_ok, mfa_ok). */
+  gint events = 0;
+  if (count_rows (store, "SELECT COUNT(*) FROM principal_events "
+          "WHERE subject_id = 'login.user';", &events) != 0)
+    return 1709;
+  if (events != 2)
+    return 1710;
+
+  /* Fresh subject, skip-MFA login: STARTED straight to authenticated. */
+  if (wyl_policy_store_apply_principal_login (store, "login.skip", TRUE, 900,
+          1004, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1711;
+  if (outcome != WYL_PRINCIPAL_LOGIN_STARTED
+      || from != WYL_PRINCIPAL_STATE_UNVERIFIED
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED || n != 1)
+    return 1712;
+
+  /* Revoked subject: typed reject, no event. */
+  if (wyl_policy_store_apply_principal_transition (store, "login.skip",
+          WYL_PRINCIPAL_EVENT_REVOKE, 5, 1005, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1713;
+  if (wyl_policy_store_apply_principal_login (store, "login.skip", FALSE, 900,
+          1006, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1714;
+  if (outcome != WYL_PRINCIPAL_LOGIN_REVOKED
+      || from != WYL_PRINCIPAL_STATE_REVOKED || n != 0)
+    return 1715;
+  return 0;
+}
+
+/* Issue #752: login on a locked subject folds the time-based auto-unlock -
+ * not-elapsed is a typed LOCKED reject with no event; elapsed unlocks and
+ * logs in atomically as two events (unlock, then login), and a skip-MFA
+ * elapsed unlock lands authenticated with a fresh authn epoch. */
+static gint
+check_store_apply_principal_login_folded_unlock (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1720;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1721;
+
+  /* Drive to mfa_required then LOCK with locked_at = 1000. */
+  gboolean moved = FALSE;
+  if (wyl_policy_store_apply_principal_login (store, "lock.user", FALSE, 900,
+          500, NULL, NULL, NULL, NULL, NULL) != WYRELOG_E_OK)
+    return 1722;
+  if (wyl_policy_store_apply_principal_transition (store, "lock.user",
+          WYL_PRINCIPAL_EVENT_LOCK, 5, 1000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1723;
+
+  /* Not elapsed (now < 1000 + 900): typed LOCKED reject, no event. */
+  wyl_principal_login_outcome_t outcome = WYL_PRINCIPAL_LOGIN_STARTED;
+  wyl_principal_state_t from = WYL_PRINCIPAL_STATE_LAST_;
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gint64 evs[2] = { -1, -1 };
+  gint n = -1;
+  if (wyl_policy_store_apply_principal_login (store, "lock.user", FALSE, 900,
+          1899, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1724;
+  if (outcome != WYL_PRINCIPAL_LOGIN_LOCKED
+      || from != WYL_PRINCIPAL_STATE_LOCKED
+      || to != WYL_PRINCIPAL_STATE_LOCKED || n != 0)
+    return 1725;
+
+  /* Elapsed (now >= 1900): folded unlock + login, two events. */
+  if (wyl_policy_store_apply_principal_login (store, "lock.user", FALSE, 900,
+          1900, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1726;
+  if (outcome != WYL_PRINCIPAL_LOGIN_UNLOCKED_STARTED
+      || from != WYL_PRINCIPAL_STATE_LOCKED
+      || to != WYL_PRINCIPAL_STATE_MFA_REQUIRED || n != 2
+      || evs[0] <= 0 || evs[1] <= evs[0])
+    return 1727;
+
+  /* The two returned event ids are exactly unlock (locked->unverified) then
+   * login_ok (unverified->mfa_required), in that order. */
+  g_autofree gchar *unlock_sql =
+      g_strdup_printf ("SELECT COUNT(*) FROM principal_events "
+      "WHERE event_id = %" G_GINT64_FORMAT " AND subject_id = 'lock.user' "
+      "AND event = 'unlock' AND from_state = 'locked' "
+      "AND to_state = 'unverified';", evs[0]);
+  gint unlock_rows = 0;
+  if (count_rows (store, unlock_sql, &unlock_rows) != 0 || unlock_rows != 1)
+    return 1728;
+  g_autofree gchar *login_sql =
+      g_strdup_printf ("SELECT COUNT(*) FROM principal_events "
+      "WHERE event_id = %" G_GINT64_FORMAT " AND subject_id = 'lock.user' "
+      "AND event = 'login_ok' AND from_state = 'unverified' "
+      "AND to_state = 'mfa_required';", evs[1]);
+  gint login_rows = 0;
+  if (count_rows (store, login_sql, &login_rows) != 0 || login_rows != 1)
+    return 1729;
+
+  /* Skip-MFA elapsed unlock lands authenticated with a fresh epoch. */
+  if (wyl_policy_store_apply_principal_transition (store, "lock.skip",
+          WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 5, 100, NULL, NULL, &moved,
+          NULL) != WYRELOG_E_OK || !moved)
+    return 1730;
+  if (wyl_policy_store_apply_principal_transition (store, "lock.skip",
+          WYL_PRINCIPAL_EVENT_LOCK, 5, 2000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved)
+    return 1731;
+  if (wyl_policy_store_apply_principal_login (store, "lock.skip", TRUE, 900,
+          2900, &outcome, &from, &to, evs, &n) != WYRELOG_E_OK)
+    return 1732;
+  if (outcome != WYL_PRINCIPAL_LOGIN_UNLOCKED_STARTED
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED || n != 2)
+    return 1733;
+  gint64 epoch = -1;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, "lock.skip", &epoch,
+          &found) != WYRELOG_E_OK || !found || epoch != evs[1])
+    return 1734;
+  return 0;
+}
+
 /* Issue #331 commit 5 iteration (LOW #4): legacy-schema migration.
  * A pre-#331-commit-5 store has principal_states with three columns
  * (subject_id, state, updated_at) - no failed_attempt_count, no
@@ -5902,6 +6071,10 @@ main (void)
   if ((rc = check_store_apply_principal_transition_lock_invariant ()) != 0)
     return rc;
   if ((rc = check_store_principal_authn_epoch_monotonic ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_login_precedence ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_login_folded_unlock ()) != 0)
     return rc;
   if ((rc = check_store_principal_states_legacy_schema_migration ()) != 0)
     return rc;
