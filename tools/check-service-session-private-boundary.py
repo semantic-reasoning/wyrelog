@@ -28,6 +28,11 @@ import threading
 import time
 from typing import NamedTuple
 
+# The self-test exec_module-loads this file, so tools/ is not on sys.path when
+# it runs; make the shared renderer importable before pulling it in.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _diag_path import escape_ascii_identity, render_source_identity
+
 PROTECTED = (
     "wyl_session_new_service_detached",
     "wyl_session_get_auth_method_private",
@@ -142,15 +147,20 @@ def allowed_uncompiled_owners(values: list[str]) -> frozenset[str]:
                 or any(part in {"", ".", ".."} for part in value.split("/"))
                 or path.suffix != ".c"):
             raise BoundaryError(
-                f"non-canonical uncompiled owner path: {value!r}")
+                "non-canonical uncompiled owner path: "
+                + render_source_identity(value))
         if value not in current_c_owners:
             raise BoundaryError(
-                f"uncompiled owner is not a current MANIFEST C owner: {value}")
+                "uncompiled owner is not a current MANIFEST C owner: "
+                + render_source_identity(value))
         if value not in CONDITIONAL_COMPILED_OWNERS:
             raise BoundaryError(
-                f"uncompiled owner is not conditionally compiled: {value}")
+                "uncompiled owner is not conditionally compiled: "
+                + render_source_identity(value))
         if value in accepted:
-            raise BoundaryError(f"duplicate uncompiled owner allowance: {value}")
+            raise BoundaryError(
+                "duplicate uncompiled owner allowance: "
+                + render_source_identity(value))
         accepted.add(value)
     return frozenset(accepted)
 
@@ -323,7 +333,8 @@ def expand_response_files(arguments: list[str], directory: Path,
             nested = (windows_command_line_split(content) if windows
                       else shlex.split(content))
         except (OSError, UnicodeDecodeError, ValueError) as error:
-            raise BoundaryError(f"cannot expand compiler response file: {path}") from error
+            raise BoundaryError("cannot expand compiler response file: "
+                                + render_source_identity(path)) from error
         # GCC, Clang, and MSVC resolve nested response paths relative to the
         # compiler invocation working directory, not the containing response.
         expanded.extend(expand_response_files(nested, directory, windows))
@@ -752,7 +763,9 @@ class IncludeSnapshot:
                            owner: str) -> None:
         if observation.state == "error":
             raise BoundaryError(
-                f"{observation.error_prefix}: {owner}: {observation.error_path}")
+                f"{observation.error_prefix}: "
+                f"{render_source_identity(owner)}: "
+                f"{render_source_identity(observation.error_path)}")
 
     def candidate(self, anchor: Path, name: str,
                   owner: str) -> CandidateObservation:
@@ -813,7 +826,8 @@ class IncludeSnapshot:
         if identity in self.text:
             value = self.text[identity]
             if isinstance(value, Exception):
-                raise BoundaryError(f"unreadable include in boundary probe: {path}") from value
+                raise BoundaryError("unreadable include in boundary probe: "
+                                    + render_source_identity(path)) from value
             return value
         try:
             self.reporter.update("distill", "read", text_reads=self.reads)
@@ -823,7 +837,8 @@ class IncludeSnapshot:
             stat = path.stat()
         except (OSError, UnicodeDecodeError) as error:
             self.text[identity] = error
-            raise BoundaryError(f"unreadable include in boundary probe: {path}") from error
+            raise BoundaryError("unreadable include in boundary probe: "
+                                + render_source_identity(path)) from error
         self.reads += 1
         self.text[identity] = value
         self.fingerprints[identity] = (
@@ -839,8 +854,8 @@ class IncludeSnapshot:
                 self.candidate_anchors[key], name, "snapshot validation")
             if actual != expected:
                 raise BoundaryError(
-                    f"include candidate changed during boundary scan: "
-                    f"{expected.lexical_identity}")
+                    "include candidate changed during boundary scan: "
+                    + render_source_identity(expected.lexical_identity))
             self._raise_observation(actual, "snapshot validation")
         for path in sorted(self.negative_paths, key=str):
             try:
@@ -849,9 +864,11 @@ class IncludeSnapshot:
                 continue
             except OSError as error:
                 raise BoundaryError(
-                    f"cannot revalidate include candidate: {path}") from error
+                    "cannot revalidate include candidate: "
+                    + render_source_identity(path)) from error
             raise BoundaryError(
-                f"include candidate appeared during boundary scan: {path}")
+                "include candidate appeared during boundary scan: "
+                + render_source_identity(path))
         for identity, expected in sorted(self.fingerprints.items()):
             path = Path(identity)
             try:
@@ -859,11 +876,13 @@ class IncludeSnapshot:
                 stat = path.stat()
             except OSError as error:
                 raise BoundaryError(
-                    f"include changed or became unreadable: {path}") from error
+                    "include changed or became unreadable: "
+                    + render_source_identity(path)) from error
             actual = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
                       hashlib.sha256(data).digest())
             if actual != expected:
-                raise BoundaryError(f"include changed during boundary scan: {path}")
+                raise BoundaryError("include changed during boundary scan: "
+                                    + render_source_identity(path))
 
 
 def distilled_expansion(rel: str, raw: str, path: Path,
@@ -920,7 +939,8 @@ def distilled_expansion(rel: str, raw: str, path: Path,
                 continue
             if not candidate.is_absolute() or not path.is_absolute():
                 raise BoundaryError(
-                    f"non-absolute snapshotted include identity: {rel}")
+                    "non-absolute snapshotted include identity: "
+                    + render_source_identity(rel))
             candidate_id = str(candidate)
             is_local = snapshot.is_local(candidate)
             if not is_local:
@@ -943,11 +963,14 @@ def distilled_expansion(rel: str, raw: str, path: Path,
                 snapshot.expansion_backedges += 1
         elif any_include.match(line):
             raise BoundaryError(
-                f"non-literal include in boundary probe: {rel}: {line.strip()}")
+                "non-literal include in boundary probe: "
+                + render_source_identity(rel) + ": "
+                + escape_ascii_identity(line.strip()))
         elif unsupported_include.match(line):
             raise BoundaryError(
-                f"unsupported include-like directive in boundary probe: "
-                f"{rel}: {line.strip()}")
+                "unsupported include-like directive in boundary probe: "
+                + render_source_identity(rel) + ": "
+                + escape_ascii_identity(line.strip()))
         elif not re.match(r"^\s*#", line):
             body.append(line)
         elif conditional.match(line):
@@ -1006,7 +1029,7 @@ def diagnostic_text(value: object) -> str:
 
 
 def decode_preprocessor_stdout(value: object, rels: tuple[str, ...]) -> str:
-    location = ", ".join(rels)
+    location = ", ".join(render_source_identity(r) for r in rels)
     if not isinstance(value, bytes):
         raise BoundaryError(
             f"C preprocessor returned non-byte output: {location}")
@@ -1037,7 +1060,8 @@ def preprocess(command: list[str], compiler_id: str, source: str,
         raise BoundaryError(f"C preprocessor execution failed: {error}") from error
     if result.returncode != 0:
         raise BoundaryError("C preprocessor rejected boundary probe: "
-                            + rel + ": " + " ".join(argv) + "\n"
+                            + render_source_identity(rel) + ": "
+                            + " ".join(argv) + "\n"
                             + diagnostic_text(result.stderr))
     return decode_preprocessor_stdout(result.stdout, (rel,))
 
@@ -1143,7 +1167,8 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
             for symbol in protected:
                 if symbol in compact and symbol not in line:
                     raise BoundaryError(
-                        f"obfuscated protected reference: {rel}:{lineno}: {symbol}")
+                        "obfuscated protected reference: "
+                        f"{render_source_identity(rel)}:{lineno}: {symbol}")
 
         if Path(rel).suffix.lower() == ".c":
             reporter.update("distill", "resolve", file=source_number,
@@ -1274,7 +1299,8 @@ def prepare_probe(rel: str, probe: str, protected: tuple[str, ...]):
                                  probe)
             if reserved is not None:
                 raise BoundaryError(
-                    f"reserved boundary sentinel in source: {rel}: "
+                    "reserved boundary sentinel in source: "
+                    f"{render_source_identity(rel)}: "
                     f"{reserved.group(0)}")
             masked_probe = probe
             sentinels = []
@@ -1299,7 +1325,7 @@ def prepare_probe(rel: str, probe: str, protected: tuple[str, ...]):
 def validate_expanded(rels: tuple[str, ...], expanded: str,
                       protected: tuple[str, ...], calibration: str,
                       sentinels: list[str]) -> None:
-            location = ", ".join(rels)
+            location = ", ".join(render_source_identity(r) for r in rels)
             if len(re.findall(rf"\b{calibration}\b", expanded)) != 1:
                 raise BoundaryError(
                     f"preprocessor calibration marker did not survive: {location}")
@@ -1334,7 +1360,8 @@ def inspect_probe_batch(items, compiler: list[str], compiler_id: str,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE)
         except subprocess.TimeoutExpired as error:
-            rels = ", ".join(item[0] for item in prepared)
+            rels = ", ".join(render_source_identity(item[0])
+                             for item in prepared)
             raise BoundaryError(
                 f"C preprocessor batch timed out after 300s: {rels}: "
                 + " ".join(argv)) from error
@@ -1343,7 +1370,9 @@ def inspect_probe_batch(items, compiler: list[str], compiler_id: str,
                 f"C preprocessor batch execution failed: {error}") from error
         if result.returncode != 0:
             raise BoundaryError("C preprocessor rejected boundary batch: "
-                                + ", ".join(rels) + ": " + " ".join(argv)
+                                + ", ".join(render_source_identity(r)
+                                            for r in rels)
+                                + ": " + " ".join(argv)
                                 + "\n" + diagnostic_text(result.stderr))
     expanded = decode_preprocessor_stdout(result.stdout, rels)
     for _, _, calibration, sentinels in prepared:

@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tempfile
 
+from _diag_path import render_source_identity
+
 
 SOUP_API = "soup_server_add_handler"
 PREFIX_API = "wyl_daemon_http_add_prefix_handler"
@@ -550,7 +552,8 @@ def reject_ownership_preprocessor_references(source: str, path: Path) -> None:
                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)]
             if any(OWNERSHIP_API.fullmatch(token) for token in identifiers):
                 raise GuardError(f"ownership API in preprocessor directive at "
-                                 f"{path}:{directive_start}")
+                                 f"{render_source_identity(path)}:"
+                                 f"{directive_start}")
             for index, token in enumerate(tokens):
                 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
                     continue
@@ -564,18 +567,20 @@ def reject_ownership_preprocessor_references(source: str, path: Path) -> None:
                     cursor += 2
                 if cursor != index and OWNERSHIP_API.fullmatch(pasted):
                     raise GuardError(f"token-pasted ownership API at "
-                                     f"{path}:{directive_start}")
+                                     f"{render_source_identity(path)}:"
+                                     f"{directive_start}")
             in_directive = False
     if in_directive:
         raise GuardError(f"unterminated preprocessor directive at "
-                         f"{path}:{directive_start}")
+                         f"{render_source_identity(path)}:{directive_start}")
 
 
 def reject_line_marker_spoofing(source: str, path: Path) -> None:
     view = preprocessing_view(source)
     for number, line in enumerate(view.splitlines(), 1):
         if re.match(r'^\s*#\s*(?:line\s+)?[0-9]+(?:\s|$)', line):
-            raise GuardError(f"project-owned line marker at {path}:{number}")
+            raise GuardError(f"project-owned line marker at "
+                             f"{render_source_identity(path)}:{number}")
 
 
 def scan_source(path: Path) -> list[Registration]:
@@ -599,7 +604,8 @@ def scan_source(path: Path) -> list[Registration]:
                            or len(defined_owners) != len(ownership_owners)
                            or path.parts[-3:] !=
                            ("wyrelog", "daemon", "http.c")):
-        raise GuardError(f"ownership adapters outside their owner: {path}")
+        raise GuardError(f"ownership adapters outside their owner: "
+                         f"{render_source_identity(path)}")
     allowed_definitions = owner_definitions
     adapter_internal_calls = {owner: 0 for owner in ownership_owners}
     for owner, _name_index, start, end in definitions:
@@ -614,11 +620,13 @@ def scan_source(path: Path) -> list[Registration]:
                 continue
             closing = pairing.get(index + 1)
             if closing is None or closing >= end:
-                raise GuardError(f"unparsed registration call in {path}")
+                raise GuardError(f"unparsed registration call in "
+                                 f"{render_source_identity(path)}")
             if not ownership_call_is_direct_statement(
                     tokens, start, index, closing):
                 raise GuardError("ownership call is not a direct owner-body "
-                                 f"expression statement at {path}:"
+                                 "expression statement at "
+                                 f"{render_source_identity(path)}:"
                                  f"{token.line}")
             seen_calls.add(index)
             arguments = split_arguments(tokens, index + 1, closing)
@@ -655,7 +663,7 @@ def scan_source(path: Path) -> list[Registration]:
         if index in allowed_definitions:
             continue
         raise GuardError(f"unparsed or indirect ownership API reference at "
-                         f"{path}:{token.line}")
+                         f"{render_source_identity(path)}:{token.line}")
     if defined_owners and any(count != 1
                               for count in adapter_internal_calls.values()):
         raise GuardError("each ownership adapter must own one Soup registration")
@@ -680,7 +688,7 @@ def project_preprocessing_inputs(root: Path) -> list[Path]:
             path = (root / relative).resolve()
             if not path.is_file():
                 raise GuardError(f"tracked preprocessing input is missing: "
-                                 f"{relative}")
+                                 f"{render_source_identity(relative)}")
             paths.append(path)
         return sorted(paths)
     return sorted({
@@ -700,7 +708,7 @@ def check_root(root: Path) -> list[Registration]:
         hidden_registrations = scan_source(preprocessing_input)
         if hidden_registrations:
             raise GuardError(f"registration in project preprocessing input: "
-                             f"{preprocessing_input}")
+                             f"{render_source_identity(preprocessing_input)}")
     registrations = []
     for source in sources:
         registrations.extend(scan_source(source))
@@ -752,7 +760,7 @@ def raw_approved_occurrences(root: Path,
         hidden_registrations = scan_source(path)
         if hidden_registrations:
             raise GuardError(f"registration in generated preprocessing input: "
-                             f"{path}")
+                             f"{render_source_identity(path)}")
     occurrences = []
     for path in paths + generated:
         source, line_map = translation_phase_source_with_lines(
@@ -849,7 +857,7 @@ def expand_response_files(arguments: list[str], directory: Path,
                       else shlex.split(content, posix=True))
         except (OSError, UnicodeError, ValueError) as error:
             raise GuardError(f"cannot expand compiler response: "
-                             f"{response}") from error
+                             f"{render_source_identity(response)}") from error
         expanded.extend(expand_response_files(
             nested, directory, windows, stack + (response,), depth + 1))
     return expanded
@@ -988,7 +996,7 @@ def production_compile_units(root: Path, build_root: Path,
         output_value = entry.get("output")
         if not isinstance(output_value, str) or not output_value:
             raise GuardError(f"production compile entry lacks output: "
-                             f"{relative_source}")
+                             f"{render_source_identity(relative_source)}")
         output = resolve_argument_path(output_value, directory)
         try:
             relative_output = output.relative_to(build_root).as_posix()
@@ -997,7 +1005,8 @@ def production_compile_units(root: Path, build_root: Path,
         if not relative_output.startswith("wyrelog/"):
             continue
         if output in outputs:
-            raise GuardError(f"ambiguous production compile output: {output}")
+            raise GuardError(f"ambiguous production compile output: "
+                             f"{render_source_identity(output)}")
         outputs.add(output)
         if "arguments" in entry:
             arguments = entry["arguments"]
@@ -1337,12 +1346,14 @@ def preprocess_unit(unit: CompileUnit, root: Path, build_root: Path,
         raise GuardError(f"preprocessor execution failed: {error}") from error
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace")
-        raise GuardError(f"preprocessor rejected {unit.source}: {diagnostic}")
+        raise GuardError(f"preprocessor rejected "
+                         f"{render_source_identity(unit.source)}: "
+                         f"{diagnostic}")
     try:
         output = completed.stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise GuardError(f"preprocessor emitted non-UTF-8 output: "
-                         f"{unit.source}") from error
+                         f"{render_source_identity(unit.source)}") from error
     unit_marker = f'"{unit.source}"'
     if unit_marker not in output:
         alternates = {
@@ -1515,6 +1526,41 @@ def write_exact_fixture(path: Path, source: str) -> None:
 
 
 def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
+    # #776: a hostile filename must not forge, merge, or suppress a daemon
+    # route-registration diagnostic.  reject_line_marker_spoofing renders the
+    # offending path through the shared ASCII-safe renderer, so every hostile
+    # spelling stays a single ASCII physical line whose rendered identity is
+    # present verbatim (and therefore round-trips) in the emitted message.
+    hostile_fragments = (
+        "\n", "\r", "\t", "\x1b", "\\", "'", "\"", "‮", "а")
+    hostile_messages = []
+    for fragment in hostile_fragments:
+        hostile_path = Path("wyrelog/a" + fragment + "b.c")
+        try:
+            reject_line_marker_spoofing("# 1\n", hostile_path)
+        except GuardError as error:
+            message = str(error)
+        else:
+            raise GuardError("self-test accepted a hostile line marker")
+        if "\n" in message or "\r" in message:
+            raise GuardError("self-test emitted a multi-line route diagnostic")
+        if not message.isascii():
+            raise GuardError("self-test emitted a non-ASCII route diagnostic")
+        if render_source_identity(hostile_path) not in message:
+            raise GuardError("self-test lost the hostile route identity")
+        hostile_messages.append(message)
+    # A newline spelling cannot fabricate a second diagnostic line, nor merge
+    # with the distinct literal backslash-n sibling.
+    newline_message = hostile_messages[0]
+    try:
+        reject_line_marker_spoofing("# 1\n", Path("wyrelog/a\\nb.c"))
+    except GuardError as error:
+        literal_message = str(error)
+    else:
+        raise GuardError("self-test accepted a literal backslash-n marker")
+    if newline_message == literal_message:
+        raise GuardError("self-test merged newline and backslash-n route paths")
+
     with tempfile.TemporaryDirectory(prefix="wyl-route-guard-") as temporary:
         root = Path(temporary)
         daemon = root / "wyrelog" / "daemon"
