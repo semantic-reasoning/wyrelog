@@ -154,6 +154,75 @@ def main() -> int:
             lambda owner=conditional_owner:
                 guard_module.allowed_uncompiled_owners([owner, owner]),
             "duplicate")
+
+    # #776: a hostile owner spelling must not forge, merge, or suppress a
+    # boundary diagnostic.  render_source_identity keeps every hostile owner a
+    # single ASCII physical line whose escapes decode back to the exact
+    # original; U+0430 with an isascii() assertion keeps this non-vacuous
+    # (repr() alone would already hide control characters).
+    def decode_boundary_identity(entry: str) -> str:
+        for tag in (" [posix]", " [windows]", " [unknown-flavor]"):
+            if entry.endswith(tag):
+                entry = entry[:-len(tag)]
+                break
+        quoted = entry[entry.index("\""):]
+        assert quoted.startswith("\"") and quoted.endswith("\"")
+        inner = quoted[1:-1]
+        out = []
+        index = 0
+        while index < len(inner):
+            char = inner[index]
+            if char != "\\":
+                out.append(char)
+                index += 1
+                continue
+            marker = inner[index + 1]
+            if marker == "\\":
+                out.append("\\")
+                index += 2
+            elif marker == "\"":
+                out.append("\"")
+                index += 2
+            elif marker == "n":
+                out.append("\n")
+                index += 2
+            elif marker == "r":
+                out.append("\r")
+                index += 2
+            elif marker == "t":
+                out.append("\t")
+                index += 2
+            elif marker == "x":
+                out.append(chr(int(inner[index + 2:index + 4], 16)))
+                index += 4
+            elif marker == "u":
+                out.append(chr(int(inner[index + 2:index + 6], 16)))
+                index += 6
+            elif marker == "U":
+                out.append(chr(int(inner[index + 2:index + 10], 16)))
+                index += 10
+            else:
+                raise AssertionError("unknown escape marker")
+        return "".join(out)
+
+    hostile_owner_fragments = (
+        "\n", "\r", "\t", "\x1b", "\\", "'", "\"", "‮", "а")
+    for fragment in hostile_owner_fragments:
+        spelling = "/wyrelog/a" + fragment + "b.c"
+        rendered = guard_module.render_source_identity(spelling)
+        assert "\n" not in rendered and "\r" not in rendered
+        assert rendered.isascii()
+        assert decode_boundary_identity(rendered) == spelling
+        try:
+            guard_module.allowed_uncompiled_owners([spelling])
+            raise AssertionError("hostile owner path was accepted")
+        except guard_module.BoundaryError as error:
+            message = str(error)
+        assert "\n" not in message and "\r" not in message
+        assert message.isascii()
+        assert guard_module.render_source_identity(spelling) in message
+        assert decode_boundary_identity(message) == spelling
+
     expect_boundary_error(
         lambda: guard_module.validate_allowance_scope(
             "{}", allowed_conditional),
