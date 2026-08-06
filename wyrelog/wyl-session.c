@@ -49,6 +49,23 @@ session_is_service (const WylSession *session)
       && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
 }
 
+/* Issue #752: store the authentication epoch this session won.  GLib exposes
+ * no 64-bit atomic primitive, so - like mfa_assured's direct store and the
+ * other 64-bit session words (created_at_us, the service_* fields) - the
+ * epoch is written straight through the volatile field from the code that
+ * owns the layout.  This is safe because it is write-once: stored exactly
+ * once, on the winning authenticating commit, ordered before that commit
+ * publishes mfa_assured via the sequentially consistent g_atomic_int_set, and
+ * only ever read afterwards (through the companion load accessor).  A single
+ * aligned 64-bit store is atomic on every supported target. */
+static void
+session_store_authn_epoch (WylSession *session, gint64 epoch)
+{
+  if (session == NULL || !WYL_IS_SESSION (session))
+    return;
+  session->authn_epoch = epoch;
+}
+
 static wyrelog_error_t
 reload_session_snapshot (WylHandle *handle)
 {
@@ -352,8 +369,11 @@ publish_principal_mutation (WylPrincipalPublication *ctx)
 
 static wyrelog_error_t
 transition_principal_state (WylHandle *handle, const gchar *username,
-    wyl_principal_state_t old_state, wyl_principal_state_t new_state)
+    wyl_principal_state_t old_state, wyl_principal_state_t new_state,
+    gint64 *out_event_id)
 {
+  if (out_event_id != NULL)
+    *out_event_id = -1;
   const gchar *old_state_name = wyl_principal_state_name (old_state);
   const gchar *new_state_name = wyl_principal_state_name (new_state);
   if (old_state_name == NULL || new_state_name == NULL)
@@ -370,7 +390,12 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   WylPrincipalPublication publication = { handle, username, old_state,
     WYL_PRINCIPAL_EVENT_MFA_OK, new_state, ev, -1
   };
-  return publish_principal_mutation (&publication);
+  wyrelog_error_t rc = publish_principal_mutation (&publication);
+  /* Issue #752: hand back the winning principal event's rowid so the caller
+   * can stamp the session's authentication epoch from the true transition. */
+  if (rc == WYRELOG_E_OK && out_event_id != NULL)
+    *out_event_id = publication.event_id;
+  return rc;
 }
 
 /* Wraps the shared principal-publication ctx with the TOTP step the
@@ -497,6 +522,12 @@ wyl_session_totp_commit_mfa_ok (WylHandle *handle, WylSession *session,
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 
   if (rc == WYRELOG_E_OK && stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED) {
+    /* Issue #752: stamp the authentication epoch this session won from the
+     * winning MFA_OK principal event's rowid (NOT a post-hoc epoch re-read,
+     * which could observe a newer superseding transition).  Stored before
+     * the mfa_assured release so the epoch is published no later than the
+     * bit every authority check gates on. */
+    session_store_authn_epoch (session, publication.publication.event_id);
     g_atomic_int_set ((gint *) & session->mfa_assured, 1);
 #ifdef WYL_HAS_AUDIT
     if (publication.publication.audit_event != NULL)
@@ -879,6 +910,14 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       g_object_unref (session);
       return rc;
     }
+    /* Issue #752: a skip-MFA login is itself the authenticating transition
+     * (unverified --login_skip_mfa--> authenticated), so this session won the
+     * epoch - stamp it from that principal event's rowid before the session
+     * becomes reachable.  A normal login only reaches mfa_required and is not
+     * yet authenticated, so it leaves authn_epoch at 0; the MFA_OK commit
+     * stamps it later. */
+    if (event == WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA)
+      session_store_authn_epoch (session, publication.principal_event_id);
     wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {
@@ -931,10 +970,15 @@ mark_session_mfa_verified (WylHandle *handle, WylSession *session)
   if (rc != WYRELOG_E_OK || state != WYL_PRINCIPAL_STATE_AUTHENTICATED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
+  gint64 event_id = -1;
   rc = transition_principal_state (handle, session->username,
-      WYL_PRINCIPAL_STATE_MFA_REQUIRED, state);
-  if (rc == WYRELOG_E_OK)
+      WYL_PRINCIPAL_STATE_MFA_REQUIRED, state, &event_id);
+  if (rc == WYRELOG_E_OK) {
+    /* Issue #752: stamp the epoch this session won from the transition's
+     * event rowid before the mfa_assured release, mirroring the proof path. */
+    session_store_authn_epoch (session, event_id);
     g_atomic_int_set ((gint *) & session->mfa_assured, 1);
+  }
   return rc;
 }
 

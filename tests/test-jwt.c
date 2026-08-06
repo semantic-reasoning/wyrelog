@@ -14,6 +14,7 @@ static const wyl_jwt_issue_input_t valid_input = {
   .tenant = "__wr_default",
   .principal_state_at_issue = "authenticated",
   .session_id = "01890c10-2e3f-7000-8000-000000000102",
+  .authn_epoch = 42,
   .issued_at = 1000,
   .ttl_seconds = 0,
 };
@@ -83,7 +84,8 @@ check_payload_json_contains_required_claims (void)
       "\"aud\":\"wyrelog-client\",\"iat\":1000,\"nbf\":1000,"
       "\"exp\":1900,\"tenant\":\"__wr_default\","
       "\"principal_state_at_issue\":\"authenticated\","
-      "\"session_id\":\"01890c10-2e3f-7000-8000-000000000102\"}";
+      "\"session_id\":\"01890c10-2e3f-7000-8000-000000000102\","
+      "\"authn_epoch\":42}";
   if (g_strcmp0 (payload, expected) != 0)
     return 31;
   return 0;
@@ -278,6 +280,8 @@ check_hs256_access_token_claims_and_time (void)
   else if (g_strcmp0 (claims.session_id,
           "01890c10-2e3f-7000-8000-000000000102") != 0)
     claims_rc = 103;
+  else if (claims.authn_epoch != 42)
+    claims_rc = 104;
   wyl_jwt_access_claims_clear (&claims);
   if (claims_rc != 0)
     return claims_rc;
@@ -690,6 +694,50 @@ check_service_claims_fail_closed (void)
   return 0;
 }
 
+#define HUMAN_BASE \
+  "\"jti\":\"jti\",\"sub\":\"alice\",\"iss\":\"wyrelogd\"," \
+  "\"aud\":\"wyrelog-client\",\"iat\":1000,\"nbf\":1000," \
+  "\"exp\":1900,\"tenant\":\"t\"," \
+  "\"principal_state_at_issue\":\"authenticated\"," \
+  "\"session_id\":\"session\""
+
+/* Issue #752: the authn_epoch claim is required on human tokens and forbidden
+ * on service tokens, and its parsed value round-trips. */
+static gint
+check_authn_epoch_claim_gating (void)
+{
+  /* Human token missing the epoch: fail-closed reject. */
+  if (parse_claim_text ("{" HUMAN_BASE "}") != WYRELOG_E_POLICY)
+    return 200;
+
+  /* Human token with the epoch: accepted, and the value round-trips. */
+  const gchar *human = "{" HUMAN_BASE ",\"authn_epoch\":7}";
+  g_autoptr (GBytes) bytes = g_bytes_new_static (human, strlen (human));
+  wyl_jwt_access_claims_t claims = { 0 };
+  wyrelog_error_t rc = wyl_jwt_parse_access_claims_json (bytes, &claims);
+  gint epoch_ok = (rc == WYRELOG_E_OK && claims.authn_epoch == 7) ? 0 : 201;
+  wyl_jwt_access_claims_clear (&claims);
+  if (epoch_ok != 0)
+    return epoch_ok;
+
+  /* A negative epoch is not a valid unsigned integer: reject. */
+  if (parse_claim_text ("{" HUMAN_BASE ",\"authn_epoch\":-1}")
+      == WYRELOG_E_OK)
+    return 202;
+
+  /* Duplicate epoch claim: reject. */
+  if (parse_claim_text ("{" HUMAN_BASE ",\"authn_epoch\":7,\"authn_epoch\":8}")
+      != WYRELOG_E_POLICY)
+    return 203;
+
+  /* Service token carrying an epoch: forbidden, reject. */
+  if (parse_claim_text ("{" SERVICE_BASE "," SERVICE_ONLY
+          ",\"authn_epoch\":7}") != WYRELOG_E_POLICY)
+    return 204;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -720,6 +768,8 @@ main (void)
   if ((rc = check_service_claim_round_trip ()) != 0)
     return rc;
   if ((rc = check_service_claims_fail_closed ()) != 0)
+    return rc;
+  if ((rc = check_authn_epoch_claim_gating ()) != 0)
     return rc;
   return 0;
 }

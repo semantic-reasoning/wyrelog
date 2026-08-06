@@ -22,6 +22,17 @@ struct _WylSession
   /* Monotonic live-session proof provenance.  This is deliberately private:
    * neither public session ABI nor JWT claims may synthesize it. */
   volatile gint mfa_assured;
+  /* Issue #752: the subject-global authentication epoch this session won.
+   * It is the principal_events rowid of the authenticating transition
+   * (login_skip_mfa or the MFA_OK commit) that THIS session drove to
+   * 'authenticated'.  It is 0 for a session that never won an authenticating
+   * transition - a loser that attached to an in-flight ceremony, or a login
+   * against an already-authenticated subject (non-authoritative).  It is
+   * write-once: set on the winning commit, never rewritten; a superseded
+   * session is rejected, not re-stamped.  Mint stamps it into the human JWT
+   * so authorization can reject a token whose epoch the durable watermark
+   * has since moved past. */
+  volatile gint64 authn_epoch;
   wyl_session_auth_method_t auth_method;
   gchar *service_jti;
   gchar *service_subject_id;
@@ -48,3 +59,8 @@ wyl_session_state_store_private (WylSession *session, wyl_session_state_t state)
 {
   g_atomic_int_set ((gint *) & session->state, (gint) state);
 }
+
+/* Issue #752 authentication-epoch accessors are declared in
+ * wyl-session-private.h and implemented in wyl-session.c (which owns this
+ * layout), because non-test daemon code that mints tokens must read the
+ * epoch without including this uninstalled layout header. */

@@ -104,6 +104,19 @@ wyl_session_is_mfa_assured_private (const WylSession *session)
       && g_atomic_int_get ((gint *) & session->mfa_assured) != 0;
 }
 
+/* Issue #752: read the authentication epoch this session won (0 if it never
+ * won an authenticating transition).  The value is a write-once volatile
+ * gint64 (GLib has no 64-bit atomic); the winning commit stores it before
+ * publishing mfa_assured, so any reader that runs after authentication
+ * observes the settled, non-torn value.  Lives here in the companion archive
+ * so the daemon can read the epoch through this stable boundary rather than
+ * touching the raw layout. */
+gint64
+wyl_session_authn_epoch_load_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session) ? session->authn_epoch : 0;
+}
+
 gboolean
 wyl_session_liveness_check_private (const WylSession *session,
     const gchar *expect_session_id, const gchar *expect_actor,

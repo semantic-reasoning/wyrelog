@@ -21,7 +21,7 @@ validate_issue_input (const wyl_jwt_issue_input_t *input)
       || !non_empty (input->audience) || !non_empty (input->tenant)
       || !non_empty (input->principal_state_at_issue)
       || !non_empty (input->session_id) || input->issued_at < 0
-      || input->ttl_seconds < 0)
+      || input->ttl_seconds < 0 || input->authn_epoch < 0)
     return WYRELOG_E_INVALID;
   return WYRELOG_E_OK;
 }
@@ -180,6 +180,13 @@ wyl_jwt_build_payload_json (const wyl_jwt_issue_input_t *input,
   append_json_string (json, input->principal_state_at_issue);
   g_string_append (json, ",\"session_id\":");
   append_json_string (json, input->session_id);
+  /* Issue #752: the subject-global authentication epoch is a signed,
+   * integral human claim.  It is always emitted here (the human payload
+   * builder); service tokens use the separate service builder, which never
+   * adds it, so its presence is exactly the human/service discriminator the
+   * parser enforces. */
+  g_string_append_printf (json, ",\"authn_epoch\":%" G_GINT64_FORMAT,
+      input->authn_epoch);
   g_string_append_c (json, '}');
 
   *out_json = g_string_free (json, FALSE);
@@ -629,6 +636,7 @@ enum
   CLAIM_AUTH_METHOD = 1u << 10,
   CLAIM_CREDENTIAL_ID = 1u << 11,
   CLAIM_CREDENTIAL_GENERATION = 1u << 12,
+  CLAIM_AUTHN_EPOCH = 1u << 13,
   CLAIM_REQUIRED_MASK = (1u << 10) - 1,
   CLAIM_SERVICE_MASK = CLAIM_AUTH_METHOD | CLAIM_CREDENTIAL_ID
       | CLAIM_CREDENTIAL_GENERATION,
@@ -758,7 +766,10 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
       rc = mark_claim_seen (claims, CLAIM_CREDENTIAL_GENERATION);
       if (rc == WYRELOG_E_OK)
         rc = parse_json_full_uint64 (&p, &claims->claims.credential_generation);
-    } else
+    } else if (g_strcmp0 (key, "authn_epoch") == 0)
+      rc = parse_int_claim_value (&p, claims, CLAIM_AUTHN_EPOCH,
+          &claims->claims.authn_epoch);
+    else
       return WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
       return rc;
@@ -801,6 +812,20 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
           || claims->claims.expires_at !=
           claims->claims.issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS))
     return WYRELOG_E_POLICY;
+  /* Issue #752: the authn_epoch claim is the human-token supersession
+   * watermark.  Require it on human tokens (service_seen == 0) and forbid
+   * it on service tokens.  A human token that omits it is fail-closed
+   * rejected here - there is no cross-version backcompat to preserve in this
+   * pre-release monolith, so a missing epoch is always a hard reject rather
+   * than a defaulted-to-zero pass.  The authorization layer separately
+   * rejects a present-but-stale epoch against the live durable watermark. */
+  gboolean has_authn_epoch = (claims->seen_mask & CLAIM_AUTHN_EPOCH) != 0;
+  if (service_seen == CLAIM_SERVICE_MASK) {
+    if (has_authn_epoch)
+      return WYRELOG_E_POLICY;
+  } else if (!has_authn_epoch) {
+    return WYRELOG_E_POLICY;
+  }
   return WYRELOG_E_OK;
 }
 

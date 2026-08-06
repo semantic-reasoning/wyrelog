@@ -46,6 +46,16 @@ G_GNUC_INTERNAL gboolean wyl_session_is_active_human_private (const
  * Skip-MFA login, service sessions, and token refresh never set this bit. */
 G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
     WylSession * session);
+/* Issue #752: the subject-global authentication epoch this session won - the
+ * principal_events rowid of the authenticating transition it drove.  0 for a
+ * session that never won one (an attached loser, or a login against an
+ * already-authenticated subject).  Write-once: stored on the winning commit
+ * by the layout owner, read here by the token mint and the supersession gate.
+ * Implemented in the service-session companion archive so non-test daemon
+ * code can read it without the uninstalled layout header.  See the field
+ * comment in wyl-session-layout-private.h. */
+G_GNUC_INTERNAL gint64 wyl_session_authn_epoch_load_private (const
+    WylSession * session);
 /* Single coherent management liveness primitive.  Returns TRUE only when
  * |session| is an ACTIVE human session (decided by one atomic state load),
  * optionally MFA-assured, whose immutable identity (session id, actor,
