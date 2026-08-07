@@ -18,6 +18,10 @@ static const wyl_principal_transition_t fsm_table[] = {
       WYL_PRINCIPAL_STATE_REVOKED},
   {WYL_PRINCIPAL_STATE_LOCKED, WYL_PRINCIPAL_EVENT_UNLOCK,
       WYL_PRINCIPAL_STATE_UNVERIFIED},
+  {WYL_PRINCIPAL_STATE_AUTHENTICATED, WYL_PRINCIPAL_EVENT_LOGOUT,
+      WYL_PRINCIPAL_STATE_UNVERIFIED},
+  {WYL_PRINCIPAL_STATE_MFA_REQUIRED, WYL_PRINCIPAL_EVENT_LOGOUT,
+      WYL_PRINCIPAL_STATE_UNVERIFIED},
 };
 
 static const gchar *const state_names[] = {
@@ -36,6 +40,7 @@ static const gchar *const event_names[] = {
   "lock",
   "unlock",
   "revoke",
+  "logout",
 };
 
 G_STATIC_ASSERT (G_N_ELEMENTS (state_names) == WYL_PRINCIPAL_STATE_LAST_);
