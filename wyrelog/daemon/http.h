@@ -23,7 +23,7 @@
 SoupServer *wyl_daemon_start_http_server (const WylDaemonOptions * opts,
     WylHandle * handle, GError ** error);
 SoupServer *wyl_daemon_start_http_server_with_runtime
-    (const WylDaemonOptions * opts, WylHandle * handle,
+  (const WylDaemonOptions * opts, WylHandle * handle,
     WylDaemonRuntime * runtime, GError ** error);
 WylSession *wyl_daemon_http_ref_session (SoupServer * server,
     const gchar * session_token);
@@ -164,7 +164,7 @@ typedef enum
   WYL_DAEMON_RETIREMENT_CREDENTIAL_ROTATE,
 } WylDaemonRetirementOperation;
 typedef void WylDaemonRetirementResponseCheckpoint
-    (WylDaemonRetirementOperation operation, const gchar * caller_request_id,
+  (WylDaemonRetirementOperation operation, const gchar * caller_request_id,
     const gchar * decision_request_id, const gchar * response_json,
     gpointer data);
 typedef struct
@@ -199,117 +199,117 @@ typedef struct
   guint profile_events_ingestions;
 } WylDaemonExactRouteStateSnapshot;
 typedef wyrelog_error_t
-    (*WylDaemonManagementReauthorizationCheckpoint) (WylHandle * handle,
+(*WylDaemonManagementReauthorizationCheckpoint) (WylHandle * handle,
     const gchar * actor, const gchar * action, const gchar * session_id,
     const gchar * target_tenant, gpointer data);
 void wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
-    (SoupServer * server,
+  (SoupServer * server,
     WylDaemonManagementReauthorizationCheckpoint checkpoint, gpointer data);
 gboolean wyl_daemon_http_exact_route_probe_snapshot_for_test
-    (SoupServer * server, const gchar * canonical_path,
+  (SoupServer * server, const gchar * canonical_path,
     WylDaemonExactRouteProbeSnapshot * out_snapshot);
 gboolean wyl_daemon_http_exact_route_state_snapshot_for_test
-    (SoupServer * server, WylDaemonExactRouteStateSnapshot * out_snapshot);
+  (SoupServer * server, WylDaemonExactRouteStateSnapshot * out_snapshot);
 void wyl_daemon_http_route_registration_counts_for_test
-    (SoupServer * server, guint * out_total, guint * out_prefixes,
+  (SoupServer * server, guint * out_total, guint * out_prefixes,
     guint * out_raw_singletons, guint * out_exact_singletons);
 void wyl_daemon_http_set_retirement_response_checkpoint_for_test
-    (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
+  (SoupServer * server, WylDaemonRetirementResponseCheckpoint * checkpoint,
     gpointer data);
 void wyl_daemon_http_set_rotate_write_checkpoint_for_test
-    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
+  (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_fail_next_retirement_latch_for_test (SoupServer * server);
 void wyl_daemon_http_set_service_resolver_checkpoint_for_test
-    (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,
+  (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,
     gpointer data);
 void wyl_daemon_http_fail_next_service_resolver_read_release_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 guint wyl_daemon_http_service_resolver_terminal_entries_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_service_registry_transition_for_test
-    (SoupServer * server, const gchar * session_id, const gchar * jti,
+  (SoupServer * server, const gchar * session_id, const gchar * jti,
     const gchar * credential_id, guint64 generation, const gchar * principal,
     const gchar * tenant, gint operation, gboolean * out_changed);
 wyrelog_error_t wyl_daemon_http_invalidate_service_auth_for_test
-    (SoupServer * server,
+  (SoupServer * server,
     const WylDaemonServiceAuthInvalidation * invalidation,
     WylServiceAuthRevokeResult * out_result);
 wyrelog_error_t wyl_daemon_http_disable_service_principal_for_test
-    (SoupServer * server, const gchar * subject_id,
+  (SoupServer * server, const gchar * subject_id,
     const gchar * request_id, void (*after_write_acquired) (gpointer data),
     gpointer data);
 WylHandle *wyl_daemon_http_get_handle_for_test (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_seal_tenant_for_test
-    (SoupServer * server, const gchar * tenant_id,
+  (SoupServer * server, const gchar * tenant_id,
     void (*after_write_acquired) (gpointer data), gpointer data);
 wyrelog_error_t wyl_daemon_http_revoke_service_credential_for_test
-    (SoupServer * server, const gchar * credential_id,
+  (SoupServer * server, const gchar * credential_id,
     const gchar * request_id,
     void (*after_write_acquired) (gpointer data), gpointer data);
 wyrelog_error_t wyl_daemon_http_rotate_service_credential_for_test
-    (SoupServer * server, const gchar * credential_id,
+  (SoupServer * server, const gchar * credential_id,
     guint64 credential_generation, const gchar * request_id,
     void (*after_write_acquired) (gpointer data), gpointer data);
 gboolean wyl_daemon_http_replace_session_for_test
-    (SoupServer * server, const gchar * session_id, WylSession * session);
+  (SoupServer * server, const gchar * session_id, WylSession * session);
 gboolean wyl_daemon_http_seed_human_session_for_test
-    (SoupServer * server, const gchar * session_id, const gchar * subject,
+  (SoupServer * server, const gchar * session_id, const gchar * subject,
     const gchar * tenant);
 gboolean wyl_daemon_http_seed_mfa_human_session_for_test
-    (SoupServer * server, const gchar * session_id, const gchar * subject,
+  (SoupServer * server, const gchar * session_id, const gchar * subject,
     const gchar * tenant);
 gboolean wyl_daemon_http_seed_human_session_with_state_for_test
-    (SoupServer * server, const gchar * session_id, const gchar * subject,
+  (SoupServer * server, const gchar * session_id, const gchar * subject,
     const gchar * tenant, wyl_session_state_t state);
 wyrelog_error_t wyl_daemon_http_configure_tenant_for_test
-    (SoupServer * server, const gchar * tenant, gboolean create,
+  (SoupServer * server, const gchar * tenant, gboolean create,
     gboolean sealed);
 gboolean wyl_daemon_http_remove_access_token_for_test
-    (SoupServer * server, const gchar * jti);
+  (SoupServer * server, const gchar * jti);
 gboolean wyl_daemon_http_revoke_access_token_for_test
-    (SoupServer * server, const gchar * jti);
+  (SoupServer * server, const gchar * jti);
 gboolean wyl_daemon_http_mutate_access_token_for_test
-    (SoupServer * server, const gchar * lookup_jti, gint field,
+  (SoupServer * server, const gchar * lookup_jti, gint field,
     const gchar * text, guint64 number);
 void wyl_daemon_http_service_authority_snapshot_for_test
-    (SoupServer * server, WylServiceAuthAuthoritySnapshot * out_snapshot);
+  (SoupServer * server, WylServiceAuthAuthoritySnapshot * out_snapshot);
 wyrelog_error_t wyl_daemon_http_latch_service_unavailable_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_issue_service_token_for_test
-    (SoupServer * server, gboolean transport_ok, const gchar * request_body,
+  (SoupServer * server, gboolean transport_ok, const gchar * request_body,
     gsize request_body_len, guint * out_status, gchar ** out_body,
     guint * out_retry_after);
 wyrelog_error_t wyl_daemon_http_publish_service_token_for_test
-    (SoupServer * server, const gchar * credential_id,
+  (SoupServer * server, const gchar * credential_id,
     const gchar * credential_secret, gsize credential_secret_len,
     gchar ** out_body);
 wyrelog_error_t wyl_daemon_http_lookup_service_registry_for_test
-    (SoupServer * server, const gchar * session_id, const gchar * jti,
+  (SoupServer * server, const gchar * session_id, const gchar * jti,
     gint * out_state, gboolean * out_found);
 wyrelog_error_t wyl_daemon_http_retire_due_service_auth_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_retire_service_auth_exact_for_test
-    (SoupServer * server, const gchar * session_id, const gchar * jti,
+  (SoupServer * server, const gchar * session_id, const gchar * jti,
     const gchar * credential_id, guint64 generation, const gchar * principal,
     const gchar * tenant, gint64 expires_at);
 gboolean wyl_daemon_http_mutate_service_session_for_test
-    (SoupServer * server, const gchar * session_id, gint field,
+  (SoupServer * server, const gchar * session_id, gint field,
     const gchar * text, guint64 number);
 gboolean wyl_daemon_http_store_human_access_token_for_test
-    (SoupServer * server, const gchar * jti, const gchar * session_id,
+  (SoupServer * server, const gchar * jti, const gchar * session_id,
     const gchar * subject, const gchar * tenant, const gchar * key_id,
     gint64 issued_at, gint64 expires_at);
 gboolean wyl_daemon_http_access_token_is_active_for_test
-    (SoupServer * server, const gchar * jti, const gchar * session_id,
+  (SoupServer * server, const gchar * jti, const gchar * session_id,
     const gchar * subject, const gchar * tenant, gint64 issued_at,
     gint64 expires_at, const gchar * auth_method,
     const gchar * credential_id, guint64 credential_generation, gint64 now);
 wyrelog_error_t wyl_daemon_http_seed_service_session_for_test
-    (SoupServer * server, WylSession * session, const gchar * session_id,
+  (SoupServer * server, WylSession * session, const gchar * session_id,
     const gchar * jti, const gchar * credential_id, guint64 generation,
     const gchar * principal, const gchar * tenant, gint registry_state);
 wyrelog_error_t wyl_daemon_http_resolve_bearer_for_test
-    (SoupServer * server, const gchar * token, gchar ** out_session_id,
+  (SoupServer * server, const gchar * token, gchar ** out_session_id,
     gchar ** out_actor, gchar ** out_tenant);
 typedef struct wyl_daemon_access_token_snapshot_t
 {
@@ -326,17 +326,17 @@ typedef struct wyl_daemon_access_token_snapshot_t
   gboolean revoked;
 } wyl_daemon_access_token_snapshot_t;
 void wyl_daemon_access_token_snapshot_clear
-    (wyl_daemon_access_token_snapshot_t * snapshot);
+  (wyl_daemon_access_token_snapshot_t * snapshot);
 gboolean wyl_daemon_http_store_service_access_token_for_test
-    (SoupServer * server, const gchar * jti, const gchar * session_id,
+  (SoupServer * server, const gchar * jti, const gchar * session_id,
     const gchar * subject, const gchar * tenant, const gchar * key_id,
     gint64 expires_at, gint auth_method, const gchar * credential_id,
     guint64 credential_generation, gboolean revoked);
 gboolean wyl_daemon_http_snapshot_access_token_for_test
-    (SoupServer * server, const gchar * jti,
+  (SoupServer * server, const gchar * jti,
     wyl_daemon_access_token_snapshot_t * out_snapshot);
 gboolean wyl_daemon_http_service_access_token_is_exact_for_test
-    (SoupServer * server, const gchar * jti, const gchar * session_id,
+  (SoupServer * server, const gchar * jti, const gchar * session_id,
     const gchar * subject, const gchar * tenant, const gchar * key_id,
     gint64 expires_at, gint auth_method, const gchar * credential_id,
     guint64 credential_generation, gint64 now);
@@ -344,7 +344,7 @@ wyrelog_error_t wyl_daemon_http_copy_access_token_secret (SoupServer * server,
     guint8 * out_secret, gsize out_len);
 gchar *wyl_daemon_http_dup_access_token_key_id (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_rotate_access_token_key_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 gboolean wyl_daemon_http_remove_session_for_test (SoupServer * server,
     const gchar * session_token);
 gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
@@ -352,7 +352,7 @@ gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
 gboolean wyl_daemon_http_session_is_revoked (SoupServer * server,
     const gchar * session_token);
 wyrelog_error_t wyl_daemon_http_issue_human_tokens_for_test
-    (SoupServer * server, WylSession * session, const gchar * session_id,
+  (SoupServer * server, WylSession * session, const gchar * session_id,
     const gchar * subject, const gchar * tenant, gchar ** out_access,
     gchar ** out_refresh);
 gboolean wyl_daemon_http_seed_refresh_for_test (SoupServer * server,
@@ -369,60 +369,60 @@ wyrelog_error_t wyl_daemon_http_service_token_exchange_for_test (SoupServer *
     server, const WylDaemonServiceTokenRequest * request, guint * out_status,
     gchar ** out_body, guint * out_retry_after);
 void wyl_daemon_http_set_service_publication_fault_for_test
-    (SoupServer * server, WylDaemonServicePublicationFault fault);
+  (SoupServer * server, WylDaemonServicePublicationFault fault);
 gchar *wyl_daemon_http_dup_last_service_publication_token_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_service_publication_counts_for_test
-    (SoupServer * server, guint * out_sessions, guint * out_access_tokens);
+  (SoupServer * server, guint * out_sessions, guint * out_access_tokens);
 void wyl_daemon_http_service_response_wipe_snapshot_for_test
-    (SoupServer * server, guint * out_count, gboolean * out_canary_seen,
+  (SoupServer * server, guint * out_count, gboolean * out_canary_seen,
     gboolean * out_all_zero);
 void wyl_daemon_http_reset_service_response_authority_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_set_service_response_checkpoint_for_test
-    (SoupServer * server, WylDaemonServiceResponseCheckpoint checkpoint,
+  (SoupServer * server, WylDaemonServiceResponseCheckpoint checkpoint,
     gpointer data);
 void wyl_daemon_http_set_service_response_retire_checkpoint_for_test
-    (SoupServer * server,
+  (SoupServer * server,
     WylDaemonServiceResponseRetireCheckpoint checkpoint, gpointer data);
 void wyl_daemon_http_set_service_due_write_checkpoint_for_test
-    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
+  (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_service_response_authority_snapshot_for_test
-    (SoupServer * server,
+  (SoupServer * server,
     WylDaemonServiceResponseAuthoritySnapshot * out_snapshot);
 gboolean
-    wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
-    (SoupServer * server, const gchar * session_id);
+wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
+  (SoupServer * server, const gchar * session_id);
 wyrelog_error_t wyl_daemon_http_profile_events_ingest_for_test (WylDaemonProfile
     profile, gboolean transport_ok, gboolean body_oversize, const gchar * body,
     gsize body_len, gint * out_status, const gchar ** out_token,
     gchar ** out_profile, gchar ** out_event, gint64 * out_timestamp_us);
 #ifdef WYL_HAS_AUDIT
 void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
-    (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot);
+  (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot);
 #endif
 void wyl_daemon_http_set_refresh_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now);
 void wyl_daemon_http_set_service_auth_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now_seconds);
 gboolean wyl_daemon_http_service_auth_maintenance_active_for_test
-    (SoupServer * server, guint * out_ticks);
+  (SoupServer * server, guint * out_ticks);
 void wyl_daemon_http_suspend_service_auth_maintenance_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_shutdown_service_auth_maintenance_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 gboolean wyl_daemon_http_set_refresh_times_for_test (SoupServer * server,
     const gchar * token, gint64 expires_at, gint64 consumed_at);
 void wyl_daemon_http_fail_next_refresh_publication_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_set_refresh_fault_for_test (SoupServer * server,
     WylDaemonRefreshFault fault);
 gchar **wyl_daemon_http_snapshot_session_access_ids_for_test
-    (SoupServer * server, const gchar * session_id);
+  (SoupServer * server, const gchar * session_id);
 gchar **wyl_daemon_http_snapshot_session_refresh_ids_for_test
-    (SoupServer * server, const gchar * session_id);
+  (SoupServer * server, const gchar * session_id);
 gchar **wyl_daemon_http_snapshot_generated_refresh_ids_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_sensitive_strv_free_for_test (gchar ** values);
 void wyl_daemon_http_revoke_human_session_for_test (SoupServer * server,
     const gchar * session_id);
@@ -491,43 +491,43 @@ typedef struct
 wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
     WylDaemonPolicyWriteCheckpoint checkpoint, gpointer data);
 void wyl_daemon_http_fail_next_policy_write_finalize_for_test
-    (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
+  (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
 void wyl_daemon_http_fail_next_policy_write_acquire_for_test
-    (SoupServer * server, WylDaemonPolicyWriteAcquireFault fault);
+  (SoupServer * server, WylDaemonPolicyWriteAcquireFault fault);
 void wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_creator_grant_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_creator_event_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_creator_receipt_verification_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_seal_verification_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_seal_write_release_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_recovery_repair_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 gboolean wyl_daemon_http_take_tenant_recovery_repair_failure_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 gboolean wyl_daemon_http_detach_tenant_recovery_slot_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_seal_tenant_recovery_for_test
-    (SoupServer * server, const gchar * tenant, const gchar * request_id);
+  (SoupServer * server, const gchar * tenant, const gchar * request_id);
 wyrelog_error_t wyl_daemon_http_attempt_seal_tenant_recovery_for_test
-    (SoupServer * server, const gchar * tenant, const gchar * request_id);
+  (SoupServer * server, const gchar * tenant, const gchar * request_id);
 void wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test
-    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
+  (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test
-    (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
+  (SoupServer * server, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-    (guint * out_allocations, guint * out_frees);
+  (guint * out_allocations, guint * out_frees);
 void wyl_daemon_http_tenant_create_publication_snapshot_for_test
-    (SoupServer * server, guint * out_attempts,
+  (SoupServer * server, guint * out_attempts,
     guint * out_noop_fault_discards);
 typedef enum
 {
@@ -550,12 +550,12 @@ typedef struct
   wyl_decision_t audit_decision;
 } WylDaemonTenantCreateOutcomeBundle;
 wyrelog_error_t wyl_daemon_http_resolve_tenant_create_outcome_for_test
-    (SoupServer * server, const WylDaemonTenantCreateOutcomeBundle * bundle,
+  (SoupServer * server, const WylDaemonTenantCreateOutcomeBundle * bundle,
     WylDaemonTenantCreateOutcomeEffect * out_effect);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
-    (SoupServer * server);
+  (SoupServer * server);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test
-    (SoupServer * server, WylDaemonPolicyWriteFinalizeSnapshot * out_snapshot);
+  (SoupServer * server, WylDaemonPolicyWriteFinalizeSnapshot * out_snapshot);
 /*
  * Test seam: drive the tenant-gate cross-check between the tenant
  * declared by the request (request_tenant, may be NULL meaning "no
@@ -569,7 +569,7 @@ gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test
  * SoupServerMessage.
  */
 gboolean wyl_daemon_http_check_request_tenant_for_test
-    (const gchar * request_tenant, const gchar * auth_tenant,
+  (const gchar * request_tenant, const gchar * auth_tenant,
     guint * out_status, gchar ** out_code);
 /*
  * Inject a mock owner-publication backend into the running daemon HTTP

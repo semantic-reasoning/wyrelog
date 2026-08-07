@@ -3050,8 +3050,8 @@ take_engine_replacement_fault (WylHandle *self, WylEngineReplacementFault fault)
 }
 
 #define RETURN_REPLACEMENT_FAULT(stage) G_STMT_START { \
-          if (take_engine_replacement_fault (self, (stage))) \
-          return WYRELOG_E_IO; \
+    if (take_engine_replacement_fault (self, (stage))) \
+    return WYRELOG_E_IO; \
 } G_STMT_END
 #else
 #define RETURN_REPLACEMENT_FAULT(stage) G_STMT_START { } G_STMT_END

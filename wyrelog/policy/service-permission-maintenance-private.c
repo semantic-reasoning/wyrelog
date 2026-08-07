@@ -789,7 +789,7 @@ wyl_service_permission_receipt_write_new_owner_only
 
 /* Audit action recorded for a durable #618 remediation apply. */
 #define WYL_SERVICE_PERMISSION_REMEDIATION_APPLY_ACTION \
-        "service.permission_closure.remediate"
+  "service.permission_closure.remediate"
 
 static void
 digest_to_hex (const guint8 digest[32], gchar out_hex[65])
