@@ -841,11 +841,16 @@ policy_write_cancel_all_for_shutdown (WylDaemonHttpContext *ctx)
     g_cancellable_cancel (g_ptr_array_index (pending, i));
 }
 
+#ifndef G_OS_WIN32
 /* TRUE when the peer has closed the connection (orderly EOF or hard error);
  * FALSE for a spurious readable wake or a live/pipelined byte still buffered.
  * Operates on a plain fd (a dup of the client fd) via recv(MSG_PEEK) only, so
  * it never touches libsoup's GSocket object -- MSG_PEEK is non-destructive and
- * concurrent recv on the shared kernel socket is safe. */
+ * concurrent recv on the shared kernel socket is safe.
+ *
+ * POSIX-only, like the arm path that reaches it: the disconnect watch is never
+ * created on Windows, so this would be dead code there, and its ssize_t/errno
+ * result convention is not what Winsock recv reports. */
 static gboolean
 policy_write_socket_peer_gone (gint fd)
 {
@@ -861,6 +866,7 @@ policy_write_socket_peer_gone (gint fd)
     return !(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
   return FALSE;
 }
+#endif /* !G_OS_WIN32 */
 
 struct _PolicyWriteWatch
 {
@@ -906,6 +912,9 @@ policy_write_watch_unref (gpointer data)
   g_free (watch);
 }
 
+#ifndef G_OS_WIN32
+/* POSIX-only for the same reason as the peek helper it calls: its only
+ * reference is the arm path, which does not exist on Windows. */
 static gboolean
 policy_write_socket_event (gint fd, GIOCondition condition, gpointer data)
 {
@@ -926,6 +935,7 @@ policy_write_socket_event (gint fd, GIOCondition condition, gpointer data)
   g_cancellable_cancel (watch->cancellable);
   return G_SOURCE_REMOVE;
 }
+#endif /* !G_OS_WIN32 */
 
 static gpointer
 policy_write_watcher_run (gpointer data)

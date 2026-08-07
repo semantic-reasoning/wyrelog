@@ -7326,8 +7326,13 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
   PolicyWriteCancelFixture fixture = { 0 };
   gint result = policy_write_cancel_fixture_setup (&fixture,
           "policy-write-disconnect-actor", 5200);
-  if (result != 0)
-    goto cleanup;
+  if (result != 0) {
+    /* Return directly rather than jumping to the shared cleanup: the label
+     * sits past g_autoptr declarations, and Clang rejects a goto that skips
+     * the initialization of a cleanup-attributed variable. */
+    policy_write_cancel_fixture_teardown (&fixture);
+    return result;
+  }
   result = 5210;
 
   /* Hold the WRITE on a for-test thread so the real request must park. */
@@ -7404,8 +7409,8 @@ release_all:
   g_mutex_clear (&request.mutex);
   g_cond_clear (&holder.changed);
   g_mutex_clear (&holder.mutex);
-
-cleanup:
+  /* Reached by fall-through only: the setup-failure path returns directly, so
+   * keeping a label here would just draw -Wunused-label. */
   policy_write_cancel_fixture_teardown (&fixture);
   return result;
 }
@@ -7463,8 +7468,11 @@ check_daemon_policy_write_acquire_wins_late_disconnect (void)
   PolicyWriteCancelFixture fixture = { 0 };
   gint result = policy_write_cancel_fixture_setup (&fixture,
           "policy-write-late-disconnect-actor", 5280);
-  if (result != 0)
-    goto cleanup;
+  if (result != 0) {
+    /* Direct return for the same reason as the disconnect case above. */
+    policy_write_cancel_fixture_teardown (&fixture);
+    return result;
+  }
 
   g_autofree gchar *query = g_strdup_printf
         ("subject=late-target&perm=cleanup.missing&scope=%s&tenant=%s"
@@ -7503,8 +7511,9 @@ teardown_request:
   g_free (request.body);
   g_cond_clear (&request.changed);
   g_mutex_clear (&request.mutex);
-
-cleanup:
+  /* The setup-failure path now returns directly, so nothing jumps here any
+   * more; the teardown is reached by fall-through and the label would only
+   * draw -Wunused-label. */
   policy_write_cancel_fixture_teardown (&fixture);
   return result;
 }
@@ -7512,13 +7521,26 @@ cleanup:
 static gint
 check_daemon_policy_write_cancellable_contract (void)
 {
-  gint rc = check_daemon_policy_write_client_disconnect_cancellable ();
+  /* The two disconnect cases exercise the client-disconnect watch, which
+   * wyl_daemon_policy_write_arm_socket_watch only installs on POSIX. On
+   * Windows nothing arms, so dropping the socket cannot cancel the parked
+   * acquire and the cases would fail on a feature that is absent by design.
+   * Shutdown cancellation is platform-neutral and keeps running everywhere. */
+  gint rc;
+#ifndef G_OS_WIN32
+  rc = check_daemon_policy_write_client_disconnect_cancellable ();
   if (rc != 0)
     return rc;
+#endif
   rc = check_daemon_policy_write_shutdown_cancellable ();
   if (rc != 0)
     return rc;
-  return check_daemon_policy_write_acquire_wins_late_disconnect ();
+#ifndef G_OS_WIN32
+  rc = check_daemon_policy_write_acquire_wins_late_disconnect ();
+  if (rc != 0)
+    return rc;
+#endif
+  return 0;
 }
 
 static gboolean
