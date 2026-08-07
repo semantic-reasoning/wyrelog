@@ -1,6 +1,7 @@
 tests/fact-test-support.h
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
+tests/test-daemon-http-decide.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
 tests/test-grant-req.c
@@ -39,6 +40,8 @@ wyrelog/break-glass.h
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c
 wyrelog/daemon/fact-status.h
+wyrelog/daemon/http.c
+wyrelog/daemon/http.h
 wyrelog/daemon/options.h
 wyrelog/daemon/runtime.c
 wyrelog/daemon/runtime.h

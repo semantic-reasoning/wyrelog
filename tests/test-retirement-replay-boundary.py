@@ -242,9 +242,11 @@ mutants = [
                      "WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION",
                      "WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY"), http,
      handoff, coordinator),
+    # The continuation indent here is whatever the pinned formatter produces;
+    # it moved from six to ten columns when this file was migrated.
     (domain, mutate_function(http, "service_principal_disable_handler",
-                             "values[1],\n      WYL_SERVICE_RETIREMENT",
-                             "decision_request_id,\n      "
+                             "values[1],\n          WYL_SERVICE_RETIREMENT",
+                             "decision_request_id,\n          "
                              "WYL_SERVICE_RETIREMENT"), handoff, coordinator),
     (domain, mutate_function(http, "tenant_mutation_handler",
                              "changed = retirement.recorded_transitioned",

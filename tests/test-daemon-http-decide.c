@@ -90,9 +90,9 @@ service_credential_store_fixture_clear (ServiceCredentialStoreFixture *fixture)
   if (fixture->policy_path != NULL) {
     (void) g_remove (fixture->policy_path);
     g_autofree gchar *clear = g_strdup_printf ("%s.wyrelog-clear",
-        fixture->policy_path);
+            fixture->policy_path);
     g_autofree gchar *lock = g_strdup_printf ("%s.wyrelog-lock",
-        fixture->policy_path);
+            fixture->policy_path);
     (void) g_remove (clear);
     (void) g_remove (lock);
   }
@@ -130,7 +130,7 @@ service_credential_store_fixture_init (ServiceCredentialStoreFixture *fixture)
   for (guint i = 0; i < sizeof key; i++)
     key[i] = (guint8) (i + 1);
   if (!g_file_set_contents (fixture->key_path, (const gchar *) key,
-          sizeof key, NULL))
+      sizeof key, NULL))
     return FALSE;
   fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
   return fixture->key_spec != NULL;
@@ -175,7 +175,7 @@ daemon_policy_close_checkpoint (gpointer data)
   DaemonPolicyShutdownRace *race = data;
   WylServiceAuthAuthoritySnapshot snapshot = { 0 };
   wyl_service_auth_authority_snapshot
-      (wyl_handle_get_service_auth_authority (race->handle), &snapshot);
+    (wyl_handle_get_service_auth_authority (race->handle), &snapshot);
   g_mutex_lock (&race->mutex);
   race->close_observed = snapshot.closing;
   race->close_entered = TRUE;
@@ -188,7 +188,7 @@ daemon_policy_write_thread (gpointer data)
 {
   DaemonPolicyShutdownRace *race = data;
   race->write_rc = wyl_daemon_http_policy_write_for_test (race->server,
-      daemon_policy_write_checkpoint, race);
+          daemon_policy_write_checkpoint, race);
   return NULL;
 }
 
@@ -212,7 +212,7 @@ check_daemon_policy_write_shutdown_contract (void)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts,
-      handle, &error);
+          handle, &error);
   if (server == NULL)
     return 1901;
 
@@ -225,7 +225,7 @@ check_daemon_policy_write_shutdown_contract (void)
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
   g_autoptr (GThread) writer = g_thread_new ("daemon-policy-write",
-      daemon_policy_write_thread, &race);
+          daemon_policy_write_thread, &race);
   g_mutex_lock (&race.mutex);
   while (!race.write_entered)
     g_cond_wait (&race.changed, &race.mutex);
@@ -236,7 +236,7 @@ check_daemon_policy_write_shutdown_contract (void)
   wyl_service_auth_authority_set_close_checkpoint (authority,
       daemon_policy_close_checkpoint, &race);
   g_autoptr (GThread) shutdown = g_thread_new ("daemon-policy-shutdown",
-      daemon_policy_shutdown_thread, &race);
+          daemon_policy_shutdown_thread, &race);
   g_mutex_lock (&race.mutex);
   while (!race.close_entered)
     g_cond_wait (&race.changed, &race.mutex);
@@ -276,15 +276,15 @@ check_daemon_policy_write_finalize_case (WylDaemonPolicyWriteFinalizeFault
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts,
-      handle, &error);
+          handle, &error);
   if (server == NULL)
     return base_error + 1;
 
   wyl_daemon_http_fail_next_policy_write_finalize_for_test (server, fault);
   guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
-      (server);
+        (server);
   wyrelog_error_t rc = wyl_daemon_http_policy_write_for_test (server, NULL,
-      NULL);
+          NULL);
   guint after = wyl_daemon_http_policy_write_terminal_entries_for_test (server);
   if (rc != expected)
     return base_error + 2;
@@ -305,7 +305,7 @@ check_daemon_policy_write_finalize_case (WylDaemonPolicyWriteFinalizeFault
 
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   wyrelog_error_t available = wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason);
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason);
   if (fault == WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE) {
     if (available != WYRELOG_E_OK
         || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
@@ -331,22 +331,22 @@ static gint
 check_daemon_policy_write_finalize_contract (void)
 {
   gint rc = check_daemon_policy_write_finalize_case
-      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 1910);
+        (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 1910);
   if (rc != 0)
     return rc;
   rc = check_daemon_policy_write_finalize_case
-      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION,
-      WYRELOG_E_INTERNAL, 1930);
+        (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION,
+          WYRELOG_E_INTERNAL, 1930);
   if (rc != 0)
     return rc;
   rc = check_daemon_policy_write_finalize_case
-      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_RANK_AFTER_POP,
-      WYRELOG_E_INTERNAL, 1950);
+        (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_RANK_AFTER_POP,
+          WYRELOG_E_INTERNAL, 1950);
   if (rc != 0)
     return rc;
   return check_daemon_policy_write_finalize_case
-      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY,
-      WYRELOG_E_INVALID, 1970);
+           (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PIN_IDENTITY,
+             WYRELOG_E_INVALID, 1970);
 }
 
 typedef struct
@@ -398,7 +398,7 @@ static gint
 check_response_request_id_header (SoupMessage *msg, gint failure_code)
 {
   const gchar *request_id = soup_message_headers_get_one
-      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
   if (!is_request_id_shape (request_id))
     return failure_code;
   return 0;
@@ -533,11 +533,11 @@ insert_allow_fixture (WylHandle *handle)
 
   wyrelog_error_t rc =
       insert_symbol_row2 (handle, "role_permission", "wr.http-decide-role",
-      action);
+          action);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.http-decide-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
@@ -550,7 +550,7 @@ insert_allow_fixture (WylHandle *handle)
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
-      "armed");
+             "armed");
 }
 
 static wyrelog_error_t
@@ -562,11 +562,11 @@ insert_not_armed_fixture (WylHandle *handle)
 
   wyrelog_error_t rc =
       insert_symbol_row2 (handle, "role_permission", "wr.http-deny-role",
-      action);
+          action);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.http-deny-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
@@ -587,11 +587,11 @@ insert_guarded_fixture (WylHandle *handle)
 
   wyrelog_error_t rc =
       insert_symbol_row2 (handle, "role_permission", "wr.http-guard-role",
-      action);
+          action);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.http-guard-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
@@ -615,8 +615,8 @@ build_decide_uri (const gchar *base_url, const gchar *user, const gchar *perm,
   g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
 
   return g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s%s%s",
-      base, escaped_user, escaped_perm, escaped_scope,
-      extra_query != NULL ? "&" : "", extra_query != NULL ? extra_query : "");
+             base, escaped_user, escaped_perm, escaped_scope,
+             extra_query != NULL ? "&" : "", extra_query != NULL ? extra_query : "");
 }
 
 static gint
@@ -642,14 +642,14 @@ send_raw_path_probe (SoupSession *session, const gchar *method,
   }
   if (request_body != NULL) {
     g_autoptr (GBytes) request_bytes = g_bytes_new_static (request_body,
-        strlen (request_body));
+            strlen (request_body));
     soup_message_set_request_body_from_bytes (msg, "application/json",
         request_bytes);
   }
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 1902;
   gint rc = check_response_request_id_header (msg, 1903);
@@ -669,7 +669,7 @@ send_raw_path (SoupSession *session, const gchar *method,
     gchar **out_body)
 {
   return send_raw_path_probe (session, method, base_url, path, NULL, NULL,
-      out_status, out_body);
+             out_status, out_body);
 }
 
 static gint
@@ -694,28 +694,28 @@ check_read_only_method_contract (const gchar *base_url)
   g_clear_pointer (&body, g_free);
 
   if (send_raw_path (session, "POST", base_url, "/facts/status", &status,
-          &body) != 0)
+      &body) != 0)
     return 554;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
     return 555;
   g_clear_pointer (&body, g_free);
 
   if (send_raw_path (session, "POST", base_url, "/profile/status", &status,
-          &body) != 0)
+      &body) != 0)
     return 556;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
     return 557;
   g_clear_pointer (&body, g_free);
 
   if (send_raw_path (session, "POST", base_url, "/audit/events", &status,
-          &body) != 0)
+      &body) != 0)
     return 558;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
     return 559;
 #ifndef WYL_HAS_AUDIT
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/audit/events", &status,
-          &body) != 0)
+      &body) != 0)
     return 560;
   if (status != 200 || g_strcmp0 (body, "[]") != 0)
     return 561;
@@ -750,7 +750,7 @@ check_service_management_route_prefix_contract (const gchar *base_url)
    * rather than the pre-strip 404 dispatcher fall-through.
    */
   if (send_raw_path (session, "GET", base_url, "/service-principals",
-          &status, &body) != 0)
+      &status, &body) != 0)
     return 2200;
   if (status != 401
       || strstr (body, "\"service_principal_auth_required\"") == NULL)
@@ -763,7 +763,7 @@ check_service_management_route_prefix_contract (const gchar *base_url)
    * terminal-handler selection.
    */
   if (send_raw_path (session, "POST", base_url, "/service-credentials",
-          &status, &body) != 0)
+      &status, &body) != 0)
     return 2202;
   if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 2203;
@@ -780,7 +780,7 @@ check_service_management_route_prefix_contract (const gchar *base_url)
    * must return the generic path-shape 404 before authentication.
    */
   if (send_raw_path (session, "GET", base_url, "/service-credentials/",
-          &status, &body) != 0)
+      &status, &body) != 0)
     return 2204;
   if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 2205;
@@ -798,7 +798,7 @@ check_service_management_route_prefix_contract (const gchar *base_url)
    * invalid_service_principal_request before ever reaching auth.
    */
   if (send_raw_path (session, "POST", base_url,
-          "/service-principals/svc-alpha/disable", &status, &body) != 0)
+      "/service-principals/svc-alpha/disable", &status, &body) != 0)
     return 2206;
   if (status != 401
       || strstr (body, "\"service_principal_auth_required\"") == NULL)
@@ -810,7 +810,7 @@ check_service_management_route_prefix_contract (const gchar *base_url)
    * classified as a trailing alias and return generic 404 before auth.
    */
   if (send_raw_path (session, "GET", base_url, "/service-principals/",
-          &status, &body) != 0)
+      &status, &body) != 0)
     return 2208;
   if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return 2209;
@@ -837,40 +837,40 @@ check_service_route_shape_matrix (const gchar *base_url)
 {
   static const ServiceRouteShapeCase cases[] = {
     {"POST", "/service-principals", 401,
-        "service_principal_auth_required", "/service-principals/"},
+     "service_principal_auth_required", "/service-principals/"},
     {"GET", "/service-principals", 401,
-        "service_principal_auth_required", "/service-principals//"},
+     "service_principal_auth_required", "/service-principals//"},
     {"POST", "/service-principals/svc:shape:worker/disable", 401,
-          "service_principal_auth_required",
-        "/service-principals//disable?tenant=invalid"},
+     "service_principal_auth_required",
+     "/service-principals//disable?tenant=invalid"},
     {"POST", "/service-principals/svc:shape:worker/credentials", 401,
-          "service_credential_auth_required",
-        "/service-principals/svc:shape:worker/credentials/x"},
+     "service_credential_auth_required",
+     "/service-principals/svc:shape:worker/credentials/x"},
     {"GET", "/service-principals/svc:shape:worker/credentials", 401,
-          "service_credential_auth_required",
-        "/service-principals/svc:shape/worker/credentials"},
+     "service_credential_auth_required",
+     "/service-principals/svc:shape/worker/credentials"},
     {"GET", "/service-credentials/wlc_000000000000000000000000000", 401,
-        "service_credential_auth_required", "/service-credentials/item/"},
+     "service_credential_auth_required", "/service-credentials/item/"},
     {"POST", "/service-credentials/wlc_000000000000000000000000000/rotate",
-          401, "service_credential_auth_required",
-        "/service-credentials/item/part/rotate"},
+     401, "service_credential_auth_required",
+     "/service-credentials/item/part/rotate"},
     {"DELETE", "/service-credentials/wlc_000000000000000000000000000",
-          401, "service_credential_auth_required",
-        "/service-credentials/item/rotate/x"},
+     401, "service_credential_auth_required",
+     "/service-credentials/item/rotate/x"},
 #ifdef WYL_HAS_AUDIT
     {"POST", "/auth/service-token", 400, "invalid_service_token_request",
-        "/auth/service-token/x?tenant=invalid"},
+     "/auth/service-token/x?tenant=invalid"},
 #endif
 #ifdef WYL_HAS_FACT_STORE
     {"GET", "/service-credential-operations", 401,
-          "service_credential_operation_status_auth_required",
-        "/service-credential-operations/"},
+     "service_credential_operation_status_auth_required",
+     "/service-credential-operations/"},
     {"POST", "/service-credential-operations/reconcile", 401,
-          "service_credential_operation_reconcile_auth_required",
-        "/service-credential-operations/reconcile/x"},
+     "service_credential_operation_reconcile_auth_required",
+     "/service-credential-operations/reconcile/x"},
     {"POST", "/service-credential-operations/recover", 401,
-          "service_credential_operation_recover_auth_required",
-        "/service-credential-operations/recover/"},
+     "service_credential_operation_recover_auth_required",
+     "/service-credential-operations/recover/"},
 #endif
   };
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
@@ -895,28 +895,28 @@ check_service_route_shape_matrix (const gchar *base_url)
     g_autofree gchar *body = NULL;
 
     if (send_raw_path_probe (session, "PATCH", base_url,
-            test->canonical_path, "Bearer malformed-control", poison_body,
-            &status, &body) != 0
+        test->canonical_path, "Bearer malformed-control", poison_body,
+        &status, &body) != 0
         || status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
       return 2211 + (gint) i *4;
 
     g_clear_pointer (&body, g_free);
     if (send_raw_path (session, test->method, base_url, test->canonical_path,
-            &status, &body) != 0
+        &status, &body) != 0
         || status != test->canonical_status
         || strstr (body, test->canonical_error) == NULL)
       return 2212 + (gint) i *4;
 
     g_clear_pointer (&body, g_free);
     if (send_raw_path_probe (session, test->method, base_url,
-            test->alias_path, "Bearer malformed-alias", poison_body,
-            &status, &body) != 0
+        test->alias_path, "Bearer malformed-alias", poison_body,
+        &status, &body) != 0
         || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
       return 2213 + (gint) i *4;
 
     g_clear_pointer (&body, g_free);
     if (send_raw_path_probe (session, "PATCH", base_url, test->alias_path,
-            NULL, NULL, &status, &body) != 0
+        NULL, NULL, &status, &body) != 0
         || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
       return 2214 + (gint) i *4;
   }
@@ -932,8 +932,8 @@ check_service_route_shape_matrix (const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw_path_probe (session, "POST", base_url,
-            suffix_collisions[i], "Bearer malformed-suffix", poison_body,
-            &status, &body) != 0
+        suffix_collisions[i], "Bearer malformed-suffix", poison_body,
+        &status, &body) != 0
         || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
       return 2260 + (gint) i;
   }
@@ -965,8 +965,8 @@ check_service_route_shape_matrix (const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw_path_probe (session, "POST", base_url,
-            encoded_separator_aliases[i], "Bearer encoded-separator",
-            poison_body, &status, &body) != 0
+        encoded_separator_aliases[i], "Bearer encoded-separator",
+        poison_body, &status, &body) != 0
         || status != 404 || g_strcmp0 (body, generic_not_found) != 0)
       return 2263 + (gint) i;
   }
@@ -979,19 +979,19 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
 {
   WylDaemonExactRouteProbeSnapshot before = { 0 };
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &before))
+      canonical_path, &before))
     return error_base;
   g_autoptr (SoupSession) session = soup_session_new ();
   const gchar *poison = "{\"mutation\":\"must-not-run\"}";
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw_path_probe (session, "PATCH", base_url, canonical_path,
-          "Bearer exact-route-poison", poison, &status, &body) != 0
+      "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != canonical_method_status)
     return error_base + 1;
   WylDaemonExactRouteProbeSnapshot after = { 0 };
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
+      canonical_path, &after)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries + 1)
     return error_base + 2;
@@ -1001,20 +1001,20 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
   WylDaemonExactRouteStateSnapshot state_before = { 0 };
   WylDaemonExactRouteStateSnapshot state_after = { 0 };
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-          &state_before))
+      &state_before))
     return error_base + 3;
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "PATCH", base_url, trailing,
-          "Bearer exact-route-poison", poison, &status, &body) != 0
+      "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return error_base + 4;
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
+      canonical_path, &after)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries)
     return error_base + 5;
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-          &state_after)
+      &state_after)
       || memcmp (&state_before, &state_after, sizeof state_before) != 0)
     return error_base + 6;
 
@@ -1023,16 +1023,16 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
   state_before = state_after;
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "PATCH", base_url, descendant,
-          "Bearer exact-route-poison", poison, &status, &body) != 0
+      "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return error_base + 7;
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
+      canonical_path, &after)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries)
     return error_base + 8;
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-          &state_after)
+      &state_after)
       || memcmp (&state_before, &state_after, sizeof state_before) != 0)
     return error_base + 9;
 
@@ -1041,16 +1041,16 @@ check_exact_route_shape (SoupServer *server, const gchar *base_url,
   state_before = state_after;
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "PATCH", base_url, sibling,
-          "Bearer exact-route-poison", poison, &status, &body) != 0
+      "Bearer exact-route-poison", poison, &status, &body) != 0
       || status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
     return error_base + 10;
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          canonical_path, &after)
+      canonical_path, &after)
       || after.selected != before.selected + 1
       || after.terminal_entries != before.terminal_entries)
     return error_base + 11;
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-          &state_after)
+      &state_after)
       || memcmp (&state_before, &state_after, sizeof state_before) != 0)
     return error_base + 12;
   return 0;
@@ -1127,7 +1127,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
       canonical_method_status = 503;
 #endif
     gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
-        canonical_method_status, 2281 + (gint) i * 13);
+            canonical_method_status, 2281 + (gint) i * 13);
     if (rc != 0)
       return rc;
   }
@@ -1137,20 +1137,20 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          "/healthz", &probe_before)
+      "/healthz", &probe_before)
       || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-          &state_before)
+      &state_before)
       || send_raw_path_probe (session, "PATCH", base_url, "/healthz//x",
-          "Bearer exact-route-poison", "{\"mutation\":\"must-not-run\"}",
-          &status, &body) != 0
+      "Bearer exact-route-poison", "{\"mutation\":\"must-not-run\"}",
+      &status, &body) != 0
       || status != 404
       || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
       || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-          "/healthz", &probe_after)
+      "/healthz", &probe_after)
       || probe_after.selected != probe_before.selected + 1
       || probe_after.terminal_entries != probe_before.terminal_entries
       || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-          &state_after)
+      &state_after)
       || memcmp (&state_before, &state_after, sizeof state_before) != 0)
     return 2750;
   return 0;
@@ -1166,9 +1166,9 @@ check_exact_facts_alias_canaries (SoupServer *server, const gchar *base_url)
   };
   static const gchar *const schema_aliases[] = {
     "/facts/schema/register/x?tenant=__wr_default&graph=orders&namespace=shop"
-        "&relation=alias_probe&schema_version=1",
+    "&relation=alias_probe&schema_version=1",
     "/facts/schema/registerx?tenant=__wr_default&graph=orders&namespace=shop"
-        "&relation=alias_probe&schema_version=1",
+    "&relation=alias_probe&schema_version=1",
   };
   const gchar *schema_body = "column_name\tcolumn_type\tnullable\tvisible\n"
       "order_id\tsymbol\tfalse\ttrue\n";
@@ -1178,7 +1178,7 @@ check_exact_facts_alias_canaries (SoupServer *server, const gchar *base_url)
     g_autofree gchar *body = NULL;
     if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
         || send_raw_path_probe (session, "GET", base_url, status_aliases[i],
-            NULL, NULL, &status, &body) != 0
+        NULL, NULL, &status, &body) != 0
         || status != 404
         || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
@@ -1191,8 +1191,8 @@ check_exact_facts_alias_canaries (SoupServer *server, const gchar *base_url)
     g_autofree gchar *body = NULL;
     if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
         || send_raw_path_probe (session, "POST", base_url, schema_aliases[i],
-            "Bearer exact-facts-valid-shape", schema_body, &status,
-            &body) != 0 || status != 404
+        "Bearer exact-facts-valid-shape", schema_body, &status,
+        &body) != 0 || status != 404
         || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
         || memcmp (&before, &after, sizeof before) != 0)
@@ -1202,7 +1202,7 @@ check_exact_facts_alias_canaries (SoupServer *server, const gchar *base_url)
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw_path_probe (session, "GET", base_url,
-          "/facts/schema/register", NULL, NULL, &status, &body) != 0)
+      "/facts/schema/register", NULL, NULL, &status, &body) != 0)
     return 2385;
 #ifdef WYL_HAS_FACT_STORE
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
@@ -1230,7 +1230,7 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/healthz?format=json", &status,
-          &body) != 0)
+      &body) != 0)
     return 1921;
   if (status != 200 || strstr (body, "\"status\":\"ok\"") == NULL)
     return 1922;
@@ -1244,7 +1244,7 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
-          &body) != 0)
+      &body) != 0)
     return 1923;
   if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
     return 1924;
@@ -1255,7 +1255,7 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/facts/status", &status,
-          &body) != 0)
+      &body) != 0)
     return 1930;
   if (status != 200 || strstr (body, "\"graphs_total\"") == NULL
       || strstr (body, "\"graphs\"") == NULL)
@@ -1271,7 +1271,7 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
-          &body) != 0)
+      &body) != 0)
     return 1925;
   if (status != 503 || strstr (body, "\"status\":\"not_ready\"") == NULL ||
       strstr (body, "\"reason\":\"delta_not_ready\"") == NULL)
@@ -1288,7 +1288,7 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
-          &body) != 0)
+      &body) != 0)
     return 1927;
   if (status != 503 || strstr (body, "\"status\":\"not_ready\"") == NULL ||
       strstr (body, "\"reason\":\"audit_degraded\"") == NULL)
@@ -1326,7 +1326,7 @@ send_raw_decide_authorization_full (SoupSession *session, const gchar *method,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) body = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (body == NULL)
     return 32;
   gint rc = check_response_request_id_header (msg, 50);
@@ -1339,7 +1339,7 @@ send_raw_decide_authorization_full (SoupSession *session, const gchar *method,
   *out_body = g_strndup (body_data, body_size);
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   return 0;
@@ -1352,7 +1352,7 @@ send_raw_decide_full (SoupSession *session, const gchar *method,
     gchar **out_body, gchar **out_request_id)
 {
   return send_raw_decide_authorization_full (session, method, base_url, user,
-      perm, scope, extra_query, NULL, out_status, out_body, out_request_id);
+             perm, scope, extra_query, NULL, out_status, out_body, out_request_id);
 }
 
 static gint
@@ -1362,9 +1362,9 @@ send_raw_decide_bearer (SoupSession *session, const gchar *method,
     guint *out_status, gchar **out_body)
 {
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   return send_raw_decide_authorization_full (session, method, base_url, user,
-      perm, scope, extra_query, authorization, out_status, out_body, NULL);
+             perm, scope, extra_query, authorization, out_status, out_body, NULL);
 }
 
 static gint
@@ -1374,7 +1374,7 @@ send_raw_decide (SoupSession *session, const gchar *method,
     gchar **out_body)
 {
   return send_raw_decide_full (session, method, base_url, user, perm, scope,
-      extra_query, out_status, out_body, NULL);
+             extra_query, out_status, out_body, NULL);
 }
 
 static gint
@@ -1391,30 +1391,30 @@ check_valid_decide_aliases (SoupServer *server, SoupSession *session,
   g_autofree gchar *escaped_perm = g_uri_escape_string (perm, NULL, TRUE);
   g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   for (gsize i = 0; i < G_N_ELEMENTS (aliases); i++) {
     g_autofree gchar *path = g_strdup_printf
-        ("%s?user=%s&perm=%s&session_token=%s%s%s", aliases[i], escaped_user,
-        escaped_perm, escaped_scope, extra_query != NULL ? "&" : "",
-        extra_query != NULL ? extra_query : "");
+          ("%s?user=%s&perm=%s&session_token=%s%s%s", aliases[i], escaped_user,
+            escaped_perm, escaped_scope, extra_query != NULL ? "&" : "",
+            extra_query != NULL ? extra_query : "");
     WylDaemonExactRouteProbeSnapshot probe_before = { 0 }, probe_after = { 0 };
     WylDaemonExactRouteStateSnapshot state_before = { 0 }, state_after = { 0 };
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (!wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-            "/decide", &probe_before)
+        "/decide", &probe_before)
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-            &state_before)
+        &state_before)
         || send_raw_path_probe (session, "POST", base_url, path,
-            authorization, NULL, &status, &body) != 0
+        authorization, NULL, &status, &body) != 0
         || status != 404
         || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-            "/decide", &probe_after)
+        "/decide", &probe_after)
         || probe_after.selected != probe_before.selected + 1
         || probe_after.terminal_entries != probe_before.terminal_entries
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-            &state_after)
+        &state_after)
         || memcmp (&state_before, &state_after, sizeof state_before) != 0)
       return error_base + (gint) i;
   }
@@ -1441,12 +1441,12 @@ send_request_id_probe (SoupSession *session, const gchar *method,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) body = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (body == NULL)
     return 1802;
   *out_status = soup_message_get_status (msg);
   const gchar *request_id = soup_message_headers_get_one
-      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
   gint rc = check_response_request_id_header (msg, 1803);
   if (rc != 0)
     return rc;
@@ -1466,7 +1466,7 @@ check_request_id_header_contract (const gchar *base_url)
   g_autofree gchar *health_id = NULL;
   g_autofree gchar *health_uri = g_strdup_printf ("%s/healthz", root);
   gint rc = send_request_id_probe (session, "GET", health_uri, NULL, &status,
-      &health_id);
+          &health_id);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -1476,7 +1476,7 @@ check_request_id_header_contract (const gchar *base_url)
   g_autofree gchar *bad_decide_uri =
       g_strdup_printf ("%s/decide?user=request-id-user", root);
   rc = send_request_id_probe (session, "POST", bad_decide_uri, NULL, &status,
-      &bad_decide_id);
+          &bad_decide_id);
   if (rc != 0)
     return rc;
   if (status != 400)
@@ -1487,9 +1487,9 @@ check_request_id_header_contract (const gchar *base_url)
   g_autofree gchar *spoofed_id = NULL;
   g_autofree gchar *deny_uri =
       build_decide_uri (root, "request-id-user", "wr.audit.read",
-      "request-id-scope", NULL);
+          "request-id-scope", NULL);
   rc = send_request_id_probe (session, "POST", deny_uri, "attacker", &status,
-      &spoofed_id);
+          &spoofed_id);
   if (rc != 0)
     return rc;
   if (status != 401)
@@ -1538,7 +1538,7 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
     return 1821;
 
   gint rc = send_raw_decide (session, "GET", base_url, "http-deny-user",
-      "http.not_armed", "http-deny-scope", NULL, &status, &body);
+          "http.not_armed", "http-deny-scope", NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 405 || strstr (body, "\"error\":\"method_not_allowed\"")
@@ -1547,7 +1547,7 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide (session, "POST", base_url, "http-deny-user",
-      "http.not_armed", "http-deny-scope", NULL, &status, &body);
+          "http.not_armed", "http-deny-scope", NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"decide_auth_required\"") == NULL)
@@ -1555,8 +1555,8 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-deny-user",
-      "http.not_armed", "http-deny-scope", NULL, deny_access_token, &status,
-      &body);
+          "http.not_armed", "http-deny-scope", NULL, deny_access_token, &status,
+          &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -1570,15 +1570,15 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
       strstr (body, "\"deny_origin\":null") == NULL)
     return 37;
   rc = check_valid_decide_aliases (server, session, base_url,
-      "http-deny-user", "http.not_armed", "http-deny-scope", NULL,
-      deny_access_token, 2670);
+          "http-deny-user", "http.not_armed", "http-deny-scope", NULL,
+          deny_access_token, 2670);
   if (rc != 0)
     return rc;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-deny-user",
-      "wr.audit.read", "http-guard-scope", NULL, guard_access_token, &status,
-      &body);
+          "wr.audit.read", "http-guard-scope", NULL, guard_access_token, &status,
+          &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"decide_denied\"") == NULL)
@@ -1586,8 +1586,8 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope", NULL, guard_access_token, &status,
-      &body);
+          "wr.audit.read", "http-guard-scope", NULL, guard_access_token, &status,
+          &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"decision\":0") == NULL)
@@ -1599,12 +1599,12 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *allow_request_id = NULL;
   g_autofree gchar *guard_authorization = g_strdup_printf ("Bearer %s",
-      guard_access_token);
+          guard_access_token);
   rc = send_raw_decide_authorization_full (session, "POST", base_url,
-      "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      guard_authorization, &status, &body, &allow_request_id);
+          "http-guard-user",
+          "wr.audit.read", "http-guard-scope",
+          "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+          guard_authorization, &status, &body, &allow_request_id);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -1623,7 +1623,7 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
     .request_id = allow_request_id,
   };
   if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), audit_event_probe_cb, &allow_audit) != WYRELOG_E_OK)
+        (handle), audit_event_probe_cb, &allow_audit) != WYRELOG_E_OK)
     return 1810;
   if (allow_audit.matches != 1)
     return 1811;
@@ -1633,9 +1633,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=123&guard_loc_class=public&guard_risk=70",
-      guard_access_token, &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "guard_timestamp=123&guard_loc_class=public&guard_risk=70",
+          guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"decision\":0") == NULL)
@@ -1645,9 +1645,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=123&guard_loc_class=public", guard_access_token,
-      &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "guard_timestamp=123&guard_loc_class=public", guard_access_token,
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
@@ -1655,9 +1655,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=123&guard_loc_class=public&guard_risk=101",
-      guard_access_token, &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "guard_timestamp=123&guard_loc_class=public&guard_risk=101",
+          guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
@@ -1665,9 +1665,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
-      guard_access_token, &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
+          guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
@@ -1675,9 +1675,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=123&guard_loc_class=unknown&guard_risk=69",
-      guard_access_token, &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "guard_timestamp=123&guard_loc_class=unknown&guard_risk=69",
+          guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
@@ -1685,9 +1685,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "tenant=unknown&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69", guard_access_token, &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "tenant=unknown&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=69", guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   /*
@@ -1704,9 +1704,9 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
    */
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope",
-      "tenant=evil-co&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69", guard_access_token, &status, &body);
+          "wr.audit.read", "http-guard-scope",
+          "tenant=evil-co&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=69", guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
@@ -1743,15 +1743,15 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
     .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
   };
   wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&foreign_tenant_input, secret,
-      sizeof secret, &foreign_tenant_token);
+          sizeof secret, &foreign_tenant_token);
   memset (secret, 0, sizeof secret);
   if (sign_rc != WYRELOG_E_OK)
     return 1825;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope", NULL, foreign_tenant_token,
-      &status, &body);
+          "wr.audit.read", "http-guard-scope", NULL, foreign_tenant_token,
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"tenant_invalid\"") == NULL)
@@ -1785,7 +1785,7 @@ send_raw_login_full (SoupSession *session, const gchar *method,
     return 1;
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 2;
   gint rc = check_response_request_id_header (msg, 513);
@@ -1797,7 +1797,7 @@ send_raw_login_full (SoupSession *session, const gchar *method,
   *out_body = g_strndup (data, size);
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   return 0;
@@ -1809,7 +1809,7 @@ send_raw_login (SoupSession *session, const gchar *method,
     gchar **out_body)
 {
   return send_raw_login_full (session, method, base_url, query, out_status,
-      out_body, NULL);
+             out_body, NULL);
 }
 
 static gchar *extract_json_string (const gchar * body, const gchar * name);
@@ -1836,7 +1836,7 @@ send_raw_refresh (SoupSession *session, const gchar *method,
     return 1;
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 2;
   gint rc = check_response_request_id_header (msg, 573);
@@ -1876,26 +1876,26 @@ dropped_human_refresh_thread (gpointer data)
 {
   DroppedHumanRefresh *request = data;
   g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
-      NULL);
+          NULL);
   g_autoptr (GSocketClient) client = g_socket_client_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) connection = uri != NULL
       ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
-      g_uri_get_port (uri), NULL, &error) : NULL;
+          g_uri_get_port (uri), NULL, &error) : NULL;
   if (connection == NULL) {
     request->rc = 1;
     return NULL;
   }
   g_autofree gchar *escaped = g_uri_escape_string (request->refresh_token,
-      NULL, TRUE);
+          NULL, TRUE);
   g_autofree gchar *wire = g_strdup_printf
-      ("POST /auth/refresh?refresh_token=%s HTTP/1.1\r\n"
-      "Host: %s:%d\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-      escaped, g_uri_get_host (uri), g_uri_get_port (uri));
+        ("POST /auth/refresh?refresh_token=%s HTTP/1.1\r\n"
+          "Host: %s:%d\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+          escaped, g_uri_get_host (uri), g_uri_get_port (uri));
   gsize written = 0;
   if (!g_output_stream_write_all (g_io_stream_get_output_stream
-          (G_IO_STREAM (connection)), wire, strlen (wire), &written, NULL,
-          &error) || written != strlen (wire)) {
+        (G_IO_STREAM (connection)), wire, strlen (wire), &written, NULL,
+      &error) || written != strlen (wire)) {
     request->rc = 2;
     return NULL;
   }
@@ -1928,11 +1928,11 @@ http_response_parse_content_length (const guint8 *data, gsize length,
 
   gsize header_length = (gsize) (headers_end - text);
   const gchar *content_length = g_strstr_len (text, header_length,
-      "\nContent-Length:");
+          "\nContent-Length:");
   if (content_length == NULL) {
     if (header_length >= strlen ("Content-Length:")
         && g_ascii_strncasecmp (text, "Content-Length:",
-            strlen ("Content-Length:")) == 0)
+        strlen ("Content-Length:")) == 0)
       content_length = text;
     else
       return FALSE;
@@ -1961,28 +1961,28 @@ raw_human_refresh_thread (gpointer data)
 {
   RawHumanRefresh *request = data;
   g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
-      NULL);
+          NULL);
   g_autoptr (GSocketClient) client = g_socket_client_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) connection = uri != NULL
       ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
-      g_uri_get_port (uri), NULL, &error) : NULL;
+          g_uri_get_port (uri), NULL, &error) : NULL;
   if (connection == NULL) {
     request->rc = 1;
     return NULL;
   }
   g_socket_set_timeout (g_socket_connection_get_socket (connection), 15);
   g_autofree gchar *escaped = g_uri_escape_string (request->refresh_token,
-      NULL, TRUE);
+          NULL, TRUE);
   g_autofree gchar *wire = g_strdup_printf
-      ("POST /auth/refresh?refresh_token=%s HTTP/1.1\r\n"
-      "Host: %s:%d\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-      escaped, g_uri_get_host (uri), g_uri_get_port (uri));
+        ("POST /auth/refresh?refresh_token=%s HTTP/1.1\r\n"
+          "Host: %s:%d\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+          escaped, g_uri_get_host (uri), g_uri_get_port (uri));
   GOutputStream *output = g_io_stream_get_output_stream
-      (G_IO_STREAM (connection));
+        (G_IO_STREAM (connection));
   gsize written = 0;
   if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
-          &error) || written != strlen (wire)
+      &error) || written != strlen (wire)
       || !g_output_stream_flush (output, NULL, &error)) {
     request->rc = 2;
     return NULL;
@@ -1998,7 +1998,7 @@ raw_human_refresh_thread (gpointer data)
   GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
   for (;;) {
     gssize count = g_input_stream_read (input, chunk, sizeof chunk, NULL,
-        &error);
+            &error);
     if (count < 0) {
       request->rc = 3;
       return NULL;
@@ -2009,9 +2009,9 @@ raw_human_refresh_thread (gpointer data)
 
     gsize content_length = 0;
     if (http_response_parse_content_length (response->data, response->len,
-            &content_length)) {
+        &content_length)) {
       const gchar *headers_end = g_strstr_len ((const gchar *) response->data,
-          response->len, "\r\n\r\n");
+              response->len, "\r\n\r\n");
       if (headers_end != NULL) {
         gsize header_length =
             (gsize) (headers_end - (const gchar *) response->data);
@@ -2043,7 +2043,7 @@ access_token_jti (SoupServer *server, const gchar *access_token)
   g_autoptr (GBytes) payload = NULL;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   wyrelog_error_t rc = wyl_jwt_verify_hs256_access_token (access_token, secret,
-      sizeof secret, key_id, "wyrelogd", "wyrelog-client", now, &payload);
+          sizeof secret, key_id, "wyrelogd", "wyrelog-client", now, &payload);
   sodium_memzero (secret, sizeof secret);
   if (rc != WYRELOG_E_OK)
     return NULL;
@@ -2061,19 +2061,19 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
   guint login_status = 0;
   g_autofree gchar *login_body = NULL;
   if (send_raw_login (login, "POST", base_url,
-          "username=login-user&skip_mfa=true", &login_status, &login_body)
+      "username=login-user&skip_mfa=true", &login_status, &login_body)
       != 0 || login_status != 200)
     return 2200;
   g_autofree gchar *session_id = extract_json_string (login_body,
-      "session_token");
+          "session_token");
   g_autofree gchar *predecessor = extract_json_string (login_body,
-      "refresh_token");
+          "refresh_token");
   if (session_id == NULL || predecessor == NULL)
     return 2201;
 
   guint refresh_before = 0, access_before = 0;
   g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_before, &access_before);
+        (server, predecessor, &refresh_before, &access_before);
   if (before == NULL)
     return 2202;
   gint result = 0;
@@ -2088,7 +2088,7 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
   wyl_daemon_access_token_snapshot_t lineage = { 0 };
   wyl_daemon_http_reset_refresh_counters_for_test (server);
   guint64 latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
+        (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   RefreshThreadBarrier barrier = { 0 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
@@ -2100,16 +2100,16 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
     requests[i].wire_barrier = i == 0 ? NULL : &barrier;
   }
   threads[0] = g_thread_new ("human-refresh-a",
-      raw_human_refresh_thread, &requests[0]);
+          raw_human_refresh_thread, &requests[0]);
   threads_started = 1;
   if (!wyl_daemon_http_wait_refresh_latch_for_test (server, latch_generation,
-          g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
     result = 2210;
     goto cleanup;
   }
   for (guint i = 1; i < G_N_ELEMENTS (threads); i++) {
     threads[i] = g_thread_new ("human-refresh-queued",
-        raw_human_refresh_thread, &requests[i]);
+            raw_human_refresh_thread, &requests[i]);
     threads_started++;
   }
   g_mutex_lock (&barrier.mutex);
@@ -2157,7 +2157,7 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
 
   guint refresh_after = 0, access_after = 0;
   after = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
-      &refresh_after, &access_after);
+          &refresh_after, &access_after);
   if (after == NULL || refresh_after != refresh_before + 1
       || access_after != access_before + 1
       || strstr (after, access_a) == NULL
@@ -2167,10 +2167,10 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
   }
   guint successor_refresh_count = 0, successor_access_count = 0;
   refresh_lineage = wyl_daemon_http_dup_refresh_state_for_test (server,
-      refresh_a, &successor_refresh_count, &successor_access_count);
+          refresh_a, &successor_refresh_count, &successor_access_count);
   expected_refresh_lineage = g_strdup_printf
-      ("%s|%s|login-user|__wr_default|%d|0|0|", refresh_a, session_id,
-      WYL_SESSION_AUTH_METHOD_HUMAN);
+        ("%s|%s|login-user|__wr_default|%d|0|0|", refresh_a, session_id,
+          WYL_SESSION_AUTH_METHOD_HUMAN);
   if (refresh_lineage == NULL
       || !g_str_has_prefix (refresh_lineage, expected_refresh_lineage)
       || successor_refresh_count != refresh_after
@@ -2199,7 +2199,7 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
   }
 
   if (wyl_daemon_http_resolve_bearer_for_test (server, access_a,
-          &resolved_session, &resolved_actor, &resolved_tenant)
+      &resolved_session, &resolved_actor, &resolved_tenant)
       != WYRELOG_E_OK || g_strcmp0 (resolved_session, session_id) != 0
       || g_strcmp0 (resolved_actor, "login-user") != 0) {
     result = 2207;
@@ -2207,7 +2207,7 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
   }
   guint successor_status = 0;
   if (send_raw_refresh (login, "POST", base_url, refresh_a,
-          &successor_status, &successor_body) != 0 || successor_status != 200)
+      &successor_status, &successor_body) != 0 || successor_status != 200)
     result = 2208;
 
 cleanup:
@@ -2241,7 +2241,7 @@ check_human_refresh_response_loss (SoupServer *server, const gchar *base_url)
   g_autofree gchar *body = NULL;
   g_autofree gchar *after = NULL;
   if (send_raw_login (login, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200)
     return 2250;
   g_autofree gchar *predecessor = extract_json_string (body, "refresh_token");
@@ -2249,10 +2249,10 @@ check_human_refresh_response_loss (SoupServer *server, const gchar *base_url)
     return 2251;
   guint refresh_before = 0, access_before = 0;
   g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_before, &access_before);
+        (server, predecessor, &refresh_before, &access_before);
   wyl_daemon_http_reset_refresh_counters_for_test (server);
   latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
+        (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   DroppedHumanRefresh dropped = {
     .base_url = base_url,
     .refresh_token = predecessor,
@@ -2261,10 +2261,10 @@ check_human_refresh_response_loss (SoupServer *server, const gchar *base_url)
   g_cond_init (&dropped.changed);
   sync_initialized = TRUE;
   thread = g_thread_new ("refresh-response-loss",
-      dropped_human_refresh_thread, &dropped);
+          dropped_human_refresh_thread, &dropped);
   thread_started = TRUE;
   if (!wyl_daemon_http_wait_refresh_latch_for_test (server, latch_generation,
-          g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
     result = 2252;
     goto cleanup;
   }
@@ -2289,13 +2289,13 @@ check_human_refresh_response_loss (SoupServer *server, const gchar *base_url)
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (login, "POST", base_url, predecessor, &status,
-          &body) != 0 || status != 200) {
+      &body) != 0 || status != 200) {
     result = 2254;
     goto cleanup;
   }
   guint refresh_count = 0, access_count = 0;
   state = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
-      &refresh_count, &access_count);
+          &refresh_count, &access_count);
   access = extract_json_string (body, "access_token");
   refresh = extract_json_string (body, "refresh_token");
   if (state == NULL || access == NULL || refresh == NULL
@@ -2347,7 +2347,7 @@ check_human_refresh_prepared_expiry (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_set_refresh_clock_for_test (server, TRUE, prepared_at);
   clock_enabled = TRUE;
   if (send_raw_login (login, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200) {
     result = 2256;
     goto cleanup;
@@ -2355,16 +2355,16 @@ check_human_refresh_prepared_expiry (SoupServer *server, const gchar *base_url)
   predecessor = extract_json_string (body, "refresh_token");
   guint refresh_before = 0, access_before = 0;
   before = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
-      &refresh_before, &access_before);
+          &refresh_before, &access_before);
   latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
+        (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   request.base_url = base_url;
   request.refresh_token = predecessor;
   thread = g_thread_new ("refresh-prepared-expiry",
-      raw_human_refresh_thread, &request);
+          raw_human_refresh_thread, &request);
   thread_started = TRUE;
   if (!wyl_daemon_http_wait_refresh_latch_for_test (server, latch_generation,
-          g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
     result = 2257;
     goto cleanup;
   }
@@ -2377,7 +2377,7 @@ check_human_refresh_prepared_expiry (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_disarm_refresh_latch_for_test (server, latch_generation);
   guint refresh_after = 0, access_after = 0;
   after = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
-      &refresh_after, &access_after);
+          &refresh_after, &access_after);
   if (request.status != 500 || before == NULL || after == NULL
       || refresh_after != refresh_before || access_after != access_before
       || strstr (after, "|0|0|") == NULL) {
@@ -2386,7 +2386,7 @@ check_human_refresh_prepared_expiry (SoupServer *server, const gchar *base_url)
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (login, "POST", base_url, predecessor, &status,
-          &body) != 0 || status != 200)
+      &body) != 0 || status != 200)
     result = 2259;
 cleanup:
   if (latch_generation != 0 && !latch_released)
@@ -2413,25 +2413,25 @@ check_human_refresh_logout_ordering (SoupServer *server, const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw_login (session, "POST", base_url,
-            "username=login-user&skip_mfa=true", &status, &body) != 0
+        "username=login-user&skip_mfa=true", &status, &body) != 0
         || status != 200)
       return 2320 + (gint) i *10;
     g_autofree gchar *session_id = extract_json_string (body, "session_token");
     g_autofree gchar *predecessor = extract_json_string (body,
-        "refresh_token");
+            "refresh_token");
     guint refresh_before = 0, access_before = 0;
     g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-        (server, predecessor, &refresh_before, &access_before);
+          (server, predecessor, &refresh_before, &access_before);
     guint64 generation = wyl_daemon_http_arm_refresh_latch_for_test (server,
-        phases[i]);
+            phases[i]);
     RawHumanRefresh request = {
       .base_url = base_url,
       .refresh_token = predecessor,
     };
     GThread *thread = g_thread_new ("refresh-logout-order",
-        raw_human_refresh_thread, &request);
+            raw_human_refresh_thread, &request);
     if (!wyl_daemon_http_wait_refresh_latch_for_test (server, generation,
-            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+        g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
       wyl_daemon_http_release_refresh_latch_for_test (server, generation);
       g_thread_join (thread);
       wyl_daemon_http_disarm_refresh_latch_for_test (server, generation);
@@ -2444,24 +2444,24 @@ check_human_refresh_logout_ordering (SoupServer *server, const gchar *base_url)
     wyl_daemon_http_disarm_refresh_latch_for_test (server, generation);
     guint refresh_after = 0, access_after = 0;
     g_autofree gchar *after = wyl_daemon_http_dup_refresh_state_for_test
-        (server, predecessor, &refresh_after, &access_after);
+          (server, predecessor, &refresh_after, &access_after);
     if (i == 0) {
       if (request.status == 200 || before == NULL || after == NULL
           || refresh_after != refresh_before || access_after != access_before)
         return 2322;
     } else {
       g_autofree gchar *access = extract_json_string (request.body,
-          "access_token");
+              "access_token");
       g_autofree gchar *refresh = extract_json_string (request.body,
-          "refresh_token");
+              "refresh_token");
       g_autofree gchar *jti = access_token_jti (server, access);
       wyl_daemon_access_token_snapshot_t access_state = { 0 };
       guint successor_refresh_count = 0, successor_access_count = 0;
       g_autofree gchar *successor =
           wyl_daemon_http_dup_refresh_state_for_test (server, refresh,
-          &successor_refresh_count, &successor_access_count);
+              &successor_refresh_count, &successor_access_count);
       gboolean revoked = wyl_daemon_http_snapshot_access_token_for_test
-          (server, jti, &access_state) && access_state.revoked;
+            (server, jti, &access_state) && access_state.revoked;
       wyl_daemon_access_token_snapshot_clear (&access_state);
       if (request.status != 200 || access == NULL || refresh == NULL
           || refresh_after != refresh_before + 1
@@ -2489,22 +2489,22 @@ check_human_refresh_shutdown_ordering (SoupServer *server,
   g_autofree gchar *body = NULL;
   g_autofree gchar *after = NULL;
   if (send_raw_login (login, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200)
     return 2260;
   g_autofree gchar *predecessor = extract_json_string (body, "refresh_token");
   guint refresh_before = 0, access_before = 0;
   g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_before, &access_before);
+        (server, predecessor, &refresh_before, &access_before);
   latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
+        (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   request.base_url = base_url;
   request.refresh_token = predecessor;
   thread = g_thread_new ("refresh-shutdown",
-      raw_human_refresh_thread, &request);
+          raw_human_refresh_thread, &request);
   thread_started = TRUE;
   if (!wyl_daemon_http_wait_refresh_latch_for_test (server, latch_generation,
-          g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
     result = 2261;
     goto cleanup;
   }
@@ -2516,7 +2516,7 @@ check_human_refresh_shutdown_ordering (SoupServer *server,
   wyl_daemon_http_disarm_refresh_latch_for_test (server, latch_generation);
   guint refresh_after = 0, access_after = 0;
   after = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
-      &refresh_after, &access_after);
+          &refresh_after, &access_after);
   gboolean ok = request.status == 503 && request.body != NULL
       && strstr (request.body, "server_shutting_down") != NULL
       && before != NULL && after != NULL
@@ -2549,14 +2549,14 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   };
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      runtime, &error);
+          runtime, &error);
   g_main_context_pop_thread_default (context);
   if (http.server == NULL)
     return 2263;
   if (!wyl_daemon_http_refresh_context_is_for_test (http.server, context))
     return 2264;
   GThread *thread = g_thread_new ("refresh-explicit-context",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   MainLoopReadyBarrier barrier = { 0 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
@@ -2565,7 +2565,7 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   g_mutex_lock (&barrier.mutex);
   if (!barrier.ready) {
     if (!g_cond_wait_until (&barrier.changed, &barrier.mutex,
-            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+        g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
       g_mutex_unlock (&barrier.mutex);
       g_main_loop_quit (http.loop);
       g_thread_join (thread);
@@ -2595,7 +2595,7 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   guint status = 0;
   g_autofree gchar *body = NULL;
   gint rc = send_raw_refresh (session, "POST", base_url, NULL, &status,
-      &body);
+          &body);
   guint owned = 0, wrong = 0;
   wyl_daemon_http_refresh_lifecycle_counts_for_test (http.server, &owned,
       &wrong);
@@ -2623,50 +2623,50 @@ check_human_refresh_fault_matrix (SoupServer *server, const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw_login (session, "POST", base_url,
-            "username=login-user&skip_mfa=true", &status, &body) != 0
+        "username=login-user&skip_mfa=true", &status, &body) != 0
         || status != 200)
       return 2270 + (gint) i *10;
     g_autofree gchar *predecessor = extract_json_string (body,
-        "refresh_token");
+            "refresh_token");
     g_autofree gchar *session_id = extract_json_string (body,
-        "session_token");
+            "session_token");
     gchar **access_ids_before =
         wyl_daemon_http_snapshot_session_access_ids_for_test (server,
-        session_id);
+            session_id);
     gchar **refresh_ids_before =
         wyl_daemon_http_snapshot_session_refresh_ids_for_test (server,
-        session_id);
+            session_id);
     guint refresh_before = 0, access_before = 0;
     g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-        (server, predecessor, &refresh_before, &access_before);
+          (server, predecessor, &refresh_before, &access_before);
     wyl_daemon_http_reset_refresh_counters_for_test (server);
     wyl_daemon_http_set_refresh_fault_for_test (server, faults[i]);
     g_clear_pointer (&body, g_free);
     if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
-            &body) != 0 || status != 500)
+        &body) != 0 || status != 500)
       return 2271 + (gint) i *10;
     guint refresh_failed = 0, access_failed = 0;
     g_autofree gchar *failed = wyl_daemon_http_dup_refresh_state_for_test
-        (server, predecessor, &refresh_failed, &access_failed);
+          (server, predecessor, &refresh_failed, &access_failed);
     gchar **access_ids_failed =
         wyl_daemon_http_snapshot_session_access_ids_for_test (server,
-        session_id);
+            session_id);
     gchar **refresh_ids_failed =
         wyl_daemon_http_snapshot_session_refresh_ids_for_test (server,
-        session_id);
+            session_id);
     gchar **generated_refresh =
         wyl_daemon_http_snapshot_generated_refresh_ids_for_test (server);
     if (before == NULL || failed == NULL || refresh_failed != refresh_before
         || access_failed != access_before || strstr (failed, "|0|0|") == NULL
         || !g_strv_equal ((const gchar * const *) access_ids_before,
-            (const gchar * const *) access_ids_failed)
+        (const gchar * const *) access_ids_failed)
         || !g_strv_equal ((const gchar * const *) refresh_ids_before,
-            (const gchar * const *) refresh_ids_failed))
+        (const gchar * const *) refresh_ids_failed))
       return 2272 + (gint) i *10;
     for (guint generated = 0; generated_refresh != NULL
         && generated_refresh[generated] != NULL; generated++)
       if (g_strv_contains ((const gchar * const *) refresh_ids_failed,
-              generated_refresh[generated]))
+          generated_refresh[generated]))
         return 2274 + (gint) i *10;
     g_strfreev (access_ids_before);
     g_strfreev (access_ids_failed);
@@ -2675,31 +2675,31 @@ check_human_refresh_fault_matrix (SoupServer *server, const gchar *base_url)
     wyl_daemon_http_sensitive_strv_free_for_test (generated_refresh);
     g_clear_pointer (&body, g_free);
     if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
-            &body) != 0 || status != 200)
+        &body) != 0 || status != 200)
       return 2273 + (gint) i *10;
   }
 
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw_login (session, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200)
     return 2310;
   g_autofree gchar *predecessor = extract_json_string (body, "refresh_token");
   guint refresh_before = 0, access_before = 0;
   g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_before, &access_before);
+        (server, predecessor, &refresh_before, &access_before);
   wyl_daemon_http_reset_refresh_counters_for_test (server);
   wyl_daemon_http_set_refresh_fault_for_test (server,
       WYL_DAEMON_REFRESH_FAULT_RESPONSE_BUILD);
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
-          &body) != 0 || status != 500
+      &body) != 0 || status != 500
       || strstr (body, "refresh_response_failed") == NULL)
     return 2311;
   guint refresh_after = 0, access_after = 0;
   g_autofree gchar *committed = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_after, &access_after);
+        (server, predecessor, &refresh_after, &access_after);
   if (before == NULL || committed == NULL
       || refresh_after != refresh_before + 1
       || access_after != access_before + 1)
@@ -2708,13 +2708,13 @@ check_human_refresh_fault_matrix (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_refresh_counters_for_test (server, &counters_before);
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
-          &body) != 0 || status != 200)
+      &body) != 0 || status != 200)
     return 2313;
   wyl_daemon_http_refresh_counters_for_test (server, &counters_after);
   if (memcmp (&counters_before.access_id_successes,
-          &counters_after.access_id_successes,
-          sizeof counters_before - G_STRUCT_OFFSET (WylDaemonRefreshCounters,
-              access_id_successes)) != 0)
+      &counters_after.access_id_successes,
+      sizeof counters_before - G_STRUCT_OFFSET (WylDaemonRefreshCounters,
+      access_id_successes)) != 0)
     return 2314;
   return 0;
 }
@@ -2727,7 +2727,7 @@ check_human_refresh_failure_and_clock_boundaries (SoupServer *server,
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw_login (session, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200)
     return 2212;
   g_autofree gchar *predecessor = extract_json_string (body, "refresh_token");
@@ -2735,11 +2735,11 @@ check_human_refresh_failure_and_clock_boundaries (SoupServer *server,
     return 2213;
   guint refresh_before = 0, access_before = 0;
   g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_before, &access_before);
+        (server, predecessor, &refresh_before, &access_before);
   wyl_daemon_http_fail_next_refresh_publication_for_test (server);
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
-          &body) != 0 || status != 500
+      &body) != 0 || status != 500
       || strstr (body, "\"refresh_failed\"") == NULL) {
     g_printerr ("refresh injected failure: status=%u body=%s\n", status,
         body != NULL ? body : "<null>");
@@ -2747,13 +2747,13 @@ check_human_refresh_failure_and_clock_boundaries (SoupServer *server,
   }
   guint refresh_failed = 0, access_failed = 0;
   g_autofree gchar *failed = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_failed, &access_failed);
+        (server, predecessor, &refresh_failed, &access_failed);
   if (before == NULL || failed == NULL || refresh_failed != refresh_before
       || access_failed != access_before || strstr (failed, "|0|0|") == NULL)
     return 2215;
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
-          &body) != 0 || status != 200)
+      &body) != 0 || status != 200)
     return 2216;
 
   gint64 boundary = g_get_real_time () / G_USEC_PER_SEC;
@@ -2762,28 +2762,28 @@ check_human_refresh_failure_and_clock_boundaries (SoupServer *server,
   g_autofree gchar *boundary_predecessor = NULL;
   g_clear_pointer (&body, g_free);
   if (send_raw_login (session, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200
       || (boundary_predecessor = extract_json_string (body,
-              "refresh_token")) == NULL)
+      "refresh_token")) == NULL)
     return 2217;
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, boundary_predecessor,
-          &status, &body) != 0 || status != 200)
+      &status, &body) != 0 || status != 200)
     return 2218;
   g_autofree gchar *committed_body = g_strdup (body);
   wyl_daemon_http_set_refresh_clock_for_test (server, TRUE,
       boundary + grace_seconds);
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, boundary_predecessor,
-          &status, &body) != 0 || status != 200
+      &status, &body) != 0 || status != 200
       || g_strcmp0 (body, committed_body) != 0)
     return 2219;
   wyl_daemon_http_set_refresh_clock_for_test (server, TRUE,
       boundary + grace_seconds + 1);
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, boundary_predecessor,
-          &status, &body) != 0 || status != 401
+      &status, &body) != 0 || status != 401
       || strstr (body, "\"refresh_reuse_detected\"") == NULL)
     return 2220;
 
@@ -2791,17 +2791,17 @@ check_human_refresh_failure_and_clock_boundaries (SoupServer *server,
   wyl_daemon_http_set_refresh_clock_for_test (server, FALSE, 0);
   g_clear_pointer (&body, g_free);
   if (send_raw_login (session, "POST", base_url,
-          "username=login-user&skip_mfa=true", &status, &body) != 0
+      "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200
       || (expiry_predecessor = extract_json_string (body,
-              "refresh_token")) == NULL
+      "refresh_token")) == NULL
       || !wyl_daemon_http_set_refresh_times_for_test (server,
-          expiry_predecessor, boundary, 0))
+      expiry_predecessor, boundary, 0))
     return 2221;
   wyl_daemon_http_set_refresh_clock_for_test (server, TRUE, boundary);
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, expiry_predecessor,
-          &status, &body) != 0 || status != 401
+      &status, &body) != 0 || status != 401
       || strstr (body, "\"refresh_auth_required\"") == NULL)
     return 2222;
   wyl_daemon_http_set_refresh_clock_for_test (server, FALSE, 0);
@@ -2840,23 +2840,23 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
 
   guint refresh_before = 0, access_before = 0;
   g_autofree gchar *missing = wyl_daemon_http_dup_refresh_state_for_test
-      (server, "missing-service-refresh", &refresh_before, &access_before);
+        (server, "missing-service-refresh", &refresh_before, &access_before);
   g_autofree gchar *access = (gchar *) 0x1;
   g_autofree gchar *refresh = (gchar *) 0x1;
   if (missing != NULL || wyl_daemon_http_issue_human_tokens_for_test (server,
-          service, session_text, descriptor.subject_id, descriptor.tenant_id,
-          &access, &refresh) != WYRELOG_E_POLICY || access != NULL
+      service, session_text, descriptor.subject_id, descriptor.tenant_id,
+      &access, &refresh) != WYRELOG_E_POLICY || access != NULL
       || refresh != NULL)
     return 1902;
   guint refresh_after = 0, access_after = 0;
   missing = wyl_daemon_http_dup_refresh_state_for_test (server,
-      "missing-service-refresh", &refresh_after, &access_after);
+          "missing-service-refresh", &refresh_after, &access_after);
   if (missing != NULL || refresh_after != refresh_before
       || access_after != access_before)
     return 1903;
 
   g_autoptr (WylSession) human = wyl_daemon_http_ref_session (server,
-      human_session_id);
+          human_session_id);
   if (human == NULL)
     return 1904;
   typedef struct
@@ -2870,14 +2870,14 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
   } InvalidRefresh;
   const InvalidRefresh invalid[] = {
     {"seed-service", service, session_text, "svc:refresh:isolation",
-        WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, FALSE},
+     WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, FALSE},
     {"seed-human-cache", service, session_text, "human.cached",
-        WYL_SESSION_AUTH_METHOD_HUMAN, FALSE},
+     WYL_SESSION_AUTH_METHOD_HUMAN, FALSE},
     {"seed-svc-cache", human, human_session_id, "svc:cached",
-        WYL_SESSION_AUTH_METHOD_HUMAN, FALSE},
+     WYL_SESSION_AUTH_METHOD_HUMAN, FALSE},
     {"seed-service-consumed", service, session_text,
-          "svc:refresh:isolation", WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
-        TRUE},
+     "svc:refresh:isolation", WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
+     TRUE},
   };
   g_autoptr (SoupSession) client = soup_session_new ();
   wyl_daemon_http_reset_refresh_counters_for_test (server);
@@ -2887,24 +2887,24 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
     const gchar *successor_refresh =
         invalid[i].consumed ? "cached-refresh" : NULL;
     if (!wyl_daemon_http_seed_refresh_for_test (server, invalid[i].session,
-            invalid[i].token, invalid[i].session_id, invalid[i].subject,
-            "default", invalid[i].auth_method, invalid[i].consumed,
-            successor_access, successor_refresh))
+        invalid[i].token, invalid[i].session_id, invalid[i].subject,
+        "default", invalid[i].auth_method, invalid[i].consumed,
+        successor_access, successor_refresh))
       return 1910 + (gint) i;
     guint before_refresh = 0, before_access = 0;
     g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
-        (server, invalid[i].token, &before_refresh, &before_access);
+          (server, invalid[i].token, &before_refresh, &before_access);
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (before == NULL || send_raw_refresh (client, "POST", base_url,
-            invalid[i].token, &status, &body) != 0 || status != 401
+        invalid[i].token, &status, &body) != 0 || status != 401
         || strstr (body, "\"refresh_auth_required\"") == NULL
         || strstr (body, "access_token") != NULL
         || strstr (body, "refresh_token") != NULL)
       return 1920 + (gint) i;
     guint after_refresh = 0, after_access = 0;
     g_autofree gchar *after = wyl_daemon_http_dup_refresh_state_for_test
-        (server, invalid[i].token, &after_refresh, &after_access);
+          (server, invalid[i].token, &after_refresh, &after_access);
     if (g_strcmp0 (after, before) != 0 || after_refresh != before_refresh
         || after_access != before_access)
       return 1930 + (gint) i;
@@ -2948,15 +2948,15 @@ check_service_access_token_state_contract (SoupServer *server,
       wyl_daemon_http_dup_access_token_key_id (server);
   if (active_key == NULL
       || !wyl_daemon_http_store_human_access_token_for_test (server,
-          human_jti, human_sid, "human-state", "tenant-state", active_key, 100,
-          500)
+      human_jti, human_sid, "human-state", "tenant-state", active_key, 100,
+      500)
       || !wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "human-state", "tenant-state", 100, 500, NULL, NULL, 0,
-          499))
+      human_sid, "human-state", "tenant-state", 100, 500, NULL, NULL, 0,
+      499))
     return 1958;
   wyl_daemon_access_token_snapshot_t human_snapshot = { 0 };
   if (!wyl_daemon_http_snapshot_access_token_for_test (server, human_jti,
-          &human_snapshot)
+      &human_snapshot)
       || human_snapshot.auth_method != WYL_SESSION_AUTH_METHOD_HUMAN
       || human_snapshot.credential_id != NULL
       || human_snapshot.credential_generation != 0
@@ -2966,12 +2966,12 @@ check_service_access_token_state_contract (SoupServer *server,
   }
   wyl_daemon_access_token_snapshot_clear (&human_snapshot);
   if (wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "human-state", "tenant-state", 101, 500, NULL, NULL, 0,
-          499))
+      human_sid, "human-state", "tenant-state", 101, 500, NULL, NULL, 0,
+      499))
     return 1963;
   if (wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "human-state", "tenant-state", 100, 500,
-          "service_credential", credential, 7, 499))
+      human_sid, "human-state", "tenant-state", 100, 500,
+      "service_credential", credential, 7, 499))
     return 1960;
 
   gchar mutable_subject[] = "svc:state:test";
@@ -2980,9 +2980,9 @@ check_service_access_token_state_contract (SoupServer *server,
   gchar mutable_credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
   memcpy (mutable_credential, credential, sizeof credential);
   if (!wyl_daemon_http_store_service_access_token_for_test (server, jti, sid,
-          mutable_subject, mutable_tenant, mutable_key, 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, mutable_credential, 7,
-          FALSE))
+      mutable_subject, mutable_tenant, mutable_key, 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, mutable_credential, 7,
+      FALSE))
     return 1941;
   mutable_subject[4] = 'X';
   mutable_tenant[0] = 'X';
@@ -3002,15 +3002,15 @@ check_service_access_token_state_contract (SoupServer *server,
       || snapshot.expires_at != 500 || snapshot.revoked)
     return 1942;
   if (!wyl_daemon_http_service_access_token_is_exact_for_test (server, jti,
-          sid, "svc:state:test", "tenant-state", "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499))
+      sid, "svc:state:test", "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499))
     return 1943;
 
 #define EXPECT_NOT_EXACT(j, s, sub, ten, key, exp, method, cred, gen, now, code) \
   G_STMT_START { \
     if (wyl_daemon_http_service_access_token_is_exact_for_test (server, (j), \
-            (s), (sub), (ten), (key), (exp), (method), (cred), (gen), (now))) \
-      return (code); \
+        (s), (sub), (ten), (key), (exp), (method), (cred), (gen), (now))) \
+    return (code); \
   } G_STMT_END
   EXPECT_NOT_EXACT (other, sid, "svc:state:test", "tenant-state",
       "key-state", 500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
@@ -3044,63 +3044,63 @@ check_service_access_token_state_contract (SoupServer *server,
   const gchar *missing[] = { NULL, "", "bad" };
   for (gsize i = 0; i < G_N_ELEMENTS (missing); i++) {
     if (wyl_daemon_http_store_service_access_token_for_test (server,
-            missing[i], sid, "svc:state:test", "tenant-state", "key-state",
-            500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7,
-            FALSE)
+        missing[i], sid, "svc:state:test", "tenant-state", "key-state",
+        500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7,
+        FALSE)
         || wyl_daemon_http_store_service_access_token_for_test (server, jti,
-            missing[i], "svc:state:test", "tenant-state", "key-state", 500,
-            WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE))
+        missing[i], "svc:state:test", "tenant-state", "key-state", 500,
+        WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE))
       return 1954;
   }
   if (wyl_daemon_http_store_service_access_token_for_test (server, other, sid,
-          NULL, "tenant-state", "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      NULL, "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server, other,
-          sid, "svc:state:test", NULL, "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      sid, "svc:state:test", NULL, "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server, other,
-          sid, "svc:state:test", "tenant-state", NULL, 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      sid, "svc:state:test", "tenant-state", NULL, 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server, other,
-          sid, "svc:state:test", "tenant-state", "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, NULL, 7, FALSE)
+      sid, "svc:state:test", "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, NULL, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server, other,
-          sid, "svc:state:test", "tenant-state", "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 0, FALSE))
+      sid, "svc:state:test", "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 0, FALSE))
     return 1955;
 
   if (!wyl_daemon_http_store_service_access_token_for_test (server, other,
-          sid, "svc:revoked", "tenant-state", "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, TRUE)
+      sid, "svc:revoked", "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, TRUE)
       || wyl_daemon_http_service_access_token_is_exact_for_test (server,
-          other, sid, "svc:revoked", "tenant-state", "key-state", 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499))
+      other, sid, "svc:revoked", "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499))
     return 1956;
 
   static const gchar noncanonical_id[] = "01900000-0000-7000-8000-00000000000A";
   wyl_id_t parsed_noncanonical = WYL_ID_NIL;
   if (wyl_id_parse (noncanonical_id, &parsed_noncanonical) != WYRELOG_E_OK
       || wyl_daemon_http_store_service_access_token_for_test (server,
-          noncanonical_id, sid, "svc:state:test", "tenant-state", active_key,
-          500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      noncanonical_id, sid, "svc:state:test", "tenant-state", active_key,
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server, jti,
-          noncanonical_id, "svc:state:test", "tenant-state", active_key, 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      noncanonical_id, "svc:state:test", "tenant-state", active_key, 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server,
-          human_jti, human_sid, "svc:bad/subject", "tenant-state", active_key,
-          500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      human_jti, human_sid, "svc:bad/subject", "tenant-state", active_key,
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_store_service_access_token_for_test (server,
-          human_jti, human_sid, "svc:state:test", "bad/tenant", active_key,
-          500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7,
-          FALSE))
+      human_jti, human_sid, "svc:state:test", "bad/tenant", active_key,
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7,
+      FALSE))
     return 1961;
 
   if (!wyl_daemon_http_store_service_access_token_for_test (server, human_jti,
-          human_sid, "svc:state:test", "tenant-state", active_key, 500,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      human_sid, "svc:state:test", "tenant-state", active_key, 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "svc:state:test", "tenant-state", 200, 500, NULL, NULL, 0,
-          499))
+      human_sid, "svc:state:test", "tenant-state", 200, 500, NULL, NULL, 0,
+      499))
     return 1962;
 
   *owned_after_teardown = snapshot;
@@ -3131,8 +3131,8 @@ service_resolver_fixture_clear (ServiceResolverFixture *fixture)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
     service_resolver_fixture_clear)
-     static gboolean
-         service_resolver_fixture_init_tenant_credential (SoupServer *server,
+static gboolean
+service_resolver_fixture_init_tenant_credential (SoupServer *server,
     ServiceResolverFixture *fixture, gint registry_state,
     guint registry_mismatch, const gchar *tenant_id,
     const gchar *credential_id, guint64 credential_generation)
@@ -3152,19 +3152,19 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
       != WYRELOG_E_OK || wyl_id_format (&jti, fixture->jti, sizeof fixture->jti)
       != WYRELOG_E_OK
       || wyl_id_format (&other_sid, fixture->other_sid,
-          sizeof fixture->other_sid) != WYRELOG_E_OK
+      sizeof fixture->other_sid) != WYRELOG_E_OK
       || wyl_id_format (&other_jti, fixture->other_jti,
-          sizeof fixture->other_jti) != WYRELOG_E_OK
+      sizeof fixture->other_jti) != WYRELOG_E_OK
       || wyl_service_credential_id_new (fixture->other_credential,
-          sizeof fixture->other_credential) != WYRELOG_E_OK)
+      sizeof fixture->other_credential) != WYRELOG_E_OK)
     return FALSE;
   if (credential_id == NULL) {
     if (wyl_service_credential_id_new (fixture->credential,
-            sizeof fixture->credential) != WYRELOG_E_OK)
+        sizeof fixture->credential) != WYRELOG_E_OK)
       return FALSE;
     credential_generation = 9;
   } else if (!wyl_service_credential_id_is_canonical (credential_id,
-          strlen (credential_id)) || credential_generation == 0) {
+      strlen (credential_id)) || credential_generation == 0) {
     return FALSE;
   } else {
     g_strlcpy (fixture->credential, credential_id, sizeof fixture->credential);
@@ -3181,12 +3181,12 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
   if (wyl_session_new_service_detached (&descriptor, &session)
       != WYRELOG_E_OK
       || !wyl_daemon_http_replace_session_for_test (server, fixture->sid,
-          session)
+      session)
       || !wyl_daemon_http_store_service_access_token_for_test (server,
-          fixture->jti, fixture->sid, descriptor.subject_id,
-          descriptor.tenant_id, fixture->key_id, fixture->now + 300,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, fixture->credential,
-          credential_generation, FALSE))
+      fixture->jti, fixture->sid, descriptor.subject_id,
+      descriptor.tenant_id, fixture->key_id, fixture->now + 300,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, fixture->credential,
+      credential_generation, FALSE))
     return FALSE;
   const gchar *reg_sid = registry_mismatch == 1 ? fixture->other_sid
       : fixture->sid;
@@ -3203,21 +3203,21 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
   gboolean changed = FALSE;
   if (registry_state >= 0
       && wyl_daemon_http_service_registry_transition_for_test (server,
-          reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
-          WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_OK)
+      reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
+      WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_OK)
     return FALSE;
   if (registry_state >= WYL_SERVICE_AUTH_ACTIVE
       && wyl_daemon_http_service_registry_transition_for_test (server,
-          reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
-          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK)
+      reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
+      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK)
     return FALSE;
   if (registry_state == WYL_SERVICE_AUTH_REVOKED
       && wyl_daemon_http_service_registry_transition_for_test (server,
-          reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
-          WYL_DAEMON_SERVICE_REGISTRY_REVOKE, &changed) != WYRELOG_E_OK)
+      reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
+      WYL_DAEMON_SERVICE_REGISTRY_REVOKE, &changed) != WYRELOG_E_OK)
     return FALSE;
   if (wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return FALSE;
   wyl_jwt_service_issue_input_t input = {
     .key_id = fixture->key_id,.jti = fixture->jti,
@@ -3227,7 +3227,7 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
     .credential_generation = credential_generation,.issued_at = fixture->now,
   };
   wyrelog_error_t rc = wyl_jwt_sign_hs256_service (&input, secret,
-      sizeof secret, &fixture->token);
+          sizeof secret, &fixture->token);
   sodium_memzero (secret, sizeof secret);
   return rc == WYRELOG_E_OK;
 }
@@ -3238,7 +3238,7 @@ service_resolver_fixture_init_tenant (SoupServer *server,
     guint registry_mismatch, const gchar *tenant_id)
 {
   return service_resolver_fixture_init_tenant_credential (server, fixture,
-      registry_state, registry_mismatch, tenant_id, NULL, 0);
+             registry_state, registry_mismatch, tenant_id, NULL, 0);
 }
 
 static gboolean
@@ -3247,7 +3247,7 @@ service_resolver_fixture_init (SoupServer *server,
     guint registry_mismatch)
 {
   return service_resolver_fixture_init_tenant (server, fixture,
-      registry_state, registry_mismatch, "__wr_default");
+             registry_state, registry_mismatch, "__wr_default");
 }
 
 static gboolean
@@ -3258,13 +3258,13 @@ service_resolver_expect (SoupServer *server,
   g_autofree gchar *actor = NULL;
   g_autofree gchar *tenant = NULL;
   wyrelog_error_t rc = wyl_daemon_http_resolve_bearer_for_test (server,
-      token, &sid, &actor, &tenant);
+          token, &sid, &actor, &tenant);
   if (!success)
     return rc == WYRELOG_E_POLICY && sid == NULL && actor == NULL
-        && tenant == NULL;
+           && tenant == NULL;
   return rc == WYRELOG_E_OK && g_strcmp0 (sid, fixture->sid) == 0
-      && g_strcmp0 (actor, "svc:resolver:test") == 0
-      && g_strcmp0 (tenant, fixture->tenant) == 0;
+         && g_strcmp0 (actor, "svc:resolver:test") == 0
+         && g_strcmp0 (tenant, fixture->tenant) == 0;
 }
 
 static WylDaemonServiceAuthInvalidation
@@ -3272,8 +3272,9 @@ service_auth_invalidation_for_fixture (const ServiceResolverFixture *fixture,
     WylDaemonServiceAuthInvalidationKind kind)
 {
   return (WylDaemonServiceAuthInvalidation) {
-  .kind = kind,.credential_id = fixture->credential,.credential_generation =
-        9,.principal = "svc:resolver:test",.tenant = fixture->tenant,};
+           .kind = kind,.credential_id = fixture->credential,.credential_generation =
+               9,.principal = "svc:resolver:test",.tenant = fixture->tenant,
+  };
 }
 
 static WylDaemonServiceAuthInvalidation
@@ -3281,9 +3282,10 @@ service_auth_invalidation_no_match (const ServiceResolverFixture *fixture,
     WylDaemonServiceAuthInvalidationKind kind)
 {
   return (WylDaemonServiceAuthInvalidation) {
-  .kind = kind,.credential_id =
-        fixture->other_credential,.credential_generation = 10,.principal =
-        "svc:resolver:other",.tenant = "tenant-other",};
+           .kind = kind,.credential_id =
+               fixture->other_credential,.credential_generation = 10,.principal =
+               "svc:resolver:other",.tenant = "tenant-other",
+  };
 }
 
 typedef struct
@@ -3299,7 +3301,7 @@ service_auth_invalidation_thread (gpointer data)
 {
   ServiceAuthInvalidationCall *call = data;
   call->rc = wyl_daemon_http_invalidate_service_auth_for_test (call->server,
-      &call->invalidation, &call->result);
+          &call->invalidation, &call->result);
   return NULL;
 }
 
@@ -3323,22 +3325,23 @@ check_service_auth_invalidator_contract (SoupServer *server)
 {
   ServiceResolverFixture pending = { 0 };
   if (!service_resolver_fixture_init (server, &pending,
-          WYL_SERVICE_AUTH_PENDING, 0))
+      WYL_SERVICE_AUTH_PENDING, 0))
     return FALSE;
 
   ServiceAuthInvalidationCall pending_call = {
     .server = server,
     .invalidation = service_auth_invalidation_for_fixture (&pending,
-        WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL),
+            WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL),
     .rc = WYRELOG_E_INTERNAL,
   };
   pending_call.result = (WylServiceAuthRevokeResult) {
-  0};
+    0
+  };
   if (pending_call.invalidation.kind !=
       WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL)
     return FALSE;
   if (wyl_daemon_http_invalidate_service_auth_for_test (server, NULL,
-          &pending_call.result) != WYRELOG_E_INVALID)
+      &pending_call.result) != WYRELOG_E_INVALID)
     return FALSE;
   return TRUE;
 }
@@ -3349,7 +3352,7 @@ service_resolver_sign_variant (SoupServer *server,
 {
   guint8 secret[32] = { 0 };
   if (wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return NULL;
   wyl_jwt_service_issue_input_t input = {
     .key_id = field == 8 ? "wrong-key" : fixture->key_id,
@@ -3379,7 +3382,7 @@ service_resolver_sign_crossed (SoupServer *server,
 {
   guint8 secret[32] = { 0 };
   if (wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return NULL;
   wyl_jwt_service_issue_input_t input = {
     .key_id = sid_source->key_id,.jti = jti_source->jti,
@@ -3405,11 +3408,11 @@ service_resolver_sign_json (SoupServer *server, const gchar *payload,
   if (secret_override != NULL)
     memcpy (secret, secret_override, sizeof secret);
   else if (wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return NULL;
   g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
   g_autofree gchar *header = g_strdup_printf
-      ("{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}", key_id);
+        ("{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}", key_id);
   g_autofree gchar *header_segment = NULL;
   g_autofree gchar *payload_segment = NULL;
   g_autofree gchar *signing_input = NULL;
@@ -3417,9 +3420,9 @@ service_resolver_sign_json (SoupServer *server, const gchar *payload,
   gchar *token = NULL;
   if (key_id == NULL
       || wyl_jwt_base64url_encode ((const guint8 *) header, strlen (header),
-          &header_segment) != WYRELOG_E_OK
+      &header_segment) != WYRELOG_E_OK
       || wyl_jwt_base64url_encode ((const guint8 *) payload, strlen (payload),
-          &payload_segment) != WYRELOG_E_OK)
+      &payload_segment) != WYRELOG_E_OK)
     goto out;
   signing_input = g_strdup_printf ("%s.%s", header_segment, payload_segment);
   guint8 signature[crypto_auth_hmacsha256_BYTES] = { 0 };
@@ -3429,7 +3432,7 @@ service_resolver_sign_json (SoupServer *server, const gchar *payload,
       strlen (signing_input));
   crypto_auth_hmacsha256_final (&state, signature);
   if (wyl_jwt_base64url_encode (signature, sizeof signature,
-          &signature_segment) == WYRELOG_E_OK)
+      &signature_segment) == WYRELOG_E_OK)
     token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
   sodium_memzero (signature, sizeof signature);
 out:
@@ -3442,13 +3445,13 @@ service_resolver_json (const ServiceResolverFixture *fixture,
     const gchar *service_tail, gint64 nbf)
 {
   return g_strdup_printf
-      ("{\"jti\":\"%s\",\"sub\":\"svc:resolver:test\","
-      "\"iss\":\"wyrelogd\",\"aud\":\"wyrelog-client\","
-      "\"iat\":%" G_GINT64_FORMAT ",\"nbf\":%" G_GINT64_FORMAT ","
-      "\"exp\":%" G_GINT64_FORMAT ",\"tenant\":\"__wr_default\","
-      "\"principal_state_at_issue\":\"authenticated\",\"sid\":\"%s\"%s}",
-      fixture->jti, fixture->now, nbf, fixture->now + 300, fixture->sid,
-      service_tail);
+           ("{\"jti\":\"%s\",\"sub\":\"svc:resolver:test\","
+             "\"iss\":\"wyrelogd\",\"aud\":\"wyrelog-client\","
+             "\"iat\":%" G_GINT64_FORMAT ",\"nbf\":%" G_GINT64_FORMAT ","
+             "\"exp\":%" G_GINT64_FORMAT ",\"tenant\":\"__wr_default\","
+             "\"principal_state_at_issue\":\"authenticated\",\"sid\":\"%s\"%s}",
+             fixture->jti, fixture->now, nbf, fixture->now + 300, fixture->sid,
+             service_tail);
 }
 
 typedef struct
@@ -3502,25 +3505,25 @@ actual_service_tokens_init (SoupServer *server, const gchar *subject,
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   if (handle == NULL || tokens == NULL
       || wyl_service_credential_issue (handle, subject, tenant, "admin",
-          request_id, 0, &tokens->issued) != WYRELOG_E_OK)
+      request_id, 0, &tokens->issued) != WYRELOG_E_OK)
     return FALSE;
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (tokens->issued.secret, &secret_len);
+        (tokens->issued.secret, &secret_len);
   g_autofree gchar *body_a = NULL;
   g_autofree gchar *body_b = NULL;
   if (secret == NULL || secret_len == 0
       || wyl_daemon_http_publish_service_token_for_test (server,
-          tokens->issued.credential.credential_id, secret, secret_len,
-          &body_a) != WYRELOG_E_OK
+      tokens->issued.credential.credential_id, secret, secret_len,
+      &body_a) != WYRELOG_E_OK
       || wyl_daemon_http_publish_service_token_for_test (server,
-          tokens->issued.credential.credential_id, secret, secret_len,
-          &body_b) != WYRELOG_E_OK)
+      tokens->issued.credential.credential_id, secret, secret_len,
+      &body_b) != WYRELOG_E_OK)
     return FALSE;
   tokens->token_a = extract_json_string (body_a, "access_token");
   tokens->token_b = extract_json_string (body_b, "access_token");
   return tokens->token_a != NULL && tokens->token_b != NULL
-      && g_strcmp0 (tokens->token_a, tokens->token_b) != 0;
+         && g_strcmp0 (tokens->token_a, tokens->token_b) != 0;
 }
 
 static gboolean
@@ -3531,13 +3534,13 @@ actual_service_token_expect (SoupServer *server, const gchar *token,
   g_autofree gchar *actor = NULL;
   g_autofree gchar *resolved_tenant = NULL;
   wyrelog_error_t rc = wyl_daemon_http_resolve_bearer_for_test (server, token,
-      &sid, &actor, &resolved_tenant);
+          &sid, &actor, &resolved_tenant);
   if (!success)
     return rc == WYRELOG_E_POLICY && sid == NULL && actor == NULL
-        && resolved_tenant == NULL;
+           && resolved_tenant == NULL;
   return rc == WYRELOG_E_OK && sid != NULL
-      && g_strcmp0 (actor, subject) == 0
-      && g_strcmp0 (resolved_tenant, tenant) == 0;
+         && g_strcmp0 (actor, subject) == 0
+         && g_strcmp0 (resolved_tenant, tenant) == 0;
 }
 #endif
 
@@ -3575,19 +3578,19 @@ compound_disable_thread (gpointer data)
   CompoundDisableRace *race = data;
   if (race->credential_id != NULL && race->credential_rotate) {
     race->rc = wyl_daemon_http_rotate_service_credential_for_test
-        (race->server, race->credential_id, race->credential_generation,
-        race->request_id, compound_disable_after_write_acquired, race);
+          (race->server, race->credential_id, race->credential_generation,
+            race->request_id, compound_disable_after_write_acquired, race);
   } else if (race->credential_id != NULL)
     race->rc = wyl_daemon_http_revoke_service_credential_for_test
-        (race->server, race->credential_id, race->request_id,
-        compound_disable_after_write_acquired, race);
+          (race->server, race->credential_id, race->request_id,
+            compound_disable_after_write_acquired, race);
   else if (race->tenant_mutation)
     race->rc = wyl_daemon_http_seal_tenant_for_test (race->server,
-        race->tenant_id, compound_disable_after_write_acquired, race);
+            race->tenant_id, compound_disable_after_write_acquired, race);
   else
     race->rc = wyl_daemon_http_disable_service_principal_for_test
-        (race->server, "svc:resolver:test", race->request_id,
-        compound_disable_after_write_acquired, race);
+          (race->server, "svc:resolver:test", race->request_id,
+            compound_disable_after_write_acquired, race);
   return NULL;
 }
 
@@ -3616,7 +3619,7 @@ service_resolver_race_thread (gpointer data)
 {
   ServiceResolverRace *race = data;
   race->resolver_rc = wyl_daemon_http_resolve_bearer_for_test (race->server,
-      race->fixture->token, &race->sid, &race->actor, &race->tenant);
+          race->fixture->token, &race->sid, &race->actor, &race->tenant);
   return NULL;
 }
 
@@ -3637,9 +3640,9 @@ service_resolver_writer_checkpoint (gpointer data)
     g_mutex_unlock (&race->mutex);
     gboolean changed = FALSE;
     race->mutation_rc = wyl_daemon_http_service_registry_transition_for_test
-        (race->server, race->fixture->sid, race->fixture->jti,
-        race->fixture->credential, 9, "svc:resolver:test", "__wr_default",
-        WYL_DAEMON_SERVICE_REGISTRY_REVOKE, &changed);
+          (race->server, race->fixture->sid, race->fixture->jti,
+            race->fixture->credential, 9, "svc:resolver:test", "__wr_default",
+            WYL_DAEMON_SERVICE_REGISTRY_REVOKE, &changed);
     if (race->mutation_rc == WYRELOG_E_OK && !changed)
       race->mutation_rc = WYRELOG_E_INTERNAL;
     g_mutex_lock (&race->mutex);
@@ -3678,12 +3681,12 @@ check_service_resolver_inverse_barrier (SoupServer *server,
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
   g_autoptr (GThread) writer = g_thread_new ("inverse-write-holder",
-      service_resolver_writer_thread, &race);
+          service_resolver_writer_thread, &race);
   gboolean ok = service_resolver_wait_flag (&race, &race.writer_acquired);
   g_autoptr (GThread) resolver = NULL;
   if (ok) {
     resolver = g_thread_new ("inverse-service-resolver",
-        service_resolver_race_thread, &race);
+            service_resolver_race_thread, &race);
     ok = service_resolver_wait_reader_queued (server);
   }
   g_mutex_lock (&race.mutex);
@@ -3719,7 +3722,7 @@ service_resolver_writer_thread (gpointer data)
 {
   ServiceResolverRace *race = data;
   race->writer_rc = wyl_daemon_http_policy_write_for_test (race->server,
-      service_resolver_writer_checkpoint, race);
+          service_resolver_writer_checkpoint, race);
   return NULL;
 }
 
@@ -3761,7 +3764,7 @@ service_resolver_call_thread (gpointer data)
 {
   ServiceResolverCall *call = data;
   call->rc = wyl_daemon_http_resolve_bearer_for_test (call->server,
-      call->token, &call->sid, &call->actor, &call->tenant);
+          call->token, &call->sid, &call->actor, &call->tenant);
   return NULL;
 }
 
@@ -3771,15 +3774,15 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
 {
   g_auto (ActualServiceTokens) active = { 0 };
   if (!actual_service_tokens_init (server, "svc:resolver:test",
-          "__wr_default", "resolver-compound-disable-credential", &active)
+      "__wr_default", "resolver-compound-disable-credential", &active)
       || !actual_service_token_expect (server, active.token_a,
-          "svc:resolver:test", "__wr_default", TRUE)
+      "svc:resolver:test", "__wr_default", TRUE)
       || !actual_service_token_expect (server, active.token_b,
-          "svc:resolver:test", "__wr_default", TRUE))
+      "svc:resolver:test", "__wr_default", TRUE))
     return FALSE;
   g_auto (ServiceResolverFixture) transition_pending = { 0 };
   if (!service_resolver_fixture_init (server, &transition_pending,
-          WYL_SERVICE_AUTH_PENDING, 0))
+      WYL_SERVICE_AUTH_PENDING, 0))
     return FALSE;
   CompoundDisableRace race = {
     .server = server,
@@ -3789,7 +3792,7 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
   g_autoptr (GThread) mutation = g_thread_new ("compound-disable",
-      compound_disable_thread, &race);
+          compound_disable_thread, &race);
   gboolean ok = compound_disable_wait_acquired (&race);
   ServiceResolverCall later = {
     .server = server,
@@ -3799,7 +3802,7 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   g_autoptr (GThread) resolver = NULL;
   if (ok) {
     resolver = g_thread_new ("compound-later-resolver",
-        service_resolver_call_thread, &later);
+            service_resolver_call_thread, &later);
     ok = service_resolver_wait_reader_queued (server);
   }
   g_mutex_lock (&race.mutex);
@@ -3812,9 +3815,9 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
       && actual_service_token_expect (server, active.token_a,
-      "svc:resolver:test", "__wr_default", FALSE)
+          "svc:resolver:test", "__wr_default", FALSE)
       && actual_service_token_expect (server, active.token_b,
-      "svc:resolver:test", "__wr_default", FALSE);
+          "svc:resolver:test", "__wr_default", FALSE);
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
@@ -3824,12 +3827,12 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   gboolean changed = TRUE;
   if (!ok
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          transition_pending.sid, transition_pending.jti,
-          transition_pending.credential, 9,
-          "svc:resolver:test", "__wr_default",
-          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
+      transition_pending.sid, transition_pending.jti,
+      transition_pending.credential, 9,
+      "svc:resolver:test", "__wr_default",
+      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
       || changed || !service_resolver_expect (server, &transition_pending,
-          transition_pending.token, FALSE))
+      transition_pending.token, FALSE))
     return FALSE;
 
   /* A fresh keyed no-op against the already disabled principal must not arm
@@ -3840,22 +3843,22 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   g_auto (ServiceResolverFixture) noop_pending = { 0 };
   changed = FALSE;
   if (!service_resolver_fixture_init (server, &noop_pending,
-          WYL_SERVICE_AUTH_PENDING, 0)
+      WYL_SERVICE_AUTH_PENDING, 0)
       || wyl_daemon_http_disable_service_principal_for_test (server,
-          "svc:resolver:test", "000000000000000000000000231", NULL,
-          NULL) != WYRELOG_E_OK
+      "svc:resolver:test", "000000000000000000000000231", NULL,
+      NULL) != WYRELOG_E_OK
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
-          "svc:resolver:test", "__wr_default",
-          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK
+      noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
+      "svc:resolver:test", "__wr_default",
+      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK
       || !changed || !service_resolver_expect (server, &noop_pending,
-          noop_pending.token, TRUE))
+      noop_pending.token, TRUE))
     return FALSE;
   changed = FALSE;
   if (wyl_daemon_http_service_registry_transition_for_test (server,
-          noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
-          "svc:resolver:test", "__wr_default",
-          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
+      noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
+      "svc:resolver:test", "__wr_default",
+      WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
       || !changed)
     return FALSE;
   return TRUE;
@@ -3867,31 +3870,31 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   const gchar *tenant = "tenant-compound";
   const gchar *subject = "svc:tenant-compound:resolver";
   if (wyl_daemon_http_configure_tenant_for_test (server, tenant, TRUE,
-          FALSE) != WYRELOG_E_OK)
+      FALSE) != WYRELOG_E_OK)
     return FALSE;
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   wyl_service_principal_t principal = { 0 };
   wyrelog_error_t principal_rc = handle != NULL ?
       wyl_service_principal_create (handle, subject, "Tenant compound resolver",
-      "admin", "resolver-compound-tenant-principal", &principal) :
+          "admin", "resolver-compound-tenant-principal", &principal) :
       WYRELOG_E_INVALID;
   wyl_service_principal_clear (&principal);
   if (principal_rc != WYRELOG_E_OK)
     return FALSE;
   g_auto (ActualServiceTokens) active = { 0 };
   if (!actual_service_tokens_init (server, subject, tenant,
-          "resolver-compound-tenant-credential", &active)
+      "resolver-compound-tenant-credential", &active)
       || !actual_service_token_expect (server, active.token_a,
-          subject, tenant, TRUE)
+      subject, tenant, TRUE)
       || !actual_service_token_expect (server, active.token_b,
-          subject, tenant, TRUE))
+      subject, tenant, TRUE))
     return FALSE;
   /* A token that is still PENDING when the first sealing transition commits
    * must inherit that transition's selector.  A later ACTIVATE therefore
    * cannot escape the retirement barrier. */
   g_auto (ServiceResolverFixture) transition_pending = { 0 };
   if (!service_resolver_fixture_init_tenant (server, &transition_pending,
-          WYL_SERVICE_AUTH_PENDING, 0, tenant))
+      WYL_SERVICE_AUTH_PENDING, 0, tenant))
     return FALSE;
   CompoundDisableRace race = {
     .server = server,
@@ -3902,7 +3905,7 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
   g_autoptr (GThread) mutation = g_thread_new ("compound-tenant-seal",
-      compound_disable_thread, &race);
+          compound_disable_thread, &race);
   gboolean ok = compound_disable_wait_acquired (&race);
   ServiceResolverCall later = {
     .server = server,
@@ -3912,7 +3915,7 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   g_autoptr (GThread) resolver = NULL;
   if (ok) {
     resolver = g_thread_new ("compound-tenant-later-resolver",
-        service_resolver_call_thread, &later);
+            service_resolver_call_thread, &later);
     ok = service_resolver_wait_reader_queued (server);
   }
   g_mutex_lock (&race.mutex);
@@ -3925,9 +3928,9 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
       && actual_service_token_expect (server, active.token_a,
-      subject, tenant, FALSE)
+          subject, tenant, FALSE)
       && actual_service_token_expect (server, active.token_b,
-      subject, tenant, FALSE);
+          subject, tenant, FALSE);
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
@@ -3937,12 +3940,12 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   gboolean changed = TRUE;
   if (!ok
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          transition_pending.sid, transition_pending.jti,
-          transition_pending.credential, 9,
-          "svc:resolver:test", tenant,
-          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
+      transition_pending.sid, transition_pending.jti,
+      transition_pending.credential, 9,
+      "svc:resolver:test", tenant,
+      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
       || changed || !service_resolver_expect (server, &transition_pending,
-          transition_pending.token, FALSE))
+      transition_pending.token, FALSE))
     return FALSE;
 
   /* A fresh request key against an already sealed tenant is an authorized
@@ -3952,15 +3955,15 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   g_auto (ServiceResolverFixture) noop_pending = { 0 };
   changed = FALSE;
   if (!service_resolver_fixture_init_tenant (server, &noop_pending,
-          WYL_SERVICE_AUTH_PENDING, 0, tenant)
+      WYL_SERVICE_AUTH_PENDING, 0, tenant)
       || wyl_daemon_http_seal_tenant_for_test (server, tenant, NULL,
-          NULL) != WYRELOG_E_OK
+      NULL) != WYRELOG_E_OK
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
-          "svc:resolver:test", tenant,
-          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK
+      noop_pending.sid, noop_pending.jti, noop_pending.credential, 9,
+      "svc:resolver:test", tenant,
+      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK
       || !changed || !service_resolver_expect (server, &noop_pending,
-          noop_pending.token, FALSE))
+      noop_pending.token, FALSE))
     return FALSE;
   return TRUE;
 }
@@ -3971,19 +3974,19 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
 {
   g_auto (ActualServiceTokens) active = { 0 };
   if (!actual_service_tokens_init (server, "svc:resolver:test",
-          "__wr_default", rotate ? "resolver-credential-rotate-issue" :
-          "resolver-credential-revoke-issue", &active)
+      "__wr_default", rotate ? "resolver-credential-rotate-issue" :
+      "resolver-credential-revoke-issue", &active)
       || !actual_service_token_expect (server, active.token_a,
-          "svc:resolver:test", "__wr_default", TRUE)
+      "svc:resolver:test", "__wr_default", TRUE)
       || !actual_service_token_expect (server, active.token_b,
-          "svc:resolver:test", "__wr_default", TRUE))
+      "svc:resolver:test", "__wr_default", TRUE))
     return FALSE;
   gboolean ok = TRUE;
   g_auto (ServiceResolverFixture) pending = { 0 };
   ok = ok && service_resolver_fixture_init_tenant_credential (server,
-      &pending, WYL_SERVICE_AUTH_PENDING, 0, "__wr_default",
-      active.issued.credential.credential_id,
-      active.issued.credential.generation);
+          &pending, WYL_SERVICE_AUTH_PENDING, 0, "__wr_default",
+          active.issued.credential.credential_id,
+          active.issued.credential.generation);
   CompoundDisableRace race = {
     .server = server,
     .request_id = rotate ? "resolver-credential-rotate" :
@@ -4004,12 +4007,12 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
   g_autoptr (GThread) resolver = NULL;
   if (ok) {
     mutation = g_thread_new (rotate ? "compound-credential-rotate" :
-        "compound-credential-revoke", compound_disable_thread, &race);
+            "compound-credential-revoke", compound_disable_thread, &race);
     ok = compound_disable_wait_acquired (&race);
   }
   if (ok) {
     resolver = g_thread_new ("compound-credential-later-resolver",
-        service_resolver_call_thread, &later);
+            service_resolver_call_thread, &later);
     ok = service_resolver_wait_reader_queued (server);
   }
   g_mutex_lock (&race.mutex);
@@ -4023,15 +4026,15 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
       && actual_service_token_expect (server, active.token_a,
-      "svc:resolver:test", "__wr_default", FALSE)
+          "svc:resolver:test", "__wr_default", FALSE)
       && actual_service_token_expect (server, active.token_b,
-      "svc:resolver:test", "__wr_default", FALSE);
+          "svc:resolver:test", "__wr_default", FALSE);
   gboolean changed = TRUE;
   ok = ok
       && wyl_daemon_http_service_registry_transition_for_test (server,
-      pending.sid, pending.jti, pending.credential,
-      active.issued.credential.generation, "svc:resolver:test", "__wr_default",
-      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) == WYRELOG_E_POLICY
+          pending.sid, pending.jti, pending.credential,
+          active.issued.credential.generation, "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) == WYRELOG_E_POLICY
       && !changed
       && service_resolver_expect (server, &pending, pending.token, FALSE);
   g_free (later.sid);
@@ -4046,7 +4049,7 @@ static gboolean
 check_compound_credential_real_resolver (SoupServer *server)
 {
   return check_compound_credential_real_resolver_operation (server, FALSE)
-      && check_compound_credential_real_resolver_operation (server, TRUE);
+         && check_compound_credential_real_resolver_operation (server, TRUE);
 }
 #endif
 
@@ -4074,14 +4077,14 @@ service_resolver_rejects_before_read (SoupServer *server, const gchar *token)
   g_mutex_init (&writer.mutex);
   g_cond_init (&writer.changed);
   g_autoptr (GThread) thread = g_thread_new ("pre-read-write-holder",
-      service_resolver_writer_thread, &writer);
+          service_resolver_writer_thread, &writer);
   gboolean ok = service_resolver_wait_flag (&writer,
-      &writer.writer_acquired);
+          &writer.writer_acquired);
   WylServiceAuthAuthoritySnapshot before = { 0 }, after = { 0 };
   wyl_daemon_http_service_authority_snapshot_for_test (server, &before);
   g_autofree gchar *sid = NULL, *actor = NULL, *tenant = NULL;
   wyrelog_error_t rc = wyl_daemon_http_resolve_bearer_for_test (server,
-      token, &sid, &actor, &tenant);
+          token, &sid, &actor, &tenant);
   wyl_daemon_http_service_authority_snapshot_for_test (server, &after);
   ok = ok && rc == WYRELOG_E_POLICY && sid == NULL && actor == NULL
       && tenant == NULL && before.writer_active && after.writer_active
@@ -4112,16 +4115,16 @@ check_service_resolver_crypto_pre_read (SoupServer *server,
   guint8 wrong_secret[32];
   memset (wrong_secret, 0xa5, sizeof wrong_secret);
   g_autofree gchar *valid_tail = g_strdup_printf
-      (",\"auth_method\":\"service_credential\",\"credential_id\":\"%s\","
-      "\"credential_generation\":9", fixture->credential);
+        (",\"auth_method\":\"service_credential\",\"credential_id\":\"%s\","
+          "\"credential_generation\":9", fixture->credential);
   g_autofree gchar *payload = service_resolver_json (fixture, valid_tail,
-      fixture->now);
+          fixture->now);
   g_autofree gchar *wrong_secret_token = service_resolver_sign_json (server,
-      payload, wrong_secret);
+          payload, wrong_secret);
   g_autofree gchar *future_payload = service_resolver_json (fixture,
-      valid_tail, fixture->now + 60);
+          valid_tail, fixture->now + 60);
   g_autofree gchar *future_token = service_resolver_sign_json (server,
-      future_payload, NULL);
+          future_payload, NULL);
   if (wrong_secret_token == NULL || future_token == NULL
       || !service_resolver_rejects_before_read (server, tampered)
       || !service_resolver_rejects_before_read (server, wrong_secret_token)
@@ -4147,47 +4150,46 @@ check_service_resolver_crypto_pre_read (SoupServer *server,
       g_strfreev (parts);
     }
     g_autofree gchar *json = service_resolver_json (fixture, tail,
-        fixture->now);
+            fixture->now);
     g_autofree gchar *token = service_resolver_sign_json (server, json, NULL);
     if (token == NULL || !service_resolver_rejects_before_read (server, token))
       return FALSE;
   }
   const gchar *duplicates[] = { "auth_method", "credential_id",
-    "credential_generation"
-  };
+                                "credential_generation"};
   for (guint i = 0; i < G_N_ELEMENTS (duplicates); i++) {
     g_autofree gchar *duplicate_tail = NULL;
     if (i == 0)
       duplicate_tail =
           g_strdup_printf ("%s,\"auth_method\":\"service_credential\"",
-          valid_tail);
+              valid_tail);
     else if (i == 1)
       duplicate_tail = g_strdup_printf ("%s,\"credential_id\":\"%s\"",
-          valid_tail, fixture->credential);
+              valid_tail, fixture->credential);
     else
       duplicate_tail = g_strdup_printf ("%s,\"credential_generation\":9",
-          valid_tail);
+              valid_tail);
     g_autofree gchar *json = service_resolver_json (fixture, duplicate_tail,
-        fixture->now);
+            fixture->now);
     g_autofree gchar *token = service_resolver_sign_json (server, json, NULL);
     if (token == NULL || !service_resolver_rejects_before_read (server, token))
       return FALSE;
   }
   g_autofree gchar *comment_json = g_strdup_printf
-      ("{ /* auth_method */ \"jti\":\"%s\" }", fixture->jti);
+        ("{ /* auth_method */ \"jti\":\"%s\" }", fixture->jti);
   g_autofree gchar *comment_token = service_resolver_sign_json (server,
-      comment_json, NULL);
+          comment_json, NULL);
   g_autofree gchar *note_tail = g_strdup
-      (",\"note\":\"auth_method credential_id credential_generation\"");
+        (",\"note\":\"auth_method credential_id credential_generation\"");
   g_autofree gchar *note_json = service_resolver_json (fixture, note_tail,
-      fixture->now);
+          fixture->now);
   g_autofree gchar *note_token = service_resolver_sign_json (server,
-      note_json, NULL);
+          note_json, NULL);
   return comment_token != NULL
-      && service_resolver_rejects_before_read (server, comment_token)
-      && note_token != NULL
-      && service_resolver_rejects_before_read (server, note_token)
-      && service_resolver_expect (server, fixture, fixture->token, TRUE);
+         && service_resolver_rejects_before_read (server, comment_token)
+         && note_token != NULL
+         && service_resolver_rejects_before_read (server, note_token)
+         && service_resolver_expect (server, fixture, fixture->token, TRUE);
 }
 
 static gboolean
@@ -4203,12 +4205,12 @@ check_service_resolver_publication_barrier (SoupServer *server,
   wyl_daemon_http_set_service_resolver_checkpoint_for_test (server,
       service_resolver_race_checkpoint, &race);
   g_autoptr (GThread) resolver = g_thread_new ("service-resolver",
-      service_resolver_race_thread, &race);
+          service_resolver_race_thread, &race);
   gboolean ok = service_resolver_wait_flag (&race, &race.published);
   g_autoptr (GThread) writer = NULL;
   if (ok) {
     writer = g_thread_new ("service-writer", service_resolver_writer_thread,
-        &race);
+            &race);
     ok = service_resolver_wait_writer_queued (server);
   }
   g_mutex_lock (&race.mutex);
@@ -4275,18 +4277,18 @@ check_service_resolver_writer_preference (SoupServer *server,
   wyl_daemon_http_set_service_resolver_checkpoint_for_test (server,
       service_resolver_race_checkpoint, &race);
   g_autoptr (GThread) first = g_thread_new ("preferred-first-reader",
-      service_resolver_race_thread, &race);
+          service_resolver_race_thread, &race);
   gboolean ok = service_resolver_wait_flag (&race, &race.published);
   g_autoptr (GThread) writer = NULL;
   g_autoptr (GThread) second = NULL;
   if (ok) {
     writer = g_thread_new ("preferred-writer", service_resolver_writer_thread,
-        &race);
+            &race);
     ok = service_resolver_wait_writer_queued (server);
   }
   if (ok) {
     second = g_thread_new ("later-reader", service_resolver_call_thread,
-        &later);
+            &later);
     ok = service_resolver_wait_writer_and_reader (server);
   }
   g_mutex_lock (&race.mutex);
@@ -4340,7 +4342,7 @@ human_resolver_sign_variant (SoupServer *server, const gchar *sid,
 {
   guint8 secret[32] = { 0 };
   if (wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return NULL;
   if (field == 5)
     memset (secret, 0xa5, sizeof secret);
@@ -4375,11 +4377,11 @@ check_human_resolver_while_write_held (SoupServer *server)
       || wyl_id_format (&sid_id, sid, sizeof sid) != WYRELOG_E_OK
       || wyl_id_format (&jti_id, jti, sizeof jti) != WYRELOG_E_OK
       || !wyl_daemon_http_seed_human_session_for_test (server, sid,
-          "human-resolver", "__wr_default")
+      "human-resolver", "__wr_default")
       || !wyl_daemon_http_store_human_access_token_for_test (server, jti, sid,
-          "human-resolver", "__wr_default", key_id, now, now + 300)
+      "human-resolver", "__wr_default", key_id, now, now + 300)
       || wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return FALSE;
   wyl_jwt_issue_input_t input = {
     .key_id = key_id,.jti = jti,.subject = "human-resolver",
@@ -4390,7 +4392,7 @@ check_human_resolver_while_write_held (SoupServer *server)
   };
   g_autofree gchar *token = NULL;
   wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&input, secret,
-      sizeof secret, &token);
+          sizeof secret, &token);
   sodium_memzero (secret, sizeof secret);
   if (sign_rc != WYRELOG_E_OK)
     return FALSE;
@@ -4400,7 +4402,7 @@ check_human_resolver_while_write_held (SoupServer *server)
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
   g_autoptr (GThread) writer = g_thread_new ("human-write-holder",
-      service_resolver_writer_thread, &race);
+          service_resolver_writer_thread, &race);
   gboolean ok = service_resolver_wait_flag (&race, &race.writer_acquired);
   WylServiceAuthAuthoritySnapshot before = { 0 }, after = { 0 };
   wyl_daemon_http_service_authority_snapshot_for_test (server, &before);
@@ -4408,7 +4410,7 @@ check_human_resolver_while_write_held (SoupServer *server)
   g_autofree gchar *actor = NULL;
   g_autofree gchar *tenant = NULL;
   wyrelog_error_t resolve_rc = wyl_daemon_http_resolve_bearer_for_test (server,
-      token, &resolved_sid, &actor, &tenant);
+          token, &resolved_sid, &actor, &tenant);
   wyl_daemon_http_service_authority_snapshot_for_test (server, &after);
   ok = ok && resolve_rc == WYRELOG_E_OK && before.writer_active
       && after.writer_active && before.active_readers == 0
@@ -4426,7 +4428,7 @@ check_human_resolver_while_write_held (SoupServer *server)
   g_mutex_clear (&race.mutex);
   for (guint field = 1; ok && field <= 5; field++) {
     g_autofree gchar *variant = human_resolver_sign_variant (server, sid,
-        jti, now, field);
+            jti, now, field);
     ok = variant != NULL
         && service_resolver_rejects_before_read (server, variant);
   }
@@ -4453,10 +4455,10 @@ check_service_resolver_prelatched_unavailable (void)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts, handle,
-      &error);
+          &error);
   g_auto (ServiceResolverFixture) fixture = { 0 };
   if (server == NULL || !service_resolver_fixture_init (server, &fixture,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &fixture, fixture.token, TRUE)
       || wyl_daemon_http_latch_service_unavailable_for_test (server)
       != WYRELOG_E_OK
@@ -4473,11 +4475,11 @@ check_service_resolver_prelatched_unavailable (void)
       || wyl_id_format (&sid_id, sid, sizeof sid) != WYRELOG_E_OK
       || wyl_id_format (&jti_id, jti, sizeof jti) != WYRELOG_E_OK
       || !wyl_daemon_http_seed_human_session_for_test (server, sid,
-          "human-after-latch", "__wr_default")
+      "human-after-latch", "__wr_default")
       || !wyl_daemon_http_store_human_access_token_for_test (server, jti, sid,
-          "human-after-latch", "__wr_default", key_id, now, now + 300)
+      "human-after-latch", "__wr_default", key_id, now, now + 300)
       || wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return FALSE;
   wyl_jwt_issue_input_t input = {
     .key_id = key_id,.jti = jti,.subject = "human-after-latch",
@@ -4488,14 +4490,14 @@ check_service_resolver_prelatched_unavailable (void)
   };
   g_autofree gchar *human_token = NULL;
   wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&input, secret,
-      sizeof secret, &human_token);
+          sizeof secret, &human_token);
   sodium_memzero (secret, sizeof secret);
   g_autofree gchar *resolved_sid = NULL;
   g_autofree gchar *actor = NULL;
   g_autofree gchar *tenant = NULL;
   if (sign_rc != WYRELOG_E_OK
       || wyl_daemon_http_resolve_bearer_for_test (server, human_token,
-          &resolved_sid, &actor, &tenant) != WYRELOG_E_OK
+      &resolved_sid, &actor, &tenant) != WYRELOG_E_OK
       || g_strcmp0 (resolved_sid, sid) != 0
       || g_strcmp0 (actor, "human-after-latch") != 0
       || g_strcmp0 (tenant, "__wr_default") != 0)
@@ -4516,22 +4518,22 @@ check_service_resolver_terminal_failure (void)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts, handle,
-      &error);
+          &error);
   g_auto (ServiceResolverFixture) fixture = { 0 };
   if (server == NULL || !service_resolver_fixture_init (server, &fixture,
-          WYL_SERVICE_AUTH_ACTIVE, 0))
+      WYL_SERVICE_AUTH_ACTIVE, 0))
     return FALSE;
   wyl_daemon_http_fail_next_service_resolver_read_release_for_test (server);
   if (!service_resolver_expect (server, &fixture, fixture.token, FALSE)
       || wyl_daemon_http_service_resolver_terminal_entries_for_test
-      (server) != 1)
+        (server) != 1)
     return FALSE;
   WylServiceAuthAuthoritySnapshot snapshot = { 0 };
   wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
   return snapshot.active_readers == 0 && !snapshot.writer_active
-      && service_resolver_expect (server, &fixture, fixture.token, FALSE)
-      && wyl_daemon_http_service_resolver_terminal_entries_for_test
-      (server) == 0;
+         && service_resolver_expect (server, &fixture, fixture.token, FALSE)
+         && wyl_daemon_http_service_resolver_terminal_entries_for_test
+           (server) == 0;
 }
 
 static gboolean
@@ -4539,7 +4541,7 @@ check_service_resolver_conflicting_candidate (SoupServer *server)
 {
   g_auto (ServiceResolverFixture) original = { 0 };
   if (!service_resolver_fixture_init (server, &original,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &original, original.token, TRUE))
     return FALSE;
   wyl_id_t sid_id = WYL_ID_NIL;
@@ -4554,23 +4556,23 @@ check_service_resolver_conflicting_candidate (SoupServer *server)
   g_autoptr (WylSession) candidate_session = NULL;
   gboolean changed = FALSE;
   if (wyl_daemon_http_service_registry_transition_for_test (server,
-          original.sid, original.other_jti, original.other_credential, 10,
-          candidate_descriptor.subject_id, candidate_descriptor.tenant_id,
-          WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_POLICY
+      original.sid, original.other_jti, original.other_credential, 10,
+      candidate_descriptor.subject_id, candidate_descriptor.tenant_id,
+      WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_POLICY
       || changed
       || wyl_session_new_service_detached (&candidate_descriptor,
-          &candidate_session) != WYRELOG_E_OK
+      &candidate_session) != WYRELOG_E_OK
       || !wyl_daemon_http_replace_session_for_test (server, original.sid,
-          candidate_session)
+      candidate_session)
       || !wyl_daemon_http_store_service_access_token_for_test (server,
-          original.other_jti, original.sid, candidate_descriptor.subject_id,
-          candidate_descriptor.tenant_id, original.key_id, original.now + 300,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
-          original.other_credential, 10, FALSE))
+      original.other_jti, original.sid, candidate_descriptor.subject_id,
+      candidate_descriptor.tenant_id, original.key_id, original.now + 300,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
+      original.other_credential, 10, FALSE))
     return FALSE;
   guint8 secret[32] = { 0 };
   if (wyl_daemon_http_copy_access_token_secret (server, secret,
-          sizeof secret) != WYRELOG_E_OK)
+      sizeof secret) != WYRELOG_E_OK)
     return FALSE;
   wyl_jwt_service_issue_input_t candidate_input = {
     .key_id = original.key_id,.jti = original.other_jti,
@@ -4581,7 +4583,7 @@ check_service_resolver_conflicting_candidate (SoupServer *server)
   };
   g_autofree gchar *candidate_token = NULL;
   wyrelog_error_t sign_rc = wyl_jwt_sign_hs256_service (&candidate_input,
-      secret, sizeof secret, &candidate_token);
+          secret, sizeof secret, &candidate_token);
   sodium_memzero (secret, sizeof secret);
   if (sign_rc != WYRELOG_E_OK
       || !service_resolver_expect (server, &original, candidate_token, FALSE))
@@ -4594,10 +4596,10 @@ check_service_resolver_conflicting_candidate (SoupServer *server)
   };
   g_autoptr (WylSession) original_session = NULL;
   return wyl_session_new_service_detached (&original_descriptor,
-      &original_session) == WYRELOG_E_OK
-      && wyl_daemon_http_replace_session_for_test (server, original.sid,
-      original_session)
-      && service_resolver_expect (server, &original, original.token, TRUE);
+             &original_session) == WYRELOG_E_OK
+         && wyl_daemon_http_replace_session_for_test (server, original.sid,
+             original_session)
+         && service_resolver_expect (server, &original, original.token, TRUE);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -4619,10 +4621,10 @@ check_service_auth_retirement_latch_isolated (void)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts, handle,
-      &error);
+          &error);
   g_auto (ServiceResolverFixture) missing = { 0 };
   if (server == NULL || !service_resolver_fixture_init (server, &missing,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !wyl_daemon_http_remove_access_token_for_test (server, missing.jti))
     return 2153;
   wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE,
@@ -4632,7 +4634,7 @@ check_service_auth_retirement_latch_isolated (void)
     return 2154;
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   if (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason)
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason)
       == WYRELOG_E_OK
       || reason != WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT)
     return 2155;
@@ -4645,26 +4647,26 @@ check_service_bearer_resolver_contract (SoupServer *server)
 {
   wyl_service_principal_t registered = { 0 };
   if (wyl_service_principal_create (wyl_daemon_http_get_handle_for_test
-          (server), "svc:resolver:test", "resolver test", "admin",
-          "resolver-principal-create", &registered) != WYRELOG_E_OK)
+        (server), "svc:resolver:test", "resolver test", "admin",
+      "resolver-principal-create", &registered) != WYRELOG_E_OK)
     return 1969;
   wyl_service_principal_clear (&registered);
   g_auto (ServiceResolverFixture) control = { 0 };
   if (!service_resolver_fixture_init (server, &control,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &control, control.token, TRUE))
     return 1970;
   if (!check_service_resolver_publication_barrier (server, &control))
     return 1971;
   g_auto (ServiceResolverFixture) preferred = { 0 };
   if (!service_resolver_fixture_init (server, &preferred,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &preferred, preferred.token, TRUE)
       || !check_service_resolver_writer_preference (server, &preferred))
     return 1976;
   g_auto (ServiceResolverFixture) inverse = { 0 };
   if (!service_resolver_fixture_init (server, &inverse,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &inverse, inverse.token, TRUE)
       || !check_service_resolver_inverse_barrier (server, &inverse))
     return 1972;
@@ -4682,7 +4684,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
   /* Every signed-claim mutation has the exact ACTIVE fixture as its control. */
   for (guint field = 1; field <= 10; field++) {
     g_autofree gchar *variant = service_resolver_sign_variant (server,
-        &control, field);
+            &control, field);
     if (variant == NULL || strcmp (variant, control.token) == 0
         || (field >= 7 ? !service_resolver_rejects_before_read (server, variant)
             : !service_resolver_expect (server, &control, variant, FALSE))
@@ -4694,7 +4696,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
   for (guint field = 0; field < 12; field++) {
     g_auto (ServiceResolverFixture) fixture = { 0 };
     if (!service_resolver_fixture_init (server, &fixture,
-            WYL_SERVICE_AUTH_ACTIVE, 0)
+        WYL_SERVICE_AUTH_ACTIVE, 0)
         || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
       return 1990 + (gint) field;
     if (field == 0) {
@@ -4714,7 +4716,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
       guint64 number = field == 2 || field == 3 ? (guint64) (fixture.now - 1)
           : field == 9 ? WYL_SESSION_AUTH_METHOD_HUMAN : 10;
       if (!wyl_daemon_http_mutate_access_token_for_test (server, fixture.jti,
-              token_field, text, number))
+          token_field, text, number))
         return 2020 + (gint) field;
     }
     if (!service_resolver_expect (server, &fixture, fixture.token, FALSE))
@@ -4737,7 +4739,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
   for (guint i = 0; i <= G_N_ELEMENTS (session_fields); i++) {
     g_auto (ServiceResolverFixture) fixture = { 0 };
     if (!service_resolver_fixture_init (server, &fixture,
-            WYL_SERVICE_AUTH_ACTIVE, 0)
+        WYL_SERVICE_AUTH_ACTIVE, 0)
         || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
       return 2060 + (gint) i;
     if (i == 0) {
@@ -4756,7 +4758,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
       guint64 number = field == WYL_DAEMON_SERVICE_SESSION_GENERATION ? 10
           : (guint64) (fixture.now + 1);
       if (!wyl_daemon_http_mutate_service_session_for_test (server,
-              fixture.sid, field, text, number))
+          fixture.sid, field, text, number))
         return 2080 + (gint) i;
     }
     if (!service_resolver_expect (server, &fixture, fixture.token, FALSE))
@@ -4777,9 +4779,9 @@ check_service_bearer_resolver_contract (SoupServer *server)
     if (state == WYL_SERVICE_AUTH_PENDING) {
       gboolean removed_pending = FALSE;
       if (wyl_daemon_http_service_registry_transition_for_test (server,
-              fixture.sid, fixture.jti, fixture.credential, 9,
-              "svc:resolver:test", "__wr_default",
-              WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &removed_pending)
+          fixture.sid, fixture.jti, fixture.credential, 9,
+          "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &removed_pending)
           != WYRELOG_E_OK || !removed_pending)
         return 2123;
     }
@@ -4787,69 +4789,69 @@ check_service_bearer_resolver_contract (SoupServer *server)
   for (guint mismatch = 1; mismatch <= 6; mismatch++) {
     g_auto (ServiceResolverFixture) fixture = { 0 };
     if (!service_resolver_fixture_init (server, &fixture,
-            WYL_SERVICE_AUTH_ACTIVE, mismatch)
+        WYL_SERVICE_AUTH_ACTIVE, mismatch)
         || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
       return 2130 + (gint) mismatch;
   }
   g_auto (ServiceResolverFixture) cross_a = { 0 };
   g_auto (ServiceResolverFixture) cross_b = { 0 };
   if (!service_resolver_fixture_init (server, &cross_a,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_fixture_init (server, &cross_b,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &cross_a, cross_a.token, TRUE)
       || !service_resolver_expect (server, &cross_b, cross_b.token, TRUE))
     return 2137;
   g_autofree gchar *crossed = service_resolver_sign_crossed (server,
-      &cross_a, &cross_b);
+          &cross_a, &cross_b);
   if (crossed == NULL
       || !wyl_daemon_http_store_service_access_token_for_test (server,
-          cross_b.jti, cross_a.sid, "svc:resolver:test", "__wr_default",
-          cross_a.key_id, cross_a.now + 300,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, cross_a.credential, 9,
-          FALSE)
+      cross_b.jti, cross_a.sid, "svc:resolver:test", "__wr_default",
+      cross_a.key_id, cross_a.now + 300,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, cross_a.credential, 9,
+      FALSE)
       || !wyl_daemon_http_mutate_service_session_for_test (server,
-          cross_a.sid, WYL_DAEMON_SERVICE_SESSION_JTI, cross_b.jti, 0)
+      cross_a.sid, WYL_DAEMON_SERVICE_SESSION_JTI, cross_b.jti, 0)
       || !service_resolver_expect (server, &cross_a, crossed, FALSE))
     return 2138;
   g_auto (ServiceResolverFixture) removed = { 0 };
   gboolean changed = FALSE;
   if (!service_resolver_fixture_init (server, &removed,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || !service_resolver_expect (server, &removed, removed.token, TRUE)
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          removed.sid, removed.jti, removed.credential, 9,
-          "svc:resolver:test", "__wr_default",
-          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
+      removed.sid, removed.jti, removed.credential, 9,
+      "svc:resolver:test", "__wr_default",
+      WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
       || !changed
       || !service_resolver_expect (server, &removed, removed.token, FALSE))
     return 2140;
   g_auto (ServiceResolverFixture) duplicate = { 0 };
   if (!service_resolver_fixture_init (server, &duplicate,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
+      WYL_SERVICE_AUTH_ACTIVE, 0)
       || wyl_daemon_http_service_registry_transition_for_test (server,
-          duplicate.sid, duplicate.jti, duplicate.other_credential, 10,
-          "svc:resolver:other", "tenant-other",
-          WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_POLICY
+      duplicate.sid, duplicate.jti, duplicate.other_credential, 10,
+      "svc:resolver:other", "tenant-other",
+      WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_POLICY
       || !service_resolver_expect (server, &duplicate, duplicate.token, TRUE))
     return 2141;
 
   g_auto (ServiceResolverFixture) sealed = { 0 };
   if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-sealed",
-          TRUE, FALSE) != WYRELOG_E_OK
+      TRUE, FALSE) != WYRELOG_E_OK
       || !service_resolver_fixture_init_tenant (server, &sealed,
-          WYL_SERVICE_AUTH_ACTIVE, 0, "tenant-sealed"))
+      WYL_SERVICE_AUTH_ACTIVE, 0, "tenant-sealed"))
     return 2144;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
     return 2145;
   if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-sealed",
-          FALSE, TRUE)
+      FALSE, TRUE)
       != WYRELOG_E_OK)
     return 2146;
   if (!service_resolver_expect (server, &sealed, sealed.token, FALSE))
     return 2147;
   if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-sealed",
-          FALSE, FALSE)
+      FALSE, FALSE)
       != WYRELOG_E_OK)
     return 2148;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
@@ -4902,7 +4904,7 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
 
   g_auto (ServiceResolverFixture) fixture = { 0 };
   if (!service_resolver_fixture_init (server, &fixture, WYL_SERVICE_AUTH_ACTIVE,
-          0)
+      0)
       || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
     return 2401;
 
@@ -4913,7 +4915,7 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
       != WYRELOG_E_OK)
     return 2402;
   if (insert_symbol_row3 (handle, "member_of", subject, "wr.svc-decide-role",
-          fixture.sid) != WYRELOG_E_OK)
+      fixture.sid) != WYRELOG_E_OK)
     return 2403;
   if (insert_symbol_row2 (handle, "session_state", fixture.sid, "active")
       != WYRELOG_E_OK)
@@ -4921,7 +4923,7 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
   if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
     return 2405;
   if (insert_symbol_row4 (handle, "perm_state", subject, perm, fixture.sid,
-          "armed") != WYRELOG_E_OK)
+      "armed") != WYRELOG_E_OK)
     return 2406;
 
   g_autoptr (SoupSession) session = soup_session_new ();
@@ -4931,7 +4933,7 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
   /* Established scope: after the fix, decision 1 (before the fix it was
    * decision 0 not_authenticated). */
   gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
-      fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.sid, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -4945,7 +4947,7 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
     return 2409;
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
-      fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.sid, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -4959,12 +4961,12 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
    * decide, so no principal_state is ever asserted for it. */
   g_auto (ServiceResolverFixture) revoked = { 0 };
   if (!service_resolver_fixture_init (server, &revoked,
-          WYL_SERVICE_AUTH_REVOKED, 0)
+      WYL_SERVICE_AUTH_REVOKED, 0)
       || !service_resolver_expect (server, &revoked, revoked.token, FALSE))
     return 2413;
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
-      fixture.sid, NULL, revoked.token, &status, &body);
+          fixture.sid, NULL, revoked.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401)
@@ -5023,24 +5025,24 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
       || wyl_id_format (&admin_sid_value, admin_session, sizeof admin_session)
       != WYRELOG_E_OK
       || !seed_management_human_access_token (server, admin_session, admin,
-          &admin_token))
+      &admin_token))
     return 4622;
 
   /* Give the admin authority to CREATE a tenant: wr.system_admin carries
    * wr.tenant.manage; wr.tenant.manage is unguarded so it arms via perm_state,
    * and __wr_default needs the session anchor + authenticated principal. */
   if (wyl_policy_store_grant_role_membership (store, admin, "wr.system_admin",
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, admin, "authenticated")
       != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store, admin,
-          "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK)
+      "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK)
     return 4623;
   /* A service-eligible workload role that maps to the approved read perm. */
   if (wyl_policy_store_upsert_permission (store, perm, "service decision read",
-          "basic") != WYRELOG_E_OK
+      "basic") != WYRELOG_E_OK
       || wyl_policy_store_upsert_role (store, role, "wl744 agent")
       != WYRELOG_E_OK
       || wyl_policy_store_grant_role_permission (store, role, perm)
@@ -5054,9 +5056,9 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
   /* (1) Create the fresh tenant through the real public path so the seed
    * fires. */
   g_autofree gchar *create_query = g_strdup_printf ("name=%s&guard_timestamp=1"
-      "&guard_loc_class=trusted&guard_risk=0", fresh);
+          "&guard_loc_class=trusted&guard_risk=0", fresh);
   gint rc = send_raw_service_principal_bearer (session, "POST", base_url,
-      "/tenants/create", create_query, admin_token, NULL, &status, &body);
+          "/tenants/create", create_query, admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
@@ -5067,7 +5069,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
    * tenant must already exist/be active for the resolver to bind it. */
   g_auto (ServiceResolverFixture) fixture = { 0 };
   if (!service_resolver_fixture_init_tenant (server, &fixture,
-          WYL_SERVICE_AUTH_ACTIVE, 0, fresh)
+      WYL_SERVICE_AUTH_ACTIVE, 0, fresh)
       || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
     return 4625;
 
@@ -5076,10 +5078,10 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
    * wr.system_admin + session_state(active) for the admin at <tenant>; without
    * the seed the wr.policy.grant_role decide at <tenant> DENIES (403). */
   g_autofree gchar *grant_query = g_strdup_printf ("subject=%s&role=%s&scope=%s"
-      "&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", svc, role,
-      fresh);
+          "&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", svc, role,
+          fresh);
   rc = send_raw_service_principal_bearer (session, "POST", base_url,
-      "/policy/roles/grant", grant_query, admin_token, NULL, &status, &body);
+          "/policy/roles/grant", grant_query, admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -5103,7 +5105,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
    * and the #762 transient arming supplies the armed perm_state. */
   g_autofree gchar *fresh_tenant_query = g_strdup_printf ("tenant=%s", fresh);
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,
-      fresh_tenant_query, fixture.token, &status, &body);
+          fresh_tenant_query, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"decision\":1") == NULL)
@@ -5114,7 +5116,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
    * has no membership there, so the grant at <tenant> confers nothing.  Keep
    * the request tenant at <tenant> so the request-tenant gate still passes. */
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm,
-      WYL_TENANT_DEFAULT, fresh_tenant_query, fixture.token, &status, &body);
+          WYL_TENANT_DEFAULT, fresh_tenant_query, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"decision\":0") == NULL)
@@ -5127,7 +5129,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 4632;
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,
-      fresh_tenant_query, fixture.token, &status, &body);
+          fresh_tenant_query, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "tenant_sealed") == NULL)
@@ -5158,7 +5160,7 @@ check_service_bearer_decide_arms_data_plane_permission (SoupServer *server,
 
   g_auto (ServiceResolverFixture) fixture = { 0 };
   if (!service_resolver_fixture_init (server, &fixture, WYL_SERVICE_AUTH_ACTIVE,
-          0)
+      0)
       || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
     return 2451;
 
@@ -5188,7 +5190,7 @@ check_service_bearer_decide_arms_data_plane_permission (SoupServer *server,
 
   /* (1) data-plane action -> decision:1, armed transiently by #762. */
   gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, dp_perm,
-      fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.sid, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -5200,7 +5202,7 @@ check_service_bearer_decide_arms_data_plane_permission (SoupServer *server,
   /* (2) control-plane action -> decision:0 not_armed: the C-list gate
    * blocks arming even though has_permission holds. */
   rc = send_raw_decide_bearer (session, "POST", base_url, subject, cp_perm,
-      fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.sid, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -5247,7 +5249,7 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
   if (key_id == NULL)
     return 532;
   wyrelog_error_t rc = wyl_jwt_verify_hs256_access_token (access_token, secret,
-      sizeof secret, key_id, "wyrelogd", "wyrelog-client", now, &payload);
+          sizeof secret, key_id, "wyrelogd", "wyrelog-client", now, &payload);
   memset (secret, 0, sizeof secret);
   if (rc != WYRELOG_E_OK)
     return 536;
@@ -5256,10 +5258,10 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
   const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
   g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
   g_autofree gchar *expected_sub = g_strdup_printf ("\"sub\":\"%s\"",
-      username);
+          username);
   g_autofree gchar *expected_state =
       g_strdup_printf ("\"principal_state_at_issue\":\"%s\"",
-      principal_state);
+          principal_state);
   g_autofree gchar *expected_session =
       g_strdup_printf ("\"session_id\":\"%s\"", session_token);
   const gchar *expected_tenant = "\"tenant\":\"__wr_default\"";
@@ -5318,8 +5320,8 @@ sign_test_access_token (SoupServer *server, const gchar *session_id,
     const gchar *audience, gint64 issued_at, gchar **out_token)
 {
   return sign_test_access_token_with_jti (server, "test-access-token",
-      session_id, subject, principal_state, issuer, audience, issued_at,
-      out_token);
+             session_id, subject, principal_state, issuer, audience, issued_at,
+             out_token);
 }
 
 static gboolean
@@ -5334,15 +5336,15 @@ seed_management_human_access_token (SoupServer *server,
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
   return key_id != NULL && wyl_id_new (&jti_id) == WYRELOG_E_OK
-      && wyl_id_format (&jti_id, jti, sizeof jti) == WYRELOG_E_OK
-      && wyl_daemon_http_seed_mfa_human_session_for_test (server, session_id,
-      subject, WYL_TENANT_DEFAULT)
-      && wyl_daemon_http_store_human_access_token_for_test (server, jti,
-      session_id, subject, WYL_TENANT_DEFAULT, key_id, now,
-      now + WYL_JWT_ACCESS_TTL_SECONDS)
-      && sign_test_access_token_with_jti (server, jti, session_id, subject,
-      "authenticated", "wyrelogd", "wyrelog-client", now,
-      out_access_token) == WYRELOG_E_OK;
+         && wyl_id_format (&jti_id, jti, sizeof jti) == WYRELOG_E_OK
+         && wyl_daemon_http_seed_mfa_human_session_for_test (server, session_id,
+             subject, WYL_TENANT_DEFAULT)
+         && wyl_daemon_http_store_human_access_token_for_test (server, jti,
+             session_id, subject, WYL_TENANT_DEFAULT, key_id, now,
+             now + WYL_JWT_ACCESS_TTL_SECONDS)
+         && sign_test_access_token_with_jti (server, jti, session_id, subject,
+             "authenticated", "wyrelogd", "wyrelog-client", now,
+             out_access_token) == WYRELOG_E_OK;
 }
 
 static gboolean
@@ -5356,15 +5358,15 @@ seed_human_tokens_with_assurance (SoupServer *server, const gchar *session_id,
   *out_refresh_token = NULL;
   gboolean seeded = mfa_assured ?
       wyl_daemon_http_seed_mfa_human_session_for_test (server, session_id,
-      subject, tenant) :
+          subject, tenant) :
       wyl_daemon_http_seed_human_session_for_test (server, session_id,
-      subject, tenant);
+          subject, tenant);
   g_autoptr (WylSession) session = seeded ?
       wyl_daemon_http_ref_session (server, session_id) : NULL;
   return session != NULL
-      && wyl_daemon_http_issue_human_tokens_for_test (server, session,
-      session_id, subject, tenant, out_access_token, out_refresh_token)
-      == WYRELOG_E_OK;
+         && wyl_daemon_http_issue_human_tokens_for_test (server, session,
+             session_id, subject, tenant, out_access_token, out_refresh_token)
+         == WYRELOG_E_OK;
 }
 
 static gint
@@ -5392,7 +5394,7 @@ send_raw_logout_full (SoupSession *session, const gchar *method,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 486;
   gint rc = check_response_request_id_header (msg, 514);
@@ -5400,7 +5402,7 @@ send_raw_logout_full (SoupSession *session, const gchar *method,
     return rc;
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   gsize size = 0;
@@ -5416,7 +5418,7 @@ send_raw_logout (SoupSession *session, const gchar *method,
     gchar **out_body)
 {
   return send_raw_logout_full (session, method, base_url, query, out_status,
-      out_body, NULL);
+             out_body, NULL);
 }
 
 static gint
@@ -5446,7 +5448,7 @@ send_raw_logout_authorization_full (SoupSession *session, const gchar *method,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 486;
   gint rc = check_response_request_id_header (msg, 515);
@@ -5454,7 +5456,7 @@ send_raw_logout_authorization_full (SoupSession *session, const gchar *method,
     return rc;
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   gsize size = 0;
@@ -5470,7 +5472,7 @@ send_raw_logout_authorization (SoupSession *session, const gchar *method,
     guint *out_status, gchar **out_body)
 {
   return send_raw_logout_authorization_full (session, method, base_url, query,
-      authorization, out_status, out_body, NULL);
+             authorization, out_status, out_body, NULL);
 }
 
 static gint send_raw_policy_mutation (SoupSession * session,
@@ -5521,7 +5523,7 @@ check_jwt_epoch_rotation_contract (SoupServer *server, WylHandle *handle,
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   gint rc = send_raw_login (session, "POST", base_url,
-      "username=rotation-user&skip_mfa=true", &status, &body);
+          "username=rotation-user&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (rc != 0)
     return rc;
@@ -5529,17 +5531,17 @@ check_jwt_epoch_rotation_contract (SoupServer *server, WylHandle *handle,
     return 1841;
 
   g_autofree gchar *session_token = extract_json_string (body,
-      "session_token");
+          "session_token");
   g_autofree gchar *access_token = extract_json_string (body, "access_token");
   g_autofree gchar *refresh_token = extract_json_string (body,
-      "refresh_token");
+          "refresh_token");
   if (session_token == NULL || access_token == NULL || refresh_token == NULL)
     return 1842;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "rotation-user",
-      "site.rotation.read", "rotation-scope", NULL, access_token, &status,
-      &body);
+          "site.rotation.read", "rotation-scope", NULL, access_token, &status,
+          &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -5556,8 +5558,8 @@ check_jwt_epoch_rotation_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "rotation-user",
-      "site.rotation.read", "rotation-scope", NULL, access_token, &status,
-      &body);
+          "site.rotation.read", "rotation-scope", NULL, access_token, &status,
+          &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"decide_auth_required\"") == NULL)
@@ -5565,7 +5567,7 @@ check_jwt_epoch_rotation_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_refresh (session, "POST", base_url, refresh_token, &status,
-      &body);
+          &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"refresh_auth_required\"") == NULL)
@@ -5583,7 +5585,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_autofree gchar *body = NULL;
 
   gint rc = send_raw_login (session, "GET", base_url,
-      "username=login-user", &status, &body);
+          "username=login-user", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
@@ -5606,8 +5608,8 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *denied_skip_request_id = NULL;
   rc = send_raw_login_full (session, "POST", base_url,
-      "username=login-user&skip_mfa=true", &status, &body,
-      &denied_skip_request_id);
+          "username=login-user&skip_mfa=true", &status, &body,
+          &denied_skip_request_id);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"login_denied\"") == NULL)
@@ -5624,7 +5626,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     .decision = WYL_DECISION_DENY,
   };
   if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), audit_event_probe_cb, &denied_skip_audit) != WYRELOG_E_OK)
+        (handle), audit_event_probe_cb, &denied_skip_audit) != WYRELOG_E_OK)
     return 1812;
   if (denied_skip_audit.matches != 1)
     return 1813;
@@ -5632,11 +5634,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
-          (handle), "login-user", "wr.login.skip_mfa", "login")
+        (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 484;
   if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
-          (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
+        (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
       != WYRELOG_E_OK)
     return 488;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
@@ -5644,8 +5646,8 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *skip_success_request_id = NULL;
   rc = send_raw_login_full (session, "POST", base_url,
-      "username=login-user&skip_mfa=true", &status, &body,
-      &skip_success_request_id);
+          "username=login-user&skip_mfa=true", &status, &body,
+          &skip_success_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -5666,7 +5668,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), audit_event_probe_cb, &principal_skip_audit)
+        (handle), audit_event_probe_cb, &principal_skip_audit)
       != WYRELOG_E_OK)
     return 1814;
   if (principal_skip_audit.matches != 1)
@@ -5681,13 +5683,13 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), audit_event_probe_cb, &session_skip_audit) != WYRELOG_E_OK)
+        (handle), audit_event_probe_cb, &session_skip_audit) != WYRELOG_E_OK)
     return 1816;
   if (session_skip_audit.matches != 1)
     return 1817;
 #endif
   rc = verify_login_access_token (body, authenticated_session_token,
-      "login-user", "authenticated", server);
+          "login-user", "authenticated", server);
   if (rc != 0)
     return rc;
   g_autofree gchar *login_access_token =
@@ -5720,12 +5722,12 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return rc;
 
   rc = check_service_refresh_isolation (server, base_url,
-      authenticated_session_token);
+          authenticated_session_token);
   if (rc != 0)
     return rc;
 
   rc = send_raw_refresh (session, "GET", base_url, login_refresh_token,
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
@@ -5740,7 +5742,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_refresh (session, "POST", base_url, login_refresh_token,
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -5754,13 +5756,13 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       g_strcmp0 (next_refresh_token, login_refresh_token) == 0)
     return 539;
   rc = verify_login_access_token (body, authenticated_session_token,
-      "login-user", "authenticated", server);
+          "login-user", "authenticated", server);
   if (rc != 0)
     return rc;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_refresh (session, "POST", base_url, login_refresh_token,
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, next_refresh_token) == NULL)
@@ -5768,10 +5770,10 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   if (!wyl_daemon_http_expire_refresh_grace_for_test (server,
-          login_refresh_token))
+      login_refresh_token))
     return 541;
   rc = send_raw_refresh (session, "POST", base_url, login_refresh_token,
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"refresh_reuse_detected\"") == NULL)
@@ -5779,7 +5781,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_decide_bearer (session, "POST", base_url, "login-user",
-      "wr.login.skip_mfa", "login", NULL, login_access_token, &status, &body);
+          "wr.login.skip_mfa", "login", NULL, login_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"decide_auth_required\"") == NULL)
@@ -5787,7 +5789,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&skip_mfa=false", &status, &body);
+          "username=login-user&skip_mfa=false", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -5798,7 +5800,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&skip_mfa=maybe", &status, &body);
+          "username=login-user&skip_mfa=maybe", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
@@ -5808,7 +5810,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
 
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&skip_mfa=true", &status, &body);
+          "username=login-user&skip_mfa=true", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -5818,7 +5820,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&skip_mfa=1", &status, &body);
+          "username=login-user&skip_mfa=1", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -5830,7 +5832,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
 
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&password=secret", &status, &body);
+          "username=login-user&password=secret", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
@@ -5838,7 +5840,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&tenant=unknown", &status, &body);
+          "username=login-user&tenant=unknown", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
@@ -5851,7 +5853,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
    * HTTP 400, mirroring the /decide gate above.
    */
   rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&tenant=evil-co", &status, &body);
+          "username=login-user&tenant=evil-co", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
@@ -5859,7 +5861,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url, "username=login-user",
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -5912,7 +5914,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_logout (session, "POST", base_url, "session_token=unknown",
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
@@ -5920,7 +5922,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url, "username=logout-user",
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -5931,16 +5933,16 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 491;
   g_clear_pointer (&body, g_free);
   if (grant_policy_write_authority (handle, "logout-user",
-          logout_session_token) != WYRELOG_E_OK)
+      logout_session_token) != WYRELOG_E_OK)
     return 492;
   if (wyl_policy_store_upsert_permission (wyl_handle_get_policy_store (handle),
-          "site.policy.read", "site policy read", "basic") != WYRELOG_E_OK)
+      "site.policy.read", "site policy read", "basic") != WYRELOG_E_OK)
     return 493;
 
   g_autofree gchar *logout_query = g_strdup_printf ("session_token=%s",
-      logout_session_token);
+          logout_session_token);
   rc = send_raw_logout_authorization (session, "POST", base_url, logout_query,
-      "Bearer ignored", &status, &body);
+          "Bearer ignored", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_logout_auth\"") == NULL)
@@ -5949,7 +5951,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *logout_request_id = NULL;
   rc = send_raw_logout_full (session, "POST", base_url, logout_query, &status,
-      &body, &logout_request_id);
+          &body, &logout_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -5963,7 +5965,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     .state = "closed",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &closed_expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &closed_expect) != WYRELOG_E_OK)
     return 497;
   if (closed_expect.matches != 1)
     return 498;
@@ -5978,7 +5980,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), audit_event_probe_cb, &close_audit) != WYRELOG_E_OK)
+        (handle), audit_event_probe_cb, &close_audit) != WYRELOG_E_OK)
     return 1818;
   if (close_audit.matches != 1)
     return 1819;
@@ -5986,11 +5988,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *guarded_query = g_strdup_printf ("session_token=%s"
-      "&subject=after-logout&perm=site.policy.read&scope=after-logout"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      logout_session_token);
+          "&subject=after-logout&perm=site.policy.read&scope=after-logout"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+          logout_session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", guarded_query, &status, &body);
+          "/policy/permissions/grant", guarded_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
@@ -5998,7 +6000,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_logout (session, "POST", base_url, logout_query, &status,
-      &body);
+          &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
@@ -6006,7 +6008,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_logout_authorization (session, "POST", base_url, NULL,
-      "Bearer malformed.jwt", &status, &body);
+          "Bearer malformed.jwt", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
@@ -6015,7 +6017,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   rc = send_raw_login (session, "POST", base_url,
-      "username=bearer-logout-user&skip_mfa=true", &status, &body);
+          "username=bearer-logout-user&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (rc != 0)
     return rc;
@@ -6035,11 +6037,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 524;
   g_clear_pointer (&body, g_free);
   if (grant_policy_write_authority (handle, "bearer-logout-user",
-          bearer_logout_session_token) != WYRELOG_E_OK)
+      bearer_logout_session_token) != WYRELOG_E_OK)
     return 505;
 
   rc = send_raw_logout_authorization (session, "POST", base_url, NULL,
-      "Bearer", &status, &body);
+          "Bearer", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
@@ -6047,11 +6049,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *bearer_logout_query = g_strdup_printf ("session_token=%s",
-      bearer_logout_session_token);
+          bearer_logout_session_token);
   g_autofree gchar *bearer_authorization = g_strdup_printf ("Bearer %s",
-      bearer_logout_access_token);
+          bearer_logout_access_token);
   rc = send_raw_logout_authorization (session, "POST", base_url,
-      bearer_logout_query, bearer_authorization, &status, &body);
+          bearer_logout_query, bearer_authorization, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_logout_auth\"") == NULL)
@@ -6060,7 +6062,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *bearer_logout_request_id = NULL;
   rc = send_raw_logout_authorization_full (session, "POST", base_url, NULL,
-      bearer_authorization, &status, &body, &bearer_logout_request_id);
+          bearer_authorization, &status, &body, &bearer_logout_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -6079,7 +6081,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
    */
   g_clear_pointer (&body, g_free);
   rc = send_raw_refresh (session, "POST", base_url,
-      bearer_logout_refresh_token, &status, &body);
+          bearer_logout_refresh_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"refresh_auth_required\"") == NULL)
@@ -6105,7 +6107,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), audit_event_probe_cb, &bearer_close_audit) != WYRELOG_E_OK)
+        (handle), audit_event_probe_cb, &bearer_close_audit) != WYRELOG_E_OK)
     return 1820;
   if (bearer_close_audit.matches != 1)
     return 1821;
@@ -6114,11 +6116,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *bearer_guarded_query =
       g_strdup_printf ("subject=after-bearer-logout&perm=site.policy.read"
-      "&scope=after-bearer-logout&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=69");
+          "&scope=after-bearer-logout&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=69");
   rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
-      "/policy/permissions/grant", bearer_guarded_query,
-      bearer_logout_access_token, &status, &body);
+          "/policy/permissions/grant", bearer_guarded_query,
+          bearer_logout_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
@@ -6126,7 +6128,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_logout_authorization (session, "POST", base_url, NULL,
-      bearer_authorization, &status, &body);
+          bearer_authorization, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
@@ -6134,7 +6136,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_logout (session, "POST", base_url, bearer_logout_query,
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
@@ -6175,13 +6177,13 @@ send_raw_policy_mutation_body_full (SoupSession *session, const gchar *method,
     return 121;
   if (request_body != NULL) {
     g_autoptr (GBytes) bytes = g_bytes_new_static (request_body,
-        strlen (request_body));
+            strlen (request_body));
     soup_message_set_request_body_from_bytes (msg, "application/json", bytes);
   }
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 122;
   gint rc = check_response_request_id_header (msg, 177);
@@ -6189,7 +6191,7 @@ send_raw_policy_mutation_body_full (SoupSession *session, const gchar *method,
     return rc;
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   gsize size = 0;
@@ -6205,7 +6207,7 @@ send_raw_policy_mutation_full (SoupSession *session, const gchar *method,
     guint *out_status, gchar **out_body, gchar **out_request_id)
 {
   return send_raw_policy_mutation_body_full (session, method, base_url, path,
-      query, NULL, out_status, out_body, out_request_id);
+             query, NULL, out_status, out_body, out_request_id);
 }
 
 static gint
@@ -6214,7 +6216,7 @@ send_raw_policy_mutation_body (SoupSession *session, const gchar *method,
     const gchar *request_body, guint *out_status, gchar **out_body)
 {
   return send_raw_policy_mutation_body_full (session, method, base_url, path,
-      query, request_body, out_status, out_body, NULL);
+             query, request_body, out_status, out_body, NULL);
 }
 
 static gint
@@ -6223,7 +6225,7 @@ send_raw_policy_mutation (SoupSession *session, const gchar *method,
     guint *out_status, gchar **out_body)
 {
   return send_raw_policy_mutation_full (session, method, base_url, path, query,
-      out_status, out_body, NULL);
+             out_status, out_body, NULL);
 }
 
 static gint
@@ -6243,13 +6245,13 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
   if (msg == NULL)
     return 121;
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   soup_message_headers_replace (soup_message_get_request_headers (msg),
       "Authorization", authorization);
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 122;
   gint rc = check_response_request_id_header (msg, 178);
@@ -6284,7 +6286,7 @@ send_raw_service_principal_full (SoupSession *session, const gchar *method,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 122;
   gint rc = check_response_request_id_header (msg, 177);
@@ -6326,13 +6328,13 @@ actual_route_call_thread (gpointer data)
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   if (call->route == ACTUAL_ROUTE_SEAL_TENANT)
     call->rc = send_raw_policy_mutation_body (session, "POST", call->base_url,
-        call->path, call->query, call->request_body, &call->status,
-        &call->body);
+            call->path, call->query, call->request_body, &call->status,
+            &call->body);
   else
     call->rc = send_raw_service_principal_bearer (session,
-        call->route == ACTUAL_ROUTE_REVOKE_CREDENTIAL ? "DELETE" : "POST",
-        call->base_url, call->path, call->query, call->access_token,
-        call->request_body, &call->status, &call->body);
+            call->route == ACTUAL_ROUTE_REVOKE_CREDENTIAL ? "DELETE" : "POST",
+            call->base_url, call->path, call->query, call->access_token,
+            call->request_body, &call->status, &call->body);
   return NULL;
 }
 
@@ -6342,18 +6344,18 @@ actual_retirement_request_body (ActualRetirementRoute route)
   switch (route) {
     case ACTUAL_ROUTE_DISABLE_PRINCIPAL:
       return "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000224\"}";
+             "\"000000000000000000000000224\"}";
     case ACTUAL_ROUTE_SEAL_TENANT:
       return "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000221\"}";
+             "\"000000000000000000000000221\"}";
     case ACTUAL_ROUTE_REVOKE_CREDENTIAL:
       return "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000226\"}";
+             "\"000000000000000000000000226\"}";
     case ACTUAL_ROUTE_ROTATE_CREDENTIAL:
       return "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000227\","
-          "\"destination\":\"route-rotate.json\","
-          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
+             "\"000000000000000000000000227\","
+             "\"destination\":\"route-rotate.json\","
+             "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
     default:
       return NULL;
   }
@@ -6374,7 +6376,7 @@ actual_retirement_response_succeeded (ActualRetirementRoute route,
       return strstr (body, "\"state\":\"revoked\"") != NULL;
     case ACTUAL_ROUTE_ROTATE_CREDENTIAL:
       return strstr (body, "\"state\":\"terminal\"") != NULL
-          && strstr (body, "\"delivered\":true") != NULL;
+             && strstr (body, "\"delivered\":true") != NULL;
     default:
       return FALSE;
   }
@@ -6402,8 +6404,8 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     wyl_daemon_http_set_rotate_write_checkpoint_for_test (server,
         compound_disable_after_write_acquired, &write_barrier);
   } else if (wyl_service_auth_authority_acquire_read
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-          &held) != WYRELOG_E_OK) {
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &held) != WYRELOG_E_OK) {
     g_cond_clear (&write_barrier.changed);
     g_mutex_clear (&write_barrier.mutex);
     return FALSE;
@@ -6418,7 +6420,7 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     .rc = -1,
   };
   g_autoptr (GThread) mutation = g_thread_new ("actual-http-retirement",
-      actual_route_call_thread, &call);
+          actual_route_call_thread, &call);
   gboolean ok = route == ACTUAL_ROUTE_ROTATE_CREDENTIAL ?
       compound_disable_wait_acquired (&write_barrier) :
       service_resolver_wait_writer_queued (server);
@@ -6430,7 +6432,7 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
   g_autoptr (GThread) resolver = NULL;
   if (ok) {
     resolver = g_thread_new ("actual-http-later-resolver",
-        service_resolver_call_thread, &later);
+            service_resolver_call_thread, &later);
     ok = route == ACTUAL_ROUTE_ROTATE_CREDENTIAL ?
         service_resolver_wait_reader_queued (server) :
         service_resolver_wait_writer_and_reader (server);
@@ -6452,15 +6454,15 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
   if (route == ACTUAL_ROUTE_ROTATE_CREDENTIAL)
     wyl_daemon_http_set_rotate_write_checkpoint_for_test (server, NULL, NULL);
   gboolean token_a_retired = actual_service_token_expect (server,
-      tokens->token_a, subject, tenant, FALSE);
+          tokens->token_a, subject, tenant, FALSE);
   gboolean token_b_retired = actual_service_token_expect (server,
-      tokens->token_b, subject, tenant, FALSE);
+          tokens->token_b, subject, tenant, FALSE);
   gboolean unrelated_a_active = unrelated == NULL
       || actual_service_token_expect (server, unrelated->token_a,
-      unrelated_subject, unrelated_tenant, TRUE);
+          unrelated_subject, unrelated_tenant, TRUE);
   gboolean unrelated_b_active = unrelated == NULL
       || actual_service_token_expect (server, unrelated->token_b,
-      unrelated_subject, unrelated_tenant, TRUE);
+          unrelated_subject, unrelated_tenant, TRUE);
   ok = ok && release_rc == WYRELOG_E_OK && call.rc == 0 && call.status == 200
       && actual_retirement_response_succeeded (route, call.body)
       && later.rc == WYRELOG_E_POLICY
@@ -6476,9 +6478,9 @@ actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
     ok = replay.rc == 0 && replay.status == 200 && replay.body != NULL
         && g_strcmp0 (replay.body, call.body) == 0
         && (unrelated == NULL || actual_service_token_expect (server,
-            unrelated->token_a, unrelated_subject, unrelated_tenant, TRUE))
+        unrelated->token_a, unrelated_subject, unrelated_tenant, TRUE))
         && (unrelated == NULL || actual_service_token_expect (server,
-            unrelated->token_b, unrelated_subject, unrelated_tenant, TRUE));
+        unrelated->token_b, unrelated_subject, unrelated_tenant, TRUE));
   }
   if (!ok)
     g_printerr ("WYRELOG_TEST_DIAG retirement route=%d release=%d call_rc=%d "
@@ -6524,14 +6526,14 @@ send_raw_reconcile_full (SoupSession *session, const gchar *method,
 
   g_autofree gchar *uri = query != NULL ?
       g_strdup_printf ("%s/service-credential-operations/reconcile?%s", root,
-      query) :
+          query) :
       g_strdup_printf ("%s/service-credential-operations/reconcile", root);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 167;
   if (access_token != NULL) {
     g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-        access_token);
+            access_token);
     soup_message_headers_replace (soup_message_get_request_headers (msg),
         "Authorization", authorization);
   }
@@ -6541,7 +6543,7 @@ send_raw_reconcile_full (SoupSession *session, const gchar *method,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) response_bytes = soup_session_send_and_read (session,
-      msg, NULL, &error);
+          msg, NULL, &error);
   if (response_bytes == NULL)
     return 168;
   gint rc = check_response_request_id_header (msg, 169);
@@ -6549,7 +6551,7 @@ send_raw_reconcile_full (SoupSession *session, const gchar *method,
     return rc;
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   gsize size = 0;
@@ -6565,7 +6567,7 @@ send_raw_reconcile (SoupSession *session, const gchar *method,
     guint *out_status, gchar **out_body)
 {
   return send_raw_reconcile_full (session, method, base_url, query, body,
-      NULL, out_status, out_body, NULL);
+             NULL, out_status, out_body, NULL);
 }
 
 static gint
@@ -6574,7 +6576,7 @@ send_raw_reconcile_bearer (SoupSession *session, const gchar *method,
     const gchar *body, guint *out_status, gchar **out_body)
 {
   return send_raw_reconcile_full (session, method, base_url, query, body,
-      access_token, out_status, out_body, NULL);
+             access_token, out_status, out_body, NULL);
 }
 #endif
 
@@ -6684,8 +6686,8 @@ tenant_recovery_request_thread (gpointer data)
   TenantRecoveryRequest *request = data;
   g_autoptr (SoupSession) session = soup_session_new ();
   request->rc = send_raw_policy_mutation_body (session, "POST",
-      request->base_url, "/tenants/seal", request->query, request->body,
-      &request->status, &request->response);
+          request->base_url, "/tenants/seal", request->query, request->body,
+          &request->status, &request->response);
   return NULL;
 }
 
@@ -6694,7 +6696,7 @@ tenant_recovery_owner_request_thread (gpointer data)
 {
   TenantRecoveryOwnerRequest *request = data;
   request->rc = wyl_daemon_http_seal_tenant_recovery_for_test
-      (request->server, request->tenant, request->request_id);
+        (request->server, request->tenant, request->request_id);
   return NULL;
 }
 
@@ -6703,7 +6705,7 @@ tenant_recovery_claim_request_thread (gpointer data)
 {
   TenantRecoveryOwnerRequest *request = data;
   request->rc = wyl_daemon_http_attempt_seal_tenant_recovery_for_test
-      (request->server, request->tenant, request->request_id);
+        (request->server, request->tenant, request->request_id);
   return NULL;
 }
 
@@ -6714,8 +6716,8 @@ concurrent_permission_grant_thread (gpointer user_data)
   g_autoptr (SoupSession) session = soup_session_new ();
 
   mutation->rc = send_raw_policy_mutation (session, "POST",
-      mutation->base_url, "/policy/permissions/grant", mutation->query,
-      &mutation->status, &mutation->body);
+          mutation->base_url, "/policy/permissions/grant", mutation->query,
+          &mutation->status, &mutation->body);
   return NULL;
 }
 
@@ -6736,8 +6738,8 @@ concurrent_tenant_create_thread (gpointer user_data)
   g_autoptr (SoupSession) session = soup_session_new ();
   ConcurrentPolicyMutation *mutation = &thread->mutation;
   mutation->rc = send_raw_policy_mutation (session, "POST",
-      mutation->base_url, "/tenants/create", mutation->query,
-      &mutation->status, &mutation->body);
+          mutation->base_url, "/tenants/create", mutation->query,
+          &mutation->status, &mutation->body);
   return NULL;
 }
 
@@ -6747,7 +6749,7 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
-      "wr.policy.write", scope);
+          "wr.policy.write", scope);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_session_state (store, scope, "active");
@@ -6762,7 +6764,7 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
-      "wr.policy.grant_role", scope);
+          "wr.policy.grant_role", scope);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_session_state (store, scope, "active");
@@ -6772,7 +6774,7 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
 }
 
 static wyrelog_error_t grant_tenant_manage_authority
-    (WylHandle * handle, const gchar * subject);
+  (WylHandle * handle, const gchar * subject);
 
 typedef enum
 {
@@ -6781,30 +6783,30 @@ typedef enum
 } PolicyWriteFaultRouteCase;
 
 static gboolean
-    policy_write_fault_snapshot_is_clean
-    (const WylDaemonPolicyWriteFinalizeSnapshot * snapshot,
+policy_write_fault_snapshot_is_clean
+  (const WylDaemonPolicyWriteFinalizeSnapshot * snapshot,
     guint expected_primary_status, const gchar * expected_primary_code,
     guint expected_owner, const gchar * expected_owner_name,
     guint expected_cleanup_resources, guint expected_diagnostic_count,
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
   return snapshot->diagnostic_count == expected_diagnostic_count
-      && snapshot->primary_status == expected_primary_status
-      && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
-      && snapshot->cleanup_rc == expected_cleanup_rc
-      && snapshot->pre_finalize_status == 0
-      && snapshot->pre_finalize_header_count == 0
-      && snapshot->pre_finalize_body_length == 0
-      && !snapshot->post_finalize_lease_live
-      && !snapshot->post_finalize_store_live
-      && snapshot->post_finalize_total_pins == 0
-      && snapshot->post_finalize_thread_pins == 0
-      && snapshot->post_finalize_rank_mask == 0
-      && !snapshot->post_finalize_transaction_active
-      && snapshot->observed_cleanup_resources == expected_cleanup_resources
-      && snapshot->acquire_fault_hits == expected_acquire_fault_hits
-      && snapshot->owner == expected_owner
-      && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0;
+         && snapshot->primary_status == expected_primary_status
+         && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
+         && snapshot->cleanup_rc == expected_cleanup_rc
+         && snapshot->pre_finalize_status == 0
+         && snapshot->pre_finalize_header_count == 0
+         && snapshot->pre_finalize_body_length == 0
+         && !snapshot->post_finalize_lease_live
+         && !snapshot->post_finalize_store_live
+         && snapshot->post_finalize_total_pins == 0
+         && snapshot->post_finalize_thread_pins == 0
+         && snapshot->post_finalize_rank_mask == 0
+         && !snapshot->post_finalize_transaction_active
+         && snapshot->observed_cleanup_resources == expected_cleanup_resources
+         && snapshot->acquire_fault_hits == expected_acquire_fault_hits
+         && snapshot->owner == expected_owner
+         && g_strcmp0 (snapshot->owner_name, expected_owner_name) == 0;
 }
 
 static gint
@@ -6823,20 +6825,20 @@ check_policy_write_fault_human_surfaces (SoupServer *server,
     return error_base + 1;
   g_clear_pointer (&body, g_free);
   if (send_raw_decide_bearer (session, "POST", base_url, actor,
-          "cleanup.unrelated.read", session_token,
-          "tenant=__wr_default", access_token, &status, &body) != 0
+      "cleanup.unrelated.read", session_token,
+      "tenant=__wr_default", access_token, &status, &body) != 0
       || status != 200)
     return error_base + 2;
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (session, "POST", base_url, refresh_token, &status,
-          &body) != 0 || status != 200
+      &body) != 0 || status != 200
       || strstr (body, "\"access_token\"") == NULL
       || strstr (body, "\"refresh_token\"") == NULL)
     return error_base + 3;
   g_clear_pointer (&body, g_free);
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   gint login_rc = send_raw_login (session, "POST", base_url,
-      "username=cleanup-post-fault-login&skip_mfa=true", &status, &body);
+          "username=cleanup-post-fault-login&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (login_rc != 0 || status != 200
       || strstr (body, "cleanup-post-fault-login") == NULL)
@@ -6845,8 +6847,8 @@ check_policy_write_fault_human_surfaces (SoupServer *server,
 }
 
 static gint
-    check_policy_write_actual_route_finalize_fault
-    (PolicyWriteFaultRouteCase route_case, gint error_base)
+check_policy_write_actual_route_finalize_fault
+  (PolicyWriteFaultRouteCase route_case, gint error_base)
 {
   static const gchar *const actor = "cleanup-route-secret-actor";
   g_autoptr (WylHandle) handle = NULL;
@@ -6877,7 +6879,7 @@ static gint
   if (http.server == NULL)
     goto cleanup;
   thread = g_thread_new ("policy-write-route-fault",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
     goto cleanup;
@@ -6890,7 +6892,7 @@ static gint
   guint status = 0;
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   gint login_rc = send_raw_login (session, "POST", base_url,
-      "username=cleanup-route-secret-actor&skip_mfa=true", &status, &body);
+          "username=cleanup-route-secret-actor&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (login_rc != 0 || status != 200)
     goto cleanup;
@@ -6913,9 +6915,9 @@ static gint
     expected_primary_code = "success";
     expected_owner = "tenant";
     query = g_strdup_printf
-        ("name=cleanup-route-secret-tenant&tenant=%s&session_token=%s"
-        "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-        WYL_TENANT_DEFAULT, session_token);
+          ("name=cleanup-route-secret-tenant&tenant=%s&session_token=%s"
+            "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+            WYL_TENANT_DEFAULT, session_token);
   } else {
     if (grant_policy_write_authority (handle, actor, WYL_TENANT_DEFAULT)
         != WYRELOG_E_OK)
@@ -6925,10 +6927,10 @@ static gint
     expected_primary_code = "invalid_policy_mutation";
     expected_owner = "direct_permission";
     query = g_strdup_printf
-        ("subject=cleanup-target&perm=cleanup.missing&scope=%s&tenant=%s"
-        "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-        "&guard_risk=49", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT,
-        session_token);
+          ("subject=cleanup-target&perm=cleanup.missing&scope=%s&tenant=%s"
+            "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+            "&guard_risk=49", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT,
+            session_token);
   }
 
   guint terminal_before =
@@ -6936,7 +6938,7 @@ static gint
   wyl_daemon_http_fail_next_policy_write_finalize_for_test (http.server,
       WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
   if (send_raw_policy_mutation (session, "POST", base_url, path, query,
-          &status, &body) != 0 || status != 500
+      &status, &body) != 0 || status != 500
       || g_strcmp0 (body, "{\"error\":\"policy_write_cleanup_failed\"}") != 0)
     goto cleanup;
   guint terminal_after =
@@ -6946,13 +6948,13 @@ static gint
 
   WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
   if (!wyl_daemon_http_policy_write_finalize_snapshot_for_test (http.server,
-          &snapshot)
+      &snapshot)
       || !policy_write_fault_snapshot_is_clean (&snapshot,
-          expected_primary_status, expected_primary_code,
-          route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 3 : 9,
-          expected_owner,
-          route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 1 : 0,
-          1, WYRELOG_E_INTERNAL, 0)
+      expected_primary_status, expected_primary_code,
+      route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 3 : 9,
+      expected_owner,
+      route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS ? 1 : 0,
+      1, WYRELOG_E_INTERNAL, 0)
       || strstr (snapshot.primary_code, actor) != NULL
       || strstr (snapshot.primary_code, "cleanup-route-secret-tenant") != NULL
       || strstr (snapshot.primary_code, session_token) != NULL) {
@@ -6980,8 +6982,8 @@ static gint
       || authority.waiting_readers != 0 || authority.waiting_writers != 0)
     goto cleanup;
   gint human_rc = check_policy_write_fault_human_surfaces (http.server,
-      handle, base_url, session, actor, session_token, access_token,
-      refresh_token, error_base + 10);
+          handle, base_url, session, actor, session_token, access_token,
+          refresh_token, error_base + 10);
   if (human_rc != 0) {
     result = human_rc;
     goto cleanup;
@@ -7015,11 +7017,11 @@ check_policy_write_non_http_finalize_fault (gint error_base)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&options,
-      handle, &error);
+          handle, &error);
   if (server == NULL)
     return error_base + 1;
   guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
-      (server);
+        (server);
   wyl_daemon_http_fail_next_policy_write_finalize_for_test (server,
       WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
   if (wyl_daemon_http_rotate_access_token_key_for_test (server)
@@ -7029,11 +7031,11 @@ check_policy_write_non_http_finalize_fault (gint error_base)
   WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
   if (after != before + 1
       || !wyl_daemon_http_policy_write_finalize_snapshot_for_test (server,
-          &snapshot)
+      &snapshot)
       || !policy_write_fault_snapshot_is_clean (&snapshot, 0, "non_http",
-          0, "key_rotation", WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE
-          | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
-          | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 1, WYRELOG_E_INTERNAL, 0)
+      0, "key_rotation", WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE
+      | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
+      | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 1, WYRELOG_E_INTERNAL, 0)
       || !snapshot.primary_rc_recorded || snapshot.primary_rc != WYRELOG_E_OK)
     return error_base + 3;
   if (wyl_daemon_http_policy_write_for_test (server, NULL, NULL)
@@ -7052,11 +7054,11 @@ check_policy_write_actual_owner_finalize_contract (void)
    * WRITE acquisition, and a higher-ranked non-HTTP owner. The fact-enabled
    * service variant runs the complete 16-owner dynamic matrix. */
   gint rc = check_policy_write_actual_route_finalize_fault
-      (POLICY_WRITE_FAULT_ROUTE_SUCCESS, 2800);
+        (POLICY_WRITE_FAULT_ROUTE_SUCCESS, 2800);
   if (rc != 0)
     return rc;
   rc = check_policy_write_actual_route_finalize_fault
-      (POLICY_WRITE_FAULT_ROUTE_PRIMARY_ERROR, 2820);
+        (POLICY_WRITE_FAULT_ROUTE_PRIMARY_ERROR, 2820);
   if (rc != 0)
     return rc;
   rc = check_policy_write_non_http_finalize_fault (2840);
@@ -7064,7 +7066,7 @@ check_policy_write_actual_owner_finalize_contract (void)
     return rc;
   /* A newly constructed handle/coordinator is the only recovery boundary. */
   return check_daemon_policy_write_finalize_case
-      (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 2860);
+           (WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_NONE, WYRELOG_E_OK, 2860);
 }
 
 static gboolean
@@ -7073,7 +7075,7 @@ exact_route_state_unchanged (SoupServer *server,
 {
   WylDaemonExactRouteStateSnapshot after = { 0 };
   return wyl_daemon_http_exact_route_state_snapshot_for_test (server, &after)
-      && memcmp (before, &after, sizeof after) == 0;
+         && memcmp (before, &after, sizeof after) == 0;
 }
 
 static gint
@@ -7086,8 +7088,8 @@ check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   g_autofree gchar *body = NULL;
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw_path_probe (session, "POST", base_url,
-          "/auth/login/x?username=exact-alias-login", NULL, NULL,
-          &status, &body) != 0)
+      "/auth/login/x?username=exact-alias-login", NULL, NULL,
+      &status, &body) != 0)
     return 2290;
   if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
       || !exact_route_state_unchanged (server, &before))
@@ -7099,67 +7101,69 @@ check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_id_new (&admin_id) != WYRELOG_E_OK
       || wyl_id_format (&admin_id, admin_session,
-          sizeof admin_session) != WYRELOG_E_OK
+      sizeof admin_session) != WYRELOG_E_OK
       || !seed_management_human_access_token (server, admin_session,
-          "exact-route-admin", &admin_access)
+      "exact-route-admin", &admin_access)
       || wyl_policy_store_set_principal_state (store, "exact-route-admin",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "exact-enroll-target",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || grant_policy_write_authority (handle, "exact-route-admin",
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
     return 2292;
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", admin_access);
   const gchar *guard = "?tenant=__wr_default&guard_timestamp=123"
       "&guard_loc_class=public&guard_risk=0";
   g_autofree gchar *start_path = g_strconcat
-      ("/auth/mfa/enroll/start", guard, NULL);
+        ("/auth/mfa/enroll/start", guard, NULL);
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "GET", base_url, start_path,
-          authorization, "{\"subject\":\"exact-enroll-target\"}",
-          &status, &body) != 0
+      authorization, "{\"subject\":\"exact-enroll-target\"}",
+      &status, &body) != 0
       || status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
     return 2293;
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "POST", base_url, start_path,
-          authorization, "{\"subject\":\"exact-enroll-target\"}",
-          &status, &body) != 0 || status != 200)
+      authorization, "{\"subject\":\"exact-enroll-target\"}",
+      &status, &body) != 0 || status != 200)
     return 2294;
   g_autofree gchar *challenge = extract_json_string (body, "challenge");
   if (challenge == NULL)
     return 2295;
 
   g_autofree gchar *start_alias = g_strconcat
-      ("/auth/mfa/enroll/start/x", guard, NULL);
+        ("/auth/mfa/enroll/start/x", guard, NULL);
   before = (WylDaemonExactRouteStateSnapshot) {
-  0};
+    0
+  };
   g_clear_pointer (&body, g_free);
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw_path_probe (session, "POST", base_url, start_alias,
-          authorization, "{\"subject\":\"exact-enroll-target\"}",
-          &status, &body) != 0
+      authorization, "{\"subject\":\"exact-enroll-target\"}",
+      &status, &body) != 0
       || status != 404 || !exact_route_state_unchanged (server, &before))
     return 2296;
 
   g_autofree gchar *confirm_body = g_strdup_printf
-      ("{\"challenge\":\"%s\",\"code\":\"000000\"}", challenge);
+        ("{\"challenge\":\"%s\",\"code\":\"000000\"}", challenge);
   g_autofree gchar *confirm_alias = g_strconcat
-      ("/auth/mfa/enroll/confirmx", guard, NULL);
+        ("/auth/mfa/enroll/confirmx", guard, NULL);
   before = (WylDaemonExactRouteStateSnapshot) {
-  0};
+    0
+  };
   g_clear_pointer (&body, g_free);
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw_path_probe (session, "POST", base_url, confirm_alias,
-          authorization, confirm_body, &status, &body) != 0
+      authorization, confirm_body, &status, &body) != 0
       || status != 404 || !exact_route_state_unchanged (server, &before))
     return 2297;
   g_autofree gchar *confirm_path = g_strconcat
-      ("/auth/mfa/enroll/confirm", guard, NULL);
+        ("/auth/mfa/enroll/confirm", guard, NULL);
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "POST", base_url, confirm_path,
-          authorization,
-          "{\"challenge\":\"missing\",\"code\":\"000000\"}",
-          &status, &body) != 0 || status != 401
+      authorization,
+      "{\"challenge\":\"missing\",\"code\":\"000000\"}",
+      &status, &body) != 0 || status != 401
       || strstr (body, "\"invalid_mfa_enroll_challenge\"") == NULL)
     return 2298;
 
@@ -7169,8 +7173,8 @@ check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_clear_pointer (&body, g_free);
   gint login_rc = send_raw_path_probe (session, "POST", base_url,
-      "/auth/login?username=exact-refresh-user&skip_mfa=true", NULL, NULL,
-      &status, &body);
+          "/auth/login?username=exact-refresh-user&skip_mfa=true", NULL, NULL,
+          &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (login_rc != 0 || status != 200
       || (human_session = extract_json_string (body, "session_token")) == NULL
@@ -7179,35 +7183,37 @@ check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
     return 2299;
   g_autofree gchar *escaped_refresh = g_uri_escape_string (refresh, NULL, TRUE);
   g_autofree gchar *refresh_alias = g_strdup_printf
-      ("/auth/refresh/x?refresh_token=%s", escaped_refresh);
+        ("/auth/refresh/x?refresh_token=%s", escaped_refresh);
   before = (WylDaemonExactRouteStateSnapshot) {
-  0};
+    0
+  };
   g_clear_pointer (&body, g_free);
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw_path_probe (session, "POST", base_url, refresh_alias,
-          NULL, NULL, &status, &body) != 0
+      NULL, NULL, &status, &body) != 0
       || status != 404 || !exact_route_state_unchanged (server, &before))
     return 2300;
   g_autofree gchar *human_authorization = g_strdup_printf ("Bearer %s", access);
   before = (WylDaemonExactRouteStateSnapshot) {
-  0};
+    0
+  };
   g_clear_pointer (&body, g_free);
   if (!wyl_daemon_http_exact_route_state_snapshot_for_test (server, &before)
       || send_raw_path_probe (session, "POST", base_url, "/auth/logoutx",
-          human_authorization, NULL, &status, &body) != 0
+      human_authorization, NULL, &status, &body) != 0
       || status != 404 || !exact_route_state_unchanged (server, &before))
     return 2301;
   g_autofree gchar *refresh_path = g_strdup_printf
-      ("/auth/refresh?refresh_token=%s", escaped_refresh);
+        ("/auth/refresh?refresh_token=%s", escaped_refresh);
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "POST", base_url, refresh_path,
-          NULL, NULL, &status, &body) != 0 || status != 200)
+      NULL, NULL, &status, &body) != 0 || status != 200)
     return 2302;
   g_autofree gchar *logout_path = g_strdup_printf
-      ("/auth/logout?session_token=%s", human_session);
+        ("/auth/logout?session_token=%s", human_session);
   g_clear_pointer (&body, g_free);
   if (send_raw_path_probe (session, "POST", base_url, logout_path,
-          NULL, NULL, &status, &body) != 0 || status != 200
+      NULL, NULL, &status, &body) != 0 || status != 200
       || strstr (body, "\"ok\":true") == NULL)
     return 2303;
   return 0;
@@ -7218,14 +7224,14 @@ grant_tenant_manage_authority (WylHandle *handle, const gchar *subject)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
-      subject, "wr.tenant.manage", WYL_TENANT_DEFAULT);
+          subject, "wr.tenant.manage", WYL_TENANT_DEFAULT);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT, "active");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_permission_state (store, subject,
-      "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed");
+          "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed");
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_reload_engine_pair (handle);
@@ -7238,7 +7244,7 @@ direct_permission_exists (WylHandle *handle, const gchar *subject,
   gboolean exists = FALSE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_direct_permission_exists (store, subject, perm, scope,
-          &exists) != WYRELOG_E_OK)
+      &exists) != WYRELOG_E_OK)
     return FALSE;
   return exists;
 }
@@ -7255,7 +7261,7 @@ tenant_state_matches (wyl_policy_store_t *store, const gchar *tenant,
     return TRUE;
   gboolean active = FALSE;
   return wyl_policy_store_tenant_is_active (store, tenant, &active)
-      == WYRELOG_E_OK && active == expected_active;
+         == WYRELOG_E_OK && active == expected_active;
 }
 
 static gint
@@ -7270,7 +7276,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   if (store == NULL)
     return 22480;
   if (wyl_daemon_http_configure_tenant_for_test (server, tenant, TRUE,
-          FALSE) != WYRELOG_E_OK)
+      FALSE) != WYRELOG_E_OK)
     return 22485;
   if (!tenant_state_matches (store, tenant, TRUE, TRUE)
       || wyl_handle_engine_pair_is_poisoned (handle))
@@ -7285,7 +7291,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   guint recovery_write_terminals_before =
       wyl_daemon_http_policy_write_terminal_entries_for_test (server);
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&recovery_allocations_before, &recovery_frees_before);
+    (&recovery_allocations_before, &recovery_frees_before);
 
   TenantRecoveryBarrier install_barrier = { 0 };
   TenantRecoveryBarrier claim_barrier = { 0 };
@@ -7307,7 +7313,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   wyl_daemon_http_set_tenant_recovery_install_checkpoint_for_test (server,
       tenant_recovery_checkpoint, &install_barrier);
   g_autoptr (GThread) thread_a = g_thread_new ("tenant-recovery-owner",
-      tenant_recovery_owner_request_thread, &request_a);
+          tenant_recovery_owner_request_thread, &request_a);
   if (!tenant_recovery_barrier_wait_entered (&install_barrier)) {
     tenant_recovery_barrier_release (&install_barrier);
     g_thread_join (g_steal_pointer (&thread_a));
@@ -7319,7 +7325,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test (server,
       tenant_recovery_checkpoint, &claim_barrier);
   g_autoptr (GThread) thread_b = g_thread_new ("tenant-recovery-claimant",
-      tenant_recovery_claim_request_thread, &request_b);
+          tenant_recovery_claim_request_thread, &request_b);
   if (!tenant_recovery_barrier_wait_entered (&claim_barrier)) {
     tenant_recovery_barrier_release (&claim_barrier);
     tenant_recovery_barrier_release (&install_barrier);
@@ -7346,7 +7352,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   tenant_recovery_barrier_release (&install_barrier);
   g_thread_join (g_steal_pointer (&thread_a));
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&recovery_allocations_after_a, &recovery_frees_after_a);
+    (&recovery_allocations_after_a, &recovery_frees_after_a);
   gboolean request_a_detached = request_a.rc
       == (detach_before_owner_release ? WYRELOG_E_POLICY : WYRELOG_E_BUSY)
       && wyl_handle_engine_pair_is_poisoned (handle)
@@ -7357,7 +7363,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   tenant_recovery_barrier_release (&claim_barrier);
   g_thread_join (g_steal_pointer (&thread_b));
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&recovery_allocations_after_b, &recovery_frees_after_b);
+    (&recovery_allocations_after_b, &recovery_frees_after_b);
   gboolean repair_failure_unconsumed =
       wyl_daemon_http_take_tenant_recovery_repair_failure_for_test (server);
   gboolean request_b_rejected = request_b.rc == WYRELOG_E_BUSY
@@ -7390,11 +7396,11 @@ check_tenant_recovery_post_write_revalidation_contract (void)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&options,
-      handle, &error);
+          handle, &error);
   if (server == NULL)
     return 22493;
   gint rc = run_tenant_recovery_slot_detach_interleaving (server, handle,
-      "tenant-recovery-post-write", "000000000000000000000000300", TRUE);
+          "tenant-recovery-post-write", "000000000000000000000000300", TRUE);
   soup_server_disconnect (server);
   return rc;
 }
@@ -7405,7 +7411,7 @@ check_tenant_recovery_slot_detach_contract (SoupServer *server,
 {
   g_atomic_int_inc (&tenant_recovery_detach_regression_executions);
   return run_tenant_recovery_slot_detach_interleaving (server, handle,
-      "tenant-recovery-detach", "000000000000000000000000301", FALSE);
+             "tenant-recovery-detach", "000000000000000000000000301", FALSE);
 }
 
 static gboolean
@@ -7420,8 +7426,8 @@ tenant_metadata (wyl_policy_store_t *store, const gchar *tenant,
   sqlite3 *db = wyl_policy_store_get_db (store);
   sqlite3_stmt *stmt = NULL;
   if (db == NULL || sqlite3_prepare_v2 (db,
-          "SELECT sealed_generation,updated_at FROM tenants "
-          "WHERE tenant_id=?;", -1, &stmt, NULL) != SQLITE_OK)
+      "SELECT sealed_generation,updated_at FROM tenants "
+      "WHERE tenant_id=?;", -1, &stmt, NULL) != SQLITE_OK)
     return FALSE;
   gboolean ok = sqlite3_bind_text (stmt, 1, tenant, -1, SQLITE_TRANSIENT)
       == SQLITE_OK && sqlite3_step (stmt) == SQLITE_ROW;
@@ -7442,8 +7448,8 @@ set_tenant_updated_at_for_test (wyl_policy_store_t *store,
   sqlite3 *db = wyl_policy_store_get_db (store);
   sqlite3_stmt *stmt = NULL;
   if (db == NULL || sqlite3_prepare_v2 (db,
-          "UPDATE tenants SET updated_at=? WHERE tenant_id=?;", -1, &stmt,
-          NULL) != SQLITE_OK)
+      "UPDATE tenants SET updated_at=? WHERE tenant_id=?;", -1, &stmt,
+      NULL) != SQLITE_OK)
     return FALSE;
   gboolean ok = sqlite3_bind_int64 (stmt, 1, updated_at) == SQLITE_OK
       && sqlite3_bind_text (stmt, 2, tenant, -1, SQLITE_TRANSIENT) == SQLITE_OK
@@ -7462,7 +7468,7 @@ tenant_projection_decision_matches (WylHandle *handle, const gchar *tenant,
   wyl_decide_req_set_action (request, "site.policy.read");
   wyl_decide_req_set_resource_id (request, tenant);
   return wyl_decide (handle, request, response) == WYRELOG_E_OK
-      && wyl_decide_resp_get_decision (response) == expected;
+         && wyl_decide_resp_get_decision (response) == expected;
 }
 
 static gboolean
@@ -7472,7 +7478,7 @@ permission_state_exists (WylHandle *handle, const gchar *subject,
   gboolean exists = FALSE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_permission_state_exists (store, subject, perm, scope,
-          &exists) != WYRELOG_E_OK)
+      &exists) != WYRELOG_E_OK)
     return FALSE;
   return exists;
 }
@@ -7525,8 +7531,8 @@ policy_audit_event_count (WylHandle *handle, guint64 *out_count)
 {
   *out_count = 0;
   return wyl_policy_store_foreach_audit_event
-      (wyl_handle_get_policy_store (handle), audit_event_count_cb, out_count)
-      == WYRELOG_E_OK;
+           (wyl_handle_get_policy_store (handle), audit_event_count_cb, out_count)
+         == WYRELOG_E_OK;
 }
 
 static gboolean
@@ -7543,7 +7549,7 @@ policy_lifecycle_audit_count (WylHandle *handle, const gchar *subject,
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event
-      (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &probe)
+        (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &probe)
       != WYRELOG_E_OK)
     return FALSE;
   *out_count = probe.matches;
@@ -7595,7 +7601,7 @@ tenant_create_outcome_bundle_probe_cb (const gchar *id,
   if (probe->matches != 1)
     return WYRELOG_E_OK;
   *probe->bundle = (WylDaemonTenantCreateOutcomeBundle) {
-  .tenant_id = g_strdup (probe->tenant),.creator_subject_id =
+    .tenant_id = g_strdup (probe->tenant),.creator_subject_id =
         g_strdup (probe->subject),.audit_id =
         g_strdup (id),.audit_created_at_us = created_at_us,.audit_subject_id =
         g_strdup (subject_id),.audit_action =
@@ -7603,7 +7609,8 @@ tenant_create_outcome_bundle_probe_cb (const gchar *id,
         g_strdup (resource_id),.audit_deny_reason =
         g_strdup (deny_reason),.audit_deny_origin =
         g_strdup (deny_origin),.audit_request_id =
-        g_strdup (request_id),.audit_decision = decision,};
+        g_strdup (request_id),.audit_decision = decision,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -7615,16 +7622,17 @@ tenant_create_outcome_bundle_from_store (WylHandle *handle,
   if (out_bundle == NULL)
     return FALSE;
   *out_bundle = (WylDaemonTenantCreateOutcomeBundle) {
-  0};
+    0
+  };
   TenantCreateOutcomeBundleProbe probe = {
     .subject = subject,
     .tenant = tenant,
     .bundle = out_bundle,
   };
   return wyl_policy_store_foreach_audit_event
-      (wyl_handle_get_policy_store (handle),
-      tenant_create_outcome_bundle_probe_cb, &probe) == WYRELOG_E_OK
-      && probe.matches == 1 && out_bundle->audit_id != NULL;
+           (wyl_handle_get_policy_store (handle),
+             tenant_create_outcome_bundle_probe_cb, &probe) == WYRELOG_E_OK
+         && probe.matches == 1 && out_bundle->audit_id != NULL;
 }
 
 static gboolean
@@ -7643,7 +7651,7 @@ tenant_create_outcome_bundle_new (const gchar *subject, const gchar *tenant,
   if (audit_id == NULL)
     return FALSE;
   *out_bundle = (WylDaemonTenantCreateOutcomeBundle) {
-  .tenant_id = g_strdup (tenant),.creator_subject_id =
+    .tenant_id = g_strdup (tenant),.creator_subject_id =
         g_strdup (subject),.audit_id =
         g_steal_pointer (&audit_id),.audit_created_at_us =
         wyl_audit_event_get_created_at_us (event),.audit_subject_id =
@@ -7651,7 +7659,8 @@ tenant_create_outcome_bundle_new (const gchar *subject, const gchar *tenant,
         g_strdup ("tenant_create"),.audit_resource_id =
         g_strdup (tenant),.audit_request_id =
         g_strdup ("outcome-helper-request"),.audit_decision =
-        WYL_DECISION_ALLOW,};
+        WYL_DECISION_ALLOW,
+  };
   return TRUE;
 }
 
@@ -7665,8 +7674,8 @@ policy_lifecycle_audit_intention_count (WylHandle *handle,
   sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
   sqlite3_stmt *stmt = NULL;
   if (db == NULL || sqlite3_prepare_v2 (db,
-          "SELECT COUNT(*) FROM audit_intentions WHERE subject_id=? "
-          "AND action=? AND resource_id=?;", -1, &stmt, NULL) != SQLITE_OK)
+      "SELECT COUNT(*) FROM audit_intentions WHERE subject_id=? "
+      "AND action=? AND resource_id=?;", -1, &stmt, NULL) != SQLITE_OK)
     return FALSE;
   gboolean ok = sqlite3_bind_text (stmt, 1, subject, -1, SQLITE_TRANSIENT)
       == SQLITE_OK
@@ -7698,11 +7707,11 @@ check_concurrent_tenant_creates_serialize (WylHandle *handle,
     threads[i].race = &race;
     threads[i].mutation.base_url = base_url;
     threads[i].mutation.query = g_strdup_printf
-        ("name=tenant-concurrent&tenant=%s&session_token=%s"
-        "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-        WYL_TENANT_DEFAULT, session_tokens[i]);
+          ("name=tenant-concurrent&tenant=%s&session_token=%s"
+            "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+            WYL_TENANT_DEFAULT, session_tokens[i]);
     workers[i] = g_thread_new ("tenant-create",
-        concurrent_tenant_create_thread, &threads[i]);
+            concurrent_tenant_create_thread, &threads[i]);
   }
   for (guint i = 0; i < G_N_ELEMENTS (workers); i++)
     g_thread_join (workers[i]);
@@ -7726,21 +7735,21 @@ check_concurrent_tenant_creates_serialize (WylHandle *handle,
   guint audit_count = 0;
   guint loser_audit_count = 0;
   if (result == 0 && (changed_true != 1 || changed_false != 1
-          || winner < 0
-          || !tenant_state_matches (wyl_handle_get_policy_store (handle),
-              "tenant-concurrent", TRUE, TRUE)
-          || !policy_lifecycle_audit_count (handle, actors[winner],
-              "tenant_create", "tenant-concurrent", &audit_count)
-          || audit_count != 1
-          || !policy_lifecycle_audit_count (handle, actors[1 - winner],
-              "tenant_create", "tenant-concurrent", &loser_audit_count)
-          || loser_audit_count != 0
-          || !tenant_creator_anchor_matches (handle, actors[winner],
-              "tenant-concurrent", TRUE)
-          || !tenant_creator_anchor_matches (handle, actors[1 - winner],
-              "tenant-concurrent", FALSE)
-          || !tenant_has_no_human_session_row (handle, "tenant-concurrent")
-          || wyl_handle_engine_pair_is_poisoned (handle)))
+      || winner < 0
+      || !tenant_state_matches (wyl_handle_get_policy_store (handle),
+      "tenant-concurrent", TRUE, TRUE)
+      || !policy_lifecycle_audit_count (handle, actors[winner],
+      "tenant_create", "tenant-concurrent", &audit_count)
+      || audit_count != 1
+      || !policy_lifecycle_audit_count (handle, actors[1 - winner],
+      "tenant_create", "tenant-concurrent", &loser_audit_count)
+      || loser_audit_count != 0
+      || !tenant_creator_anchor_matches (handle, actors[winner],
+      "tenant-concurrent", TRUE)
+      || !tenant_creator_anchor_matches (handle, actors[1 - winner],
+      "tenant-concurrent", FALSE)
+      || !tenant_has_no_human_session_row (handle, "tenant-concurrent")
+      || wyl_handle_engine_pair_is_poisoned (handle)))
     result = 2243;
   for (guint i = 0; i < G_N_ELEMENTS (threads); i++) {
     g_free (threads[i].mutation.query);
@@ -7760,36 +7769,36 @@ check_tenant_create_anchor_rollback_fault (SoupServer *server,
     TenantCreateFaultArm arm, gint error_base)
 {
   g_autofree gchar *query = g_strdup_printf
-      ("name=%s&tenant=%s&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", tenant, WYL_TENANT_DEFAULT,
-      session_token);
+        ("name=%s&tenant=%s&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", tenant, WYL_TENANT_DEFAULT,
+          session_token);
   guint audit_before = 0;
   guint audit_after = 0;
   guint intention_before = 0;
   guint intention_after = 0;
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", tenant, &audit_before)
+      "tenant_create", tenant, &audit_before)
       || !policy_lifecycle_audit_intention_count (handle,
-          "http-policy-admin", "tenant_create", tenant, &intention_before))
+      "http-policy-admin", "tenant_create", tenant, &intention_before))
     return error_base;
   arm (server);
   guint status = 0;
   g_autofree gchar *body = NULL;
   gint rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", query, &status, &body);
+          "/tenants/create", query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
       || !tenant_state_matches (wyl_handle_get_policy_store (handle), tenant,
-          FALSE, FALSE)
+      FALSE, FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-admin", tenant,
-          FALSE)
+      FALSE)
       || !tenant_has_no_human_session_row (handle, tenant)
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", tenant, &audit_after)
+      "tenant_create", tenant, &audit_after)
       || audit_after != audit_before
       || !policy_lifecycle_audit_intention_count (handle,
-          "http-policy-admin", "tenant_create", tenant, &intention_after)
+      "http-policy-admin", "tenant_create", tenant, &intention_after)
       || intention_after != intention_before
       || wyl_handle_engine_pair_is_poisoned (handle))
     return error_base + 1;
@@ -7812,19 +7821,19 @@ check_valid_policy_aliases (SoupServer *server, WylHandle *handle,
     g_autofree gchar *body = NULL;
     if (!policy_audit_event_count (handle, &audit_before)
         || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-            canonical_path, &probe_before)
+        canonical_path, &probe_before)
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-            &state_before)
+        &state_before)
         || send_raw_policy_mutation (session, "POST", base_url, aliases[i],
-            query, &status, &body) != 0
+        query, &status, &body) != 0
         || status != 404
         || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-            canonical_path, &probe_after)
+        canonical_path, &probe_after)
         || probe_after.selected != probe_before.selected + 1
         || probe_after.terminal_entries != probe_before.terminal_entries
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-            &state_after)
+        &state_after)
         || memcmp (&state_before, &state_after, sizeof state_before) != 0
         || !policy_audit_event_count (handle, &audit_after)
         || audit_after != audit_before)
@@ -7872,7 +7881,7 @@ role_membership_exists (WylHandle *handle, const gchar *subject,
   gboolean exists = FALSE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_role_membership_exists (store, subject, role, scope,
-          &exists) != WYRELOG_E_OK)
+      &exists) != WYRELOG_E_OK)
     return FALSE;
   return exists;
 }
@@ -7914,8 +7923,8 @@ role_membership_event_count (WylHandle *handle, const gchar *subject,
     .operation = operation,
   };
   if (wyl_policy_store_foreach_role_membership_event
-      (wyl_handle_get_policy_store (handle), role_membership_event_probe_cb,
-          &probe) != WYRELOG_E_OK)
+        (wyl_handle_get_policy_store (handle), role_membership_event_probe_cb,
+      &probe) != WYRELOG_E_OK)
     return FALSE;
   *out_count = probe.matches;
   return TRUE;
@@ -7958,13 +7967,13 @@ tenant_has_no_human_session_row (WylHandle *handle, const gchar *tenant)
 {
   TenantHumanSessionRowProbe probe = {.scope = tenant };
   if (wyl_policy_store_foreach_session_state
-      (wyl_handle_get_policy_store (handle), tenant_human_session_row_probe_cb,
-          &probe) != WYRELOG_E_OK || probe.matches != 0)
+        (wyl_handle_get_policy_store (handle), tenant_human_session_row_probe_cb,
+      &probe) != WYRELOG_E_OK || probe.matches != 0)
     return FALSE;
   return wyl_policy_store_foreach_session_event
-      (wyl_handle_get_policy_store (handle),
-      tenant_human_session_event_probe_cb, &probe) == WYRELOG_E_OK
-      && probe.matches == 0;
+           (wyl_handle_get_policy_store (handle),
+             tenant_human_session_event_probe_cb, &probe) == WYRELOG_E_OK
+         && probe.matches == 0;
 }
 
 static gboolean
@@ -7975,14 +7984,14 @@ tenant_creator_permission_matches (WylHandle *handle, const gchar *creator,
   gboolean found = FALSE;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   return session != NULL
-      && wyl_engine_session_intern_symbol (session, creator, &row[0])
-      == WYRELOG_E_OK
-      && wyl_engine_session_intern_symbol (session, permission, &row[1])
-      == WYRELOG_E_OK
-      && wyl_engine_session_intern_symbol (session, tenant, &row[2])
-      == WYRELOG_E_OK
-      && wyl_engine_session_contains (session, "has_permission", row,
-      G_N_ELEMENTS (row), &found) == WYRELOG_E_OK && found == expected;
+         && wyl_engine_session_intern_symbol (session, creator, &row[0])
+         == WYRELOG_E_OK
+         && wyl_engine_session_intern_symbol (session, permission, &row[1])
+         == WYRELOG_E_OK
+         && wyl_engine_session_intern_symbol (session, tenant, &row[2])
+         == WYRELOG_E_OK
+         && wyl_engine_session_contains (session, "has_permission", row,
+             G_N_ELEMENTS (row), &found) == WYRELOG_E_OK && found == expected;
 }
 
 static gboolean
@@ -7991,17 +8000,17 @@ tenant_creator_anchor_matches (WylHandle *handle, const gchar *creator,
 {
   guint event_count = 0;
   gboolean durable = role_membership_exists (handle, creator,
-      "wr.system_admin", tenant)
+          "wr.system_admin", tenant)
       == expected
       && role_membership_event_count (handle, creator, "wr.system_admin",
-      tenant, "grant", &event_count)
+          tenant, "grant", &event_count)
       && event_count == (expected ? 1u : 0u);
   if (!durable || wyl_handle_engine_pair_is_poisoned (handle))
     return durable;
   return tenant_creator_permission_matches (handle, creator,
-      "wr.policy.write", tenant, expected)
-      && tenant_creator_permission_matches (handle, creator,
-      "wr.policy.grant_role", tenant, expected);
+             "wr.policy.write", tenant, expected)
+         && tenant_creator_permission_matches (handle, creator,
+             "wr.policy.grant_role", tenant, expected);
 }
 
 static gboolean
@@ -8011,14 +8020,14 @@ tenant_creator_revoked_anchor_matches (WylHandle *handle,
   guint grant_count = 0;
   guint revoke_count = 0;
   return !role_membership_exists (handle, creator, "wr.system_admin", tenant)
-      && tenant_creator_permission_matches (handle, creator,
-      "wr.policy.write", tenant, FALSE)
-      && tenant_creator_permission_matches (handle, creator,
-      "wr.policy.grant_role", tenant, FALSE)
-      && role_membership_event_count (handle, creator, "wr.system_admin",
-      tenant, "grant", &grant_count) && grant_count == 1
-      && role_membership_event_count (handle, creator, "wr.system_admin",
-      tenant, "revoke", &revoke_count) && revoke_count == 1;
+         && tenant_creator_permission_matches (handle, creator,
+             "wr.policy.write", tenant, FALSE)
+         && tenant_creator_permission_matches (handle, creator,
+             "wr.policy.grant_role", tenant, FALSE)
+         && role_membership_event_count (handle, creator, "wr.system_admin",
+             tenant, "grant", &grant_count) && grant_count == 1
+         && role_membership_event_count (handle, creator, "wr.system_admin",
+             tenant, "revoke", &revoke_count) && revoke_count == 1;
 }
 
 static gint
@@ -8033,7 +8042,7 @@ check_unknown_tenant_create_outcome_isolated (void)
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts,
-      handle, &error);
+          handle, &error);
   if (server == NULL)
     return 2283;
   guint descriptor_alloc_before = 0;
@@ -8043,32 +8052,32 @@ check_unknown_tenant_create_outcome_isolated (void)
   guint audit_count = 0;
   g_auto (WylDaemonTenantCreateOutcomeBundle) bundle = { 0 };
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&descriptor_alloc_before, &descriptor_free_before);
+    (&descriptor_alloc_before, &descriptor_free_before);
   WylDaemonTenantCreateOutcomeEffect effect =
       WYL_DAEMON_TENANT_CREATE_OUTCOME_REPAIR_ABSENT_PAIR;
   if (wyl_daemon_http_configure_tenant_for_test (server,
-          "tenant-outcome-unknown", TRUE, FALSE) != WYRELOG_E_OK
+      "tenant-outcome-unknown", TRUE, FALSE) != WYRELOG_E_OK
       || !tenant_create_outcome_bundle_new ("http-policy-admin",
-          "tenant-outcome-unknown", &bundle)
+      "tenant-outcome-unknown", &bundle)
       || wyl_handle_poison_engine_pair (handle) != WYRELOG_E_OK
       || wyl_daemon_http_resolve_tenant_create_outcome_for_test (server,
-          &bundle, &effect)
+      &bundle, &effect)
       != WYRELOG_E_OK
       || effect != WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN
       || !wyl_handle_engine_pair_is_poisoned (handle)
       || !tenant_state_matches (wyl_handle_get_policy_store (handle),
-          "tenant-outcome-unknown", TRUE, TRUE)
+      "tenant-outcome-unknown", TRUE, TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-outcome-unknown", FALSE)
+      "tenant-outcome-unknown", FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-outcome-unknown", FALSE)
+      "tenant-outcome-unknown", FALSE)
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-outcome-unknown", &audit_count)
+      "tenant_create", "tenant-outcome-unknown", &audit_count)
       || audit_count != 0
       || !tenant_has_no_human_session_row (handle, "tenant-outcome-unknown"))
     return 2283;
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&descriptor_alloc_after, &descriptor_free_after);
+    (&descriptor_alloc_after, &descriptor_free_after);
   if (descriptor_alloc_after != descriptor_alloc_before
       || descriptor_free_after != descriptor_free_before)
     return 2284;
@@ -8082,19 +8091,19 @@ arm_tenant_creator_role_grant (SoupSession *session, WylHandle *handle,
     gint error_base)
 {
   g_autofree gchar *query = g_strdup_printf
-      ("subject=http-policy-admin&perm=wr.policy.grant_role&scope=%s"
-      "&event=grant&tenant=%s&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", tenant, WYL_TENANT_DEFAULT,
-      session_token);
+        ("subject=http-policy-admin&perm=wr.policy.grant_role&scope=%s"
+          "&event=grant&tenant=%s&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", tenant, WYL_TENANT_DEFAULT,
+          session_token);
   guint status = 0;
   g_autofree gchar *body = NULL;
   gint rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition", query, &status, &body);
+          "/policy/permissions/transition", query, &status, &body);
   if (rc != 0)
     return rc;
   return status == 200 && strstr (body, "\"ok\":true") != NULL
-      && permission_state_exists (handle, "http-policy-admin",
-      "wr.policy.grant_role", tenant) ? 0 : error_base;
+         && permission_state_exists (handle, "http-policy-admin",
+             "wr.policy.grant_role", tenant) ? 0 : error_base;
 }
 
 static gint
@@ -8105,7 +8114,7 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
   if (wyl_policy_store_upsert_permission (store, "site.concurrent.read",
-          "site concurrent read", "basic") != WYRELOG_E_OK)
+      "site concurrent read", "basic") != WYRELOG_E_OK)
     return 204;
 
   ConcurrentPolicyMutation mutations[n_threads];
@@ -8118,12 +8127,12 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
     mutations[i].base_url = base_url;
     mutations[i].query =
         g_strdup_printf ("subject=concurrent-target"
-        "&perm=site.concurrent.read&scope=tenant-a"
-        "&session_token=%s&guard_timestamp=123"
-        "&guard_loc_class=public&guard_risk=49", session_token);
+            "&perm=site.concurrent.read&scope=tenant-a"
+            "&session_token=%s&guard_timestamp=123"
+            "&guard_loc_class=public&guard_risk=49", session_token);
     g_autofree gchar *name = g_strdup_printf ("policy-grant-%u", i);
     threads[i] = g_thread_new (name, concurrent_permission_grant_thread,
-        &mutations[i]);
+            &mutations[i]);
   }
 
   for (guint i = 0; i < n_threads; i++)
@@ -8142,7 +8151,7 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
   }
 
   if (!direct_permission_exists (handle, "concurrent-target",
-          "site.concurrent.read", "tenant-a")) {
+      "site.concurrent.read", "tenant-a")) {
     result = 207;
     goto cleanup;
   }
@@ -8154,7 +8163,7 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
     .deny_origin = "site.concurrent.read",
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &grant_audit) != WYRELOG_E_OK) {
+      &grant_audit) != WYRELOG_E_OK) {
     result = 208;
     goto cleanup;
   }
@@ -8208,7 +8217,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2250;
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   wyrelog_error_t competing_login = wyl_client_login_skip_mfa
-      (competing_creator, "http-policy-racer");
+        (competing_creator, "http-policy-racer");
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (competing_login != WYRELOG_E_OK
       || grant_tenant_manage_authority (handle, "http-policy-racer")
@@ -8221,7 +8230,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.policy.read",
-          "site policy read", "basic") != WYRELOG_E_OK)
+      "site policy read", "basic") != WYRELOG_E_OK)
     return 125;
 
   g_autoptr (SoupSession) session = soup_session_new ();
@@ -8230,23 +8239,23 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   guint anonymous_audit_count = 0;
   gint rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", "name=tenant-anonymous&tenant=__wr_default"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      &status, &body);
+          "/tenants/create", "name=tenant-anonymous&tenant=__wr_default"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "tenant_auth_required") == NULL
       || !tenant_state_matches (store, "tenant-anonymous", FALSE, FALSE)
       || !policy_lifecycle_audit_count (handle, "anonymous",
-          "tenant_create", "tenant-anonymous", &anonymous_audit_count)
+      "tenant_create", "tenant-anonymous", &anonymous_audit_count)
       || anonymous_audit_count != 0
       || !tenant_has_no_human_session_row (handle, "tenant-anonymous"))
     return 2275;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "GET", base_url,
-      "/policy/permissions/grant", "subject=target&perm=site.policy.read"
-      "&scope=tenant-a", &status, &body);
+          "/policy/permissions/grant", "subject=target&perm=site.policy.read"
+          "&scope=tenant-a", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
@@ -8254,8 +8263,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "GET", base_url,
-      "/policy/permissions/transition", "subject=state-target"
-      "&perm=site.policy.read&scope=tenant-a&event=grant", &status, &body);
+          "/policy/permissions/transition", "subject=state-target"
+          "&perm=site.policy.read&scope=tenant-a&event=grant", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
@@ -8263,8 +8272,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", "perm=site.policy.read&scope=tenant-a",
-      &status, &body);
+          "/policy/permissions/grant", "perm=site.policy.read&scope=tenant-a",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -8272,9 +8281,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition",
-      "subject=state-target&perm=site.policy.read&scope=tenant-a",
-      &status, &body);
+          "/policy/permissions/transition",
+          "subject=state-target&perm=site.policy.read&scope=tenant-a",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -8282,9 +8291,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition",
-      "subject=state-target&perm=site.policy.read&scope=tenant-a&event=nope",
-      &status, &body);
+          "/policy/permissions/transition",
+          "subject=state-target&perm=site.policy.read&scope=tenant-a&event=nope",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -8292,9 +8301,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", "subject=target&perm=site.policy.read"
-      "&scope=tenant-a&session_token=unknown&guard_timestamp=abc"
-      "&guard_loc_class=public&guard_risk=49", &status, &body);
+          "/policy/permissions/grant", "subject=target&perm=site.policy.read"
+          "&scope=tenant-a&session_token=unknown&guard_timestamp=abc"
+          "&guard_loc_class=public&guard_risk=49", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_auth\"") == NULL)
@@ -8302,9 +8311,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", "subject=target&perm=site.policy.read"
-      "&scope=tenant-a&session_token=unknown&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", &status, &body);
+          "/policy/permissions/grant", "subject=target&perm=site.policy.read"
+          "&scope=tenant-a&session_token=unknown&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
@@ -8312,9 +8321,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", "subject=target&perm=site.missing"
-      "&scope=tenant-a&session_token=unknown&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", &status, &body);
+          "/policy/permissions/grant", "subject=target&perm=site.missing"
+          "&scope=tenant-a&session_token=unknown&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
@@ -8323,53 +8332,53 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *denied_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=49", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", denied_query, &status, &body);
+          "/policy/permissions/grant", denied_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
     return 130;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a")) {
+      "tenant-a")) {
     return 131;
   }
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *unknown_tenant_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
-      "&tenant=unknown&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&tenant=unknown&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", unknown_tenant_query, &status, &body);
+          "/policy/permissions/grant", unknown_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 187;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a")) {
+      "tenant-a")) {
     return 188;
   }
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *tenant_create_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
-      "&creator=spoofed-creator&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+          "&creator=spoofed-creator&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, session_token);
   g_autofree gchar *tenant_create_competing_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
-      "&creator=spoofed-creator&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
-      competing_session_token);
+          "&creator=spoofed-creator&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
+          competing_session_token);
   static const gchar *const tenant_delete_aliases[] = {
     "/tenants/delete/x",
     "/tenants/deletex",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_delete_aliases); i++) {
     rc = send_raw_policy_mutation (session, "POST", base_url,
-        tenant_delete_aliases[i], tenant_create_query, &status, &body);
+            tenant_delete_aliases[i], tenant_create_query, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
@@ -8378,7 +8387,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_clear_pointer (&body, g_free);
   }
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/delete", "name=tenant-a", &status, &body);
+          "/tenants/delete", "name=tenant-a", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 501 || strstr (body, "\"tenant_delete_unsupported\"") == NULL)
@@ -8391,7 +8400,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_create_aliases); i++) {
     rc = send_raw_policy_mutation (session, "POST", base_url,
-        tenant_create_aliases[i], tenant_create_query, &status, &body);
+            tenant_create_aliases[i], tenant_create_query, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
@@ -8407,23 +8416,23 @@ check_policy_permission_mutation_contract (SoupServer *server,
     session_token, competing_session_token,
   };
   gint concurrent_tenant_rc = check_concurrent_tenant_creates_serialize
-      (handle, base_url, concurrent_actors, concurrent_tokens);
+        (handle, base_url, concurrent_actors, concurrent_tokens);
   if (concurrent_tenant_rc != 0)
     return concurrent_tenant_rc;
 
   gint creator_fault_rc = check_tenant_create_anchor_rollback_fault (server,
-      handle, session, base_url, session_token, "tenant-grant-rollback",
-      wyl_daemon_http_fail_next_tenant_creator_grant_for_test, 2253);
+          handle, session, base_url, session_token, "tenant-grant-rollback",
+          wyl_daemon_http_fail_next_tenant_creator_grant_for_test, 2253);
   if (creator_fault_rc != 0)
     return creator_fault_rc;
   creator_fault_rc = check_tenant_create_anchor_rollback_fault (server,
-      handle, session, base_url, session_token, "tenant-event-rollback",
-      wyl_daemon_http_fail_next_tenant_creator_event_for_test, 2255);
+          handle, session, base_url, session_token, "tenant-event-rollback",
+          wyl_daemon_http_fail_next_tenant_creator_event_for_test, 2255);
   if (creator_fault_rc != 0)
     return creator_fault_rc;
   creator_fault_rc = check_tenant_create_anchor_rollback_fault (server,
-      handle, session, base_url, session_token, "tenant-append-rollback",
-      wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test, 2269);
+          handle, session, base_url, session_token, "tenant-append-rollback",
+          wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test, 2269);
   if (creator_fault_rc != 0)
     return creator_fault_rc;
 
@@ -8437,48 +8446,48 @@ check_policy_permission_mutation_contract (SoupServer *server,
     WylDaemonTenantCreateOutcomeEffect outcome_effect =
         WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN;
     wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-        (&descriptor_alloc_before, &descriptor_free_before);
+      (&descriptor_alloc_before, &descriptor_free_before);
     if (!tenant_create_outcome_bundle_new ("http-policy-admin",
-            "tenant-outcome-absent", &outcome_absent_bundle)
+        "tenant-outcome-absent", &outcome_absent_bundle)
         || wyl_handle_poison_engine_pair (handle) != WYRELOG_E_OK
         || wyl_daemon_http_resolve_tenant_create_outcome_for_test (server,
-            &outcome_absent_bundle, &outcome_effect)
+        &outcome_absent_bundle, &outcome_effect)
         != WYRELOG_E_OK
         || outcome_effect !=
         WYL_DAEMON_TENANT_CREATE_OUTCOME_REPAIR_ABSENT_PAIR
         || wyl_handle_engine_pair_is_poisoned (handle)
         || !tenant_state_matches (store, "tenant-outcome-absent", FALSE, FALSE)
         || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-            "tenant-outcome-absent", FALSE)
+        "tenant-outcome-absent", FALSE)
         || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-            "tenant-outcome-absent", FALSE)
+        "tenant-outcome-absent", FALSE)
         || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-            "tenant_create", "tenant-outcome-absent", &outcome_audit_count)
+        "tenant_create", "tenant-outcome-absent", &outcome_audit_count)
         || outcome_audit_count != 0
         || !tenant_has_no_human_session_row (handle, "tenant-outcome-absent"))
       return 2277;
     wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-        (&descriptor_alloc_after, &descriptor_free_after);
+      (&descriptor_alloc_after, &descriptor_free_after);
     if (descriptor_alloc_after != descriptor_alloc_before
         || descriptor_free_after != descriptor_free_before)
       return 2278;
 
     g_autofree gchar *outcome_absent_query =
         g_strdup_printf ("name=tenant-outcome-absent&tenant=%s"
-        "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-        "&guard_risk=49", WYL_TENANT_DEFAULT, competing_session_token);
+            "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+            "&guard_risk=49", WYL_TENANT_DEFAULT, competing_session_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
-        "/tenants/create", outcome_absent_query, &status, &body);
+            "/tenants/create", outcome_absent_query, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 200 || strstr (body, "\"changed\":true") == NULL
         || wyl_handle_engine_pair_is_poisoned (handle)
         || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-            "tenant-outcome-absent", FALSE)
+        "tenant-outcome-absent", FALSE)
         || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-            "tenant-outcome-absent", TRUE)
+        "tenant-outcome-absent", TRUE)
         || !policy_lifecycle_audit_count (handle, "http-policy-racer",
-            "tenant_create", "tenant-outcome-absent", &outcome_audit_count)
+        "tenant_create", "tenant-outcome-absent", &outcome_audit_count)
         || outcome_audit_count != 1
         || !tenant_has_no_human_session_row (handle, "tenant-outcome-absent"))
       return 2279;
@@ -8486,71 +8495,71 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
     g_autofree gchar *outcome_present_initial_query =
         g_strdup_printf ("name=tenant-outcome-present&tenant=%s"
-        "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-        "&guard_risk=49", WYL_TENANT_DEFAULT, session_token);
+            "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+            "&guard_risk=49", WYL_TENANT_DEFAULT, session_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
-        "/tenants/create", outcome_present_initial_query, &status, &body);
+            "/tenants/create", outcome_present_initial_query, &status, &body);
     if (rc != 0)
       return rc;
     g_auto (WylDaemonTenantCreateOutcomeBundle) outcome_present_bundle = { 0 };
     if (status != 200 || strstr (body, "\"changed\":true") == NULL
         || !tenant_create_outcome_bundle_from_store (handle,
-            "http-policy-admin", "tenant-outcome-present",
-            &outcome_present_bundle))
+        "http-policy-admin", "tenant-outcome-present",
+        &outcome_present_bundle))
       return 2280;
     g_clear_pointer (&body, g_free);
 
     wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-        (&descriptor_alloc_before, &descriptor_free_before);
+      (&descriptor_alloc_before, &descriptor_free_before);
     outcome_effect = WYL_DAEMON_TENANT_CREATE_OUTCOME_FAIL_CLOSED_UNKNOWN;
     if (wyl_handle_poison_engine_pair (handle) != WYRELOG_E_OK
         || wyl_daemon_http_resolve_tenant_create_outcome_for_test (server,
-            &outcome_present_bundle, &outcome_effect)
+        &outcome_present_bundle, &outcome_effect)
         != WYRELOG_E_OK
         || outcome_effect !=
         WYL_DAEMON_TENANT_CREATE_OUTCOME_INSTALL_ORIGINAL_DESCRIPTOR
         || !wyl_handle_engine_pair_is_poisoned (handle)
         || !tenant_state_matches (store, "tenant-outcome-present", TRUE, TRUE)
         || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-            "tenant-outcome-present", TRUE)
+        "tenant-outcome-present", TRUE)
         || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-            "tenant-outcome-present", FALSE)
+        "tenant-outcome-present", FALSE)
         || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-            "tenant_create", "tenant-outcome-present", &outcome_audit_count)
+        "tenant_create", "tenant-outcome-present", &outcome_audit_count)
         || outcome_audit_count != 1
         || !tenant_has_no_human_session_row (handle, "tenant-outcome-present"))
       return 2280;
     wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-        (&descriptor_alloc_after, &descriptor_free_after);
+      (&descriptor_alloc_after, &descriptor_free_after);
     if (descriptor_alloc_after != descriptor_alloc_before + 1
         || descriptor_free_after != descriptor_free_before)
       return 2281;
 
     g_autofree gchar *outcome_present_query =
         g_strdup_printf ("name=tenant-outcome-present&tenant=%s"
-        "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-        "&guard_risk=49", WYL_TENANT_DEFAULT, competing_session_token);
+            "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+            "&guard_risk=49", WYL_TENANT_DEFAULT, competing_session_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
-        "/tenants/create", outcome_present_query, &status, &body);
+            "/tenants/create", outcome_present_query, &status, &body);
     if (rc != 0)
       return rc;
     guint competing_outcome_audit_count = 0;
     wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-        (&descriptor_alloc_after, &descriptor_free_after);
+      (&descriptor_alloc_after, &descriptor_free_after);
     if (status != 200 || strstr (body, "\"changed\":false") == NULL
         || wyl_handle_engine_pair_is_poisoned (handle)
         || descriptor_alloc_after != descriptor_alloc_before + 1
         || descriptor_free_after != descriptor_free_before + 1
         || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-            "tenant-outcome-present", TRUE)
+        "tenant-outcome-present", TRUE)
         || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-            "tenant-outcome-present", FALSE)
+        "tenant-outcome-present", FALSE)
         || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-            "tenant_create", "tenant-outcome-present", &outcome_audit_count)
+        "tenant_create", "tenant-outcome-present", &outcome_audit_count)
         || outcome_audit_count != 1
         || !policy_lifecycle_audit_count (handle, "http-policy-racer",
-            "tenant_create", "tenant-outcome-present",
-            &competing_outcome_audit_count)
+        "tenant_create", "tenant-outcome-present",
+        &competing_outcome_audit_count)
         || competing_outcome_audit_count != 0
         || !tenant_has_no_human_session_row (handle, "tenant-outcome-present"))
       return 2282;
@@ -8564,27 +8573,27 @@ check_policy_permission_mutation_contract (SoupServer *server,
   guint lifecycle_audit_after = 0;
   g_autofree gchar *rollback_tenant_query =
       g_strdup_printf ("name=tenant-rollback&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, session_token);
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-rollback", &lifecycle_audit_before))
+      "tenant_create", "tenant-rollback", &lifecycle_audit_before))
     return 2230;
   wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test (server);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", rollback_tenant_query, &status, &body);
+          "/tenants/create", rollback_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
   gboolean rollback_tenant_absent = tenant_state_matches (store,
-      "tenant-rollback", FALSE, FALSE);
+          "tenant-rollback", FALSE, FALSE);
   gboolean rollback_audit_counted = policy_lifecycle_audit_count (handle,
-      "http-policy-admin", "tenant_create", "tenant-rollback",
-      &lifecycle_audit_after);
+          "http-policy-admin", "tenant_create", "tenant-rollback",
+          &lifecycle_audit_after);
   gboolean rollback_poisoned = wyl_handle_engine_pair_is_poisoned (handle);
   if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
       || !rollback_tenant_absent || !rollback_audit_counted
       || lifecycle_audit_after != lifecycle_audit_before || rollback_poisoned
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-rollback", FALSE)
+      "tenant-rollback", FALSE)
       || !tenant_has_no_human_session_row (handle, "tenant-rollback")) {
     g_printerr ("WYRELOG_TEST_DIAG tenant_lifecycle_rollback status=%u "
         "body=%s absent=%d audit=%d before=%u after=%u poisoned=%d\n", status,
@@ -8597,26 +8606,26 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *postcommit_tenant_query =
       g_strdup_printf ("name=tenant-postcommit&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, session_token);
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-postcommit", &lifecycle_audit_before))
+      "tenant_create", "tenant-postcommit", &lifecycle_audit_before))
     return 2230;
   wyl_daemon_http_fail_next_tenant_creator_receipt_verification_for_test
-      (server);
+    (server);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", postcommit_tenant_query, &status, &body);
+          "/tenants/create", postcommit_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
       || !tenant_state_matches (store, "tenant-postcommit", TRUE, TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-postcommit", TRUE)
+      "tenant-postcommit", TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-postcommit", FALSE)
+      "tenant-postcommit", FALSE)
       || !tenant_has_no_human_session_row (handle, "tenant-postcommit")
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
+      "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before + 1
       || !wyl_handle_engine_pair_is_poisoned (handle))
     return 2232;
@@ -8624,20 +8633,20 @@ check_policy_permission_mutation_contract (SoupServer *server,
   lifecycle_audit_before = lifecycle_audit_after;
   g_autofree gchar *postcommit_competing_query =
       g_strdup_printf ("name=tenant-postcommit&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, competing_session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, competing_session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", postcommit_competing_query, &status, &body);
+          "/tenants/create", postcommit_competing_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
+      "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-postcommit", TRUE)
+      "tenant-postcommit", TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-postcommit", FALSE)
+      "tenant-postcommit", FALSE)
       || wyl_handle_engine_pair_is_poisoned (handle))
     return 2234;
   g_clear_pointer (&body, g_free);
@@ -8652,17 +8661,17 @@ check_policy_permission_mutation_contract (SoupServer *server,
   guint publication_attempts_after = 0;
   guint noop_fault_discards_after = 0;
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&recovery_alloc_before, &recovery_free_before);
+    (&recovery_alloc_before, &recovery_free_before);
   wyl_daemon_http_tenant_create_publication_snapshot_for_test (server,
       &publication_attempts_before, &noop_fault_discards_before);
   wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test (server);
   wyl_daemon_http_fail_next_tenant_lifecycle_verification_for_test (server);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", postcommit_competing_query, &status, &body);
+          "/tenants/create", postcommit_competing_query, &status, &body);
   if (rc != 0)
     return rc;
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&recovery_alloc_after, &recovery_free_after);
+    (&recovery_alloc_after, &recovery_free_after);
   wyl_daemon_http_tenant_create_publication_snapshot_for_test (server,
       &publication_attempts_after, &noop_fault_discards_after);
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
@@ -8672,14 +8681,14 @@ check_policy_permission_mutation_contract (SoupServer *server,
       || publication_attempts_after != publication_attempts_before
       || noop_fault_discards_after != noop_fault_discards_before + 2
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-postcommit", TRUE)
+      "tenant-postcommit", TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-postcommit", FALSE)
+      "tenant-postcommit", FALSE)
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
+      "tenant_create", "tenant-postcommit", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before
       || !policy_lifecycle_audit_count (handle, "http-policy-racer",
-          "tenant_create", "tenant-postcommit", &competing_audit_count)
+      "tenant_create", "tenant-postcommit", &competing_audit_count)
       || competing_audit_count != 0
       || !tenant_has_no_human_session_row (handle, "tenant-postcommit"))
     return 2235;
@@ -8687,15 +8696,15 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *noop_followup_query =
       g_strdup_printf ("name=tenant-noop-followup&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, competing_session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, competing_session_token);
   guint followup_audit_count = 0;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", noop_followup_query, &status, &body);
+          "/tenants/create", noop_followup_query, &status, &body);
   if (rc != 0)
     return rc;
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
-      (&recovery_alloc_after, &recovery_free_after);
+    (&recovery_alloc_after, &recovery_free_after);
   wyl_daemon_http_tenant_create_publication_snapshot_for_test (server,
       &publication_attempts_after, &noop_fault_discards_after);
   if (status != 200 || strstr (body, "\"changed\":true") == NULL
@@ -8705,11 +8714,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
       || publication_attempts_after != publication_attempts_before + 1
       || noop_fault_discards_after != noop_fault_discards_before + 2
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-noop-followup", FALSE)
+      "tenant-noop-followup", FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-noop-followup", TRUE)
+      "tenant-noop-followup", TRUE)
       || !policy_lifecycle_audit_count (handle, "http-policy-racer",
-          "tenant_create", "tenant-noop-followup", &followup_audit_count)
+      "tenant_create", "tenant-noop-followup", &followup_audit_count)
       || followup_audit_count != 1
       || !tenant_has_no_human_session_row (handle, "tenant-noop-followup"))
     return 2236;
@@ -8717,84 +8726,84 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   gboolean legacy_created = FALSE;
   if (wyl_policy_store_create_tenant (store, "tenant-legacy",
-          &legacy_created) != WYRELOG_E_OK || !legacy_created
+      &legacy_created) != WYRELOG_E_OK || !legacy_created
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 2257;
   g_autofree gchar *legacy_create_query =
       g_strdup_printf ("name=tenant-legacy&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, competing_session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, competing_session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", legacy_create_query, &status, &body);
+          "/tenants/create", legacy_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-legacy", FALSE)
+      "tenant-legacy", FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-legacy", FALSE)
+      "tenant-legacy", FALSE)
       || !tenant_has_no_human_session_row (handle, "tenant-legacy")
       || !policy_lifecycle_audit_count (handle, "http-policy-racer",
-          "tenant_create", "tenant-legacy", &lifecycle_audit_after)
+      "tenant_create", "tenant-legacy", &lifecycle_audit_after)
       || lifecycle_audit_after != 0)
     return 2258;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *default_create_query =
       g_strdup_printf ("name=%s&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, competing_session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, competing_session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", default_create_query, &status, &body);
+          "/tenants/create", default_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          WYL_TENANT_DEFAULT, FALSE))
+      WYL_TENANT_DEFAULT, FALSE))
     return 2259;
   g_clear_pointer (&body, g_free);
 
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-a", &lifecycle_audit_before))
+      "tenant_create", "tenant-a", &lifecycle_audit_before))
     return 2235;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", tenant_create_query, &status, &body);
+          "/tenants/create", tenant_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"tenant\":\"tenant-a\"") == NULL ||
       strstr (body, "\"changed\":true") == NULL)
     return 190;
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-a", &lifecycle_audit_after)
+      "tenant_create", "tenant-a", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before + 1
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-a", FALSE)
+      "tenant-a", FALSE)
       || !tenant_creator_anchor_matches (handle, "spoofed-creator",
-          "tenant-a", FALSE)
+      "tenant-a", FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          WYL_TENANT_DEFAULT, FALSE)
+      WYL_TENANT_DEFAULT, FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-b", FALSE)
+      "tenant-b", FALSE)
       || !tenant_has_no_human_session_row (handle, "tenant-a"))
     return 2236;
   g_clear_pointer (&body, g_free);
 
   lifecycle_audit_before = lifecycle_audit_after;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", tenant_create_competing_query, &status, &body);
+          "/tenants/create", tenant_create_competing_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL)
     return 191;
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-a", &lifecycle_audit_after)
+      "tenant_create", "tenant-a", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-a", FALSE))
+      "tenant-a", FALSE))
     return 2237;
   g_clear_pointer (&body, g_free);
 
@@ -8804,7 +8813,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_list_aliases); i++) {
     rc = send_raw_policy_mutation (session, "GET", base_url,
-        tenant_list_aliases[i], tenant_create_query, &status, &body);
+            tenant_list_aliases[i], tenant_create_query, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
@@ -8813,7 +8822,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_clear_pointer (&body, g_free);
   }
   rc = send_raw_policy_mutation (session, "GET", base_url, "/tenants",
-      tenant_create_query, &status, &body);
+          tenant_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"tenant\":\"tenant-a\"") == NULL ||
@@ -8823,7 +8832,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   rc = send_raw_login (session, "POST", base_url,
-      "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
+          "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (rc != 0)
     return rc;
@@ -8837,144 +8846,144 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *cross_tenant_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-b"
-      "&tenant=tenant-a&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", tenant_session_token);
+          "&tenant=tenant-a&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", tenant_session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", cross_tenant_query, &status, &body);
+          "/policy/permissions/grant", cross_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"tenant_denied\"") == NULL)
     return 196;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-b"))
+      "tenant-b"))
     return 197;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *tenant_grant_query =
       g_strdup_printf ("subject=tenant-target&perm=site.policy.read"
-      "&scope=tenant-a&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+          "&scope=tenant-a&tenant=%s&session_token=%s"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", tenant_grant_query, &status, &body);
+          "/policy/permissions/grant", tenant_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
     return 198;
   if (!direct_permission_exists (handle, "tenant-target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 199;
   g_clear_pointer (&body, g_free);
   if (wyl_policy_store_upsert_role (store, "site.creator-role",
-          "creator role") != WYRELOG_E_OK)
+      "creator role") != WYRELOG_E_OK)
     return 2260;
   gint arm_creator_rc = arm_tenant_creator_role_grant (session, handle,
-      base_url, session_token, "tenant-a", 2261);
+          base_url, session_token, "tenant-a", 2261);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
   g_autofree gchar *tenant_role_grant_query =
       g_strdup_printf ("subject=creator-role-target&role=site.creator-role"
-      "&scope=tenant-a&tenant=%s&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=29", WYL_TENANT_DEFAULT,
-      session_token);
+          "&scope=tenant-a&tenant=%s&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=29", WYL_TENANT_DEFAULT,
+          session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", tenant_role_grant_query, &status, &body);
+          "/policy/roles/grant", tenant_role_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || !role_membership_exists (handle,
-          "creator-role-target", "site.creator-role", "tenant-a"))
+      "creator-role-target", "site.creator-role", "tenant-a"))
     return 2262;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *revoked_tenant_create_query = g_strdup_printf
-      ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
-      session_token);
+        ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
+          session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", revoked_tenant_create_query, &status, &body);
+          "/tenants/create", revoked_tenant_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-revoke", TRUE)
+      "tenant-revoke", TRUE)
       || !tenant_has_no_human_session_row (handle, "tenant-revoke"))
     return 2264;
   g_clear_pointer (&body, g_free);
 
   arm_creator_rc = arm_tenant_creator_role_grant (session, handle, base_url,
-      session_token, "tenant-revoke", 2265);
+          session_token, "tenant-revoke", 2265);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
 
   g_autofree gchar *creator_self_revoke_query = g_strdup_printf
-      ("subject=http-policy-admin&role=wr.system_admin&scope=tenant-revoke"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=29", session_token);
+        ("subject=http-policy-admin&role=wr.system_admin&scope=tenant-revoke"
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=29", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/revoke", creator_self_revoke_query, &status, &body);
+          "/policy/roles/revoke", creator_self_revoke_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL
       || !tenant_creator_revoked_anchor_matches (handle,
-          "http-policy-admin", "tenant-revoke")
+      "http-policy-admin", "tenant-revoke")
       || !tenant_has_no_human_session_row (handle, "tenant-revoke"))
     return 2266;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", revoked_tenant_create_query, &status, &body);
+          "/tenants/create", revoked_tenant_create_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
       || !tenant_creator_revoked_anchor_matches (handle,
-          "http-policy-admin", "tenant-revoke")
+      "http-policy-admin", "tenant-revoke")
       || !tenant_has_no_human_session_row (handle, "tenant-revoke"))
     return 2267;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *revoked_tenant_seal_query = g_strdup_printf
-      ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
-      session_token);
+        ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
+          session_token);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", revoked_tenant_seal_query,
-      "{\"version\":\"1\",\"request_id\":"
-      "\"000000000000000000000000231\"}", &status, &body);
+          "/tenants/seal", revoked_tenant_seal_query,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000231\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL
       || !tenant_creator_revoked_anchor_matches (handle,
-          "http-policy-admin", "tenant-revoke"))
+      "http-policy-admin", "tenant-revoke"))
     return 2268;
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/unseal", revoked_tenant_seal_query, &status, &body);
+          "/tenants/unseal", revoked_tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL
       || !tenant_creator_revoked_anchor_matches (handle,
-          "http-policy-admin", "tenant-revoke")
+      "http-policy-admin", "tenant-revoke")
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
       || !tenant_creator_revoked_anchor_matches (handle,
-          "http-policy-admin", "tenant-revoke")
+      "http-policy-admin", "tenant-revoke")
       || !tenant_has_no_human_session_row (handle, "tenant-revoke"))
     return 2269;
   g_clear_pointer (&body, g_free);
 
   if (wyl_policy_store_set_principal_state (store, "tenant-target",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store, "tenant-target",
-          "site.policy.read", "tenant-a", "armed") != WYRELOG_E_OK
+      "site.policy.read", "tenant-a", "armed") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK
       || !tenant_projection_decision_matches (handle, "tenant-a",
-          WYL_DECISION_ALLOW))
+      WYL_DECISION_ALLOW))
     return 1991;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *tenant_seal_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, session_token);
   static const gchar *tenant_seal_body =
       "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000222\"}";
   static const gchar *const tenant_seal_aliases[] = {
@@ -8983,8 +8992,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_seal_aliases); i++) {
     rc = send_raw_policy_mutation_body (session, "POST", base_url,
-        tenant_seal_aliases[i], tenant_seal_query, tenant_seal_body,
-        &status, &body);
+            tenant_seal_aliases[i], tenant_seal_query, tenant_seal_body,
+            &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
@@ -8997,17 +9006,17 @@ check_policy_permission_mutation_contract (SoupServer *server,
     "",
     "{}",
     "{\"version\":\"1\",\"request_id\":"
-        "\"000000000000000000000000222\",\"extra\":true}",
+    "\"000000000000000000000000222\",\"extra\":true}",
     "{\"version\":\"1\",\"version\":\"1\",\"request_id\":"
-        "\"000000000000000000000000222\"}",
+    "\"000000000000000000000000222\"}",
     "{\"version\":1,\"request_id\":" "\"000000000000000000000000222\"}",
     "{\"version\":\"2\",\"request_id\":" "\"000000000000000000000000222\"}",
     "{\"version\":\"1\",\"request_id\":" "\"abcdefghijklmnopqrstuvwxyz0\"}",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_tenant_seal_bodies); i++) {
     rc = send_raw_policy_mutation_body (session, "POST", base_url,
-        "/tenants/seal", tenant_seal_query, invalid_tenant_seal_bodies[i],
-        &status, &body);
+            "/tenants/seal", tenant_seal_query, invalid_tenant_seal_bodies[i],
+            &status, &body);
     if (rc != 0)
       return rc;
     if (status != 400 || strstr (body, "invalid_tenant_request") == NULL)
@@ -9016,8 +9025,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
   }
   g_autofree gchar *oversized_tenant_seal_body = g_strnfill (1025, 'x');
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query, oversized_tenant_seal_body,
-      &status, &body);
+          "/tenants/seal", tenant_seal_query, oversized_tenant_seal_body,
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "invalid_tenant_request") == NULL)
@@ -9027,31 +9036,31 @@ check_policy_permission_mutation_contract (SoupServer *server,
   guint tenant_seal_audit_before = 0;
   guint tenant_seal_audit_after = 0;
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_seal", "tenant-a", &tenant_seal_audit_before))
+      "tenant_seal", "tenant-a", &tenant_seal_audit_before))
     return 2242;
   wyl_daemon_http_fail_next_tenant_seal_verification_for_test (server);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+          "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
   WylServiceAuthUnavailableReason seal_unavailable =
       WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   if (rc != 0)
     return rc;
   gboolean seal_state_closed = tenant_state_matches (store, "tenant-a",
-      TRUE, FALSE);
+          TRUE, FALSE);
   gboolean seal_pair_poisoned = wyl_handle_engine_pair_is_poisoned (handle);
   wyrelog_error_t seal_available_rc =
       wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-      &seal_unavailable);
+        (wyl_handle_get_service_auth_authority (handle), handle,
+          &seal_unavailable);
   gboolean seal_audit_counted = policy_lifecycle_audit_count (handle,
-      "http-policy-admin", "tenant_seal", "tenant-a",
-      &tenant_seal_audit_after);
+          "http-policy-admin", "tenant_seal", "tenant-a",
+          &tenant_seal_audit_after);
   if (status != 500 || strstr (body, "tenant_mutation_failed") == NULL
       || !seal_state_closed || !seal_pair_poisoned
       || seal_available_rc != WYRELOG_E_OK || !seal_audit_counted
       || tenant_seal_audit_after != tenant_seal_audit_before + 1
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_has_no_human_session_row (handle, "tenant-a")) {
     g_printerr ("WYRELOG_TEST_DIAG tenant_seal_recovery status=%u body=%s "
         "closed=%d poisoned=%d available=%d reason=%d audit=%d before=%u "
@@ -9064,9 +9073,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query,
-      "{\"version\":\"1\",\"request_id\":"
-      "\"000000000000000000000000229\"}", &status, &body);
+          "/tenants/seal", tenant_seal_query,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000229\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
@@ -9074,7 +9083,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2245;
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/unseal", tenant_seal_query, &status, &body);
+          "/tenants/unseal", tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
@@ -9083,10 +9092,10 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *wrong_recovery_tenant_query =
       g_strdup_printf ("name=tenant-wrong&tenant=%s&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      WYL_TENANT_DEFAULT, session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          WYL_TENANT_DEFAULT, session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", wrong_recovery_tenant_query, &status, &body);
+          "/tenants/create", wrong_recovery_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
@@ -9109,13 +9118,13 @@ check_policy_permission_mutation_contract (SoupServer *server,
   wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test (server,
       tenant_recovery_checkpoint, &recovery_barrier);
   g_autoptr (GThread) recovery_thread = g_thread_new ("tenant-recovery",
-      tenant_recovery_request_thread, &recovery_request);
+          tenant_recovery_request_thread, &recovery_request);
   g_mutex_lock (&recovery_barrier.mutex);
   while (!recovery_barrier.entered)
     g_cond_wait (&recovery_barrier.changed, &recovery_barrier.mutex);
   g_mutex_unlock (&recovery_barrier.mutex);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+          "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
   if (rc != 0 || status != 503
       || strstr (body, "tenant_mutation_unavailable") == NULL
       || !wyl_handle_engine_pair_is_poisoned (handle)) {
@@ -9151,22 +9160,22 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *tenant_seal_correlation = NULL;
   rc = send_raw_policy_mutation_body_full (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body,
-      &tenant_seal_correlation);
+          "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body,
+          &tenant_seal_correlation);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 200;
   if (wyl_handle_engine_pair_is_poisoned (handle)
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_seal", "tenant-a", &tenant_seal_audit_after)
+      "tenant_seal", "tenant-a", &tenant_seal_audit_after)
       || tenant_seal_audit_after != tenant_seal_audit_before + 1
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_has_no_human_session_row (handle, "tenant-a"))
     return 2244;
   if (!tenant_projection_decision_matches (handle, "tenant-a",
-          WYL_DECISION_DENY))
+      WYL_DECISION_DENY))
     return 2005;
   if (g_strcmp0 (tenant_seal_correlation, "000000000000000000000000222") == 0)
     return 2002;
@@ -9174,7 +9183,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+          "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || g_strcmp0 (body, first_tenant_seal_response) != 0)
@@ -9184,20 +9193,20 @@ check_policy_permission_mutation_contract (SoupServer *server,
   guint sealed_create_audit_before = 0;
   guint sealed_create_audit_after = 0;
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-a", &sealed_create_audit_before))
+      "tenant_create", "tenant-a", &sealed_create_audit_before))
     return 2262;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/create", tenant_create_competing_query, &status, &body);
+          "/tenants/create", tenant_create_competing_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
       || !tenant_state_matches (store, "tenant-a", TRUE, FALSE)
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_creator_anchor_matches (handle, "http-policy-racer",
-          "tenant-a", FALSE)
+      "tenant-a", FALSE)
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_create", "tenant-a", &sealed_create_audit_after)
+      "tenant_create", "tenant-a", &sealed_create_audit_after)
       || sealed_create_audit_after != sealed_create_audit_before
       || wyl_handle_engine_pair_is_poisoned (handle)
       || !tenant_has_no_human_session_row (handle, "tenant-a"))
@@ -9210,7 +9219,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_unseal_aliases); i++) {
     rc = send_raw_policy_mutation (session, "POST", base_url,
-        tenant_unseal_aliases[i], tenant_seal_query, &status, &body);
+            tenant_unseal_aliases[i], tenant_seal_query, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
@@ -9219,7 +9228,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_clear_pointer (&body, g_free);
   }
   rc = send_raw_login (session, "POST", base_url,
-      "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
+          "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_sealed\"") == NULL)
@@ -9227,22 +9236,22 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_unseal", "tenant-a", &lifecycle_audit_before))
+      "tenant_unseal", "tenant-a", &lifecycle_audit_before))
     return 2238;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/unseal", tenant_seal_query, &status, &body);
+          "/tenants/unseal", tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 202;
   if (!tenant_projection_decision_matches (handle, "tenant-a",
-          WYL_DECISION_ALLOW))
+      WYL_DECISION_ALLOW))
     return 2026;
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_unseal", "tenant-a", &lifecycle_audit_after)
+      "tenant_unseal", "tenant-a", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before + 1
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_has_no_human_session_row (handle, "tenant-a"))
     return 2239;
   g_clear_pointer (&body, g_free);
@@ -9254,30 +9263,30 @@ check_policy_permission_mutation_contract (SoupServer *server,
   gint64 unseal_updated_at_after = -1;
   if (!set_tenant_updated_at_for_test (store, "tenant-a", no_op_updated_at)
       || !tenant_metadata (store, "tenant-a", &unseal_generation_before,
-          &unseal_updated_at_before)
+      &unseal_updated_at_before)
       || unseal_updated_at_before != no_op_updated_at)
     return 2240;
   lifecycle_audit_before = lifecycle_audit_after;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/unseal", tenant_seal_query, &status, &body);
+          "/tenants/unseal", tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":false") == NULL
       || !tenant_metadata (store, "tenant-a", &unseal_generation_after,
-          &unseal_updated_at_after)
+      &unseal_updated_at_after)
       || unseal_generation_after != unseal_generation_before
       || unseal_updated_at_after != unseal_updated_at_before
       || !policy_lifecycle_audit_count (handle, "http-policy-admin",
-          "tenant_unseal", "tenant-a", &lifecycle_audit_after)
+      "tenant_unseal", "tenant-a", &lifecycle_audit_after)
       || lifecycle_audit_after != lifecycle_audit_before
       || !tenant_creator_anchor_matches (handle, "http-policy-admin",
-          "tenant-a", TRUE)
+      "tenant-a", TRUE)
       || !tenant_has_no_human_session_row (handle, "tenant-a"))
     return 2241;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
+          "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 409 || body == NULL
@@ -9291,19 +9300,19 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *implicit_tenant_seal_query =
       g_strdup_printf ("name=tenant-a&session_token=%s"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      session_token);
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          session_token);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", implicit_tenant_seal_query,
-      "{\"version\":\"1\",\"request_id\":"
-      "\"000000000000000000000000223\"}", &status, &body);
+          "/tenants/seal", implicit_tenant_seal_query,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000223\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"changed\":true") == NULL)
     return 2021;
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/tenants/unseal", implicit_tenant_seal_query, &status, &body);
+          "/tenants/unseal", implicit_tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -9313,15 +9322,15 @@ check_policy_permission_mutation_contract (SoupServer *server,
   WylPolicyAuthorityMutationResult tenant_promoted =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   if (wyl_policy_store_reconcile_tenant_authority
-      (wyl_handle_get_policy_store (handle), "tenant-a",
-          WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
-          &tenant_promoted) != WYRELOG_E_OK
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
+      &tenant_promoted) != WYRELOG_E_OK
       || tenant_promoted != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
     return 2024;
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
-      "/tenants/seal", implicit_tenant_seal_query,
-      "{\"version\":\"1\",\"request_id\":"
-      "\"000000000000000000000000227\"}", &status, &body);
+          "/tenants/seal", implicit_tenant_seal_query,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"000000000000000000000000227\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 503 || body == NULL
@@ -9334,26 +9343,26 @@ check_policy_permission_mutation_contract (SoupServer *server,
    * successful public create makes its creator authoritative there. */
   g_autofree gchar *transition_denied_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
-      "&scope=tenant-b&event=grant&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&scope=tenant-b&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition", transition_denied_query, &status,
-      &body);
+          "/policy/permissions/transition", transition_denied_query, &status,
+          &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
     return 170;
   if (permission_state_exists (handle, "state-target", "site.policy.read",
-          "tenant-b"))
+      "tenant-b"))
     return 171;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *missing_perm_grant_query =
       g_strdup_printf ("subject=target&perm=site.missing&scope=tenant-a"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=49", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
+          "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -9361,12 +9370,12 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   gint concurrent_rc = check_concurrent_permission_grants_serialize (handle,
-      base_url, session_token);
+          base_url, session_token);
   if (concurrent_rc != 0)
     return concurrent_rc;
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
+          "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -9375,11 +9384,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *missing_perm_transition_query =
       g_strdup_printf ("subject=state-target&perm=site.missing"
-      "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition", missing_perm_transition_query,
-      &status, &body);
+          "/policy/permissions/transition", missing_perm_transition_query,
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -9388,34 +9397,34 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *invalid_edge_transition_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
-      "&scope=tenant-a&event=revoke&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&scope=tenant-a&event=revoke&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition", invalid_edge_transition_query,
-      &status, &body);
+          "/policy/permissions/transition", invalid_edge_transition_query,
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
     return 173;
   if (permission_state_exists (handle, "state-target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 174;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *guard_denied_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=50", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=50", session_token);
   g_autofree gchar *guard_denied_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
-      "/policy/permissions/grant", guard_denied_query, &status, &body,
-      &guard_denied_request_id);
+          "/policy/permissions/grant", guard_denied_query, &status, &body,
+          &guard_denied_request_id);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
     return 133;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 134;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe guard_denied_audit = {
@@ -9429,7 +9438,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .decision = WYL_DECISION_DENY,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &guard_denied_audit) != WYRELOG_E_OK)
+      &guard_denied_audit) != WYRELOG_E_OK)
     return 200;
   if (guard_denied_audit.matches != 1)
     return 201;
@@ -9438,28 +9447,28 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *transition_allowed_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
-      "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = check_valid_policy_aliases (server, handle, session, base_url,
-      "/policy/permissions/transition", transition_allowed_query, 2680);
+          "/policy/permissions/transition", transition_allowed_query, 2680);
   if (rc != 0)
     return rc;
   if (permission_state_exists (handle, "state-target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 2682;
   g_autofree gchar *transition_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
-      "/policy/permissions/transition", transition_allowed_query, &status,
-      &body, &transition_request_id);
+          "/policy/permissions/transition", transition_allowed_query, &status,
+          &body, &transition_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 175;
   if (!permission_state_exists (handle, "state-target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 176;
   if (direct_permission_exists (handle, "state-target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 177;
   AuditEventProbe transition_audit = {
     .subject_id = "http-policy-admin",
@@ -9470,7 +9479,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .request_id = transition_request_id,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &transition_audit) != WYRELOG_E_OK)
+      &transition_audit) != WYRELOG_E_OK)
     return 178;
   if (transition_audit.matches != 1)
     return 179;
@@ -9486,10 +9495,10 @@ check_policy_permission_mutation_contract (SoupServer *server,
    */
   g_autofree gchar *svc_transition_query =
       g_strdup_printf ("subject=svc:transition-reject-762&perm=site.policy.read"
-      "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/transition", svc_transition_query, &status, &body);
+          "/policy/permissions/transition", svc_transition_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -9497,17 +9506,17 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   if (wyl_policy_store_set_principal_state (store, "client-state-target",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 180;
   if (wyl_client_policy_permission_transition (client, "client-state-target",
-          "site.policy.read", "tenant-a", "grant", 123, "public", 49)
+      "site.policy.read", "tenant-a", "grant", 123, "public", 49)
       != WYRELOG_E_OK)
     return 182;
   if (!permission_state_exists (handle, "client-state-target",
-          "site.policy.read", "tenant-a"))
+      "site.policy.read", "tenant-a"))
     return 183;
   if (direct_permission_exists (handle, "client-state-target",
-          "site.policy.read", "tenant-a"))
+      "site.policy.read", "tenant-a"))
     return 184;
   PermissionStateProbe state_probe = {
     .subject_id = "client-state-target",
@@ -9516,7 +9525,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state (store,
-          permission_state_probe_cb, &state_probe) != WYRELOG_E_OK)
+      permission_state_probe_cb, &state_probe) != WYRELOG_E_OK)
     return 185;
   if (state_probe.matches != 1)
     return 186;
@@ -9529,7 +9538,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_probe_cb, &event_probe) != WYRELOG_E_OK)
+      permission_state_event_probe_cb, &event_probe) != WYRELOG_E_OK)
     return 187;
   if (event_probe.matches != 1)
     return 188;
@@ -9541,7 +9550,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .deny_origin = "tenant-a",
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &client_transition_audit) != WYRELOG_E_OK)
+      &client_transition_audit) != WYRELOG_E_OK)
     return 194;
   if (client_transition_audit.matches != 2)
     return 195;
@@ -9556,7 +9565,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (wyl_decide_resp_get_decision (client_state_resp) != WYL_DECISION_DENY)
     return 190;
   if (wyl_client_policy_permission_grant (client, "client-state-target",
-          "site.policy.read", "tenant-a", 123, "public", 49)
+      "site.policy.read", "tenant-a", 123, "public", 49)
       != WYRELOG_E_OK)
     return 191;
   g_autoptr (wyl_decide_req_t) client_grant_decide = wyl_decide_req_new ();
@@ -9572,28 +9581,28 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *grant_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=49", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", session_token);
   rc = check_valid_policy_aliases (server, handle, session, base_url,
-      "/policy/permissions/grant", grant_query, 2683);
+          "/policy/permissions/grant", grant_query, 2683);
   if (rc != 0)
     return rc;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 2685;
   g_autofree gchar *grant_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
-      "/policy/permissions/grant", grant_query, &status, &body,
-      &grant_request_id);
+          "/policy/permissions/grant", grant_query, &status, &body,
+          &grant_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 135;
   if (!direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 136;
   if (permission_state_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 204;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe grant_audit = {
@@ -9604,7 +9613,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .request_id = grant_request_id,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &grant_audit) != WYRELOG_E_OK)
+      &grant_audit) != WYRELOG_E_OK)
     return 196;
   if (grant_audit.matches != 1)
     return 197;
@@ -9617,7 +9626,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &grant_auth_audit) != WYRELOG_E_OK)
+      &grant_auth_audit) != WYRELOG_E_OK)
     return 202;
   if (grant_auth_audit.matches != 1)
     return 203;
@@ -9625,83 +9634,83 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
-      "/policy/permissions/grant",
-      "subject=bearer-target&perm=site.policy.read&scope=tenant-a"
-      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-      access_token, &status, &body);
+          "/policy/permissions/grant",
+          "subject=bearer-target&perm=site.policy.read&scope=tenant-a"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+          access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 165;
   if (!direct_permission_exists (handle, "bearer-target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 166;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *builtin_grant_query =
       g_strdup_printf ("subject=builtin-target&perm=wr.stream.read"
-      "&scope=tenant-a&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=49", session_token);
+          "&scope=tenant-a&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", builtin_grant_query, &status, &body);
+          "/policy/permissions/grant", builtin_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 156;
   if (!direct_permission_exists (handle, "builtin-target", "wr.stream.read",
-          "tenant-a"))
+      "tenant-a"))
     return 157;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/revoke", builtin_grant_query, &status, &body);
+          "/policy/permissions/revoke", builtin_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 158;
   if (direct_permission_exists (handle, "builtin-target", "wr.stream.read",
-          "tenant-a"))
+      "tenant-a"))
     return 159;
   g_clear_pointer (&body, g_free);
 
   rc = check_valid_policy_aliases (server, handle, session, base_url,
-      "/policy/permissions/revoke", grant_query, 2686);
+          "/policy/permissions/revoke", grant_query, 2686);
   if (rc != 0)
     return rc;
   if (!direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 2688;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/revoke", grant_query, &status, &body);
+          "/policy/permissions/revoke", grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 137;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+      "tenant-a"))
     return 138;
 
   g_autofree gchar *missing_perm_revoke_query =
       g_strdup_printf ("subject=target&perm=site.missing&scope=tenant-a"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=49", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", session_token);
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/revoke", missing_perm_revoke_query, &status, &body);
+          "/policy/permissions/revoke", missing_perm_revoke_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
     return 149;
 
   if (wyl_policy_store_upsert_role (store, "site.reader",
-          "site reader") != WYRELOG_E_OK)
+      "site reader") != WYRELOG_E_OK)
     return 139;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", "subject=role-target&role=site.missing"
-      "&scope=tenant-b&session_token=unknown&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=29", &status, &body);
+          "/policy/roles/grant", "subject=role-target&role=site.missing"
+          "&scope=tenant-b&session_token=unknown&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=29", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
@@ -9709,11 +9718,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *role_denied_query =
       g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=29", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=29", session_token);
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", role_denied_query, &status, &body);
+          "/policy/roles/grant", role_denied_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
@@ -9723,23 +9732,23 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *role_missing_denied_query =
       g_strdup_printf ("subject=role-target&role=site.missing&scope=tenant-b"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=29", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=29", session_token);
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", role_missing_denied_query, &status, &body);
+          "/policy/roles/grant", role_missing_denied_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
     return 151;
 
   if (grant_policy_role_authority (handle, "http-policy-admin",
-          "tenant-b") != WYRELOG_E_OK)
+      "tenant-b") != WYRELOG_E_OK)
     return 142;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", role_missing_denied_query, &status, &body);
+          "/policy/roles/grant", role_missing_denied_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
@@ -9747,11 +9756,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *role_guard_denied_query =
       g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=30", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=30", session_token);
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", role_guard_denied_query, &status, &body);
+          "/policy/roles/grant", role_guard_denied_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
@@ -9761,25 +9770,25 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *role_grant_query =
       g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
-      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=29", session_token);
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=29", session_token);
   g_clear_pointer (&body, g_free);
   rc = check_valid_policy_aliases (server, handle, session, base_url,
-      "/policy/roles/grant", role_grant_query, 2689);
+          "/policy/roles/grant", role_grant_query, 2689);
   if (rc != 0)
     return rc;
   if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
     return 2691;
   g_autofree gchar *role_grant_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
-      "/policy/roles/grant", role_grant_query, &status, &body,
-      &role_grant_request_id);
+          "/policy/roles/grant", role_grant_query, &status, &body,
+          &role_grant_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 145;
   if (!role_membership_exists (handle, "role-target", "site.reader",
-          "tenant-b"))
+      "tenant-b"))
     return 146;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe role_grant_audit = {
@@ -9790,7 +9799,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .request_id = role_grant_request_id,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &role_grant_audit) != WYRELOG_E_OK)
+      &role_grant_audit) != WYRELOG_E_OK)
     return 198;
   if (role_grant_audit.matches != 1)
     return 199;
@@ -9798,40 +9807,40 @@ check_policy_permission_mutation_contract (SoupServer *server,
 
   g_autofree gchar *builtin_role_query =
       g_strdup_printf ("subject=builtin-role-target&role=wr.auditor"
-      "&scope=tenant-b&session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=29", session_token);
+          "&scope=tenant-b&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=29", session_token);
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", builtin_role_query, &status, &body);
+          "/policy/roles/grant", builtin_role_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 160;
   if (!role_membership_exists (handle, "builtin-role-target", "wr.auditor",
-          "tenant-b"))
+      "tenant-b"))
     return 161;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/revoke", builtin_role_query, &status, &body);
+          "/policy/roles/revoke", builtin_role_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 162;
   if (role_membership_exists (handle, "builtin-role-target", "wr.auditor",
-          "tenant-b"))
+      "tenant-b"))
     return 163;
 
   g_clear_pointer (&body, g_free);
   rc = check_valid_policy_aliases (server, handle, session, base_url,
-      "/policy/roles/revoke", role_grant_query, 2692);
+          "/policy/roles/revoke", role_grant_query, 2692);
   if (rc != 0)
     return rc;
   if (!role_membership_exists (handle, "role-target", "site.reader",
-          "tenant-b"))
+      "tenant-b"))
     return 2694;
   rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/revoke", role_grant_query, &status, &body);
+          "/policy/roles/revoke", role_grant_query, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -9849,15 +9858,15 @@ grant_audit_read (WylHandle *handle, const gchar *subject_id,
 {
   wyrelog_error_t rc =
       insert_symbol_row2 (handle, "role_permission", "wr.http-audit-role",
-      "wr.audit.read");
+          "wr.audit.read");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject_id,
-      "wr.http-audit-role", scope);
+          "wr.http-audit-role", scope);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", subject_id,
-      "authenticated");
+          "authenticated");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "session_state", scope, "active");
@@ -9894,7 +9903,7 @@ send_raw_audit (SoupSession *session, const gchar *base_url,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 92;
   gint rc = check_response_request_id_header (msg, 110);
@@ -9922,13 +9931,13 @@ send_raw_audit_bearer_full (SoupSession *session, const gchar *base_url,
   if (msg == NULL)
     return 91;
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   soup_message_headers_replace (soup_message_get_request_headers (msg),
       "Authorization", authorization);
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 92;
   gint rc = check_response_request_id_header (msg, 111);
@@ -9936,7 +9945,7 @@ send_raw_audit_bearer_full (SoupSession *session, const gchar *base_url,
     return rc;
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   gsize size = 0;
@@ -9952,7 +9961,7 @@ send_raw_audit_bearer (SoupSession *session, const gchar *base_url,
     gchar **out_body)
 {
   return send_raw_audit_bearer_full (session, base_url, query, access_token,
-      out_status, out_body, NULL);
+             out_status, out_body, NULL);
 }
 
 static gint
@@ -9966,7 +9975,7 @@ runtime_audit_events_table_exists (WylHandle *handle, gboolean *out_exists)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result = { 0 };
   duckdb_state rc = duckdb_query (conn,
-      "SELECT COUNT(*) FROM audit_events;", &result);
+          "SELECT COUNT(*) FROM audit_events;", &result);
   duckdb_destroy_result (&result);
   *out_exists = rc == DuckDBSuccess;
   return 0;
@@ -9982,7 +9991,7 @@ check_valid_audit_aliases (SoupServer *server, WylHandle *handle,
     "/audit/eventsx",
   };
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   for (gsize i = 0; i < G_N_ELEMENTS (aliases); i++) {
     g_autofree gchar *path = g_strdup_printf ("%s?%s", aliases[i], query);
     WylDaemonExactRouteProbeSnapshot probe_before = { 0 }, probe_after = { 0 };
@@ -9995,19 +10004,19 @@ check_valid_audit_aliases (SoupServer *server, WylHandle *handle,
         || runtime_audit_events_table_exists (handle, &table_before) != 0
         || table_before
         || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-            "/audit/events", &probe_before)
+        "/audit/events", &probe_before)
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-            &state_before)
+        &state_before)
         || send_raw_path_probe (session, "GET", base_url, path, authorization,
-            NULL, &status, &body) != 0
+        NULL, &status, &body) != 0
         || status != 404
         || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !wyl_daemon_http_exact_route_probe_snapshot_for_test (server,
-            "/audit/events", &probe_after)
+        "/audit/events", &probe_after)
         || probe_after.selected != probe_before.selected + 1
         || probe_after.terminal_entries != probe_before.terminal_entries
         || !wyl_daemon_http_exact_route_state_snapshot_for_test (server,
-            &state_after)
+        &state_after)
         || memcmp (&state_before, &state_after, sizeof state_before) != 0
         || !policy_audit_event_count (handle, &audit_after)
         || audit_after != audit_before
@@ -10039,8 +10048,8 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit (session, base_url,
-      "session_token=unknown&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69", &status, &body);
+          "session_token=unknown&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=69", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
@@ -10051,15 +10060,15 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *bearer_allowed =
       g_strdup_printf ("guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69");
+          "&guard_risk=69");
   rc = check_valid_audit_aliases (server, handle, session, base_url,
-      bearer_allowed, access_token);
+          bearer_allowed, access_token);
   if (rc != 0)
     return rc;
   g_autofree gchar *bearer_allowed_request_id = NULL;
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit_bearer_full (session, base_url, bearer_allowed,
-      access_token, &status, &body, &bearer_allowed_request_id);
+          access_token, &status, &body, &bearer_allowed_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "[") == NULL)
@@ -10070,8 +10079,8 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit (session, base_url,
-      "session_token=unknown&guard_timestamp=abc&guard_loc_class=public"
-      "&guard_risk=69", &status, &body);
+          "session_token=unknown&guard_timestamp=abc&guard_loc_class=public"
+          "&guard_risk=69", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
@@ -10080,7 +10089,7 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *malformed =
       g_strdup_printf ("session_token=%s&guard_timestamp=abc"
-      "&guard_loc_class=public&guard_risk=69", session_token);
+          "&guard_loc_class=public&guard_risk=69", session_token);
   rc = send_raw_audit (session, base_url, malformed, &status, &body);
   if (rc != 0)
     return rc;
@@ -10090,7 +10099,7 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *denied =
       g_strdup_printf ("session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=70", session_token);
+          "&guard_loc_class=public&guard_risk=70", session_token);
   rc = send_raw_audit (session, base_url, denied, &status, &body);
   if (rc != 0)
     return rc;
@@ -10100,9 +10109,9 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bearer_unknown_tenant =
       g_strdup_printf ("tenant=unknown&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=69");
+          "&guard_loc_class=public&guard_risk=69");
   rc = send_raw_audit_bearer (session, base_url, bearer_unknown_tenant,
-      access_token, &status, &body);
+          access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
@@ -10115,9 +10124,9 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
       g_uri_escape_string (request_filter, NULL, TRUE);
   g_autofree gchar *request_filter_query =
       g_strdup_printf ("filter=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=69", escaped_request_filter);
+          "&guard_loc_class=public&guard_risk=69", escaped_request_filter);
   rc = send_raw_audit_bearer (session, base_url, request_filter_query,
-      access_token, &status, &body);
+          access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -10130,9 +10139,9 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
   g_autofree gchar *mixed =
       g_strdup_printf ("session_token=%s&guard_timestamp=123"
-      "&guard_loc_class=public&guard_risk=69", session_token);
+          "&guard_loc_class=public&guard_risk=69", session_token);
   rc = send_raw_audit_bearer (session, base_url, mixed, access_token,
-      &status, &body);
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
@@ -10140,8 +10149,8 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit_bearer (session, base_url,
-      "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
-      "malformed.jwt", &status, &body);
+          "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
+          "malformed.jwt", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
@@ -10149,8 +10158,8 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit_bearer (session, base_url,
-      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      "malformed.jwt", &status, &body);
+          "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+          "malformed.jwt", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
@@ -10168,33 +10177,33 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
     gint failure_code;
   } invalid_tokens[] = {
     {"unknown-session", "http-audit-user", "authenticated", "wyrelogd",
-        "wyrelog-client", 0, 110},
+     "wyrelog-client", 0, 110},
     {session_token, "other-user", "authenticated", "wyrelogd",
-        "wyrelog-client", 0, 111},
+     "wyrelog-client", 0, 111},
     {session_token, "http-audit-user", "mfa_required", "wyrelogd",
-        "wyrelog-client", 0, 112},
+     "wyrelog-client", 0, 112},
     {session_token, "http-audit-user", "authenticated", "wyrelogd",
-        "other-audience", 0, 113},
+     "other-audience", 0, 113},
     {session_token, "http-audit-user", "authenticated", "other-issuer",
-        "wyrelog-client", 0, 116},
+     "wyrelog-client", 0, 116},
     {session_token, "http-audit-user", "authenticated", "wyrelogd",
-        "wyrelog-client", -1000, 114},
+     "wyrelog-client", -1000, 114},
     {session_token, "http-audit-user", "authenticated", "wyrelogd",
-        "wyrelog-client", 60, 115},
+     "wyrelog-client", 60, 115},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_tokens); i++) {
     g_autofree gchar *bad_token = NULL;
     if (sign_test_access_token (server, invalid_tokens[i].session_id,
-            invalid_tokens[i].subject, invalid_tokens[i].principal_state,
-            invalid_tokens[i].issuer, invalid_tokens[i].audience,
-            now + invalid_tokens[i].issued_at_delta, &bad_token)
+        invalid_tokens[i].subject, invalid_tokens[i].principal_state,
+        invalid_tokens[i].issuer, invalid_tokens[i].audience,
+        now + invalid_tokens[i].issued_at_delta, &bad_token)
         != WYRELOG_E_OK)
       return invalid_tokens[i].failure_code + 40;
 
     g_clear_pointer (&body, g_free);
     rc = send_raw_audit_bearer (session, base_url,
-        "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-        bad_token, &status, &body);
+            "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+            bad_token, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
@@ -10203,13 +10212,13 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *unregistered_token = NULL;
   if (sign_test_access_token_with_jti (server, "unregistered-access-token",
-          session_token, "http-audit-user", "authenticated", "wyrelogd",
-          "wyrelog-client", now, &unregistered_token) != WYRELOG_E_OK)
+      session_token, "http-audit-user", "authenticated", "wyrelogd",
+      "wyrelog-client", now, &unregistered_token) != WYRELOG_E_OK)
     return 161;
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit_bearer (session, base_url,
-      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      unregistered_token, &status, &body);
+          "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+          unregistered_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
@@ -10217,14 +10226,14 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_autofree gchar *session_jti_token = NULL;
   if (sign_test_access_token_with_jti (server, session_token, session_token,
-          "http-audit-user", "authenticated", "wyrelogd", "wyrelog-client",
-          now, &session_jti_token) != WYRELOG_E_OK)
+      "http-audit-user", "authenticated", "wyrelogd", "wyrelog-client",
+      now, &session_jti_token) != WYRELOG_E_OK)
     return 158;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit_bearer (session, base_url,
-      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      session_jti_token, &status, &body);
+          "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+          session_jti_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
@@ -10232,7 +10241,7 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
 
   g_autoptr (WylAuditIter) invalid_filter = NULL;
   if (wyl_client_audit_query_with_guard_context (client, "action()", 123,
-          "public", 69, &invalid_filter) != WYRELOG_E_OK)
+      "public", 69, &invalid_filter) != WYRELOG_E_OK)
     return 99;
   gboolean has_next = FALSE;
   if (wyl_audit_iter_next (invalid_filter, &has_next) != WYRELOG_E_IO)
@@ -10269,7 +10278,7 @@ malform_runtime_audit_events_table (WylHandle *handle)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result = { 0 };
   if (duckdb_query (conn,
-          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -10315,7 +10324,7 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 {
   g_autoptr (WylAuditIter) iter = NULL;
   if (wyl_client_audit_query_with_guard_context (client, filter, 123,
-          "public", 69, &iter) != WYRELOG_E_OK)
+      "public", 69, &iter) != WYRELOG_E_OK)
     return 80;
 
   while (TRUE) {
@@ -10356,11 +10365,11 @@ prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id,
     *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_SETUP_FAILED;
   wyl_service_principal_t principal = { 0 };
   g_autofree gchar *request_id = g_strdup_printf ("principal-create:%s",
-      subject_id);
+          subject_id);
   if (request_id == NULL)
     return WYRELOG_E_INTERNAL;
   wyrelog_error_t rc = wyl_service_principal_create (handle, subject_id,
-      subject_id, "admin", request_id, &principal);
+          subject_id, "admin", request_id, &principal);
   if (rc != WYRELOG_E_OK) {
     if (out_failure != NULL)
       *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED;
@@ -10369,7 +10378,7 @@ prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id,
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   rc = wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-      "tenant-a", &created);
+          "tenant-a", &created);
   if (rc != WYRELOG_E_OK) {
     if (out_failure != NULL)
       *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED;
@@ -10395,9 +10404,9 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   g_autofree gchar *access_token = NULL;
   if (wyl_id_new (&session_id) != WYRELOG_E_OK
       || wyl_id_format (&session_id, session_token,
-          sizeof session_token) != WYRELOG_E_OK
+      sizeof session_token) != WYRELOG_E_OK
       || !seed_management_human_access_token (server, session_token,
-          "http-allow-user", &access_token))
+      "http-allow-user", &access_token))
     return 1922;
   gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
   if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
@@ -10405,14 +10414,14 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1925;
   g_autofree gchar *issue_body =
       g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
-      issue_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+          "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
+          issue_request_id);
   g_autofree gchar *query =
       g_strdup ("tenant=tenant-a&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69");
+          "&guard_risk=69");
   gint rc = send_raw_reconcile (session, "POST", base_url, NULL, issue_body,
-      &status, &body);
+          &status, &body);
   if (rc != 0 || status != 401)
     return 1923;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
@@ -10422,23 +10431,23 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1923;
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, issue_body, &status, &body);
+          access_token, issue_body, &status, &body);
   if (rc != 0 || status != 403)
     return 1923;
   wyrelog_error_t grant_rc = wyl_policy_store_set_principal_state (store,
-      "http-allow-user", "authenticated");
+          "http-allow-user", "authenticated");
   if (grant_rc != WYRELOG_E_OK)
     return 1923;
   grant_rc = wyl_policy_store_grant_direct_permission (store,
-      "http-allow-user", "wr.service_credential.manage", session_token);
+          "http-allow-user", "wr.service_credential.manage", session_token);
   if (grant_rc != WYRELOG_E_OK)
     return 1923;
   grant_rc = wyl_policy_store_set_session_state (store, session_token,
-      "active");
+          "active");
   if (grant_rc != WYRELOG_E_OK)
     return 1923;
   grant_rc = wyl_policy_store_set_permission_state (store, "http-allow-user",
-      "wr.service_credential.manage", session_token, "armed");
+          "wr.service_credential.manage", session_token, "armed");
   if (grant_rc != WYRELOG_E_OK)
     return 1923;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
@@ -10447,7 +10456,7 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   ServiceCredentialSubjectPrepareFailure issue_prepare_failure =
       SERVICE_CREDENTIAL_SUBJECT_PREPARE_SETUP_FAILED;
   wyrelog_error_t issue_prepare_rc = prepare_service_credential_subject
-      (handle, "svc:reconcile:issue", &issue_prepare_failure);
+        (handle, "svc:reconcile:issue", &issue_prepare_failure);
   if (issue_prepare_rc != WYRELOG_E_OK) {
     /*
      * Keep legacy 1924 for the principal write and use compact fallback
@@ -10473,25 +10482,25 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   }
   wyl_service_credential_issue_result_t issue_result = { 0 };
   if (wyl_service_credential_issue (handle, "svc:reconcile:issue",
-          "tenant-a", "http-allow-user", issue_request_id,
-          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issue_result)
+      "tenant-a", "http-allow-user", issue_request_id,
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issue_result)
       != WYRELOG_E_OK)
     return 1926;
   g_autofree gchar *issue_credential_id = g_strdup
-      (issue_result.credential.credential_id);
+        (issue_result.credential.credential_id);
   guint64 issue_generation = issue_result.credential.generation;
   wyl_service_credential_issue_result_clear (&issue_result);
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, issue_body, &status, &body);
+          access_token, issue_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"status\":\"committed\"") == NULL ||
       strstr (body, "\"operation\":\"issue\"") == NULL)
     return 1927;
   g_autofree gchar *response_issue_credential_id = extract_json_string (body,
-      "credential_id");
+          "credential_id");
   if (response_issue_credential_id == NULL ||
       g_strcmp0 (response_issue_credential_id, issue_credential_id) != 0)
     return 1928;
@@ -10501,46 +10510,46 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1929;
 
   g_autofree gchar *noncanonical_request_body = g_strdup
-      ("{\"version\":1,\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
-      "\"operation\":\"issue\",\"target\":{\"subject\":"
-      "\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}");
+        ("{\"version\":1,\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
+          "\"operation\":\"issue\",\"target\":{\"subject\":"
+          "\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}");
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, noncanonical_request_body, &status, &body);
+          access_token, noncanonical_request_body, &status, &body);
   if (rc != 0 || status != 400)
     return 1929;
   g_autofree gchar *unknown_operation_body = g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"revoke\","
-      "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
-      issue_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"revoke\","
+          "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
+          issue_request_id);
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, unknown_operation_body, &status, &body);
+          access_token, unknown_operation_body, &status, &body);
   if (rc != 0 || status != 400)
     return 1929;
 
   g_autofree gchar *mismatched_issue_body = g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:reconcile:issue\","
-      "\"tenant\":\"__wr_default\"}}", issue_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+          "\"target\":{\"subject\":\"svc:reconcile:issue\","
+          "\"tenant\":\"__wr_default\"}}", issue_request_id);
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, mismatched_issue_body, &status, &body);
+          access_token, mismatched_issue_body, &status, &body);
   if (rc != 0 || status != 400)
     return 1929;
 
   g_autofree gchar *unknown_rotate_body = g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
-      "\"target\":{\"old_credential_id\":"
-      "\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"}}", issue_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
+          "\"target\":{\"old_credential_id\":"
+          "\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"}}", issue_request_id);
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, unknown_rotate_body, &status, &body);
+          access_token, unknown_rotate_body, &status, &body);
   if (rc != 0 || status != 404)
     return 1929;
 
   if (prepare_service_credential_subject (handle, "svc:reconcile:rotate",
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return 1930;
   gchar rotate_seed_request_id[WYL_REQUEST_ID_STRING_BUF];
   if (wyl_request_id_new (rotate_seed_request_id, sizeof rotate_seed_request_id)
@@ -10548,8 +10557,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1931;
   wyl_service_credential_issue_result_t rotate_seed = { 0 };
   if (wyl_service_credential_issue (handle, "svc:reconcile:rotate",
-          "tenant-a", "http-allow-user", rotate_seed_request_id,
-          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rotate_seed)
+      "tenant-a", "http-allow-user", rotate_seed_request_id,
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rotate_seed)
       != WYRELOG_E_OK)
     return 1932;
   g_autofree gchar *rotate_old_credential_id =
@@ -10562,8 +10571,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1933;
   wyl_service_credential_issue_result_t rotate_result = { 0 };
   if (wyl_service_credential_rotate (handle, rotate_old_credential_id,
-          "http-allow-user", rotate_request_id,
-          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rotate_result)
+      "http-allow-user", rotate_request_id,
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rotate_result)
       != WYRELOG_E_OK)
     return 1934;
   g_autofree gchar *rotate_credential_id =
@@ -10573,19 +10582,19 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
 
   g_autofree gchar *rotate_body =
       g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
-      "\"target\":{\"old_credential_id\":\"%s\"}}",
-      rotate_request_id, rotate_old_credential_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
+          "\"target\":{\"old_credential_id\":\"%s\"}}",
+          rotate_request_id, rotate_old_credential_id);
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, rotate_body, &status, &body);
+          access_token, rotate_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"status\":\"committed\"") == NULL ||
       strstr (body, "\"operation\":\"rotate\"") == NULL)
     return 1935;
   g_autofree gchar *response_rotate_credential_id = extract_json_string (body,
-      "credential_id");
+          "credential_id");
   if (response_rotate_credential_id == NULL ||
       g_strcmp0 (response_rotate_credential_id, rotate_credential_id) != 0)
     return 1936;
@@ -10600,16 +10609,16 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1938;
   g_autofree gchar *pending_body =
       g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:reconcile:pending\",\"tenant\":\"tenant-a\"}}",
-      pending_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+          "\"target\":{\"subject\":\"svc:reconcile:pending\",\"tenant\":\"tenant-a\"}}",
+          pending_request_id);
   if (prepare_service_credential_subject (handle, "svc:reconcile:pending",
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return 1939;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, pending_body, &status, &body);
+          access_token, pending_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -10620,7 +10629,7 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, pending_body, &status, &body);
+          access_token, pending_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -10629,15 +10638,15 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
 
   g_autofree gchar *conflict_body =
       g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:reconcile:conflict\",\"tenant\":\"tenant-a\"}}",
-      pending_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+          "\"target\":{\"subject\":\"svc:reconcile:conflict\",\"tenant\":\"tenant-a\"}}",
+          pending_request_id);
   if (prepare_service_credential_subject (handle, "svc:reconcile:conflict",
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return 1942;
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, conflict_body, &status, &body);
+          access_token, conflict_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 409 ||
@@ -10646,17 +10655,17 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
 
   g_autofree gchar *invalid_body =
       g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:reconcile:bad\",\"tenant\":\"tenant-a\","
-      "\"extra\":\"x\"}}", pending_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+          "\"target\":{\"subject\":\"svc:reconcile:bad\",\"tenant\":\"tenant-a\","
+          "\"extra\":\"x\"}}", pending_request_id);
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile_bearer (session, "POST", base_url, query,
-      access_token, invalid_body, &status, &body);
+          access_token, invalid_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 ||
       strstr (body,
-          "\"error\":\"invalid_service_credential_operation_reconcile_request\"")
+      "\"error\":\"invalid_service_credential_operation_reconcile_request\"")
       == NULL)
     return 1944;
 
@@ -10683,7 +10692,7 @@ check_service_profile_reconcile_denied (WylHandle *handle)
     return 1945;
   }
   GThread *thread = g_thread_new ("daemon-http-reconcile-service-profile",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL) {
     g_main_loop_quit (http.loop);
@@ -10699,7 +10708,7 @@ check_service_profile_reconcile_denied (WylHandle *handle)
   guint status = 0;
   g_autofree gchar *body = NULL;
   gint rc = base_url == NULL ? 1947 : send_raw_reconcile (session, "POST",
-      base_url, NULL, "{}", &status, &body);
+          base_url, NULL, "{}", &status, &body);
   /* The status and recover endpoints deny a non-SYSTEM profile the same way,
    * before any body or session is inspected. */
   guint status_status = 0;
@@ -10708,13 +10717,13 @@ check_service_profile_reconcile_denied (WylHandle *handle)
   g_autofree gchar *recover_body = NULL;
   if (rc == 0 && status == 403) {
     if (send_raw_service_principal_full (session, "GET", base_url,
-            "/service-credential-operations", "tenant=tenant-a", NULL,
-            &status_status, &status_body) != 0 || status_status != 403)
+        "/service-credential-operations", "tenant=tenant-a", NULL,
+        &status_status, &status_body) != 0 || status_status != 403)
       rc = 1949;
     else if (send_raw_service_principal_full (session, "POST", base_url,
-            "/service-credential-operations/recover", "tenant=tenant-a",
-            "{\"version\":\"1\",\"request_id\":\"111111111111111111111111111\"}",
-            &recover_status, &recover_body) != 0 || recover_status != 403)
+        "/service-credential-operations/recover", "tenant=tenant-a",
+        "{\"version\":\"1\",\"request_id\":\"111111111111111111111111111\"}",
+        &recover_status, &recover_body) != 0 || recover_status != 403)
       rc = 1950;
   }
   g_main_loop_quit (http.loop);
@@ -10732,12 +10741,12 @@ prepare_service_token_subject (WylHandle *handle, const gchar *subject_id)
 {
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, subject_id,
-          subject_id, "admin", "principal-create", &principal), ==,
+      subject_id, "admin", "principal-create", &principal), ==,
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-      (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
 }
@@ -10748,7 +10757,7 @@ issue_service_token_credential (WylHandle *handle, const gchar *subject_id,
     wyl_service_credential_issue_result_t *out)
 {
   g_assert_cmpint (wyl_service_credential_issue (handle, subject_id,
-          tenant_id, "admin", request_id, expires_at_us, out), ==,
+      tenant_id, "admin", request_id, expires_at_us, out), ==,
       WYRELOG_E_OK);
 }
 
@@ -10847,12 +10856,12 @@ service_response_test_server_start (ServiceResponseTestServer *fixture,
   fixture->http.loop = g_main_loop_new (fixture->context, FALSE);
   g_main_context_push_thread_default (fixture->context);
   fixture->http.server = wyl_daemon_start_http_server (&options, handle,
-      &error);
+          &error);
   g_main_context_pop_thread_default (fixture->context);
   if (fixture->http.server == NULL)
     return FALSE;
   fixture->thread = g_thread_new ("service-response-server",
-      test_http_server_thread_ctx, &fixture->http);
+          test_http_server_thread_ctx, &fixture->http);
   GSList *uris = soup_server_get_uris (fixture->http.server);
   if (uris != NULL)
     fixture->base_url = g_uri_to_string (uris->data);
@@ -10973,29 +10982,29 @@ service_abort_mutation_thread (gpointer data)
   switch (mutation->kind) {
     case SERVICE_ABORT_RACE_CREDENTIAL_ROTATE:
       mutation->rc = wyl_daemon_http_rotate_service_credential_for_test
-          (mutation->server, mutation->credential_id,
-          mutation->credential_generation, "000000000000000000000000240",
-          service_abort_mutation_checkpoint, mutation);
+            (mutation->server, mutation->credential_id,
+              mutation->credential_generation, "000000000000000000000000240",
+              service_abort_mutation_checkpoint, mutation);
       break;
     case SERVICE_ABORT_RACE_CREDENTIAL_REVOKE:
       mutation->rc = wyl_daemon_http_revoke_service_credential_for_test
-          (mutation->server, mutation->credential_id,
-          "000000000000000000000000241",
-          service_abort_mutation_checkpoint, mutation);
+            (mutation->server, mutation->credential_id,
+              "000000000000000000000000241",
+              service_abort_mutation_checkpoint, mutation);
       break;
     case SERVICE_ABORT_RACE_PRINCIPAL_DISABLE:
       mutation->rc = wyl_daemon_http_disable_service_principal_for_test
-          (mutation->server, mutation->subject,
-          "000000000000000000000000242",
-          service_abort_mutation_checkpoint, mutation);
+            (mutation->server, mutation->subject,
+              "000000000000000000000000242",
+              service_abort_mutation_checkpoint, mutation);
       break;
     case SERVICE_ABORT_RACE_TENANT_SEAL:
       mutation->rc = wyl_daemon_http_seal_tenant_for_test (mutation->server,
-          mutation->tenant, service_abort_mutation_checkpoint, mutation);
+              mutation->tenant, service_abort_mutation_checkpoint, mutation);
       break;
     case SERVICE_ABORT_RACE_EXPIRY:
       mutation->rc = wyl_daemon_http_retire_due_service_auth_for_test
-          (mutation->server);
+            (mutation->server);
       break;
     case SERVICE_ABORT_PARTIAL_MISMATCH:
     case SERVICE_ABORT_CROSSED_MISMATCH:
@@ -11010,27 +11019,27 @@ dropped_service_token_response_thread (gpointer data)
 {
   DroppedServiceTokenResponse *request = data;
   g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
-      NULL);
+          NULL);
   g_autoptr (GSocketClient) client = g_socket_client_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) connection = uri != NULL
       ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
-      g_uri_get_port (uri), NULL, &error) : NULL;
+          g_uri_get_port (uri), NULL, &error) : NULL;
   if (connection == NULL) {
     request->rc = 1;
     return NULL;
   }
   g_autofree gchar *wire = g_strdup_printf
-      ("POST /auth/service-token HTTP/1.1\r\nHost: %s:%d\r\n"
-      "Content-Type: application/json\r\nConnection: close\r\n"
-      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
-      g_uri_get_host (uri), g_uri_get_port (uri),
-      strlen (request->request_body), request->request_body);
+        ("POST /auth/service-token HTTP/1.1\r\nHost: %s:%d\r\n"
+          "Content-Type: application/json\r\nConnection: close\r\n"
+          "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+          g_uri_get_host (uri), g_uri_get_port (uri),
+          strlen (request->request_body), request->request_body);
   gsize written = 0;
   GOutputStream *output = g_io_stream_get_output_stream
-      (G_IO_STREAM (connection));
+        (G_IO_STREAM (connection));
   if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
-          &error) || written != strlen (wire)
+      &error) || written != strlen (wire)
       || !g_output_stream_flush (output, NULL, &error)) {
     request->rc = 2;
     return NULL;
@@ -11054,28 +11063,28 @@ finished_service_token_response_thread (gpointer data)
 {
   FinishedServiceTokenResponse *request = data;
   g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
-      NULL);
+          NULL);
   g_autoptr (GSocketClient) client = g_socket_client_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) connection = uri != NULL
       ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
-      g_uri_get_port (uri), NULL, &error) : NULL;
+          g_uri_get_port (uri), NULL, &error) : NULL;
   if (connection == NULL) {
     request->rc = 1;
     return NULL;
   }
   g_socket_set_timeout (g_socket_connection_get_socket (connection), 15);
   g_autofree gchar *wire = g_strdup_printf
-      ("POST /auth/service-token HTTP/1.1\r\nHost: %s:%d\r\n"
-      "Content-Type: application/json\r\nConnection: close\r\n"
-      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
-      g_uri_get_host (uri), g_uri_get_port (uri),
-      strlen (request->request_body), request->request_body);
+        ("POST /auth/service-token HTTP/1.1\r\nHost: %s:%d\r\n"
+          "Content-Type: application/json\r\nConnection: close\r\n"
+          "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+          g_uri_get_host (uri), g_uri_get_port (uri),
+          strlen (request->request_body), request->request_body);
   GOutputStream *output = g_io_stream_get_output_stream
-      (G_IO_STREAM (connection));
+        (G_IO_STREAM (connection));
   gsize written = 0;
   if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
-          &error) || written != strlen (wire)
+      &error) || written != strlen (wire)
       || !g_output_stream_flush (output, NULL, &error)) {
     request->rc = 2;
     return NULL;
@@ -11086,7 +11095,7 @@ finished_service_token_response_thread (gpointer data)
   GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
   for (;;) {
     gssize count = g_input_stream_read (input, chunk, sizeof chunk, NULL,
-        &error);
+            &error);
     if (count < 0) {
       request->rc = 3;
       return NULL;
@@ -11096,9 +11105,9 @@ finished_service_token_response_thread (gpointer data)
     g_byte_array_append (response, chunk, (guint) count);
     gsize content_length = 0;
     if (http_response_parse_content_length (response->data, response->len,
-            &content_length)) {
+        &content_length)) {
       const gchar *headers_end = g_strstr_len ((const gchar *) response->data,
-          response->len, "\r\n\r\n");
+              response->len, "\r\n\r\n");
       if (headers_end != NULL) {
         gsize header_length =
             (gsize) (headers_end - (const gchar *) response->data);
@@ -11144,15 +11153,15 @@ send_service_token_response_and_wait (SoupServer *server,
   wyl_daemon_http_set_service_response_checkpoint_for_test (server,
       service_response_delivery_checkpoint, barrier);
   gint rc = send_raw_service_principal_full (session, "POST", base_url,
-      "/auth/service-token", NULL, request_body, out_status, out_body);
+          "/auth/service-token", NULL, request_body, out_status, out_body);
   if (rc == 0) {
     g_mutex_lock (&barrier->mutex);
     gboolean terminal = service_response_delivery_wait (barrier,
-        &barrier->terminal);
+            &barrier->terminal);
     gboolean body_wiped = service_response_delivery_wait (barrier,
-        &barrier->body_wiped);
+            &barrier->body_wiped);
     gboolean destroyed = service_response_delivery_wait (barrier,
-        &barrier->authority_destroyed);
+            &barrier->authority_destroyed);
     *out_completed = terminal && body_wiped && destroyed
         && barrier->terminal_phase == WYL_DAEMON_SERVICE_RESPONSE_FINISHED;
     g_mutex_unlock (&barrier->mutex);
@@ -11183,8 +11192,8 @@ service_response_retire_wait (ServiceResponseRetireBarrier *barrier)
 }
 
 static gboolean
-    service_response_retire_wait_before_write
-    (ServiceResponseRetireBarrier * barrier)
+service_response_retire_wait_before_write
+  (ServiceResponseRetireBarrier * barrier)
 {
   gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
   g_mutex_lock (&barrier->mutex);
@@ -11240,19 +11249,19 @@ check_service_response_delivery_finished (SoupServer *server,
   wyl_daemon_http_set_service_response_checkpoint_for_test (server,
       service_response_delivery_checkpoint, &barrier);
   GThread *thread = g_thread_new ("finished-service-response",
-      finished_service_token_response_thread, &finished);
+          finished_service_token_response_thread, &finished);
 
   g_mutex_lock (&barrier.mutex);
   gboolean pre_handoff = service_response_delivery_wait (&barrier,
-      &barrier.pre_handoff);
+          &barrier.pre_handoff);
   barrier.release_handler = TRUE;
   g_cond_broadcast (&barrier.changed);
   gboolean terminal = service_response_delivery_wait (&barrier,
-      &barrier.terminal);
+          &barrier.terminal);
   gboolean body_wiped = service_response_delivery_wait (&barrier,
-      &barrier.body_wiped);
+          &barrier.body_wiped);
   gboolean destroyed = service_response_delivery_wait (&barrier,
-      &barrier.authority_destroyed);
+          &barrier.authority_destroyed);
   g_mutex_unlock (&barrier.mutex);
   g_thread_join (thread);
   wyl_daemon_http_set_service_response_checkpoint_for_test (server, NULL, NULL);
@@ -11290,15 +11299,15 @@ check_service_response_delivery_finished (SoupServer *server,
     result = 195916;
   if (result == 0) {
     g_autofree gchar *token = extract_json_string (finished.body,
-        "access_token");
+            "access_token");
     g_autofree gchar *jti = token != NULL ? access_token_jti (server,
-        token) : NULL;
+            token) : NULL;
     g_autofree gchar *session = NULL;
     g_autofree gchar *actor = NULL;
     g_autofree gchar *tenant = NULL;
     if (token == NULL || jti == NULL
         || wyl_daemon_http_resolve_bearer_for_test (server, token, &session,
-            &actor, &tenant) != WYRELOG_E_OK
+        &actor, &tenant) != WYRELOG_E_OK
         || g_strcmp0 (session, barrier.session_id) != 0
         || g_strcmp0 (jti, barrier.jti) != 0
         || g_strcmp0 (actor, "svc:exchange:worker") != 0
@@ -11340,23 +11349,23 @@ check_service_response_delivery_abort (SoupServer *server,
   wyl_daemon_http_set_service_publication_fault_for_test (server,
       WYL_DAEMON_SERVICE_PUBLICATION_FAULT_EMIT_REQUEST_ABORTED_AFTER_HANDOFF);
   GThread *thread = g_thread_new ("dropped-service-response",
-      dropped_service_token_response_thread, &dropped);
+          dropped_service_token_response_thread, &dropped);
 
   g_mutex_lock (&barrier.mutex);
   gboolean pre_handoff = service_response_delivery_wait (&barrier,
-      &barrier.pre_handoff);
+          &barrier.pre_handoff);
   barrier.close_now = TRUE;
   g_cond_broadcast (&barrier.changed);
   gboolean socket_closed = service_response_delivery_wait (&barrier,
-      &barrier.socket_closed);
+          &barrier.socket_closed);
   barrier.release_handler = TRUE;
   g_cond_broadcast (&barrier.changed);
   gboolean terminal = service_response_delivery_wait (&barrier,
-      &barrier.terminal);
+          &barrier.terminal);
   gboolean body_wiped = service_response_delivery_wait (&barrier,
-      &barrier.body_wiped);
+          &barrier.body_wiped);
   gboolean destroyed = service_response_delivery_wait (&barrier,
-      &barrier.authority_destroyed);
+          &barrier.authority_destroyed);
   g_mutex_unlock (&barrier.mutex);
   g_thread_join (thread);
   wyl_daemon_http_set_service_response_checkpoint_for_test (server, NULL, NULL);
@@ -11377,7 +11386,7 @@ check_service_response_delivery_abort (SoupServer *server,
       &response_wipes, &response_canary, &response_all_zero);
   wyrelog_error_t lookup_rc = barrier.session_id != NULL && barrier.jti != NULL
       ? wyl_daemon_http_lookup_service_registry_for_test (server,
-      barrier.session_id, barrier.jti, &registry_state, &registry_found)
+          barrier.session_id, barrier.jti, &registry_state, &registry_found)
       : WYRELOG_E_INVALID;
   gint result = 0;
   if (!pre_handoff || !socket_closed || dropped.rc != 0)
@@ -11406,8 +11415,8 @@ check_service_response_delivery_abort (SoupServer *server,
     g_autofree gchar *aborted_tenant = NULL;
     if (aborted_token == NULL
         || wyl_daemon_http_resolve_bearer_for_test (server, aborted_token,
-            &aborted_session, &aborted_actor,
-            &aborted_tenant) != WYRELOG_E_POLICY
+        &aborted_session, &aborted_actor,
+        &aborted_tenant) != WYRELOG_E_POLICY
         || aborted_session != NULL || aborted_actor != NULL
         || aborted_tenant != NULL)
       result = 195961;
@@ -11418,7 +11427,7 @@ check_service_response_delivery_abort (SoupServer *server,
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw_service_principal_full (session, "POST", base_url,
-            "/auth/service-token", NULL, request_body, &status, &body) != 0
+        "/auth/service-token", NULL, request_body, &status, &body) != 0
         || status != 200 || body == NULL) {
       result = 19597;
     } else {
@@ -11430,7 +11439,7 @@ check_service_response_delivery_abort (SoupServer *server,
       g_autofree gchar *retry_tenant = NULL;
       if (token == NULL || retry_jti == NULL
           || wyl_daemon_http_resolve_bearer_for_test (server, token,
-              &retry_session, &retry_actor, &retry_tenant) != WYRELOG_E_OK
+          &retry_session, &retry_actor, &retry_tenant) != WYRELOG_E_OK
           || g_strcmp0 (retry_session, barrier.session_id) == 0
           || g_strcmp0 (retry_jti, barrier.jti) == 0)
         result = 19598;
@@ -11498,10 +11507,10 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
       g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   request_body = g_strdup_printf
-      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
-      issued.credential.credential_id, secret);
+        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+          issued.credential.credential_id, secret);
   context = g_main_context_new ();
   http.loop = g_main_loop_new (context, FALSE);
   g_main_context_push_thread_default (context);
@@ -11514,7 +11523,7 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   if (http.server == NULL)
     goto cleanup;
   http_thread = g_thread_new ("delivery-race-server",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
     goto cleanup;
@@ -11525,13 +11534,13 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
   if (kind == SERVICE_ABORT_CROSSED_MISMATCH) {
     if (wyl_daemon_http_publish_service_token_for_test (http.server,
-            issued.credential.credential_id, secret, secret_len,
-            &other_body) != WYRELOG_E_OK || other_body == NULL
+        issued.credential.credential_id, secret, secret_len,
+        &other_body) != WYRELOG_E_OK || other_body == NULL
         || (other_token = extract_json_string (other_body,
-                "access_token")) == NULL
+        "access_token")) == NULL
         || (other_jti = access_token_jti (http.server, other_token)) == NULL
         || wyl_daemon_http_resolve_bearer_for_test (http.server, other_token,
-            &other_sid, &other_actor, &other_tenant) != WYRELOG_E_OK)
+        &other_sid, &other_actor, &other_tenant) != WYRELOG_E_OK)
       goto cleanup;
   }
 
@@ -11564,17 +11573,17 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
       WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK);
   if (kind < SERVICE_ABORT_PARTIAL_MISMATCH)
     wyl_daemon_http_set_service_response_retire_checkpoint_for_test
-        (http.server, service_response_retire_checkpoint, &retire);
+      (http.server, service_response_retire_checkpoint, &retire);
   drop_thread = g_thread_new ("delivery-race-drop",
-      dropped_service_token_response_thread, &dropped);
+          dropped_service_token_response_thread, &dropped);
 
   g_mutex_lock (&delivery.mutex);
   gboolean pre_handoff = service_response_delivery_wait (&delivery,
-      &delivery.pre_handoff);
+          &delivery.pre_handoff);
   delivery.close_now = TRUE;
   g_cond_broadcast (&delivery.changed);
   gboolean socket_closed = service_response_delivery_wait (&delivery,
-      &delivery.socket_closed);
+          &delivery.socket_closed);
   g_mutex_unlock (&delivery.mutex);
   if (!pre_handoff || !socket_closed) {
     result = result_base + 1;
@@ -11589,22 +11598,22 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   if (kind >= SERVICE_ABORT_PARTIAL_MISMATCH) {
     gboolean mutated = kind == SERVICE_ABORT_PARTIAL_MISMATCH
         ? wyl_daemon_http_remove_access_token_for_test (http.server,
-        delivery.jti)
+            delivery.jti)
         : wyl_daemon_http_mutate_service_session_for_test (http.server,
-        delivery.session_id, WYL_DAEMON_SERVICE_SESSION_JTI, other_jti, 0);
+            delivery.session_id, WYL_DAEMON_SERVICE_SESSION_JTI, other_jti, 0);
     if (!mutated)
       goto cleanup;
     g_mutex_lock (&delivery.mutex);
     delivery.release_handler = TRUE;
     g_cond_broadcast (&delivery.changed);
     gboolean mismatch_terminal = service_response_delivery_wait (&delivery,
-        &delivery.terminal);
+            &delivery.terminal);
     gboolean mismatch_wiped = service_response_delivery_wait (&delivery,
-        &delivery.body_wiped);
+            &delivery.body_wiped);
     gboolean mismatch_fallback = service_response_delivery_wait (&delivery,
-        &delivery.unclaimed_fallback);
+            &delivery.unclaimed_fallback);
     gboolean mismatch_destroyed = service_response_delivery_wait (&delivery,
-        &delivery.authority_destroyed);
+            &delivery.authority_destroyed);
     g_mutex_unlock (&delivery.mutex);
     WylDaemonServiceResponseAuthoritySnapshot mismatch_authority = { 0 };
     wyl_daemon_http_service_response_authority_snapshot_for_test (http.server,
@@ -11619,7 +11628,7 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
         WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_autofree gchar *mismatch_token =
         wyl_daemon_http_dup_last_service_publication_token_for_test
-        (http.server);
+          (http.server);
     g_autofree gchar *mismatch_sid = NULL;
     g_autofree gchar *mismatch_actor = NULL;
     g_autofree gchar *mismatch_tenant = NULL;
@@ -11634,16 +11643,16 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
         || mismatch_sessions != (kind == SERVICE_ABORT_PARTIAL_MISMATCH ? 1 : 2)
         || mismatch_access != (kind == SERVICE_ABORT_PARTIAL_MISMATCH ? 0 : 2)
         || wyl_daemon_http_lookup_service_registry_for_test (http.server,
-            delivery.session_id, delivery.jti, &target_state,
-            &target_found) != WYRELOG_E_OK
+        delivery.session_id, delivery.jti, &target_state,
+        &target_found) != WYRELOG_E_OK
         || !target_found || target_state != WYL_SERVICE_AUTH_ACTIVE
         || mismatch_token == NULL
         || wyl_daemon_http_resolve_bearer_for_test (http.server,
-            mismatch_token, &mismatch_sid, &mismatch_actor,
-            &mismatch_tenant) != WYRELOG_E_POLICY
+        mismatch_token, &mismatch_sid, &mismatch_actor,
+        &mismatch_tenant) != WYRELOG_E_POLICY
         || wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle,
-            &mismatch_reason) == WYRELOG_E_OK
+          (wyl_handle_get_service_auth_authority (handle), handle,
+        &mismatch_reason) == WYRELOG_E_OK
         || mismatch_reason != WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT)
       goto cleanup;
     if (kind == SERVICE_ABORT_CROSSED_MISMATCH) {
@@ -11652,13 +11661,13 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
       wyl_daemon_access_token_snapshot_t other_access = { 0 };
       gchar **other_session_access =
           wyl_daemon_http_snapshot_session_access_ids_for_test (http.server,
-          other_sid);
+              other_sid);
       gboolean other_access_found =
           wyl_daemon_http_snapshot_access_token_for_test (http.server,
-          other_jti, &other_access);
+              other_jti, &other_access);
       gboolean other_exact = other_sid != NULL && other_jti != NULL
           && wyl_daemon_http_lookup_service_registry_for_test (http.server,
-          other_sid, other_jti, &other_state, &other_found) == WYRELOG_E_OK
+              other_sid, other_jti, &other_state, &other_found) == WYRELOG_E_OK
           && other_found && other_state == WYL_SERVICE_AUTH_ACTIVE
           && other_access_found && other_session_access != NULL
           && g_strcmp0 (other_session_access[0], other_jti) == 0
@@ -11668,7 +11677,7 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
           && g_strcmp0 (other_access.subject, other_actor) == 0
           && g_strcmp0 (other_access.tenant, other_tenant) == 0
           && g_strcmp0 (other_access.credential_id,
-          issued.credential.credential_id) == 0
+              issued.credential.credential_id) == 0
           && other_access.credential_generation == issued.credential.generation;
       wyl_daemon_access_token_snapshot_clear (&other_access);
       wyl_daemon_http_sensitive_strv_free_for_test (other_session_access);
@@ -11687,7 +11696,7 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
 
   if (invalidator_first) {
     mutation_thread = g_thread_new ("delivery-race-invalidator",
-        service_abort_mutation_thread, &mutation);
+            service_abort_mutation_thread, &mutation);
     if (!service_abort_mutation_wait (&mutation)) {
       result = result_base + 3;
       goto cleanup;
@@ -11724,7 +11733,7 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
       goto cleanup;
     }
     mutation_thread = g_thread_new ("delivery-race-invalidator",
-        service_abort_mutation_thread, &mutation);
+            service_abort_mutation_thread, &mutation);
     if (!service_abort_wait_writer_queued (http.server)) {
       result = result_base + 7;
       goto cleanup;
@@ -11747,13 +11756,13 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
 
   g_mutex_lock (&delivery.mutex);
   gboolean terminal = service_response_delivery_wait (&delivery,
-      &delivery.terminal);
+          &delivery.terminal);
   gboolean body_wiped = service_response_delivery_wait (&delivery,
-      &delivery.body_wiped);
+          &delivery.body_wiped);
   gboolean fallback = service_response_delivery_wait (&delivery,
-      &delivery.unclaimed_fallback);
+          &delivery.unclaimed_fallback);
   gboolean destroyed = service_response_delivery_wait (&delivery,
-      &delivery.authority_destroyed);
+          &delivery.authority_destroyed);
   g_mutex_unlock (&delivery.mutex);
   if (!terminal || !body_wiped || !fallback || !destroyed) {
     result = result_base + (!terminal ? 9 : !body_wiped ? 10 : !fallback ? 11
@@ -11768,7 +11777,7 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
   wyl_daemon_http_service_publication_counts_for_test (http.server, &sessions,
       &access);
   token = wyl_daemon_http_dup_last_service_publication_token_for_test
-      (http.server);
+        (http.server);
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   if (mutation.rc != WYRELOG_E_OK
       || delivery.terminal_phase != WYL_DAEMON_SERVICE_RESPONSE_ABORTED
@@ -11777,10 +11786,10 @@ check_service_response_abort_invalidation_race (ServiceAbortRaceKind kind,
       || authority.unclaimed_fallbacks != 1
       || sessions != 0 || access != 0 || token == NULL
       || wyl_daemon_http_resolve_bearer_for_test (http.server, token, &sid,
-          &actor, &tenant) != WYRELOG_E_POLICY
+      &actor, &tenant) != WYRELOG_E_POLICY
       || wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-          &reason) != WYRELOG_E_OK
+        (wyl_handle_get_service_auth_authority (handle), handle,
+      &reason) != WYRELOG_E_OK
       || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
     result = result_base + 13;
     goto cleanup;
@@ -11792,7 +11801,7 @@ cleanup:
     wyl_daemon_http_set_service_response_checkpoint_for_test (http.server,
         NULL, NULL);
     wyl_daemon_http_set_service_response_retire_checkpoint_for_test
-        (http.server, NULL, NULL);
+      (http.server, NULL, NULL);
     wyl_daemon_http_set_service_due_write_checkpoint_for_test (http.server,
         NULL, NULL);
   }
@@ -11900,12 +11909,12 @@ check_service_response_shutdown_restart_contract (void)
       g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   if (secret == NULL)
     goto cleanup;
   request_body = g_strdup_printf
-      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
-      issued.credential.credential_id, secret);
+        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+          issued.credential.credential_id, secret);
   if (!service_response_test_server_start (&first, handle))
     goto cleanup;
 
@@ -11918,22 +11927,22 @@ check_service_response_shutdown_restart_contract (void)
   fault_initialized = TRUE;
   wyl_daemon_http_reset_service_response_authority_for_test (first.http.server);
   wyl_daemon_http_set_service_response_checkpoint_for_test
-      (first.http.server, service_response_delivery_checkpoint, &fault);
+    (first.http.server, service_response_delivery_checkpoint, &fault);
   wyl_daemon_http_set_service_publication_fault_for_test (first.http.server,
       WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF);
   fault_response.base_url = first.base_url;
   fault_response.request_body = request_body;
   fault_thread = g_thread_new ("service-response-fault",
-      finished_service_token_response_thread, &fault_response);
+          finished_service_token_response_thread, &fault_response);
   g_mutex_lock (&fault.mutex);
   gboolean fault_active = service_response_delivery_wait (&fault,
-      &fault.active_pre_handoff_failure);
+          &fault.active_pre_handoff_failure);
   g_mutex_unlock (&fault.mutex);
   if (!fault_active)
     goto cleanup;
   fault_token =
       wyl_daemon_http_dup_last_service_publication_token_for_test
-      (first.http.server);
+        (first.http.server);
   fault_session_id = g_strdup (fault.session_id);
   fault_jti = g_strdup (fault.jti);
   guint sessions = 0;
@@ -11945,34 +11954,34 @@ check_service_response_shutdown_restart_contract (void)
   if (fault_token == NULL || fault_session_id == NULL || fault_jti == NULL
       || sessions != 1 || access != 1
       || wyl_daemon_http_lookup_service_registry_for_test (first.http.server,
-          fault_session_id, fault_jti, &state, &found) != WYRELOG_E_OK
+      fault_session_id, fault_jti, &state, &found) != WYRELOG_E_OK
       || !found || state != WYL_SERVICE_AUTH_ACTIVE
       || wyl_daemon_http_resolve_bearer_for_test (first.http.server,
-          fault_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_OK)
+      fault_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_OK)
     goto cleanup;
   g_mutex_lock (&fault.mutex);
   fault.release_handler = TRUE;
   g_cond_broadcast (&fault.changed);
   gboolean fault_terminal = service_response_delivery_wait (&fault,
-      &fault.terminal);
+          &fault.terminal);
   gboolean fault_wiped = service_response_delivery_wait (&fault,
-      &fault.body_wiped);
+          &fault.body_wiped);
   gboolean fault_destroyed = service_response_delivery_wait (&fault,
-      &fault.authority_destroyed);
+          &fault.authority_destroyed);
   g_mutex_unlock (&fault.mutex);
   g_thread_join (fault_thread);
   fault_thread = NULL;
   wyl_daemon_http_set_service_response_checkpoint_for_test
-      (first.http.server, NULL, NULL);
+    (first.http.server, NULL, NULL);
   WylDaemonServiceResponseAuthoritySnapshot authority = { 0 };
   guint response_wipes = 0;
   gboolean response_canary = FALSE;
   gboolean response_all_zero = FALSE;
   wyl_daemon_http_service_response_authority_snapshot_for_test
-      (first.http.server, &authority);
+    (first.http.server, &authority);
   wyl_daemon_http_service_response_wipe_snapshot_for_test
-      (first.http.server, &response_wipes, &response_canary,
+    (first.http.server, &response_wipes, &response_canary,
       &response_all_zero);
   sessions = G_MAXUINT;
   access = G_MAXUINT;
@@ -11997,11 +12006,11 @@ check_service_response_shutdown_restart_contract (void)
       || authority.unclaimed_fallbacks != 0
       || sessions != 0 || access != 0
       || wyl_daemon_http_lookup_service_registry_for_test (first.http.server,
-          fault_session_id, fault_jti, &state, &found) != WYRELOG_E_OK
+      fault_session_id, fault_jti, &state, &found) != WYRELOG_E_OK
       || found
       || wyl_daemon_http_resolve_bearer_for_test (first.http.server,
-          fault_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_POLICY)
+      fault_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_POLICY)
     goto cleanup;
   g_clear_pointer (&fault_response.body, g_free);
 
@@ -12013,7 +12022,7 @@ check_service_response_shutdown_restart_contract (void)
   shutdown_initialized = TRUE;
   wyl_daemon_http_reset_service_response_authority_for_test (first.http.server);
   wyl_daemon_http_set_service_response_checkpoint_for_test
-      (first.http.server, service_response_delivery_checkpoint, &shutdown);
+    (first.http.server, service_response_delivery_checkpoint, &shutdown);
   wyl_daemon_http_set_service_publication_fault_for_test (first.http.server,
       WYL_DAEMON_SERVICE_PUBLICATION_FAULT_FORCE_RESPONSE_AUTHORITY_FALLBACK);
   dropped.base_url = first.base_url;
@@ -12022,16 +12031,16 @@ check_service_response_shutdown_restart_contract (void)
   shutdown.shutdown_on_socket_close = TRUE;
   shutdown.shutdown_server = first.http.server;
   shutdown_thread = g_thread_new ("service-response-shutdown",
-      dropped_service_token_response_thread, &dropped);
+          dropped_service_token_response_thread, &dropped);
   g_mutex_lock (&shutdown.mutex);
   gboolean shutdown_pre = service_response_delivery_wait (&shutdown,
-      &shutdown.pre_handoff);
+          &shutdown.pre_handoff);
   shutdown.close_now = TRUE;
   g_cond_broadcast (&shutdown.changed);
   gboolean socket_closed = service_response_delivery_wait (&shutdown,
-      &shutdown.socket_closed);
+          &shutdown.socket_closed);
   gboolean shutdown_done = service_response_delivery_wait (&shutdown,
-      &shutdown.shutdown_done);
+          &shutdown.shutdown_done);
   g_mutex_unlock (&shutdown.mutex);
   if (!shutdown_pre || !socket_closed || !shutdown_done)
     goto cleanup;
@@ -12041,35 +12050,35 @@ check_service_response_shutdown_restart_contract (void)
     goto cleanup;
   abort_token =
       wyl_daemon_http_dup_last_service_publication_token_for_test
-      (first.http.server);
+        (first.http.server);
   abort_session_id = g_strdup (shutdown.session_id);
   abort_jti = g_strdup (shutdown.jti);
   guint shutdown_ticks = 0;
   if (wyl_daemon_http_service_auth_maintenance_active_for_test
-      (first.http.server, &shutdown_ticks))
+        (first.http.server, &shutdown_ticks))
     goto cleanup;
   g_mutex_lock (&shutdown.mutex);
   shutdown.release_handler = TRUE;
   g_cond_broadcast (&shutdown.changed);
   gboolean shutdown_terminal = service_response_delivery_wait (&shutdown,
-      &shutdown.terminal);
+          &shutdown.terminal);
   gboolean shutdown_wiped = service_response_delivery_wait (&shutdown,
-      &shutdown.body_wiped);
+          &shutdown.body_wiped);
   gboolean shutdown_fallback = service_response_delivery_wait (&shutdown,
-      &shutdown.unclaimed_fallback);
+          &shutdown.unclaimed_fallback);
   gboolean shutdown_destroyed = service_response_delivery_wait (&shutdown,
-      &shutdown.authority_destroyed);
+          &shutdown.authority_destroyed);
   g_mutex_unlock (&shutdown.mutex);
   wyl_daemon_http_set_service_response_checkpoint_for_test
-      (first.http.server, NULL, NULL);
+    (first.http.server, NULL, NULL);
   memset (&authority, 0, sizeof authority);
   response_wipes = 0;
   response_canary = FALSE;
   response_all_zero = FALSE;
   wyl_daemon_http_service_response_authority_snapshot_for_test
-      (first.http.server, &authority);
+    (first.http.server, &authority);
   wyl_daemon_http_service_response_wipe_snapshot_for_test
-      (first.http.server, &response_wipes, &response_canary,
+    (first.http.server, &response_wipes, &response_canary,
       &response_all_zero);
   sessions = G_MAXUINT;
   access = G_MAXUINT;
@@ -12092,11 +12101,11 @@ check_service_response_shutdown_restart_contract (void)
       || authority.unclaimed_fallbacks != 1
       || sessions != 0 || access != 0
       || wyl_daemon_http_lookup_service_registry_for_test (first.http.server,
-          abort_session_id, abort_jti, &state, &found) != WYRELOG_E_OK
+      abort_session_id, abort_jti, &state, &found) != WYRELOG_E_OK
       || found
       || wyl_daemon_http_resolve_bearer_for_test (first.http.server,
-          abort_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_POLICY)
+      abort_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_POLICY)
     goto cleanup;
 
   service_response_test_server_stop (&first);
@@ -12118,19 +12127,19 @@ check_service_response_shutdown_restart_contract (void)
       &sessions, &access);
   if (sessions != 0 || access != 0
       || wyl_daemon_http_lookup_service_registry_for_test (second.http.server,
-          abort_session_id, abort_jti, &state, &found) != WYRELOG_E_OK
+      abort_session_id, abort_jti, &state, &found) != WYRELOG_E_OK
       || found
       || wyl_daemon_http_resolve_bearer_for_test (second.http.server,
-          abort_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_POLICY)
+      abort_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_POLICY)
     goto cleanup;
   gint finished_rc = check_service_response_delivery_finished
-      (second.http.server, second.base_url, request_body);
+        (second.http.server, second.base_url, request_body);
   if (finished_rc != 0)
     goto cleanup;
   finished_token =
       wyl_daemon_http_dup_last_service_publication_token_for_test
-      (second.http.server);
+        (second.http.server);
   finished_jti = finished_token != NULL
       ? access_token_jti (second.http.server, finished_token) : NULL;
   g_clear_pointer (&resolved_session, g_free);
@@ -12138,8 +12147,8 @@ check_service_response_shutdown_restart_contract (void)
   g_clear_pointer (&resolved_tenant, g_free);
   if (finished_token == NULL || finished_jti == NULL
       || wyl_daemon_http_resolve_bearer_for_test (second.http.server,
-          finished_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_OK)
+      finished_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_OK)
     goto cleanup;
   finished_session_id = g_strdup (resolved_session);
   service_response_test_server_stop (&second);
@@ -12159,23 +12168,23 @@ check_service_response_shutdown_restart_contract (void)
   if (sessions != 0 || access != 0
       || finished_session_id == NULL
       || wyl_daemon_http_lookup_service_registry_for_test (third.http.server,
-          finished_session_id, finished_jti, &state, &found)
+      finished_session_id, finished_jti, &state, &found)
       != WYRELOG_E_OK || found
       || wyl_daemon_http_resolve_bearer_for_test (third.http.server,
-          finished_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_POLICY
+      finished_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_POLICY
       || wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-          &reason) != WYRELOG_E_OK
+        (wyl_handle_get_service_auth_authority (handle), handle,
+      &reason) != WYRELOG_E_OK
       || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
     goto cleanup;
   gint expiry_finished_rc = check_service_response_delivery_finished
-      (third.http.server, third.base_url, request_body);
+        (third.http.server, third.base_url, request_body);
   if (expiry_finished_rc != 0)
     goto cleanup;
   expiry_token =
       wyl_daemon_http_dup_last_service_publication_token_for_test
-      (third.http.server);
+        (third.http.server);
   expiry_jti = expiry_token != NULL
       ? access_token_jti (third.http.server, expiry_token) : NULL;
   g_clear_pointer (&resolved_session, g_free);
@@ -12183,13 +12192,13 @@ check_service_response_shutdown_restart_contract (void)
   g_clear_pointer (&resolved_tenant, g_free);
   if (expiry_token == NULL || expiry_jti == NULL
       || wyl_daemon_http_resolve_bearer_for_test (third.http.server,
-          expiry_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_OK)
+      expiry_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_OK)
     goto cleanup;
   expiry_session_id = g_strdup (resolved_session);
   wyl_daemon_access_token_snapshot_t expiry_access = { 0 };
   if (!wyl_daemon_http_snapshot_access_token_for_test (third.http.server,
-          expiry_jti, &expiry_access)) {
+      expiry_jti, &expiry_access)) {
     wyl_daemon_access_token_snapshot_clear (&expiry_access);
     goto cleanup;
   }
@@ -12211,14 +12220,14 @@ check_service_response_shutdown_restart_contract (void)
   reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   if (expiry_session_id == NULL || sessions != 0 || access != 0
       || wyl_daemon_http_lookup_service_registry_for_test (third.http.server,
-          expiry_session_id, expiry_jti, &state, &found) != WYRELOG_E_OK
+      expiry_session_id, expiry_jti, &state, &found) != WYRELOG_E_OK
       || found
       || wyl_daemon_http_resolve_bearer_for_test (third.http.server,
-          expiry_token, &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_POLICY
+      expiry_token, &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_POLICY
       || wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-          &reason) != WYRELOG_E_OK
+        (wyl_handle_get_service_auth_authority (handle), handle,
+      &reason) != WYRELOG_E_OK
       || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
     goto cleanup;
   result = 0;
@@ -12226,7 +12235,7 @@ check_service_response_shutdown_restart_contract (void)
 cleanup:
   if (first.http.server != NULL)
     wyl_daemon_http_set_service_response_checkpoint_for_test
-        (first.http.server, NULL, NULL);
+      (first.http.server, NULL, NULL);
   if (fault_initialized) {
     g_mutex_lock (&fault.mutex);
     fault.release_handler = TRUE;
@@ -12284,18 +12293,18 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       &issued);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   if (secret == NULL)
     return 1946;
 
   g_autofree gchar *request_body = g_strdup_printf
-      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
-      issued.credential.credential_id, secret);
+        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+          issued.credential.credential_id, secret);
   guint status = 0;
   guint retry_after = 0;
   g_autofree gchar *body = NULL;
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
-          strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
+      strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
     return 1947;
   if (status != 200 || body == NULL)
     return 1948;
@@ -12309,15 +12318,15 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
 
   guint8 secret_key[32];
   if (wyl_daemon_http_copy_access_token_secret (server, secret_key,
-          sizeof secret_key) != WYRELOG_E_OK)
+      sizeof secret_key) != WYRELOG_E_OK)
     return 1950;
   g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
   if (key_id == NULL)
     return 1951;
   g_autoptr (GBytes) payload = NULL;
   if (wyl_jwt_verify_hs256_access_token (access_token, secret_key,
-          sizeof secret_key, key_id, "wyrelogd", "wyrelog-client",
-          g_get_real_time () / G_USEC_PER_SEC, &payload) != WYRELOG_E_OK)
+      sizeof secret_key, key_id, "wyrelogd", "wyrelog-client",
+      g_get_real_time () / G_USEC_PER_SEC, &payload) != WYRELOG_E_OK)
     return 1952;
   gsize payload_len = 0;
   const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
@@ -12333,8 +12342,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autofree gchar *resolved_actor = NULL;
   g_autofree gchar *resolved_tenant = NULL;
   if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
-          &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_OK
+      &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_OK
       || resolved_session == NULL
       || g_strcmp0 (resolved_actor, "svc:exchange:worker") != 0
       || g_strcmp0 (resolved_tenant, "tenant-a") != 0)
@@ -12344,15 +12353,15 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   guint protected_status = 0;
   g_autofree gchar *protected_body = NULL;
   if (send_raw_decide_bearer (protected_session, "POST", base_url,
-          "svc:exchange:worker", "http.not_armed", "service-scope",
-          "tenant=tenant-a", access_token, &protected_status,
-          &protected_body) != 0 || protected_status != 200
+      "svc:exchange:worker", "http.not_armed", "service-scope",
+      "tenant=tenant-a", access_token, &protected_status,
+      &protected_body) != 0 || protected_status != 200
       || protected_body == NULL
       || strstr (protected_body, "\"decision\":") == NULL)
     return 1957;
   gint decide_alias_rc = check_valid_decide_aliases (server,
-      protected_session, base_url, "svc:exchange:worker", "http.not_armed",
-      "service-scope", "tenant=tenant-a", access_token, 2672);
+          protected_session, base_url, "svc:exchange:worker", "http.not_armed",
+          "service-scope", "tenant=tenant-a", access_token, 2672);
   if (decide_alias_rc != 0)
     return decide_alias_rc;
 
@@ -12378,14 +12387,14 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autofree gchar *old_rotation_actor = NULL;
   g_autofree gchar *old_rotation_tenant = NULL;
   if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
-          &old_rotation_session, &old_rotation_actor,
-          &old_rotation_tenant) == WYRELOG_E_OK)
+      &old_rotation_session, &old_rotation_actor,
+      &old_rotation_tenant) == WYRELOG_E_OK)
     return 19583;
   gint pre_rotation_state = WYL_SERVICE_AUTH_PENDING;
   gboolean pre_rotation_found = TRUE;
   if (wyl_daemon_http_lookup_service_registry_for_test (server,
-          pre_rotation_claims.session_id, pre_rotation_claims.jti,
-          &pre_rotation_state, &pre_rotation_found) != WYRELOG_E_OK
+      pre_rotation_claims.session_id, pre_rotation_claims.jti,
+      &pre_rotation_state, &pre_rotation_found) != WYRELOG_E_OK
       || pre_rotation_found)
     return 19584;
   guint rotation_sessions = 0;
@@ -12397,13 +12406,13 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   WylServiceAuthUnavailableReason rotation_reason =
       WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   if (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-          &rotation_reason) != WYRELOG_E_OK
+        (wyl_handle_get_service_auth_authority (handle), handle,
+      &rotation_reason) != WYRELOG_E_OK
       || rotation_reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
     return 19586;
   g_clear_pointer (&body, g_free);
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
-          strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK
+      strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK
       || status != 200 || body == NULL)
     return 19587;
   g_autofree gchar *rotated_access = extract_json_string (body, "access_token");
@@ -12418,8 +12427,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autofree gchar *route_body = NULL;
   gboolean route_response_completed = FALSE;
   if (send_service_token_response_and_wait (server, session, base_url,
-          request_body, &route_status, &route_body,
-          &route_response_completed) != 0)
+      request_body, &route_status, &route_body,
+      &route_response_completed) != 0)
     return 1959;
   if (route_status != 200 || route_body == NULL)
     return 1959;
@@ -12450,17 +12459,17 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_clear_pointer (&resolved_actor, g_free);
   g_clear_pointer (&resolved_tenant, g_free);
   if (wyl_daemon_http_resolve_bearer_for_test (server, route_access_token,
-          &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_OK
+      &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_OK
       || g_strcmp0 (resolved_actor, "svc:exchange:worker") != 0
       || g_strcmp0 (resolved_tenant, "tenant-a") != 0)
     return 195911;
   gint delivery_finished_rc = check_service_response_delivery_finished
-      (server, base_url, request_body);
+        (server, base_url, request_body);
   if (delivery_finished_rc != 0)
     return delivery_finished_rc;
   gint delivery_abort_rc = check_service_response_delivery_abort (server,
-      base_url, request_body);
+          base_url, request_body);
   if (delivery_abort_rc != 0)
     return delivery_abort_rc;
 
@@ -12468,8 +12477,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   guint denied_retry_after = 0;
   g_autofree gchar *denied_body = NULL;
   if (wyl_daemon_http_issue_service_token_for_test (server, FALSE,
-          request_body, strlen (request_body), &denied_status, &denied_body,
-          &denied_retry_after) != WYRELOG_E_OK
+      request_body, strlen (request_body), &denied_status, &denied_body,
+      &denied_retry_after) != WYRELOG_E_OK
       || denied_status != 403 || denied_body == NULL
       || strstr (denied_body, "access_token") != NULL
       || strstr (denied_body, "credential_secret") != NULL)
@@ -12477,11 +12486,11 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
 
   g_autofree gchar *malformed_body =
       g_strdup_printf ("{\"credential_id\":\"%s\",\"extra\":\"x\"}",
-      issued.credential.credential_id);
+          issued.credential.credential_id);
   g_clear_pointer (&body, g_free);
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
-          malformed_body, strlen (malformed_body), &status, &body,
-          &retry_after) != WYRELOG_E_OK)
+      malformed_body, strlen (malformed_body), &status, &body,
+      &retry_after) != WYRELOG_E_OK)
     return 1956;
   if (status != 400
       || strstr (body, "\"error\":\"invalid_service_token_request\"")
@@ -12493,7 +12502,7 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
    * refunds admission, so the next exchange must be rate limited. */
   g_clear_pointer (&body, g_free);
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
-          strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
+      strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
     return 1980;
   if (status != 429 || retry_after == 0 ||
       strstr (body, "\"error\":\"service_token_rate_limited\"") == NULL)
@@ -12510,7 +12519,7 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       (G_MAXINT64 / G_USEC_PER_SEC) + 1);
   g_clear_pointer (&body, g_free);
   if (wyl_daemon_http_publish_service_token_for_test (server,
-          issued.credential.credential_id, secret, secret_len, &body)
+      issued.credential.credential_id, secret, secret_len, &body)
       != WYRELOG_E_INVALID || body != NULL)
     return 19811;
   guint post_overflow_sessions = 0;
@@ -12525,8 +12534,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
     return 1982;
   if (wyl_daemon_http_revoke_service_credential_for_test (server,
-          issued.credential.credential_id,
-          "000000000000000000000000232", NULL, NULL)
+      issued.credential.credential_id,
+      "000000000000000000000000232", NULL, NULL)
       != WYRELOG_E_OK)
     return 1983;
   wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE, G_MAXINT64);
@@ -12536,14 +12545,14 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   gint registry_state = WYL_SERVICE_AUTH_PENDING;
   gboolean registry_found = TRUE;
   if (wyl_daemon_http_lookup_service_registry_for_test (server,
-          claims.session_id, claims.jti, &registry_state, &registry_found)
+      claims.session_id, claims.jti, &registry_state, &registry_found)
       != WYRELOG_E_OK || registry_found)
     return 1985;
   g_clear_pointer (&resolved_session, g_free);
   g_clear_pointer (&resolved_actor, g_free);
   g_clear_pointer (&resolved_tenant, g_free);
   if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
-          &resolved_session, &resolved_actor, &resolved_tenant) == WYRELOG_E_OK)
+      &resolved_session, &resolved_actor, &resolved_tenant) == WYRELOG_E_OK)
     return 1986;
   guint retired_sessions = 0;
   guint retired_access_tokens = 0;
@@ -12589,10 +12598,10 @@ check_service_tenant_create_rejected (void)
   if (wyl_request_id_new (principal_request_id, sizeof principal_request_id)
       != WYRELOG_E_OK
       || wyl_request_id_new (credential_request_id,
-          sizeof credential_request_id) != WYRELOG_E_OK
+      sizeof credential_request_id) != WYRELOG_E_OK
       || wyl_service_principal_create (handle, "svc:tenant-create-negative",
-          "tenant create negative", "admin", principal_request_id,
-          &principal) != WYRELOG_E_OK
+      "tenant create negative", "admin", principal_request_id,
+      &principal) != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
     wyl_service_principal_clear (&principal);
     return 2281;
@@ -12611,7 +12620,7 @@ check_service_tenant_create_rejected (void)
   if (http.server == NULL)
     goto cleanup;
   thread = g_thread_new ("service-tenant-create", test_http_server_thread_ctx,
-      &http);
+          &http);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
     goto cleanup;
@@ -12621,18 +12630,18 @@ check_service_tenant_create_rejected (void)
     goto cleanup;
 
   if (!actual_service_tokens_init (http.server,
-          "svc:tenant-create-negative", WYL_TENANT_DEFAULT,
-          credential_request_id, &tokens)) {
+      "svc:tenant-create-negative", WYL_TENANT_DEFAULT,
+      credential_request_id, &tokens)) {
     result = 2282;
     goto cleanup;
   }
   session = soup_session_new ();
   guint status = 0;
   if (send_raw_policy_mutation_bearer (session, "POST", base_url,
-          "/tenants/create", "name=tenant-service-denied"
-          "&tenant=__wr_default&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", tokens.token_a,
-          &status, &body) != 0) {
+      "/tenants/create", "name=tenant-service-denied"
+      "&tenant=__wr_default&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", tokens.token_a,
+      &status, &body) != 0) {
     result = 2283;
     goto cleanup;
   }
@@ -12641,18 +12650,18 @@ check_service_tenant_create_rejected (void)
   guint audit_intentions = 0;
   result = status == 403 && strstr (body, "tenant_denied") != NULL
       && tenant_state_matches (wyl_handle_get_policy_store (handle),
-      "tenant-service-denied", FALSE, FALSE)
+          "tenant-service-denied", FALSE, FALSE)
       && tenant_creator_anchor_matches (handle,
-      "svc:tenant-create-negative", "tenant-service-denied", FALSE)
+          "svc:tenant-create-negative", "tenant-service-denied", FALSE)
       && role_membership_event_count (handle, "svc:tenant-create-negative",
-      "wr.system_admin", "tenant-service-denied", "grant", &grant_events)
+          "wr.system_admin", "tenant-service-denied", "grant", &grant_events)
       && grant_events == 0
       && policy_lifecycle_audit_count (handle, "svc:tenant-create-negative",
-      "tenant_create", "tenant-service-denied", &audit_events)
+          "tenant_create", "tenant-service-denied", &audit_events)
       && audit_events == 0
       && policy_lifecycle_audit_intention_count (handle,
-      "svc:tenant-create-negative", "tenant_create", "tenant-service-denied",
-      &audit_intentions) && audit_intentions == 0
+          "svc:tenant-create-negative", "tenant_create", "tenant-service-denied",
+          &audit_intentions) && audit_intentions == 0
       && tenant_has_no_human_session_row (handle, "tenant-service-denied")
       ? 0 : 2284;
 
@@ -12706,7 +12715,7 @@ check_service_token_exchange_contract (void)
   if (http.server == NULL)
     goto cleanup;
   thread = g_thread_new ("service-token-exchange",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
     goto cleanup;
@@ -12715,17 +12724,17 @@ check_service_token_exchange_contract (void)
   if (base_url == NULL)
     goto cleanup;
   result = check_service_token_exchange_contract_on_server (http.server,
-      handle, base_url);
+          handle, base_url);
   if (result == 0) {
     guint ticks = 0;
     if (!wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
-            &ticks))
+        &ticks))
       result = 1988;
     else {
       wyl_daemon_http_shutdown_service_auth_maintenance_for_test (http.server);
       guint after_shutdown = 0;
       if (wyl_daemon_http_service_auth_maintenance_active_for_test
-          (http.server, &after_shutdown) || after_shutdown != ticks)
+            (http.server, &after_shutdown) || after_shutdown != ticks)
         result = 1989;
     }
   }
@@ -12745,13 +12754,13 @@ cleanup:
     for (gint invalidator_first = 0;
         result == 0 && invalidator_first <= 1; invalidator_first++)
       result = check_service_response_abort_invalidation_race (kind,
-          invalidator_first);
+              invalidator_first);
   if (result == 0)
     result = check_service_response_abort_invalidation_race
-        (SERVICE_ABORT_PARTIAL_MISMATCH, FALSE);
+          (SERVICE_ABORT_PARTIAL_MISMATCH, FALSE);
   if (result == 0)
     result = check_service_response_abort_invalidation_race
-        (SERVICE_ABORT_CROSSED_MISMATCH, FALSE);
+          (SERVICE_ABORT_CROSSED_MISMATCH, FALSE);
   if (result == 0)
     result = check_service_response_shutdown_restart_contract ();
   if (result == 0)
@@ -12775,27 +12784,27 @@ check_service_publication_fault_matrix (void)
     gboolean registry_conflict_latched;
   } cases[] = {
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_RESPONSE_PREPARE, 0, 0, FALSE,
-        FALSE, 0, FALSE, FALSE, FALSE},
+     FALSE, 0, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_CANCEL, 0, 0, FALSE,
-        FALSE, 1, FALSE, FALSE, FALSE},
+     FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_AFTER_SESSION_INSERT, 0, 0, FALSE,
-        FALSE, 1, FALSE, FALSE, FALSE},
+     FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_DISCONNECT, 0, 0, FALSE,
-        FALSE, 1, FALSE, FALSE, FALSE},
+     FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH, 1, 1,
-        FALSE, FALSE, 1, FALSE, FALSE, TRUE},
+     FALSE, FALSE, 1, FALSE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION, 1,
-        1, FALSE, FALSE, 1, TRUE, FALSE, TRUE},
+     1, FALSE, FALSE, 1, TRUE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH, 1, 1,
-        FALSE, FALSE, 1, FALSE, FALSE, TRUE},
+     FALSE, FALSE, 1, FALSE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION, 1, 1,
-        FALSE, FALSE, 1, FALSE, TRUE, TRUE},
+     FALSE, FALSE, 1, FALSE, TRUE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE, 1, 1,
-        FALSE, FALSE, 1, FALSE, FALSE, TRUE},
+     FALSE, FALSE, 1, FALSE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF, 1, 1, FALSE,
-        FALSE, 1, FALSE, FALSE, FALSE},
+     FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE, 1, 1, TRUE, FALSE,
-        1, FALSE, FALSE, FALSE},
+     1, FALSE, FALSE, FALSE},
   };
 
   for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
@@ -12821,7 +12830,7 @@ check_service_publication_fault_matrix (void)
     gsize credential_secret_len = 0;
     const gchar *credential_secret =
         wyl_service_credential_secret_peek_encoded (issued.secret,
-        &credential_secret_len);
+            &credential_secret_len);
     WylDaemonOptions opts = {
       .template_dir = WYL_TEST_TEMPLATE_DIR,
       .listen_port = 0,
@@ -12838,11 +12847,11 @@ check_service_publication_fault_matrix (void)
     if (cases[i].fault ==
         WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF) {
       if (wyl_daemon_http_publish_service_token_for_test (server,
-              issued.credential.credential_id, credential_secret,
-              credential_secret_len, &unrelated_body) != WYRELOG_E_OK
+          issued.credential.credential_id, credential_secret,
+          credential_secret_len, &unrelated_body) != WYRELOG_E_OK
           || unrelated_body == NULL
           || (unrelated_token = extract_json_string (unrelated_body,
-                  "access_token")) == NULL) {
+          "access_token")) == NULL) {
         soup_server_disconnect (server);
         g_object_unref (server);
         wyl_service_credential_issue_result_clear (&issued);
@@ -12855,8 +12864,8 @@ check_service_publication_fault_matrix (void)
     g_autofree gchar *body = NULL;
     wyrelog_error_t publish_rc =
         wyl_daemon_http_publish_service_token_for_test (server,
-        issued.credential.credential_id, credential_secret,
-        credential_secret_len, &body);
+            issued.credential.credential_id, credential_secret,
+            credential_secret_len, &body);
     g_autofree gchar *token =
         wyl_daemon_http_dup_last_service_publication_token_for_test (server);
     guint sessions = 0;
@@ -12873,7 +12882,7 @@ check_service_publication_fault_matrix (void)
         || access_tokens != cases[i].access_tokens
         || response_wipes != cases[i].response_wipes
         || (response_wipes > 0
-            && (!response_canary_seen || !response_all_zero))) {
+        && (!response_canary_seen || !response_all_zero))) {
       soup_server_disconnect (server);
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
@@ -12883,21 +12892,21 @@ check_service_publication_fault_matrix (void)
     wyl_daemon_http_service_response_authority_snapshot_for_test (server,
         &response_authority);
     if ((cases[i].fault ==
-            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF
-            && (response_authority.created != 2
-                || response_authority.complete != 2
-                || response_authority.finished != 1
-                || response_authority.aborted != 1
-                || response_authority.cleanup_failed != 0
-                || response_authority.destroyed != 2))
+        WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_PRE_HANDOFF
+        && (response_authority.created != 2
+        || response_authority.complete != 2
+        || response_authority.finished != 1
+        || response_authority.aborted != 1
+        || response_authority.cleanup_failed != 0
+        || response_authority.destroyed != 2))
         || (cases[i].fault ==
-            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE
-            && (response_authority.created != 1
-                || response_authority.complete != 1
-                || response_authority.finished != 0
-                || response_authority.aborted != 0
-                || response_authority.cleanup_failed != 1
-                || response_authority.destroyed != 1))) {
+        WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE
+        && (response_authority.created != 1
+        || response_authority.complete != 1
+        || response_authority.finished != 0
+        || response_authority.aborted != 0
+        || response_authority.cleanup_failed != 1
+        || response_authority.destroyed != 1))) {
       soup_server_disconnect (server);
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
@@ -12909,10 +12918,10 @@ check_service_publication_fault_matrix (void)
     g_autoptr (GBytes) payload = NULL;
     if (key_id == NULL
         || wyl_daemon_http_copy_access_token_secret (server, token_secret,
-            sizeof token_secret) != WYRELOG_E_OK
+        sizeof token_secret) != WYRELOG_E_OK
         || wyl_jwt_verify_hs256_access_token (token, token_secret,
-            sizeof token_secret, key_id, "wyrelogd", "wyrelog-client",
-            g_get_real_time () / G_USEC_PER_SEC, &payload) != WYRELOG_E_OK) {
+        sizeof token_secret, key_id, "wyrelogd", "wyrelog-client",
+        g_get_real_time () / G_USEC_PER_SEC, &payload) != WYRELOG_E_OK) {
       sodium_memzero (token_secret, sizeof token_secret);
       soup_server_disconnect (server);
       g_object_unref (server);
@@ -12929,11 +12938,11 @@ check_service_publication_fault_matrix (void)
     }
     gboolean mutated_same_pointer =
         wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
-        (server, claims.session_id);
+          (server, claims.session_id);
     wyl_daemon_access_token_snapshot_t access_snapshot = { 0 };
     gboolean has_access_snapshot =
         wyl_daemon_http_snapshot_access_token_for_test (server, claims.jti,
-        &access_snapshot);
+            &access_snapshot);
     gboolean mutated_access_iat = has_access_snapshot
         && access_snapshot.issued_at != claims.issued_at;
     wyl_daemon_access_token_snapshot_clear (&access_snapshot);
@@ -12948,8 +12957,8 @@ check_service_publication_fault_matrix (void)
     WylServiceAuthUnavailableReason unavailable_reason =
         WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     wyrelog_error_t available_rc = wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle,
-        &unavailable_reason);
+          (wyl_handle_get_service_auth_authority (handle), handle,
+            &unavailable_reason);
     gboolean registry_conflict_latched =
         available_rc != WYRELOG_E_OK
         && unavailable_reason ==
@@ -12964,8 +12973,8 @@ check_service_publication_fault_matrix (void)
     gint registry_state = WYL_SERVICE_AUTH_PENDING;
     gboolean registry_found = FALSE;
     if (wyl_daemon_http_lookup_service_registry_for_test (server,
-            claims.session_id, claims.jti, &registry_state,
-            &registry_found) != WYRELOG_E_OK
+        claims.session_id, claims.jti, &registry_state,
+        &registry_found) != WYRELOG_E_OK
         || registry_found != cases[i].registry_found
         || (registry_found && registry_state != WYL_SERVICE_AUTH_ACTIVE)) {
       wyl_jwt_access_claims_clear (&claims);
@@ -12979,7 +12988,7 @@ check_service_publication_fault_matrix (void)
     g_autofree gchar *resolved_actor = NULL;
     g_autofree gchar *resolved_tenant = NULL;
     gboolean resolves = wyl_daemon_http_resolve_bearer_for_test (server, token,
-        &resolved_session, &resolved_actor, &resolved_tenant) == WYRELOG_E_OK;
+            &resolved_session, &resolved_actor, &resolved_tenant) == WYRELOG_E_OK;
     if (resolves != cases[i].resolves) {
       wyl_jwt_access_claims_clear (&claims);
       soup_server_disconnect (server);
@@ -12991,9 +13000,9 @@ check_service_publication_fault_matrix (void)
       /* The response-loss path has already retired this exact authority.
        * Replaying that same authority cleanup is deliberately idempotent. */
       if (wyl_daemon_http_retire_service_auth_exact_for_test (server,
-              claims.session_id, claims.jti, claims.credential_id,
-              claims.credential_generation, claims.subject, claims.tenant,
-              claims.expires_at) != WYRELOG_E_OK) {
+          claims.session_id, claims.jti, claims.credential_id,
+          claims.credential_generation, claims.subject, claims.tenant,
+          claims.expires_at) != WYRELOG_E_OK) {
         wyl_jwt_access_claims_clear (&claims);
         soup_server_disconnect (server);
         g_object_unref (server);
@@ -13004,8 +13013,8 @@ check_service_publication_fault_matrix (void)
       g_clear_pointer (&resolved_actor, g_free);
       g_clear_pointer (&resolved_tenant, g_free);
       if (wyl_daemon_http_resolve_bearer_for_test (server, unrelated_token,
-              &resolved_session, &resolved_actor,
-              &resolved_tenant) != WYRELOG_E_OK) {
+          &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK) {
         wyl_jwt_access_claims_clear (&claims);
         soup_server_disconnect (server);
         g_object_unref (server);
@@ -13017,13 +13026,13 @@ check_service_publication_fault_matrix (void)
       g_autoptr (GBytes) unrelated_payload = NULL;
       wyl_jwt_access_claims_t unrelated_claims = { 0 };
       if (wyl_daemon_http_copy_access_token_secret (server, unrelated_secret,
-              sizeof unrelated_secret) != WYRELOG_E_OK
+          sizeof unrelated_secret) != WYRELOG_E_OK
           || wyl_jwt_verify_hs256_access_token (unrelated_token,
-              unrelated_secret, sizeof unrelated_secret, key_id, "wyrelogd",
-              "wyrelog-client", g_get_real_time () / G_USEC_PER_SEC,
-              &unrelated_payload) != WYRELOG_E_OK
+          unrelated_secret, sizeof unrelated_secret, key_id, "wyrelogd",
+          "wyrelog-client", g_get_real_time () / G_USEC_PER_SEC,
+          &unrelated_payload) != WYRELOG_E_OK
           || wyl_jwt_parse_access_claims_json (unrelated_payload,
-              &unrelated_claims) != WYRELOG_E_OK) {
+          &unrelated_claims) != WYRELOG_E_OK) {
         sodium_memzero (unrelated_secret, sizeof unrelated_secret);
         wyl_jwt_access_claims_clear (&unrelated_claims);
         wyl_jwt_access_claims_clear (&claims);
@@ -13040,32 +13049,32 @@ check_service_publication_fault_matrix (void)
       wyl_jwt_access_claims_t revoked_claims = { 0 };
       gboolean revoked_changed = FALSE;
       if (wyl_daemon_http_publish_service_token_for_test (server,
-              issued.credential.credential_id, credential_secret,
-              credential_secret_len, &revoked_body) != WYRELOG_E_OK
+          issued.credential.credential_id, credential_secret,
+          credential_secret_len, &revoked_body) != WYRELOG_E_OK
           || revoked_body == NULL
           || (revoked_token = extract_json_string (revoked_body,
-                  "access_token")) == NULL
+          "access_token")) == NULL
           || wyl_daemon_http_copy_access_token_secret (server,
-              unrelated_secret, sizeof unrelated_secret) != WYRELOG_E_OK
+          unrelated_secret, sizeof unrelated_secret) != WYRELOG_E_OK
           || wyl_jwt_verify_hs256_access_token (revoked_token,
-              unrelated_secret, sizeof unrelated_secret, key_id, "wyrelogd",
-              "wyrelog-client", g_get_real_time () / G_USEC_PER_SEC,
-              &revoked_payload) != WYRELOG_E_OK
+          unrelated_secret, sizeof unrelated_secret, key_id, "wyrelogd",
+          "wyrelog-client", g_get_real_time () / G_USEC_PER_SEC,
+          &revoked_payload) != WYRELOG_E_OK
           || wyl_jwt_parse_access_claims_json (revoked_payload,
-              &revoked_claims) != WYRELOG_E_OK
+          &revoked_claims) != WYRELOG_E_OK
           || wyl_daemon_http_service_registry_transition_for_test (server,
-              revoked_claims.session_id, revoked_claims.jti,
-              revoked_claims.credential_id,
-              revoked_claims.credential_generation, revoked_claims.subject,
-              revoked_claims.tenant, WYL_DAEMON_SERVICE_REGISTRY_REVOKE,
-              &revoked_changed) != WYRELOG_E_OK
+          revoked_claims.session_id, revoked_claims.jti,
+          revoked_claims.credential_id,
+          revoked_claims.credential_generation, revoked_claims.subject,
+          revoked_claims.tenant, WYL_DAEMON_SERVICE_REGISTRY_REVOKE,
+          &revoked_changed) != WYRELOG_E_OK
           || !revoked_changed
           || wyl_daemon_http_retire_service_auth_exact_for_test (server,
-              revoked_claims.session_id, revoked_claims.jti,
-              revoked_claims.credential_id,
-              revoked_claims.credential_generation, revoked_claims.subject,
-              revoked_claims.tenant,
-              revoked_claims.expires_at) != WYRELOG_E_OK) {
+          revoked_claims.session_id, revoked_claims.jti,
+          revoked_claims.credential_id,
+          revoked_claims.credential_generation, revoked_claims.subject,
+          revoked_claims.tenant,
+          revoked_claims.expires_at) != WYRELOG_E_OK) {
         sodium_memzero (unrelated_secret, sizeof unrelated_secret);
         wyl_jwt_access_claims_clear (&revoked_claims);
         wyl_jwt_access_claims_clear (&unrelated_claims);
@@ -13083,8 +13092,8 @@ check_service_publication_fault_matrix (void)
       wyl_daemon_http_service_publication_counts_for_test (server,
           &revoked_sessions, &revoked_access);
       if (wyl_daemon_http_lookup_service_registry_for_test (server,
-              revoked_claims.session_id, revoked_claims.jti, &revoked_state,
-              &revoked_found) != WYRELOG_E_OK || revoked_found
+          revoked_claims.session_id, revoked_claims.jti, &revoked_state,
+          &revoked_found) != WYRELOG_E_OK || revoked_found
           || revoked_sessions != 1 || revoked_access != 1) {
         wyl_jwt_access_claims_clear (&revoked_claims);
         wyl_jwt_access_claims_clear (&unrelated_claims);
@@ -13097,14 +13106,14 @@ check_service_publication_fault_matrix (void)
       wyl_jwt_access_claims_clear (&revoked_claims);
 
       if (!wyl_daemon_http_mutate_service_session_for_test (server,
-              unrelated_claims.session_id,
-              WYL_DAEMON_SERVICE_SESSION_SUBJECT, "svc:exchange:mismatch", 0)
+          unrelated_claims.session_id,
+          WYL_DAEMON_SERVICE_SESSION_SUBJECT, "svc:exchange:mismatch", 0)
           || wyl_daemon_http_retire_service_auth_exact_for_test (server,
-              unrelated_claims.session_id, unrelated_claims.jti,
-              unrelated_claims.credential_id,
-              unrelated_claims.credential_generation,
-              unrelated_claims.subject, unrelated_claims.tenant,
-              unrelated_claims.expires_at) != WYRELOG_E_POLICY) {
+          unrelated_claims.session_id, unrelated_claims.jti,
+          unrelated_claims.credential_id,
+          unrelated_claims.credential_generation,
+          unrelated_claims.subject, unrelated_claims.tenant,
+          unrelated_claims.expires_at) != WYRELOG_E_POLICY) {
         wyl_jwt_access_claims_clear (&unrelated_claims);
         wyl_jwt_access_claims_clear (&claims);
         soup_server_disconnect (server);
@@ -13121,22 +13130,22 @@ check_service_publication_fault_matrix (void)
           &preserved_sessions, &preserved_access);
       gboolean access_preserved =
           wyl_daemon_http_snapshot_access_token_for_test (server,
-          unrelated_claims.jti, &preserved_snapshot);
+              unrelated_claims.jti, &preserved_snapshot);
       if (wyl_daemon_http_lookup_service_registry_for_test (server,
-              unrelated_claims.session_id, unrelated_claims.jti,
-              &preserved_state, &preserved_found) != WYRELOG_E_OK
+          unrelated_claims.session_id, unrelated_claims.jti,
+          &preserved_state, &preserved_found) != WYRELOG_E_OK
           || !preserved_found || preserved_state != WYL_SERVICE_AUTH_ACTIVE
           || preserved_sessions != 1 || preserved_access != 1
           || !access_preserved
           || g_strcmp0 (preserved_snapshot.jti, unrelated_claims.jti) != 0
           || g_strcmp0 (preserved_snapshot.session_id,
-              unrelated_claims.session_id) != 0
+          unrelated_claims.session_id) != 0
           || g_strcmp0 (preserved_snapshot.subject,
-              unrelated_claims.subject) != 0
+          unrelated_claims.subject) != 0
           || g_strcmp0 (preserved_snapshot.tenant,
-              unrelated_claims.tenant) != 0
+          unrelated_claims.tenant) != 0
           || g_strcmp0 (preserved_snapshot.credential_id,
-              unrelated_claims.credential_id) != 0
+          unrelated_claims.credential_id) != 0
           || preserved_snapshot.credential_generation !=
           unrelated_claims.credential_generation
           || preserved_snapshot.expires_at != unrelated_claims.expires_at) {
@@ -13152,8 +13161,8 @@ check_service_publication_fault_matrix (void)
       WylServiceAuthUnavailableReason mismatch_reason =
           WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
       if (wyl_service_auth_authority_validate_available
-          (wyl_handle_get_service_auth_authority (handle), handle,
-              &mismatch_reason) == WYRELOG_E_OK
+            (wyl_handle_get_service_auth_authority (handle), handle,
+          &mismatch_reason) == WYRELOG_E_OK
           || mismatch_reason !=
           WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT) {
         wyl_jwt_access_claims_clear (&unrelated_claims);
@@ -13218,7 +13227,7 @@ check_service_terminal_release_restart_contract (void)
   gsize credential_secret_len = 0;
   const gchar *credential_secret =
       wyl_service_credential_secret_peek_encoded (issued.secret,
-      &credential_secret_len);
+          &credential_secret_len);
   WylDaemonOptions options = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .listen_port = 0,
@@ -13230,8 +13239,8 @@ check_service_terminal_release_restart_contract (void)
   wyl_daemon_http_set_service_publication_fault_for_test (server,
       WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE);
   if (wyl_daemon_http_publish_service_token_for_test (server,
-          issued.credential.credential_id, credential_secret,
-          credential_secret_len, &failed_body) == WYRELOG_E_OK
+      issued.credential.credential_id, credential_secret,
+      credential_secret_len, &failed_body) == WYRELOG_E_OK
       || failed_body != NULL)
     goto cleanup;
   old_token =
@@ -13247,26 +13256,26 @@ check_service_terminal_release_restart_contract (void)
   old_key_id = wyl_daemon_http_dup_access_token_key_id (server);
   if (old_key_id == NULL
       || wyl_daemon_http_copy_access_token_secret (server, old_secret,
-          sizeof old_secret) != WYRELOG_E_OK
+      sizeof old_secret) != WYRELOG_E_OK
       || wyl_jwt_verify_hs256_access_token (old_token, old_secret,
-          sizeof old_secret, old_key_id, "wyrelogd", "wyrelog-client",
-          g_get_real_time () / G_USEC_PER_SEC, &old_payload) != WYRELOG_E_OK) {
+      sizeof old_secret, old_key_id, "wyrelogd", "wyrelog-client",
+      g_get_real_time () / G_USEC_PER_SEC, &old_payload) != WYRELOG_E_OK) {
     sodium_memzero (old_secret, sizeof old_secret);
     goto cleanup;
   }
   sodium_memzero (old_secret, sizeof old_secret);
   if (wyl_jwt_parse_access_claims_json (old_payload,
-          &old_claims) != WYRELOG_E_OK)
+      &old_claims) != WYRELOG_E_OK)
     goto cleanup;
   gboolean old_registry_found = FALSE;
   gint old_registry_state = WYL_SERVICE_AUTH_PENDING;
   if (wyl_daemon_http_lookup_service_registry_for_test (server,
-          old_claims.session_id, old_claims.jti, &old_registry_state,
-          &old_registry_found) != WYRELOG_E_OK
+      old_claims.session_id, old_claims.jti, &old_registry_state,
+      &old_registry_found) != WYRELOG_E_OK
       || !old_registry_found || old_registry_state != WYL_SERVICE_AUTH_ACTIVE)
     goto cleanup;
   if (wyl_daemon_http_resolve_bearer_for_test (server, old_token,
-          &resolved_session, NULL, NULL) == WYRELOG_E_OK)
+      &resolved_session, NULL, NULL) == WYRELOG_E_OK)
     goto cleanup;
 
   soup_server_disconnect (server);
@@ -13287,18 +13296,18 @@ check_service_terminal_release_restart_contract (void)
   gint restarted_registry_state = WYL_SERVICE_AUTH_ACTIVE;
   if (sessions != 0 || access_tokens != 0
       || wyl_daemon_http_lookup_service_registry_for_test (server,
-          old_claims.session_id, old_claims.jti, &restarted_registry_state,
-          &restarted_registry_found) != WYRELOG_E_OK
+      old_claims.session_id, old_claims.jti, &restarted_registry_state,
+      &restarted_registry_found) != WYRELOG_E_OK
       || restarted_registry_found)
     goto cleanup;
   g_clear_pointer (&resolved_session, g_free);
   if (wyl_daemon_http_resolve_bearer_for_test (server, old_token,
-          &resolved_session, NULL, NULL) == WYRELOG_E_OK)
+      &resolved_session, NULL, NULL) == WYRELOG_E_OK)
     goto cleanup;
 
   if (wyl_daemon_http_publish_service_token_for_test (server,
-          issued.credential.credential_id, credential_secret,
-          credential_secret_len, &fresh_body) != WYRELOG_E_OK
+      issued.credential.credential_id, credential_secret,
+      credential_secret_len, &fresh_body) != WYRELOG_E_OK
       || fresh_body == NULL)
     goto cleanup;
   fresh_token = extract_json_string (fresh_body, "access_token");
@@ -13306,19 +13315,19 @@ check_service_terminal_release_restart_contract (void)
   fresh_key_id = wyl_daemon_http_dup_access_token_key_id (server);
   if (fresh_token == NULL || fresh_key_id == NULL
       || wyl_daemon_http_copy_access_token_secret (server, fresh_secret,
-          sizeof fresh_secret) != WYRELOG_E_OK
+      sizeof fresh_secret) != WYRELOG_E_OK
       || wyl_jwt_verify_hs256_access_token (fresh_token, fresh_secret,
-          sizeof fresh_secret, fresh_key_id, "wyrelogd", "wyrelog-client",
-          g_get_real_time () / G_USEC_PER_SEC,
-          &fresh_payload) != WYRELOG_E_OK) {
+      sizeof fresh_secret, fresh_key_id, "wyrelogd", "wyrelog-client",
+      g_get_real_time () / G_USEC_PER_SEC,
+      &fresh_payload) != WYRELOG_E_OK) {
     sodium_memzero (fresh_secret, sizeof fresh_secret);
     goto cleanup;
   }
   sodium_memzero (fresh_secret, sizeof fresh_secret);
   if (wyl_jwt_parse_access_claims_json (fresh_payload,
-          &fresh_claims) != WYRELOG_E_OK
+      &fresh_claims) != WYRELOG_E_OK
       || wyl_id_parse (fresh_claims.session_id,
-          &canonical_session) != WYRELOG_E_OK
+      &canonical_session) != WYRELOG_E_OK
       || wyl_id_parse (fresh_claims.jti, &canonical_jti) != WYRELOG_E_OK
       || g_strcmp0 (fresh_claims.auth_method, "service_credential") != 0)
     goto cleanup;
@@ -13336,15 +13345,15 @@ check_service_terminal_release_restart_contract (void)
   if (sessions != 1 || access_tokens != 1 || fresh_response_wipes != 0
       || fresh_response_canary || fresh_response_all_zero
       || wyl_daemon_http_lookup_service_registry_for_test (server,
-          fresh_claims.session_id, fresh_claims.jti, &fresh_registry_state,
-          &fresh_registry_found) != WYRELOG_E_OK
+      fresh_claims.session_id, fresh_claims.jti, &fresh_registry_state,
+      &fresh_registry_found) != WYRELOG_E_OK
       || !fresh_registry_found
       || fresh_registry_state != WYL_SERVICE_AUTH_ACTIVE)
     goto cleanup;
   g_clear_pointer (&resolved_session, g_free);
   if (wyl_daemon_http_resolve_bearer_for_test (server, fresh_token,
-          &resolved_session, &resolved_actor,
-          &resolved_tenant) != WYRELOG_E_OK
+      &resolved_session, &resolved_actor,
+      &resolved_tenant) != WYRELOG_E_OK
       || g_strcmp0 (resolved_actor, "svc:exchange:restart") != 0
       || g_strcmp0 (resolved_tenant, "tenant-a") != 0)
     goto cleanup;
@@ -13412,11 +13421,12 @@ static void
 sp_copy_plan (const WyctlPublicationPlan *source, WyctlPublicationPlan *out)
 {
   *out = (WyctlPublicationPlan) {
-  .version = source->version,.destination =
+    .version = source->version,.destination =
         g_strdup (source->destination),.reservation_id =
         g_strdup (source->reservation_id),.parent_identity =
         g_strdup (source->parent_identity),.stage_basename =
-        g_strdup (source->stage_basename),};
+        g_strdup (source->stage_basename),
+  };
 }
 
 static wyrelog_error_t
@@ -13444,15 +13454,17 @@ sp_stage (gpointer data, const WyctlPublicationPlan *plan,
   g_free (backend->staged_secret);
   backend->staged_secret = g_strndup (secret->text, secret->len);
   *out_receipt = (WyctlPublicationReceipt) {
-  .version = WYCTL_PUBLICATION_RECEIPT_VERSION,.destination =
+    .version = WYCTL_PUBLICATION_RECEIPT_VERSION,.destination =
         g_strdup (plan->destination),.reservation_id =
         g_strdup (plan->reservation_id),.parent_identity =
         g_strdup (plan->parent_identity),.stage_basename =
         g_strdup (plan->stage_basename),.stage_identity =
-        g_strdup ("test-stage-identity"),};
+        g_strdup ("test-stage-identity"),
+  };
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
-        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,};
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,
+  };
   *out_replayed = FALSE;
   return WYRELOG_E_OK;
 }
@@ -13499,8 +13511,9 @@ sp_target_commit (gpointer data,
   backend->published = TRUE;
   lease->destination_target = TRUE;
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
-        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,};
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -13517,11 +13530,12 @@ sp_target_inspect (gpointer data,
   (void) secret;
   backend->inspect_calls++;
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         lease->destination_target ?
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
         WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED,.exact_identity =
-        TRUE,.cleanup_required = !lease->destination_target,};
+        TRUE,.cleanup_required = !lease->destination_target,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -13565,8 +13579,8 @@ sp_body_leaks_root (const gchar *body, const gchar *r1, const gchar *r2,
     const gchar *r3)
 {
   return (r1 != NULL && strstr (body, r1) != NULL)
-      || (r2 != NULL && strstr (body, r2) != NULL)
-      || (r3 != NULL && strstr (body, r3) != NULL);
+         || (r2 != NULL && strstr (body, r2) != NULL)
+         || (r3 != NULL && strstr (body, r3) != NULL);
 }
 
 static gint send_raw_service_principal_bearer (SoupSession * session,
@@ -13603,12 +13617,12 @@ verify_seeded_prepared_operation (const gchar *operation_root,
     goto out;
   }
   if (wyl_service_credential_operation_storage_capture_anchor (&storage,
-          &anchor) != WYRELOG_E_OK) {
+      &anchor) != WYRELOG_E_OK) {
     rc_out = 2106;
     goto out;
   }
   if (wyl_service_credential_operation_coordinator_load (&storage, &anchor,
-          request_id, &loaded) != WYRELOG_E_OK) {
+      request_id, &loaded) != WYRELOG_E_OK) {
     rc_out = 2107;
     goto out;
   }
@@ -13627,21 +13641,21 @@ verify_seeded_prepared_operation (const gchar *operation_root,
     goto out;
   }
   if ((tenant_id == NULL
-          && loaded.tenant_id != NULL && loaded.tenant_id[0] != '\0')
+      && loaded.tenant_id != NULL && loaded.tenant_id[0] != '\0')
       || (tenant_id != NULL && g_strcmp0 (loaded.tenant_id, tenant_id) != 0)) {
     rc_out = 2173;
     goto out;
   }
   if ((old_credential_id == NULL
-          && loaded.old_credential_id != NULL
-          && loaded.old_credential_id[0] != '\0')
+      && loaded.old_credential_id != NULL
+      && loaded.old_credential_id[0] != '\0')
       || (old_credential_id != NULL
-          && g_strcmp0 (loaded.old_credential_id, old_credential_id) != 0)) {
+      && g_strcmp0 (loaded.old_credential_id, old_credential_id) != 0)) {
     rc_out = 2174;
     goto out;
   }
   if (wyl_service_credential_operation_coordinator_lock_acquire (&storage,
-          &anchor, request_id, &lifecycle_lock) != WYRELOG_E_OK) {
+      &anchor, request_id, &lifecycle_lock) != WYRELOG_E_OK) {
     rc_out = 2108;
     goto out;
   }
@@ -13669,7 +13683,7 @@ seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
 
 #ifdef WYL_TEST_DAEMON_HTTP_SEED_HELPER_DSO
   rc_out = wyl_test_daemon_http_seed_prepared_operation (operation_root,
-      request_id, (guint32) kind, subject_id, tenant_id, old_credential_id);
+          request_id, (guint32) kind, subject_id, tenant_id, old_credential_id);
 #else
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -13687,7 +13701,7 @@ seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
     goto direct_out;
   }
   if (wyl_service_credential_operation_storage_capture_anchor (&storage,
-          &anchor) != WYRELOG_E_OK) {
+      &anchor) != WYRELOG_E_OK) {
     rc_out = 2102;
     goto direct_out;
   }
@@ -13706,7 +13720,7 @@ seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
   request.expected_generation =
       kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ? 1 : 0;
   if (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
-      (&storage, &anchor, &request, 1, NULL, &begun) != WYRELOG_E_OK
+        (&storage, &anchor, &request, 1, NULL, &begun) != WYRELOG_E_OK
       || begun.state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     rc_out = 2103;
 direct_out:
@@ -13717,7 +13731,7 @@ direct_out:
 
   if (rc_out == 0)
     rc_out = verify_seeded_prepared_operation (operation_root, request_id,
-        kind, subject_id, tenant_id, old_credential_id);
+            kind, subject_id, tenant_id, old_credential_id);
   return rc_out;
 }
 
@@ -13742,12 +13756,12 @@ capture_operation_signature (const gchar *operation_root,
       != WYRELOG_E_OK)
     return 2130;
   if (wyl_service_credential_operation_storage_capture_anchor (&storage,
-          &anchor) != WYRELOG_E_OK) {
+      &anchor) != WYRELOG_E_OK) {
     rc_out = 2131;
     goto out;
   }
   if (wyl_service_credential_operation_coordinator_load (&storage, &anchor,
-          request_id, &record) != WYRELOG_E_OK) {
+      request_id, &record) != WYRELOG_E_OK) {
     rc_out = 2132;
     goto out;
   }
@@ -13766,18 +13780,18 @@ static gboolean
 status_body_leaks_secret (const gchar *body)
 {
   return strstr (body, "escrow") != NULL
-      || strstr (body, "binding") != NULL
-      || strstr (body, "stage_") != NULL
-      || strstr (body, "parent_identity") != NULL
-      || strstr (body, "actor_subject") != NULL
-      || strstr (body, "reservation") != NULL
-      || strstr (body, "publication_receipt") != NULL
-      || strstr (body, "remediation") != NULL
-      || strstr (body, "credential_secret") != NULL
-      || strstr (body, "subject_id") != NULL
-      || strstr (body, "tenant_id") != NULL
-      || strstr (body, "operation_id") != NULL
-      || strstr (body, "old_credential_id") != NULL;
+         || strstr (body, "binding") != NULL
+         || strstr (body, "stage_") != NULL
+         || strstr (body, "parent_identity") != NULL
+         || strstr (body, "actor_subject") != NULL
+         || strstr (body, "reservation") != NULL
+         || strstr (body, "publication_receipt") != NULL
+         || strstr (body, "remediation") != NULL
+         || strstr (body, "credential_secret") != NULL
+         || strstr (body, "subject_id") != NULL
+         || strstr (body, "tenant_id") != NULL
+         || strstr (body, "operation_id") != NULL
+         || strstr (body, "old_credential_id") != NULL;
 }
 
 /* Drives the durable operation status + recover HTTP contract against the
@@ -13803,29 +13817,29 @@ check_service_credential_operation_status_recover (SoupServer *server,
     return 2111;
 
   gint seed_rc = seed_prepared_operation (operation_root, issue_a_id,
-      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:worker", "tenant-a",
-      NULL);
+          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:worker", "tenant-a",
+          NULL);
   if (seed_rc != 0)
     return seed_rc;
   seed_rc = seed_prepared_operation (operation_root, issue_b_id,
-      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:misleading",
-      "tenant-b", NULL);
+          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:misleading",
+          "tenant-b", NULL);
   if (seed_rc != 0)
     return seed_rc;
   seed_rc = seed_prepared_operation (operation_root, rotate_a_id,
-      WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE, "svc:tenant-b:misleading",
-      NULL, rotate_old_credential_id);
+          WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE, "svc:tenant-b:misleading",
+          NULL, rotate_old_credential_id);
   if (seed_rc != 0)
     return seed_rc;
 
   /* The seeds bypass the authenticated path that normally registers a target,
    * so register tenant-b symmetrically with the already-active tenant-a. */
   if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-b", TRUE,
-          FALSE) != WYRELOG_E_OK)
+      FALSE) != WYRELOG_E_OK)
     return 2128;
 
   g_autofree gchar *tenant_a_query = g_strdup
-      ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
 
   guint status = 0;
   g_autofree gchar *body = NULL;
@@ -13833,8 +13847,8 @@ check_service_credential_operation_status_recover (SoupServer *server,
   /* Status listing for tenant-a includes its issue and the rotate resolved
    * through the old credential; subject_id is never used for scope. */
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          "/service-credential-operations", tenant_a_query, access_token,
-          NULL, &status, &body) != 0 || status != 200 || body == NULL
+      "/service-credential-operations", tenant_a_query, access_token,
+      NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, issue_a_id) == NULL
       || strstr (body, rotate_a_id) == NULL
       || strstr (body, issue_b_id) != NULL
@@ -13848,10 +13862,10 @@ check_service_credential_operation_status_recover (SoupServer *server,
    * error. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *default_query = g_strdup
-      ("tenant=__wr_default&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("tenant=__wr_default&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          "/service-credential-operations", default_query, access_token,
-          NULL, &status, &body) != 0 || status != 200 || body == NULL
+      "/service-credential-operations", default_query, access_token,
+      NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"operations\":[]") == NULL)
     return 2115;
 
@@ -13859,18 +13873,18 @@ check_service_credential_operation_status_recover (SoupServer *server,
    * or reconcile sibling handlers. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations", default_query, access_token,
-          "{}", &status, &body) != 0 || status != 405)
+      "/service-credential-operations", default_query, access_token,
+      "{}", &status, &body) != 0 || status != 405)
     return 2116;
 
   /* Recover the tenant-a issue: no server-side commit evidence exists yet, so
    * it classifies as pending and returns 200. */
   g_autofree gchar *recover_a_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_a_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_a_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations/recover", tenant_a_query,
-          access_token, recover_a_body, &status, &body) != 0 || status != 200
+      "/service-credential-operations/recover", tenant_a_query,
+      access_token, recover_a_body, &status, &body) != 0 || status != 200
       || body == NULL
       || strstr (body, "\"recovery\":\"pending\"") == NULL
       || strstr (body, issue_a_id) == NULL || status_body_leaks_secret (body))
@@ -13881,21 +13895,21 @@ check_service_credential_operation_status_recover (SoupServer *server,
   if (wyl_request_id_new (unknown_id, sizeof unknown_id) != WYRELOG_E_OK)
     return 2119;
   g_autofree gchar *recover_unknown_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", unknown_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", unknown_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations/recover", tenant_a_query,
-          access_token, recover_unknown_body, &status, &body) != 0
+      "/service-credential-operations/recover", tenant_a_query,
+      access_token, recover_unknown_body, &status, &body) != 0
       || status != 404)
     return 2120;
 
   /* A 27-character alphanumeric but noncanonical request id is a 400. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations/recover", tenant_a_query,
-          access_token,
-          "{\"version\":\"1\",\"request_id\":"
-          "\"abcdefghijklmnopqrstuvwxyz0\"}", &status, &body) != 0
+      "/service-credential-operations/recover", tenant_a_query,
+      access_token,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"abcdefghijklmnopqrstuvwxyz0\"}", &status, &body) != 0
       || status != 400)
     return 2121;
 
@@ -13908,22 +13922,22 @@ check_service_credential_operation_status_recover (SoupServer *server,
   gint64 pre_updated_at_us = 0;
   guint32 pre_attempts = 0;
   if (capture_operation_signature (operation_root, issue_b_id, &pre_state,
-          &pre_updated_at_us, &pre_attempts) != 0
+      &pre_updated_at_us, &pre_attempts) != 0
       || pre_state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     return 2122;
   g_autofree gchar *recover_cross_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_b_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_b_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations/recover", tenant_a_query,
-          access_token, recover_cross_body, &status, &body) != 0
+      "/service-credential-operations/recover", tenant_a_query,
+      access_token, recover_cross_body, &status, &body) != 0
       || status != 404 || (body != NULL && strstr (body, issue_b_id) != NULL))
     return 2123;
   WylServiceCredentialOperationState post_state = 0;
   gint64 post_updated_at_us = 0;
   guint32 post_attempts = 0;
   if (capture_operation_signature (operation_root, issue_b_id, &post_state,
-          &post_updated_at_us, &post_attempts) != 0
+      &post_updated_at_us, &post_attempts) != 0
       || post_state != pre_state || post_updated_at_us != pre_updated_at_us
       || post_attempts != pre_attempts)
     return 2124;
@@ -13931,11 +13945,11 @@ check_service_credential_operation_status_recover (SoupServer *server,
   /* A legitimate tenant-b recover of the same operation still classifies as
    * pending: the cross-tenant attempt neither advanced nor consumed it. */
   g_autofree gchar *tenant_b_query = g_strdup
-      ("tenant=tenant-b&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("tenant=tenant-b&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations/recover", tenant_b_query,
-          access_token, recover_cross_body, &status, &body) != 0
+      "/service-credential-operations/recover", tenant_b_query,
+      access_token, recover_cross_body, &status, &body) != 0
       || status != 200
       || body == NULL || strstr (body, "\"recovery\":\"pending\"") == NULL
       || strstr (body, issue_b_id) == NULL || status_body_leaks_secret (body))
@@ -13945,8 +13959,8 @@ check_service_credential_operation_status_recover (SoupServer *server,
    * and must 404 rather than be served by longest-prefix routing. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-credential-operations/recover/extra", tenant_a_query,
-          access_token, recover_a_body, &status, &body) != 0 || status != 404)
+      "/service-credential-operations/recover/extra", tenant_a_query,
+      access_token, recover_a_body, &status, &body) != 0 || status != 404)
     return 2127;
 
   return 0;
@@ -14050,7 +14064,7 @@ check_service_principal_management_contract (void)
    * so a literal username would fail to seed the session. */
   if (wyl_id_new (&session_id_value) != WYRELOG_E_OK
       || wyl_id_format (&session_id_value, session_token,
-          sizeof session_token) != WYRELOG_E_OK)
+      sizeof session_token) != WYRELOG_E_OK)
     return 1973;
 
   /* The escrow handoff needs both opt-in roots configured; the publication
@@ -14060,7 +14074,7 @@ check_service_principal_management_contract (void)
   if (handoff_dir == NULL)
     return 1974;
   operation_root = service_credential_operation_root_for_test (handoff_dir,
-      "http-handoff-operations");
+          "http-handoff-operations");
   publication_root = g_build_filename (handoff_dir, "publication", NULL);
   if (g_mkdir_with_parents (publication_root, 0700) != 0)
     return 1974;
@@ -14082,7 +14096,7 @@ check_service_principal_management_contract (void)
   if (http.server == NULL)
     return 1977;
   thread = g_thread_new ("daemon-http-service-principal",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   /* Barrier: wait until the worker thread is running g_main_loop_run before
    * issuing any request, so an early goto cleanup cannot quit the loop before
    * the worker enters it and hang g_thread_join. */
@@ -14111,7 +14125,7 @@ check_service_principal_management_contract (void)
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
   guint maintenance_ticks = 0;
   if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
-          &maintenance_ticks)) {
+      &maintenance_ticks)) {
     rc = 2164;
     goto cleanup;
   }
@@ -14128,7 +14142,7 @@ check_service_principal_management_contract (void)
       &sp_publication_vtable, &publication);
 
   if (!seed_management_human_access_token (http.server, session_token,
-          "human-principal-admin", &access_token)) {
+      "human-principal-admin", &access_token)) {
     rc = 1979;
     goto cleanup;
   }
@@ -14140,40 +14154,40 @@ check_service_principal_management_contract (void)
    * service_principal_management_authorize_session evaluates the session id as
    * the decide resource. */
   if (wyl_policy_store_set_principal_state (policy_store,
-          "human-principal-admin", "authenticated") != WYRELOG_E_OK
+      "human-principal-admin", "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (policy_store, session_token,
-          "active") != WYRELOG_E_OK) {
+      "active") != WYRELOG_E_OK) {
     rc = 1971;
     goto cleanup;
   }
   if (wyl_policy_store_grant_direct_permission (policy_store,
-          "human-principal-admin", "wr.service_principal.manage",
-          session_token) != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_principal.manage",
+      session_token) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (policy_store,
-          "human-principal-admin", "wr.service_principal.manage",
-          session_token, "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_principal.manage",
+      session_token, "armed") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (policy_store,
-          "human-principal-admin", "wr.service_credential.manage",
-          session_token) != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      session_token) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (policy_store,
-          "human-principal-admin", "wr.service_credential.manage",
-          session_token, "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      session_token, "armed") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (policy_store,
-          "human-principal-admin", "wr.tenant.manage",
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      "human-principal-admin", "wr.tenant.manage",
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (policy_store,
-          "human-principal-admin", "wr.tenant.manage",
-          WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.tenant.manage",
+      WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (policy_store, WYL_TENANT_DEFAULT,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
     rc = 1989;
     goto cleanup;
   }
   query = g_strdup ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals", query, access_token, create_body, &status,
-          &body) != 0
+      "/service-principals", query, access_token, create_body, &status,
+      &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -14186,8 +14200,8 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          "/service-principals", query, access_token, NULL, &status,
-          &body) != 0
+      "/service-principals", query, access_token, NULL, &status,
+      &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"service_principals\":[") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -14198,8 +14212,8 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          "/service-principals/svc:tenant-a:worker/credentials",
-          query, access_token, NULL, &status, &body) != 0 || status != 200
+      "/service-principals/svc:tenant-a:worker/credentials",
+      query, access_token, NULL, &status, &body) != 0 || status != 200
       || body == NULL
       || strstr (body, "\"service_credentials\":[") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -14209,8 +14223,8 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          "/service-credentials/wlc_000000000000000000000000000",
-          query, access_token, NULL, &status, &body) != 0 || status != 404
+      "/service-credentials/wlc_000000000000000000000000000",
+      query, access_token, NULL, &status, &body) != 0 || status != 404
       || body == NULL
       || strstr (body, "service_credential_not_found") == NULL) {
     rc = 1985;
@@ -14218,25 +14232,25 @@ check_service_principal_management_contract (void)
   }
 
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-          "tenant-a", &tenant_created) != WYRELOG_E_OK || !tenant_created) {
+      "tenant-a", &tenant_created) != WYRELOG_E_OK || !tenant_created) {
     rc = 1986;
     goto cleanup;
   }
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
-          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
+      session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1988;
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
   tenant_query = g_strdup
-      ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals/svc:tenant-b:worker/credentials",
-          tenant_query, access_token,
-          "{\"version\":\"1\",\"tenant\":\"tenant-a\","
-          "\"request_id\":\"000000000000000000000000000\"}",
-          &status, &body) != 0 || status != 400 || body == NULL
+      "/service-principals/svc:tenant-b:worker/credentials",
+      tenant_query, access_token,
+      "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"000000000000000000000000000\"}",
+      &status, &body) != 0 || status != 400 || body == NULL
       || strstr (body, "credential_secret") != NULL) {
     rc = 1987;
     goto cleanup;
@@ -14252,23 +14266,23 @@ check_service_principal_management_contract (void)
   gint64 issue_credentials_before = 0;
   gint64 issue_credentials_after = 0;
   if (!policy_count_rows (handle, "SELECT count(*) FROM service_credentials;",
-          &issue_credentials_before)) {
+      &issue_credentials_before)) {
     rc = 2170;
     goto cleanup;
   }
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals/svc:tenant-a:worker/credentials",
-          tenant_query, access_token,
-          "{\"version\":\"1\",\"tenant\":\"tenant-a\","
-          "\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
-          "\"destination\":\"issue.json\",\"expires_at_us\":\""
-          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      "/service-principals/svc:tenant-a:worker/credentials",
+      tenant_query, access_token,
+      "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
+      "\"destination\":\"issue.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
       || status != 400 || body == NULL
       || strstr (body, "invalid_service_credential_request") == NULL
       || strstr (body, "credential_secret") != NULL
       || publication.stage_calls != 0 || publication.commit_calls != 0
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_credentials;", &issue_credentials_after)
+      "SELECT count(*) FROM service_credentials;", &issue_credentials_after)
       || issue_credentials_after != issue_credentials_before) {
     rc = 2171;
     goto cleanup;
@@ -14281,15 +14295,15 @@ check_service_principal_management_contract (void)
    * the production 403 loopback gate is covered at the module level rather
    * than here. */
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals/svc:tenant-a:worker/credentials",
-          tenant_query, access_token, issue_body, &status, &body) != 0
+      "/service-principals/svc:tenant-a:worker/credentials",
+      tenant_query, access_token, issue_body, &status, &body) != 0
       || status != 200
       || body == NULL || strstr (body, "credential_secret") != NULL
       || strstr (body, "\"state\":\"terminal\"") == NULL
       || strstr (body, "\"delivered\":true") == NULL
       || strstr (body, "\"destination\":\"issue.json\"") == NULL
       || (http_credential_id =
-          extract_json_string (body, "credential_id")) == NULL) {
+      extract_json_string (body, "credential_id")) == NULL) {
     rc = 1990;
     goto cleanup;
   }
@@ -14320,7 +14334,7 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   /* #517 capstone: the actual one-time secret staged into escrow must never
-   * appear anywhere in the HTTP response body -- not merely the key name. */
+  * appear anywhere in the HTTP response body -- not merely the key name. */
   if (publication.staged_secret == NULL || publication.staged_secret[0] == '\0'
       || strstr (body, publication.staged_secret) != NULL) {
     rc = 2016;
@@ -14332,9 +14346,9 @@ check_service_principal_management_contract (void)
   {
     wyl_service_credential_issue_result_t exchange_seed = { 0 };
     if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
-            "human-principal-admin", "http-exchange-seed",
-            CONTRACT_FUTURE_EXPIRES_AT_US,
-            &exchange_seed) != WYRELOG_E_OK || exchange_seed.secret == NULL
+        "human-principal-admin", "http-exchange-seed",
+        CONTRACT_FUTURE_EXPIRES_AT_US,
+        &exchange_seed) != WYRELOG_E_OK || exchange_seed.secret == NULL
         || exchange_seed.credential.credential_id == NULL) {
       wyl_service_credential_issue_result_clear (&exchange_seed);
       rc = 1993;
@@ -14342,16 +14356,16 @@ check_service_principal_management_contract (void)
     }
     gsize exchange_secret_len = 0;
     const gchar *exchange_secret = wyl_service_credential_secret_peek_encoded
-        (exchange_seed.secret, &exchange_secret_len);
+          (exchange_seed.secret, &exchange_secret_len);
     http_exchange_body = g_strdup_printf
-        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
-        exchange_seed.credential.credential_id, (gint) exchange_secret_len,
-        exchange_secret);
+          ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
+            exchange_seed.credential.credential_id, (gint) exchange_secret_len,
+            exchange_secret);
     wyl_service_credential_issue_result_clear (&exchange_seed);
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/auth/service-token", NULL, http_exchange_body, &status, &body)
+      "/auth/service-token", NULL, http_exchange_body, &status, &body)
       != 0) {
     rc = 1993;
     goto cleanup;
@@ -14370,8 +14384,8 @@ check_service_principal_management_contract (void)
   denied_retry_after = 0;
   g_clear_pointer (&denied_body, g_free);
   if (wyl_daemon_http_issue_service_token_for_test (http.server, FALSE,
-          http_exchange_body, strlen (http_exchange_body), &denied_status,
-          &denied_body, &denied_retry_after) != WYRELOG_E_OK
+      http_exchange_body, strlen (http_exchange_body), &denied_status,
+      &denied_body, &denied_retry_after) != WYRELOG_E_OK
       || denied_status != 403 || denied_body == NULL
       || strstr (denied_body, "access_token") != NULL
       || strstr (denied_body, "credential_secret") != NULL) {
@@ -14386,8 +14400,8 @@ check_service_principal_management_contract (void)
   {
     g_autofree gchar *replay_id = NULL;
     if (send_raw_service_principal_bearer (session, "POST", base_url,
-            "/service-principals/svc:tenant-a:worker/credentials",
-            tenant_query, access_token, issue_body, &status, &body) != 0
+        "/service-principals/svc:tenant-a:worker/credentials",
+        tenant_query, access_token, issue_body, &status, &body) != 0
         || status != 200
         || body == NULL || strstr (body, "credential_secret") != NULL
         || strstr (body, "\"state\":\"terminal\"") == NULL
@@ -14398,7 +14412,7 @@ check_service_principal_management_contract (void)
       goto cleanup;
     }
     if (sp_body_leaks_root (body, handoff_dir, operation_root,
-            publication_root)) {
+        publication_root)) {
       rc = 2012;
       goto cleanup;
     }
@@ -14412,23 +14426,23 @@ check_service_principal_management_contract (void)
   }
   g_clear_pointer (&query, g_free);
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
-          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
+      session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1989;
     goto cleanup;
   }
   query = g_strdup ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
-          "human-principal-admin", "http-credential-read",
-          CONTRACT_FUTURE_EXPIRES_AT_US,
-          &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
+      "human-principal-admin", "http-credential-read",
+      CONTRACT_FUTURE_EXPIRES_AT_US,
+      &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1987;
     goto cleanup;
   }
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
-          "human-principal-admin", "http-credential-rotate",
-          CONTRACT_FUTURE_EXPIRES_AT_US,
-          &rotate_seed) != WYRELOG_E_OK
+      "human-principal-admin", "http-credential-rotate",
+      CONTRACT_FUTURE_EXPIRES_AT_US,
+      &rotate_seed) != WYRELOG_E_OK
       || rotate_seed.credential.credential_id == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
@@ -14436,7 +14450,7 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
-          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
+      session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     rc = 1998;
@@ -14444,33 +14458,33 @@ check_service_principal_management_contract (void)
   }
   g_clear_pointer (&query, g_free);
   query = g_strdup
-      ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("tenant=tenant-a&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
-      rotate_seed.credential.credential_id);
+          rotate_seed.credential.credential_id);
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&publication.staged_secret, g_free);
   memset (&publication, 0, sizeof publication);
   gint64 rotate_credentials_before = 0;
   gint64 rotate_credentials_after = 0;
   if (!policy_count_rows (handle, "SELECT count(*) FROM service_credentials;",
-          &rotate_credentials_before)) {
+      &rotate_credentials_before)) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     rc = 2172;
     goto cleanup;
   }
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          rotate_path, query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
-          "\"destination\":\"rotate.json\",\"expires_at_us\":\""
-          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      rotate_path, query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\","
+      "\"destination\":\"rotate.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
       || status != 400 || body == NULL
       || strstr (body, "invalid_service_credential_request") == NULL
       || strstr (body, "credential_secret") != NULL
       || publication.stage_calls != 0 || publication.commit_calls != 0
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_credentials;",
-          &rotate_credentials_after)
+      "SELECT count(*) FROM service_credentials;",
+      &rotate_credentials_after)
       || rotate_credentials_after != rotate_credentials_before) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
@@ -14481,11 +14495,11 @@ check_service_principal_management_contract (void)
   /* Rotate delivers the successor secret via the escrow file too; assert the
    * non-secret receipt naming a fresh successor credential. */
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          rotate_path, query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
-          "\"destination\":\"rotate.json\","
-          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
-          &status, &body) != 0 || status != 200 || body == NULL
+      rotate_path, query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+      "\"destination\":\"rotate.json\","
+      "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
+      &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "credential_secret") != NULL
       || strstr (body, "\"state\":\"terminal\"") == NULL
       || strstr (body, "\"delivered\":true") == NULL
@@ -14530,11 +14544,11 @@ check_service_principal_management_contract (void)
   {
     g_autofree gchar *replay_rotate_id = NULL;
     if (send_raw_service_principal_bearer (session, "POST", base_url,
-            rotate_path, query, access_token,
-            "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
-            "\"destination\":\"rotate.json\","
-            "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
-            &status, &body) != 0 || status != 200 || body == NULL
+        rotate_path, query, access_token,
+        "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+        "\"destination\":\"rotate.json\","
+        "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
+        &status, &body) != 0 || status != 200 || body == NULL
         || strstr (body, "credential_secret") != NULL
         || strstr (body, "\"state\":\"terminal\"") == NULL
         || strstr (body, "\"delivered\":true") == NULL
@@ -14546,7 +14560,7 @@ check_service_principal_management_contract (void)
       goto cleanup;
     }
     if (sp_body_leaks_root (body, handoff_dir, operation_root,
-            publication_root)) {
+        publication_root)) {
       wyl_service_credential_issue_result_clear (&issued);
       wyl_service_credential_issue_result_clear (&rotate_seed);
       rc = 2014;
@@ -14564,9 +14578,9 @@ check_service_principal_management_contract (void)
   }
   wyl_service_credential_issue_result_clear (&rotate_seed);
   cross_tenant_rotate_path = g_strdup_printf
-      ("/service-credentials/%s/rotate", issued.credential.credential_id);
+        ("/service-credentials/%s/rotate", issued.credential.credential_id);
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
-          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
+      session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 2001;
     goto cleanup;
@@ -14575,11 +14589,11 @@ check_service_principal_management_contract (void)
   query = g_strdup ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          cross_tenant_rotate_path, query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\","
-          "\"destination\":\"rotate.json\","
-          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
-          &status, &body) != 0 || status != 404 || body == NULL
+      cross_tenant_rotate_path, query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\","
+      "\"destination\":\"rotate.json\","
+      "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
+      &status, &body) != 0 || status != 404 || body == NULL
       || strstr (body, "service_credential_not_found") == NULL
       || strstr (body, "credential_secret") != NULL) {
     wyl_service_credential_issue_result_clear (&issued);
@@ -14594,10 +14608,10 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   credential_path = g_strdup_printf
-      ("/service-credentials/%s", issued.credential.credential_id);
+        ("/service-credentials/%s", issued.credential.credential_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          credential_path, query, access_token, NULL, &status, &body) != 0
+      credential_path, query, access_token, NULL, &status, &body) != 0
       || status != 404
       || body == NULL || strstr (body, "service_credential_not_found") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -14606,7 +14620,7 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
-          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
+      session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1993;
     goto cleanup;
@@ -14625,65 +14639,65 @@ check_service_principal_management_contract (void)
   gint64 noncanonical_artifacts = 0;
   gsize revoke_secret_len = 0;
   const gchar *revoke_secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &revoke_secret_len);
+        (issued.secret, &revoke_secret_len);
   if (revoke_secret == NULL || revoke_secret_len == 0
       || wyl_service_credential_get (handle,
-          issued.credential.credential_id, &revoke_before) != WYRELOG_E_OK
+      issued.credential.credential_id, &revoke_before) != WYRELOG_E_OK
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_domain_requests;", &requests_before)
+      "SELECT count(*) FROM service_domain_requests;", &requests_before)
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_credential_events "
-          "WHERE event='revoked';", &revoke_events_before)
+      "SELECT count(*) FROM service_credential_events "
+      "WHERE event='revoked';", &revoke_events_before)
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_events "
-          "WHERE action='service.credential.revoke';", &revoke_audits_before)
+      "SELECT count(*) FROM audit_events "
+      "WHERE action='service.credential.revoke';", &revoke_audits_before)
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
-          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
-          &revoke_outbox_before)) {
+      "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+      "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+      &revoke_outbox_before)) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_clear (&revoke_before);
     rc = 2174;
     goto cleanup;
   }
   if (send_raw_service_principal_bearer (session, "DELETE", base_url,
-          credential_path, tenant_query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\"}",
-          &status, &body) != 0 || status != 400 || body == NULL
+      credential_path, tenant_query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"abcdefghijklmnopqrstuvwxyz0\"}",
+      &status, &body) != 0 || status != 400 || body == NULL
       || strstr (body, "invalid_service_credential_request") == NULL
       || strstr (body, "credential_secret") != NULL
       || strstr (body, revoke_secret) != NULL
       || wyl_service_credential_get (handle,
-          issued.credential.credential_id, &revoke_after) != WYRELOG_E_OK
+      issued.credential.credential_id, &revoke_after) != WYRELOG_E_OK
       || g_strcmp0 (revoke_after.state, revoke_before.state) != 0
       || revoke_after.generation != revoke_before.generation
       || revoke_after.updated_at_us != revoke_before.updated_at_us
       || revoke_after.revoked_at_us != revoke_before.revoked_at_us
       || g_strcmp0 (revoke_after.revoked_by, revoke_before.revoked_by) != 0
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_domain_requests;", &requests_after)
+      "SELECT count(*) FROM service_domain_requests;", &requests_after)
       || requests_after != requests_before
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_credential_events "
-          "WHERE event='revoked';", &revoke_events_after)
+      "SELECT count(*) FROM service_credential_events "
+      "WHERE event='revoked';", &revoke_events_after)
       || revoke_events_after != revoke_events_before
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_events "
-          "WHERE action='service.credential.revoke';", &revoke_audits_after)
+      "SELECT count(*) FROM audit_events "
+      "WHERE action='service.credential.revoke';", &revoke_audits_after)
       || revoke_audits_after != revoke_audits_before
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
-          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
-          &revoke_outbox_after)
+      "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+      "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+      &revoke_outbox_after)
       || revoke_outbox_after != revoke_outbox_before
       || !policy_count_rows (handle,
-          "SELECT (SELECT count(*) FROM service_domain_requests "
-          "WHERE request_id='abcdefghijklmnopqrstuvwxyz0') + "
-          "(SELECT count(*) FROM service_credential_events "
-          "WHERE request_id='abcdefghijklmnopqrstuvwxyz0') + "
-          "(SELECT count(*) FROM audit_events "
-          "WHERE request_id='abcdefghijklmnopqrstuvwxyz0');",
-          &noncanonical_artifacts)
+      "SELECT (SELECT count(*) FROM service_domain_requests "
+      "WHERE request_id='abcdefghijklmnopqrstuvwxyz0') + "
+      "(SELECT count(*) FROM service_credential_events "
+      "WHERE request_id='abcdefghijklmnopqrstuvwxyz0') + "
+      "(SELECT count(*) FROM audit_events "
+      "WHERE request_id='abcdefghijklmnopqrstuvwxyz0');",
+      &noncanonical_artifacts)
       || noncanonical_artifacts != 0) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_clear (&revoke_before);
@@ -14695,9 +14709,9 @@ check_service_principal_management_contract (void)
   wyl_service_credential_clear (&revoke_after);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "DELETE", base_url,
-          credential_path, tenant_query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
-          &status, &body) != 0 || status != 200 || body == NULL
+      credential_path, tenant_query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
+      &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"state\":\"revoked\"") == NULL
       || strstr (body, "credential_secret") != NULL) {
     wyl_service_credential_issue_result_clear (&issued);
@@ -14706,43 +14720,43 @@ check_service_principal_management_contract (void)
   }
   first_revoke_response = g_strdup (body);
   if (!policy_count_rows (handle,
-          "SELECT count(*) FROM service_domain_requests;", &requests_before)
+      "SELECT count(*) FROM service_domain_requests;", &requests_before)
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_credential_events "
-          "WHERE event='revoked';", &revoke_events_before)
+      "SELECT count(*) FROM service_credential_events "
+      "WHERE event='revoked';", &revoke_events_before)
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_events "
-          "WHERE action='service.credential.revoke';", &revoke_audits_before)
+      "SELECT count(*) FROM audit_events "
+      "WHERE action='service.credential.revoke';", &revoke_audits_before)
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
-          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
-          &revoke_outbox_before)) {
+      "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+      "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+      &revoke_outbox_before)) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 2176;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "DELETE", base_url,
-          credential_path, tenant_query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
-          &status, &body) != 0 || status != 200 || body == NULL
+      credential_path, tenant_query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
+      &status, &body) != 0 || status != 200 || body == NULL
       || g_strcmp0 (body, first_revoke_response) != 0
       || strstr (body, "credential_secret") != NULL
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_domain_requests;", &requests_after)
+      "SELECT count(*) FROM service_domain_requests;", &requests_after)
       || requests_after != requests_before
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM service_credential_events "
-          "WHERE event='revoked';", &revoke_events_after)
+      "SELECT count(*) FROM service_credential_events "
+      "WHERE event='revoked';", &revoke_events_after)
       || revoke_events_after != revoke_events_before
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_events "
-          "WHERE action='service.credential.revoke';", &revoke_audits_after)
+      "SELECT count(*) FROM audit_events "
+      "WHERE action='service.credential.revoke';", &revoke_audits_after)
       || revoke_audits_after != revoke_audits_before
       || !policy_count_rows (handle,
-          "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
-          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
-          &revoke_outbox_after)
+      "SELECT count(*) FROM audit_intentions i JOIN audit_events a "
+      "ON a.id=i.audit_id WHERE a.action='service.credential.revoke';",
+      &revoke_outbox_after)
       || revoke_outbox_after != revoke_outbox_before) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1995;
@@ -14751,76 +14765,76 @@ check_service_principal_management_contract (void)
   wyl_service_credential_issue_result_clear (&issued);
 
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
-          session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
+      session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1996;
     goto cleanup;
   }
 
 #ifdef WYL_HAS_AUDIT
   if (wyl_service_principal_create (handle, "svc:tenant-a:observer",
-          "Unrelated route observer", "human-principal-admin",
-          "http-route-unrelated-principal", &principal_unrelated)
+      "Unrelated route observer", "human-principal-admin",
+      "http-route-unrelated-principal", &principal_unrelated)
       != WYRELOG_E_OK
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
-          "tenant-a", "http-route-disable-token", &principal_route_tokens)
+      "tenant-a", "http-route-disable-token", &principal_route_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:observer",
-          "tenant-a", "http-route-disable-unrelated-token",
-          &principal_unrelated_tokens)
+      "tenant-a", "http-route-disable-unrelated-token",
+      &principal_unrelated_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
-          "tenant-a", "http-route-revoke-token", &revoke_route_tokens)
+      "tenant-a", "http-route-revoke-token", &revoke_route_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
-          "tenant-a", "http-route-revoke-unrelated-token",
-          &revoke_unrelated_tokens)
+      "tenant-a", "http-route-revoke-unrelated-token",
+      &revoke_unrelated_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
-          "tenant-a", "http-route-rotate-token", &rotate_route_tokens)
+      "tenant-a", "http-route-rotate-token", &rotate_route_tokens)
       || !actual_service_tokens_init (http.server, "svc:tenant-a:worker",
-          "tenant-a", "http-route-rotate-unrelated-token",
-          &rotate_unrelated_tokens)) {
+      "tenant-a", "http-route-rotate-unrelated-token",
+      &rotate_unrelated_tokens)) {
     rc = 2160;
     goto cleanup;
   }
   revoke_route_path = g_strdup_printf
-      ("/service-credentials/%s",
-      revoke_route_tokens.issued.credential.credential_id);
+        ("/service-credentials/%s",
+          revoke_route_tokens.issued.credential.credential_id);
   rotate_route_path = g_strdup_printf
-      ("/service-credentials/%s/rotate",
-      rotate_route_tokens.issued.credential.credential_id);
+        ("/service-credentials/%s/rotate",
+          rotate_route_tokens.issued.credential.credential_id);
   if (!actual_http_route_retirement_race (http.server, base_url,
-          revoke_route_path, tenant_query, ACTUAL_ROUTE_REVOKE_CREDENTIAL,
-          access_token, &revoke_route_tokens, "svc:tenant-a:worker", "tenant-a",
-          &revoke_unrelated_tokens, "svc:tenant-a:worker", "tenant-a")) {
+      revoke_route_path, tenant_query, ACTUAL_ROUTE_REVOKE_CREDENTIAL,
+      access_token, &revoke_route_tokens, "svc:tenant-a:worker", "tenant-a",
+      &revoke_unrelated_tokens, "svc:tenant-a:worker", "tenant-a")) {
     rc = 2167;
     goto cleanup;
   }
   if (!actual_http_route_retirement_race (http.server, base_url,
-          rotate_route_path, tenant_query, ACTUAL_ROUTE_ROTATE_CREDENTIAL,
-          access_token, &rotate_route_tokens, "svc:tenant-a:worker", "tenant-a",
-          &rotate_unrelated_tokens, "svc:tenant-a:worker", "tenant-a")) {
+      rotate_route_path, tenant_query, ACTUAL_ROUTE_ROTATE_CREDENTIAL,
+      access_token, &rotate_route_tokens, "svc:tenant-a:worker", "tenant-a",
+      &rotate_unrelated_tokens, "svc:tenant-a:worker", "tenant-a")) {
     rc = 2168;
     goto cleanup;
   }
   tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (policy_store, "tenant-route",
-          &tenant_created) != WYRELOG_E_OK || !tenant_created
+      &tenant_created) != WYRELOG_E_OK || !tenant_created
       || wyl_service_principal_create (handle, "svc:tenant-route:worker",
-          "Tenant route worker", "human-principal-admin",
-          "http-route-tenant-principal",
-          &tenant_route_principal) != WYRELOG_E_OK
+      "Tenant route worker", "human-principal-admin",
+      "http-route-tenant-principal",
+      &tenant_route_principal) != WYRELOG_E_OK
       || !actual_service_tokens_init (http.server,
-          "svc:tenant-route:worker", "tenant-route",
-          "http-route-tenant-token", &tenant_route_tokens)) {
+      "svc:tenant-route:worker", "tenant-route",
+      "http-route-tenant-token", &tenant_route_tokens)) {
     rc = 2161;
     goto cleanup;
   }
   /* Tenant lifecycle routes retain their session-token authorization
    * contract; do not inherit the Bearer-only management query above. */
   tenant_route_query = g_strdup_printf ("name=tenant-route&session_token=%s&%s",
-      session_token, query);
+          session_token, query);
   if (!actual_http_route_retirement_race (http.server, base_url,
-          "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
-          NULL, &tenant_route_tokens, "svc:tenant-route:worker",
-          "tenant-route", &principal_route_tokens, "svc:tenant-a:worker",
-          "tenant-a")) {
+      "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
+      NULL, &tenant_route_tokens, "svc:tenant-route:worker",
+      "tenant-route", &principal_route_tokens, "svc:tenant-a:worker",
+      "tenant-a")) {
     rc = 2162;
     goto cleanup;
   }
@@ -14829,10 +14843,10 @@ check_service_principal_management_contract (void)
     "",
     "{}",
     "{\"version\":\"1\",\"request_id\":"
-        "\"000000000000000000000000224\",\"extra\":true}",
+    "\"000000000000000000000000224\",\"extra\":true}",
     "{\"version\":\"1\",\"request_id\":"
-        "\"000000000000000000000000224\",\"request_id\":"
-        "\"000000000000000000000000224\"}",
+    "\"000000000000000000000000224\",\"request_id\":"
+    "\"000000000000000000000000224\"}",
     "{\"version\":1,\"request_id\":" "\"000000000000000000000000224\"}",
     "{\"version\":\"2\",\"request_id\":" "\"000000000000000000000000224\"}",
     "{\"version\":\"1\",\"request_id\":" "\"abcdefghijklmnopqrstuvwxyz0\"}",
@@ -14840,9 +14854,9 @@ check_service_principal_management_contract (void)
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_principal_disable_bodies); i++) {
     g_clear_pointer (&body, g_free);
     if (send_raw_service_principal_bearer (session, "POST", base_url,
-            "/service-principals/svc:tenant-a:worker/disable", query,
-            access_token, invalid_principal_disable_bodies[i], &status,
-            &body) != 0 || status != 400 || body == NULL
+        "/service-principals/svc:tenant-a:worker/disable", query,
+        access_token, invalid_principal_disable_bodies[i], &status,
+        &body) != 0 || status != 400 || body == NULL
         || strstr (body, "invalid_service_principal_request") == NULL) {
       rc = 2164;
       goto cleanup;
@@ -14851,27 +14865,27 @@ check_service_principal_management_contract (void)
   g_clear_pointer (&body, g_free);
   oversized_principal_disable_body = g_strnfill (1025, 'x');
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals/svc:tenant-a:worker/disable", query,
-          access_token, oversized_principal_disable_body, &status,
-          &body) != 0 || status != 400 || body == NULL
+      "/service-principals/svc:tenant-a:worker/disable", query,
+      access_token, oversized_principal_disable_body, &status,
+      &body) != 0 || status != 400 || body == NULL
       || strstr (body, "invalid_service_principal_request") == NULL) {
     rc = 2166;
     goto cleanup;
   }
   if (!actual_http_route_retirement_race (http.server, base_url,
-          "/service-principals/svc:tenant-a:worker/disable", query,
-          ACTUAL_ROUTE_DISABLE_PRINCIPAL, access_token,
-          &principal_route_tokens, "svc:tenant-a:worker", "tenant-a",
-          &principal_unrelated_tokens, "svc:tenant-a:observer", "tenant-a")) {
+      "/service-principals/svc:tenant-a:worker/disable", query,
+      ACTUAL_ROUTE_DISABLE_PRINCIPAL, access_token,
+      &principal_route_tokens, "svc:tenant-a:worker", "tenant-a",
+      &principal_unrelated_tokens, "svc:tenant-a:observer", "tenant-a")) {
     rc = 2163;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals/svc:tenant-route:worker/disable", query,
-          access_token,
-          "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000224\"}", &status, &body) != 0
+      "/service-principals/svc:tenant-route:worker/disable", query,
+      access_token,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"000000000000000000000000224\"}", &status, &body) != 0
       || status != 409 || body == NULL
       || strstr (body, "service_principal_conflict") == NULL) {
     rc = 2165;
@@ -14880,10 +14894,10 @@ check_service_principal_management_contract (void)
 #else
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "POST", base_url,
-          "/service-principals/svc:tenant-a:worker/disable", query,
-          access_token,
-          "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000225\"}", &status, &body) != 0
+      "/service-principals/svc:tenant-a:worker/disable", query,
+      access_token,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"000000000000000000000000225\"}", &status, &body) != 0
       || status != 200
       || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
@@ -14898,8 +14912,8 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "GET", base_url,
-          "/service-principals", query, access_token, NULL, &status,
-          &body) != 0
+      "/service-principals", query, access_token, NULL, &status,
+      &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"state\":\"disabled\"") == NULL
       || strstr (body, "\"disabled_by\":\"human-principal-admin\"")
@@ -14911,8 +14925,8 @@ check_service_principal_management_contract (void)
 #ifdef WYL_HAS_FACT_STORE
   {
     gint status_recover_rc = check_service_credential_operation_status_recover
-        (http.server, session, base_url, access_token, operation_root,
-        rotate_successor_id);
+          (http.server, session, base_url, access_token, operation_root,
+            rotate_successor_id);
     if (status_recover_rc != 0) {
       rc = status_recover_rc;
       goto cleanup;
@@ -14980,7 +14994,7 @@ check_service_management_profile_denied (void)
     return 2201;
   }
   thread = g_thread_new ("daemon-http-profile-denied",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   session = g_object_new (SOUP_TYPE_SESSION, NULL);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL) {
@@ -14993,9 +15007,9 @@ check_service_management_profile_denied (void)
       "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0";
   /* Principal write: the profile gate fires before body validation. */
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/service-principals", guard_query,
-          "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
-          &status, &body) != 0 || status != 403 || body == NULL
+      "/service-principals", guard_query,
+      "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
+      &status, &body) != 0 || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL) {
     rc = 2203;
     goto cleanup;
@@ -15003,8 +15017,8 @@ check_service_management_profile_denied (void)
   g_clear_pointer (&body, g_free);
   /* Credential read: same profile gate, distinct wire token. */
   if (send_raw_service_principal_full (session, "GET", base_url,
-          "/service-credentials/wlc_000000000000000000000000000",
-          guard_query, NULL, &status, &body) != 0 || status != 403
+      "/service-credentials/wlc_000000000000000000000000000",
+      guard_query, NULL, &status, &body) != 0 || status != 403
       || body == NULL || strstr (body, "service_credential_denied") == NULL) {
     rc = 2204;
     goto cleanup;
@@ -15092,10 +15106,10 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   wyl_id_t session_id_value = WYL_ID_NIL;
   if (wyl_id_new (&session_id_value) != WYRELOG_E_OK
       || wyl_id_format (&session_id_value, env->session_token,
-          sizeof env->session_token) != WYRELOG_E_OK)
+      sizeof env->session_token) != WYRELOG_E_OK)
     return 2103;
   g_autofree gchar *created_handoff_dir = g_dir_make_tmp
-      ("wyl-daemon-http-denial-XXXXXX", NULL);
+        ("wyl-daemon-http-denial-XXXXXX", NULL);
   if (created_handoff_dir == NULL)
     return 2104;
 #ifdef G_OS_WIN32
@@ -15111,10 +15125,10 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   }
 #endif
   env->operation_root = service_credential_operation_root_for_test
-      (env->handoff_dir, "denial-operations");
+        (env->handoff_dir, "denial-operations");
   env->fact_root = g_build_filename (env->handoff_dir, "facts", NULL);
   env->publication_root = g_build_filename (env->handoff_dir, "publication",
-      NULL);
+          NULL);
   if (g_mkdir_with_parents (env->publication_root, 0700) != 0
       || g_mkdir_with_parents (env->fact_root, 0700) != 0)
     return 2105;
@@ -15135,7 +15149,7 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   if (env->http.server == NULL)
     return 2106;
   env->thread = g_thread_new ("daemon-http-denial",
-      test_http_server_thread_ctx, &env->http);
+          test_http_server_thread_ctx, &env->http);
   g_main_context_invoke_full (env->context, G_PRIORITY_DEFAULT,
       mark_main_loop_ready, &env->barrier, NULL);
   g_mutex_lock (&env->barrier.mutex);
@@ -15159,7 +15173,7 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
       &sp_publication_vtable, &env->publication);
 
   if (!seed_management_human_access_token (env->http.server,
-          env->session_token, "human-principal-admin", &env->access_token))
+      env->session_token, "human-principal-admin", &env->access_token))
     return 2110;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
   gboolean tenant_created = FALSE;
@@ -15167,41 +15181,41 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
       != WYRELOG_E_OK || !tenant_created)
     return 2111;
   if (wyl_policy_store_set_principal_state (store, "human-principal-admin",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 2112;
   if (wyl_policy_store_grant_direct_permission (store, "human-principal-admin",
-          "wr.service_principal.manage", env->session_token) != WYRELOG_E_OK
+      "wr.service_principal.manage", env->session_token) != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
-          "human-principal-admin", "wr.service_credential.manage",
-          env->session_token) != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      env->session_token) != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
-          "human-principal-admin", "wr.tenant.manage", "tenant-a")
+      "human-principal-admin", "wr.tenant.manage", "tenant-a")
       != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store, "human-principal-admin",
-          "wr.tenant.manage", "tenant-a", "armed") != WYRELOG_E_OK)
+      "wr.tenant.manage", "tenant-a", "armed") != WYRELOG_E_OK)
     return 2113;
   if (arm_principal
       && wyl_policy_store_set_permission_state (store, "human-principal-admin",
-          "wr.service_principal.manage", env->session_token, "armed")
+      "wr.service_principal.manage", env->session_token, "armed")
       != WYRELOG_E_OK)
     return 2114;
   if (arm_credential
       && wyl_policy_store_set_permission_state (store, "human-principal-admin",
-          "wr.service_credential.manage", env->session_token, "armed")
+      "wr.service_credential.manage", env->session_token, "armed")
       != WYRELOG_E_OK)
     return 2115;
   if (session_active
       && (wyl_policy_store_set_session_state (store, env->session_token,
-              "active") != WYRELOG_E_OK
-          || wyl_policy_store_set_session_state (store, "tenant-a", "active")
-          != WYRELOG_E_OK))
+      "active") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, "tenant-a", "active")
+      != WYRELOG_E_OK))
     return 2116;
   if (wyl_handle_reload_engine_pair (env->handle) != WYRELOG_E_OK)
     return 2117;
   env->query = g_strdup
-      ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
   env->tenant_query = g_strdup ("tenant=tenant-a&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0");
+          "guard_loc_class=trusted&guard_risk=0");
   return 0;
 }
 
@@ -15250,7 +15264,7 @@ service_denial_env_restart (ServiceDenialEnv *env)
   wyl_id_t session_id = WYL_ID_NIL;
   if (wyl_id_new (&session_id) != WYRELOG_E_OK
       || wyl_id_format (&session_id, env->session_token,
-          sizeof env->session_token) != WYRELOG_E_OK)
+      sizeof env->session_token) != WYRELOG_E_OK)
     return 2601;
   env->context = g_main_context_new ();
   g_main_context_push_thread_default (env->context);
@@ -15268,7 +15282,7 @@ service_denial_env_restart (ServiceDenialEnv *env)
   if (env->http.server == NULL)
     return 2602;
   env->thread = g_thread_new ("daemon-http-retirement-restart",
-      test_http_server_thread_ctx, &env->http);
+          test_http_server_thread_ctx, &env->http);
   g_main_context_invoke_full (env->context, G_PRIORITY_DEFAULT,
       mark_main_loop_ready, &env->barrier, NULL);
   g_mutex_lock (&env->barrier.mutex);
@@ -15289,33 +15303,33 @@ service_denial_env_restart (ServiceDenialEnv *env)
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (env->http.server);
   if (env->base_url == NULL
       || !seed_management_human_access_token (env->http.server,
-          env->session_token, "human-principal-admin", &env->access_token))
+      env->session_token, "human-principal-admin", &env->access_token))
     return 2605;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
   if (wyl_policy_store_set_principal_state (store, "human-principal-admin",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, env->session_token,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
-          "human-principal-admin", "wr.service_principal.manage",
-          env->session_token) != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_principal.manage",
+      env->session_token) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store,
-          "human-principal-admin", "wr.service_principal.manage",
-          env->session_token, "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_principal.manage",
+      env->session_token, "armed") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
-          "human-principal-admin", "wr.service_credential.manage",
-          env->session_token) != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      env->session_token) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store,
-          "human-principal-admin", "wr.service_credential.manage",
-          env->session_token, "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      env->session_token, "armed") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
-          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
+      "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
       != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store,
-          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT,
-          "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT,
+      "armed") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env->handle) != WYRELOG_E_OK)
     return 2606;
   return 0;
@@ -15362,7 +15376,7 @@ send_raw_service_principal_bearer_full (SoupSession *session,
   if (msg == NULL)
     return 121;
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   soup_message_headers_replace (soup_message_get_request_headers (msg),
       "Authorization", authorization);
   if (body != NULL) {
@@ -15373,7 +15387,7 @@ send_raw_service_principal_bearer_full (SoupSession *session,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 122;
   gint rc = check_response_request_id_header (msg, 178);
@@ -15381,7 +15395,7 @@ send_raw_service_principal_bearer_full (SoupSession *session,
     return rc;
   if (out_request_id != NULL) {
     const gchar *request_id = soup_message_headers_get_one
-        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+          (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
     *out_request_id = g_strdup (request_id);
   }
   gsize size = 0;
@@ -15398,7 +15412,7 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
     gchar **out_body)
 {
   return send_raw_service_principal_bearer_full (session, method, base_url,
-      path, query, access_token, body, out_status, out_body, NULL);
+             path, query, access_token, body, out_status, out_body, NULL);
 }
 
 #ifdef WYL_HAS_FACT_STORE
@@ -15436,8 +15450,8 @@ policy_write_owner_graph_probe_cb (const wyl_policy_fact_graph_info_t *info,
 
 static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
   {0, "key_rotation", WYL_DAEMON_POLICY_WRITE_RESOURCE_MAINTENANCE
-        | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
-        | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 0, "non_http"},
+   | WYL_DAEMON_POLICY_WRITE_RESOURCE_CONTEXT
+   | WYL_DAEMON_POLICY_WRITE_RESOURCE_REGISTRY, 0, "non_http"},
   {1, "test_configure", 0, 0, "non_http"},
   {2, "test_policy_write", 0, 0, "non_http"},
   {3, "tenant", 1, 500, "tenant_mutation_failed"},
@@ -15445,26 +15459,26 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
   {5, "graph_seal", 0, 500, "graph_mutation_failed"},
   {6, "schema_register", 0, 500, "schema_register_failed"},
   {7, "fact_forget", WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE,
-      500, "fact_forget_failed"},
+   500, "fact_forget_failed"},
   {8, "fact_publication", WYL_DAEMON_POLICY_WRITE_RESOURCE_FACT_STORE,
-      500, "fact_append_failed"},
+   500, "fact_append_failed"},
   {9, "direct_permission", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
-      500, "policy_mutation_failed"},
+   500, "policy_mutation_failed"},
   {10, "permission_transition", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
-      500, "policy_mutation_failed"},
+   500, "policy_mutation_failed"},
   {11, "role_membership", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
-      500, "policy_mutation_failed"},
+   500, "policy_mutation_failed"},
   {12, "operation_reconcile",
-        WYL_DAEMON_POLICY_WRITE_RESOURCE_TRANSACTION, 500,
-      "service_credential_operation_reconcile_failed"},
+   WYL_DAEMON_POLICY_WRITE_RESOURCE_TRANSACTION, 500,
+   "service_credential_operation_reconcile_failed"},
   {13, "operation_recover",
-        WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_STORAGE
-        | WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_LOCK, 500,
-      "service_credential_operation_recover_failed"},
+   WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_STORAGE
+   | WYL_DAEMON_POLICY_WRITE_RESOURCE_OPERATION_LOCK, 500,
+   "service_credential_operation_recover_failed"},
   {14, "mfa_confirm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
-      500, "mfa_enroll_failed"},
+   500, "mfa_enroll_failed"},
   {15, "self_arm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
-      500, "service_authority_failed"},
+   500, "service_authority_failed"},
 };
 
 static wyrelog_error_t
@@ -15481,24 +15495,24 @@ policy_write_owner_fault_prepare_authority (ServiceDenialEnv *env)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
   for (gsize i = 0; i < G_N_ELEMENTS (permissions); i++) {
     wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
-        "human-principal-admin", permissions[i], WYL_TENANT_DEFAULT);
+            "human-principal-admin", permissions[i], WYL_TENANT_DEFAULT);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_policy_store_set_permission_state (store,
-        "human-principal-admin", permissions[i], WYL_TENANT_DEFAULT, "armed");
+            "human-principal-admin", permissions[i], WYL_TENANT_DEFAULT, "armed");
     if (rc != WYRELOG_E_OK)
       return rc;
   }
   if (wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT, "active")
       != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "owner-mfa-target",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_upsert_permission (store, "owner.policy.read",
-          "owner policy read", "basic") != WYRELOG_E_OK
+      "owner policy read", "basic") != WYRELOG_E_OK
       || wyl_policy_store_upsert_role (store, "owner.reader", "owner reader")
       != WYRELOG_E_OK
       || wyl_policy_store_grant_role_membership (store,
-          "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
+      "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT)
       != WYRELOG_E_OK)
     return WYRELOG_E_INTERNAL;
   return wyl_handle_reload_engine_pair (env->handle);
@@ -15512,8 +15526,8 @@ policy_write_owner_fault_send_expect_ok (ServiceDenialEnv *env,
   guint status = 0;
   g_autofree gchar *response = NULL;
   return send_raw_service_principal_bearer (env->session, method,
-      env->base_url, path, query, env->access_token, body, &status,
-      &response) == 0 && status == 200 ? 0 : 1;
+             env->base_url, path, query, env->access_token, body, &status,
+             &response) == 0 && status == 200 ? 0 : 1;
 }
 
 static gint
@@ -15522,29 +15536,29 @@ policy_write_owner_fault_prepare_facts (ServiceDenialEnv *env,
 {
   const gchar *guard = "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0";
   g_autofree gchar *graph_query = g_strdup_printf
-      ("tenant=%s&graph=owner-fault&%s", WYL_TENANT_DEFAULT, guard);
+        ("tenant=%s&graph=owner-fault&%s", WYL_TENANT_DEFAULT, guard);
   if (policy_write_owner_fault_send_expect_ok (env, "POST", "/graphs/create",
-          graph_query, NULL) != 0)
+      graph_query, NULL) != 0)
     return 1;
   if (!schema)
     return 0;
   g_autofree gchar *schema_query = g_strdup_printf
-      ("tenant=%s&graph=owner-fault&namespace=owner&relation=rows&"
-      "schema_version=1&%s", WYL_TENANT_DEFAULT, guard);
+        ("tenant=%s&graph=owner-fault&namespace=owner&relation=rows&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, guard);
   const gchar *schema_body =
       "column_name\tcolumn_type\tnullable\tvisible\n"
       "row_id\tsymbol\tfalse\ttrue\n" "amount\tint64\tfalse\ttrue\n";
   if (policy_write_owner_fault_send_expect_ok (env, "POST",
-          "/facts/schema/register", schema_query, schema_body) != 0)
+      "/facts/schema/register", schema_query, schema_body) != 0)
     return 2;
   if (!append)
     return 0;
   g_autofree gchar *append_query = g_strdup_printf
-      ("tenant=%s&namespace=owner&schema_version=1&batch_id=owner-batch&"
-      "idempotency_key=owner-key&%s", WYL_TENANT_DEFAULT, guard);
+        ("tenant=%s&namespace=owner&schema_version=1&batch_id=owner-batch&"
+          "idempotency_key=owner-key&%s", WYL_TENANT_DEFAULT, guard);
   return policy_write_owner_fault_send_expect_ok (env, "POST",
-      "/facts/__wr_default/owner-fault/rows:append", append_query,
-      "row_id\tamount\nrow-1\t42\n") == 0 ? 0 : 3;
+             "/facts/__wr_default/owner-fault/rows:append", append_query,
+             "row_id\tamount\nrow-1\t42\n") == 0 ? 0 : 3;
 }
 
 static gint
@@ -15556,8 +15570,8 @@ policy_write_owner_fault_prepare_mfa (ServiceDenialEnv *env,
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw_service_principal_bearer (env->session, "POST", env->base_url,
-          "/auth/mfa/enroll/start", guard, env->access_token,
-          "{\"subject\":\"owner-mfa-target\"}", &status, &body) != 0
+      "/auth/mfa/enroll/start", guard, env->access_token,
+      "{\"subject\":\"owner-mfa-target\"}", &status, &body) != 0
       || status != 200)
     return 1;
   g_autofree gchar *challenge = extract_json_string (body, "challenge");
@@ -15569,8 +15583,8 @@ policy_write_owner_fault_prepare_mfa (ServiceDenialEnv *env,
       || wyl_totp_base32_decode (base32, &seed, &seed_len, NULL)
       != WYRELOG_E_OK || seed_len != WYL_TOTP_SEED_BYTES
       || wyl_totp_code_at_step (seed, seed_len,
-          (guint64) (g_get_real_time () / G_USEC_PER_SEC
-              / WYL_TOTP_STEP_SECONDS), &code, NULL) != WYRELOG_E_OK) {
+      (guint64) (g_get_real_time () / G_USEC_PER_SEC
+      / WYL_TOTP_STEP_SECONDS), &code, NULL) != WYRELOG_E_OK) {
     if (seed != NULL) {
       sodium_memzero (seed, seed_len);
       g_free (seed);
@@ -15579,7 +15593,7 @@ policy_write_owner_fault_prepare_mfa (ServiceDenialEnv *env,
   }
   *out_challenge = g_steal_pointer (&challenge);
   *out_confirm_body = g_strdup_printf
-      ("{\"challenge\":\"%s\",\"code\":\"%06u\"}", *out_challenge, code);
+        ("{\"challenge\":\"%s\",\"code\":\"%06u\"}", *out_challenge, code);
   sodium_memzero (seed, seed_len);
   g_free (seed);
   return *out_confirm_body != NULL ? 0 : 3;
@@ -15603,7 +15617,7 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
     case 3:
       path = "/tenants/create";
       query = g_strdup_printf ("name=owner-fault-tenant&tenant=%s&%s",
-          WYL_TENANT_DEFAULT, guard);
+              WYL_TENANT_DEFAULT, guard);
       break;
     case 4:
     {
@@ -15611,13 +15625,13 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       PolicyWriteOwnerGraphProbe probe = {.graph_id = "owner-fault" };
       wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
       if (wyl_policy_store_tenant_is_active (store, WYL_TENANT_DEFAULT,
-              &tenant_active) != WYRELOG_E_OK || !tenant_active) {
+          &tenant_active) != WYRELOG_E_OK || !tenant_active) {
         g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
             "tenant_inactive\n");
         return 10;
       }
       if (wyl_policy_store_foreach_fact_graph (store, WYL_TENANT_DEFAULT,
-              policy_write_owner_graph_probe_cb, &probe) != WYRELOG_E_OK
+          policy_write_owner_graph_probe_cb, &probe) != WYRELOG_E_OK
           || probe.found) {
         g_printerr ("WYRELOG_TEST_DIAG owner_fault graph_precondition="
             "registry_present\n");
@@ -15627,13 +15641,13 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       WylFactGraphLocator locator = { 0 };
       WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
       wyrelog_error_t directory_rc = wyl_fact_graph_resolver_open
-          (env->fact_root, &resolver);
+            (env->fact_root, &resolver);
       if (directory_rc == WYRELOG_E_OK)
         directory_rc = wyl_fact_graph_locator_init (&locator,
-            WYL_TENANT_DEFAULT, "owner-fault");
+                WYL_TENANT_DEFAULT, "owner-fault");
       if (directory_rc == WYRELOG_E_OK)
         directory_rc = wyl_fact_graph_resolver_open_directory (&resolver,
-            &locator, FALSE, &directory);
+                &locator, FALSE, &directory);
       wyl_fact_graph_directory_clear (&directory);
       wyl_fact_graph_locator_clear (&locator);
       wyl_fact_graph_resolver_clear (&resolver);
@@ -15650,22 +15664,22 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
     }
       path = "/graphs/create";
       query = g_strdup_printf ("tenant=%s&graph=owner-fault&%s",
-          WYL_TENANT_DEFAULT, guard);
+              WYL_TENANT_DEFAULT, guard);
       break;
     case 5:
       if (policy_write_owner_fault_prepare_facts (env, FALSE, FALSE) != 0)
         return 1;
       path = "/graphs/seal";
       query = g_strdup_printf ("tenant=%s&graph=owner-fault&%s",
-          WYL_TENANT_DEFAULT, guard);
+              WYL_TENANT_DEFAULT, guard);
       break;
     case 6:
       if (policy_write_owner_fault_prepare_facts (env, FALSE, FALSE) != 0)
         return 2;
       path = "/facts/schema/register";
       query = g_strdup_printf
-          ("tenant=%s&graph=owner-fault&namespace=owner&relation=rows&"
-          "schema_version=1&%s", WYL_TENANT_DEFAULT, guard);
+            ("tenant=%s&graph=owner-fault&namespace=owner&relation=rows&"
+              "schema_version=1&%s", WYL_TENANT_DEFAULT, guard);
       body = "column_name\tcolumn_type\tnullable\tvisible\n"
           "row_id\tsymbol\tfalse\ttrue\n" "amount\tint64\tfalse\ttrue\n";
       break;
@@ -15675,8 +15689,8 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       method = "DELETE";
       path = "/facts/__wr_default/owner-fault/rows:forget";
       query = g_strdup_printf
-          ("tenant=%s&namespace=owner&schema_version=1&%s",
-          WYL_TENANT_DEFAULT, guard);
+            ("tenant=%s&namespace=owner&schema_version=1&%s",
+              WYL_TENANT_DEFAULT, guard);
       body = "{\"batch_id\":\"owner-batch\",\"operator\":\"owner-admin\","
           "\"reason\":\"owner-cleanup-test\"}";
       break;
@@ -15685,61 +15699,61 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
         return 4;
       path = "/facts/__wr_default/owner-fault/rows:append";
       query = g_strdup_printf
-          ("tenant=%s&namespace=owner&schema_version=1&batch_id=owner-batch&"
-          "idempotency_key=owner-key&%s", WYL_TENANT_DEFAULT, guard);
+            ("tenant=%s&namespace=owner&schema_version=1&batch_id=owner-batch&"
+              "idempotency_key=owner-key&%s", WYL_TENANT_DEFAULT, guard);
       body = "row_id\tamount\nrow-1\t42\n";
       break;
     case 9:
       path = "/policy/permissions/grant";
       query = g_strdup_printf
-          ("subject=owner-permission-target&perm=owner.policy.read&scope=%s&"
-          "tenant=%s&%s", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, guard);
+            ("subject=owner-permission-target&perm=owner.policy.read&scope=%s&"
+              "tenant=%s&%s", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, guard);
       break;
     case 10:
       path = "/policy/permissions/transition";
       query = g_strdup_printf
-          ("subject=owner-transition-target&perm=owner.policy.read&scope=%s&"
-          "event=grant&tenant=%s&%s", WYL_TENANT_DEFAULT,
-          WYL_TENANT_DEFAULT, guard);
+            ("subject=owner-transition-target&perm=owner.policy.read&scope=%s&"
+              "event=grant&tenant=%s&%s", WYL_TENANT_DEFAULT,
+              WYL_TENANT_DEFAULT, guard);
       break;
     case 11:
       path = "/policy/roles/grant";
       query = g_strdup_printf
-          ("subject=owner-role-target&role=owner.reader&scope=%s&tenant=%s&%s",
-          WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, guard);
+            ("subject=owner-role-target&role=owner.reader&scope=%s&tenant=%s&%s",
+              WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, guard);
       break;
     case 12:
       if (prepare_service_credential_subject (env->handle,
-              "svc:owner:reconcile", NULL) != WYRELOG_E_OK
+          "svc:owner:reconcile", NULL) != WYRELOG_E_OK
           || wyl_request_id_new (request_id, sizeof request_id)
           != WYRELOG_E_OK)
         return 5;
       path = "/service-credential-operations/reconcile";
       query = g_strdup_printf ("tenant=tenant-a&%s", guard);
       owned_body = g_strdup_printf
-          ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-          "\"target\":{\"subject\":\"svc:owner:reconcile\","
-          "\"tenant\":\"tenant-a\"}}", request_id);
+            ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+              "\"target\":{\"subject\":\"svc:owner:reconcile\","
+              "\"tenant\":\"tenant-a\"}}", request_id);
       body = owned_body;
       break;
     case 13:
       if (prepare_service_credential_subject (env->handle,
-              "svc:owner:recover", NULL) != WYRELOG_E_OK
+          "svc:owner:recover", NULL) != WYRELOG_E_OK
           || wyl_request_id_new (request_id, sizeof request_id)
           != WYRELOG_E_OK
           || seed_prepared_operation (env->operation_root, request_id,
-              WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:owner:recover",
-              "tenant-a", NULL) != 0)
+          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:owner:recover",
+          "tenant-a", NULL) != 0)
         return 6;
       path = "/service-credential-operations/recover";
       query = g_strdup_printf ("tenant=tenant-a&%s", guard);
       owned_body = g_strdup_printf
-          ("{\"version\":\"1\",\"request_id\":\"%s\"}", request_id);
+            ("{\"version\":\"1\",\"request_id\":\"%s\"}", request_id);
       body = owned_body;
       break;
     case 14:
       if (policy_write_owner_fault_prepare_mfa (env, &challenge,
-              &owned_body) != 0)
+          &owned_body) != 0)
         return 7;
       path = "/auth/mfa/enroll/confirm";
       query = g_strdup_printf ("tenant=%s&%s", WYL_TENANT_DEFAULT, guard);
@@ -15760,7 +15774,7 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       wyl_daemon_http_policy_write_terminal_entries_for_test (env->http.server);
   if (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE)
     wyl_daemon_http_fail_next_policy_write_finalize_for_test
-        (env->http.server,
+      (env->http.server,
         WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
   else
     wyl_daemon_http_fail_next_policy_write_acquire_for_test (env->http.server,
@@ -15771,9 +15785,9 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       g_strdup ("{\"error\":\"policy_write_cleanup_failed\"}")
       : g_strdup_printf ("{\"error\":\"%s\"}", test_case->acquire_code);
   if (send_raw_service_principal_bearer (env->session, method, env->base_url,
-          path, query, env->access_token, body, &status, &response) != 0
+      path, query, env->access_token, body, &status, &response) != 0
       || status != (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE ? 500 :
-          test_case->acquire_status)
+      test_case->acquire_status)
       || g_strcmp0 (response, expected_response) != 0)
     return 9;
   return 0;
@@ -15794,41 +15808,41 @@ check_policy_write_all_owner_faults (void)
       ServiceDenialEnv env = { 0 };
       gint error_base = 3000 + (gint) mode * 400 + (gint) i * 20;
       gint result = service_denial_env_init (&env, TRUE,
-          test_case->owner != 15, test_case->owner != 15);
+              test_case->owner != 15, test_case->owner != 15);
       if (result != 0) {
         service_denial_env_clear (&env);
         return error_base;
       }
       wyl_daemon_http_suspend_service_auth_maintenance_for_test
-          (env.http.server);
+        (env.http.server);
       if (policy_write_owner_fault_prepare_authority (&env) != WYRELOG_E_OK) {
         service_denial_env_clear (&env);
         return error_base + 1;
       }
       guint before = wyl_daemon_http_policy_write_terminal_entries_for_test
-          (env.http.server);
+            (env.http.server);
       wyrelog_error_t non_http_rc = WYRELOG_E_OK;
       if (test_case->owner <= 2) {
         if (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE)
           wyl_daemon_http_fail_next_policy_write_finalize_for_test
-              (env.http.server,
+            (env.http.server,
               WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
         else
           wyl_daemon_http_fail_next_policy_write_acquire_for_test
-              (env.http.server,
+            (env.http.server,
               WYL_DAEMON_POLICY_WRITE_ACQUIRE_FAULT_AFTER_STORE);
         if (test_case->owner == 0)
           non_http_rc = wyl_daemon_http_rotate_access_token_key_for_test
-              (env.http.server);
+                (env.http.server);
         else if (test_case->owner == 1)
           non_http_rc = wyl_daemon_http_configure_tenant_for_test
-              (env.http.server, "owner-configure-tenant", TRUE, FALSE);
+                (env.http.server, "owner-configure-tenant", TRUE, FALSE);
         else
           non_http_rc = wyl_daemon_http_policy_write_for_test
-              (env.http.server, NULL, NULL);
+                (env.http.server, NULL, NULL);
       } else {
         result = policy_write_owner_fault_invoke_http (&env, test_case,
-            (PolicyWriteOwnerFaultMode) mode, &before);
+                (PolicyWriteOwnerFaultMode) mode, &before);
         if (result != 0) {
           g_printerr ("WYRELOG_TEST_DIAG owner_fault invoke mode=%u owner=%u "
               "name=%s stage=%d\n", mode, test_case->owner, test_case->name,
@@ -15839,28 +15853,28 @@ check_policy_write_all_owner_faults (void)
       }
 
       guint after = wyl_daemon_http_policy_write_terminal_entries_for_test
-          (env.http.server);
+            (env.http.server);
       gboolean acquire_mode =
           mode == POLICY_WRITE_OWNER_FAULT_ACQUIRE_AFTER_STORE;
       WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
       gboolean snapshot_ok =
           wyl_daemon_http_policy_write_finalize_snapshot_for_test
-          (env.http.server, &snapshot)
+            (env.http.server, &snapshot)
           && policy_write_fault_snapshot_is_clean (&snapshot,
-          acquire_mode ? test_case->acquire_status :
-          test_case->owner <= 2 ? 0 : 200,
-          acquire_mode ? test_case->acquire_code :
-          test_case->owner <= 2 ? "non_http" : "success", test_case->owner,
-          test_case->name, acquire_mode ? 0 : test_case->resources,
-          acquire_mode ? 0 : 1,
-          acquire_mode ? WYRELOG_E_OK : WYRELOG_E_INTERNAL,
-          acquire_mode ? 1 : 0);
+              acquire_mode ? test_case->acquire_status :
+              test_case->owner <= 2 ? 0 : 200,
+              acquire_mode ? test_case->acquire_code :
+              test_case->owner <= 2 ? "non_http" : "success", test_case->owner,
+              test_case->name, acquire_mode ? 0 : test_case->resources,
+              acquire_mode ? 0 : 1,
+              acquire_mode ? WYRELOG_E_OK : WYRELOG_E_INTERNAL,
+              acquire_mode ? 1 : 0);
       if ((test_case->owner <= 2
-              && (non_http_rc != WYRELOG_E_INTERNAL
-                  || (!acquire_mode && (!snapshot.primary_rc_recorded
-                          || snapshot.primary_rc != WYRELOG_E_OK))))
+          && (non_http_rc != WYRELOG_E_INTERNAL
+          || (!acquire_mode && (!snapshot.primary_rc_recorded
+          || snapshot.primary_rc != WYRELOG_E_OK))))
           || (acquire_mode && (!snapshot.primary_rc_recorded
-                  || snapshot.primary_rc != WYRELOG_E_INTERNAL))
+          || snapshot.primary_rc != WYRELOG_E_INTERNAL))
           || after != before + 1 || !snapshot_ok) {
         g_printerr ("WYRELOG_TEST_DIAG owner_fault snapshot mode=%u owner=%u "
             "name=%s non_http_rc=%d terminal=%u/%u observed=%u expected=%u "
@@ -15888,24 +15902,24 @@ check_policy_write_all_owner_faults (void)
           WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
       wyrelog_error_t available =
           wyl_service_auth_authority_validate_available
-          (wyl_handle_get_service_auth_authority (env.handle), env.handle,
-          &reason);
+            (wyl_handle_get_service_auth_authority (env.handle), env.handle,
+              &reason);
       wyrelog_error_t subsequent = wyl_daemon_http_policy_write_for_test
-          (env.http.server, NULL, NULL);
+            (env.http.server, NULL, NULL);
       guint subsequent_after =
           wyl_daemon_http_policy_write_terminal_entries_for_test
-          (env.http.server);
+            (env.http.server);
       if (authority.writer_active || authority.active_readers != 0
           || authority.waiting_readers != 0 || authority.waiting_writers != 0
           || (acquire_mode && (available != WYRELOG_E_OK
-                  || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE
-                  || subsequent != WYRELOG_E_OK
-                  || subsequent_after != after + 1))
+          || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE
+          || subsequent != WYRELOG_E_OK
+          || subsequent_after != after + 1))
           || (!acquire_mode && (available != WYRELOG_E_BUSY
-                  || reason !=
-                  WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
-                  || subsequent != WYRELOG_E_BUSY
-                  || subsequent_after != after))) {
+          || reason !=
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
+          || subsequent != WYRELOG_E_BUSY
+          || subsequent_after != after))) {
         service_denial_env_clear (&env);
         return error_base + 4;
       }
@@ -15979,12 +15993,12 @@ dropped_management_request_thread (gpointer data)
 {
   DroppedManagementRequest *request = data;
   g_autoptr (GUri) uri = g_uri_parse (request->base_url, G_URI_FLAGS_NONE,
-      NULL);
+          NULL);
   g_autoptr (GSocketClient) client = g_socket_client_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) connection = uri != NULL
       ? g_socket_client_connect_to_host (client, g_uri_get_host (uri),
-      g_uri_get_port (uri), NULL, &error) : NULL;
+          g_uri_get_port (uri), NULL, &error) : NULL;
   if (connection == NULL) {
     request->rc = 1;
     return NULL;
@@ -15992,16 +16006,16 @@ dropped_management_request_thread (gpointer data)
   g_autofree gchar *target = request->query == NULL ? g_strdup (request->path)
       : g_strdup_printf ("%s?%s", request->path, request->query);
   g_autofree gchar *wire = g_strdup_printf
-      ("%s %s HTTP/1.1\r\nHost: %s:%d\r\nAuthorization: Bearer %s\r\n"
-      "Content-Type: application/json\r\nConnection: close\r\n"
-      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s", request->method,
-      target, g_uri_get_host (uri), g_uri_get_port (uri),
-      request->access_token, strlen (request->body), request->body);
+        ("%s %s HTTP/1.1\r\nHost: %s:%d\r\nAuthorization: Bearer %s\r\n"
+          "Content-Type: application/json\r\nConnection: close\r\n"
+          "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s", request->method,
+          target, g_uri_get_host (uri), g_uri_get_port (uri),
+          request->access_token, strlen (request->body), request->body);
   gsize written = 0;
   GOutputStream *output = g_io_stream_get_output_stream
-      (G_IO_STREAM (connection));
+        (G_IO_STREAM (connection));
   if (!g_output_stream_write_all (output, wire, strlen (wire), &written, NULL,
-          &error) || written != strlen (wire)
+      &error) || written != strlen (wire)
       || !g_output_stream_flush (output, NULL, &error)) {
     request->rc = 2;
     return NULL;
@@ -16034,7 +16048,7 @@ drop_management_response (SoupServer *server,
   wyl_daemon_http_set_retirement_response_checkpoint_for_test (server,
       retirement_response_checkpoint, &barrier);
   GThread *thread = g_thread_new ("drop-retirement-response",
-      dropped_management_request_thread, request);
+          dropped_management_request_thread, request);
   g_mutex_lock (&barrier.mutex);
   if (!barrier.entered)
     g_cond_wait_until (&barrier.changed, &barrier.mutex,
@@ -16083,11 +16097,11 @@ replay_retirement_response (ServiceDenialEnv *env, const gchar *method,
       || dropped->captured_decision_request_id == NULL
       || !wyl_request_id_is_canonical (dropped->captured_decision_request_id)
       || g_strcmp0 (dropped->captured_decision_request_id,
-          caller_request_id) == 0)
+      caller_request_id) == 0)
     return FALSE;
   if (send_raw_service_principal_bearer_full (env->session, method,
-          env->base_url, path, query, env->access_token, body, &status,
-          &response_a, &correlation_a) != 0 || status != 200
+      env->base_url, path, query, env->access_token, body, &status,
+      &response_a, &correlation_a) != 0 || status != 200
       || response_a == NULL || correlation_a == NULL
       || g_strcmp0 (response_a, dropped->captured_response) != 0
       || strstr (response_a, expected_fragment) == NULL
@@ -16095,8 +16109,8 @@ replay_retirement_response (ServiceDenialEnv *env, const gchar *method,
       || g_strcmp0 (correlation_a, caller_request_id) == 0)
     return FALSE;
   if (send_raw_service_principal_bearer_full (env->session, method,
-          env->base_url, path, query, env->access_token, body, &status,
-          &response_b, &correlation_b) != 0 || status != 200
+      env->base_url, path, query, env->access_token, body, &status,
+      &response_b, &correlation_b) != 0 || status != 200
       || response_b == NULL || correlation_b == NULL
       || g_strcmp0 (response_b, response_a) != 0
       || !wyl_request_id_is_canonical (correlation_b)
@@ -16127,9 +16141,9 @@ check_service_management_self_arm_end_to_end (void)
    * (wyl_policy_store_apply_bootstrap_admin) seeds; mirror that here so the
    * eligibility decide at __wr_default can be satisfied. */
   if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
-          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2700;
@@ -16142,8 +16156,8 @@ check_service_management_self_arm_end_to_end (void)
 
   /* (b) Without self-arm the management verb is denied. */
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-principals", env.query, env.access_token, create_body,
-          &status, &body) != 0 || status != 403) {
+      "/service-principals", env.query, env.access_token, create_body,
+      &status, &body) != 0 || status != 403) {
     service_denial_env_clear (&env);
     return 2701;
   }
@@ -16151,8 +16165,8 @@ check_service_management_self_arm_end_to_end (void)
 
   /* (a) Self-arm at the caller's own session. */
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-management-authority/arm", env.query, env.access_token,
-          "{}", &status, &body) != 0 || status != 200) {
+      "/service-management-authority/arm", env.query, env.access_token,
+      "{}", &status, &body) != 0 || status != 200) {
     service_denial_env_clear (&env);
     return 2702;
   }
@@ -16162,10 +16176,10 @@ check_service_management_self_arm_end_to_end (void)
   gboolean armed_p = FALSE;
   gboolean armed_c = FALSE;
   if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
-          "wr.service_principal.manage", env.session_token, "armed", &armed_p)
+      "wr.service_principal.manage", env.session_token, "armed", &armed_p)
       != WYRELOG_E_OK || !armed_p
       || wyl_policy_store_permission_state_is (store, "human-principal-admin",
-          "wr.service_credential.manage", env.session_token, "armed", &armed_c)
+      "wr.service_credential.manage", env.session_token, "armed", &armed_c)
       != WYRELOG_E_OK || !armed_c) {
     service_denial_env_clear (&env);
     return 2703;
@@ -16173,8 +16187,8 @@ check_service_management_self_arm_end_to_end (void)
 
   /* create (wr.service_principal.manage) now authorizes. */
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-principals", env.query, env.access_token, create_body,
-          &status, &body) != 0 || status != 200 || body == NULL
+      "/service-principals", env.query, env.access_token, create_body,
+      &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL) {
     service_denial_env_clear (&env);
     return 2704;
@@ -16188,8 +16202,8 @@ check_service_management_self_arm_end_to_end (void)
       "\"destination\":\"issue.json\",\"expires_at_us\":\""
       CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-principals/svc:tenant-a:worker/credentials",
-          env.tenant_query, env.access_token, issue_body, &status, &body) != 0
+      "/service-principals/svc:tenant-a:worker/credentials",
+      env.tenant_query, env.access_token, issue_body, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"delivered\":true") == NULL) {
     service_denial_env_clear (&env);
@@ -16202,9 +16216,9 @@ check_service_management_self_arm_end_to_end (void)
   wyl_daemon_http_revoke_human_session_for_test (env.http.server,
       env.session_token);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-principals", env.query, env.access_token,
-          "{\"subject_id\":\"svc:tenant-a:worker2\",\"display_name\":\"W2\"}",
-          &status, &body) != 0 || (status != 403 && status != 401)) {
+      "/service-principals", env.query, env.access_token,
+      "{\"subject_id\":\"svc:tenant-a:worker2\",\"display_name\":\"W2\"}",
+      &status, &body) != 0 || (status != 403 && status != 401)) {
     service_denial_env_clear (&env);
     return 2706;
   }
@@ -16212,8 +16226,8 @@ check_service_management_self_arm_end_to_end (void)
 
   gboolean still_armed = FALSE;
   if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
-          "wr.service_principal.manage", env.session_token, "armed",
-          &still_armed) != WYRELOG_E_OK || !still_armed) {
+      "wr.service_principal.manage", env.session_token, "armed",
+      &still_armed) != WYRELOG_E_OK || !still_armed) {
     service_denial_env_clear (&env);
     return 2707;
   }
@@ -16248,15 +16262,15 @@ check_service_management_self_arm_rejections (void)
   /* (f) SoD: before promotion the admin lacks wr.service.self_authorize, so
    * the eligibility decide denies the self-arm. */
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-management-authority/arm", env.query, env.access_token,
-          "{}", &status, &body) != 0 || status != 403) {
+      "/service-management-authority/arm", env.query, env.access_token,
+      "{}", &status, &body) != 0 || status != 403) {
     service_denial_env_clear (&env);
     return 2710;
   }
   g_clear_pointer (&body, g_free);
 
   if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
-          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2711;
@@ -16264,8 +16278,8 @@ check_service_management_self_arm_rejections (void)
 
   /* (d) Non-POST -> 405. */
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-management-authority/arm", env.query, env.access_token,
-          NULL, &status, &body) != 0 || status != 405) {
+      "/service-management-authority/arm", env.query, env.access_token,
+      NULL, &status, &body) != 0 || status != 405) {
     service_denial_env_clear (&env);
     return 2712;
   }
@@ -16273,8 +16287,8 @@ check_service_management_self_arm_rejections (void)
 
   /* (d) Missing guard triple -> 400. */
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-management-authority/arm", "foo=bar", env.access_token,
-          "{}", &status, &body) != 0 || status != 400) {
+      "/service-management-authority/arm", "foo=bar", env.access_token,
+      "{}", &status, &body) != 0 || status != 400) {
     service_denial_env_clear (&env);
     return 2713;
   }
@@ -16282,9 +16296,9 @@ check_service_management_self_arm_rejections (void)
 
   /* (d) Invalid guard (risk out of range) -> 400. */
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-management-authority/arm",
-          "guard_timestamp=1&guard_loc_class=trusted&guard_risk=200",
-          env.access_token, "{}", &status, &body) != 0 || status != 400) {
+      "/service-management-authority/arm",
+      "guard_timestamp=1&guard_loc_class=trusted&guard_risk=200",
+      env.access_token, "{}", &status, &body) != 0 || status != 400) {
     service_denial_env_clear (&env);
     return 2714;
   }
@@ -16301,14 +16315,14 @@ check_service_management_self_arm_rejections (void)
         || wyl_id_format (&nonmfa_id, nonmfa_session, sizeof nonmfa_session)
         != WYRELOG_E_OK
         || !seed_human_tokens_with_assurance (env.http.server, nonmfa_session,
-            "human-principal-admin", WYL_TENANT_DEFAULT, FALSE, &nonmfa_access,
-            &nonmfa_refresh)) {
+        "human-principal-admin", WYL_TENANT_DEFAULT, FALSE, &nonmfa_access,
+        &nonmfa_refresh)) {
       service_denial_env_clear (&env);
       return 2715;
     }
     if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-            "/service-management-authority/arm", env.query, nonmfa_access,
-            "{}", &status, &body) != 0 || status != 403) {
+        "/service-management-authority/arm", env.query, nonmfa_access,
+        "{}", &status, &body) != 0 || status != 403) {
       service_denial_env_clear (&env);
       return 2716;
     }
@@ -16318,7 +16332,7 @@ check_service_management_self_arm_rejections (void)
   /* Every failed attempt left the authority un-armed. */
   gboolean armed = TRUE;
   if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
-          "wr.service_principal.manage", env.session_token, "armed", &armed)
+      "wr.service_principal.manage", env.session_token, "armed", &armed)
       != WYRELOG_E_OK || armed) {
     service_denial_env_clear (&env);
     return 2717;
@@ -16341,9 +16355,9 @@ check_service_management_self_arm_scopes_to_session (void)
   }
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
-          "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2720;
@@ -16355,8 +16369,8 @@ check_service_management_self_arm_scopes_to_session (void)
       "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0"
       "&scope=attacker-scope&subject=svc:tenant-a:evil";
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-management-authority/arm", steer_query, env.access_token,
-          "{}", &status, &body) != 0 || status != 200) {
+      "/service-management-authority/arm", steer_query, env.access_token,
+      "{}", &status, &body) != 0 || status != 200) {
     service_denial_env_clear (&env);
     return 2721;
   }
@@ -16365,11 +16379,11 @@ check_service_management_self_arm_scopes_to_session (void)
   gboolean armed_self = FALSE;
   gboolean armed_injected_scope = TRUE;
   if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
-          "wr.service_principal.manage", env.session_token, "armed",
-          &armed_self) != WYRELOG_E_OK || !armed_self
+      "wr.service_principal.manage", env.session_token, "armed",
+      &armed_self) != WYRELOG_E_OK || !armed_self
       || wyl_policy_store_permission_state_is (store, "human-principal-admin",
-          "wr.service_principal.manage", "attacker-scope", "armed",
-          &armed_injected_scope) != WYRELOG_E_OK || armed_injected_scope) {
+      "wr.service_principal.manage", "attacker-scope", "armed",
+      &armed_injected_scope) != WYRELOG_E_OK || armed_injected_scope) {
     service_denial_env_clear (&env);
     return 2722;
   }
@@ -16377,8 +16391,8 @@ check_service_management_self_arm_scopes_to_session (void)
    * or has no armed row for it. */
   gboolean armed_injected_subject = TRUE;
   wyrelog_error_t subj_rc = wyl_policy_store_permission_state_is (store,
-      "svc:tenant-a:evil", "wr.service_principal.manage", "attacker-scope",
-      "armed", &armed_injected_subject);
+          "svc:tenant-a:evil", "wr.service_principal.manage", "attacker-scope",
+          "armed", &armed_injected_subject);
   if (subj_rc == WYRELOG_E_OK && armed_injected_subject) {
     service_denial_env_clear (&env);
     return 2723;
@@ -16401,15 +16415,15 @@ check_retirement_response_loss_restart_contract (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   gboolean seal_tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (store, "tenant-drop-seal",
-          &seal_tenant_created) != WYRELOG_E_OK || !seal_tenant_created
+      &seal_tenant_created) != WYRELOG_E_OK || !seal_tenant_created
       || wyl_policy_store_grant_direct_permission (store,
-          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
+      "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
       != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store,
-          "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT,
-          "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT,
+      "armed") != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2610;
@@ -16426,21 +16440,21 @@ check_retirement_response_loss_restart_contract (void)
     }
   wyl_service_principal_t principal = { 0 };
   if (wyl_service_principal_create (env.handle, disable_subject,
-          "Drop disable", "human-principal-admin", seed_ids[0], &principal)
+      "Drop disable", "human-principal-admin", seed_ids[0], &principal)
       != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2612;
   }
   wyl_service_principal_clear (&principal);
   if (wyl_service_principal_create (env.handle, revoke_subject, "Drop revoke",
-          "human-principal-admin", seed_ids[1], &principal) != WYRELOG_E_OK) {
+      "human-principal-admin", seed_ids[1], &principal) != WYRELOG_E_OK) {
     wyl_service_principal_clear (&principal);
     service_denial_env_clear (&env);
     return 2613;
   }
   wyl_service_principal_clear (&principal);
   if (wyl_service_principal_create (env.handle, rotate_subject, "Drop rotate",
-          "human-principal-admin", seed_ids[2], &principal) != WYRELOG_E_OK) {
+      "human-principal-admin", seed_ids[2], &principal) != WYRELOG_E_OK) {
     wyl_service_principal_clear (&principal);
     service_denial_env_clear (&env);
     return 2614;
@@ -16449,11 +16463,11 @@ check_retirement_response_loss_restart_contract (void)
   wyl_service_credential_issue_result_t revoke_seed = { 0 };
   wyl_service_credential_issue_result_t rotate_seed = { 0 };
   if (wyl_service_credential_issue (env.handle, revoke_subject, "tenant-a",
-          "human-principal-admin", seed_ids[3],
-          CONTRACT_FUTURE_EXPIRES_AT_US, &revoke_seed) != WYRELOG_E_OK
+      "human-principal-admin", seed_ids[3],
+      CONTRACT_FUTURE_EXPIRES_AT_US, &revoke_seed) != WYRELOG_E_OK
       || wyl_service_credential_issue (env.handle, rotate_subject, "tenant-a",
-          "human-principal-admin", seed_ids[4],
-          CONTRACT_FUTURE_EXPIRES_AT_US, &rotate_seed) != WYRELOG_E_OK) {
+      "human-principal-admin", seed_ids[4],
+      CONTRACT_FUTURE_EXPIRES_AT_US, &rotate_seed) != WYRELOG_E_OK) {
     wyl_service_credential_issue_result_clear (&revoke_seed);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     service_denial_env_clear (&env);
@@ -16470,8 +16484,7 @@ check_retirement_response_loss_restart_contract (void)
     return 2616;
   }
 
-  gchar caller_ids[4][WYL_REQUEST_ID_STRING_BUF] = { {0}
-  };
+  gchar caller_ids[4][WYL_REQUEST_ID_STRING_BUF] = { {0}};
   for (guint i = 0; i < G_N_ELEMENTS (caller_ids); i++)
     if (wyl_request_id_new (caller_ids[i], sizeof caller_ids[i])
         != WYRELOG_E_OK) {
@@ -16479,36 +16492,36 @@ check_retirement_response_loss_restart_contract (void)
       return 2617;
     }
   g_autofree gchar *disable_path = g_strdup_printf
-      ("/service-principals/%s/disable", disable_subject);
+        ("/service-principals/%s/disable", disable_subject);
   g_autofree gchar *revoke_path = g_strdup_printf ("/service-credentials/%s",
-      revoke_credential);
+          revoke_credential);
   g_autofree gchar *rotate_path = g_strdup_printf
-      ("/service-credentials/%s/rotate", rotate_credential);
+        ("/service-credentials/%s/rotate", rotate_credential);
   g_autofree gchar *seal_query = g_strdup_printf ("name=tenant-drop-seal&%s",
-      env.query);
+          env.query);
   g_autofree gchar *disable_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[0]);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[0]);
   g_autofree gchar *revoke_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[1]);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[1]);
   g_autofree gchar *seal_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[3]);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_ids[3]);
   g_autofree gchar *rotate_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\","
-      "\"destination\":\"drop-rotate.json\",\"expires_at_us\":\"%s\"}",
-      caller_ids[2], CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+        ("{\"version\":\"1\",\"request_id\":\"%s\","
+          "\"destination\":\"drop-rotate.json\",\"expires_at_us\":\"%s\"}",
+          caller_ids[2], CONTRACT_FUTURE_EXPIRES_AT_US_STR);
   DroppedManagementRequest dropped[4] = {
     {.base_url = env.base_url,.method = "POST",.path = disable_path,
-          .query = env.query,.access_token = env.access_token,
-        .body = disable_body},
+     .query = env.query,.access_token = env.access_token,
+     .body = disable_body},
     {.base_url = env.base_url,.method = "DELETE",.path = revoke_path,
-          .query = env.tenant_query,.access_token = env.access_token,
-        .body = revoke_body},
+     .query = env.tenant_query,.access_token = env.access_token,
+     .body = revoke_body},
     {.base_url = env.base_url,.method = "POST",.path = rotate_path,
-          .query = env.tenant_query,.access_token = env.access_token,
-        .body = rotate_body},
+     .query = env.tenant_query,.access_token = env.access_token,
+     .body = rotate_body},
     {.base_url = env.base_url,.method = "POST",.path = "/tenants/seal",
-          .query = seal_query,.access_token = env.access_token,
-        .body = seal_body},
+     .query = seal_query,.access_token = env.access_token,
+     .body = seal_body},
   };
   const WylDaemonRetirementOperation operations[] = {
     WYL_DAEMON_RETIREMENT_PRINCIPAL_DISABLE,
@@ -16519,7 +16532,7 @@ check_retirement_response_loss_restart_contract (void)
   g_autofree gchar *probe_body = NULL;
   for (guint i = 0; i < G_N_ELEMENTS (dropped); i++) {
     if (!drop_management_response (env.http.server, operations[i],
-            caller_ids[i], &dropped[i])) {
+        caller_ids[i], &dropped[i])) {
       guint diagnostic_status = 0;
       g_autofree gchar *diagnostic_body = NULL;
       (void) send_raw_service_principal_bearer (env.session,
@@ -16544,8 +16557,8 @@ check_retirement_response_loss_restart_contract (void)
   }
   guint status = 0;
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, env.access_token, NULL, &status,
-          &probe_body) != 0 || status != 200) {
+      "/service-principals", env.query, env.access_token, NULL, &status,
+      &probe_body) != 0 || status != 200) {
     rc = 2622;
     goto clear_dropped;
   }
@@ -16554,10 +16567,10 @@ check_retirement_response_loss_restart_contract (void)
   guint stage_before = env.publication.stage_calls;
   guint commit_before = env.publication.commit_calls;
   if (!policy_count_rows (env.handle,
-          "SELECT count(*) FROM service_retirement_receipts;", &receipts_before)
+      "SELECT count(*) FROM service_retirement_receipts;", &receipts_before)
       || receipts_before != 3
       || !policy_count_rows (env.handle,
-          "SELECT count(*) FROM service_credentials;", &credentials_before)
+      "SELECT count(*) FROM service_credentials;", &credentials_before)
       || credentials_before != 3 || stage_before == 0 || commit_before == 0) {
     rc = 2623;
     goto clear_dropped;
@@ -16566,35 +16579,35 @@ check_retirement_response_loss_restart_contract (void)
   if ((rc = service_denial_env_restart (&env)) != 0)
     goto clear_dropped;
   if (!replay_retirement_response (&env, "POST", disable_path, env.query,
-          disable_body, caller_ids[0], &dropped[0], "\"state\":\"disabled\"")) {
+      disable_body, caller_ids[0], &dropped[0], "\"state\":\"disabled\"")) {
     rc = 2624;
     goto clear_dropped;
   }
   if (!replay_retirement_response (&env, "DELETE", revoke_path,
-          env.tenant_query, revoke_body, caller_ids[1], &dropped[1],
-          "\"state\":\"revoked\"")) {
+      env.tenant_query, revoke_body, caller_ids[1], &dropped[1],
+      "\"state\":\"revoked\"")) {
     rc = 2625;
     goto clear_dropped;
   }
   if (!replay_retirement_response (&env, "POST", rotate_path,
-          env.tenant_query, rotate_body, caller_ids[2], &dropped[2],
-          "\"state\":\"terminal\"")) {
+      env.tenant_query, rotate_body, caller_ids[2], &dropped[2],
+      "\"state\":\"terminal\"")) {
     rc = 2626;
     goto clear_dropped;
   }
   if (!replay_retirement_response (&env, "POST", "/tenants/seal",
-          seal_query, seal_body, caller_ids[3], &dropped[3],
-          "\"changed\":true")) {
+      seal_query, seal_body, caller_ids[3], &dropped[3],
+      "\"changed\":true")) {
     rc = 2627;
     goto clear_dropped;
   }
   gint64 receipts_after = 0;
   gint64 credentials_after = 0;
   if (!policy_count_rows (env.handle,
-          "SELECT count(*) FROM service_retirement_receipts;", &receipts_after)
+      "SELECT count(*) FROM service_retirement_receipts;", &receipts_after)
       || receipts_after != receipts_before
       || !policy_count_rows (env.handle,
-          "SELECT count(*) FROM service_credentials;", &credentials_after)
+      "SELECT count(*) FROM service_credentials;", &credentials_after)
       || credentials_after != credentials_before
       || env.publication.stage_calls != stage_before
       || env.publication.commit_calls != commit_before) {
@@ -16630,7 +16643,7 @@ check_retirement_postcommit_http_fault (guint expected_status,
   if (wyl_request_id_new (create_id, sizeof create_id) != WYRELOG_E_OK
       || wyl_request_id_new (caller_id, sizeof caller_id) != WYRELOG_E_OK
       || wyl_service_principal_create (env.handle, subject, "Fault target",
-          "human-principal-admin", create_id, &principal) != WYRELOG_E_OK) {
+      "human-principal-admin", create_id, &principal) != WYRELOG_E_OK) {
     wyl_service_principal_clear (&principal);
     service_denial_env_clear (&env);
     return 2630;
@@ -16639,27 +16652,27 @@ check_retirement_postcommit_http_fault (guint expected_status,
   if (fail_latch)
     wyl_daemon_http_fail_next_retirement_latch_for_test (env.http.server);
   wyl_policy_store_service_authority_transaction_fail_once
-      (wyl_handle_get_policy_store (env.handle),
+    (wyl_handle_get_policy_store (env.handle),
       WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
   g_autofree gchar *path = g_strdup_printf
-      ("/service-principals/%s/disable", subject);
+        ("/service-principals/%s/disable", subject);
   g_autofree gchar *body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", caller_id);
   guint status = 0;
   g_autofree gchar *response = NULL;
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          path, env.query, env.access_token, body, &status, &response) != 0
+      path, env.query, env.access_token, body, &status, &response) != 0
       || status != expected_status || response == NULL
       || strstr (response, "service_principal_failed") == NULL) {
     service_denial_env_clear (&env);
     return fail_latch ? 2631 : 2632;
   }
   g_autofree gchar *receipt_sql = g_strdup_printf
-      ("SELECT count(*) FROM service_retirement_receipts WHERE "
-      "request_id='%s';", caller_id);
+        ("SELECT count(*) FROM service_retirement_receipts WHERE "
+          "request_id='%s';", caller_id);
   g_autofree gchar *state_sql = g_strdup_printf
-      ("SELECT count(*) FROM service_principals WHERE subject_id='%s' AND "
-      "state='disabled';", subject);
+        ("SELECT count(*) FROM service_principals WHERE subject_id='%s' AND "
+          "state='disabled';", subject);
   gint64 receipt_count = 0;
   gint64 disabled_count = 0;
   if (!policy_count_rows (env.handle, receipt_sql, &receipt_count)
@@ -16700,16 +16713,16 @@ check_retirement_corruption_http_matrix (void)
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
   wyl_service_principal_t principal = { 0 };
   if (wyl_service_principal_create (env.handle, "svc:tenant-a:corrupt-http",
-          "Corruption HTTP", "human-principal-admin", "corrupt-http-create",
-          &principal) != WYRELOG_E_OK) {
+      "Corruption HTTP", "human-principal-admin", "corrupt-http-create",
+      &principal) != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2640;
   }
   wyl_service_principal_clear (&principal);
   wyl_service_credential_issue_result_t issued = { 0 };
   if (wyl_service_credential_issue (env.handle,
-          "svc:tenant-a:corrupt-http", "tenant-a", "human-principal-admin",
-          "corrupt-http-issue", CONTRACT_FUTURE_EXPIRES_AT_US, &issued)
+      "svc:tenant-a:corrupt-http", "tenant-a", "human-principal-admin",
+      "corrupt-http-issue", CONTRACT_FUTURE_EXPIRES_AT_US, &issued)
       != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
     return 2641;
@@ -16717,9 +16730,9 @@ check_retirement_corruption_http_matrix (void)
   g_autofree gchar *credential_id = g_strdup (issued.credential.credential_id);
   wyl_service_credential_issue_result_clear (&issued);
   g_autofree gchar *principal_path = g_strdup
-      ("/service-principals/svc:tenant-a:corrupt-http/disable");
+        ("/service-principals/svc:tenant-a:corrupt-http/disable");
   g_autofree gchar *credential_path = g_strdup_printf
-      ("/service-credentials/%s", credential_id);
+        ("/service-credentials/%s", credential_id);
   const gchar *principal_transition =
       "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000240\"}";
   const gchar *principal_terminal =
@@ -16731,34 +16744,34 @@ check_retirement_corruption_http_matrix (void)
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          principal_path, env.query, env.access_token, principal_transition,
-          &status, &body) != 0 || status != 200) {
+      principal_path, env.query, env.access_token, principal_transition,
+      &status, &body) != 0 || status != 200) {
     rc = 2642;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          principal_path, env.query, env.access_token, principal_terminal,
-          &status, &body) != 0 || status != 200) {
+      principal_path, env.query, env.access_token, principal_terminal,
+      &status, &body) != 0 || status != 200) {
     rc = 2643;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "DELETE", env.base_url,
-          credential_path, env.tenant_query, env.access_token,
-          credential_transition, &status, &body) != 0 || status != 200) {
+      credential_path, env.tenant_query, env.access_token,
+      credential_transition, &status, &body) != 0 || status != 200) {
     rc = 2644;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "DELETE", env.base_url,
-          credential_path, env.tenant_query, env.access_token,
-          credential_terminal, &status, &body) != 0 || status != 200) {
+      credential_path, env.tenant_query, env.access_token,
+      credential_terminal, &status, &body) != 0 || status != 200) {
     rc = 2645;
     goto cleanup;
   }
   sqlite3 *db = wyl_policy_store_get_db
-      (wyl_handle_get_policy_store (env.handle));
+        (wyl_handle_get_policy_store (env.handle));
   gint64 effects_before = 0;
   const gchar *effects_sql =
       "SELECT (SELECT count(*) FROM service_retirement_receipts)+"
@@ -16774,20 +16787,20 @@ check_retirement_corruption_http_matrix (void)
     goto cleanup;
   }
   if (retirement_http_exec (db,
-          "DROP TRIGGER trg_service_retirement_no_update;"
-          "CREATE TEMP TABLE saved_http_principal AS SELECT disabled_by,"
-          "disabled_at_us,updated_at_us FROM service_principals WHERE "
-          "subject_id='svc:tenant-a:corrupt-http';"
-          "UPDATE service_principals SET disabled_by='forged-http',"
-          "disabled_at_us=disabled_at_us+1,updated_at_us=updated_at_us+1 WHERE "
-          "subject_id='svc:tenant-a:corrupt-http';") != 0) {
+      "DROP TRIGGER trg_service_retirement_no_update;"
+      "CREATE TEMP TABLE saved_http_principal AS SELECT disabled_by,"
+      "disabled_at_us,updated_at_us FROM service_principals WHERE "
+      "subject_id='svc:tenant-a:corrupt-http';"
+      "UPDATE service_principals SET disabled_by='forged-http',"
+      "disabled_at_us=disabled_at_us+1,updated_at_us=updated_at_us+1 WHERE "
+      "subject_id='svc:tenant-a:corrupt-http';") != 0) {
     rc = 2652;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          principal_path, env.query, env.access_token, principal_terminal,
-          &status, &body) != 0 || status != 500 || body == NULL
+      principal_path, env.query, env.access_token, principal_terminal,
+      &status, &body) != 0 || status != 500 || body == NULL
       || strstr (body, "service_principal_failed") == NULL) {
     rc = 2647;
     goto cleanup;
@@ -16799,27 +16812,27 @@ check_retirement_corruption_http_matrix (void)
     goto cleanup;
   }
   if (retirement_http_exec (db,
-          "UPDATE service_principals SET "
-          "disabled_by=(SELECT disabled_by FROM saved_http_principal),"
-          "disabled_at_us=(SELECT disabled_at_us FROM saved_http_principal),"
-          "updated_at_us=(SELECT updated_at_us FROM saved_http_principal) WHERE "
-          "subject_id='svc:tenant-a:corrupt-http';"
-          "DROP TABLE saved_http_principal;"
-          "CREATE TEMP TABLE saved_http_credential AS SELECT revoked_by,"
-          "revoked_at_us,updated_at_us FROM service_credentials WHERE "
-          "credential_id=(SELECT resource_id FROM service_retirement_receipts "
-          "WHERE request_id='000000000000000000000000243');"
-          "UPDATE service_credentials SET revoked_by='forged-http',"
-          "revoked_at_us=revoked_at_us+1,updated_at_us=updated_at_us+1 WHERE "
-          "credential_id=(SELECT resource_id FROM service_retirement_receipts "
-          "WHERE request_id='000000000000000000000000243');") != 0) {
+      "UPDATE service_principals SET "
+      "disabled_by=(SELECT disabled_by FROM saved_http_principal),"
+      "disabled_at_us=(SELECT disabled_at_us FROM saved_http_principal),"
+      "updated_at_us=(SELECT updated_at_us FROM saved_http_principal) WHERE "
+      "subject_id='svc:tenant-a:corrupt-http';"
+      "DROP TABLE saved_http_principal;"
+      "CREATE TEMP TABLE saved_http_credential AS SELECT revoked_by,"
+      "revoked_at_us,updated_at_us FROM service_credentials WHERE "
+      "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+      "WHERE request_id='000000000000000000000000243');"
+      "UPDATE service_credentials SET revoked_by='forged-http',"
+      "revoked_at_us=revoked_at_us+1,updated_at_us=updated_at_us+1 WHERE "
+      "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+      "WHERE request_id='000000000000000000000000243');") != 0) {
     rc = 2653;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "DELETE", env.base_url,
-          credential_path, env.tenant_query, env.access_token,
-          credential_terminal, &status, &body) != 0 || status != 500
+      credential_path, env.tenant_query, env.access_token,
+      credential_terminal, &status, &body) != 0 || status != 500
       || body == NULL || strstr (body, "service_credential_failed") == NULL) {
     rc = 2649;
     goto cleanup;
@@ -16830,25 +16843,25 @@ check_retirement_corruption_http_matrix (void)
     goto cleanup;
   }
   if (retirement_http_exec (db,
-          "UPDATE service_credentials SET "
-          "revoked_by=(SELECT revoked_by FROM saved_http_credential),"
-          "revoked_at_us=(SELECT revoked_at_us FROM saved_http_credential),"
-          "updated_at_us=(SELECT updated_at_us FROM saved_http_credential) WHERE "
-          "credential_id=(SELECT resource_id FROM service_retirement_receipts "
-          "WHERE request_id='000000000000000000000000243');"
-          "DROP TABLE saved_http_credential;"
-          "CREATE TEMP TABLE saved_http_fingerprint AS SELECT input_fingerprint "
-          "FROM service_retirement_receipts WHERE "
-          "request_id='000000000000000000000000241';"
-          "UPDATE service_retirement_receipts SET input_fingerprint=zeroblob(32) "
-          "WHERE request_id='000000000000000000000000241';") != 0) {
+      "UPDATE service_credentials SET "
+      "revoked_by=(SELECT revoked_by FROM saved_http_credential),"
+      "revoked_at_us=(SELECT revoked_at_us FROM saved_http_credential),"
+      "updated_at_us=(SELECT updated_at_us FROM saved_http_credential) WHERE "
+      "credential_id=(SELECT resource_id FROM service_retirement_receipts "
+      "WHERE request_id='000000000000000000000000243');"
+      "DROP TABLE saved_http_credential;"
+      "CREATE TEMP TABLE saved_http_fingerprint AS SELECT input_fingerprint "
+      "FROM service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000241';"
+      "UPDATE service_retirement_receipts SET input_fingerprint=zeroblob(32) "
+      "WHERE request_id='000000000000000000000000241';") != 0) {
     rc = 2654;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          principal_path, env.query, env.access_token, principal_terminal,
-          &status, &body) != 0 || status != 500 || body == NULL
+      principal_path, env.query, env.access_token, principal_terminal,
+      &status, &body) != 0 || status != 500 || body == NULL
       || strstr (body, "service_principal_failed") == NULL
       || !policy_count_rows (env.handle, effects_sql, &effects_after)
       || effects_after != effects_before) {
@@ -16877,7 +16890,7 @@ send_raw_service_management_forwarded_spoof (SoupSession *session,
   if (msg == NULL)
     return 2521;
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
   soup_message_headers_replace (headers, "Authorization", authorization);
   /* These attacker-controlled forwarding claims must never replace the
@@ -16895,7 +16908,7 @@ send_raw_service_management_forwarded_spoof (SoupSession *session,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 2522;
   gint rc = check_response_request_id_header (msg, 2523);
@@ -16951,21 +16964,21 @@ check_service_management_caller_and_refresh_matrix (void)
   }
   store = wyl_handle_get_policy_store (env.handle);
   if (wyl_policy_store_set_principal_state (store, "tenant-local-admin",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "skip-mfa-admin",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "refresh-mfa-admin",
-          "authenticated") != WYRELOG_E_OK) {
+      "authenticated") != WYRELOG_E_OK) {
     rc = 2541;
     goto out;
   }
 
   if (!seed_human_tokens_with_assurance (env.http.server, tenant_session,
-          "tenant-local-admin", "tenant-a", TRUE, &tenant_access,
-          &tenant_refresh)
+      "tenant-local-admin", "tenant-a", TRUE, &tenant_access,
+      &tenant_refresh)
       || send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, tenant_access, NULL, &status,
-          &body) != 0 || status != 403
+      "/service-principals", env.query, tenant_access, NULL, &status,
+      &body) != 0 || status != 403
       || body == NULL || strstr (body, "service_principal_denied") == NULL) {
     g_printerr ("WYRELOG_TEST_DIAG management_caller tenant_local status=%u "
         "body=%s\n", status, body != NULL ? body : "(null)");
@@ -16976,10 +16989,10 @@ check_service_management_caller_and_refresh_matrix (void)
   /* A valid live session id in the query never substitutes for Bearer. */
   g_clear_pointer (&body, g_free);
   session_query = g_strdup_printf
-      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
-      env.session_token);
+        ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+          env.session_token);
   if (send_raw_service_principal_full (env.session, "GET", env.base_url,
-          "/service-principals", session_query, NULL, &status, &body) != 0
+      "/service-principals", session_query, NULL, &status, &body) != 0
       || status != 401 || body == NULL
       || strstr (body, "service_principal_auth_required") == NULL) {
     rc = 2532;
@@ -16987,15 +17000,15 @@ check_service_management_caller_and_refresh_matrix (void)
   }
 
   if (!seed_human_tokens_with_assurance (env.http.server, skip_session,
-          "skip-mfa-admin", WYL_TENANT_DEFAULT, FALSE, &skip_access,
-          &skip_refresh)) {
+      "skip-mfa-admin", WYL_TENANT_DEFAULT, FALSE, &skip_access,
+      &skip_refresh)) {
     rc = 2533;
     goto out;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, skip_access, NULL, &status,
-          &body) != 0 || status != 403 || body == NULL
+      "/service-principals", env.query, skip_access, NULL, &status,
+      &body) != 0 || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL) {
     rc = 2534;
     goto out;
@@ -17005,7 +17018,7 @@ check_service_management_caller_and_refresh_matrix (void)
    * session. The successor bearer remains denied by the live-session gate. */
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (env.session, "POST", env.base_url, skip_refresh,
-          &status, &body) != 0 || status != 200 || body == NULL) {
+      &status, &body) != 0 || status != 200 || body == NULL) {
     rc = 2535;
     goto out;
   }
@@ -17013,8 +17026,8 @@ check_service_management_caller_and_refresh_matrix (void)
   g_clear_pointer (&body, g_free);
   if (skip_refreshed_access == NULL
       || send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, skip_refreshed_access, NULL,
-          &status, &body) != 0 || status != 403) {
+      "/service-principals", env.query, skip_refreshed_access, NULL,
+      &status, &body) != 0 || status != 403) {
     rc = 2536;
     goto out;
   }
@@ -17023,19 +17036,19 @@ check_service_management_caller_and_refresh_matrix (void)
    * live assurance bit; the rotated token itself carries no authority to
    * elevate a different session. */
   if (!seed_human_tokens_with_assurance (env.http.server, assured_session,
-          "refresh-mfa-admin", WYL_TENANT_DEFAULT, TRUE, &assured_access,
-          &assured_refresh)) {
+      "refresh-mfa-admin", WYL_TENANT_DEFAULT, TRUE, &assured_access,
+      &assured_refresh)) {
     rc = 2537;
     goto out;
   }
   if (wyl_policy_store_set_principal_state (store, "refresh-mfa-admin",
-          "authenticated") != WYRELOG_E_OK
+      "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store, "refresh-mfa-admin",
-          "wr.service_principal.manage", assured_session) != WYRELOG_E_OK
+      "wr.service_principal.manage", assured_session) != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, assured_session, "active")
       != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (store, "refresh-mfa-admin",
-          "wr.service_principal.manage", assured_session, "armed")
+      "wr.service_principal.manage", assured_session, "armed")
       != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     rc = 2538;
@@ -17043,7 +17056,7 @@ check_service_management_caller_and_refresh_matrix (void)
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_refresh (env.session, "POST", env.base_url, assured_refresh,
-          &status, &body) != 0 || status != 200 || body == NULL) {
+      &status, &body) != 0 || status != 200 || body == NULL) {
     rc = 2539;
     goto out;
   }
@@ -17051,8 +17064,8 @@ check_service_management_caller_and_refresh_matrix (void)
   g_clear_pointer (&body, g_free);
   if (assured_refreshed_access == NULL
       || send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, assured_refreshed_access, NULL,
-          &status, &body) != 0 || status != 200) {
+      "/service-principals", env.query, assured_refreshed_access, NULL,
+      &status, &body) != 0 || status != 200) {
     rc = 2540;
     goto out;
   }
@@ -17096,14 +17109,14 @@ management_checkpoint_mutate_authority (WylHandle *handle,
      * lifecycle word to CLOSED so the relocated gate must fail closed. */
     if (probe->server == NULL
         || !wyl_daemon_http_mutate_service_session_for_test (probe->server,
-            session_id, WYL_DAEMON_SERVICE_SESSION_INACTIVE, NULL, 0))
+        session_id, WYL_DAEMON_SERVICE_SESSION_INACTIVE, NULL, 0))
       return WYRELOG_E_INVALID;
     return WYRELOG_E_OK;
   }
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (probe->mutation == MANAGEMENT_CHECKPOINT_PERMISSION_DORMANT) {
     wyrelog_error_t rc = wyl_policy_store_set_permission_state (store, actor,
-        action, session_id, "dormant");
+            action, session_id, "dormant");
     return rc == WYRELOG_E_OK ? wyl_handle_reload_engine_pair (handle) : rc;
   }
   if (target_tenant == NULL)
@@ -17112,9 +17125,9 @@ management_checkpoint_mutate_authority (WylHandle *handle,
 }
 
 /* Pair the table-driven response matrix with observable no-effect canaries.
- * These requests carry valid human authority and mutation-shaped bodies, so
- * any accidental delegation would be able to consume limiter capacity,
- * publish escrow material, advance an operation, or change service state. */
+* These requests carry valid human authority and mutation-shaped bodies, so
+* any accidental delegation would be able to consume limiter capacity,
+* publish escrow material, advance an operation, or change service state. */
 static gint
 check_service_route_alias_no_effects (void)
 {
@@ -17154,57 +17167,57 @@ check_service_route_alias_no_effects (void)
       || wyl_request_id_new (issue_request_id, sizeof issue_request_id)
       != WYRELOG_E_OK
       || wyl_request_id_new (alias_issue_request_id,
-          sizeof alias_issue_request_id) != WYRELOG_E_OK
+      sizeof alias_issue_request_id) != WYRELOG_E_OK
       || wyl_request_id_new (rotate_request_id, sizeof rotate_request_id)
       != WYRELOG_E_OK
       || wyl_request_id_new (revoke_request_id, sizeof revoke_request_id)
       != WYRELOG_E_OK
       || wyl_service_principal_create (env.handle, "svc:tenant-a:alias",
-          "Alias canary", "human-principal-admin", principal_request_id,
-          &principal) != WYRELOG_E_OK
+      "Alias canary", "human-principal-admin", principal_request_id,
+      &principal) != WYRELOG_E_OK
       || wyl_service_credential_issue (env.handle, "svc:tenant-a:alias",
-          "tenant-a", "human-principal-admin", issue_request_id,
-          CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
+      "tenant-a", "human-principal-admin", issue_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
       || issued.credential.credential_id == NULL || issued.secret == NULL) {
     rc = 2270;
     goto out;
   }
   credential_id = g_strdup (issued.credential.credential_id);
   rotate_alias = g_strdup_printf ("/service-credentials/%s/rotate/x",
-      credential_id);
+          credential_id);
   rotate_encoded_alias = g_strdup_printf
-      ("/service-credentials/%s/rotate%%2Fx", credential_id);
+        ("/service-credentials/%s/rotate%%2Fx", credential_id);
   revoke_alias = g_strdup_printf ("/service-credentials/%s/x", credential_id);
   revoke_encoded_alias = g_strdup_printf ("/service-credentials/%s%%2Fx",
-      credential_id);
+          credential_id);
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   if (secret == NULL || secret_len == 0) {
     rc = 2271;
     goto out;
   }
   token_body = g_strdup_printf
-      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
-      credential_id, (gint) secret_len, secret);
+        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
+          credential_id, (gint) secret_len, secret);
   issue_body = g_strdup_printf
-      ("{\"version\":\"1\",\"tenant\":\"tenant-a\","
-      "\"request_id\":\"%s\",\"destination\":\"alias-issue.json\","
-      "\"expires_at_us\":\"%s\"}", alias_issue_request_id,
-      CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+        ("{\"version\":\"1\",\"tenant\":\"tenant-a\","
+          "\"request_id\":\"%s\",\"destination\":\"alias-issue.json\","
+          "\"expires_at_us\":\"%s\"}", alias_issue_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US_STR);
   rotate_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\","
-      "\"destination\":\"alias-rotate.json\",\"expires_at_us\":\"%s\"}",
-      rotate_request_id, CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+        ("{\"version\":\"1\",\"request_id\":\"%s\","
+          "\"destination\":\"alias-rotate.json\",\"expires_at_us\":\"%s\"}",
+          rotate_request_id, CONTRACT_FUTURE_EXPIRES_AT_US_STR);
   revoke_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   if (wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_before) != WYRELOG_E_OK
+      count_service_principals_cb, &principal_before) != WYRELOG_E_OK
       || wyl_policy_store_foreach_service_credential (store,
-          "svc:tenant-a:alias", "tenant-a", count_service_credentials_cb,
-          &credential_before) != WYRELOG_E_OK) {
+      "svc:tenant-a:alias", "tenant-a", count_service_credentials_cb,
+      &credential_before) != WYRELOG_E_OK) {
     rc = 2272;
     goto out;
   }
@@ -17216,30 +17229,30 @@ check_service_route_alias_no_effects (void)
     const gchar *body;
   } mutation_aliases[] = {
     {"POST", "/service-principals/", env.query,
-        "{\"subject_id\":\"svc:tenant-a:unexpected\","
-          "\"display_name\":\"Unexpected\"}"},
+     "{\"subject_id\":\"svc:tenant-a:unexpected\","
+     "\"display_name\":\"Unexpected\"}"},
     {"POST", "/service-principals/svc:tenant-a:alias/credentials/x",
-        env.tenant_query, issue_body},
+     env.tenant_query, issue_body},
     {"POST", "/service-principals/svc:tenant-a:alias/disable/x", env.query,
-        revoke_body},
+     revoke_body},
     {"POST", rotate_alias, env.tenant_query, rotate_body},
     {"DELETE", revoke_alias, env.tenant_query, revoke_body},
     {"POST", "/service-principals%2F", env.query,
-        "{\"subject_id\":\"svc:tenant-a:unexpected-encoded\","
-          "\"display_name\":\"Unexpected encoded\"}"},
+     "{\"subject_id\":\"svc:tenant-a:unexpected-encoded\","
+     "\"display_name\":\"Unexpected encoded\"}"},
     {"POST", "/service-principals/svc:tenant-a:alias/credentials%2Fx",
-        env.tenant_query, issue_body},
+     env.tenant_query, issue_body},
     {"POST", "/service-principals/svc:tenant-a:alias/disable%2Fx", env.query,
-        revoke_body},
+     revoke_body},
     {"POST", rotate_encoded_alias, env.tenant_query, rotate_body},
     {"DELETE", revoke_encoded_alias, env.tenant_query, revoke_body},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (mutation_aliases); i++) {
     g_clear_pointer (&body, g_free);
     if (send_raw_service_principal_bearer (env.session,
-            mutation_aliases[i].method, env.base_url, mutation_aliases[i].path,
-            mutation_aliases[i].query, env.access_token,
-            mutation_aliases[i].body, &status, &body) != 0
+        mutation_aliases[i].method, env.base_url, mutation_aliases[i].path,
+        mutation_aliases[i].query, env.access_token,
+        mutation_aliases[i].body, &status, &body) != 0
         || status != 404
         || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0) {
       rc = 2273 + (gint) i;
@@ -17251,17 +17264,17 @@ check_service_route_alias_no_effects (void)
   WylServiceExchangeLimiterSnapshot limiter_before = { 0 };
   WylServiceExchangeLimiterSnapshot limiter_after = { 0 };
   wyl_daemon_http_service_exchange_limiter_snapshot_for_test
-      (env.http.server, &limiter_before);
+    (env.http.server, &limiter_before);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/auth/service-token%2Fx", NULL, env.access_token, token_body,
-          &status, &body) != 0 || status != 404
+      "/auth/service-token%2Fx", NULL, env.access_token, token_body,
+      &status, &body) != 0 || status != 404
       || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0) {
     rc = 2280;
     goto out;
   }
   wyl_daemon_http_service_exchange_limiter_snapshot_for_test
-      (env.http.server, &limiter_after);
+    (env.http.server, &limiter_after);
   if (limiter_after.credential_bucket_count
       != limiter_before.credential_bucket_count
       || limiter_after.full_credential_bucket_count
@@ -17284,28 +17297,28 @@ check_service_route_alias_no_effects (void)
   if (wyl_request_id_new (operation_request_id, sizeof operation_request_id)
       != WYRELOG_E_OK
       || seed_prepared_operation (env.operation_root, operation_request_id,
-          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:alias",
-          "tenant-a", NULL) != 0
+      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:alias",
+      "tenant-a", NULL) != 0
       || capture_operation_signature (env.operation_root,
-          operation_request_id, &state_before, &updated_before,
-          &attempts_before) != 0) {
+      operation_request_id, &state_before, &updated_before,
+      &attempts_before) != 0) {
     rc = 2282;
     goto out;
   }
   reconcile_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\","
-      "\"operation\":\"issue\",\"target\":{"
-      "\"subject\":\"svc:tenant-a:alias\",\"tenant\":\"tenant-a\"}}",
-      operation_request_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\","
+          "\"operation\":\"issue\",\"target\":{"
+          "\"subject\":\"svc:tenant-a:alias\",\"tenant\":\"tenant-a\"}}",
+          operation_request_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-credential-operations/reconcile%2Fx", env.tenant_query,
-          env.access_token, reconcile_body, &status, &body) != 0
+      "/service-credential-operations/reconcile%2Fx", env.tenant_query,
+      env.access_token, reconcile_body, &status, &body) != 0
       || status != 404
       || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
       || capture_operation_signature (env.operation_root,
-          operation_request_id, &state_after, &updated_after,
-          &attempts_after) != 0
+      operation_request_id, &state_after, &updated_after,
+      &attempts_after) != 0
       || state_after != state_before || updated_after != updated_before
       || attempts_after != attempts_before) {
     rc = 2283;
@@ -17314,10 +17327,10 @@ check_service_route_alias_no_effects (void)
 #endif
 
   if (wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      count_service_principals_cb, &principal_after) != WYRELOG_E_OK
       || wyl_policy_store_foreach_service_credential (store,
-          "svc:tenant-a:alias", "tenant-a", count_service_credentials_cb,
-          &credential_after) != WYRELOG_E_OK
+      "svc:tenant-a:alias", "tenant-a", count_service_credentials_cb,
+      &credential_after) != WYRELOG_E_OK
       || principal_after != principal_before
       || credential_after != credential_before
       || env.publication.plan_calls != 0 || env.publication.stage_calls != 0
@@ -17339,7 +17352,7 @@ out:
 }
 
 /* Prove the WRITE-lease callback is not ceremonial: authority changes after
- * the front-door ALLOW are observed synchronously before domain mutation. */
+* the front-door ALLOW are observed synchronously before domain mutation. */
 static gint
 check_service_management_write_reauthorization_matrix (void)
 {
@@ -17371,23 +17384,23 @@ check_service_management_write_reauthorization_matrix (void)
 
   permission_store = wyl_handle_get_policy_store (permission_env.handle);
   if (wyl_policy_store_foreach_service_principal (permission_store,
-          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+      count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
     rc = 2550;
     goto out;
   }
   wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
-      (permission_env.http.server, management_checkpoint_mutate_authority,
+    (permission_env.http.server, management_checkpoint_mutate_authority,
       &permission_probe);
   if (send_raw_service_principal_bearer (permission_env.session, "POST",
-          permission_env.base_url, "/service-principals", permission_env.query,
-          permission_env.access_token,
-          "{\"subject_id\":\"svc:checkpoint:permission\","
-          "\"display_name\":\"Denied\"}", &status, &body) != 0
+      permission_env.base_url, "/service-principals", permission_env.query,
+      permission_env.access_token,
+      "{\"subject_id\":\"svc:checkpoint:permission\","
+      "\"display_name\":\"Denied\"}", &status, &body) != 0
       || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL
       || permission_probe.calls != 1
       || wyl_policy_store_foreach_service_principal (permission_store,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      count_service_principals_cb, &principal_after) != WYRELOG_E_OK
       || principal_after != principal_before) {
     rc = 2551;
     goto out;
@@ -17397,18 +17410,18 @@ check_service_management_write_reauthorization_matrix (void)
   if (rc != 0)
     goto out;
   if (wyl_request_id_new (principal_request_id,
-          sizeof principal_request_id) != WYRELOG_E_OK
+      sizeof principal_request_id) != WYRELOG_E_OK
       || wyl_request_id_new (issue_request_id, sizeof issue_request_id)
       != WYRELOG_E_OK
       || wyl_request_id_new (revoke_request_id, sizeof revoke_request_id)
       != WYRELOG_E_OK
       || wyl_service_principal_create (tenant_env.handle,
-          "svc:checkpoint:tenant", "Tenant checkpoint",
-          "human-principal-admin", principal_request_id, &principal)
+      "svc:checkpoint:tenant", "Tenant checkpoint",
+      "human-principal-admin", principal_request_id, &principal)
       != WYRELOG_E_OK
       || wyl_service_credential_issue (tenant_env.handle,
-          "svc:checkpoint:tenant", "tenant-a", "human-principal-admin",
-          issue_request_id, CONTRACT_FUTURE_EXPIRES_AT_US, &issued)
+      "svc:checkpoint:tenant", "tenant-a", "human-principal-admin",
+      issue_request_id, CONTRACT_FUTURE_EXPIRES_AT_US, &issued)
       != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
     rc = 2552;
     goto out;
@@ -17419,14 +17432,14 @@ check_service_management_write_reauthorization_matrix (void)
   wyl_service_principal_clear (&principal);
 
   wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
-      (tenant_env.http.server, management_checkpoint_mutate_authority,
+    (tenant_env.http.server, management_checkpoint_mutate_authority,
       &tenant_probe);
   revoke_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (tenant_env.session, "DELETE",
-          tenant_env.base_url, credential_path, tenant_env.tenant_query,
-          tenant_env.access_token, revoke_body, &status, &body) != 0
+      tenant_env.base_url, credential_path, tenant_env.tenant_query,
+      tenant_env.access_token, revoke_body, &status, &body) != 0
       || status != 404 || tenant_probe.calls != 1) {
     rc = 2553;
     goto out;
@@ -17480,21 +17493,21 @@ check_service_management_logout_liveness_barrier (void)
   logout_probe.server = logout_env.http.server;
   store = wyl_handle_get_policy_store (logout_env.handle);
   if (wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+      count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
     rc = 2560;
     goto out;
   }
   wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
-      (logout_env.http.server, management_checkpoint_mutate_authority,
+    (logout_env.http.server, management_checkpoint_mutate_authority,
       &logout_probe);
   if (send_raw_service_principal_bearer (logout_env.session, "POST",
-          logout_env.base_url, "/service-principals", logout_env.query,
-          logout_env.access_token,
-          "{\"subject_id\":\"svc:barrier:loser\","
-          "\"display_name\":\"LogoutWins\"}", &status, &body) != 0
+      logout_env.base_url, "/service-principals", logout_env.query,
+      logout_env.access_token,
+      "{\"subject_id\":\"svc:barrier:loser\","
+      "\"display_name\":\"LogoutWins\"}", &status, &body) != 0
       || status != 403 || body == NULL || logout_probe.calls != 1
       || wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      count_service_principals_cb, &principal_after) != WYRELOG_E_OK
       || principal_after != principal_before) {
     rc = 2561;
     goto out;
@@ -17504,13 +17517,13 @@ check_service_management_logout_liveness_barrier (void)
    * session and stays denied without any checkpoint at all. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (logout_env.session, "POST",
-          logout_env.base_url, "/service-principals", logout_env.query,
-          logout_env.access_token,
-          "{\"subject_id\":\"svc:barrier:loser2\","
-          "\"display_name\":\"StillOut\"}", &status, &body) != 0
+      logout_env.base_url, "/service-principals", logout_env.query,
+      logout_env.access_token,
+      "{\"subject_id\":\"svc:barrier:loser2\","
+      "\"display_name\":\"StillOut\"}", &status, &body) != 0
       || status == 200
       || wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      count_service_principals_cb, &principal_after) != WYRELOG_E_OK
       || principal_after != principal_before) {
     rc = 2562;
     goto out;
@@ -17524,24 +17537,24 @@ check_service_management_logout_liveness_barrier (void)
   commit_probe.server = commit_env.http.server;
   store = wyl_handle_get_policy_store (commit_env.handle);
   if (wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+      count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
     rc = 2563;
     goto out;
   }
   wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
-      (commit_env.http.server, management_checkpoint_mutate_authority,
+    (commit_env.http.server, management_checkpoint_mutate_authority,
       &commit_probe);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (commit_env.session, "POST",
-          commit_env.base_url, "/service-principals", commit_env.query,
-          commit_env.access_token,
-          "{\"subject_id\":\"svc:barrier:winner\","
-          "\"display_name\":\"MutationWins\"}", &status, &body) != 0
+      commit_env.base_url, "/service-principals", commit_env.query,
+      commit_env.access_token,
+      "{\"subject_id\":\"svc:barrier:winner\","
+      "\"display_name\":\"MutationWins\"}", &status, &body) != 0
       || status != 200 || body == NULL || commit_probe.calls != 1
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:barrier:winner\"") == NULL
       || wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      count_service_principals_cb, &principal_after) != WYRELOG_E_OK
       || principal_after != principal_before + 1) {
     rc = 2564;
     goto out;
@@ -17558,9 +17571,9 @@ service_management_body_leaks_secret (const gchar *body,
     const gchar *first_canary, const gchar *second_canary)
 {
   return body == NULL || strstr (body, "credential_secret") != NULL
-      || strstr (body, "secret=") != NULL
-      || (first_canary != NULL && strstr (body, first_canary) != NULL)
-      || (second_canary != NULL && strstr (body, second_canary) != NULL);
+         || strstr (body, "secret=") != NULL
+         || (first_canary != NULL && strstr (body, first_canary) != NULL)
+         || (second_canary != NULL && strstr (body, second_canary) != NULL);
 }
 
 /* Every exact management route must consume the real loopback listener/peer
@@ -17612,11 +17625,11 @@ check_service_management_loopback_forwarded_matrix (void)
 
   /* 1: principal create. */
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
-          env.base_url, "/service-principals", env.query, env.access_token,
-          "{\"subject_id\":\"svc:forwarded:matrix\","
-          "\"display_name\":\"Forwarded matrix\"}", &status, &body) != 0
+      env.base_url, "/service-principals", env.query, env.access_token,
+      "{\"subject_id\":\"svc:forwarded:matrix\","
+      "\"display_name\":\"Forwarded matrix\"}", &status, &body) != 0
       || status != 200 || service_management_body_leaks_secret (body, NULL,
-          NULL)) {
+      NULL)) {
     rc = 2561;
     goto out;
   }
@@ -17624,8 +17637,8 @@ check_service_management_loopback_forwarded_matrix (void)
   /* 2: global principal list. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "GET",
-          env.base_url, "/service-principals", env.query, env.access_token,
-          NULL, &status, &body) != 0 || status != 200
+      env.base_url, "/service-principals", env.query, env.access_token,
+      NULL, &status, &body) != 0 || status != 200
       || strstr (body, "svc:forwarded:matrix") == NULL
       || service_management_body_leaks_secret (body, NULL, NULL)) {
     rc = 2562;
@@ -17635,18 +17648,18 @@ check_service_management_loopback_forwarded_matrix (void)
   /* 4: credential issue (disable is ordered last so the principal remains
    * active for the credential matrix). */
   issue_body = g_strdup_printf
-      ("{\"version\":\"1\",\"tenant\":\"tenant-a\","
-      "\"request_id\":\"%s\",\"destination\":\"forwarded-issue.json\","
-      "\"expires_at_us\":\"%s\"}", issue_request_id,
-      CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+        ("{\"version\":\"1\",\"tenant\":\"tenant-a\","
+          "\"request_id\":\"%s\",\"destination\":\"forwarded-issue.json\","
+          "\"expires_at_us\":\"%s\"}", issue_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US_STR);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
-          env.base_url,
-          "/service-principals/svc:forwarded:matrix/credentials",
-          env.tenant_query, env.access_token, issue_body, &status, &body) != 0
+      env.base_url,
+      "/service-principals/svc:forwarded:matrix/credentials",
+      env.tenant_query, env.access_token, issue_body, &status, &body) != 0
       || status != 200 || env.publication.staged_secret == NULL
       || service_management_body_leaks_secret (body,
-          env.publication.staged_secret, NULL)) {
+      env.publication.staged_secret, NULL)) {
     rc = 2563;
     goto out;
   }
@@ -17661,9 +17674,9 @@ check_service_management_loopback_forwarded_matrix (void)
   /* 5: principal credential list. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "GET",
-          env.base_url,
-          "/service-principals/svc:forwarded:matrix/credentials",
-          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      env.base_url,
+      "/service-principals/svc:forwarded:matrix/credentials",
+      env.tenant_query, env.access_token, NULL, &status, &body) != 0
       || status != 200 || strstr (body, credential_id) == NULL
       || service_management_body_leaks_secret (body, issue_secret, NULL)) {
     rc = 2565;
@@ -17673,8 +17686,8 @@ check_service_management_loopback_forwarded_matrix (void)
   /* 6: credential metadata. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "GET",
-          env.base_url, credential_path, env.tenant_query, env.access_token,
-          NULL, &status, &body) != 0 || status != 200
+      env.base_url, credential_path, env.tenant_query, env.access_token,
+      NULL, &status, &body) != 0 || status != 200
       || strstr (body, credential_id) == NULL
       || service_management_body_leaks_secret (body, issue_secret, NULL)) {
     rc = 2566;
@@ -17686,19 +17699,19 @@ check_service_management_loopback_forwarded_matrix (void)
   g_clear_pointer (&env.publication.staged_secret, g_free);
   memset (&env.publication, 0, sizeof env.publication);
   rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
-      credential_id);
+          credential_id);
   rotate_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\","
-      "\"destination\":\"forwarded-rotate.json\","
-      "\"expires_at_us\":\"%s\"}", rotate_request_id,
-      CONTRACT_FUTURE_EXPIRES_AT_US_STR);
+        ("{\"version\":\"1\",\"request_id\":\"%s\","
+          "\"destination\":\"forwarded-rotate.json\","
+          "\"expires_at_us\":\"%s\"}", rotate_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US_STR);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
-          env.base_url, rotate_path, env.tenant_query, env.access_token,
-          rotate_body, &status, &body) != 0 || status != 200
+      env.base_url, rotate_path, env.tenant_query, env.access_token,
+      rotate_body, &status, &body) != 0 || status != 200
       || env.publication.staged_secret == NULL
       || service_management_body_leaks_secret (body, issue_secret,
-          env.publication.staged_secret)) {
+      env.publication.staged_secret)) {
     rc = 2567;
     goto out;
   }
@@ -17714,28 +17727,28 @@ check_service_management_loopback_forwarded_matrix (void)
   /* 9: operation status collection. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "GET",
-          env.base_url, "/service-credential-operations", env.tenant_query,
-          env.access_token, NULL, &status, &body) != 0 || status != 200
+      env.base_url, "/service-credential-operations", env.tenant_query,
+      env.access_token, NULL, &status, &body) != 0 || status != 200
       || strstr (body, issue_request_id) == NULL
       || strstr (body, rotate_request_id) == NULL
       || service_management_body_leaks_secret (body, issue_secret,
-          rotate_secret)) {
+      rotate_secret)) {
     rc = 2569;
     goto out;
   }
 
   /* 10: exact reconcile. */
   reconcile_body = g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:forwarded:matrix\","
-      "\"tenant\":\"tenant-a\"}}", issue_request_id);
+        ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+          "\"target\":{\"subject\":\"svc:forwarded:matrix\","
+          "\"tenant\":\"tenant-a\"}}", issue_request_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
-          env.base_url, "/service-credential-operations/reconcile",
-          env.tenant_query, env.access_token, reconcile_body, &status, &body)
+      env.base_url, "/service-credential-operations/reconcile",
+      env.tenant_query, env.access_token, reconcile_body, &status, &body)
       != 0 || status != 200 || strstr (body, issue_request_id) == NULL
       || service_management_body_leaks_secret (body, issue_secret,
-          rotate_secret)) {
+      rotate_secret)) {
     rc = 2570;
     goto out;
   }
@@ -17744,48 +17757,48 @@ check_service_management_loopback_forwarded_matrix (void)
   if (wyl_request_id_new (recover_request_id, sizeof recover_request_id)
       != WYRELOG_E_OK
       || seed_prepared_operation (env.operation_root, recover_request_id,
-          WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:forwarded:matrix",
-          "tenant-a", NULL) != 0) {
+      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:forwarded:matrix",
+      "tenant-a", NULL) != 0) {
     rc = 2576;
     goto out;
   }
   recover_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", recover_request_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", recover_request_id);
   /* Reconcile performs both its front-door and WRITE-lease decisions. Rearm
    * the deterministic permission fixture so recover independently proves its
    * own envelope rather than inheriting the decision-state transition. */
   wyl_policy_store_t *matrix_store = wyl_handle_get_policy_store (env.handle);
   if (wyl_id_new (&recover_session_id) != WYRELOG_E_OK
       || wyl_id_format (&recover_session_id, recover_session,
-          sizeof recover_session) != WYRELOG_E_OK
+      sizeof recover_session) != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (matrix_store,
-          "human-principal-admin", "wr.service_credential.manage",
-          recover_session) != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      recover_session) != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (matrix_store, recover_session,
-          "active") != WYRELOG_E_OK
+      "active") != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (matrix_store,
-          "human-principal-admin", "wr.service_credential.manage",
-          recover_session, "armed") != WYRELOG_E_OK
+      "human-principal-admin", "wr.service_credential.manage",
+      recover_session, "armed") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     rc = 2574;
     goto out;
   }
   if (!seed_human_tokens_with_assurance (env.http.server, recover_session,
-          "human-principal-admin", WYL_TENANT_DEFAULT, TRUE, &recover_access,
-          &recover_refresh)) {
+      "human-principal-admin", WYL_TENANT_DEFAULT, TRUE, &recover_access,
+      &recover_refresh)) {
     rc = 2575;
     goto out;
   }
   wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
-      (env.http.server, management_checkpoint_mutate_authority, &recover_probe);
+    (env.http.server, management_checkpoint_mutate_authority, &recover_probe);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
-          env.base_url, "/service-credential-operations/recover",
-          env.tenant_query, recover_access, recover_body, &status, &body)
+      env.base_url, "/service-credential-operations/recover",
+      env.tenant_query, recover_access, recover_body, &status, &body)
       != 0 || status != 200 || strstr (body, recover_request_id) == NULL
       || recover_probe.calls != 1
       || service_management_body_leaks_secret (body, issue_secret,
-          rotate_secret)) {
+      rotate_secret)) {
     g_printerr ("WYRELOG_TEST_DIAG management_forwarded recover status=%u "
         "checkpoint_calls=%u body=%s\n", status, recover_probe.calls,
         body != NULL ? body : "(null)");
@@ -17796,13 +17809,13 @@ check_service_management_loopback_forwarded_matrix (void)
 
   /* 8: revoke the successor. */
   revoke_body = g_strdup_printf
-      ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
+        ("{\"version\":\"1\",\"request_id\":\"%s\"}", revoke_request_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "DELETE",
-          env.base_url, successor_path, env.tenant_query, env.access_token,
-          revoke_body, &status, &body) != 0 || status != 200
+      env.base_url, successor_path, env.tenant_query, env.access_token,
+      revoke_body, &status, &body) != 0 || status != 200
       || service_management_body_leaks_secret (body, issue_secret,
-          rotate_secret)) {
+      rotate_secret)) {
     rc = 2572;
     goto out;
   }
@@ -17810,13 +17823,13 @@ check_service_management_loopback_forwarded_matrix (void)
   /* 3: principal disable. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_management_forwarded_spoof (env.session, "POST",
-          env.base_url, "/service-principals/svc:forwarded:matrix/disable",
-          env.query, env.access_token,
-          "{\"version\":\"1\",\"request_id\":"
-          "\"000000000000000000000000226\"}", &status, &body) != 0
+      env.base_url, "/service-principals/svc:forwarded:matrix/disable",
+      env.query, env.access_token,
+      "{\"version\":\"1\",\"request_id\":"
+      "\"000000000000000000000000226\"}", &status, &body) != 0
       || status != 200 || strstr (body, "\"state\":\"disabled\"") == NULL
       || service_management_body_leaks_secret (body, issue_secret,
-          rotate_secret)) {
+      rotate_secret)) {
     rc = 2573;
     goto out;
   }
@@ -17854,23 +17867,23 @@ check_service_management_global_principal_cross_tenant (void)
   if (wyl_policy_store_create_tenant (store, "tenant-b", &created)
       != WYRELOG_E_OK || !created
       || wyl_request_id_new (principal_request_id,
-          sizeof principal_request_id) != WYRELOG_E_OK
+      sizeof principal_request_id) != WYRELOG_E_OK
       || wyl_request_id_new (tenant_a_request_id,
-          sizeof tenant_a_request_id) != WYRELOG_E_OK
+      sizeof tenant_a_request_id) != WYRELOG_E_OK
       || wyl_request_id_new (tenant_b_request_id,
-          sizeof tenant_b_request_id) != WYRELOG_E_OK
+      sizeof tenant_b_request_id) != WYRELOG_E_OK
       || wyl_service_principal_create (env.handle,
-          "svc:tenant-a:misleading-global", "Global principal",
-          "human-principal-admin", principal_request_id, &principal)
+      "svc:tenant-a:misleading-global", "Global principal",
+      "human-principal-admin", principal_request_id, &principal)
       != WYRELOG_E_OK
       || wyl_service_credential_issue (env.handle,
-          "svc:tenant-a:misleading-global", "tenant-a",
-          "human-principal-admin", tenant_a_request_id,
-          CONTRACT_FUTURE_EXPIRES_AT_US, &tenant_a) != WYRELOG_E_OK
+      "svc:tenant-a:misleading-global", "tenant-a",
+      "human-principal-admin", tenant_a_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US, &tenant_a) != WYRELOG_E_OK
       || wyl_service_credential_issue (env.handle,
-          "svc:tenant-a:misleading-global", "tenant-b",
-          "human-principal-admin", tenant_b_request_id,
-          CONTRACT_FUTURE_EXPIRES_AT_US, &tenant_b) != WYRELOG_E_OK
+      "svc:tenant-a:misleading-global", "tenant-b",
+      "human-principal-admin", tenant_b_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US, &tenant_b) != WYRELOG_E_OK
       || tenant_a.credential.credential_id == NULL
       || tenant_b.credential.credential_id == NULL) {
     rc = 2580;
@@ -17880,19 +17893,19 @@ check_service_management_global_principal_cross_tenant (void)
   tenant_b_id = g_strdup (tenant_b.credential.credential_id);
   tenant_b_path = g_strdup_printf ("/service-credentials/%s", tenant_b_id);
   tenant_b_query = g_strdup
-      ("tenant=tenant-b&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
+        ("tenant=tenant-b&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0");
 
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, env.access_token, NULL, &status,
-          &body) != 0 || status != 200
+      "/service-principals", env.query, env.access_token, NULL, &status,
+      &body) != 0 || status != 200
       || strstr (body, "svc:tenant-a:misleading-global") == NULL) {
     rc = 2581;
     goto out;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals/svc:tenant-a:misleading-global/credentials",
-          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      "/service-principals/svc:tenant-a:misleading-global/credentials",
+      env.tenant_query, env.access_token, NULL, &status, &body) != 0
       || status != 200 || strstr (body, tenant_a_id) == NULL
       || strstr (body, tenant_b_id) != NULL) {
     rc = 2582;
@@ -17900,8 +17913,8 @@ check_service_management_global_principal_cross_tenant (void)
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals/svc:tenant-a:misleading-global/credentials",
-          tenant_b_query, env.access_token, NULL, &status, &body) != 0
+      "/service-principals/svc:tenant-a:misleading-global/credentials",
+      tenant_b_query, env.access_token, NULL, &status, &body) != 0
       || status != 200 || strstr (body, tenant_b_id) == NULL
       || strstr (body, tenant_a_id) != NULL) {
     rc = 2583;
@@ -17912,8 +17925,8 @@ check_service_management_global_principal_cross_tenant (void)
    * unknown id; the response does not echo the known id. */
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          tenant_b_path, env.tenant_query, env.access_token, NULL, &status,
-          &body) != 0 || status != 404 || body == NULL
+      tenant_b_path, env.tenant_query, env.access_token, NULL, &status,
+      &body) != 0 || status != 404 || body == NULL
       || strstr (body, "service_credential_not_found") == NULL
       || strstr (body, tenant_b_id) != NULL) {
     rc = 2584;
@@ -17966,27 +17979,27 @@ check_service_management_bearer_denied (void)
     goto out;
   }
   if (wyl_service_principal_create (env.handle, "svc:tenant-a:worker",
-          "Worker", "human-principal-admin", request_id, &principal)
+      "Worker", "human-principal-admin", request_id, &principal)
       != WYRELOG_E_OK) {
     rc = 2211;
     goto out;
   }
   if (wyl_service_credential_issue (env.handle, "svc:tenant-a:worker",
-          "tenant-a", "human-principal-admin", issue_request_id,
-          CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
+      "tenant-a", "human-principal-admin", issue_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
       || issued.credential.credential_id == NULL || issued.secret == NULL) {
     rc = 2212;
     goto out;
   }
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   if (secret == NULL) {
     rc = 2213;
     goto out;
   }
   if (wyl_daemon_http_publish_service_token_for_test (env.http.server,
-          issued.credential.credential_id, secret, secret_len, &pub_body)
+      issued.credential.credential_id, secret, secret_len, &pub_body)
       != WYRELOG_E_OK || pub_body == NULL
       || (access_token = extract_json_string (pub_body, "access_token"))
       == NULL) {
@@ -17996,29 +18009,29 @@ check_service_management_bearer_denied (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   if (wyl_policy_store_foreach_service_credential (store,
-          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
-          &credential_before) != WYRELOG_E_OK) {
+      "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+      &credential_before) != WYRELOG_E_OK) {
     rc = 2215;
     goto out;
   }
 
   bearer_query = g_strdup_printf ("tenant=tenant-a&guard_timestamp=1&"
-      "guard_loc_class=trusted&guard_risk=0");
+          "guard_loc_class=trusted&guard_risk=0");
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          "/service-principals/svc:tenant-a:worker/disable", bearer_query,
-          access_token, NULL, &status, &body) != 0 || status != 403
+      "/service-principals/svc:tenant-a:worker/disable", bearer_query,
+      access_token, NULL, &status, &body) != 0 || status != 403
       || body == NULL || strstr (body, "service_principal_denied") == NULL) {
     rc = 2216;
     goto out;
   }
   g_clear_pointer (&body, g_free);
   rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
-      issued.credential.credential_id);
+          issued.credential.credential_id);
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
-          rotate_path, bearer_query, access_token,
-          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
-          "\"destination\":\"rotate.json\",\"expires_at_us\":\""
-          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      rotate_path, bearer_query, access_token,
+      "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+      "\"destination\":\"rotate.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
       || status != 403 || body == NULL
       || strstr (body, "service_credential_denied") == NULL) {
     rc = 2217;
@@ -18026,8 +18039,8 @@ check_service_management_bearer_denied (void)
   }
 
   if (wyl_policy_store_foreach_service_credential (store,
-          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
-          &credential_after) != WYRELOG_E_OK) {
+      "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+      &credential_after) != WYRELOG_E_OK) {
     rc = 2218;
     goto out;
   }
@@ -18068,14 +18081,14 @@ check_service_management_inactive_session_denied (void)
   /* Force the resolvable human session into a non-ACTIVE in-memory state so
    * the only remaining denial is the is_active_human gate. */
   if (!wyl_daemon_http_seed_human_session_with_state_for_test (env.http.server,
-          env.session_token, "human-principal-admin", WYL_TENANT_DEFAULT,
-          WYL_SESSION_STATE_CLOSED)) {
+      env.session_token, "human-principal-admin", WYL_TENANT_DEFAULT,
+      WYL_SESSION_STATE_CLOSED)) {
     rc = 2300;
     goto out;
   }
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals", env.query, env.access_token, NULL, &status,
-          &body) != 0
+      "/service-principals", env.query, env.access_token, NULL, &status,
+      &body) != 0
       || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL) {
     rc = 2301;
@@ -18083,8 +18096,8 @@ check_service_management_inactive_session_denied (void)
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-credentials/wlc_000000000000000000000000000",
-          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      "/service-credentials/wlc_000000000000000000000000000",
+      env.tenant_query, env.access_token, NULL, &status, &body) != 0
       || status != 403
       || body == NULL || strstr (body, "service_credential_denied") == NULL) {
     rc = 2302;
@@ -18123,15 +18136,15 @@ check_service_management_permission_mapping (void)
     goto out;
   wyl_policy_store_t *store_a = wyl_handle_get_policy_store (env_a.handle);
   if (wyl_policy_store_foreach_service_principal (store_a,
-          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+      count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
     rc = 2400;
     goto out;
   }
   if (send_raw_service_principal_bearer (env_a.session, "POST", env_a.base_url,
-          "/service-principals", env_a.query,
-          env_a.access_token,
-          "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
-          &status, &body) != 0 || status != 403 || body == NULL
+      "/service-principals", env_a.query,
+      env_a.access_token,
+      "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
+      &status, &body) != 0 || status != 403 || body == NULL
       || strstr (body, "service_principal_denied") == NULL) {
     rc = 2401;
     goto out;
@@ -18140,15 +18153,15 @@ check_service_management_permission_mapping (void)
   /* Control: the credential action is authorized (404 not-found, never a
    * 403 denial), proving the armed principal permission is not consulted. */
   if (send_raw_service_principal_bearer (env_a.session, "GET", env_a.base_url,
-          "/service-credentials/wlc_000000000000000000000000000",
-          env_a.tenant_query, env_a.access_token, NULL, &status, &body) != 0
+      "/service-credentials/wlc_000000000000000000000000000",
+      env_a.tenant_query, env_a.access_token, NULL, &status, &body) != 0
       || status == 403
       || body == NULL || strstr (body, "service_credential_denied") != NULL) {
     rc = 2402;
     goto out;
   }
   if (wyl_policy_store_foreach_service_principal (store_a,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK) {
+      count_service_principals_cb, &principal_after) != WYRELOG_E_OK) {
     rc = 2403;
     goto out;
   }
@@ -18163,18 +18176,18 @@ check_service_management_permission_mapping (void)
     goto out;
   wyl_policy_store_t *store_b = wyl_handle_get_policy_store (env_b.handle);
   if (wyl_policy_store_foreach_service_credential (store_b,
-          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
-          &credential_before) != WYRELOG_E_OK) {
+      "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+      &credential_before) != WYRELOG_E_OK) {
     rc = 2405;
     goto out;
   }
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (env_b.session, "POST", env_b.base_url,
-          "/service-credentials/wlc_000000000000000000000000000/rotate",
-          env_b.tenant_query, env_b.access_token,
-          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
-          "\"destination\":\"rotate.json\",\"expires_at_us\":\""
-          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      "/service-credentials/wlc_000000000000000000000000000/rotate",
+      env_b.tenant_query, env_b.access_token,
+      "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+      "\"destination\":\"rotate.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
       || status != 403 || body == NULL
       || strstr (body, "service_credential_denied") == NULL) {
     rc = 2406;
@@ -18183,16 +18196,16 @@ check_service_management_permission_mapping (void)
   g_clear_pointer (&body, g_free);
   /* Control: the principal action is authorized (200 list, never a 403). */
   if (send_raw_service_principal_bearer (env_b.session, "GET", env_b.base_url,
-          "/service-principals", env_b.query, env_b.access_token, NULL,
-          &status, &body) != 0
+      "/service-principals", env_b.query, env_b.access_token, NULL,
+      &status, &body) != 0
       || status == 403 || body == NULL
       || strstr (body, "service_principal_denied") != NULL) {
     rc = 2407;
     goto out;
   }
   if (wyl_policy_store_foreach_service_credential (store_b,
-          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
-          &credential_after) != WYRELOG_E_OK) {
+      "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+      &credential_after) != WYRELOG_E_OK) {
     rc = 2408;
     goto out;
   }
@@ -18237,21 +18250,21 @@ check_service_management_populated_secret_leak (void)
     goto out;
   }
   if (wyl_service_principal_create (env.handle, "svc:tenant-a:worker",
-          "Worker", "human-principal-admin", principal_request_id, &principal)
+      "Worker", "human-principal-admin", principal_request_id, &principal)
       != WYRELOG_E_OK) {
     rc = 2501;
     goto out;
   }
   if (wyl_service_credential_issue (env.handle, "svc:tenant-a:worker",
-          "tenant-a", "human-principal-admin", issue_request_id,
-          CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
+      "tenant-a", "human-principal-admin", issue_request_id,
+      CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
       || issued.credential.credential_id == NULL || issued.secret == NULL) {
     rc = 2502;
     goto out;
   }
   gsize secret_len = 0;
   const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
+        (issued.secret, &secret_len);
   if (secret == NULL || secret_len == 0) {
     rc = 2503;
     goto out;
@@ -18260,10 +18273,10 @@ check_service_management_populated_secret_leak (void)
 
   /* Single-credential read: populated 200 that never carries the secret. */
   credential_path = g_strdup_printf ("/service-credentials/%s",
-      issued.credential.credential_id);
+          issued.credential.credential_id);
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          credential_path, env.tenant_query, env.access_token, NULL, &status,
-          &body) != 0
+      credential_path, env.tenant_query, env.access_token, NULL, &status,
+      &body) != 0
       || status != 200 || body == NULL
       || strstr (body, issued.credential.credential_id) == NULL
       || strstr (body, plaintext) != NULL) {
@@ -18274,8 +18287,8 @@ check_service_management_populated_secret_leak (void)
   /* Per-principal credentials list: a non-empty array naming the credential,
    * still with no secret anywhere in the body. */
   if (send_raw_service_principal_bearer (env.session, "GET", env.base_url,
-          "/service-principals/svc:tenant-a:worker/credentials",
-          env.tenant_query, env.access_token, NULL, &status, &body) != 0
+      "/service-principals/svc:tenant-a:worker/credentials",
+      env.tenant_query, env.access_token, NULL, &status, &body) != 0
       || status != 200
       || body == NULL
       || strstr (body, "\"service_credentials\":[") == NULL
@@ -18303,7 +18316,7 @@ check_tenant_gate_codes_contract (void)
   guint status = 0;
   g_autofree gchar *code = NULL;
   if (!wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
-          "__wr_default", &status, &code))
+      "__wr_default", &status, &code))
     return 1900;
   if (status != 0 || code != NULL)
     return 1901;
@@ -18312,7 +18325,7 @@ check_tenant_gate_codes_contract (void)
   g_clear_pointer (&code, g_free);
   status = 0;
   if (!wyl_daemon_http_check_request_tenant_for_test (NULL, "__wr_default",
-          &status, &code))
+      &status, &code))
     return 1902;
   if (status != 0 || code != NULL)
     return 1903;
@@ -18321,7 +18334,7 @@ check_tenant_gate_codes_contract (void)
   g_clear_pointer (&code, g_free);
   status = 0;
   if (wyl_daemon_http_check_request_tenant_for_test ("unknown",
-          "__wr_default", &status, &code))
+      "__wr_default", &status, &code))
     return 1904;
   if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
     return 1905;
@@ -18330,7 +18343,7 @@ check_tenant_gate_codes_contract (void)
   g_clear_pointer (&code, g_free);
   status = 0;
   if (wyl_daemon_http_check_request_tenant_for_test ("", "__wr_default",
-          &status, &code))
+      &status, &code))
     return 1906;
   if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
     return 1907;
@@ -18342,7 +18355,7 @@ check_tenant_gate_codes_contract (void)
   g_clear_pointer (&code, g_free);
   status = 0;
   if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
-          "other-tenant", &status, &code))
+      "other-tenant", &status, &code))
     return 1908;
   if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
     return 1909;
@@ -18351,7 +18364,7 @@ check_tenant_gate_codes_contract (void)
   g_clear_pointer (&code, g_free);
   status = 0;
   if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default", NULL,
-          &status, &code))
+      &status, &code))
     return 1910;
   if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
     return 1911;
@@ -18420,18 +18433,18 @@ main (void)
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 14;
   gint dispatch_context_rc = check_explicit_refresh_dispatch_context (handle,
-      &runtime);
+          &runtime);
   if (dispatch_context_rc != 0)
     return dispatch_context_rc;
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   if (http.server == NULL)
     return 3;
   GThread *thread = g_thread_new ("daemon-http-decide-refresh",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
@@ -18444,11 +18457,11 @@ main (void)
     return read_only_method_rc;
 
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
-          (handle), "login-user", "wr.login.skip_mfa", "login")
+        (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 15;
   if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
-          (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
+        (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
       != WYRELOG_E_OK)
     return 16;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
@@ -18458,16 +18471,16 @@ main (void)
   guint login_status = 0;
   g_autofree gchar *login_body = NULL;
   if (send_raw_login (login, "POST", base_url,
-          "username=login-user&skip_mfa=true", &login_status, &login_body)
+      "username=login-user&skip_mfa=true", &login_status, &login_body)
       != 0 || login_status != 200)
     return 18;
 
   gint jwt_rc = check_jwt_epoch_rotation_contract (http.server, handle,
-      base_url);
+          base_url);
   if (jwt_rc != 0)
     return jwt_rc;
   gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
-      (http.server, base_url);
+        (http.server, base_url);
   if (refresh_shutdown_rc != 0)
     return refresh_shutdown_rc;
 
@@ -18529,11 +18542,11 @@ main (void)
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   if (http.server == NULL)
     return 3;
   GThread *thread = g_thread_new ("daemon-http-decide",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
   MainLoopReadyBarrier barrier = { 0 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
@@ -18542,7 +18555,7 @@ main (void)
   g_mutex_lock (&barrier.mutex);
   if (!barrier.ready) {
     if (!g_cond_wait_until (&barrier.changed, &barrier.mutex,
-            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+        g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
       g_mutex_unlock (&barrier.mutex);
       g_main_loop_quit (http.loop);
       g_thread_join (thread);
@@ -18556,7 +18569,7 @@ main (void)
   }
   g_mutex_unlock (&barrier.mutex);
   if (!wyl_daemon_http_refresh_context_is_for_test (http.server,
-          g_main_context_default ()))
+      g_main_context_default ()))
     return 2267;
   if (wyl_daemon_http_refresh_context_owned_for_test (http.server))
     return 2268;
@@ -18573,15 +18586,15 @@ main (void)
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
   gint exact_probe_rc = check_exact_route_probe_framework (http.server,
-      base_url);
+          base_url);
   if (exact_probe_rc != 0)
     return exact_probe_rc;
   gint exact_facts_rc = check_exact_facts_alias_canaries (http.server,
-      base_url);
+          base_url);
   if (exact_facts_rc != 0)
     return exact_facts_rc;
   gint exact_alias_rc = check_valid_exact_auth_alias_canaries
-      (http.server, handle, base_url);
+        (http.server, handle, base_url);
   if (exact_alias_rc != 0)
     return exact_alias_rc;
 
@@ -18614,7 +18627,7 @@ main (void)
   if (insert_allow_fixture (handle) != WYRELOG_E_OK)
     return 1822;
   if (wyl_client_decide (client, "http-allow-user", "http.allow",
-          "http-allow-scope", &decision) != WYRELOG_E_OK)
+      "http-allow-scope", &decision) != WYRELOG_E_OK)
     return 8;
   if (decision != WYL_DECISION_ALLOW)
     return 9;
@@ -18627,20 +18640,20 @@ main (void)
   if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
     return 1823;
   if (wyl_client_decide_with_guard_context (client, "http-guard-user",
-          "wr.audit.read", "http-guard-scope", 123, "public", 69,
-          &decision) != WYRELOG_E_OK)
+      "wr.audit.read", "http-guard-scope", 123, "public", 69,
+      &decision) != WYRELOG_E_OK)
     return 10;
   if (decision != WYL_DECISION_ALLOW)
     return 11;
   if (wyl_client_decide_with_guard_context (client, "http-guard-user",
-          "wr.audit.read", "http-guard-scope", 123, "public", 70,
-          &decision) != WYRELOG_E_OK)
+      "wr.audit.read", "http-guard-scope", 123, "public", 70,
+      &decision) != WYRELOG_E_OK)
     return 12;
   if (decision != WYL_DECISION_DENY)
     return 13;
 
   gint recovery_detach_rc = check_tenant_recovery_slot_detach_contract
-      (http.server, handle);
+        (http.server, handle);
   if (recovery_detach_rc != 0)
     return recovery_detach_rc;
   if (g_atomic_int_get (&tenant_recovery_detach_regression_executions) != 1)
@@ -18672,8 +18685,8 @@ main (void)
 #ifdef WYL_HAS_FACT_STORE
 #ifndef G_OS_WIN32
   /* This matrix provisions POSIX owner-mode fact roots.  Windows fact roots
-   * require the separate fixed-volume, owner-only ACL fixture contract; #757
-   * deliberately validates the complete 16x2 owner matrix on POSIX lanes. */
+  * require the separate fixed-volume, owner-only ACL fixture contract; #757
+  * deliberately validates the complete 16x2 owner matrix on POSIX lanes. */
   gint all_owner_fault_rc = check_policy_write_all_owner_faults ();
   if (all_owner_fault_rc != 0)
     return all_owner_fault_rc;
@@ -18724,12 +18737,12 @@ main (void)
   http.loop = g_main_loop_new (context, FALSE);
   g_main_context_push_thread_default (context);
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   g_main_context_pop_thread_default (context);
   if (http.server == NULL)
     return 3;
   thread = g_thread_new ("daemon-http-decide-service",
-      test_http_server_thread_ctx, &http);
+          test_http_server_thread_ctx, &http);
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL) {
     result = 4;
@@ -18758,7 +18771,7 @@ main (void)
     goto cleanup;
   }
   gint service_state_rc = check_service_access_token_state_contract
-      (http.server, &service_token_snapshot);
+        (http.server, &service_token_snapshot);
   if (service_state_rc != 0) {
     result = service_state_rc;
     goto cleanup;
@@ -18773,7 +18786,7 @@ main (void)
    * exchange-server tests continue to own the scheduler lifecycle contract. */
   guint maintenance_ticks_pre_suspend = 0;
   if (!wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
-          &maintenance_ticks_pre_suspend)) {
+      &maintenance_ticks_pre_suspend)) {
     g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
         "stage=pre_suspend source_active=0 ticks_pre=%u\n",
         maintenance_ticks_pre_suspend);
@@ -18783,7 +18796,7 @@ main (void)
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
   guint maintenance_ticks_drained = 0;
   if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
-          &maintenance_ticks_drained)) {
+      &maintenance_ticks_drained)) {
     g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
         "stage=post_drain source_active=1 ticks_pre=%u ticks_drained=%u\n",
         maintenance_ticks_pre_suspend, maintenance_ticks_drained);
@@ -18801,8 +18814,8 @@ main (void)
       WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   wyrelog_error_t resolver_authority_rc =
       wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-      &resolver_authority_reason);
+        (wyl_handle_get_service_auth_authority (handle), handle,
+          &resolver_authority_reason);
   if (resolver_authority_rc != WYRELOG_E_OK
       || resolver_authority_reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
     g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
@@ -18814,14 +18827,14 @@ main (void)
     goto cleanup;
   }
   gint service_resolver_rc = check_service_bearer_resolver_contract
-      (http.server);
+        (http.server);
   if (service_resolver_rc != 0) {
     result = service_resolver_rc;
     goto cleanup;
   }
   guint maintenance_ticks_final = 0;
   if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
-          &maintenance_ticks_final)) {
+      &maintenance_ticks_final)) {
     g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
         "stage=post_resolver source_active=1 ticks_pre=%u ticks_drained=%u "
         "ticks_final=%u\n", maintenance_ticks_pre_suspend,
@@ -18839,8 +18852,8 @@ main (void)
   }
   resolver_authority_reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   resolver_authority_rc = wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-      &resolver_authority_reason);
+        (wyl_handle_get_service_auth_authority (handle), handle,
+          &resolver_authority_reason);
   if (resolver_authority_rc != WYRELOG_E_OK
       || resolver_authority_reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
     g_printerr ("WYRELOG_TEST_DIAG service_resolver_isolation "
@@ -18854,7 +18867,7 @@ main (void)
   }
   gint service_decide_rc =
       check_service_bearer_decide_injects_principal_state (http.server,
-      base_url);
+          base_url);
   if (service_decide_rc != 0) {
     result = service_decide_rc;
     goto cleanup;
@@ -18867,7 +18880,7 @@ main (void)
   }
   gint service_data_plane_rc =
       check_service_bearer_decide_arms_data_plane_permission (http.server,
-      base_url);
+          base_url);
   if (service_data_plane_rc != 0) {
     result = service_data_plane_rc;
     goto cleanup;
@@ -18993,7 +19006,7 @@ main (void)
   }
 #ifdef WYL_HAS_FACT_STORE
   gint reconcile_rc = check_service_credential_operation_reconcile_contract
-      (http.server, handle, base_url);
+        (http.server, handle, base_url);
   if (reconcile_rc != 0) {
     result = reconcile_rc;
     goto cleanup;
@@ -19050,11 +19063,11 @@ main (void)
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   if (http.server == NULL)
     return 3;
   GThread *thread = g_thread_new ("daemon-http-decide-audit",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
@@ -19071,7 +19084,7 @@ main (void)
     return read_only_method_rc;
 
   gint readyz_rc = check_readyz_malformed_audit_projection_contract (handle,
-      base_url);
+          base_url);
   if (readyz_rc != 0)
     return readyz_rc;
 
@@ -19091,7 +19104,7 @@ main (void)
   if (insert_allow_fixture (handle) != WYRELOG_E_OK)
     return 1822;
   if (wyl_client_decide (client, "http-allow-user", "http.allow",
-          "http-allow-scope", &decision) != WYRELOG_E_OK)
+      "http-allow-scope", &decision) != WYRELOG_E_OK)
     return 8;
   if (decision != WYL_DECISION_ALLOW)
     return 9;
@@ -19104,20 +19117,20 @@ main (void)
   if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
     return 1823;
   if (wyl_client_decide_with_guard_context (client, "http-guard-user",
-          "wr.audit.read", "http-guard-scope", 123, "public", 69,
-          &decision) != WYRELOG_E_OK)
+      "wr.audit.read", "http-guard-scope", 123, "public", 69,
+      &decision) != WYRELOG_E_OK)
     return 10;
   if (decision != WYL_DECISION_ALLOW)
     return 11;
   if (wyl_client_decide_with_guard_context (client, "http-guard-user",
-          "wr.audit.read", "http-guard-scope", 123, "public", 70,
-          &decision) != WYRELOG_E_OK)
+      "wr.audit.read", "http-guard-scope", 123, "public", 70,
+      &decision) != WYRELOG_E_OK)
     return 12;
   if (decision != WYL_DECISION_DENY)
     return 13;
 
   raw_rc = check_policy_permission_mutation_contract (http.server, handle,
-      client, base_url);
+          client, base_url);
   if (raw_rc != 0)
     return raw_rc;
 
@@ -19139,7 +19152,7 @@ main (void)
     return 87;
 
   gint audit_auth_rc = check_raw_audit_contract (http.server, handle, client,
-      base_url, audit_session_token, audit_access_token);
+          base_url, audit_session_token, audit_access_token);
   if (audit_auth_rc != 0)
     return audit_auth_rc;
 
@@ -19147,64 +19160,64 @@ main (void)
     return 88;
 
   gint audit_rc = check_audit_event_present (client,
-      "action(\"http.not_armed\")",
-      "http-deny-user", "http.not_armed", "http-deny-scope",
-      WYL_DECISION_DENY, "not_armed", "perm_state");
+          "action(\"http.not_armed\")",
+          "http-deny-user", "http.not_armed", "http-deny-scope",
+          WYL_DECISION_DENY, "not_armed", "perm_state");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"http.allow\")",
-      "http-allow-user", "http.allow", "http-allow-scope",
-      WYL_DECISION_ALLOW, NULL, NULL);
+          "http-allow-user", "http.allow", "http-allow-scope",
+          WYL_DECISION_ALLOW, NULL, NULL);
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client,
-      "deny_reason(\"not_armed\")",
-      "http-deny-user", "http.not_armed", "http-deny-scope",
-      WYL_DECISION_DENY, "not_armed", "perm_state");
+          "deny_reason(\"not_armed\")",
+          "http-deny-user", "http.not_armed", "http-deny-scope",
+          WYL_DECISION_DENY, "not_armed", "perm_state");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client,
-      "deny_origin(\"perm_state\")",
-      "http-deny-user", "http.not_armed", "http-deny-scope",
-      WYL_DECISION_DENY, "not_armed", "perm_state");
+          "deny_origin(\"perm_state\")",
+          "http-deny-user", "http.not_armed", "http-deny-scope",
+          WYL_DECISION_DENY, "not_armed", "perm_state");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"wr.audit.read\")",
-      "http-guard-user", "wr.audit.read", "http-guard-scope",
-      WYL_DECISION_DENY, "not_armed", "perm_state");
+          "http-guard-user", "wr.audit.read", "http-guard-scope",
+          WYL_DECISION_DENY, "not_armed", "perm_state");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"wr.audit.read\")",
-      "http-guard-user", "wr.audit.read", "http-guard-scope",
-      WYL_DECISION_ALLOW, NULL, NULL);
+          "http-guard-user", "wr.audit.read", "http-guard-scope",
+          WYL_DECISION_ALLOW, NULL, NULL);
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client,
-      "action(\"permission_grant\")",
-      "http-policy-admin", "permission_grant", "tenant-a",
-      WYL_DECISION_ALLOW, NULL, "site.policy.read");
+          "action(\"permission_grant\")",
+          "http-policy-admin", "permission_grant", "tenant-a",
+          WYL_DECISION_ALLOW, NULL, "site.policy.read");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client,
-      "action(\"permission_revoke\")",
-      "http-policy-admin", "permission_revoke", "tenant-a",
-      WYL_DECISION_ALLOW, NULL, "site.policy.read");
+          "action(\"permission_revoke\")",
+          "http-policy-admin", "permission_revoke", "tenant-a",
+          WYL_DECISION_ALLOW, NULL, "site.policy.read");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client,
-      "action(\"permission_state.grant\")",
-      "http-policy-admin", "permission_state.grant", "site.policy.read",
-      WYL_DECISION_ALLOW, "grant", "tenant-a");
+          "action(\"permission_state.grant\")",
+          "http-policy-admin", "permission_state.grant", "site.policy.read",
+          WYL_DECISION_ALLOW, "grant", "tenant-a");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"role_grant\")",
-      "http-policy-admin", "role_grant", "tenant-b",
-      WYL_DECISION_ALLOW, NULL, "site.reader");
+          "http-policy-admin", "role_grant", "tenant-b",
+          WYL_DECISION_ALLOW, NULL, "site.reader");
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"role_revoke\")",
-      "http-policy-admin", "role_revoke", "tenant-b",
-      WYL_DECISION_ALLOW, NULL, "site.reader");
+          "http-policy-admin", "role_revoke", "tenant-b",
+          WYL_DECISION_ALLOW, NULL, "site.reader");
   if (audit_rc != 0)
     return audit_rc;
 

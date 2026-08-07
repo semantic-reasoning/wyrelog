@@ -616,7 +616,7 @@ exchange_sign_service_token (const gchar *key_id, const WylSession *session,
 
   GString *payload = g_string_new ("{\"jti\":");
 #define APPEND_STRING_CLAIM(name, value) G_STMT_START { \
-          g_string_append (payload, name); append_json_string (payload, value); \
+    g_string_append (payload, name); append_json_string (payload, value); \
 } G_STMT_END
   append_json_string (payload, session->service_jti);
   APPEND_STRING_CLAIM (",\"sub\":", session->service_subject_id);
