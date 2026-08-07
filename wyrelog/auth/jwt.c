@@ -32,8 +32,8 @@ canonical_id_text (const gchar *value)
   wyl_id_t parsed;
   gchar encoded[WYL_ID_STRING_BUF];
   return non_empty (value) && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
-      && wyl_id_format (&parsed, encoded, sizeof encoded) == WYRELOG_E_OK
-      && strcmp (value, encoded) == 0;
+         && wyl_id_format (&parsed, encoded, sizeof encoded) == WYRELOG_E_OK
+         && strcmp (value, encoded) == 0;
 }
 
 static void
@@ -207,11 +207,11 @@ wyl_jwt_build_unsigned_segments (const wyl_jwt_issue_input_t *input,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_jwt_base64url_encode ((const guint8 *) header, strlen (header),
-      out_header_segment);
+          out_header_segment);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_jwt_base64url_encode ((const guint8 *) payload, strlen (payload),
-      out_payload_segment);
+          out_payload_segment);
   if (rc != WYRELOG_E_OK)
     g_clear_pointer (out_header_segment, g_free);
   return rc;
@@ -258,12 +258,12 @@ wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t *input,
   g_autofree gchar *header_segment = NULL;
   g_autofree gchar *payload_segment = NULL;
   wyrelog_error_t rc = wyl_jwt_build_unsigned_segments (input,
-      &header_segment, &payload_segment);
+          &header_segment, &payload_segment);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
-      header_segment, payload_segment);
+          header_segment, payload_segment);
   guint8 signature[crypto_auth_hmacsha256_BYTES];
   rc = sign_hs256_input (signing_input, secret, secret_len, signature);
   if (rc != WYRELOG_E_OK)
@@ -271,7 +271,7 @@ wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t *input,
 
   g_autofree gchar *signature_segment = NULL;
   rc = wyl_jwt_base64url_encode (signature, sizeof signature,
-      &signature_segment);
+          &signature_segment);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -312,7 +312,7 @@ wyl_jwt_verify_hs256_signature (const gchar *token, const guint8 *secret,
     return WYRELOG_E_POLICY;
 
   g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
-      parts[0], parts[1]);
+          parts[0], parts[1]);
   guint8 expected[crypto_auth_hmacsha256_BYTES];
   rc = sign_hs256_input (signing_input, secret, secret_len, expected);
   if (rc != WYRELOG_E_OK)
@@ -388,7 +388,7 @@ parse_json_string (const gchar **cursor, gchar **out_value)
         g_string_append_c (value, '\t');
         p++;
         break;
-      case 'u':{
+      case 'u': {
         guint h0, h1, h2, h3;
         for (guint i = 1; i <= 4; i++) {
           if (p[i] == '\0') {
@@ -554,7 +554,7 @@ parse_jwt_header (const gchar *text, ParsedJwtHeader *header)
 
     if (g_strcmp0 (key, "alg") == 0)
       rc = parse_header_string_value (&p, header, HEADER_ALG,
-          &header->algorithm);
+              &header->algorithm);
     else if (g_strcmp0 (key, "typ") == 0)
       rc = parse_header_string_value (&p, header, HEADER_TYP, &header->type);
     else if (g_strcmp0 (key, "kid") == 0)
@@ -720,40 +720,40 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
 
     if (g_strcmp0 (key, "jti") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_JTI,
-          &claims->claims.jti);
+              &claims->claims.jti);
     else if (g_strcmp0 (key, "sub") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_SUB,
-          &claims->claims.subject);
+              &claims->claims.subject);
     else if (g_strcmp0 (key, "iss") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_ISS,
-          &claims->claims.issuer);
+              &claims->claims.issuer);
     else if (g_strcmp0 (key, "aud") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_AUD,
-          &claims->claims.audience);
+              &claims->claims.audience);
     else if (g_strcmp0 (key, "iat") == 0)
       rc = parse_int_claim_value (&p, claims, CLAIM_IAT,
-          &claims->claims.issued_at);
+              &claims->claims.issued_at);
     else if (g_strcmp0 (key, "nbf") == 0)
       rc = parse_int_claim_value (&p, claims, CLAIM_NBF,
-          &claims->claims.not_before);
+              &claims->claims.not_before);
     else if (g_strcmp0 (key, "exp") == 0)
       rc = parse_int_claim_value (&p, claims, CLAIM_EXP,
-          &claims->claims.expires_at);
+              &claims->claims.expires_at);
     else if (g_strcmp0 (key, "tenant") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_TENANT,
-          &claims->claims.tenant);
+              &claims->claims.tenant);
     else if (g_strcmp0 (key, "principal_state_at_issue") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_PRINCIPAL_STATE,
-          &claims->claims.principal_state_at_issue);
+              &claims->claims.principal_state_at_issue);
     else if (g_strcmp0 (key, "session_id") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_SESSION_ID,
-          &claims->claims.session_id);
+              &claims->claims.session_id);
     else if (g_strcmp0 (key, "auth_method") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_AUTH_METHOD,
-          &claims->claims.auth_method);
+              &claims->claims.auth_method);
     else if (g_strcmp0 (key, "credential_id") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_CREDENTIAL_ID,
-          &claims->claims.credential_id);
+              &claims->claims.credential_id);
     else if (g_strcmp0 (key, "credential_generation") == 0) {
       rc = mark_claim_seen (claims, CLAIM_CREDENTIAL_GENERATION);
       if (rc == WYRELOG_E_OK)
@@ -784,22 +784,22 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
     return WYRELOG_E_POLICY;
   if (service_seen == CLAIM_SERVICE_MASK
       && (g_strcmp0 (claims->claims.auth_method,
-              "service_credential") != 0
-          || claims->claims.credential_generation == 0
-          || !canonical_id_text (claims->claims.jti)
-          || !canonical_id_text (claims->claims.session_id)
-          || g_strcmp0 (claims->claims.principal_state_at_issue,
-              "authenticated") != 0
-          || !wyl_policy_service_subject_is_valid (claims->claims.subject,
-              strlen (claims->claims.subject))
-          || !wyl_policy_store_tenant_id_is_valid (claims->claims.tenant)
-          || !wyl_service_credential_id_is_canonical (claims->
-              claims.credential_id, strlen (claims->claims.credential_id))
-          || claims->claims.not_before != claims->claims.issued_at
-          || claims->claims.issued_at >
-          G_MAXINT64 - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS
-          || claims->claims.expires_at !=
-          claims->claims.issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS))
+      "service_credential") != 0
+      || claims->claims.credential_generation == 0
+      || !canonical_id_text (claims->claims.jti)
+      || !canonical_id_text (claims->claims.session_id)
+      || g_strcmp0 (claims->claims.principal_state_at_issue,
+      "authenticated") != 0
+      || !wyl_policy_service_subject_is_valid (claims->claims.subject,
+      strlen (claims->claims.subject))
+      || !wyl_policy_store_tenant_id_is_valid (claims->claims.tenant)
+      || !wyl_service_credential_id_is_canonical (claims->
+      claims.credential_id, strlen (claims->claims.credential_id))
+      || claims->claims.not_before != claims->claims.issued_at
+      || claims->claims.issued_at >
+      G_MAXINT64 - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS
+      || claims->claims.expires_at !=
+      claims->claims.issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS))
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
@@ -842,7 +842,7 @@ wyl_jwt_verify_hs256_access_token (const gchar *token, const guint8 *secret,
 
   g_autoptr (GBytes) payload = NULL;
   wyrelog_error_t rc = wyl_jwt_verify_hs256_signature (token, secret,
-      secret_len, expected_key_id, &payload);
+          secret_len, expected_key_id, &payload);
   if (rc != WYRELOG_E_OK)
     return rc;
 

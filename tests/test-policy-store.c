@@ -43,7 +43,7 @@ check_store_creates_authority_schema (void)
       return 13;
   }
   if (wyl_policy_store_required_table_name
-      (wyl_policy_store_required_table_count ()) != NULL)
+        (wyl_policy_store_required_table_count ()) != NULL)
     return 14;
 
   return 0;
@@ -61,10 +61,10 @@ check_template_schema_creates_state_tables (void)
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
     return 20;
   if (!g_file_get_contents (WYL_TEST_SQLITE_SCHEMA_PATH, &schema,
-          &schema_len, &error))
+      &schema_len, &error))
     return 21;
   if (sqlite3_exec (wyl_policy_store_get_db (store), schema, NULL, NULL,
-          &errmsg) != SQLITE_OK) {
+      &errmsg) != SQLITE_OK) {
     sqlite3_free (errmsg);
     return 22;
   }
@@ -110,22 +110,22 @@ check_store_rejects_invalid_args (void)
       != WYRELOG_E_INVALID)
     return 38;
   if (wyl_policy_store_apply_permission_state_transition (NULL, "user",
-          "perm", "scope", "grant", NULL) != WYRELOG_E_INVALID)
+      "perm", "scope", "grant", NULL) != WYRELOG_E_INVALID)
     return 39;
   if (wyl_policy_store_apply_permission_state_transition (store, NULL,
-          "perm", "scope", "grant", NULL) != WYRELOG_E_INVALID)
+      "perm", "scope", "grant", NULL) != WYRELOG_E_INVALID)
     return 56;
   if (wyl_policy_store_apply_permission_state_transition (store, "user",
-          NULL, "scope", "grant", NULL) != WYRELOG_E_INVALID)
+      NULL, "scope", "grant", NULL) != WYRELOG_E_INVALID)
     return 57;
   if (wyl_policy_store_apply_permission_state_transition (store, "user",
-          "perm", NULL, "grant", NULL) != WYRELOG_E_INVALID)
+      "perm", NULL, "grant", NULL) != WYRELOG_E_INVALID)
     return 62;
   if (wyl_policy_store_apply_permission_state_transition (store, "user",
-          "perm", "scope", NULL, NULL) != WYRELOG_E_INVALID)
+      "perm", "scope", NULL, NULL) != WYRELOG_E_INVALID)
     return 63;
   if (wyl_policy_store_apply_permission_state_transition (store, "user",
-          "perm", "scope", "bogus", NULL) != WYRELOG_E_INVALID)
+      "perm", "scope", "bogus", NULL) != WYRELOG_E_INVALID)
     return 64;
   return 0;
 }
@@ -249,8 +249,8 @@ check_store_sets_deployment_mode (void)
       return 52;
   }
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "UPDATE wyrelog_config SET config_value = 'test' "
-          "WHERE config_key = 'deployment_mode';", NULL, NULL, NULL)
+      "UPDATE wyrelog_config SET config_value = 'test' "
+      "WHERE config_key = 'deployment_mode';", NULL, NULL, NULL)
       == SQLITE_OK)
     return 53;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
@@ -368,7 +368,8 @@ failing_keyprovider_seal (gpointer self, const guint8 *plaintext,
   (void) plaintext_len;
   if (out_blob != NULL)
     *out_blob = (wyl_sealed_blob_t) {
-    0};
+      0
+    };
   return WYRELOG_E_INTERNAL;
 }
 
@@ -398,7 +399,8 @@ failing_keyprovider_clear_blob (gpointer self, wyl_sealed_blob_t *blob)
     return;
   g_free (blob->bytes);
   *blob = (wyl_sealed_blob_t) {
-  0};
+    0
+  };
 }
 
 static const wyl_keyprovider_vtable_t failing_keyprovider_vtable = {
@@ -463,11 +465,11 @@ check_encrypted_policy_store_hardening_and_rotation (void)
       return 304;
     char *sqlite_error = NULL;
     if (sqlite3_exec (wyl_policy_store_get_db (store),
-            "INSERT INTO service_credential_cvk"
-            " (slot,generation,envelope_format_version,provider_binding,"
-            "sealed_cvk,created_at_us,updated_at_us)"
-            " VALUES(1,1,1,zeroblob(32),x'010203',1,1);", NULL, NULL,
-            &sqlite_error) != SQLITE_OK) {
+        "INSERT INTO service_credential_cvk"
+        " (slot,generation,envelope_format_version,provider_binding,"
+        "sealed_cvk,created_at_us,updated_at_us)"
+        " VALUES(1,1,1,zeroblob(32),x'010203',1,1);", NULL, NULL,
+        &sqlite_error) != SQLITE_OK) {
       sqlite3_free (sqlite_error);
       return 333;
     }
@@ -497,7 +499,7 @@ check_encrypted_policy_store_hardening_and_rotation (void)
     return 311;
 
   g_autofree gchar *variant_path = g_build_filename (tmpdir, "variant.store",
-      NULL);
+          NULL);
   g_autofree gchar *variant_bytes = g_memdup2 (valid_bytes, valid_len);
   variant_bytes[0] ^= 0x01;
   if (!g_file_set_contents (variant_path, variant_bytes, valid_len, NULL))
@@ -533,7 +535,7 @@ check_encrypted_policy_store_hardening_and_rotation (void)
     return 319;
 
   g_autofree gchar *tmp_write_path = g_strdup_printf ("%s.wyrelog-tmp",
-      store_path);
+          store_path);
   if (!g_file_set_contents (tmp_write_path, "interrupted", -1, NULL))
     return 320;
   {
@@ -551,7 +553,7 @@ check_encrypted_policy_store_hardening_and_rotation (void)
   g_autofree gchar *before_malformed_rotation = NULL;
   gsize before_malformed_rotation_len = 0;
   if (!g_file_get_contents (store_path, &before_malformed_rotation,
-          &before_malformed_rotation_len, &error))
+      &before_malformed_rotation_len, &error))
     return 324;
   if (rotate_encrypted_policy_store (store_path, old_key_path, new_key_path)
       != WYRELOG_E_CRYPTO)
@@ -559,10 +561,10 @@ check_encrypted_policy_store_hardening_and_rotation (void)
   g_autofree gchar *after_malformed_rotation = NULL;
   gsize after_malformed_rotation_len = 0;
   if (!g_file_get_contents (store_path, &after_malformed_rotation,
-          &after_malformed_rotation_len, &error)
+      &after_malformed_rotation_len, &error)
       || after_malformed_rotation_len != before_malformed_rotation_len
       || memcmp (after_malformed_rotation, before_malformed_rotation,
-          before_malformed_rotation_len) != 0)
+      before_malformed_rotation_len) != 0)
     return 337;
   {
     g_autoptr (wyl_policy_store_t) store = NULL;
@@ -584,7 +586,7 @@ check_encrypted_policy_store_hardening_and_rotation (void)
     }
     wyl_policy_service_cvk_info_clear (&cvk);
     if (sqlite3_exec (wyl_policy_store_get_db (store),
-            "DELETE FROM service_credential_cvk;", NULL, NULL, NULL)
+        "DELETE FROM service_credential_cvk;", NULL, NULL, NULL)
         != SQLITE_OK)
       return 340;
   }
@@ -613,7 +615,7 @@ check_encrypted_policy_store_hardening_and_rotation (void)
   }
 
   if (rotate_encrypted_policy_store_to_failing_provider (store_path,
-          new_key_path)
+      new_key_path)
       == WYRELOG_E_OK)
     return 329;
   {
@@ -649,7 +651,7 @@ count_rows (wyl_policy_store_t *store, const gchar *sql, gint *out_count)
   sqlite3_stmt *stmt = NULL;
 
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK)
+      NULL) != SQLITE_OK)
     return 1;
 
   int rc = sqlite3_step (stmt);
@@ -739,7 +741,7 @@ cleanup_fact_graph_root (const gchar *root)
   for (gsize i = 0; i < G_N_ELEMENTS (graph_ids); i++) {
     WylFactGraphLocator locator = { 0 };
     if (wyl_fact_graph_locator_init (&locator, graph_ids[i].tenant_id,
-            graph_ids[i].graph_id) != WYRELOG_E_OK) {
+        graph_ids[i].graph_id) != WYRELOG_E_OK) {
       removed = FALSE;
       continue;
     }
@@ -800,7 +802,7 @@ check_store_manages_fact_graph_registry (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-facts-XXXXXX", &error);
+        ("wyl-facts-XXXXXX", &error);
   if (root == NULL)
     return 400;
 
@@ -831,7 +833,7 @@ check_store_manages_fact_graph_registry (void)
   g_autofree gchar *tenant_a_uri = NULL;
   wyl_policy_fact_graph_create_options_t opts =
       make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), queries, G_N_ELEMENTS (queries));
+          G_N_ELEMENTS (relations), queries, G_N_ELEMENTS (queries));
   if (wyl_policy_store_create_fact_graph (store, &opts, &tenant_a_uri)
       != WYRELOG_E_OK)
     return 405;
@@ -839,35 +841,35 @@ check_store_manages_fact_graph_registry (void)
     return 406;
 
   opts = make_fact_graph_options ("tenant-b", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), queries, G_N_ELEMENTS (queries));
+          G_N_ELEMENTS (relations), queries, G_N_ELEMENTS (queries));
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_OK)
     return 407;
 
   gint matches = 0;
   if (count_rows (store, "SELECT COUNT(*) FROM fact_graphs;",
-          &matches) != 0 || matches != 2)
+      &matches) != 0 || matches != 2)
     return 408;
   if (count_rows (store, "SELECT COUNT(*) FROM fact_graph_relations;",
-          &matches) != 0 || matches != 2)
+      &matches) != 0 || matches != 2)
     return 409;
   if (count_rows (store, "SELECT COUNT(*) FROM fact_graph_relation_columns;",
-          &matches) != 0 || matches != 4)
+      &matches) != 0 || matches != 4)
     return 410;
   if (count_rows (store, "SELECT COUNT(*) FROM fact_graph_query_allowlist;",
-          &matches) != 0 || matches != 2)
+      &matches) != 0 || matches != 2)
     return 411;
 
   FactGraphIterProbe probe = { 0 };
   if (wyl_policy_store_foreach_fact_graph (store, NULL,
-          fact_graph_iter_probe_cb, &probe) != WYRELOG_E_OK) {
+      fact_graph_iter_probe_cb, &probe) != WYRELOG_E_OK) {
     fact_graph_iter_probe_clear (&probe);
     return 412;
   }
   if (probe.count != 2 || !probe.saw_tenant_a || !probe.saw_tenant_b
       || probe.tenant_a_sealed || g_strcmp0 (probe.tenant_a_uri,
-          tenant_a_uri) != 0 || g_strcmp0 (probe.tenant_a_path,
-          probe.tenant_b_path) == 0) {
+      tenant_a_uri) != 0 || g_strcmp0 (probe.tenant_a_path,
+      probe.tenant_b_path) == 0) {
     fact_graph_iter_probe_clear (&probe);
     return 413;
   }
@@ -884,7 +886,7 @@ check_store_seals_fact_graph_registry (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-facts-seal-XXXXXX", &error);
+        ("wyl-facts-seal-XXXXXX", &error);
   if (root == NULL)
     return 420;
 
@@ -907,18 +909,18 @@ check_store_seals_fact_graph_registry (void)
   };
   wyl_policy_fact_graph_create_options_t opts =
       make_fact_graph_options ("tenant-a", "graph-sealed", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_OK)
     return 424;
   if (wyl_policy_store_fact_graph_is_active (store, "tenant-a",
-          "graph-sealed", &active) != WYRELOG_E_OK || !active)
+      "graph-sealed", &active) != WYRELOG_E_OK || !active)
     return 425;
   if (wyl_policy_store_seal_fact_graph (store, "tenant-a", "graph-sealed")
       != WYRELOG_E_OK)
     return 426;
   if (wyl_policy_store_fact_graph_is_active (store, "tenant-a",
-          "graph-sealed", &active) != WYRELOG_E_OK || active)
+      "graph-sealed", &active) != WYRELOG_E_OK || active)
     return 427;
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
@@ -931,7 +933,7 @@ check_store_seals_fact_graph_registry (void)
       != WYRELOG_E_OK)
     return 430;
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
     return 431;
@@ -947,9 +949,9 @@ check_store_rejects_fact_graph_registry_escapes (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-facts-esc-XXXXXX", &error);
+        ("wyl-facts-esc-XXXXXX", &error);
   g_autofree gchar *outside = wyl_test_make_secure_fact_root
-      ("wyl-facts-out-XXXXXX", &error);
+        ("wyl-facts-out-XXXXXX", &error);
   if (root == NULL || outside == NULL)
     return 440;
 
@@ -971,12 +973,12 @@ check_store_rejects_fact_graph_registry_escapes (void)
   };
   wyl_policy_fact_graph_create_options_t opts =
       make_fact_graph_options ("tenant-a", "../escape", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_INVALID)
     return 444;
   opts = make_fact_graph_options ("tenant-a", "bad/name", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_INVALID)
     return 445;
@@ -986,11 +988,11 @@ check_store_rejects_fact_graph_registry_escapes (void)
       != WYRELOG_E_OK)
     return 446;
   g_autofree gchar *tenant_link = g_build_filename (root, tenant_component,
-      NULL);
+          NULL);
   if (!wyl_test_create_directory_alias (tenant_link, outside, &error))
     return 446;
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
     return 447;
@@ -1008,7 +1010,7 @@ check_store_rejects_fact_graph_reserved_metadata (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-facts-rsv-XXXXXX", &error);
+        ("wyl-facts-rsv-XXXXXX", &error);
   if (root == NULL)
     return 460;
 
@@ -1030,7 +1032,7 @@ check_store_rejects_fact_graph_reserved_metadata (void)
   };
   wyl_policy_fact_graph_create_options_t opts =
       make_fact_graph_options ("tenant-a", "graph-main", root,
-      reserved_relations, G_N_ELEMENTS (reserved_relations), NULL, 0);
+          reserved_relations, G_N_ELEMENTS (reserved_relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
     return 464;
@@ -1042,7 +1044,7 @@ check_store_rejects_fact_graph_reserved_metadata (void)
     {"site.node.query", "site.node", "wr.fact.missing", 100},
   };
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), queries, G_N_ELEMENTS (queries));
+          G_N_ELEMENTS (relations), queries, G_N_ELEMENTS (queries));
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
     return 465;
@@ -1051,8 +1053,8 @@ check_store_rejects_fact_graph_reserved_metadata (void)
     {"wr.node.query", "site.node", "wr.fact.read", 100},
   };
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), reserved_queries,
-      G_N_ELEMENTS (reserved_queries));
+          G_N_ELEMENTS (relations), reserved_queries,
+          G_N_ELEMENTS (reserved_queries));
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
     return 469;
@@ -1064,19 +1066,19 @@ check_store_rejects_fact_graph_reserved_metadata (void)
     {"site.bad_columns", reserved_columns, G_N_ELEMENTS (reserved_columns)},
   };
   opts = make_fact_graph_options ("tenant-a", "graph-main", root,
-      column_relations, G_N_ELEMENTS (column_relations), NULL, 0);
+          column_relations, G_N_ELEMENTS (column_relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY)
     return 466;
 
   opts = make_fact_graph_options ("tenant-a", "wr.graph", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_INVALID)
     return 467;
 
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   opts.owner_scope = "tenant-b";
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_INVALID)
@@ -1093,7 +1095,7 @@ check_store_fact_graph_metadata_only (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-facts-meta-XXXXXX", &error);
+        ("wyl-facts-meta-XXXXXX", &error);
   if (root == NULL)
     return 480;
 
@@ -1116,24 +1118,24 @@ check_store_fact_graph_metadata_only (void)
   };
   wyl_policy_fact_graph_create_options_t opts =
       make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_OK)
     return 484;
 
   gint matches = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM sqlite_master "
-          "WHERE type = 'table' AND ("
-          "name LIKE '%fact_row%' OR name LIKE '%tuple%' OR "
-          "name LIKE '%payload%' OR name LIKE '%edb%');", &matches) != 0)
+      "SELECT COUNT(*) FROM sqlite_master "
+      "WHERE type = 'table' AND ("
+      "name LIKE '%fact_row%' OR name LIKE '%tuple%' OR "
+      "name LIKE '%payload%' OR name LIKE '%edb%');", &matches) != 0)
     return 485;
   if (matches != 0)
     return 486;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM pragma_table_info('fact_graphs') "
-          "WHERE name IN ('payload', 'tuple', 'row_value', 'fact_value', "
-          "'compound_payload');", &matches) != 0)
+      "SELECT COUNT(*) FROM pragma_table_info('fact_graphs') "
+      "WHERE name IN ('payload', 'tuple', 'row_value', 'fact_value', "
+      "'compound_payload');", &matches) != 0)
     return 487;
   if (matches != 0)
     return 488;
@@ -1156,9 +1158,9 @@ check_store_pins_fact_root_identity (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-facts-pin-XXXXXX", &error);
+        ("wyl-facts-pin-XXXXXX", &error);
   g_autofree gchar *other_root = wyl_test_make_secure_fact_root
-      ("wyl-facts-other-XXXXXX", &error);
+        ("wyl-facts-other-XXXXXX", &error);
   if (root == NULL || other_root == NULL)
     return 490;
   g_autofree gchar *old_root = g_strdup_printf ("%s.old", root);
@@ -1184,19 +1186,19 @@ check_store_pins_fact_root_identity (void)
   };
   wyl_policy_fact_graph_create_options_t opts =
       make_fact_graph_options ("tenant-a", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_OK)
     return 495;
 
   opts = make_fact_graph_options ("tenant-b", "graph-main", root, relations,
-      G_N_ELEMENTS (relations), NULL, 0);
+          G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_OK)
     return 496;
 
   opts = make_fact_graph_options ("tenant-a", "graph-sealed", other_root,
-      relations, G_N_ELEMENTS (relations), NULL, 0);
+          relations, G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY || !directory_is_empty (other_root))
     return 497;
@@ -1205,7 +1207,7 @@ check_store_pins_fact_root_identity (void)
       || !wyl_test_create_secure_directory (root, &error))
     return 498;
   opts = make_fact_graph_options ("tenant-a", "graph-sealed", root,
-      relations, G_N_ELEMENTS (relations), NULL, 0);
+          relations, G_N_ELEMENTS (relations), NULL, 0);
   if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
       != WYRELOG_E_POLICY || !directory_is_empty (root))
     return 499;
@@ -1223,8 +1225,8 @@ check_permission_seed (wyl_policy_store_t *store, const gchar *perm_id,
     const gchar *klass, gint error_base)
 {
   g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM permissions "
-      "WHERE perm_id = '%s' AND class = '%s';",
-      perm_id, klass);
+          "WHERE perm_id = '%s' AND class = '%s';",
+          perm_id, klass);
   gint matches = 0;
   if (count_rows (store, sql, &matches) != 0)
     return error_base;
@@ -1237,8 +1239,8 @@ check_role_permission_seed (wyl_policy_store_t *store, const gchar *role_id,
 {
   g_autofree gchar *sql =
       g_strdup_printf ("SELECT COUNT(*) FROM role_permissions "
-      "WHERE role_id = '%s' AND perm_id = '%s';",
-      role_id, perm_id);
+          "WHERE role_id = '%s' AND perm_id = '%s';",
+          role_id, perm_id);
   gint matches = 0;
   if (count_rows (store, sql, &matches) != 0)
     return error_base;
@@ -1269,19 +1271,19 @@ check_store_seeds_builtin_catalog (void)
 
   gint matches = 0;
   if (count_rows (store, "SELECT COUNT(*) FROM roles "
-          "WHERE role_id = 'wr.auditor';", &matches) != 0)
+      "WHERE role_id = 'wr.auditor';", &matches) != 0)
     return 206;
   if (matches != 1)
     return 207;
 
   if (count_rows (store, "SELECT COUNT(*) FROM permissions "
-          "WHERE perm_id = 'wr.audit.read';", &matches) != 0)
+      "WHERE perm_id = 'wr.audit.read';", &matches) != 0)
     return 208;
   if (matches != 1)
     return 209;
   if (count_rows (store, "SELECT COUNT(*) FROM permissions "
-          "WHERE perm_id = 'wr.login.skip_mfa' "
-          "AND class = 'critical';", &matches) != 0)
+      "WHERE perm_id = 'wr.login.skip_mfa' "
+      "AND class = 'critical';", &matches) != 0)
     return 210;
   if (matches != 1)
     return 211;
@@ -1307,7 +1309,7 @@ check_store_seeds_builtin_catalog (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (permission_seeds); i++) {
     gint rc = check_permission_seed (store, permission_seeds[i].perm_id,
-        permission_seeds[i].klass, (gint) (244 + (i * 2)));
+            permission_seeds[i].klass, (gint) (244 + (i * 2)));
     if (rc != 0)
       return rc;
   }
@@ -1329,14 +1331,14 @@ check_store_seeds_builtin_catalog (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (role_permission_seeds); i++) {
     gint rc = check_role_permission_seed (store,
-        role_permission_seeds[i].role_id, role_permission_seeds[i].perm_id,
-        role_permission_seeds[i].expected, (gint) (260 + (i * 2)));
+            role_permission_seeds[i].role_id, role_permission_seeds[i].perm_id,
+            role_permission_seeds[i].expected, (gint) (260 + (i * 2)));
     if (rc != 0)
       return rc;
   }
 
   if (wyl_policy_store_upsert_role (store, "site.local-admin",
-          "local admin") != WYRELOG_E_OK)
+      "local admin") != WYRELOG_E_OK)
     return 212;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 213;
@@ -1347,7 +1349,7 @@ check_store_seeds_builtin_catalog (void)
     return 215;
 
   if (count_rows (store, "SELECT COUNT(*) FROM roles "
-          "WHERE role_id = 'wr.auditor';", &matches) != 0)
+      "WHERE role_id = 'wr.auditor';", &matches) != 0)
     return 216;
   if (matches != 1)
     return 217;
@@ -1365,8 +1367,8 @@ check_store_rejects_builtin_catalog_drift (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 217;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "UPDATE roles SET role_name = 'changed auditor' "
-          "WHERE role_id = 'wr.auditor';", NULL, NULL, NULL) != SQLITE_OK)
+      "UPDATE roles SET role_name = 'changed auditor' "
+      "WHERE role_id = 'wr.auditor';", NULL, NULL, NULL) != SQLITE_OK)
     return 218;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
     return 219;
@@ -1377,8 +1379,8 @@ check_store_rejects_builtin_catalog_drift (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 221;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "UPDATE permissions SET class = 'basic' "
-          "WHERE perm_id = 'wr.audit.read';", NULL, NULL, NULL) != SQLITE_OK)
+      "UPDATE permissions SET class = 'basic' "
+      "WHERE perm_id = 'wr.audit.read';", NULL, NULL, NULL) != SQLITE_OK)
     return 222;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
     return 223;
@@ -1389,9 +1391,9 @@ check_store_rejects_builtin_catalog_drift (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 225;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "INSERT INTO roles (role_id, role_name, description, created_at, "
-          "modified_at) VALUES ('wr.unregistered', 'unregistered', "
-          "'raw', unixepoch(), unixepoch());", NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO roles (role_id, role_name, description, created_at, "
+      "modified_at) VALUES ('wr.unregistered', 'unregistered', "
+      "'raw', unixepoch(), unixepoch());", NULL, NULL, NULL) != SQLITE_OK)
     return 226;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
     return 227;
@@ -1402,9 +1404,9 @@ check_store_rejects_builtin_catalog_drift (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 229;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "INSERT INTO permissions (perm_id, perm_name, class, created_at) "
-          "VALUES ('wr.unregistered.read', 'unregistered read', 'basic', "
-          "unixepoch());", NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO permissions (perm_id, perm_name, class, created_at) "
+      "VALUES ('wr.unregistered.read', 'unregistered read', 'basic', "
+      "unixepoch());", NULL, NULL, NULL) != SQLITE_OK)
     return 230;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
     return 231;
@@ -1430,28 +1432,28 @@ check_store_rejects_builtin_catalog_upsert_drift (void)
     return 235;
 
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
-          "audit read", "sensitive") != WYRELOG_E_OK)
+      "audit read", "sensitive") != WYRELOG_E_OK)
     return 236;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
-          "changed audit read", "sensitive") != WYRELOG_E_POLICY)
+      "changed audit read", "sensitive") != WYRELOG_E_POLICY)
     return 237;
   if (wyl_policy_store_upsert_permission (store, "wr.login.skip_mfa",
-          "login skip mfa", "critical") != WYRELOG_E_OK)
+      "login skip mfa", "critical") != WYRELOG_E_OK)
     return 242;
   if (wyl_policy_store_upsert_permission (store, "wr.login.skip_mfa",
-          "login skip mfa", "sensitive") != WYRELOG_E_POLICY)
+      "login skip mfa", "sensitive") != WYRELOG_E_POLICY)
     return 243;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
-          "audit read", "basic") != WYRELOG_E_POLICY)
+      "audit read", "basic") != WYRELOG_E_POLICY)
     return 238;
   if (wyl_policy_store_upsert_role (store, "wr.unregistered",
-          "unregistered") != WYRELOG_E_POLICY)
+      "unregistered") != WYRELOG_E_POLICY)
     return 239;
   if (wyl_policy_store_upsert_permission (store, "wr.unregistered.read",
-          "unregistered read", "basic") != WYRELOG_E_POLICY)
+      "unregistered read", "basic") != WYRELOG_E_POLICY)
     return 240;
   if (wyl_policy_store_apply_direct_permission_mutation (store, "subject",
-          "wr.unregistered.read", "scope", TRUE) != WYRELOG_E_POLICY)
+      "wr.unregistered.read", "scope", TRUE) != WYRELOG_E_POLICY)
     return 241;
 
   return 0;
@@ -1810,13 +1812,13 @@ check_store_grants_role_permission (void)
       != WYRELOG_E_OK)
     return 42;
   if (wyl_policy_store_upsert_permission (store, "site.test.read", "test read",
-          "basic") != WYRELOG_E_OK)
+      "basic") != WYRELOG_E_OK)
     return 43;
   if (wyl_policy_store_grant_role_permission (store, "site.test-role",
-          "site.test.read") != WYRELOG_E_OK)
+      "site.test.read") != WYRELOG_E_OK)
     return 44;
   if (wyl_policy_store_grant_role_permission (store, "site.test-role",
-          "site.test.read") != WYRELOG_E_OK)
+      "site.test.read") != WYRELOG_E_OK)
     return 45;
 
   RolePermissionExpect expect = {
@@ -1824,7 +1826,7 @@ check_store_grants_role_permission (void)
     .perm_id = "site.test.read",
   };
   if (wyl_policy_store_foreach_role_permission (store,
-          role_permission_expect_cb, &expect) != WYRELOG_E_OK)
+      role_permission_expect_cb, &expect) != WYRELOG_E_OK)
     return 46;
   if (expect.matches != 1)
     return 47;
@@ -1854,10 +1856,10 @@ check_store_catalog_existence_probes (void)
     return 223;
 
   if (wyl_policy_store_upsert_role (store, "site.exists-role",
-          "exists role") != WYRELOG_E_OK)
+      "exists role") != WYRELOG_E_OK)
     return 224;
   if (wyl_policy_store_upsert_permission (store, "site.exists-perm",
-          "exists perm", "basic") != WYRELOG_E_OK)
+      "exists perm", "basic") != WYRELOG_E_OK)
     return 225;
 
   if (wyl_policy_store_role_exists (store, "site.exists-role", &exists)
@@ -1904,16 +1906,16 @@ check_store_grants_role_inheritance (void)
       != WYRELOG_E_OK)
     return 59;
   if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
-          "site.parent-role") != WYRELOG_E_OK)
+      "site.parent-role") != WYRELOG_E_OK)
     return 60;
   if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
-          "site.parent-role") != WYRELOG_E_OK)
+      "site.parent-role") != WYRELOG_E_OK)
     return 61;
   if (wyl_policy_store_upsert_permission (store, "site.inherited.read",
-          "inherited read", "basic") != WYRELOG_E_OK)
+      "inherited read", "basic") != WYRELOG_E_OK)
     return 62;
   if (wyl_policy_store_grant_role_permission (store, "site.parent-role",
-          "site.inherited.read") != WYRELOG_E_OK)
+      "site.inherited.read") != WYRELOG_E_OK)
     return 63;
 
   RoleInheritanceExpect expect = {
@@ -1921,7 +1923,7 @@ check_store_grants_role_inheritance (void)
     .parent_role_id = "site.parent-role",
   };
   if (wyl_policy_store_foreach_role_inheritance (store,
-          role_inheritance_expect_cb, &expect) != WYRELOG_E_OK)
+      role_inheritance_expect_cb, &expect) != WYRELOG_E_OK)
     return 64;
   if (expect.matches != 1)
     return 65;
@@ -1931,7 +1933,7 @@ check_store_grants_role_inheritance (void)
     .perm_id = "site.inherited.read",
   };
   if (wyl_policy_store_foreach_role_permission (store,
-          role_permission_expect_cb, &permission_expect) != WYRELOG_E_OK)
+      role_permission_expect_cb, &permission_expect) != WYRELOG_E_OK)
     return 66;
   if (permission_expect.matches != 1)
     return 67;
@@ -1951,13 +1953,13 @@ check_store_grants_role_membership (void)
       != WYRELOG_E_OK)
     return 70;
   if (wyl_policy_store_grant_role_membership (store, "member-user",
-          "site.member-role", "member-scope") != WYRELOG_E_OK)
+      "site.member-role", "member-scope") != WYRELOG_E_OK)
     return 71;
   if (wyl_policy_store_append_role_membership_event (store, "member-user",
-          "site.member-role", "member-scope", "grant") != WYRELOG_E_OK)
+      "site.member-role", "member-scope", "grant") != WYRELOG_E_OK)
     return 100;
   if (wyl_policy_store_grant_role_membership (store, "member-user",
-          "site.member-role", "member-scope") != WYRELOG_E_OK)
+      "site.member-role", "member-scope") != WYRELOG_E_OK)
     return 72;
 
   RoleMembershipExpect expect = {
@@ -1966,13 +1968,13 @@ check_store_grants_role_membership (void)
     .scope = "member-scope",
   };
   if (wyl_policy_store_foreach_role_membership (store,
-          role_membership_expect_cb, &expect) != WYRELOG_E_OK)
+      role_membership_expect_cb, &expect) != WYRELOG_E_OK)
     return 73;
   if (expect.matches != 1)
     return 74;
   gboolean exists = FALSE;
   if (wyl_policy_store_role_membership_exists (store, "member-user",
-          "site.member-role", "member-scope", &exists) != WYRELOG_E_OK)
+      "site.member-role", "member-scope", &exists) != WYRELOG_E_OK)
     return 101;
   if (!exists)
     return 102;
@@ -1984,19 +1986,19 @@ check_store_grants_role_membership (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_role_membership_event (store,
-          role_membership_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+      role_membership_event_expect_cb, &event_expect) != WYRELOG_E_OK)
     return 103;
   if (event_expect.matches != 1)
     return 104;
   if (wyl_policy_store_revoke_role_membership (store, "member-user",
-          "site.member-role", "member-scope") != WYRELOG_E_OK)
+      "site.member-role", "member-scope") != WYRELOG_E_OK)
     return 105;
   if (wyl_policy_store_append_role_membership_event (store, "member-user",
-          "site.member-role", "member-scope", "revoke") != WYRELOG_E_OK)
+      "site.member-role", "member-scope", "revoke") != WYRELOG_E_OK)
     return 106;
   exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "member-user",
-          "site.member-role", "member-scope", &exists) != WYRELOG_E_OK)
+      "site.member-role", "member-scope", &exists) != WYRELOG_E_OK)
     return 107;
   if (exists)
     return 108;
@@ -2013,18 +2015,18 @@ check_store_grants_direct_permission (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 61;
   if (wyl_policy_store_upsert_permission (store, "site.direct.read",
-          "direct read", "basic") != WYRELOG_E_OK)
+      "direct read", "basic") != WYRELOG_E_OK)
     return 62;
   if (wyl_policy_store_grant_direct_permission (store, "direct-user",
-          "site.direct.read", "direct-scope") != WYRELOG_E_OK)
+      "site.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 63;
   if (wyl_policy_store_grant_direct_permission (store, "direct-user",
-          "site.direct.read", "direct-scope") != WYRELOG_E_OK)
+      "site.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 64;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
-          "site.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
+      "site.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
     return 65;
   if (!exists)
     return 66;
@@ -2034,15 +2036,15 @@ check_store_grants_direct_permission (void)
     .scope = "direct-scope",
   };
   if (wyl_policy_store_foreach_direct_permission (store,
-          direct_permission_expect_cb, &expect) != WYRELOG_E_OK)
+      direct_permission_expect_cb, &expect) != WYRELOG_E_OK)
     return 78;
   if (expect.matches != 1)
     return 79;
   if (wyl_policy_store_revoke_direct_permission (store, "direct-user",
-          "site.direct.read", "direct-scope") != WYRELOG_E_OK)
+      "site.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 67;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
-          "site.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
+      "site.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
     return 68;
   if (exists)
     return 69;
@@ -2077,7 +2079,7 @@ check_store_reports_permission_planes (void)
     return 87;
 
   if (wyl_policy_store_permission_plane (store,
-          "wr.svc.read_decision", &plane) != WYRELOG_E_OK)
+      "wr.svc.read_decision", &plane) != WYRELOG_E_OK)
     return 88;
   if (plane != WYL_PERMISSION_PLANE_DATA)
     return 89;
@@ -2089,13 +2091,13 @@ check_store_reports_permission_planes (void)
     return 109;
 
   if (wyl_policy_store_permission_plane (store,
-          "wr.service_principal.manage", &plane) != WYRELOG_E_OK)
+      "wr.service_principal.manage", &plane) != WYRELOG_E_OK)
     return 90;
   if (plane != WYL_PERMISSION_PLANE_CONTROL)
     return 91;
 
   if (wyl_policy_store_permission_plane (store,
-          "wr.service_credential.manage", &plane) != WYRELOG_E_OK)
+      "wr.service_credential.manage", &plane) != WYRELOG_E_OK)
     return 92;
   if (plane != WYL_PERMISSION_PLANE_CONTROL)
     return 93;
@@ -2109,7 +2111,7 @@ check_store_reports_permission_planes (void)
   /* A custom permission persisted with class 'basic' must remain control:
    * the mutable class no longer grants data-plane authority (#614). */
   if (wyl_policy_store_upsert_permission (store, "site.custom.basic",
-          "custom basic", "basic") != WYRELOG_E_OK)
+      "custom basic", "basic") != WYRELOG_E_OK)
     return 97;
   if (wyl_policy_store_permission_plane (store, "site.custom.basic", &plane)
       != WYRELOG_E_OK)
@@ -2120,8 +2122,8 @@ check_store_reports_permission_planes (void)
   /* An allowlisted permission whose persisted class has been tampered must
    * fall back to control: DATA requires the canonical name and class. */
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "UPDATE permissions SET class = 'critical' "
-          "WHERE perm_id = 'wr.stream.read';", NULL, NULL, NULL) != SQLITE_OK)
+      "UPDATE permissions SET class = 'critical' "
+      "WHERE perm_id = 'wr.stream.read';", NULL, NULL, NULL) != SQLITE_OK)
     return 100;
   if (wyl_policy_store_permission_plane (store, "wr.stream.read", &plane)
       != WYRELOG_E_OK)
@@ -2146,73 +2148,73 @@ check_store_enforces_service_permission_planes (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 92;
   if (wyl_policy_store_create_service_principal (store, "svc:plane:test",
-          "plane test", "admin-user", "req-service-plane", &principal)
+      "plane test", "admin-user", "req-service-plane", &principal)
       != WYRELOG_E_OK)
     return 93;
   wyl_policy_service_principal_info_clear (&principal);
 
   if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
-          "wr.stream.read", "svc-scope") != WYRELOG_E_OK)
+      "wr.stream.read", "svc-scope") != WYRELOG_E_OK)
     return 94;
   if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
-          "wr.service_principal.manage", "svc-scope") != WYRELOG_E_POLICY)
+      "wr.service_principal.manage", "svc-scope") != WYRELOG_E_POLICY)
     return 95;
   if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
-          "site.unknown.read", "svc-scope") != WYRELOG_E_POLICY)
+      "site.unknown.read", "svc-scope") != WYRELOG_E_POLICY)
     return 96;
 
   if (wyl_policy_store_upsert_role (store, "site.service-role",
-          "service role") != WYRELOG_E_OK)
+      "service role") != WYRELOG_E_OK)
     return 97;
   if (wyl_policy_store_grant_role_permission (store, "site.service-role",
-          "wr.stream.read") != WYRELOG_E_OK)
+      "wr.stream.read") != WYRELOG_E_OK)
     return 98;
   if (wyl_policy_store_grant_role_membership (store, "svc:plane:test",
-          "site.service-role", "svc-scope") != WYRELOG_E_OK)
+      "site.service-role", "svc-scope") != WYRELOG_E_OK)
     return 99;
   if (wyl_policy_store_role_is_service_eligible (store, "site.service-role",
-          &eligible) != WYRELOG_E_OK)
+      &eligible) != WYRELOG_E_OK)
     return 100;
   if (!eligible)
     return 101;
   if (wyl_policy_store_grant_role_permission (store, "site.service-role",
-          "wr.service_principal.manage") != WYRELOG_E_POLICY)
+      "wr.service_principal.manage") != WYRELOG_E_POLICY)
     return 102;
 
   if (wyl_policy_store_upsert_role (store, "site.control-role",
-          "control role") != WYRELOG_E_OK)
+      "control role") != WYRELOG_E_OK)
     return 103;
   if (wyl_policy_store_grant_role_permission (store, "site.control-role",
-          "wr.service_credential.manage") != WYRELOG_E_OK)
+      "wr.service_credential.manage") != WYRELOG_E_OK)
     return 104;
   if (wyl_policy_store_role_is_service_eligible (store, "site.control-role",
-          &eligible) != WYRELOG_E_OK)
+      &eligible) != WYRELOG_E_OK)
     return 105;
   if (eligible)
     return 106;
   if (wyl_policy_store_grant_role_membership (store, "svc:plane:test",
-          "site.control-role", "svc-scope") != WYRELOG_E_POLICY)
+      "site.control-role", "svc-scope") != WYRELOG_E_POLICY)
     return 107;
 
   if (wyl_policy_store_upsert_role (store, "site.control-parent",
-          "control parent") != WYRELOG_E_OK)
+      "control parent") != WYRELOG_E_OK)
     return 108;
   if (wyl_policy_store_grant_role_permission (store, "site.control-parent",
-          "wr.service_credential.manage") != WYRELOG_E_OK)
+      "wr.service_credential.manage") != WYRELOG_E_OK)
     return 109;
   if (wyl_policy_store_upsert_role (store, "site.child-role",
-          "child role") != WYRELOG_E_OK)
+      "child role") != WYRELOG_E_OK)
     return 110;
   if (wyl_policy_store_create_service_principal (store, "svc:plane:child",
-          "plane child", "admin-user", "req-service-plane-child",
-          &principal) != WYRELOG_E_OK)
+      "plane child", "admin-user", "req-service-plane-child",
+      &principal) != WYRELOG_E_OK)
     return 111;
   wyl_policy_service_principal_info_clear (&principal);
   if (wyl_policy_store_grant_role_membership (store, "svc:plane:child",
-          "site.child-role", "svc-scope") != WYRELOG_E_OK)
+      "site.child-role", "svc-scope") != WYRELOG_E_OK)
     return 112;
   if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
-          "site.control-parent") != WYRELOG_E_POLICY)
+      "site.control-parent") != WYRELOG_E_POLICY)
     return 113;
 
   return 0;
@@ -2238,15 +2240,15 @@ check_store_validates_service_permission_closure (void)
   if (wyl_policy_store_create_schema (safe_direct) != WYRELOG_E_OK)
     return 301;
   if (wyl_policy_store_create_service_principal (safe_direct,
-          "svc:closure:safedirect", "safe direct", "admin-user",
-          "req-closure-safe-direct", &principal) != WYRELOG_E_OK)
+      "svc:closure:safedirect", "safe direct", "admin-user",
+      "req-closure-safe-direct", &principal) != WYRELOG_E_OK)
     return 302;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (safe_direct),
-          "INSERT INTO direct_permissions "
-          "(subject_id, perm_id, scope, granted_at) VALUES "
-          "('svc:closure:safedirect', 'wr.stream.read', 'svc-scope', 0);",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO direct_permissions "
+      "(subject_id, perm_id, scope, granted_at) VALUES "
+      "('svc:closure:safedirect', 'wr.stream.read', 'svc-scope', 0);",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 303;
   if (wyl_policy_store_validate_service_permission_closure (safe_direct)
       != WYRELOG_E_OK)
@@ -2258,18 +2260,18 @@ check_store_validates_service_permission_closure (void)
   if (wyl_policy_store_create_schema (safe_role) != WYRELOG_E_OK)
     return 306;
   if (wyl_policy_store_create_service_principal (safe_role,
-          "svc:closure:saferole", "safe role", "admin-user",
-          "req-closure-safe-role", &principal) != WYRELOG_E_OK)
+      "svc:closure:saferole", "safe role", "admin-user",
+      "req-closure-safe-role", &principal) != WYRELOG_E_OK)
     return 307;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (safe_role),
-          "INSERT INTO roles (role_id, role_name) VALUES "
-          "  ('closure.safe-role', 'closure safe role');"
-          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
-          "  ('closure.safe-role', 'wr.stream.list');"
-          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
-          "  ('svc:closure:saferole', 'closure.safe-role', 'svc-scope');",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO roles (role_id, role_name) VALUES "
+      "  ('closure.safe-role', 'closure safe role');"
+      "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+      "  ('closure.safe-role', 'wr.stream.list');"
+      "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+      "  ('svc:closure:saferole', 'closure.safe-role', 'svc-scope');",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 308;
   if (wyl_policy_store_validate_service_permission_closure (safe_role)
       != WYRELOG_E_OK)
@@ -2281,15 +2283,15 @@ check_store_validates_service_permission_closure (void)
   if (wyl_policy_store_create_schema (bad_direct) != WYRELOG_E_OK)
     return 311;
   if (wyl_policy_store_create_service_principal (bad_direct,
-          "svc:closure:baddirect", "bad direct", "admin-user",
-          "req-closure-bad-direct", &principal) != WYRELOG_E_OK)
+      "svc:closure:baddirect", "bad direct", "admin-user",
+      "req-closure-bad-direct", &principal) != WYRELOG_E_OK)
     return 312;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (bad_direct),
-          "INSERT INTO direct_permissions "
-          "(subject_id, perm_id, scope, granted_at) VALUES "
-          "('svc:closure:baddirect', 'wr.service_credential.manage', "
-          "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO direct_permissions "
+      "(subject_id, perm_id, scope, granted_at) VALUES "
+      "('svc:closure:baddirect', 'wr.service_credential.manage', "
+      "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
     return 313;
   if (wyl_policy_store_validate_service_permission_closure (bad_direct)
       != WYRELOG_E_POLICY)
@@ -2302,18 +2304,18 @@ check_store_validates_service_permission_closure (void)
   if (wyl_policy_store_create_schema (bad_role) != WYRELOG_E_OK)
     return 316;
   if (wyl_policy_store_create_service_principal (bad_role,
-          "svc:closure:badrole", "bad role", "admin-user",
-          "req-closure-bad-role", &principal) != WYRELOG_E_OK)
+      "svc:closure:badrole", "bad role", "admin-user",
+      "req-closure-bad-role", &principal) != WYRELOG_E_OK)
     return 317;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (bad_role),
-          "INSERT INTO roles (role_id, role_name) VALUES "
-          "  ('closure.bad-role', 'closure bad role');"
-          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
-          "  ('closure.bad-role', 'wr.service_credential.manage');"
-          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
-          "  ('svc:closure:badrole', 'closure.bad-role', 'svc-scope');",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO roles (role_id, role_name) VALUES "
+      "  ('closure.bad-role', 'closure bad role');"
+      "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+      "  ('closure.bad-role', 'wr.service_credential.manage');"
+      "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+      "  ('svc:closure:badrole', 'closure.bad-role', 'svc-scope');",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 318;
   if (wyl_policy_store_validate_service_permission_closure (bad_role)
       != WYRELOG_E_POLICY)
@@ -2326,23 +2328,23 @@ check_store_validates_service_permission_closure (void)
   if (wyl_policy_store_create_schema (bad_inherit) != WYRELOG_E_OK)
     return 321;
   if (wyl_policy_store_create_service_principal (bad_inherit,
-          "svc:closure:badinherit", "bad inherit", "admin-user",
-          "req-closure-bad-inherit", &principal) != WYRELOG_E_OK)
+      "svc:closure:badinherit", "bad inherit", "admin-user",
+      "req-closure-bad-inherit", &principal) != WYRELOG_E_OK)
     return 322;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (bad_inherit),
-          "INSERT INTO roles (role_id, role_name) VALUES "
-          "  ('closure.child', 'closure child'),"
-          "  ('closure.parent', 'closure parent'),"
-          "  ('closure.grand', 'closure grand');"
-          "INSERT INTO role_inheritances (child_role_id, parent_role_id) "
-          "VALUES ('closure.child', 'closure.parent'),"
-          "  ('closure.parent', 'closure.grand');"
-          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
-          "  ('closure.grand', 'wr.service_credential.manage');"
-          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
-          "  ('svc:closure:badinherit', 'closure.child', 'svc-scope');",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO roles (role_id, role_name) VALUES "
+      "  ('closure.child', 'closure child'),"
+      "  ('closure.parent', 'closure parent'),"
+      "  ('closure.grand', 'closure grand');"
+      "INSERT INTO role_inheritances (child_role_id, parent_role_id) "
+      "VALUES ('closure.child', 'closure.parent'),"
+      "  ('closure.parent', 'closure.grand');"
+      "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+      "  ('closure.grand', 'wr.service_credential.manage');"
+      "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+      "  ('svc:closure:badinherit', 'closure.child', 'svc-scope');",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 323;
   if (wyl_policy_store_validate_service_permission_closure (bad_inherit)
       != WYRELOG_E_POLICY)
@@ -2368,21 +2370,21 @@ check_store_analyzes_service_permission_closure (void)
   WylPolicyPermissionClosureRemoval *removal = NULL;
 
   /* Clean closure: allowlisted direct data-plane permission only. Empty
-   * removal list, zero counts, and a well-formed non-zero generation. */
+  * removal list, zero counts, and a well-formed non-zero generation. */
   if (wyl_policy_store_open (NULL, &clean) != WYRELOG_E_OK)
     return 700;
   if (wyl_policy_store_create_schema (clean) != WYRELOG_E_OK)
     return 701;
   if (wyl_policy_store_create_service_principal (clean,
-          "svc:closure:clean", "clean", "admin-user",
-          "req-closure-clean", &principal) != WYRELOG_E_OK)
+      "svc:closure:clean", "clean", "admin-user",
+      "req-closure-clean", &principal) != WYRELOG_E_OK)
     return 702;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (clean),
-          "INSERT INTO direct_permissions "
-          "(subject_id, perm_id, scope, granted_at) VALUES "
-          "('svc:closure:clean', 'wr.stream.read', 'svc-scope', 0);",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO direct_permissions "
+      "(subject_id, perm_id, scope, granted_at) VALUES "
+      "('svc:closure:clean', 'wr.stream.read', 'svc-scope', 0);",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 703;
   if (wyl_policy_store_analyze_service_permission_closure (clean, &analysis)
       != WYRELOG_E_OK)
@@ -2403,23 +2405,23 @@ check_store_analyzes_service_permission_closure (void)
   guint64 gen_a = 0;
   guint64 gen_b = 0;
   if (wyl_policy_store_service_permission_authority_snapshot (clean,
-          &gen_a, digest_a) != WYRELOG_E_OK)
+      &gen_a, digest_a) != WYRELOG_E_OK)
     return 708;
   if (wyl_policy_store_service_permission_authority_snapshot (clean,
-          &gen_b, digest_b) != WYRELOG_E_OK)
+      &gen_b, digest_b) != WYRELOG_E_OK)
     return 709;
   if (memcmp (digest_a, digest_b, 32) != 0 || gen_a != gen_b)
     return 710;
   if (memcmp (analysis.digest, digest_a, 32) != 0)
     return 711;
   if (sqlite3_exec (wyl_policy_store_get_db (clean),
-          "INSERT INTO direct_permissions "
-          "(subject_id, perm_id, scope, granted_at) VALUES "
-          "('svc:closure:clean', 'wr.stream.list', 'svc-scope', 0);",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO direct_permissions "
+      "(subject_id, perm_id, scope, granted_at) VALUES "
+      "('svc:closure:clean', 'wr.stream.list', 'svc-scope', 0);",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 712;
   if (wyl_policy_store_service_permission_authority_snapshot (clean,
-          &gen_b, digest_b) != WYRELOG_E_OK)
+      &gen_b, digest_b) != WYRELOG_E_OK)
     return 713;
   if (memcmp (digest_a, digest_b, 32) == 0)
     return 714;
@@ -2432,18 +2434,18 @@ check_store_analyzes_service_permission_closure (void)
   if (wyl_policy_store_create_schema (bad_direct) != WYRELOG_E_OK)
     return 716;
   if (wyl_policy_store_create_service_principal (bad_direct,
-          "svc:closure:baddirect", "bad direct", "admin-user",
-          "req-closure-bad-direct", &principal) != WYRELOG_E_OK)
+      "svc:closure:baddirect", "bad direct", "admin-user",
+      "req-closure-bad-direct", &principal) != WYRELOG_E_OK)
     return 717;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (bad_direct),
-          "INSERT INTO direct_permissions "
-          "(subject_id, perm_id, scope, granted_at) VALUES "
-          "('svc:closure:baddirect', 'wr.service_credential.manage', "
-          "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO direct_permissions "
+      "(subject_id, perm_id, scope, granted_at) VALUES "
+      "('svc:closure:baddirect', 'wr.service_credential.manage', "
+      "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
     return 718;
   if (wyl_policy_store_analyze_service_permission_closure (bad_direct,
-          &analysis) != WYRELOG_E_OK)
+      &analysis) != WYRELOG_E_OK)
     return 719;
   if (analysis.removals->len != 1)
     return 720;
@@ -2471,21 +2473,21 @@ check_store_analyzes_service_permission_closure (void)
   if (wyl_policy_store_create_schema (bad_role) != WYRELOG_E_OK)
     return 728;
   if (wyl_policy_store_create_service_principal (bad_role,
-          "svc:closure:badrole", "bad role", "admin-user",
-          "req-closure-bad-role", &principal) != WYRELOG_E_OK)
+      "svc:closure:badrole", "bad role", "admin-user",
+      "req-closure-bad-role", &principal) != WYRELOG_E_OK)
     return 729;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (bad_role),
-          "INSERT INTO roles (role_id, role_name) VALUES "
-          "  ('closure.bad-role', 'closure bad role');"
-          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
-          "  ('closure.bad-role', 'wr.service_credential.manage');"
-          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
-          "  ('svc:closure:badrole', 'closure.bad-role', 'svc-scope');",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO roles (role_id, role_name) VALUES "
+      "  ('closure.bad-role', 'closure bad role');"
+      "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+      "  ('closure.bad-role', 'wr.service_credential.manage');"
+      "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+      "  ('svc:closure:badrole', 'closure.bad-role', 'svc-scope');",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 730;
   if (wyl_policy_store_analyze_service_permission_closure (bad_role,
-          &analysis) != WYRELOG_E_OK)
+      &analysis) != WYRELOG_E_OK)
     return 731;
   if (analysis.removals->len != 1)
     return 732;
@@ -2513,26 +2515,26 @@ check_store_analyzes_service_permission_closure (void)
   if (wyl_policy_store_create_schema (bad_inherit) != WYRELOG_E_OK)
     return 740;
   if (wyl_policy_store_create_service_principal (bad_inherit,
-          "svc:closure:badinherit", "bad inherit", "admin-user",
-          "req-closure-bad-inherit", &principal) != WYRELOG_E_OK)
+      "svc:closure:badinherit", "bad inherit", "admin-user",
+      "req-closure-bad-inherit", &principal) != WYRELOG_E_OK)
     return 741;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (bad_inherit),
-          "INSERT INTO roles (role_id, role_name) VALUES "
-          "  ('closure.child', 'closure child'),"
-          "  ('closure.parent', 'closure parent'),"
-          "  ('closure.grand', 'closure grand');"
-          "INSERT INTO role_inheritances (child_role_id, parent_role_id) "
-          "VALUES ('closure.child', 'closure.parent'),"
-          "  ('closure.parent', 'closure.grand');"
-          "INSERT INTO role_permissions (role_id, perm_id) VALUES "
-          "  ('closure.grand', 'wr.service_credential.manage');"
-          "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
-          "  ('svc:closure:badinherit', 'closure.child', 'svc-scope');",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO roles (role_id, role_name) VALUES "
+      "  ('closure.child', 'closure child'),"
+      "  ('closure.parent', 'closure parent'),"
+      "  ('closure.grand', 'closure grand');"
+      "INSERT INTO role_inheritances (child_role_id, parent_role_id) "
+      "VALUES ('closure.child', 'closure.parent'),"
+      "  ('closure.parent', 'closure.grand');"
+      "INSERT INTO role_permissions (role_id, perm_id) VALUES "
+      "  ('closure.grand', 'wr.service_credential.manage');"
+      "INSERT INTO role_memberships (subject_id, role_id, scope) VALUES "
+      "  ('svc:closure:badinherit', 'closure.child', 'svc-scope');",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 742;
   if (wyl_policy_store_analyze_service_permission_closure (bad_inherit,
-          &analysis) != WYRELOG_E_OK)
+      &analysis) != WYRELOG_E_OK)
     return 743;
   if (analysis.removals->len != 1)
     return 744;
@@ -2564,33 +2566,33 @@ check_store_checks_effective_subject_permission (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 234;
   if (wyl_policy_store_upsert_permission (store, "site.effective.read",
-          "effective read", "basic") != WYRELOG_E_OK)
+      "effective read", "basic") != WYRELOG_E_OK)
     return 235;
   if (wyl_policy_store_grant_direct_permission (store, "direct-effective-user",
-          "site.effective.read", "effective-scope") != WYRELOG_E_OK)
+      "site.effective.read", "effective-scope") != WYRELOG_E_OK)
     return 236;
 
   gboolean has_permission = FALSE;
   if (wyl_policy_store_subject_has_permission (store, "direct-effective-user",
-          "site.effective.read", "effective-scope", &has_permission)
+      "site.effective.read", "effective-scope", &has_permission)
       != WYRELOG_E_OK)
     return 237;
   if (!has_permission)
     return 238;
 
   if (wyl_policy_store_upsert_role (store, "site.effective-role",
-          "effective role") != WYRELOG_E_OK)
+      "effective role") != WYRELOG_E_OK)
     return 239;
   if (wyl_policy_store_grant_role_permission (store, "site.effective-role",
-          "site.effective.read") != WYRELOG_E_OK)
+      "site.effective.read") != WYRELOG_E_OK)
     return 240;
   if (wyl_policy_store_grant_role_membership (store, "role-effective-user",
-          "site.effective-role", "effective-scope") != WYRELOG_E_OK)
+      "site.effective-role", "effective-scope") != WYRELOG_E_OK)
     return 241;
 
   has_permission = FALSE;
   if (wyl_policy_store_subject_has_permission (store, "role-effective-user",
-          "site.effective.read", "effective-scope", &has_permission)
+      "site.effective.read", "effective-scope", &has_permission)
       != WYRELOG_E_OK)
     return 242;
   if (!has_permission)
@@ -2598,13 +2600,13 @@ check_store_checks_effective_subject_permission (void)
 
   has_permission = TRUE;
   if (wyl_policy_store_subject_has_permission (store, "role-effective-user",
-          "site.effective.read", "other-scope", &has_permission)
+      "site.effective.read", "other-scope", &has_permission)
       != WYRELOG_E_OK)
     return 244;
   if (has_permission)
     return 245;
   if (wyl_policy_store_subject_has_permission (store, "role-effective-user",
-          "site.effective.read", "effective-scope", NULL)
+      "site.effective.read", "effective-scope", NULL)
       != WYRELOG_E_INVALID)
     return 246;
   return 0;
@@ -2620,23 +2622,23 @@ check_role_membership_mutation_rolls_back_on_event_failure (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 198;
   if (wyl_policy_store_upsert_role (store, "site.rollback-role",
-          "rollback role") != WYRELOG_E_OK)
+      "rollback role") != WYRELOG_E_OK)
     return 199;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_role_membership_event "
-          "BEFORE INSERT ON role_membership_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "CREATE TRIGGER fail_role_membership_event "
+      "BEFORE INSERT ON role_membership_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 200;
 
   if (wyl_policy_store_apply_role_membership_mutation (store,
-          "rollback-role-user", "site.rollback-role", "rollback-role-scope",
-          TRUE) != WYRELOG_E_IO)
+      "rollback-role-user", "site.rollback-role", "rollback-role-scope",
+      TRUE) != WYRELOG_E_IO)
     return 201;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "rollback-role-user",
-          "site.rollback-role", "rollback-role-scope", &exists)
+      "site.rollback-role", "rollback-role-scope", &exists)
       != WYRELOG_E_OK)
     return 202;
   if (exists)
@@ -2649,7 +2651,7 @@ check_role_membership_mutation_rolls_back_on_event_failure (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_role_membership_event (store,
-          role_membership_event_expect_cb, &expect) != WYRELOG_E_OK)
+      role_membership_event_expect_cb, &expect) != WYRELOG_E_OK)
     return 204;
   if (expect.matches != 0)
     return 205;
@@ -2666,28 +2668,28 @@ check_role_membership_revoke_rolls_back_on_event_failure (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 207;
   if (wyl_policy_store_upsert_role (store, "site.rollback-role-revoke",
-          "rollback role revoke") != WYRELOG_E_OK)
+      "rollback role revoke") != WYRELOG_E_OK)
     return 208;
   if (wyl_policy_store_grant_role_membership (store,
-          "rollback-role-revoke-user", "site.rollback-role-revoke",
-          "rollback-role-revoke-scope") != WYRELOG_E_OK)
+      "rollback-role-revoke-user", "site.rollback-role-revoke",
+      "rollback-role-revoke-scope") != WYRELOG_E_OK)
     return 209;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_role_membership_revoke_event "
-          "BEFORE INSERT ON role_membership_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "CREATE TRIGGER fail_role_membership_revoke_event "
+      "BEFORE INSERT ON role_membership_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 210;
 
   if (wyl_policy_store_apply_role_membership_mutation (store,
-          "rollback-role-revoke-user", "site.rollback-role-revoke",
-          "rollback-role-revoke-scope", FALSE) != WYRELOG_E_IO)
+      "rollback-role-revoke-user", "site.rollback-role-revoke",
+      "rollback-role-revoke-scope", FALSE) != WYRELOG_E_IO)
     return 211;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_role_membership_exists (store,
-          "rollback-role-revoke-user", "site.rollback-role-revoke",
-          "rollback-role-revoke-scope", &exists) != WYRELOG_E_OK)
+      "rollback-role-revoke-user", "site.rollback-role-revoke",
+      "rollback-role-revoke-scope", &exists) != WYRELOG_E_OK)
     return 212;
   if (!exists)
     return 213;
@@ -2704,7 +2706,7 @@ check_store_appends_direct_permission_event (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 93;
   if (wyl_policy_store_append_direct_permission_event (store, "direct-user",
-          "site.direct.read", "direct-scope", "grant") != WYRELOG_E_OK)
+      "site.direct.read", "direct-scope", "grant") != WYRELOG_E_OK)
     return 94;
 
   DirectPermissionExpect expect = {
@@ -2714,7 +2716,7 @@ check_store_appends_direct_permission_event (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_direct_permission_event (store,
-          direct_permission_event_expect_cb, &expect) != WYRELOG_E_OK)
+      direct_permission_event_expect_cb, &expect) != WYRELOG_E_OK)
     return 95;
   if (expect.matches != 1)
     return 96;
@@ -2731,20 +2733,20 @@ check_direct_permission_mutation_rolls_back_on_event_failure (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 181;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_direct_permission_event "
-          "BEFORE INSERT ON direct_permission_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "CREATE TRIGGER fail_direct_permission_event "
+      "BEFORE INSERT ON direct_permission_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 182;
 
   if (wyl_policy_store_apply_direct_permission_mutation (store,
-          "rollback-user", "site.rollback-direct", "rollback-scope", TRUE)
+      "rollback-user", "site.rollback-direct", "rollback-scope", TRUE)
       != WYRELOG_E_IO)
     return 183;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (store, "rollback-user",
-          "site.rollback-direct", "rollback-scope", &exists) != WYRELOG_E_OK)
+      "site.rollback-direct", "rollback-scope", &exists) != WYRELOG_E_OK)
     return 184;
   if (exists)
     return 185;
@@ -2756,7 +2758,7 @@ check_direct_permission_mutation_rolls_back_on_event_failure (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_direct_permission_event (store,
-          direct_permission_event_expect_cb, &expect) != WYRELOG_E_OK)
+      direct_permission_event_expect_cb, &expect) != WYRELOG_E_OK)
     return 186;
   if (expect.matches != 0)
     return 187;
@@ -2767,11 +2769,11 @@ check_direct_permission_mutation_rolls_back_on_event_failure (void)
     return 188;
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-          "SELECT 1 FROM permissions WHERE perm_id = ?;", -1, &stmt,
-          NULL) != SQLITE_OK)
+      "SELECT 1 FROM permissions WHERE perm_id = ?;", -1, &stmt,
+      NULL) != SQLITE_OK)
     return 214;
   if (sqlite3_bind_text (stmt, 1, "site.rollback-direct", -1,
-          SQLITE_TRANSIENT) != SQLITE_OK) {
+      SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     return 215;
   }
@@ -2794,27 +2796,27 @@ check_direct_permission_revoke_rolls_back_on_event_failure (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 190;
   if (wyl_policy_store_upsert_permission (store, "site.rollback-revoke",
-          "rollback revoke", "basic") != WYRELOG_E_OK)
+      "rollback revoke", "basic") != WYRELOG_E_OK)
     return 191;
   if (wyl_policy_store_grant_direct_permission (store, "rollback-revoke-user",
-          "site.rollback-revoke", "rollback-revoke-scope") != WYRELOG_E_OK)
+      "site.rollback-revoke", "rollback-revoke-scope") != WYRELOG_E_OK)
     return 192;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_direct_permission_revoke_event "
-          "BEFORE INSERT ON direct_permission_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "CREATE TRIGGER fail_direct_permission_revoke_event "
+      "BEFORE INSERT ON direct_permission_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 193;
 
   if (wyl_policy_store_apply_direct_permission_mutation (store,
-          "rollback-revoke-user", "site.rollback-revoke",
-          "rollback-revoke-scope", FALSE) != WYRELOG_E_IO)
+      "rollback-revoke-user", "site.rollback-revoke",
+      "rollback-revoke-scope", FALSE) != WYRELOG_E_IO)
     return 194;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store,
-          "rollback-revoke-user", "site.rollback-revoke",
-          "rollback-revoke-scope", &exists) != WYRELOG_E_OK)
+      "rollback-revoke-user", "site.rollback-revoke",
+      "rollback-revoke-scope", &exists) != WYRELOG_E_OK)
     return 195;
   if (!exists)
     return 196;
@@ -2831,20 +2833,20 @@ check_store_sets_permission_state (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 219;
   if (wyl_policy_store_set_permission_state (store, "perm-user",
-          "wr.perm.read", "perm-scope", "armed") != WYRELOG_E_OK)
+      "wr.perm.read", "perm-scope", "armed") != WYRELOG_E_OK)
     return 220;
   if (wyl_policy_store_set_permission_state (store, "perm-user",
-          "wr.perm.read", "perm-scope", "dormant") != WYRELOG_E_OK)
+      "wr.perm.read", "perm-scope", "dormant") != WYRELOG_E_OK)
     return 221;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_permission_state_exists (store, "perm-user",
-          "wr.perm.read", "perm-scope", &exists) != WYRELOG_E_OK)
+      "wr.perm.read", "perm-scope", &exists) != WYRELOG_E_OK)
     return 222;
   if (!exists)
     return 223;
   if (wyl_policy_store_permission_state_exists (store, "perm-user",
-          "wr.perm.read", "missing-scope", &exists) != WYRELOG_E_OK)
+      "wr.perm.read", "missing-scope", &exists) != WYRELOG_E_OK)
     return 224;
   if (exists)
     return 225;
@@ -2856,7 +2858,7 @@ check_store_sets_permission_state (void)
     .state = "dormant",
   };
   if (wyl_policy_store_foreach_permission_state (store,
-          permission_state_expect_cb, &expect) != WYRELOG_E_OK)
+      permission_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 226;
   if (expect.matches != 1)
     return 227;
@@ -2874,8 +2876,8 @@ check_store_appends_permission_state_event (void)
     return 229;
   gint64 event_id = -1;
   if (wyl_policy_store_append_permission_state_event (store, "perm-event-user",
-          "wr.perm.event", "perm-event-scope", "grant", "dormant", "armed",
-          &event_id) != WYRELOG_E_OK)
+      "wr.perm.event", "perm-event-scope", "grant", "dormant", "armed",
+      &event_id) != WYRELOG_E_OK)
     return 230;
 
   PermissionStateEventExpect expect = {
@@ -2888,7 +2890,7 @@ check_store_appends_permission_state_event (void)
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
     return 231;
   if (expect.matches != 1)
     return 232;
@@ -2907,8 +2909,8 @@ check_store_applies_permission_state_transition (void)
 
   gint64 grant_event_id = -1;
   if (wyl_policy_store_apply_permission_state_transition (store,
-          "perm-apply-user", "wr.perm.apply", "perm-apply-scope", "grant",
-          &grant_event_id) != WYRELOG_E_OK)
+      "perm-apply-user", "wr.perm.apply", "perm-apply-scope", "grant",
+      &grant_event_id) != WYRELOG_E_OK)
     return 240;
   if (grant_event_id <= 0)
     return 241;
@@ -2920,7 +2922,7 @@ check_store_applies_permission_state_transition (void)
     .state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state (store,
-          permission_state_expect_cb, &state_expect) != WYRELOG_E_OK)
+      permission_state_expect_cb, &state_expect) != WYRELOG_E_OK)
     return 242;
   if (state_expect.matches != 1)
     return 243;
@@ -2935,15 +2937,15 @@ check_store_applies_permission_state_transition (void)
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &grant_expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &grant_expect) != WYRELOG_E_OK)
     return 244;
   if (grant_expect.matches != 1)
     return 245;
 
   gint64 revoke_event_id = -1;
   if (wyl_policy_store_apply_permission_state_transition (store,
-          "perm-apply-user", "wr.perm.apply", "perm-apply-scope", "revoke",
-          &revoke_event_id) != WYRELOG_E_OK)
+      "perm-apply-user", "wr.perm.apply", "perm-apply-scope", "revoke",
+      &revoke_event_id) != WYRELOG_E_OK)
     return 246;
   if (revoke_event_id <= grant_event_id)
     return 247;
@@ -2955,19 +2957,19 @@ check_store_applies_permission_state_transition (void)
     .state = "dormant",
   };
   if (wyl_policy_store_foreach_permission_state (store,
-          permission_state_expect_cb, &dormant_expect) != WYRELOG_E_OK)
+      permission_state_expect_cb, &dormant_expect) != WYRELOG_E_OK)
     return 248;
   if (dormant_expect.matches != 1)
     return 249;
 
   gint64 trigger_event_id = -1;
   if (wyl_policy_store_apply_permission_state_transition (store,
-          "perm-trigger-user", "wr.perm.trigger", "perm-trigger-scope",
-          "grant", NULL) != WYRELOG_E_OK)
+      "perm-trigger-user", "wr.perm.trigger", "perm-trigger-scope",
+      "grant", NULL) != WYRELOG_E_OK)
     return 279;
   if (wyl_policy_store_apply_permission_state_transition (store,
-          "perm-trigger-user", "wr.perm.trigger", "perm-trigger-scope",
-          "trigger", &trigger_event_id) != WYRELOG_E_OK)
+      "perm-trigger-user", "wr.perm.trigger", "perm-trigger-scope",
+      "trigger", &trigger_event_id) != WYRELOG_E_OK)
     return 280;
   if (trigger_event_id <= revoke_event_id)
     return 281;
@@ -2979,7 +2981,7 @@ check_store_applies_permission_state_transition (void)
     .state = "firing",
   };
   if (wyl_policy_store_foreach_permission_state (store,
-          permission_state_expect_cb, &firing_expect) != WYRELOG_E_OK)
+      permission_state_expect_cb, &firing_expect) != WYRELOG_E_OK)
     return 282;
   if (firing_expect.matches != 1)
     return 283;
@@ -2994,7 +2996,7 @@ check_store_applies_permission_state_transition (void)
     .to_state = "firing",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &trigger_expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &trigger_expect) != WYRELOG_E_OK)
     return 284;
   if (trigger_expect.matches != 1)
     return 285;
@@ -3013,15 +3015,15 @@ check_store_permission_state_transition_rejects_invalid_edge (void)
 
   gint64 event_id = 77;
   if (wyl_policy_store_apply_permission_state_transition (store,
-          "perm-invalid-user", "wr.perm.invalid", "perm-invalid-scope",
-          "revoke", &event_id) != WYRELOG_E_POLICY)
+      "perm-invalid-user", "wr.perm.invalid", "perm-invalid-scope",
+      "revoke", &event_id) != WYRELOG_E_POLICY)
     return 252;
   if (event_id != -1)
     return 253;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_permission_state_exists (store, "perm-invalid-user",
-          "wr.perm.invalid", "perm-invalid-scope", &exists) != WYRELOG_E_OK)
+      "wr.perm.invalid", "perm-invalid-scope", &exists) != WYRELOG_E_OK)
     return 254;
   if (exists)
     return 255;
@@ -3036,7 +3038,7 @@ check_store_permission_state_transition_rejects_invalid_edge (void)
     .to_state = "dormant",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
     return 256;
   if (expect.matches != 0)
     return 257;
@@ -3053,20 +3055,20 @@ check_store_permission_state_transition_rolls_back_event_failure (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 259;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_permission_state_event "
-          "BEFORE INSERT ON permission_state_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "CREATE TRIGGER fail_permission_state_event "
+      "BEFORE INSERT ON permission_state_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 260;
 
   if (wyl_policy_store_apply_permission_state_transition (store,
-          "perm-rollback-user", "wr.perm.rollback", "perm-rollback-scope",
-          "grant", NULL) != WYRELOG_E_IO)
+      "perm-rollback-user", "wr.perm.rollback", "perm-rollback-scope",
+      "grant", NULL) != WYRELOG_E_IO)
     return 261;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_permission_state_exists (store, "perm-rollback-user",
-          "wr.perm.rollback", "perm-rollback-scope", &exists)
+      "wr.perm.rollback", "perm-rollback-scope", &exists)
       != WYRELOG_E_OK)
     return 262;
   if (exists)
@@ -3086,11 +3088,11 @@ check_store_permission_state_transition_appends_audit (void)
 
   gint64 event_id = -1;
   if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
-          "perm-audit-user", "wr.perm.audit", "perm-audit-scope", "grant",
-          &event_id, "01890c10-2e3f-7000-8000-000000000010", 999,
-          "perm-audit-user", "permission_state.grant", "wr.perm.audit",
-          "allowed", "permission_state", NULL,
-          WYL_DECISION_ALLOW) != WYRELOG_E_OK)
+      "perm-audit-user", "wr.perm.audit", "perm-audit-scope", "grant",
+      &event_id, "01890c10-2e3f-7000-8000-000000000010", 999,
+      "perm-audit-user", "permission_state.grant", "wr.perm.audit",
+      "allowed", "permission_state", NULL,
+      WYL_DECISION_ALLOW) != WYRELOG_E_OK)
     return 266;
   if (event_id <= 0)
     return 267;
@@ -3106,7 +3108,7 @@ check_store_permission_state_transition_appends_audit (void)
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
-          &audit_expect) != WYRELOG_E_OK)
+      &audit_expect) != WYRELOG_E_OK)
     return 268;
   if (audit_expect.matches != 1)
     return 269;
@@ -3123,28 +3125,28 @@ check_store_permission_state_transition_rolls_back_audit_failure (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 271;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_permission_state_audit "
-          "BEFORE INSERT ON audit_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "CREATE TRIGGER fail_permission_state_audit "
+      "BEFORE INSERT ON audit_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 272;
 
   gint64 event_id = 99;
   if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
-          "perm-audit-rollback-user", "wr.perm.audit.rollback",
-          "perm-audit-rollback-scope", "grant", &event_id,
-          "01890c10-2e3f-7000-8000-000000000011", 1000,
-          "perm-audit-rollback-user", "permission_state.grant",
-          "wr.perm.audit.rollback", "allowed", "permission_state",
-          NULL, WYL_DECISION_ALLOW) != WYRELOG_E_IO)
+      "perm-audit-rollback-user", "wr.perm.audit.rollback",
+      "perm-audit-rollback-scope", "grant", &event_id,
+      "01890c10-2e3f-7000-8000-000000000011", 1000,
+      "perm-audit-rollback-user", "permission_state.grant",
+      "wr.perm.audit.rollback", "allowed", "permission_state",
+      NULL, WYL_DECISION_ALLOW) != WYRELOG_E_IO)
     return 273;
   if (event_id != -1)
     return 274;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_permission_state_exists (store,
-          "perm-audit-rollback-user", "wr.perm.audit.rollback",
-          "perm-audit-rollback-scope", &exists) != WYRELOG_E_OK)
+      "perm-audit-rollback-user", "wr.perm.audit.rollback",
+      "perm-audit-rollback-scope", &exists) != WYRELOG_E_OK)
     return 275;
   if (exists)
     return 276;
@@ -3158,7 +3160,7 @@ check_store_permission_state_transition_rolls_back_audit_failure (void)
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
     return 277;
   if (event_expect.matches != 0)
     return 278;
@@ -3177,18 +3179,18 @@ check_store_permission_state_transition_rejects_invalid_audit (void)
 
   gint64 event_id = 101;
   if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
-          "perm-bad-audit-user", "wr.perm.bad.audit",
-          "perm-bad-audit-scope", "grant", &event_id, "not-a-wyl-id", 1000,
-          "perm-bad-audit-user", "permission_state.grant",
-          "wr.perm.bad.audit", "allowed", "permission_state",
-          NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+      "perm-bad-audit-user", "wr.perm.bad.audit",
+      "perm-bad-audit-scope", "grant", &event_id, "not-a-wyl-id", 1000,
+      "perm-bad-audit-user", "permission_state.grant",
+      "wr.perm.bad.audit", "allowed", "permission_state",
+      NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
     return 288;
   if (event_id != -1)
     return 289;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_permission_state_exists (store, "perm-bad-audit-user",
-          "wr.perm.bad.audit", "perm-bad-audit-scope", &exists)
+      "wr.perm.bad.audit", "perm-bad-audit-scope", &exists)
       != WYRELOG_E_OK)
     return 290;
   if (exists)
@@ -3203,7 +3205,7 @@ check_store_permission_state_transition_rejects_invalid_audit (void)
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
     return 292;
   if (event_expect.matches != 0)
     return 293;
@@ -3221,25 +3223,25 @@ check_store_permission_state_transition_rolls_back_audit_conflict (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 295;
   if (wyl_policy_store_append_audit_event (store, id, 1001,
-          "existing-audit-user", "existing.action", "existing-resource",
-          NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_OK)
+      "existing-audit-user", "existing.action", "existing-resource",
+      NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_OK)
     return 296;
 
   gint64 event_id = 102;
   if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
-          "perm-audit-conflict-user", "wr.perm.audit.conflict",
-          "perm-audit-conflict-scope", "grant", &event_id, id, 1001,
-          "perm-audit-conflict-user", "permission_state.grant",
-          "wr.perm.audit.conflict", "allowed", "permission_state",
-          NULL, WYL_DECISION_ALLOW) != WYRELOG_E_POLICY)
+      "perm-audit-conflict-user", "wr.perm.audit.conflict",
+      "perm-audit-conflict-scope", "grant", &event_id, id, 1001,
+      "perm-audit-conflict-user", "permission_state.grant",
+      "wr.perm.audit.conflict", "allowed", "permission_state",
+      NULL, WYL_DECISION_ALLOW) != WYRELOG_E_POLICY)
     return 297;
   if (event_id != -1)
     return 298;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_permission_state_exists (store,
-          "perm-audit-conflict-user", "wr.perm.audit.conflict",
-          "perm-audit-conflict-scope", &exists) != WYRELOG_E_OK)
+      "perm-audit-conflict-user", "wr.perm.audit.conflict",
+      "perm-audit-conflict-scope", &exists) != WYRELOG_E_OK)
     return 299;
   if (exists)
     return 300;
@@ -3253,7 +3255,7 @@ check_store_permission_state_transition_rolls_back_audit_conflict (void)
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
     return 301;
   if (event_expect.matches != 0)
     return 302;
@@ -3267,7 +3269,7 @@ check_store_permission_state_transition_rolls_back_audit_conflict (void)
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
-          &audit_expect) != WYRELOG_E_OK)
+      &audit_expect) != WYRELOG_E_OK)
     return 303;
   if (audit_expect.matches != 1)
     return 304;
@@ -3284,10 +3286,10 @@ check_store_sets_principal_state (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 81;
   if (wyl_policy_store_set_principal_state (store, "principal-user",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 82;
   if (wyl_policy_store_set_principal_state (store, "principal-user",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 83;
 
   PrincipalStateExpect expect = {
@@ -3295,7 +3297,7 @@ check_store_sets_principal_state (void)
     .state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_state (store,
-          principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+      principal_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 84;
   if (expect.matches != 1)
     return 85;
@@ -3321,7 +3323,7 @@ check_store_get_principal_state_round_trip (void)
   g_autofree gchar *missing = (gchar *) 0x1;    /* deliberate sentinel */
   gboolean found = TRUE;
   if (wyl_policy_store_get_principal_state (store, "no-such-subject",
-          &missing, &found) != WYRELOG_E_OK)
+      &missing, &found) != WYRELOG_E_OK)
     return 1502;
   if (found)
     return 1503;
@@ -3330,12 +3332,12 @@ check_store_get_principal_state_round_trip (void)
 
   /* Row present: round-trip a value via the existing set_principal_state. */
   if (wyl_policy_store_set_principal_state (store, "subject-A",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1505;
   g_autofree gchar *state_a = NULL;
   gboolean found_a = FALSE;
   if (wyl_policy_store_get_principal_state (store, "subject-A", &state_a,
-          &found_a) != WYRELOG_E_OK)
+      &found_a) != WYRELOG_E_OK)
     return 1506;
   if (!found_a)
     return 1507;
@@ -3344,11 +3346,11 @@ check_store_get_principal_state_round_trip (void)
 
   /* Updated row: re-read picks up the new value. */
   if (wyl_policy_store_set_principal_state (store, "subject-A",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 1509;
   g_clear_pointer (&state_a, g_free);
   if (wyl_policy_store_get_principal_state (store, "subject-A", &state_a,
-          &found_a) != WYRELOG_E_OK)
+      &found_a) != WYRELOG_E_OK)
     return 1510;
   if (!found_a)
     return 1511;
@@ -3357,16 +3359,16 @@ check_store_get_principal_state_round_trip (void)
 
   /* NULL-input shape check. */
   if (wyl_policy_store_get_principal_state (NULL, "subject-A", &state_a,
-          &found_a) != WYRELOG_E_INVALID)
+      &found_a) != WYRELOG_E_INVALID)
     return 1513;
   if (wyl_policy_store_get_principal_state (store, NULL, &state_a,
-          &found_a) != WYRELOG_E_INVALID)
+      &found_a) != WYRELOG_E_INVALID)
     return 1514;
   if (wyl_policy_store_get_principal_state (store, "subject-A", NULL,
-          &found_a) != WYRELOG_E_INVALID)
+      &found_a) != WYRELOG_E_INVALID)
     return 1515;
   if (wyl_policy_store_get_principal_state (store, "subject-A", &state_a,
-          NULL) != WYRELOG_E_INVALID)
+      NULL) != WYRELOG_E_INVALID)
     return 1516;
   return 0;
 }
@@ -3383,7 +3385,7 @@ check_store_apply_principal_failure_increments_counter (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 1521;
   if (wyl_policy_store_set_principal_state (store, "lockout.below",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1522;
 
   for (gint64 expected = 1; expected <= 4; expected++) {
@@ -3391,7 +3393,7 @@ check_store_apply_principal_failure_increments_counter (void)
     gint64 count = -1;
     gint64 locked_at = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.below",
-            5, 100000, &st, &count, &locked_at, NULL) != WYRELOG_E_OK)
+        5, 100000, &st, &count, &locked_at, NULL) != WYRELOG_E_OK)
       return 1523;
     if (g_strcmp0 (st, "mfa_required") != 0)
       return 1524;
@@ -3414,7 +3416,7 @@ check_store_apply_principal_failure_transitions_to_locked (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 1531;
   if (wyl_policy_store_set_principal_state (store, "lockout.cross",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1532;
 
   gint64 final_locked_at = 0;
@@ -3423,7 +3425,7 @@ check_store_apply_principal_failure_transitions_to_locked (void)
     gint64 count = -1;
     gint64 locked_at = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.cross",
-            5, 200000 + i, &st, &count, &locked_at, NULL) != WYRELOG_E_OK)
+        5, 200000 + i, &st, &count, &locked_at, NULL) != WYRELOG_E_OK)
       return 1533;
     if (i < 5) {
       if (g_strcmp0 (st, "mfa_required") != 0)
@@ -3449,7 +3451,7 @@ check_store_apply_principal_failure_transitions_to_locked (void)
   gint64 locked_at = -1;
   gboolean found = FALSE;
   if (wyl_policy_store_get_principal_lock_info (store, "lockout.cross", &st,
-          &count, &locked_at, &found) != WYRELOG_E_OK)
+      &count, &locked_at, &found) != WYRELOG_E_OK)
     return 1539;
   if (!found)
     return 1540;
@@ -3491,7 +3493,7 @@ check_store_apply_principal_failure_survives_reopen (void)
       goto cleanup;
     }
     if (wyl_policy_store_set_principal_state (store, "lockout.persist",
-            "mfa_required") != WYRELOG_E_OK) {
+        "mfa_required") != WYRELOG_E_OK) {
       rc_inner = 1553;
       goto cleanup;
     }
@@ -3500,7 +3502,7 @@ check_store_apply_principal_failure_survives_reopen (void)
       gint64 count = -1;
       gint64 locked_at = 0;
       if (wyl_policy_store_apply_principal_failure (store, "lockout.persist",
-              5, 300000 + i, &st, &count, &locked_at, NULL) != WYRELOG_E_OK) {
+          5, 300000 + i, &st, &count, &locked_at, NULL) != WYRELOG_E_OK) {
         rc_inner = 1554;
         goto cleanup;
       }
@@ -3523,7 +3525,7 @@ check_store_apply_principal_failure_survives_reopen (void)
     gint64 locked_at = 0;
     gboolean found = FALSE;
     if (wyl_policy_store_get_principal_lock_info (store2, "lockout.persist",
-            &st, &count, &locked_at, &found) != WYRELOG_E_OK) {
+        &st, &count, &locked_at, &found) != WYRELOG_E_OK) {
       rc_inner = 1556;
       goto cleanup;
     }
@@ -3551,7 +3553,7 @@ check_store_reset_principal_failure_counter (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 1561;
   if (wyl_policy_store_set_principal_state (store, "lockout.reset",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1562;
 
   /* Bump the counter to 4 (below threshold). */
@@ -3560,20 +3562,20 @@ check_store_reset_principal_failure_counter (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.reset",
-            5, 400000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
+        5, 400000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1563;
   }
 
   /* Reset; counter must be 0, locked_at NULL (INT64_MIN). */
   if (wyl_policy_store_reset_principal_failure_counter (store,
-          "lockout.reset") != WYRELOG_E_OK)
+      "lockout.reset") != WYRELOG_E_OK)
     return 1564;
   g_autofree gchar *st = NULL;
   gint64 count = -1;
   gint64 locked_at = -1;
   gboolean found = FALSE;
   if (wyl_policy_store_get_principal_lock_info (store, "lockout.reset", &st,
-          &count, &locked_at, &found) != WYRELOG_E_OK)
+      &count, &locked_at, &found) != WYRELOG_E_OK)
     return 1565;
   if (!found || count != 0 || locked_at != G_MININT64)
     return 1566;
@@ -3583,7 +3585,7 @@ check_store_reset_principal_failure_counter (void)
   gint64 c2 = 0;
   gint64 l2 = 0;
   if (wyl_policy_store_apply_principal_failure (store, "lockout.reset", 5,
-          500000, &st2, &c2, &l2, NULL) != WYRELOG_E_OK)
+      500000, &st2, &c2, &l2, NULL) != WYRELOG_E_OK)
     return 1567;
   if (c2 != 1 || g_strcmp0 (st2, "mfa_required") != 0)
     return 1568;
@@ -3610,7 +3612,7 @@ check_store_apply_principal_failure_sequential_race (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 1581;
   if (wyl_policy_store_set_principal_state (store, "lockout.race",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1582;
 
   /* Five successful failures, threshold cross on the fifth. */
@@ -3619,7 +3621,7 @@ check_store_apply_principal_failure_sequential_race (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.race",
-            5, 700000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
+        5, 700000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1583;
   }
 
@@ -3630,7 +3632,7 @@ check_store_apply_principal_failure_sequential_race (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.race",
-            5, 700100, &st, &c, &l, NULL) != WYRELOG_E_POLICY)
+        5, 700100, &st, &c, &l, NULL) != WYRELOG_E_POLICY)
       return 1589;
   }
 
@@ -3639,7 +3641,7 @@ check_store_apply_principal_failure_sequential_race (void)
   gint64 locked_at = -1;
   gboolean found = FALSE;
   if (wyl_policy_store_get_principal_lock_info (store, "lockout.race", &st,
-          &count, &locked_at, &found) != WYRELOG_E_OK)
+      &count, &locked_at, &found) != WYRELOG_E_OK)
     return 1584;
   if (!found)
     return 1585;
@@ -3666,25 +3668,25 @@ check_store_apply_principal_unlock (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 1571;
   if (wyl_policy_store_set_principal_state (store, "lockout.unlock",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1572;
   for (gint64 i = 1; i <= 5; i++) {
     g_autofree gchar *st = NULL;
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.unlock",
-            5, 600000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
+        5, 600000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1573;
   }
   if (wyl_policy_store_apply_principal_unlock (store, "lockout.unlock", NULL,
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return 1574;
   g_autofree gchar *st = NULL;
   gint64 count = -1;
   gint64 locked_at = -1;
   gboolean found = FALSE;
   if (wyl_policy_store_get_principal_lock_info (store, "lockout.unlock", &st,
-          &count, &locked_at, &found) != WYRELOG_E_OK)
+      &count, &locked_at, &found) != WYRELOG_E_OK)
     return 1575;
   if (!found || g_strcmp0 (st, "unverified") != 0 || count != 0
       || locked_at != G_MININT64)
@@ -3709,7 +3711,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 1581;
   if (wyl_policy_store_set_principal_state (store, "lockout.relock",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 1582;
 
   /* Drive the subject across the 5-failure threshold to LOCKED. */
@@ -3718,7 +3720,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
     gint64 c = 0;
     gint64 l = 0;
     if (wyl_policy_store_apply_principal_failure (store, "lockout.relock",
-            5, 700000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
+        5, 700000 + i, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 1583;
   }
 
@@ -3728,7 +3730,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   gint64 locked_at_before = -1;
   gboolean found_before = FALSE;
   if (wyl_policy_store_get_principal_lock_info (store, "lockout.relock",
-          &st_before, &count_before, &locked_at_before, &found_before)
+      &st_before, &count_before, &locked_at_before, &found_before)
       != WYRELOG_E_OK)
     return 1584;
   if (!found_before || g_strcmp0 (st_before, "locked") != 0
@@ -3739,8 +3741,8 @@ check_store_apply_principal_failure_refuses_already_locked (void)
    * so we can prove no new event was appended. */
   gint events_before = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM principal_events "
-          "WHERE subject_id = 'lockout.relock';", &events_before) != 0)
+      "SELECT COUNT(*) FROM principal_events "
+      "WHERE subject_id = 'lockout.relock';", &events_before) != 0)
     return 1586;
 
   /* Re-drive FAILED_ATTEMPT against the already-LOCKED row with a
@@ -3751,7 +3753,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   gint64 l_attempt = 0;
   wyrelog_error_t relock_rc =
       wyl_policy_store_apply_principal_failure (store, "lockout.relock", 5,
-      800000, &st_attempt, &c_attempt, &l_attempt, NULL);
+          800000, &st_attempt, &c_attempt, &l_attempt, NULL);
   if (relock_rc != WYRELOG_E_POLICY)
     return 1587;
   /* Out-params on the refuse path should not leak partial state. */
@@ -3765,7 +3767,7 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   gint64 locked_at_after = -1;
   gboolean found_after = FALSE;
   if (wyl_policy_store_get_principal_lock_info (store, "lockout.relock",
-          &st_after, &count_after, &locked_at_after, &found_after)
+      &st_after, &count_after, &locked_at_after, &found_after)
       != WYRELOG_E_OK)
     return 1589;
   if (!found_after || g_strcmp0 (st_after, "locked") != 0
@@ -3775,8 +3777,8 @@ check_store_apply_principal_failure_refuses_already_locked (void)
   /* No additional principal_event row should have been emitted. */
   gint events_after = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM principal_events "
-          "WHERE subject_id = 'lockout.relock';", &events_after) != 0)
+      "SELECT COUNT(*) FROM principal_events "
+      "WHERE subject_id = 'lockout.relock';", &events_after) != 0)
     return 1591;
   if (events_after != events_before)
     return 1592;
@@ -3817,15 +3819,15 @@ check_store_principal_states_legacy_schema_migration (void)
     if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
       return 1603;
     if (sqlite3_exec (wyl_policy_store_get_db (store),
-            "DROP TABLE principal_states;"
-            "CREATE TABLE principal_states ("
-            "  subject_id TEXT PRIMARY KEY,"
-            "  state TEXT NOT NULL,"
-            "  updated_at INTEGER"
-            ");"
-            "INSERT INTO principal_states (subject_id, state, updated_at) "
-            "  VALUES ('legacy.user', 'mfa_required', 1234567);",
-            NULL, NULL, NULL) != SQLITE_OK)
+        "DROP TABLE principal_states;"
+        "CREATE TABLE principal_states ("
+        "  subject_id TEXT PRIMARY KEY,"
+        "  state TEXT NOT NULL,"
+        "  updated_at INTEGER"
+        ");"
+        "INSERT INTO principal_states (subject_id, state, updated_at) "
+        "  VALUES ('legacy.user', 'mfa_required', 1234567);",
+        NULL, NULL, NULL) != SQLITE_OK)
       return 1604;
   }
 
@@ -3842,14 +3844,14 @@ check_store_principal_states_legacy_schema_migration (void)
       return 1606;
 
     /* The new columns must be present and defaulted to (0, NULL) on
-     * the migrated row.  Use the lock_info accessor so we exercise
-     * the same SELECT path that the validator uses in production. */
+    * the migrated row.  Use the lock_info accessor so we exercise
+    * the same SELECT path that the validator uses in production. */
     g_autofree gchar *st = NULL;
     gint64 count = -1;
     gint64 locked_at = -1;
     gboolean found = FALSE;
     if (wyl_policy_store_get_principal_lock_info (store, "legacy.user",
-            &st, &count, &locked_at, &found) != WYRELOG_E_OK)
+        &st, &count, &locked_at, &found) != WYRELOG_E_OK)
       return 1607;
     if (!found)
       return 1608;
@@ -3864,8 +3866,8 @@ check_store_principal_states_legacy_schema_migration (void)
      * lock_info accessor does not expose it. */
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-            "SELECT updated_at FROM principal_states "
-            "WHERE subject_id = 'legacy.user';", -1, &stmt, NULL)
+        "SELECT updated_at FROM principal_states "
+        "WHERE subject_id = 'legacy.user';", -1, &stmt, NULL)
         != SQLITE_OK)
       return 1612;
     if (sqlite3_step (stmt) != SQLITE_ROW) {
@@ -3909,39 +3911,39 @@ check_store_validate_principal_domain (void)
   } state_cases[] = {
     /* REJECT: unknown state literal. */
     {"INSERT INTO principal_states VALUES('s','bogus',1,0,NULL);",
-        WYRELOG_E_POLICY},
+     WYRELOG_E_POLICY},
     /* REJECT: negative/corrupt counter. */
     {"INSERT INTO principal_states VALUES('s','mfa_required',1,-1,NULL);",
-        WYRELOG_E_POLICY},
+     WYRELOG_E_POLICY},
     /* REJECT: counter at G_MAXINT64 would overflow on a later +1. */
     {"INSERT INTO principal_states "
-          "VALUES('s','mfa_required',1,9223372036854775807,NULL);",
-        WYRELOG_E_POLICY},
+     "VALUES('s','mfa_required',1,9223372036854775807,NULL);",
+     WYRELOG_E_POLICY},
     /* REJECT: locked row with count=0 (forward lock invariant). */
     {"INSERT INTO principal_states VALUES('s','locked',1,0,100);",
-        WYRELOG_E_POLICY},
+     WYRELOG_E_POLICY},
     /* REJECT: locked row with NULL locked_at (forward lock invariant). */
     {"INSERT INTO principal_states VALUES('s','locked',1,3,NULL);",
-        WYRELOG_E_POLICY},
+     WYRELOG_E_POLICY},
     /* ACCEPT: every valid state literal. */
     {"INSERT INTO principal_states VALUES('s','unverified',1,0,NULL);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     {"INSERT INTO principal_states VALUES('s','mfa_required',1,0,NULL);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     {"INSERT INTO principal_states VALUES('s','authenticated',1,0,NULL);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     {"INSERT INTO principal_states VALUES('s','locked',1,1,100);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     {"INSERT INTO principal_states VALUES('s','revoked',1,0,NULL);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     /* ACCEPT (forward-only key case): NON-LOCKED rows carrying a stale
      * nonzero counter and a stale locked_at MUST be accepted. */
     {"INSERT INTO principal_states VALUES('s','mfa_required',1,5,12345);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     {"INSERT INTO principal_states VALUES('s','authenticated',1,4,999);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
     {"INSERT INTO principal_states VALUES('s','unverified',1,2,777);",
-        WYRELOG_E_OK},
+     WYRELOG_E_OK},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (state_cases); i++) {
     if (sqlite3_exec (db, "DELETE FROM principal_states;", NULL, NULL, NULL)
@@ -3959,16 +3961,16 @@ check_store_validate_principal_domain (void)
 
   /* All eight defined transitions land together and must be accepted. */
   if (sqlite3_exec (db,
-          "INSERT INTO principal_events"
-          "(subject_id,event,from_state,to_state,created_at) VALUES"
-          "('s','login_ok','unverified','mfa_required',1),"
-          "('s','login_skip_mfa','unverified','authenticated',1),"
-          "('s','mfa_ok','mfa_required','authenticated',1),"
-          "('s','failed_attempt','mfa_required','mfa_required',1),"
-          "('s','lock','mfa_required','locked',1),"
-          "('s','lock','authenticated','locked',1),"
-          "('s','revoke','authenticated','revoked',1),"
-          "('s','unlock','locked','unverified',1);", NULL, NULL, NULL)
+      "INSERT INTO principal_events"
+      "(subject_id,event,from_state,to_state,created_at) VALUES"
+      "('s','login_ok','unverified','mfa_required',1),"
+      "('s','login_skip_mfa','unverified','authenticated',1),"
+      "('s','mfa_ok','mfa_required','authenticated',1),"
+      "('s','failed_attempt','mfa_required','mfa_required',1),"
+      "('s','lock','mfa_required','locked',1),"
+      "('s','lock','authenticated','locked',1),"
+      "('s','revoke','authenticated','revoked',1),"
+      "('s','unlock','locked','unverified',1);", NULL, NULL, NULL)
       != SQLITE_OK)
     return 1625;
   if (wyl_policy_store_validate_principal_domain (store) != WYRELOG_E_OK)
@@ -3977,24 +3979,24 @@ check_store_validate_principal_domain (void)
   static const char *const bad_events[] = {
     /* undefined (from,event,to) tuple - event valid but no such edge */
     "INSERT INTO principal_events"
-        "(subject_id,event,from_state,to_state,created_at) "
-        "VALUES('s','mfa_ok','unverified','authenticated',1);",
+    "(subject_id,event,from_state,to_state,created_at) "
+    "VALUES('s','mfa_ok','unverified','authenticated',1);",
     /* defined edge but wrong to_state */
     "INSERT INTO principal_events"
-        "(subject_id,event,from_state,to_state,created_at) "
-        "VALUES('s','lock','mfa_required','revoked',1);",
+    "(subject_id,event,from_state,to_state,created_at) "
+    "VALUES('s','lock','mfa_required','revoked',1);",
     /* unknown event literal */
     "INSERT INTO principal_events"
-        "(subject_id,event,from_state,to_state,created_at) "
-        "VALUES('s','explode','mfa_required','locked',1);",
+    "(subject_id,event,from_state,to_state,created_at) "
+    "VALUES('s','explode','mfa_required','locked',1);",
     /* unknown from_state literal */
     "INSERT INTO principal_events"
-        "(subject_id,event,from_state,to_state,created_at) "
-        "VALUES('s','lock','bogus','locked',1);",
+    "(subject_id,event,from_state,to_state,created_at) "
+    "VALUES('s','lock','bogus','locked',1);",
     /* unknown to_state literal */
     "INSERT INTO principal_events"
-        "(subject_id,event,from_state,to_state,created_at) "
-        "VALUES('s','lock','mfa_required','bogus',1);",
+    "(subject_id,event,from_state,to_state,created_at) "
+    "VALUES('s','lock','mfa_required','bogus',1);",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (bad_events); i++) {
     if (sqlite3_exec (db, "DELETE FROM principal_events;", NULL, NULL, NULL)
@@ -4037,17 +4039,17 @@ check_store_validate_principal_domain_legacy_roundtrip (void)
     /* Model a pre-lockout binary: three-column principal_states with a
      * spread of valid states, no lockout columns. */
     if (sqlite3_exec (wyl_policy_store_get_db (store),
-            "DROP TABLE principal_states;"
-            "CREATE TABLE principal_states ("
-            "  subject_id TEXT PRIMARY KEY,"
-            "  state TEXT NOT NULL,"
-            "  updated_at INTEGER"
-            ");"
-            "INSERT INTO principal_states VALUES('legacy.a','unverified',10);"
-            "INSERT INTO principal_states VALUES('legacy.b','mfa_required',11);"
-            "INSERT INTO principal_states"
-            "  VALUES('legacy.c','authenticated',12);",
-            NULL, NULL, NULL) != SQLITE_OK)
+        "DROP TABLE principal_states;"
+        "CREATE TABLE principal_states ("
+        "  subject_id TEXT PRIMARY KEY,"
+        "  state TEXT NOT NULL,"
+        "  updated_at INTEGER"
+        ");"
+        "INSERT INTO principal_states VALUES('legacy.a','unverified',10);"
+        "INSERT INTO principal_states VALUES('legacy.b','mfa_required',11);"
+        "INSERT INTO principal_states"
+        "  VALUES('legacy.c','authenticated',12);",
+        NULL, NULL, NULL) != SQLITE_OK)
       return 1644;
   }
 
@@ -4057,7 +4059,7 @@ check_store_validate_principal_domain_legacy_roundtrip (void)
         != WYRELOG_E_OK)
       return 1645;
     /* create_schema migrates and (via validate_snapshot at the tail)
-     * would reject any invalid row; a clean legacy store succeeds. */
+    * would reject any invalid row; a clean legacy store succeeds. */
     if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
       return 1646;
     if (wyl_policy_store_validate_principal_domain (store) != WYRELOG_E_OK)
@@ -4069,7 +4071,7 @@ check_store_validate_principal_domain_legacy_roundtrip (void)
     gint64 locked_at = -1;
     gboolean found = FALSE;
     if (wyl_policy_store_get_principal_lock_info (store, "legacy.b",
-            &st, &count, &locked_at, &found) != WYRELOG_E_OK)
+        &st, &count, &locked_at, &found) != WYRELOG_E_OK)
       return 1648;
     if (!found || g_strcmp0 (st, "mfa_required") != 0 || count != 0
         || locked_at != G_MININT64)
@@ -4109,9 +4111,9 @@ check_store_validate_principal_domain_open_time_reject (void)
     /* Seed a durable row that violates the forward lock invariant:
      * LOCKED with counter=0 and NULL locked_at. */
     if (sqlite3_exec (wyl_policy_store_get_db (store),
-            "INSERT INTO principal_states "
-            "VALUES('corrupt.user','locked',7,0,NULL);",
-            NULL, NULL, NULL) != SQLITE_OK)
+        "INSERT INTO principal_states "
+        "VALUES('corrupt.user','locked',7,0,NULL);",
+        NULL, NULL, NULL) != SQLITE_OK)
       return 1664;
   }
 
@@ -4153,7 +4155,7 @@ check_store_sets_session_state (void)
     .state = "closed",
   };
   if (wyl_policy_store_foreach_session_state (store,
-          session_state_expect_cb, &expect) != WYRELOG_E_OK)
+      session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 90;
   if (expect.matches != 1)
     return 91;
@@ -4183,7 +4185,7 @@ check_store_seed_created_tenant_authority (void)
   if (wyl_policy_store_begin_mutation (store) != WYRELOG_E_OK)
     return 3963;
   if (wyl_policy_store_seed_created_tenant_authority (store, "seed-tenant",
-          "seed-admin") != WYRELOG_E_OK) {
+      "seed-admin") != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return 3964;
   }
@@ -4192,11 +4194,11 @@ check_store_seed_created_tenant_authority (void)
 
   /* system_admin membership is present at <tenant>, absent at __wr_default. */
   if (wyl_policy_store_role_membership_exists (store, "seed-admin",
-          "wr.system_admin", "seed-tenant", &exists) != WYRELOG_E_OK || !exists)
+      "wr.system_admin", "seed-tenant", &exists) != WYRELOG_E_OK || !exists)
     return 3966;
   exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "seed-admin",
-          "wr.system_admin", "__wr_default", &exists) != WYRELOG_E_OK || exists)
+      "wr.system_admin", "__wr_default", &exists) != WYRELOG_E_OK || exists)
     return 3967;
 
   /* session_state(active) is present at <tenant>, absent at __wr_default. */
@@ -4209,12 +4211,12 @@ check_store_seed_created_tenant_authority (void)
     .state = "active",
   };
   if (wyl_policy_store_foreach_session_state (store, session_state_expect_cb,
-          &tenant_state) != WYRELOG_E_OK)
+      &tenant_state) != WYRELOG_E_OK)
     return 3968;
   if (tenant_state.matches != 1)
     return 3969;
   if (wyl_policy_store_foreach_session_state (store, session_state_expect_cb,
-          &default_state) != WYRELOG_E_OK)
+      &default_state) != WYRELOG_E_OK)
     return 3970;
   if (default_state.matches != 0)
     return 3971;
@@ -4227,7 +4229,7 @@ check_store_seed_created_tenant_authority (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_role_membership_event (store,
-          role_membership_event_expect_cb, &grant_event) != WYRELOG_E_OK)
+      role_membership_event_expect_cb, &grant_event) != WYRELOG_E_OK)
     return 3972;
   if (grant_event.matches != 1)
     return 3973;
@@ -4237,7 +4239,7 @@ check_store_seed_created_tenant_authority (void)
   if (wyl_policy_store_begin_mutation (store) != WYRELOG_E_OK)
     return 3974;
   if (wyl_policy_store_seed_created_tenant_authority (store, "seed-tenant",
-          "seed-admin") != WYRELOG_E_OK) {
+      "seed-admin") != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return 3975;
   }
@@ -4250,7 +4252,7 @@ check_store_seed_created_tenant_authority (void)
     .scope = "seed-tenant",
   };
   if (wyl_policy_store_foreach_role_membership (store,
-          role_membership_expect_cb, &membership) != WYRELOG_E_OK)
+      role_membership_expect_cb, &membership) != WYRELOG_E_OK)
     return 3977;
   if (membership.matches != 1)
     return 3978;
@@ -4259,7 +4261,7 @@ check_store_seed_created_tenant_authority (void)
     .state = "active",
   };
   if (wyl_policy_store_foreach_session_state (store, session_state_expect_cb,
-          &tenant_state_again) != WYRELOG_E_OK)
+      &tenant_state_again) != WYRELOG_E_OK)
     return 3979;
   if (tenant_state_again.matches != 1)
     return 3980;
@@ -4277,7 +4279,7 @@ check_store_appends_principal_event (void)
     return 93;
   gint64 event_id = -1;
   if (wyl_policy_store_append_principal_event (store, "principal-user",
-          "login_skip_mfa", "unverified", "authenticated", &event_id)
+      "login_skip_mfa", "unverified", "authenticated", &event_id)
       != WYRELOG_E_OK)
     return 94;
 
@@ -4289,7 +4291,7 @@ check_store_appends_principal_event (void)
     .to_state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_event (store,
-          principal_event_expect_cb, &expect) != WYRELOG_E_OK)
+      principal_event_expect_cb, &expect) != WYRELOG_E_OK)
     return 95;
   if (expect.matches != 1)
     return 96;
@@ -4307,7 +4309,7 @@ check_store_appends_session_event (void)
     return 98;
   gint64 event_id = -1;
   if (wyl_policy_store_append_session_event (store, "session/1",
-          "elevate_grant", "active", "elevated", &event_id) != WYRELOG_E_OK)
+      "elevate_grant", "active", "elevated", &event_id) != WYRELOG_E_OK)
     return 99;
 
   SessionEventExpect expect = {
@@ -4318,7 +4320,7 @@ check_store_appends_session_event (void)
     .to_state = "elevated",
   };
   if (wyl_policy_store_foreach_session_event (store, session_event_expect_cb,
-          &expect) != WYRELOG_E_OK)
+      &expect) != WYRELOG_E_OK)
     return 100;
   if (expect.matches != 1)
     return 101;
@@ -4337,11 +4339,11 @@ check_store_distinguishes_duplicate_events (void)
   gint64 principal_first = -1;
   gint64 principal_second = -1;
   if (wyl_policy_store_append_principal_event (store, "principal-dup",
-          "login_ok", "unverified", "mfa_required", &principal_first)
+      "login_ok", "unverified", "mfa_required", &principal_first)
       != WYRELOG_E_OK)
     return 104;
   if (wyl_policy_store_append_principal_event (store, "principal-dup",
-          "login_ok", "unverified", "mfa_required", &principal_second)
+      "login_ok", "unverified", "mfa_required", &principal_second)
       != WYRELOG_E_OK)
     return 105;
   if (principal_first <= 0 || principal_second <= principal_first)
@@ -4354,7 +4356,7 @@ check_store_distinguishes_duplicate_events (void)
     .to_state = "mfa_required",
   };
   if (wyl_policy_store_foreach_principal_event (store,
-          principal_event_expect_cb, &principal_expect) != WYRELOG_E_OK)
+      principal_event_expect_cb, &principal_expect) != WYRELOG_E_OK)
     return 107;
   if (principal_expect.matches != 2)
     return 108;
@@ -4362,11 +4364,11 @@ check_store_distinguishes_duplicate_events (void)
   gint64 session_first = -1;
   gint64 session_second = -1;
   if (wyl_policy_store_append_session_event (store, "session-dup",
-          "elevate_grant", "active", "elevated", &session_first)
+      "elevate_grant", "active", "elevated", &session_first)
       != WYRELOG_E_OK)
     return 109;
   if (wyl_policy_store_append_session_event (store, "session-dup",
-          "elevate_grant", "active", "elevated", &session_second)
+      "elevate_grant", "active", "elevated", &session_second)
       != WYRELOG_E_OK)
     return 110;
   if (session_first <= 0 || session_second <= session_first)
@@ -4379,19 +4381,19 @@ check_store_distinguishes_duplicate_events (void)
     .to_state = "elevated",
   };
   if (wyl_policy_store_foreach_session_event (store, session_event_expect_cb,
-          &session_expect) != WYRELOG_E_OK)
+      &session_expect) != WYRELOG_E_OK)
     return 112;
   if (session_expect.matches != 2)
     return 113;
   gint64 perm_first = -1;
   gint64 perm_second = -1;
   if (wyl_policy_store_append_permission_state_event (store, "perm-dup-user",
-          "wr.perm.dup", "perm-dup-scope", "grant", "dormant", "armed",
-          &perm_first) != WYRELOG_E_OK)
+      "wr.perm.dup", "perm-dup-scope", "grant", "dormant", "armed",
+      &perm_first) != WYRELOG_E_OK)
     return 233;
   if (wyl_policy_store_append_permission_state_event (store, "perm-dup-user",
-          "wr.perm.dup", "perm-dup-scope", "grant", "dormant", "armed",
-          &perm_second) != WYRELOG_E_OK)
+      "wr.perm.dup", "perm-dup-scope", "grant", "dormant", "armed",
+      &perm_second) != WYRELOG_E_OK)
     return 234;
   if (perm_first <= 0 || perm_second <= perm_first)
     return 235;
@@ -4404,7 +4406,7 @@ check_store_distinguishes_duplicate_events (void)
     .to_state = "armed",
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_expect_cb, &perm_expect) != WYRELOG_E_OK)
+      permission_state_event_expect_cb, &perm_expect) != WYRELOG_E_OK)
     return 236;
   if (perm_expect.matches != 2)
     return 237;
@@ -4422,9 +4424,9 @@ check_store_appends_audit_event (void)
     return 121;
   gboolean inserted = FALSE;
   if (wyl_policy_store_append_audit_event_full (store,
-          "01890c10-2e3f-7000-8000-000000000001", 123,
-          "audit-user", "read", "doc/1", "not_armed", "perm_state",
-          "req-policy-store", WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
+      "01890c10-2e3f-7000-8000-000000000001", 123,
+      "audit-user", "read", "doc/1", "not_armed", "perm_state",
+      "req-policy-store", WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
     return 122;
   if (!inserted)
     return 123;
@@ -4434,10 +4436,10 @@ check_store_appends_audit_event (void)
       "SELECT subject_id, action, resource_id, deny_reason, deny_origin, "
       "request_id, decision FROM audit_events WHERE id = ?;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK)
+      NULL) != SQLITE_OK)
     return 124;
   if (sqlite3_bind_text (stmt, 1, "01890c10-2e3f-7000-8000-000000000001",
-          -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+      -1, SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     return 125;
   }
@@ -4447,22 +4449,22 @@ check_store_appends_audit_event (void)
   if (step_rc != SQLITE_ROW)
     rc = 126;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 0),
-          "audit-user") != 0)
+      "audit-user") != 0)
     rc = 127;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
-          "read") != 0)
+      "read") != 0)
     rc = 128;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
-          "doc/1") != 0)
+      "doc/1") != 0)
     rc = 129;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 3),
-          "not_armed") != 0)
+      "not_armed") != 0)
     rc = 130;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
-          "perm_state") != 0)
+      "perm_state") != 0)
     rc = 131;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 5),
-          "req-policy-store") != 0)
+      "req-policy-store") != 0)
     rc = 132;
   else if (sqlite3_column_int (stmt, 6) != WYL_DECISION_DENY)
     rc = 133;
@@ -4482,9 +4484,9 @@ check_store_iterates_audit_event (void)
     return 133;
   gboolean inserted = FALSE;
   if (wyl_policy_store_append_audit_event_full (store,
-          "01890c10-2e3f-7000-8000-000000000002", 456,
-          "audit-user", "write", "doc/2", "allowed", "test",
-          "req-iter", WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+      "01890c10-2e3f-7000-8000-000000000002", 456,
+      "audit-user", "write", "doc/2", "allowed", "test",
+      "req-iter", WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
     return 134;
 
   AuditEventExpect expect = {
@@ -4499,7 +4501,7 @@ check_store_iterates_audit_event (void)
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
-          &expect) != WYRELOG_E_OK)
+      &expect) != WYRELOG_E_OK)
     return 135;
   if (expect.matches != 1)
     return 136;
@@ -4517,22 +4519,22 @@ check_store_append_audit_event_is_idempotent (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 145;
   if (wyl_policy_store_append_audit_event (store, id, 777, NULL,
-          "same.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      "same.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK)
     return 146;
   if (wyl_policy_store_append_audit_event (store, id, 777, NULL,
-          "same.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      "same.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK)
     return 147;
   if (wyl_policy_store_append_audit_event (store, id, 777, NULL,
-          "different.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      "different.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_POLICY)
     return 148;
 
   sqlite3_stmt *stmt = NULL;
   static const gchar *sql = "SELECT COUNT(*) FROM audit_events WHERE id = ?;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK)
+      NULL) != SQLITE_OK)
     return 149;
   if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
@@ -4562,8 +4564,8 @@ check_store_records_audit_intention (void)
     return 241;
   gboolean inserted = FALSE;
   if (wyl_policy_store_record_audit_intention_full (store, id, 1002,
-          "audit-user", "read", "doc/intent", "not_armed", "perm_state",
-          "req-intent", WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
+      "audit-user", "read", "doc/intent", "not_armed", "perm_state",
+      "req-intent", WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
     return 242;
   if (!inserted)
     return 243;
@@ -4582,7 +4584,7 @@ check_store_records_audit_intention (void)
     .attempt_count = 0,
   };
   if (wyl_policy_store_foreach_audit_intention (store, "pending",
-          audit_intention_expect_cb, &expect) != WYRELOG_E_OK)
+      audit_intention_expect_cb, &expect) != WYRELOG_E_OK)
     return 244;
   if (expect.matches != 1)
     return 245;
@@ -4592,7 +4594,7 @@ check_store_records_audit_intention (void)
       "SELECT chain_prev, chain_hash, anchor_batch_id "
       "FROM audit_intentions WHERE audit_id = ?;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK)
+      NULL) != SQLITE_OK)
     return 246;
   if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
@@ -4624,28 +4626,28 @@ check_store_audit_intention_is_idempotent (void)
     return 251;
   gboolean inserted = FALSE;
   if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
-          "audit-user", "same.action", NULL, NULL, NULL, "req-same",
-          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+      "audit-user", "same.action", NULL, NULL, NULL, "req-same",
+      WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
     return 252;
   if (!inserted)
     return 253;
   inserted = TRUE;
   if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
-          "audit-user", "same.action", NULL, NULL, NULL, "req-same",
-          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+      "audit-user", "same.action", NULL, NULL, NULL, "req-same",
+      WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
     return 254;
   if (inserted)
     return 255;
   if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
-          "audit-user", "different.action", NULL, NULL, NULL, "req-same",
-          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_POLICY)
+      "audit-user", "different.action", NULL, NULL, NULL, "req-same",
+      WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_POLICY)
     return 256;
 
   sqlite3_stmt *stmt = NULL;
   static const gchar *sql =
       "SELECT COUNT(*) FROM audit_intentions WHERE audit_id = ?;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK)
+      NULL) != SQLITE_OK)
     return 257;
   if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
@@ -4676,12 +4678,12 @@ check_store_marks_audit_intention_states (void)
     return 262;
   gboolean inserted = FALSE;
   if (wyl_policy_store_record_audit_intention_full (store, committed_id, 1004,
-          "audit-user", "commit.action", NULL, NULL, NULL, NULL,
-          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+      "audit-user", "commit.action", NULL, NULL, NULL, NULL,
+      WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
     return 263;
   if (wyl_policy_store_record_audit_intention_full (store, failed_id, 1005,
-          "audit-user", "fail.action", NULL, NULL, NULL, NULL,
-          WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
+      "audit-user", "fail.action", NULL, NULL, NULL, NULL,
+      WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
     return 264;
   if (wyl_policy_store_mark_audit_intention_committed (store, committed_id)
       != WYRELOG_E_OK)
@@ -4690,16 +4692,16 @@ check_store_marks_audit_intention_states (void)
       != WYRELOG_E_OK)
     return 283;
   if (wyl_policy_store_mark_audit_intention_failed (store, committed_id,
-          "late failure") != WYRELOG_E_POLICY)
+      "late failure") != WYRELOG_E_POLICY)
     return 284;
   if (wyl_policy_store_mark_audit_intention_failed (store, failed_id,
-          "duckdb append failed") != WYRELOG_E_OK)
+      "duckdb append failed") != WYRELOG_E_OK)
     return 266;
   if (wyl_policy_store_mark_audit_intention_committed (store, failed_id)
       != WYRELOG_E_OK)
     return 285;
   if (wyl_policy_store_mark_audit_intention_failed (store, failed_id,
-          "late failure") != WYRELOG_E_POLICY)
+      "late failure") != WYRELOG_E_POLICY)
     return 286;
 
   AuditIntentionExpect committed = {
@@ -4712,7 +4714,7 @@ check_store_marks_audit_intention_states (void)
     .attempt_count = 0,
   };
   if (wyl_policy_store_foreach_audit_intention (store, "committed",
-          audit_intention_expect_cb, &committed) != WYRELOG_E_OK)
+      audit_intention_expect_cb, &committed) != WYRELOG_E_OK)
     return 267;
   if (committed.matches != 1)
     return 268;
@@ -4727,7 +4729,7 @@ check_store_marks_audit_intention_states (void)
     .attempt_count = 1,
   };
   if (wyl_policy_store_foreach_audit_intention (store, "committed",
-          audit_intention_expect_cb, &failed) != WYRELOG_E_OK)
+      audit_intention_expect_cb, &failed) != WYRELOG_E_OK)
     return 269;
   if (failed.matches != 1)
     return 270;
@@ -4745,40 +4747,40 @@ check_store_rejects_bad_audit_intentions (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 272;
   if (wyl_policy_store_record_audit_intention_full (NULL,
-          "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
-          NULL, NULL, WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_INVALID)
+      "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
+      NULL, NULL, WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_INVALID)
     return 273;
   if (wyl_policy_store_record_audit_intention_full (store, NULL, 1, NULL,
-          NULL, NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW, &inserted)
+      NULL, NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW, &inserted)
       != WYRELOG_E_INVALID)
     return 274;
   if (wyl_policy_store_record_audit_intention_full (store,
-          "01890c10-2e3f-7000-8000-000000000010", -1, NULL, NULL, NULL, NULL,
-          NULL, NULL, WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_INVALID)
+      "01890c10-2e3f-7000-8000-000000000010", -1, NULL, NULL, NULL, NULL,
+      NULL, NULL, WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_INVALID)
     return 275;
   if (wyl_policy_store_record_audit_intention_full (store, "not-a-uuid", 1,
-          NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW, &inserted)
+      NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW, &inserted)
       != WYRELOG_E_INVALID)
     return 276;
   if (wyl_policy_store_record_audit_intention_full (store,
-          "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
-          NULL, NULL, (wyl_decision_t) 9, &inserted) != WYRELOG_E_INVALID)
+      "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
+      NULL, NULL, (wyl_decision_t) 9, &inserted) != WYRELOG_E_INVALID)
     return 277;
   if (wyl_policy_store_record_audit_intention_full (store,
-          "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
-          NULL, NULL, WYL_DECISION_ALLOW, NULL) != WYRELOG_E_INVALID)
+      "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
+      NULL, NULL, WYL_DECISION_ALLOW, NULL) != WYRELOG_E_INVALID)
     return 278;
   if (wyl_policy_store_foreach_audit_intention (store, "unknown",
-          audit_intention_expect_cb, NULL) != WYRELOG_E_INVALID)
+      audit_intention_expect_cb, NULL) != WYRELOG_E_INVALID)
     return 279;
   if (wyl_policy_store_foreach_audit_intention (store, NULL, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 280;
   if (wyl_policy_store_mark_audit_intention_committed (store,
-          "01890c10-2e3f-7000-8000-000000000010") != WYRELOG_E_POLICY)
+      "01890c10-2e3f-7000-8000-000000000010") != WYRELOG_E_POLICY)
     return 281;
   if (wyl_policy_store_mark_audit_intention_failed (store,
-          "01890c10-2e3f-7000-8000-000000000010", NULL)
+      "01890c10-2e3f-7000-8000-000000000010", NULL)
       != WYRELOG_E_INVALID)
     return 282;
   return 0;
@@ -4795,26 +4797,26 @@ check_store_rejects_corrupt_audit_events (void)
     return 138;
 
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "INSERT INTO audit_events "
-          "(id, created_at_us, action, decision) "
-          "VALUES ('not-a-uuid', 1, 'bad.id', 1);",
-          NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO audit_events "
+      "(id, created_at_us, action, decision) "
+      "VALUES ('not-a-uuid', 1, 'bad.id', 1);",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 139;
   if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
-          NULL) != WYRELOG_E_POLICY)
+      NULL) != WYRELOG_E_POLICY)
     return 140;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "DELETE FROM audit_events;", NULL, NULL, NULL) != SQLITE_OK)
+      "DELETE FROM audit_events;", NULL, NULL, NULL) != SQLITE_OK)
     return 141;
 
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "INSERT INTO audit_events "
-          "(id, created_at_us, action, decision) "
-          "VALUES ('01890c10-2e3f-7000-8000-000000000004', -1, "
-          "'bad.timestamp', 1);", NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO audit_events "
+      "(id, created_at_us, action, decision) "
+      "VALUES ('01890c10-2e3f-7000-8000-000000000004', -1, "
+      "'bad.timestamp', 1);", NULL, NULL, NULL) != SQLITE_OK)
     return 142;
   if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
-          NULL) != WYRELOG_E_POLICY)
+      NULL) != WYRELOG_E_POLICY)
     return 143;
 
   return 0;
@@ -4831,28 +4833,28 @@ check_store_rejects_bad_direct_permission (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 71;
   if (wyl_policy_store_grant_direct_permission (store, "direct-user",
-          "missing-perm", "direct-scope") != WYRELOG_E_IO)
+      "missing-perm", "direct-scope") != WYRELOG_E_IO)
     return 72;
   if (wyl_policy_store_grant_direct_permission (NULL, "direct-user",
-          "missing-perm", "direct-scope") != WYRELOG_E_INVALID)
+      "missing-perm", "direct-scope") != WYRELOG_E_INVALID)
     return 73;
   if (wyl_policy_store_revoke_direct_permission (store, NULL,
-          "missing-perm", "direct-scope") != WYRELOG_E_INVALID)
+      "missing-perm", "direct-scope") != WYRELOG_E_INVALID)
     return 74;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
-          "missing-perm", "direct-scope", NULL) != WYRELOG_E_INVALID)
+      "missing-perm", "direct-scope", NULL) != WYRELOG_E_INVALID)
     return 75;
   if (wyl_policy_store_foreach_direct_permission (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 78;
   if (wyl_policy_store_append_direct_permission_event (store, NULL,
-          "missing-perm", "direct-scope", "grant") != WYRELOG_E_INVALID)
+      "missing-perm", "direct-scope", "grant") != WYRELOG_E_INVALID)
     return 79;
   if (wyl_policy_store_foreach_direct_permission_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 80;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
-          "missing-perm", "direct-scope", &exists) != WYRELOG_E_OK)
+      "missing-perm", "direct-scope", &exists) != WYRELOG_E_OK)
     return 76;
   if (exists)
     return 77;
@@ -4869,7 +4871,7 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 51;
   if (wyl_policy_store_grant_role_permission (store, "missing-role",
-          "missing-perm") != WYRELOG_E_IO)
+      "missing-perm") != WYRELOG_E_IO)
     return 52;
   if (wyl_policy_store_upsert_role (NULL, "role", "role") != WYRELOG_E_INVALID)
     return 53;
@@ -4880,81 +4882,81 @@ check_store_rejects_bad_role_permission (void)
       != WYRELOG_E_INVALID)
     return 55;
   if (wyl_policy_store_grant_role_inheritance (store, "missing-child",
-          "missing-parent") != WYRELOG_E_IO)
+      "missing-parent") != WYRELOG_E_IO)
     return 58;
   if (wyl_policy_store_foreach_role_inheritance (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 59;
   if (wyl_policy_store_grant_role_membership (store, "role-user",
-          "missing-role", "role-scope") != WYRELOG_E_IO)
+      "missing-role", "role-scope") != WYRELOG_E_IO)
     return 97;
   if (wyl_policy_store_grant_role_membership (store, NULL, "missing-role",
-          "role-scope") != WYRELOG_E_INVALID)
+      "role-scope") != WYRELOG_E_INVALID)
     return 98;
   if (wyl_policy_store_revoke_role_membership (store, NULL, "missing-role",
-          "role-scope") != WYRELOG_E_INVALID)
+      "role-scope") != WYRELOG_E_INVALID)
     return 100;
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, NULL, "missing-role",
-          "role-scope", &exists) != WYRELOG_E_INVALID)
+      "role-scope", &exists) != WYRELOG_E_INVALID)
     return 101;
   if (wyl_policy_store_foreach_role_membership (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 99;
   if (wyl_policy_store_append_role_membership_event (store, "role-user",
-          "missing-role", "role-scope", "grant") != WYRELOG_E_IO)
+      "missing-role", "role-scope", "grant") != WYRELOG_E_IO)
     return 102;
   if (wyl_policy_store_append_role_membership_event (store, "role-user",
-          "missing-role", "role-scope", "invalid") != WYRELOG_E_IO)
+      "missing-role", "role-scope", "invalid") != WYRELOG_E_IO)
     return 103;
   if (wyl_policy_store_foreach_role_membership_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 104;
   if (wyl_policy_store_set_permission_state (store, NULL, "wr.read", "scope",
-          "armed") != WYRELOG_E_INVALID)
+      "armed") != WYRELOG_E_INVALID)
     return 105;
   if (wyl_policy_store_set_permission_state (store, "user", NULL, "scope",
-          "armed") != WYRELOG_E_INVALID)
+      "armed") != WYRELOG_E_INVALID)
     return 106;
   if (wyl_policy_store_set_permission_state (store, "user", "wr.read", NULL,
-          "armed") != WYRELOG_E_INVALID)
+      "armed") != WYRELOG_E_INVALID)
     return 107;
   if (wyl_policy_store_set_permission_state (store, "user", "wr.read", "scope",
-          NULL) != WYRELOG_E_INVALID)
+      NULL) != WYRELOG_E_INVALID)
     return 108;
   gboolean permission_state_exists = FALSE;
   if (wyl_policy_store_permission_state_exists (store, NULL, "wr.read", "scope",
-          &permission_state_exists) != WYRELOG_E_INVALID)
+      &permission_state_exists) != WYRELOG_E_INVALID)
     return 109;
   if (wyl_policy_store_permission_state_exists (store, "user", NULL, "scope",
-          &permission_state_exists) != WYRELOG_E_INVALID)
+      &permission_state_exists) != WYRELOG_E_INVALID)
     return 110;
   if (wyl_policy_store_permission_state_exists (store, "user", "wr.read", NULL,
-          &permission_state_exists) != WYRELOG_E_INVALID)
+      &permission_state_exists) != WYRELOG_E_INVALID)
     return 111;
   if (wyl_policy_store_permission_state_exists (store, "user", "wr.read",
-          "scope", NULL) != WYRELOG_E_INVALID)
+      "scope", NULL) != WYRELOG_E_INVALID)
     return 112;
   if (wyl_policy_store_foreach_permission_state (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 113;
   if (wyl_policy_store_append_permission_state_event (store, NULL, "wr.read",
-          "scope", "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+      "scope", "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
     return 114;
   if (wyl_policy_store_append_permission_state_event (store, "user", NULL,
-          "scope", "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+      "scope", "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
     return 115;
   if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
-          NULL, "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+      NULL, "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
     return 116;
   if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
-          "scope", NULL, "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+      "scope", NULL, "dormant", "armed", NULL) != WYRELOG_E_INVALID)
     return 117;
   if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
-          "scope", "grant", NULL, "armed", NULL) != WYRELOG_E_INVALID)
+      "scope", "grant", NULL, "armed", NULL) != WYRELOG_E_INVALID)
     return 118;
   if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
-          "scope", "grant", "dormant", NULL, NULL) != WYRELOG_E_INVALID)
+      "scope", "grant", "dormant", NULL, NULL) != WYRELOG_E_INVALID)
     return 119;
   if (wyl_policy_store_foreach_permission_state_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
@@ -4966,7 +4968,7 @@ check_store_rejects_bad_role_permission (void)
       != WYRELOG_E_INVALID)
     return 57;
   if (wyl_policy_store_append_principal_event (store, NULL, "login_ok",
-          "unverified", "mfa_required", NULL) != WYRELOG_E_INVALID)
+      "unverified", "mfa_required", NULL) != WYRELOG_E_INVALID)
     return 92;
   if (wyl_policy_store_foreach_principal_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
@@ -4978,20 +4980,20 @@ check_store_rejects_bad_role_permission (void)
       != WYRELOG_E_INVALID)
     return 59;
   if (wyl_policy_store_append_session_event (store, NULL, "request", "idle",
-          "active", NULL) != WYRELOG_E_INVALID)
+      "active", NULL) != WYRELOG_E_INVALID)
     return 60;
   if (wyl_policy_store_foreach_session_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 61;
   if (wyl_policy_store_append_audit_event (store, NULL, 0, NULL, NULL, NULL,
-          NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+      NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
     return 94;
   if (wyl_policy_store_append_audit_event (store,
-          "01890c10-2e3f-7000-8000-000000000003", -1, NULL, NULL, NULL,
-          NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+      "01890c10-2e3f-7000-8000-000000000003", -1, NULL, NULL, NULL,
+      NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
     return 95;
   if (wyl_policy_store_append_audit_event (store, "audit-bad", 0, NULL,
-          NULL, NULL, NULL, NULL, (wyl_decision_t) 9) != WYRELOG_E_INVALID)
+      NULL, NULL, NULL, NULL, (wyl_decision_t) 9) != WYRELOG_E_INVALID)
     return 96;
   if (wyl_policy_store_foreach_audit_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
@@ -5019,7 +5021,7 @@ check_bootstrap_admin_applies_on_fresh_store (void)
   gboolean applied = FALSE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-          &applied, &existing) != WYRELOG_E_OK)
+      &applied, &existing) != WYRELOG_E_OK)
     return 804;
   if (!applied)
     return 805;
@@ -5044,39 +5046,39 @@ check_bootstrap_admin_applies_on_fresh_store (void)
 
   gint membership_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM role_memberships "
-          "WHERE subject_id = 'alice.root' "
-          "  AND role_id = 'wr.system_admin' "
-          "  AND scope = '__wr_default';", &membership_count) != 0)
+      "SELECT COUNT(*) FROM role_memberships "
+      "WHERE subject_id = 'alice.root' "
+      "  AND role_id = 'wr.system_admin' "
+      "  AND scope = '__wr_default';", &membership_count) != 0)
     return 812;
   if (membership_count != 1)
     return 813;
 
   gint default_scope_state_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM session_states "
-          "WHERE session_id = '__wr_default' "
-          "  AND state = 'active';", &default_scope_state_count) != 0)
+      "SELECT COUNT(*) FROM session_states "
+      "WHERE session_id = '__wr_default' "
+      "  AND state = 'active';", &default_scope_state_count) != 0)
     return 816;
   if (default_scope_state_count != 1)
     return 817;
 
   gint default_scope_event_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM session_events "
-          "WHERE session_id = '__wr_default' "
-          "  AND event = 'request' "
-          "  AND from_state = 'idle' "
-          "  AND to_state = 'active';", &default_scope_event_count) != 0)
+      "SELECT COUNT(*) FROM session_events "
+      "WHERE session_id = '__wr_default' "
+      "  AND event = 'request' "
+      "  AND from_state = 'idle' "
+      "  AND to_state = 'active';", &default_scope_event_count) != 0)
     return 818;
   if (default_scope_event_count != 1)
     return 819;
 
   gint skip_mfa_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM direct_permissions "
-          "WHERE subject_id = 'alice.root' "
-          "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
+      "SELECT COUNT(*) FROM direct_permissions "
+      "WHERE subject_id = 'alice.root' "
+      "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
     return 814;
   if (skip_mfa_count != 0)
     return 815;
@@ -5097,7 +5099,7 @@ check_bootstrap_admin_same_subject_is_idempotent (void)
   gboolean applied = FALSE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-          &applied, &existing) != WYRELOG_E_OK)
+      &applied, &existing) != WYRELOG_E_OK)
     return 822;
   if (!applied)
     return 823;
@@ -5105,7 +5107,7 @@ check_bootstrap_admin_same_subject_is_idempotent (void)
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-          &applied, &existing2) != WYRELOG_E_OK)
+      &applied, &existing2) != WYRELOG_E_OK)
     return 824;
   if (applied)
     return 825;
@@ -5114,16 +5116,16 @@ check_bootstrap_admin_same_subject_is_idempotent (void)
 
   gint membership_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM role_memberships "
-          "WHERE role_id = 'wr.system_admin';", &membership_count) != 0)
+      "SELECT COUNT(*) FROM role_memberships "
+      "WHERE role_id = 'wr.system_admin';", &membership_count) != 0)
     return 827;
   if (membership_count != 1)
     return 828;
 
   gint marker_rows = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM wyrelog_config "
-          "WHERE config_key = 'bootstrap_admin_subject';", &marker_rows) != 0)
+      "SELECT COUNT(*) FROM wyrelog_config "
+      "WHERE config_key = 'bootstrap_admin_subject';", &marker_rows) != 0)
     return 829;
   if (marker_rows != 1)
     return 830;
@@ -5144,7 +5146,7 @@ check_bootstrap_admin_different_subject_is_refused (void)
   gboolean applied = FALSE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-          &applied, &existing) != WYRELOG_E_OK)
+      &applied, &existing) != WYRELOG_E_OK)
     return 842;
   if (!applied)
     return 843;
@@ -5152,7 +5154,7 @@ check_bootstrap_admin_different_subject_is_refused (void)
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "bob.root", FALSE,
-          &applied, &existing2) != WYRELOG_E_POLICY)
+      &applied, &existing2) != WYRELOG_E_POLICY)
     return 844;
   if (applied)
     return 845;
@@ -5161,8 +5163,8 @@ check_bootstrap_admin_different_subject_is_refused (void)
 
   gint membership_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM role_memberships "
-          "WHERE subject_id = 'bob.root';", &membership_count) != 0)
+      "SELECT COUNT(*) FROM role_memberships "
+      "WHERE subject_id = 'bob.root';", &membership_count) != 0)
     return 847;
   if (membership_count != 0)
     return 848;
@@ -5183,7 +5185,7 @@ check_bootstrap_admin_rejects_empty_subject (void)
   gboolean applied = TRUE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "", FALSE,
-          &applied, &existing) != WYRELOG_E_INVALID)
+      &applied, &existing) != WYRELOG_E_INVALID)
     return 862;
   if (applied)
     return 863;
@@ -5193,7 +5195,7 @@ check_bootstrap_admin_rejects_empty_subject (void)
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, NULL, FALSE,
-          &applied, &existing2) != WYRELOG_E_INVALID)
+      &applied, &existing2) != WYRELOG_E_INVALID)
     return 865;
   if (applied)
     return 866;
@@ -5216,7 +5218,7 @@ check_bootstrap_admin_rejects_whitespace_subject (void)
   gboolean applied = TRUE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice root", FALSE,
-          &applied, &existing) != WYRELOG_E_INVALID)
+      &applied, &existing) != WYRELOG_E_INVALID)
     return 872;
   if (applied)
     return 873;
@@ -5224,7 +5226,7 @@ check_bootstrap_admin_rejects_whitespace_subject (void)
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice/root", FALSE,
-          &applied, &existing2) != WYRELOG_E_INVALID)
+      &applied, &existing2) != WYRELOG_E_INVALID)
     return 874;
   if (applied)
     return 875;
@@ -5232,7 +5234,7 @@ check_bootstrap_admin_rejects_whitespace_subject (void)
   applied = TRUE;
   g_autofree gchar *existing3 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice\troot", FALSE,
-          &applied, &existing3) != WYRELOG_E_INVALID)
+      &applied, &existing3) != WYRELOG_E_INVALID)
     return 876;
   if (applied)
     return 877;
@@ -5259,7 +5261,7 @@ check_bootstrap_admin_rejects_overlong_subject (void)
   gboolean applied = TRUE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, overlong, FALSE,
-          &applied, &existing) != WYRELOG_E_INVALID)
+      &applied, &existing) != WYRELOG_E_INVALID)
     return 882;
   if (applied)
     return 883;
@@ -5268,7 +5270,7 @@ check_bootstrap_admin_rejects_overlong_subject (void)
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "ab", FALSE,
-          &applied, &existing2) != WYRELOG_E_INVALID)
+      &applied, &existing2) != WYRELOG_E_INVALID)
     return 884;
   if (applied)
     return 885;
@@ -5281,7 +5283,7 @@ check_bootstrap_admin_seal_survives_reopen (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-policy-bootstrap-XXXXXX",
-      &error);
+          &error);
   if (tmpdir == NULL)
     return 900;
   g_autofree gchar *store_path =
@@ -5300,7 +5302,7 @@ check_bootstrap_admin_seal_survives_reopen (void)
     gboolean applied = FALSE;
     g_autofree gchar *existing = NULL;
     if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-            &applied, &existing) != WYRELOG_E_OK)
+        &applied, &existing) != WYRELOG_E_OK)
       return 904;
     if (!applied)
       return 905;
@@ -5341,7 +5343,7 @@ check_bootstrap_admin_legacy_skip_migration (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-policy-legacy-XXXXXX",
-      &error);
+          &error);
   if (tmpdir == NULL)
     return 920;
   g_autofree gchar *store_path =
@@ -5360,16 +5362,16 @@ check_bootstrap_admin_legacy_skip_migration (void)
     if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
       return 923;
     if (wyl_policy_store_grant_role_membership (store, "legacy.admin",
-            "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
+        "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
       return 924;
     /* Erase any marker the migration may have written so this
      * fixture genuinely looks like a pre-#305 store on the next
      * open. */
     if (sqlite3_exec (wyl_policy_store_get_db (store),
-            "DELETE FROM wyrelog_config "
-            "WHERE config_key IN ('bootstrap_admin_subject',"
-            "                     'bootstrap_admin_sealed_at_us');",
-            NULL, NULL, NULL) != SQLITE_OK)
+        "DELETE FROM wyrelog_config "
+        "WHERE config_key IN ('bootstrap_admin_subject',"
+        "                     'bootstrap_admin_sealed_at_us');",
+        NULL, NULL, NULL) != SQLITE_OK)
       return 925;
   }
 
@@ -5403,7 +5405,7 @@ check_bootstrap_admin_legacy_skip_migration (void)
     gboolean applied = TRUE;
     g_autofree gchar *existing = NULL;
     if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-            &applied, &existing) != WYRELOG_E_POLICY)
+        &applied, &existing) != WYRELOG_E_POLICY)
       return 932;
     if (applied)
       return 933;
@@ -5430,41 +5432,41 @@ check_bootstrap_admin_allow_skip_mfa_flag (void)
   gboolean applied = FALSE;
   g_autofree gchar *existing = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", TRUE,
-          &applied, &existing) != WYRELOG_E_OK)
+      &applied, &existing) != WYRELOG_E_OK)
     return 942;
   if (!applied)
     return 943;
 
   gint skip_mfa_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM direct_permissions "
-          "WHERE subject_id = 'alice.root' "
-          "  AND perm_id = 'wr.login.skip_mfa' "
-          "  AND scope = 'login';", &skip_mfa_count) != 0)
+      "SELECT COUNT(*) FROM direct_permissions "
+      "WHERE subject_id = 'alice.root' "
+      "  AND perm_id = 'wr.login.skip_mfa' "
+      "  AND scope = 'login';", &skip_mfa_count) != 0)
     return 944;
   if (skip_mfa_count != 1)
     return 945;
 
   gint skip_mfa_state_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM permission_states "
-          "WHERE subject_id = 'alice.root' "
-          "  AND perm_id = 'wr.login.skip_mfa' "
-          "  AND scope = 'login' "
-          "  AND state = 'armed';", &skip_mfa_state_count) != 0)
+      "SELECT COUNT(*) FROM permission_states "
+      "WHERE subject_id = 'alice.root' "
+      "  AND perm_id = 'wr.login.skip_mfa' "
+      "  AND scope = 'login' "
+      "  AND state = 'armed';", &skip_mfa_state_count) != 0)
     return 946;
   if (skip_mfa_state_count != 1)
     return 947;
 
   gint skip_mfa_state_event_count = 0;
   if (count_rows (store,
-          "SELECT COUNT(*) FROM permission_state_events "
-          "WHERE subject_id = 'alice.root' "
-          "  AND perm_id = 'wr.login.skip_mfa' "
-          "  AND scope = 'login' "
-          "  AND event = 'grant' "
-          "  AND from_state = 'dormant' "
-          "  AND to_state = 'armed';", &skip_mfa_state_event_count) != 0)
+      "SELECT COUNT(*) FROM permission_state_events "
+      "WHERE subject_id = 'alice.root' "
+      "  AND perm_id = 'wr.login.skip_mfa' "
+      "  AND scope = 'login' "
+      "  AND event = 'grant' "
+      "  AND from_state = 'dormant' "
+      "  AND to_state = 'armed';", &skip_mfa_state_event_count) != 0)
     return 948;
   if (skip_mfa_state_event_count != 1)
     return 949;
@@ -5474,23 +5476,23 @@ check_bootstrap_admin_allow_skip_mfa_flag (void)
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
-          &applied, &existing2) != WYRELOG_E_OK)
+      &applied, &existing2) != WYRELOG_E_OK)
     return 950;
   if (applied)
     return 951;
 
   if (count_rows (store,
-          "SELECT COUNT(*) FROM direct_permissions "
-          "WHERE subject_id = 'alice.root' "
-          "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
+      "SELECT COUNT(*) FROM direct_permissions "
+      "WHERE subject_id = 'alice.root' "
+      "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
     return 952;
   if (skip_mfa_count != 1)
     return 953;
 
   if (count_rows (store,
-          "SELECT COUNT(*) FROM permission_states "
-          "WHERE subject_id = 'alice.root' "
-          "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_state_count) != 0)
+      "SELECT COUNT(*) FROM permission_states "
+      "WHERE subject_id = 'alice.root' "
+      "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_state_count) != 0)
     return 954;
   if (skip_mfa_state_count != 1)
     return 955;
@@ -5592,7 +5594,7 @@ main (void)
       != 0)
     return rc;
   if ((rc =
-          check_store_permission_state_transition_rolls_back_audit_conflict ())
+      check_store_permission_state_transition_rolls_back_audit_conflict ())
       != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
