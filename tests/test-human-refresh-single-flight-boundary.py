@@ -78,10 +78,16 @@ def check(source: str) -> None:
         "WylHumanRefreshRotation", "WylHumanRefreshWaiter",
         "human_refresh_rotation_", "human_refresh_waiter_",
         "soup_server_message_pause", "soup_server_message_unpause",
-        "g_main_context_iteration", "g_main_context_invoke",
-        "g_idle_source_new", "g_timeout_source_new", "g_cond_wait",
+        "g_main_context_iteration", "g_idle_source_new",
+        # Banned in the refresh handler only; swept file-wide above this point.
+        # g_main_context_invoke and the named helper that wraps it are pinned to
+        # the policy-write watcher below, the way g_timeout_source_new is pinned
+        # to the retirement scheduler.
+        "g_main_context_invoke", "policy_write_watch_run_on_watcher",
+        "g_timeout_source_new", "g_cond_wait",
         "issue_access_token (", "issue_refresh_token (",
     )
+    file_wide_forbidden = forbidden[:8]
     for item in forbidden:
         if item in handler:
             raise SystemExit(f"refresh handler regained async/legacy path: {item}")
@@ -190,9 +196,21 @@ def check(source: str) -> None:
     if code.count("g_main_context_invoke") != 1 or \
             marshaller.count(watcher_marshal) != 1:
         raise SystemExit("policy-write watcher marshal escaped its single site")
-    for obsolete in forbidden[:9]:
-        if obsolete == "g_main_context_invoke":
-            continue
+    # Pinning the primitive is not enough: the marshalled source must also land
+    # on the watcher context.  Attaching it to the dispatch context instead
+    # would put a GSource on libsoup's frozen main loop -- the very thread
+    # ownership violation the carve-out exists to permit avoiding.
+    arm_cb = function_body(code, "policy_write_watch_arm_cb")
+    arm_site = function_body(code, "wyl_daemon_policy_write_arm_socket_watch")
+    # Pin the WATCH's attach only: the context also attaches the service-auth
+    # retirement source, which is a different owner with its own gate above.
+    if code.count("g_source_attach (watch->source,") != 1 or \
+            arm_cb.count("g_source_attach (watch->source, op->context)") != 1:
+        raise SystemExit("watcher source attach escaped the watcher context")
+    if "policy_write_watch_arm_cb" not in arm_site or \
+            "write->ctx->policy_write_watcher_context)" not in arm_site:
+        raise SystemExit("watcher arm no longer targets the watcher context")
+    for obsolete in file_wide_forbidden:
         if obsolete in source:
             raise SystemExit(f"obsolete async machinery remains: {obsolete}")
     if "g_cond_wait_until" not in latch or "10 * G_USEC_PER_SEC" not in latch:
@@ -377,28 +395,43 @@ def main() -> int:
         pass
     else:
         raise SystemExit("structural guard accepted wrong-owner refresh route")
+    # Inject INSIDE refresh_handler.  "(void) path;" is not a refresh-handler
+    # anchor -- it first matches an unrelated handler -- so anchor on the
+    # dispatch-ownership gate, which the handler check above already pins.
+    handler_anchor = "gboolean dispatch_owned = human_refresh_dispatch_owned (ctx);"
+    if source.count(handler_anchor) != 1:
+        raise SystemExit("refresh handler injection anchor missing")
     for index, injection in enumerate((
             "g_main_context_iteration (ctx->dispatch_context, FALSE);",
             "soup_server_message_pause (msg);",
             "g_main_context_invoke (ctx->dispatch_context, NULL, NULL);",
+            "policy_write_watch_run_on_watcher (ctx, NULL, NULL, NULL);",
             "g_idle_source_new ();"), start=len(replacements)):
-        mutant = source.replace("(void) path;", f"(void) path;\n  {injection}", 1)
+        mutant = source.replace(handler_anchor,
+                                f"{handler_anchor}\n  {injection}", 1)
         try:
             check(mutant)
         except SystemExit:
             continue
         raise SystemExit(f"structural guard accepted async mutant {index}")
-    # The watcher marshal is allowed exactly once and only inside its owning
-    # helper: prove a second site and a relocated site are both still rejected.
+    # The watcher marshal is allowed exactly once, only inside its owning
+    # helper, and only onto the watcher context.  Prove a second site, a
+    # relocated site, a deleted site and a redirected attach are all rejected.
     watcher_call = ("g_main_context_invoke_full (ctx->policy_write_watcher_context,"
                     "\n      G_PRIORITY_DEFAULT, cb, op, NULL);")
-    if source.count(watcher_call) != 1:
-        raise SystemExit("watcher marshal mutant anchor missing")
+    watcher_attach = "g_source_attach (watch->source, op->context);"
+    for anchor, label in ((watcher_call, "marshal"), (watcher_attach, "attach")):
+        if source.count(anchor) != 1:
+            raise SystemExit(f"watcher {label} mutant anchor missing")
     for index, mutant in enumerate((
             source.replace(watcher_call, watcher_call + "\n  " + watcher_call, 1),
             source.replace(watcher_call, "", 1)
             + "\nstatic void misplaced_watch_marshal (void)\n{\n  "
-            + watcher_call + "\n}\n")):
+            + watcher_call + "\n}\n",
+            source.replace(watcher_call, "", 1),
+            source.replace(watcher_attach,
+                           "g_source_attach (watch->source, ctx->dispatch_context);",
+                           1))):
         try:
             check(mutant)
         except SystemExit:
