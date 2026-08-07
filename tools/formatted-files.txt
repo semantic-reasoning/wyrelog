@@ -2,12 +2,14 @@ tests/fact-test-support.h
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
 tests/test-daemon-http-decide.c
+tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
 tests/test-grant-req.c
 tests/test-handle-id.c
 tests/test-lobac-partial-delta.c
 tests/test-login-req.c
+tests/test-policy-store-totp.c
 tests/test-revoke-req.c
 tests/test-secure-duckdb-bridge.c
 tests/test-service-credential-domain.c
@@ -26,6 +28,7 @@ wyrelog/audit/event-private.h
 wyrelog/audit/iter-private.h
 wyrelog/auth/jwt-private.h
 wyrelog/auth/mfa-enrollment-private.h
+wyrelog/auth/mfa-validator.c
 wyrelog/auth/mfa-validator.h
 wyrelog/auth/service-auth-coordination.c
 wyrelog/auth/service-credential-domain.c
@@ -61,6 +64,8 @@ wyrelog/handle.h
 wyrelog/perm.h
 wyrelog/policy/service-permission-maintenance-private.c
 wyrelog/policy/store-lease-private.h
+wyrelog/policy/store-private.h
+wyrelog/policy/store.c
 wyrelog/session.h
 wyrelog/version.h
 wyrelog/wyctl/wyctl-config.h
@@ -82,6 +87,8 @@ wyrelog/wyl-keyprovider-dev-private.h
 wyrelog/wyl-keyprovider-dev.c
 wyrelog/wyl-request-id-private.h
 wyrelog/wyl-request-id.c
+wyrelog/wyl-session-private.h
+wyrelog/wyl-session.c
 wyrelog/wyl-traits-private.h
 wyrelog/wyl-version.c
 wyrelog/wyrelog.h

@@ -131,7 +131,7 @@ verify_principal_event_row (WylEngineVerification *verification, gpointer data)
   const gchar *symbols[] = { ctx->subject_id, from_name, event_name, to_name };
   for (guint i = 0; i < G_N_ELEMENTS (symbols); i++) {
     wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-        symbols[i], &row[i + 1]);
+            symbols[i], &row[i + 1]);
     /* A missing symbol means the row cannot be present: fail closed. */
     if (rc == WYRELOG_E_NOT_FOUND)
       return WYRELOG_E_POLICY;
@@ -141,7 +141,7 @@ verify_principal_event_row (WylEngineVerification *verification, gpointer data)
   gboolean exact = FALSE;
   wyrelog_error_t rc =
       wyl_engine_verification_has_exact_keyed_row (verification,
-      "principal_fired", ctx->event_id, row, G_N_ELEMENTS (row), &exact);
+          "principal_fired", ctx->event_id, row, G_N_ELEMENTS (row), &exact);
   if (rc != WYRELOG_E_OK)
     return rc;
   return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
@@ -177,14 +177,14 @@ publish_principal_transition (WylHandle *handle, const gchar *subject_id,
     return WYRELOG_E_INTERNAL;
   guint64 generation = 0;
   wyrelog_error_t rc = wyl_handle_policy_store_capture_generation (handle,
-      store, &generation);
+          store, &generation);
   if (rc == WYRELOG_E_OK) {
     WylMfaPrincipalPublication ctx = {
       subject_id, from_state, event, to_state, event_id
     };
     rc = wyl_engine_session_finish_external_publication (session, store,
-        generation, WYL_DURABLE_COMMIT_COMMITTED, verify_principal_event_row,
-        &ctx);
+            generation, WYL_DURABLE_COMMIT_COMMITTED, verify_principal_event_row,
+            &ctx);
   }
   wyl_engine_session_release (session);
   return rc;
@@ -258,11 +258,11 @@ note_failed_attempt (WylHandle *handle, const gchar *subject_id)
    * possession of the seed, and the counter will be reset on the next
    * successful verify. */
   wyrelog_error_t rc = wyl_policy_store_apply_principal_failure (store,
-      subject_id, WYL_MFA_LOCKOUT_THRESHOLD, (gint64) time (NULL),
-      &new_state, &new_count, &new_locked_at, &event_id);
+          subject_id, WYL_MFA_LOCKOUT_THRESHOLD, (gint64) time (NULL),
+          &new_state, &new_count, &new_locked_at, &event_id);
   if (rc != WYRELOG_E_OK) {
     /* Operator-visibility on the IO fault.  Keyed on subject_id and the
-     * error code; never includes the submitted code or the seed (F2). */
+    * error code; never includes the submitted code or the seed (F2). */
     WYL_LOG_WARN (WYL_LOG_SECTION_POLICY,
         "mfa: failed to durably record failed attempt for subject_id=%s rc=%d",
         subject_id, (int) rc);
@@ -278,8 +278,8 @@ note_failed_attempt (WylHandle *handle, const gchar *subject_id)
    * Any publication failure fails closed as E_INTERNAL. */
   if (g_strcmp0 (new_state, "locked") == 0) {
     wyrelog_error_t pub_rc = publish_principal_transition (handle, subject_id,
-        WYL_PRINCIPAL_STATE_MFA_REQUIRED, WYL_PRINCIPAL_EVENT_LOCK,
-        WYL_PRINCIPAL_STATE_LOCKED, event_id);
+            WYL_PRINCIPAL_STATE_MFA_REQUIRED, WYL_PRINCIPAL_EVENT_LOCK,
+            WYL_PRINCIPAL_STATE_LOCKED, event_id);
     if (pub_rc != WYRELOG_E_OK) {
       WYL_LOG_WARN (WYL_LOG_SECTION_POLICY,
           "mfa: failed to publish lockout transition for subject_id=%s rc=%d",
@@ -328,7 +328,7 @@ maybe_auto_unlock (WylHandle *handle, const gchar *subject_id,
   gboolean unlocked = FALSE;
   gint64 event_id = 0;
   if (wyl_policy_store_apply_principal_unlock (store, subject_id, &unlocked,
-          &event_id) != WYRELOG_E_OK)
+      &event_id) != WYRELOG_E_OK)
     return WYL_MFA_AUTO_UNLOCK_STORE_FAILURE;
   if (!unlocked)
     /* No row actually transitioned (a concurrent writer already moved it
@@ -336,8 +336,8 @@ maybe_auto_unlock (WylHandle *handle, const gchar *subject_id,
      * caller keeps the ordinary E_POLICY bounce. */
     return WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED;
   if (publish_principal_transition (handle, subject_id,
-          WYL_PRINCIPAL_STATE_LOCKED, WYL_PRINCIPAL_EVENT_UNLOCK,
-          WYL_PRINCIPAL_STATE_UNVERIFIED, event_id) != WYRELOG_E_OK)
+      WYL_PRINCIPAL_STATE_LOCKED, WYL_PRINCIPAL_EVENT_UNLOCK,
+      WYL_PRINCIPAL_STATE_UNVERIFIED, event_id) != WYRELOG_E_OK)
     return WYL_MFA_AUTO_UNLOCK_PUBLICATION_FAILURE;
   return WYL_MFA_AUTO_UNLOCK_UNLOCKED;
 }
@@ -379,16 +379,16 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
   gint64 plocked_at = 0;
   gboolean pfound = FALSE;
   wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
-      subject_id, &pstate, &pcount, &plocked_at, &pfound);
+          subject_id, &pstate, &pcount, &plocked_at, &pfound);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (pfound && g_strcmp0 (pstate, "locked") == 0) {
     switch (maybe_auto_unlock (handle, subject_id, pstate, plocked_at, now)) {
       case WYL_MFA_AUTO_UNLOCK_UNLOCKED:
-        /* Row is now UNVERIFIED and the transition is published.  The
-         * verify-with-proof contract bounces because the principal is no
-         * longer in mfa_required; HTTP layer will surface mfa_auth_required
-         * (uniform) on the next call. */
+      /* Row is now UNVERIFIED and the transition is published.  The
+       * verify-with-proof contract bounces because the principal is no
+       * longer in mfa_required; HTTP layer will surface mfa_auth_required
+       * (uniform) on the next call. */
       case WYL_MFA_AUTO_UNLOCK_NOT_ELAPSED:
         /* Still inside the lockout window (or a benign race): fail closed
          * without consulting the TOTP enrollment.  F1 timing: the HMAC
@@ -416,7 +416,7 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
   WylTotpEnrollment enr = { 0 };
   gboolean found = FALSE;
   rc = wyl_policy_store_totp_enrollment_lookup (store, subject_id, &enr,
-      &found);
+          &found);
   if (rc != WYRELOG_E_OK) {
     wyl_totp_enrollment_clear (&enr);
     return rc;
@@ -439,7 +439,7 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
   guint64 matched_step = 0;
 
   gboolean matched = wyl_totp_code_matches (enr.secret, sizeof enr.secret,
-      now, submitted_code, &matched_step, NULL);
+          now, submitted_code, &matched_step, NULL);
   if (!matched) {
     wyrelog_error_t note_rc = note_failed_attempt (handle, subject_id);
     wyl_totp_enrollment_clear (&enr);
@@ -499,7 +499,7 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
    * F2: no log/audit emission below ever sees the seed or the code.
    */
   rc = wyl_policy_store_totp_enrollment_update_step (store, subject_id,
-      (gint64) matched_step);
+          (gint64) matched_step);
   wyl_totp_enrollment_clear (&enr);
   if (rc != WYRELOG_E_OK)
     return rc;

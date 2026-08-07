@@ -68,7 +68,7 @@ G_GNUC_INTERNAL gchar *wyl_session_dup_service_tenant_private (const
 G_GNUC_INTERNAL gchar *wyl_session_dup_service_credential_id_private (const
     WylSession * session);
 G_GNUC_INTERNAL guint64 wyl_session_get_service_credential_generation_private
-    (const WylSession * session);
+  (const WylSession * session);
 G_GNUC_INTERNAL gint64 wyl_session_get_service_issued_at_seconds_private (const
     WylSession * session);
 G_GNUC_INTERNAL gint64 wyl_session_get_service_expires_at_seconds_private (const
