@@ -7385,8 +7385,10 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
     /* 5213 truncates to the same exit status as the raw audit contract's 93,
      * so name the branch and the observed reason explicitly. */
     g_printerr ("WYRELOG_TEST_DIAG policy_write_disconnect_cancel "
-        "expected=%d observed=%d\n", POLICY_WRITE_CANCEL_CLIENT_DISCONNECT,
-        cancel_reason);
+        "expected=%d observed=%d armed=%d\n",
+        POLICY_WRITE_CANCEL_CLIENT_DISCONNECT, cancel_reason,
+        wyl_daemon_http_policy_write_last_watch_armed_for_test
+          (fixture.server));
     result = 5213;
     goto release_all;
   }
