@@ -492,6 +492,12 @@ typedef struct _WylDaemonHttpContext
   * cancelled policy WRITE acquisition so lifecycle tests can observe the
   * disconnect/shutdown path without depending on response delivery. */
   gint policy_write_last_cancel_reason;
+  /* 1 when the most recent policy WRITE actually created a disconnect watch,
+   * 0 when arming bailed out early (no watcher context, no socket, or a failed
+   * dup).  A silent bail leaves the request unwatched, which is indistinguishable
+   * from a watch that armed but never observed the peer's EOF unless the two are
+   * recorded apart. */
+  gint policy_write_last_watch_armed;
   guint policy_write_terminal_entries;
   WylDaemonPolicyWriteFinalizeSnapshot policy_write_finalize_snapshot;
   gboolean fail_next_retirement_latch;
@@ -1075,6 +1081,12 @@ static void
 wyl_daemon_policy_write_arm_socket_watch (WylDaemonPolicyWrite *write,
     SoupServerMessage *message)
 {
+#ifdef WYL_TEST_DAEMON_HTTP
+  /* Record the outcome for every bail-out below, so a test can tell "never
+   * armed" apart from "armed but missed the EOF". */
+  if (write->ctx != NULL)
+    g_atomic_int_set (&write->ctx->policy_write_last_watch_armed, 0);
+#endif
   if (write->ctx == NULL || write->ctx->policy_write_watcher_context == NULL)
     return;
 #ifndef G_OS_WIN32
@@ -1091,6 +1103,9 @@ wyl_daemon_policy_write_arm_socket_watch (WylDaemonPolicyWrite *write,
   write->watch = policy_write_watch_new (write->cancellable, fd);
   policy_write_watch_run_on_watcher (write->ctx, policy_write_watch_arm_cb,
       write->watch, write->ctx->policy_write_watcher_context);
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_atomic_int_set (&write->ctx->policy_write_last_watch_armed, 1);
+#endif
 #else
   (void) message;               /* disconnect watch is POSIX-only */
 #endif
@@ -3707,6 +3722,15 @@ wyl_daemon_http_policy_write_last_cancel_reason_for_test (SoupServer *server)
   if (ctx == NULL)
     return WYL_DAEMON_POLICY_WRITE_CANCEL_NONE;
   return g_atomic_int_get (&ctx->policy_write_last_cancel_reason);
+}
+
+gint
+wyl_daemon_http_policy_write_last_watch_armed_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return -1;
+  return g_atomic_int_get (&ctx->policy_write_last_watch_armed);
 }
 
 void
