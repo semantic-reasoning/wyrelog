@@ -178,7 +178,21 @@ def check(source: str) -> None:
     ):
         if required not in context_new:
             raise SystemExit("service-auth retirement scheduler lost ownership")
+    # The policy-WRITE disconnect watch owns one cross-thread hop: GLib requires
+    # a GSource be created, attached and destroyed on the thread owning its
+    # GMainContext, so the lifecycle ops are marshalled onto the watcher thread.
+    # It is not part of human refresh -- the handler ban above still rejects it
+    # there -- so keep the blanket sweep for the rest and pin this one to its
+    # single, watcher-context-bound marshalling site.
+    code = without_c_comments(source)
+    marshaller = function_body(code, "policy_write_watch_run_on_watcher")
+    watcher_marshal = "g_main_context_invoke_full (ctx->policy_write_watcher_context,"
+    if code.count("g_main_context_invoke") != 1 or \
+            marshaller.count(watcher_marshal) != 1:
+        raise SystemExit("policy-write watcher marshal escaped its single site")
     for obsolete in forbidden[:9]:
+        if obsolete == "g_main_context_invoke":
+            continue
         if obsolete in source:
             raise SystemExit(f"obsolete async machinery remains: {obsolete}")
     if "g_cond_wait_until" not in latch or "10 * G_USEC_PER_SEC" not in latch:
@@ -366,6 +380,7 @@ def main() -> int:
     for index, injection in enumerate((
             "g_main_context_iteration (ctx->dispatch_context, FALSE);",
             "soup_server_message_pause (msg);",
+            "g_main_context_invoke (ctx->dispatch_context, NULL, NULL);",
             "g_idle_source_new ();"), start=len(replacements)):
         mutant = source.replace("(void) path;", f"(void) path;\n  {injection}", 1)
         try:
@@ -373,6 +388,22 @@ def main() -> int:
         except SystemExit:
             continue
         raise SystemExit(f"structural guard accepted async mutant {index}")
+    # The watcher marshal is allowed exactly once and only inside its owning
+    # helper: prove a second site and a relocated site are both still rejected.
+    watcher_call = ("g_main_context_invoke_full (ctx->policy_write_watcher_context,"
+                    "\n      G_PRIORITY_DEFAULT, cb, op, NULL);")
+    if source.count(watcher_call) != 1:
+        raise SystemExit("watcher marshal mutant anchor missing")
+    for index, mutant in enumerate((
+            source.replace(watcher_call, watcher_call + "\n  " + watcher_call, 1),
+            source.replace(watcher_call, "", 1)
+            + "\nstatic void misplaced_watch_marshal (void)\n{\n  "
+            + watcher_call + "\n}\n")):
+        try:
+            check(mutant)
+        except SystemExit:
+            continue
+        raise SystemExit(f"structural guard accepted watcher marshal mutant {index}")
     test_mutations = (
         ("drop_human_refresh_response (&dropped);\n  drop_signaled = TRUE;",
          "drop_signaled = TRUE;"),
