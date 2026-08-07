@@ -7379,8 +7379,14 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
     result = 5212;
     goto release_all;
   }
-  if (wyl_daemon_http_policy_write_last_cancel_reason_for_test (fixture.server)
-      != POLICY_WRITE_CANCEL_CLIENT_DISCONNECT) {
+  gint cancel_reason =
+      wyl_daemon_http_policy_write_last_cancel_reason_for_test (fixture.server);
+  if (cancel_reason != POLICY_WRITE_CANCEL_CLIENT_DISCONNECT) {
+    /* 5213 truncates to the same exit status as the raw audit contract's 93,
+     * so name the branch and the observed reason explicitly. */
+    g_printerr ("WYRELOG_TEST_DIAG policy_write_disconnect_cancel "
+        "expected=%d observed=%d\n", POLICY_WRITE_CANCEL_CLIENT_DISCONNECT,
+        cancel_reason);
     result = 5213;
     goto release_all;
   }
@@ -7521,11 +7527,13 @@ teardown_request:
 static gint
 check_daemon_policy_write_cancellable_contract (void)
 {
-  /* The two disconnect cases exercise the client-disconnect watch, which
-   * wyl_daemon_policy_write_arm_socket_watch only installs on POSIX. On
-   * Windows nothing arms, so dropping the socket cannot cancel the parked
-   * acquire and the cases would fail on a feature that is absent by design.
-   * Shutdown cancellation is platform-neutral and keeps running everywhere. */
+  /* Only the first case needs the client-disconnect watch, which
+   * wyl_daemon_policy_write_arm_socket_watch installs on POSIX alone: it
+   * asserts the cancel reason is CLIENT_DISCONNECT, which nothing on Windows
+   * can produce. The other two are platform-neutral and must keep running
+   * everywhere -- the late-disconnect case deliberately accepts either race
+   * outcome and only checks quiesce, a clean authority and a grantable fresh
+   * WRITE, none of which depend on the watch existing. */
   gint rc;
 #ifndef G_OS_WIN32
   rc = check_daemon_policy_write_client_disconnect_cancellable ();
@@ -7535,12 +7543,7 @@ check_daemon_policy_write_cancellable_contract (void)
   rc = check_daemon_policy_write_shutdown_cancellable ();
   if (rc != 0)
     return rc;
-#ifndef G_OS_WIN32
-  rc = check_daemon_policy_write_acquire_wins_late_disconnect ();
-  if (rc != 0)
-    return rc;
-#endif
-  return 0;
+  return check_daemon_policy_write_acquire_wins_late_disconnect ();
 }
 
 static gboolean
