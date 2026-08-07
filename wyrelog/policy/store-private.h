@@ -45,7 +45,7 @@ typedef enum
 } WylPolicySnapshotFinishFailStage;
 
 void wyl_policy_store_read_snapshot_finish_fail_once_for_test
-    (wyl_policy_store_t * store, WylPolicySnapshotFinishFailStage stage);
+  (wyl_policy_store_t * store, WylPolicySnapshotFinishFailStage stage);
 #endif
 
 typedef enum
@@ -81,9 +81,9 @@ typedef struct
 } WylPolicyPermissionClosureAnalysis;
 
 void wyl_policy_permission_closure_removal_free
-    (WylPolicyPermissionClosureRemoval * removal);
+  (WylPolicyPermissionClosureRemoval * removal);
 void wyl_policy_permission_closure_analysis_clear
-    (WylPolicyPermissionClosureAnalysis * analysis);
+  (WylPolicyPermissionClosureAnalysis * analysis);
 
 /* One durable, immutable #618 remediation-apply receipt. Maps 1:1 onto a row of
  * service_permission_remediation_receipts. Heap-owned strings are populated by
@@ -104,7 +104,7 @@ typedef struct
 } wyl_policy_service_permission_receipt_t;
 
 void wyl_policy_service_permission_receipt_clear
-    (wyl_policy_service_permission_receipt_t * receipt);
+  (wyl_policy_service_permission_receipt_t * receipt);
 
 typedef enum
 {
@@ -252,33 +252,33 @@ typedef struct
 } WylPolicyFactReconcileJournalRecord;
 
 void wyl_policy_fact_reconcile_journal_record_free
-    (WylPolicyFactReconcileJournalRecord * record);
+  (WylPolicyFactReconcileJournalRecord * record);
 const gchar *wyl_policy_fact_reconcile_journal_state_name
-    (WylPolicyFactReconcileJournalState state);
+  (WylPolicyFactReconcileJournalState state);
 
 /* Pure validators for reconciliation source-artifact evidence.  They operate
  * only on the evidence struct and are shared with the reconciler's private
  * file-move phase.  |is_valid| enforces the closed V1 contract; |equal|
  * requires full identity, size and digest equality. */
 gboolean wyl_policy_fact_reconcile_artifact_evidence_is_valid
-    (const WylPolicyFactReconcileArtifactEvidence * evidence);
+  (const WylPolicyFactReconcileArtifactEvidence * evidence);
 gboolean wyl_policy_fact_reconcile_artifact_evidence_equal
-    (const WylPolicyFactReconcileArtifactEvidence * a,
+  (const WylPolicyFactReconcileArtifactEvidence * a,
     const WylPolicyFactReconcileArtifactEvidence * b);
 
 wyrelog_error_t wyl_policy_store_reconcile_journal_prepare
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     const WylPolicyFactReconcileJournalInput * input,
     WylPolicyFactReconcileJournalRecord ** out_record,
     WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_reconcile_journal_read
-    (wyl_policy_store_t * store, const gchar * op_uuid,
+  (wyl_policy_store_t * store, const gchar * op_uuid,
     WylPolicyFactReconcileJournalRecord ** out_record);
 wyrelog_error_t wyl_policy_store_reconcile_journal_list
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
 wyrelog_error_t wyl_policy_store_reconcile_journal_transition
-    (wyl_policy_store_t * store, const gchar * op_uuid,
+  (wyl_policy_store_t * store, const gchar * op_uuid,
     WylPolicyFactReconcileJournalState expected_state,
     WylPolicyFactReconcileJournalState target_state, guint64 expected_attempt,
     WylPolicyAuthorityMutationResult * out_result);
@@ -323,21 +323,21 @@ typedef struct
 } WylPolicyGraphProvisioningRecord;
 
 void wyl_policy_graph_provisioning_record_free
-    (WylPolicyGraphProvisioningRecord * record);
+  (WylPolicyGraphProvisioningRecord * record);
 const gchar *wyl_policy_graph_provisioning_phase_name
-    (WylPolicyGraphProvisioningPhase phase);
+  (WylPolicyGraphProvisioningPhase phase);
 wyrelog_error_t wyl_policy_store_graph_provisioning_prepare
-    (wyl_policy_store_t * store, const WylPolicyGraphProvisioningInput * input,
+  (wyl_policy_store_t * store, const WylPolicyGraphProvisioningInput * input,
     WylPolicyGraphProvisioningRecord ** out_record,
     WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_graph_provisioning_read
-    (wyl_policy_store_t * store, const gchar * op_uuid,
+  (wyl_policy_store_t * store, const gchar * op_uuid,
     WylPolicyGraphProvisioningRecord ** out_record);
 wyrelog_error_t wyl_policy_store_graph_provisioning_list
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
 wyrelog_error_t wyl_policy_store_graph_provisioning_transition
-    (wyl_policy_store_t * store, const gchar * op_uuid,
+  (wyl_policy_store_t * store, const gchar * op_uuid,
     WylPolicyGraphProvisioningPhase expected_phase,
     WylPolicyGraphProvisioningPhase target_phase, guint64 expected_attempt,
     WylPolicyGraphErrorClass degraded_error_class,
@@ -368,28 +368,28 @@ typedef struct
 } WylPolicyGraphAuthorityRecord;
 
 void wyl_policy_tenant_authority_record_free
-    (WylPolicyTenantAuthorityRecord * record);
+  (WylPolicyTenantAuthorityRecord * record);
 void wyl_policy_graph_authority_record_free
-    (WylPolicyGraphAuthorityRecord * record);
+  (WylPolicyGraphAuthorityRecord * record);
 wyrelog_error_t wyl_policy_store_read_tenant_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyTenantAuthorityRecord ** out_record);
 wyrelog_error_t wyl_policy_store_list_tenant_authorities
-    (wyl_policy_store_t * store, GPtrArray ** out_records);
+  (wyl_policy_store_t * store, GPtrArray ** out_records);
 wyrelog_error_t wyl_policy_store_read_graph_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, WylPolicyGraphAuthorityRecord ** out_record);
 wyrelog_error_t wyl_policy_store_list_graph_authorities
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
 wyrelog_error_t wyl_policy_store_reserve_graph_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * store_uuid, guint64 format_version,
     guint64 path_encoding_version, guint64 expected_lifecycle_generation,
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_transition_graph_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, WylPolicyGraphLifecycleState expected_state,
     WylPolicyGraphLifecycleState target_state,
     WylPolicyGraphErrorClass target_error_class,
@@ -397,27 +397,27 @@ wyrelog_error_t wyl_policy_store_transition_graph_authority
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_reconcile_graph_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, guint64 expected_lifecycle_generation,
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_transition_tenant_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyTenantLifecycleState expected_state,
     WylPolicyTenantLifecycleState target_state,
     guint64 expected_lifecycle_generation,
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_reconcile_tenant_authority
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyTenantLifecycleState target_state,
     guint64 expected_lifecycle_generation,
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult * out_result);
 
 /* No pinned SQLite VFS is shipped yet. File-backed plaintext provider stores
- * remain fail-closed until a platform implementation can bind SQLite's main
- * database and every journal/WAL/SHM path to the retained lease authority. */
+* remain fail-closed until a platform implementation can bind SQLite's main
+* database and every journal/WAL/SHM path to the retained lease authority. */
 gboolean wyl_policy_store_pinned_backend_available (void);
 
 typedef struct _WylServiceAuthorityTransaction WylServiceAuthorityTransaction;
@@ -477,7 +477,7 @@ typedef struct wyl_policy_store_cvk_runtime_t
   int (*secure_unlock) (gpointer data, gpointer ptr, gsize size);
   void (*secure_free) (gpointer data, gpointer ptr);
   int (*fill_random) (gpointer data, guint8 * out, gsize len);
-    gint64 (*now_us) (gpointer data);
+  gint64 (*now_us) (gpointer data);
   gpointer data;
 } wyl_policy_store_cvk_runtime_t;
 
@@ -606,8 +606,8 @@ typedef enum
 } wyl_policy_service_rotate_fail_stage_t;
 
 /* rotation_runtime is a private, per-call fault seam. rotate_keyprovider uses
- * only old_opts->rotation_runtime and the CVK runtime snapshotted while opening
- * the old store. new_opts runtime pointers are neither adopted nor invoked. */
+* only old_opts->rotation_runtime and the CVK runtime snapshotted while opening
+* the old store. new_opts runtime pointers are neither adopted nor invoked. */
 
 /* service_cvk_runtime is copied by value during open. Callback functions and
  * data are borrowed, not owned: their code and data context must remain valid
@@ -900,7 +900,7 @@ typedef struct
 } WylPolicyTenantSealReceiptProof;
 
 wyrelog_error_t wyl_policy_store_read_exact_tenant_seal_receipt_proof
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, WylPolicyTenantSealReceiptProof * out_proof);
 
@@ -966,11 +966,11 @@ typedef struct wyl_policy_service_handoff_secret_t
     wyl_policy_service_handoff_secret_t;
 
 void wyl_policy_service_handoff_escrow_info_clear
-    (wyl_policy_service_handoff_escrow_info_t * info);
+  (wyl_policy_service_handoff_escrow_info_t * info);
 void wyl_policy_service_handoff_secret_clear
-    (wyl_policy_service_handoff_secret_t ** secret);
+  (wyl_policy_service_handoff_secret_t ** secret);
 const guint8 *wyl_policy_service_handoff_secret_peek
-    (const wyl_policy_service_handoff_secret_t * secret, gsize * out_len);
+  (const wyl_policy_service_handoff_secret_t * secret, gsize * out_len);
 
 typedef struct
 {
@@ -1246,11 +1246,11 @@ typedef enum
 } WylPolicyServiceHandoffFailStage;
 
 void wyl_policy_service_handoff_disposition_result_clear
-    (WylPolicyServiceHandoffDispositionResult * result);
+  (WylPolicyServiceHandoffDispositionResult * result);
 G_GNUC_INTERNAL void wyl_policy_service_handoff_cancellation_result_clear
-    (WylPolicyServiceHandoffCancellationResult * result);
+  (WylPolicyServiceHandoffCancellationResult * result);
 G_GNUC_INTERNAL void wyl_policy_service_handoff_remediation_result_clear
-    (WylPolicyServiceHandoffRemediationResult * result);
+  (WylPolicyServiceHandoffRemediationResult * result);
 
 typedef struct
 {
@@ -1270,7 +1270,7 @@ typedef struct
  * clears an earlier result before validating its inputs, and every failure
  * leaves it cleared. Call this when releasing a successful classification. */
 void wyl_policy_service_successor_exact_classification_clear
-    (WylPolicyServiceSuccessorExactClassification * classification);
+  (WylPolicyServiceSuccessorExactClassification * classification);
 
 typedef wyrelog_error_t (*wyl_policy_service_principal_cb) (const
     wyl_policy_service_principal_info_t * info, gpointer user_data);
@@ -1292,19 +1292,19 @@ gboolean wyl_policy_service_actor_subject_is_valid (const gchar *
  * to the service namespace and must never fall back to a human identity path. */
 gboolean wyl_policy_subject_has_service_prefix (const gchar * subject_id);
 void wyl_policy_service_principal_info_clear
-    (wyl_policy_service_principal_info_t * info);
+  (wyl_policy_service_principal_info_t * info);
 void wyl_policy_service_credential_info_clear
-    (wyl_policy_service_credential_info_t * info);
+  (wyl_policy_service_credential_info_t * info);
 void wyl_policy_service_cvk_info_clear (wyl_policy_service_cvk_info_t * info);
 void wyl_policy_service_principal_event_info_clear
-    (wyl_policy_service_principal_event_info_t * info);
+  (wyl_policy_service_principal_event_info_t * info);
 void wyl_policy_service_credential_event_info_clear
-    (wyl_policy_service_credential_event_info_t * info);
+  (wyl_policy_service_credential_event_info_t * info);
 
 void wyl_policy_fact_relation_schema_columns_free
-    (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns);
+  (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns);
 void wyl_policy_fact_relation_query_info_clear
-    (wyl_policy_fact_relation_query_info_t * info);
+  (wyl_policy_fact_relation_query_info_t * info);
 
 /*
  * Policy authority store lifecycle wrapper.
@@ -1322,10 +1322,10 @@ wyrelog_error_t wyl_policy_store_open_with_options (const
 wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
     const gchar * fact_root);
 wyrelog_error_t wyl_policy_store_bind_fact_root_authorized
-    (wyl_policy_store_t * store, const gchar * fact_root,
+  (wyl_policy_store_t * store, const gchar * fact_root,
     WylFactRootWriterLease * lease);
 wyrelog_error_t wyl_policy_store_open_fact_graph_directory
-    (wyl_policy_store_t * store, const gchar * fact_root,
+  (wyl_policy_store_t * store, const gchar * fact_root,
     const gchar * tenant_id, const gchar * graph_id, gboolean create,
     WylFactGraphDirectory * out_directory);
 /* Basic invalid rotation arguments (empty path, NULL options, or aliased
@@ -1340,7 +1340,7 @@ wyrelog_error_t wyl_policy_store_rotate_keyprovider (const gchar * path,
  * entry, rejects lengths other than the hash key size, and never retains the
  * output. Callers must still wipe the buffer on every path. */
 wyrelog_error_t wyl_policy_rotation_intent_derive_auth_key
-    (const wyl_policy_store_t * store, guint8 * out_key, gsize out_key_len);
+  (const wyl_policy_store_t * store, guint8 * out_key, gsize out_key_len);
 wyrelog_error_t wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent
     * intent, const guint8 * auth_key, gsize auth_key_len, guint8 ** out_bytes,
     gsize * out_len);
@@ -1403,34 +1403,34 @@ wyrelog_error_t wyl_policy_store_commit_mutation (wyl_policy_store_t * store);
 void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);
 gboolean wyl_policy_store_is_autocommit (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_publication_transaction_begin
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_publication_transaction_commit
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_publication_transaction_rollback_checked
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 void wyl_policy_store_graph_authority_migration_fail_once
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMigrationFailStage stage);
 void wyl_policy_store_graph_authority_mutation_fail_once
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMutationFailStage stage);
 wyrelog_error_t wyl_policy_store_validate_service_schema
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_principal_domain
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_audit_publication
-    (wyl_policy_store_t * store, const gchar * id, gint64 created_at_us,
+  (wyl_policy_store_t * store, const gchar * id, gint64 created_at_us,
     const gchar * subject_id, const gchar * action,
     const gchar * resource_id, const gchar * deny_reason,
     const gchar * deny_origin, const gchar * request_id,
     wyl_decision_t decision);
 wyrelog_error_t wyl_policy_store_read_snapshot_begin
-    (wyl_policy_store_t * store, WylPolicyStoreReadSnapshot * snapshot);
+  (wyl_policy_store_t * store, WylPolicyStoreReadSnapshot * snapshot);
 wyrelog_error_t wyl_policy_store_read_snapshot_finish
-    (WylPolicyStoreReadSnapshot * snapshot);
+  (WylPolicyStoreReadSnapshot * snapshot);
 
 /*
  * Starts a non-nestable SQLite savepoint while claiming |write_lease| and
@@ -1439,26 +1439,26 @@ wyrelog_error_t wyl_policy_store_read_snapshot_finish
  * retain their result metadata until freed, but own no locks or lease claim.
  */
 wyrelog_error_t wyl_policy_store_service_authority_transaction_begin
-    (wyl_policy_store_t * store, WylHandle * handle,
+  (wyl_policy_store_t * store, WylHandle * handle,
     WylServiceAuthWriteLease * write_lease,
     WylServiceAuthorityTransaction ** out_transaction);
 /* Handle-owned retained-engine entry; direct consumers must not call this. */
 wyrelog_error_t
-    wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
-    (wyl_policy_store_t * store, WylHandle * handle,
+wyl_policy_store_service_authority_transaction_begin_retained_engine_parent
+  (wyl_policy_store_t * store, WylHandle * handle,
     WylServiceAuthWriteLease * write_lease,
     WylServiceAuthorityTransaction ** out_transaction);
 gboolean wyl_policy_store_service_authority_transaction_is_active
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_service_authority_transaction_commit
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 wyrelog_error_t wyl_policy_store_service_authority_transaction_rollback
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 wyrelog_error_t wyl_policy_store_service_authority_transaction_abort
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 WylServiceAuthorityTransactionState
-    wyl_policy_store_service_authority_transaction_get_state
-    (const WylServiceAuthorityTransaction * transaction);
+wyl_policy_store_service_authority_transaction_get_state
+  (const WylServiceAuthorityTransaction * transaction);
 wyrelog_error_t
 wyl_policy_store_service_authority_transaction_get_primary_result (const
     WylServiceAuthorityTransaction * transaction);
@@ -1467,51 +1467,51 @@ wyl_policy_store_service_authority_transaction_get_cleanup_result (const
     WylServiceAuthorityTransaction * transaction);
 int
 wyl_policy_store_service_authority_transaction_get_primary_sqlite_extended_error
-    (const WylServiceAuthorityTransaction * transaction);
+  (const WylServiceAuthorityTransaction * transaction);
 int
 wyl_policy_store_service_authority_transaction_get_recovery_sqlite_extended_error
-    (const WylServiceAuthorityTransaction * transaction);
+  (const WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_abort_barrier_arm
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_abort_barrier_wait
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_abort_barrier_release
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_cleanup_barrier_arm
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_cleanup_barrier_wait
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_cleanup_barrier_release
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_free
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 
 wyrelog_error_t wyl_policy_store_service_authority_prepare_commit_evidence
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     WylServiceAuthorityCommitEvidence ** out_evidence);
 WylServiceAuthorityCommitEvidence
-    * wyl_policy_store_service_authority_commit_evidence_ref
-    (WylServiceAuthorityCommitEvidence * evidence);
+* wyl_policy_store_service_authority_commit_evidence_ref
+  (WylServiceAuthorityCommitEvidence * evidence);
 void wyl_policy_store_service_authority_commit_evidence_unref
-    (WylServiceAuthorityCommitEvidence * evidence);
+  (WylServiceAuthorityCommitEvidence * evidence);
 wyrelog_error_t
-    wyl_policy_store_service_authority_commit_evidence_validate_pending
-    (WylServiceAuthorityCommitEvidence * evidence,
+wyl_policy_store_service_authority_commit_evidence_validate_pending
+  (WylServiceAuthorityCommitEvidence * evidence,
     WylServiceAuthorityTransaction * transaction, WylHandle * handle,
     wyl_policy_store_t * store);
 wyrelog_error_t
-    wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
-    (WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,
+wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+  (WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,
     wyl_policy_store_t * store);
 
 wyrelog_error_t
-    wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
-    (WylServiceAuthorityCommitEvidence * evidence,
+wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+  (WylServiceAuthorityCommitEvidence * evidence,
     WylServiceAuthWriteLease * write_lease, WylHandle * handle,
     wyl_policy_store_t * expected_store, guint64 expected_transaction_serial);
 guint64 wyl_policy_store_service_authority_transaction_get_serial
-    (const WylServiceAuthorityTransaction * transaction);
+  (const WylServiceAuthorityTransaction * transaction);
 /* Enter a store-owned participant in the existing authority transaction.
  * This validates the ACTIVE owner-thread transaction, exact current store,
  * locks/pin/claim and operational WRITE lease, then latches that durable work
@@ -1520,17 +1520,17 @@ guint64 wyl_policy_store_service_authority_transaction_get_serial
  * and must not open a nested transaction or expose raw database access.
  */
 wyrelog_error_t
-    wyl_policy_store_service_authority_transaction_enter_participant
-    (WylServiceAuthorityTransaction * transaction,
+wyl_policy_store_service_authority_transaction_enter_participant
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * expected_store);
 wyrelog_error_t
-    wyl_policy_store_service_authority_transaction_acquire_write_intent
-    (WylServiceAuthorityTransaction * transaction,
+wyl_policy_store_service_authority_transaction_acquire_write_intent
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * expected_store, GCancellable * cancellable,
     WylServiceAuthorityWriteIntentOutcome * out_outcome);
 wyrelog_error_t
-    wyl_policy_store_service_authority_transaction_record_credential_last_used
-    (WylServiceAuthorityTransaction * transaction,
+wyl_policy_store_service_authority_transaction_record_credential_last_used
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * credential_id,
     guint64 generation, const gchar * subject_id, const gchar * tenant_id,
     gint64 used_at_us);
@@ -1589,8 +1589,8 @@ typedef struct
  * lookup, reconciliation, and conflict-detection path calls this exact
  * function rather than reimplementing the transcript. */
 wyrelog_error_t
-    wyl_policy_store_service_credential_operation_fence_fingerprint
-    (WylServiceCredentialFenceOperation operation, const gchar * field_a,
+wyl_policy_store_service_credential_operation_fence_fingerprint
+  (WylServiceCredentialFenceOperation operation, const gchar * field_a,
     gsize field_a_len, const gchar * field_b, gsize field_b_len,
     guint8 out[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES]);
 
@@ -1606,8 +1606,8 @@ wyrelog_error_t
  * or old_credential_id (rotate) must be supplied, matching |operation|.
  */
 wyrelog_error_t
-    wyl_policy_store_reconcile_service_credential_operation_fence
-    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+wyl_policy_store_reconcile_service_credential_operation_fence
+  (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     GCancellable * cancellable, WylServiceCredentialFenceOperation operation,
     const gchar * request_id, const gchar * subject_id,
     const gchar * tenant_id, const gchar * old_credential_id,
@@ -1621,8 +1621,8 @@ wyrelog_error_t
  * does, and a retryable/terminal error for storage failures.
  */
 wyrelog_error_t
-    wyl_policy_store_precheck_service_credential_operation_fence
-    (wyl_policy_store_t * store, GCancellable * cancellable,
+wyl_policy_store_precheck_service_credential_operation_fence
+  (wyl_policy_store_t * store, GCancellable * cancellable,
     WylServiceCredentialFenceOperation operation, const gchar * request_id,
     const gchar * subject_id, const gchar * tenant_id,
     const gchar * old_credential_id,
@@ -1636,8 +1636,8 @@ wyrelog_error_t
  * different operation or frozen target returns CONFLICT.  Missing or malformed
  * committed successor evidence is WYRELOG_E_POLICY.  This never writes. */
 wyrelog_error_t
-    wyl_policy_store_precheck_service_credential_operation_fence_with_committed
-    (wyl_policy_store_t * store, GCancellable * cancellable,
+wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+  (wyl_policy_store_t * store, GCancellable * cancellable,
     WylServiceCredentialFenceOperation operation, const gchar * request_id,
     const gchar * subject_id, const gchar * tenant_id,
     const gchar * old_credential_id,
@@ -1669,35 +1669,35 @@ typedef struct WylServiceExchangeIntentionRecord
 } WylServiceExchangeIntentionRecord;
 
 void wyl_service_exchange_intention_record_free
-    (WylServiceExchangeIntentionRecord * record);
+  (WylServiceExchangeIntentionRecord * record);
 wyrelog_error_t wyl_policy_store_service_exchange_intention_append
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     const wyl_service_exchange_audit_input_t * input,
     WylServiceExchangeIntentionClassification * out_classification,
     WylServiceExchangeIntentionRecord ** out_record);
 wyrelog_error_t wyl_policy_store_service_exchange_intention_load
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const wyl_id_t * intention_id,
     const gchar * payload_digest,
     WylServiceExchangeIntentionRecord ** out_record);
 wyrelog_error_t wyl_policy_store_service_exchange_intention_enumerate
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, GPtrArray ** out_records);
 void wyl_policy_store_service_exchange_intention_fail_preallocation_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_exchange_intention_fail_readback_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 /* Typed recovery read fault seams. Array creation uses GLib's fatal allocator;
  * the recoverable allocation seam targets decoded owned records. */
 void wyl_policy_store_service_exchange_intention_fail_typed_read_prepare_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_exchange_intention_fail_typed_read_step_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_exchange_intention_fail_typed_read_allocation_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_exchange_intention_typed_read_state_for_test
-    (const WylServiceAuthorityTransaction * transaction,
+  (const WylServiceAuthorityTransaction * transaction,
     gboolean * out_has_evidence, gboolean * out_has_write_intent);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityTransaction,
@@ -1707,73 +1707,73 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityCommitEvidence,
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceExchangeIntentionRecord,
     wyl_service_exchange_intention_record_free);
 WylServiceExchangeReceipt *wyl_service_exchange_receipt_ref
-    (WylServiceExchangeReceipt * receipt);
+  (WylServiceExchangeReceipt * receipt);
 void wyl_service_exchange_receipt_unref (WylServiceExchangeReceipt * receipt);
 void wyl_service_exchange_receipt_test_set_refcount_max
-    (WylServiceExchangeReceipt * receipt);
+  (WylServiceExchangeReceipt * receipt);
 void wyl_service_exchange_receipt_test_restore_refcount_one
-    (WylServiceExchangeReceipt * receipt);
+  (WylServiceExchangeReceipt * receipt);
 wyrelog_error_t wyl_service_exchange_receipt_dup_record
-    (const WylServiceExchangeReceipt * receipt,
+  (const WylServiceExchangeReceipt * receipt,
     WylServiceExchangeIntentionRecord ** out_record);
 WylServiceExchangeIntentionClassification
 wyl_service_exchange_receipt_get_classification (const
     WylServiceExchangeReceipt * receipt);
 wyrelog_error_t wyl_service_exchange_receipt_validate_handle
-    (const WylServiceExchangeReceipt * receipt, WylHandle * handle,
+  (const WylServiceExchangeReceipt * receipt, WylHandle * handle,
     wyl_policy_store_t * store);
 wyrelog_error_t wyl_service_exchange_receipt_validate_for_active_write
-    (const WylServiceExchangeReceipt * receipt,
+  (const WylServiceExchangeReceipt * receipt,
     WylServiceAuthWriteLease * write_lease, WylHandle * handle,
     wyl_policy_store_t * store);
 wyrelog_error_t wyl_service_exchange_receipt_snapshot_for_active_write
-    (const WylServiceExchangeReceipt * receipt,
+  (const WylServiceExchangeReceipt * receipt,
     WylServiceAuthWriteLease * write_lease, WylHandle * handle,
     wyl_policy_store_t * store, WylServiceExchangeReceiptIdentity * out);
 wyrelog_error_t wyl_policy_store_service_exchange_receipt_take
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,
     wyl_policy_store_t * store, WylServiceExchangeReceipt ** out_receipt);
 void wyl_policy_store_service_exchange_receipt_fail_allocation
-    (WylServiceAuthorityTransaction * transaction, guint allocation_index);
+  (WylServiceAuthorityTransaction * transaction, guint allocation_index);
 guint wyl_policy_store_service_exchange_receipt_get_allocation_count
-    (const WylServiceAuthorityTransaction * transaction);
+  (const WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceExchangeReceipt,
     wyl_service_exchange_receipt_unref);
 
 /* Deterministic private fault and observation seams for transaction tests. */
 void wyl_policy_store_service_authority_transaction_fail_once
-    (wyl_policy_store_t * store, WylPolicyAuthorityTransactionFailStage stage);
+  (wyl_policy_store_t * store, WylPolicyAuthorityTransactionFailStage stage);
 void
 wyl_policy_store_service_authority_transaction_fail_evidence_allocation_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 guint
-    wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
-    (const WylServiceAuthorityTransaction * transaction);
+wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+  (const WylServiceAuthorityTransaction * transaction);
 gboolean
-    wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
-    (WylServiceAuthorityCommitEvidence * evidence);
+wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
+  (WylServiceAuthorityCommitEvidence * evidence);
 void wyl_policy_store_service_authority_transaction_fail_last_used_sql_once
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_test_arm_intent_barrier
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_test_wait_intent_barrier
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_test_release_intent_barrier
-    (WylServiceAuthorityTransaction * transaction);
+  (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_test_fail_intent_once
-    (WylServiceAuthorityTransaction * transaction, int sqlite_extended_code);
+  (WylServiceAuthorityTransaction * transaction, int sqlite_extended_code);
 gboolean
-    wyl_policy_store_service_authority_transaction_is_poisoned
-    (wyl_policy_store_t * store);
+wyl_policy_store_service_authority_transaction_is_poisoned
+  (wyl_policy_store_t * store);
 void wyl_policy_store_service_authority_transaction_test_set_poison_identity
-    (WylServiceAuthorityTransaction * transaction, gboolean owner_exact,
+  (WylServiceAuthorityTransaction * transaction, gboolean owner_exact,
     gboolean serial_exact);
 gboolean
-    wyl_policy_store_service_authority_transaction_test_poison_identity_is_clear
-    (WylServiceAuthorityTransaction * transaction);
+wyl_policy_store_service_authority_transaction_test_poison_identity_is_clear
+  (WylServiceAuthorityTransaction * transaction);
 
 /* Owned-output contract for the service lookup/load APIs below:
  * - On first use, the caller MUST pass an output initialized to { 0 }.
@@ -1796,31 +1796,31 @@ wyrelog_error_t wyl_policy_store_get_principal_kind (wyl_policy_store_t * store,
  * SQLite savepoint.
  */
 wyrelog_error_t wyl_policy_store_create_service_principal
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * display_name, const gchar * actor_subject_id,
     const gchar * request_id, wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_create_service_principal_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * display_name, const gchar * actor_subject_id,
     const gchar * request_id, wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_disable_service_principal
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_disable_service_principal_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_disable_service_principal_keyed_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
     wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_disable_service_principal_keyed_precheck_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, gboolean * out_found,
@@ -1829,11 +1829,11 @@ wyrelog_error_t wyl_policy_store_disable_service_principal_keyed_precheck_core
 /* Test seam: fail the next service lifecycle operation after validation but
  * before savepoint release. The operation must roll all local rows back. */
 void wyl_policy_store_service_lifecycle_fail_commit_once
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 void wyl_policy_store_service_handoff_fail_once (wyl_policy_store_t * store,
     WylPolicyServiceHandoffFailStage stage);
 wyrelog_error_t wyl_policy_store_service_handoff_sqlite_error_for_test
-    (int sqlite_rc);
+  (int sqlite_rc);
 void wyl_policy_store_service_rotate_fail_once (wyl_policy_store_t * store,
     wyl_policy_service_rotate_fail_stage_t stage);
 wyrelog_error_t wyl_policy_store_lookup_service_principal (wyl_policy_store_t *
@@ -1844,7 +1844,7 @@ wyrelog_error_t wyl_policy_store_lookup_service_credential (wyl_policy_store_t *
     store, const gchar * credential_id, const gchar * subject_id,
     const gchar * tenant_id, wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_lookup_service_credential_by_id
-    (wyl_policy_store_t * store, const gchar * credential_id,
+  (wyl_policy_store_t * store, const gchar * credential_id,
     wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_foreach_service_credential (wyl_policy_store_t
     * store, const gchar * subject_id, const gchar * tenant_id,
@@ -1852,68 +1852,68 @@ wyrelog_error_t wyl_policy_store_foreach_service_credential (wyl_policy_store_t
 wyrelog_error_t wyl_policy_store_load_service_cvk (wyl_policy_store_t * store,
     wyl_policy_service_cvk_info_t * out);
 wyrelog_error_t wyl_policy_store_materialize_service_cvk_existing
-    (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+  (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
 wyrelog_error_t wyl_policy_store_ensure_service_cvk_for_issuance
-    (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+  (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
 
 /* Private service-authority escrow. Sealed bytes never leave this module;
  * unseal returns a store-runtime locked secret object only. Insert is safe to
  * call while the caller's SQLite authority transaction is active. */
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_insert
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     const wyl_policy_service_handoff_escrow_input_t * input);
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_load
-    (wyl_policy_store_t * store, const wyl_id_t * escrow_id,
+  (wyl_policy_store_t * store, const wyl_id_t * escrow_id,
     wyl_policy_service_handoff_escrow_info_t * out_info);
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_load_by_request
-    (wyl_policy_store_t * store, const gchar * request_id,
+  (wyl_policy_store_t * store, const gchar * request_id,
     wyl_policy_service_handoff_escrow_info_t * out_info);
 typedef wyrelog_error_t (*wyl_policy_store_service_handoff_unseal_gate_fn)
   (gpointer data);
 /* Test-only gate immediately before the escrow KeyProvider unseal call. */
 void wyl_policy_store_service_handoff_set_unseal_gate_for_test
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     wyl_policy_store_service_handoff_unseal_gate_fn gate, gpointer data);
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_unseal
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     const wyl_policy_service_handoff_escrow_info_t * expected,
     wyl_policy_service_handoff_secret_t ** out_secret);
 wyrelog_error_t
-    wyl_policy_store_classify_service_credential_successor_exact_core
-    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+wyl_policy_store_classify_service_credential_successor_exact_core
+  (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const WylPolicyServiceHandoffExactTuple * tuple, gint64 now_us,
     WylPolicyServiceSuccessorExactClassification * out_classification);
 wyrelog_error_t wyl_policy_store_record_service_handoff_disposition_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffDispositionInput * input,
     WylPolicyServiceHandoffDispositionResult * out_result);
 wyrelog_error_t wyl_policy_store_record_service_handoff_not_committed_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffDispositionInput * input,
     WylPolicyServiceHandoffDispositionResult * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_policy_store_handoff_claim_cancellation_core
-    (WylServiceAuthorityTransaction * transaction,
+wyl_policy_store_handoff_claim_cancellation_core
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffCancellationInput * input,
     WylPolicyServiceHandoffCancellationResult * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_policy_store_remediate_service_handoff_exact_core
-    (WylServiceAuthorityTransaction * transaction,
+wyl_policy_store_remediate_service_handoff_exact_core
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffRemediationInput * input,
     WylPolicyServiceHandoffRemediationResult * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_policy_store_resolve_service_handoff_remediation_core
-    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+wyl_policy_store_resolve_service_handoff_remediation_core
+  (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const gchar * remediation_request_id,
     const gchar * current_actor_subject_id,
     WylPolicyServiceHandoffRemediationResult * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_policy_store_resolve_service_handoff_remediation_incident_core
-    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+wyl_policy_store_resolve_service_handoff_remediation_incident_core
+  (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const gchar * original_request_id,
     const guint8 journal_snapshot_digest
     [WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES],
@@ -1922,7 +1922,7 @@ G_GNUC_INTERNAL wyrelog_error_t
  * A later domain failure may therefore leave only the idempotent CVK row;
  * credential, event, ledger and audit rows still roll back together. */
 wyrelog_error_t wyl_policy_store_issue_service_credential
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * tenant_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 expires_at_us,
     wyl_policy_service_credential_info_t * out,
@@ -1941,14 +1941,14 @@ wyrelog_error_t wyl_policy_store_issue_service_credential
  * store or service domain; doing so can deadlock.
  */
 wyrelog_error_t wyl_policy_store_issue_service_credential_with_runtime
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * tenant_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 expires_at_us,
     const wyl_service_credential_runtime_t * runtime,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_issue_service_credential_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * tenant_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 expires_at_us,
@@ -1956,7 +1956,7 @@ wyrelog_error_t wyl_policy_store_issue_service_credential_core
     gsize cvk_len, wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_issue_service_credential_handoff_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * tenant_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 expires_at_us,
@@ -1970,55 +1970,55 @@ wyrelog_error_t wyl_policy_store_issue_service_credential_handoff_core
  * service-domain gate. All callbacks MUST be non-reentrant: calling the same
  * store or service-domain APIs from a callback can deadlock. */
 wyrelog_error_t wyl_policy_store_verify_service_credential_by_id
-    (wyl_policy_store_t * store, const gchar * credential_id,
+  (wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * presented_secret, gsize presented_secret_len,
     void (*before_gate) (gpointer data),
     gint64 (*now_us) (gpointer data), gpointer now_data,
     const wyl_service_credential_runtime_t * runtime,
     gboolean * out_authenticated);
 wyrelog_error_t wyl_policy_store_revoke_service_credential
-    (wyl_policy_store_t * store, const gchar * credential_id,
+  (wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_revoke_service_credential_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_revoke_service_credential_keyed_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
     wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_revoke_service_credential_keyed_precheck_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, gboolean * out_found,
     WylPolicyServiceRetirementOutcome * retirement,
     wyl_policy_service_credential_info_t * out);
 /* now_us and now_data are borrowed and need remain valid only until this call
- * returns. runtime itself is likewise borrowed only for the call. Its callback
- * table, including the runtime->data pointer value, is copied into a
- * successfully returned secret, so that callback code, targets and data MUST
- * remain valid until wyl_service_credential_secret_clear() releases the
- * secret. On failure or when no secret is returned, those lifetimes need only
- * extend through this call. The store-scoped rotate fault seam owns no callback
- * or data lifetime.
- *
- * Clock and credential callbacks execute under the service-domain gate;
- * credential generation also holds the lifecycle mutex. They MUST be
- * non-reentrant and MUST NOT call APIs on the same store or service domain. */
+* returns. runtime itself is likewise borrowed only for the call. Its callback
+* table, including the runtime->data pointer value, is copied into a
+* successfully returned secret, so that callback code, targets and data MUST
+* remain valid until wyl_service_credential_secret_clear() releases the
+* secret. On failure or when no secret is returned, those lifetimes need only
+* extend through this call. The store-scoped rotate fault seam owns no callback
+* or data lifetime.
+*
+* Clock and credential callbacks execute under the service-domain gate;
+* credential generation also holds the lifecycle mutex. They MUST be
+* non-reentrant and MUST NOT call APIs on the same store or service domain. */
 wyrelog_error_t wyl_policy_store_rotate_service_credential
-    (wyl_policy_store_t * store, const gchar * old_credential_id,
+  (wyl_policy_store_t * store, const gchar * old_credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
     gpointer now_data, const wyl_service_credential_runtime_t * runtime,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_rotate_service_credential_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * old_credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
@@ -2028,7 +2028,7 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential_core
     wyl_service_credential_secret_t ** out_secret,
     WylPolicyServiceCredentialPredecessor * out_predecessor);
 wyrelog_error_t wyl_policy_store_rotate_service_credential_handoff_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * old_credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
@@ -2039,15 +2039,15 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential_handoff_core
     wyl_policy_service_handoff_escrow_info_t * out_escrow,
     WylPolicyServiceCredentialPredecessor * out_predecessor);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     const wyl_policy_service_credential_info_t * credential,
     const gchar * presented_secret, gsize presented_secret_len,
     gboolean * out_match);
 wyrelog_error_t wyl_policy_store_foreach_service_principal_event
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     wyl_policy_service_principal_event_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_foreach_service_credential_event
-    (wyl_policy_store_t * store, const gchar * credential_id,
+  (wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * subject_id, const gchar * tenant_id,
     wyl_policy_service_credential_event_cb cb, gpointer user_data);
 gsize wyl_policy_store_required_table_count (void);
@@ -2069,24 +2069,24 @@ wyrelog_error_t wyl_policy_store_permission_plane (wyl_policy_store_t * store,
 gsize wyl_policy_store_approved_data_plane_permission_count (void);
 const gchar *wyl_policy_store_approved_data_plane_permission_id (gsize idx);
 wyrelog_error_t wyl_policy_store_role_is_service_eligible
-    (wyl_policy_store_t * store, const gchar * role_id,
+  (wyl_policy_store_t * store, const gchar * role_id,
     gboolean * out_eligible);
 wyrelog_error_t wyl_policy_store_validate_service_permission_closure
-    (wyl_policy_store_t * store);
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_analyze_service_permission_closure
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     WylPolicyPermissionClosureAnalysis * out_analysis);
 wyrelog_error_t wyl_policy_store_service_permission_authority_snapshot
-    (wyl_policy_store_t * store, guint64 * out_generation,
+  (wyl_policy_store_t * store, guint64 * out_generation,
     guint8 out_digest[32]);
 wyrelog_error_t wyl_policy_store_service_permission_remediation_generation
-    (wyl_policy_store_t * store, guint64 * out_generation);
+  (wyl_policy_store_t * store, guint64 * out_generation);
 wyrelog_error_t wyl_policy_store_service_permission_receipt_lookup
-    (wyl_policy_store_t * store, const gchar * request_id,
+  (wyl_policy_store_t * store, const gchar * request_id,
     gboolean * out_found,
     wyl_policy_service_permission_receipt_t * out_receipt);
 wyrelog_error_t wyl_policy_store_service_permission_receipt_insert
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     const wyl_policy_service_permission_receipt_t * receipt);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
@@ -2103,22 +2103,22 @@ wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
  * wr.system_admin membership for actor) at <tenant> scope. Owns no
  * transaction; the caller wraps create+seed in one SAVEPOINT. */
 wyrelog_error_t wyl_policy_store_seed_created_tenant_authority
-    (wyl_policy_store_t * store, const gchar * tenant, const gchar * actor);
+  (wyl_policy_store_t * store, const gchar * tenant, const gchar * actor);
 /* Compatibility/test setup mutator. Production tenant sealing must use the
  * keyed authority core below; non-test callers use this only to unseal. */
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean sealed);
 wyrelog_error_t wyl_policy_store_set_tenant_sealed_full
-    (wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
+  (wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
     gboolean * out_changed);
 wyrelog_error_t wyl_policy_store_seal_tenant_keyed_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
 wyrelog_error_t wyl_policy_store_seal_tenant_keyed_precheck_core
-    (WylServiceAuthorityTransaction * transaction,
+  (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, gboolean * out_found,
@@ -2151,7 +2151,7 @@ typedef struct
 /* Exact durable readback classifier for an ambiguous tenant CREATE commit.
  * The caller retains the daemon WRITE lease that owns @store. */
 wyrelog_error_t wyl_policy_store_classify_tenant_create_bundle
-    (wyl_policy_store_t * store, const WylPolicyTenantCreateBundle * bundle,
+  (wyl_policy_store_t * store, const WylPolicyTenantCreateBundle * bundle,
     WylPolicyTenantCreateBundleState * out_state);
 wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
     wyl_policy_tenant_cb cb, gpointer user_data);
@@ -2167,17 +2167,17 @@ wyrelog_error_t wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *
     store, const gchar * tenant_id, const gchar * graph_id,
     gboolean * out_active);
 wyrelog_error_t wyl_policy_store_register_fact_relation_schema
-    (wyl_policy_store_t * store,
+  (wyl_policy_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * opts);
 wyrelog_error_t wyl_policy_store_load_fact_relation_schema_columns
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * namespace_id,
     const gchar * relation_name, guint32 schema_version,
     gboolean * out_relation_visible,
     wyl_policy_fact_relation_schema_column_info_t ** out_columns,
     gsize * out_n_columns);
 wyrelog_error_t wyl_policy_store_load_fact_relation_query
-    (wyl_policy_store_t * store, const gchar * tenant_id,
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * query_name,
     wyl_policy_fact_relation_query_info_t * out_info);
 wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
@@ -2207,8 +2207,8 @@ wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t * store,
     const gchar * subject_id, const gchar * role_id, const gchar * scope,
     gboolean insert);
 wyrelog_error_t
-    wyl_policy_store_apply_role_membership_mutation_with_audit
-    (wyl_policy_store_t * store, const gchar * subject_id,
+wyl_policy_store_apply_role_membership_mutation_with_audit
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * role_id, const gchar * scope, gboolean insert,
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
@@ -2238,8 +2238,8 @@ wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t * store,
     const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean insert);
 wyrelog_error_t
-    wyl_policy_store_apply_direct_permission_mutation_with_audit
-    (wyl_policy_store_t * store, const gchar * subject_id,
+wyl_policy_store_apply_direct_permission_mutation_with_audit
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, gboolean insert,
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
@@ -2271,27 +2271,27 @@ wyrelog_error_t wyl_policy_store_permission_state_is (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     const gchar * state, gboolean * out_matches);
 wyrelog_error_t wyl_policy_store_get_permission_state_for_publication
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, gchar ** out_state);
 wyrelog_error_t wyl_policy_store_foreach_permission_state (wyl_policy_store_t *
     store, wyl_policy_permission_state_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_permission_state_event
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     const gchar * from_state, const gchar * to_state, gint64 * out_event_id);
 wyrelog_error_t wyl_policy_store_apply_permission_state_transition
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     gint64 * out_event_id);
 /* Transaction-body variant for committed-publication runners.  The caller
  * owns the surrounding transaction and snapshot validation. */
 wyrelog_error_t wyl_policy_store_apply_permission_state_transition_body
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     gint64 * out_event_id);
 wyrelog_error_t
-    wyl_policy_store_apply_permission_state_transition_with_audit
-    (wyl_policy_store_t * store, const gchar * subject_id,
+wyl_policy_store_apply_permission_state_transition_with_audit
+  (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     gint64 * out_event_id, const gchar * audit_id,
     gint64 audit_created_at_us, const gchar * audit_subject_id,
@@ -2299,7 +2299,7 @@ wyrelog_error_t
     const gchar * audit_deny_reason, const gchar * audit_deny_origin,
     const gchar * audit_request_id, wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_foreach_permission_state_event
-    (wyl_policy_store_t * store, wyl_policy_permission_state_event_cb cb,
+  (wyl_policy_store_t * store, wyl_policy_permission_state_event_cb cb,
     gpointer user_data);
 wyrelog_error_t wyl_policy_store_set_principal_state (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * state);
@@ -2319,7 +2319,7 @@ wyrelog_error_t wyl_policy_store_get_principal_state (wyl_policy_store_t *
  * g_strdup'd; out_locked_at is INT64_MIN when the column is NULL.
  * out_found follows the same semantics as get_principal_state. */
 wyrelog_error_t wyl_policy_store_get_principal_lock_info
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     gchar ** out_state, gint64 * out_failed_count, gint64 * out_locked_at,
     gboolean * out_found);
 /* Atomic mutation for a FAILED_ATTEMPT.  Inside a single savepoint:
@@ -2342,13 +2342,13 @@ wyrelog_error_t wyl_policy_store_get_principal_lock_info
  * the auth layer publish the exact immutable principal_fired event row
  * to the live engine pair (#746). */
 wyrelog_error_t wyl_policy_store_apply_principal_failure
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     gint64 threshold, gint64 now_secs, gchar ** out_state,
     gint64 * out_count, gint64 * out_locked_at, gint64 * out_event_id);
 /* Reset the failed_attempt_count to 0 and clear locked_at.  Called on a
  * successful TOTP verify and on auto-unlock. */
 wyrelog_error_t wyl_policy_store_reset_principal_failure_counter
-    (wyl_policy_store_t * store, const gchar * subject_id);
+  (wyl_policy_store_t * store, const gchar * subject_id);
 /* Atomic LOCKED -> UNVERIFIED transition: clears locked_at and the
  * counter, sets state='unverified', and appends an `unlock`
  * principal_event row in one savepoint.  The UPDATE is guarded by
@@ -2358,7 +2358,7 @@ wyrelog_error_t wyl_policy_store_reset_principal_failure_counter
  * when a real transition occurred).  When no locked row matched, no
  * unlock event is appended and *out_unlocked is FALSE. */
 wyrelog_error_t wyl_policy_store_apply_principal_unlock
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     gboolean * out_unlocked, gint64 * out_event_id);
 wyrelog_error_t wyl_policy_store_append_principal_event (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * event,
@@ -2373,7 +2373,7 @@ wyrelog_error_t wyl_policy_store_foreach_session_state (wyl_policy_store_t *
  * precedence over colliding human session rows without mutating either
  * durable source. */
 wyrelog_error_t wyl_policy_store_foreach_effective_scope_state
-    (wyl_policy_store_t * store, wyl_policy_session_state_cb cb,
+  (wyl_policy_store_t * store, wyl_policy_session_state_cb cb,
     gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_session_event (wyl_policy_store_t *
     store, const gchar * session_id, const gchar * event,
@@ -2390,17 +2390,17 @@ wyrelog_error_t wyl_policy_store_append_audit_event_full (wyl_policy_store_t *
     const gchar * deny_reason, const gchar * deny_origin,
     const gchar * request_id, wyl_decision_t decision, gboolean * out_inserted);
 wyrelog_error_t wyl_policy_store_record_audit_intention_full
-    (wyl_policy_store_t * store, const gchar * id, gint64 created_at_us,
+  (wyl_policy_store_t * store, const gchar * id, gint64 created_at_us,
     const gchar * subject_id, const gchar * action,
     const gchar * resource_id, const gchar * deny_reason,
     const gchar * deny_origin, const gchar * request_id,
     wyl_decision_t decision, gboolean * out_inserted);
 wyrelog_error_t wyl_policy_store_mark_audit_intention_committed
-    (wyl_policy_store_t * store, const gchar * id);
+  (wyl_policy_store_t * store, const gchar * id);
 wyrelog_error_t wyl_policy_store_mark_audit_intention_failed
-    (wyl_policy_store_t * store, const gchar * id, const gchar * last_error);
+  (wyl_policy_store_t * store, const gchar * id, const gchar * last_error);
 wyrelog_error_t wyl_policy_store_foreach_audit_intention
-    (wyl_policy_store_t * store, const gchar * state,
+  (wyl_policy_store_t * store, const gchar * state,
     wyl_policy_audit_intention_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_delete_audit_event (wyl_policy_store_t *
     store, const gchar * id);
@@ -2456,7 +2456,7 @@ wyrelog_error_t wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *
     store, const gchar * subject_id, gboolean allow_login_skip_mfa,
     gboolean * out_applied, gchar ** out_existing_subject);
 wyrelog_error_t wyl_policy_store_apply_bootstrap_admin_body
-    (wyl_policy_store_t * store, const gchar * subject_id,
+  (wyl_policy_store_t * store, const gchar * subject_id,
     gboolean allow_login_skip_mfa, gboolean * out_applied,
     gchar ** out_existing_subject);
 
@@ -2548,7 +2548,7 @@ wyrelog_error_t wyl_policy_store_totp_enrollment_lookup (wyl_policy_store_t *
  * combine with a prior lookup.
  */
 wyrelog_error_t wyl_policy_store_totp_enrollment_update_step
-    (wyl_policy_store_t * store, const gchar * subject_id, gint64 new_step);
+  (wyl_policy_store_t * store, const gchar * subject_id, gint64 new_step);
 
 /*
  * Remove the TOTP enrollment row for subject_id.  Idempotent: deleting

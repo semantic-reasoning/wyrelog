@@ -107,7 +107,7 @@ check_totp_enrollment_migration_is_idempotent (void)
     return 21;
 
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "DROP TABLE totp_enrollments;", NULL, NULL, NULL) != SQLITE_OK)
+      "DROP TABLE totp_enrollments;", NULL, NULL, NULL) != SQLITE_OK)
     return 22;
 
   gboolean exists = TRUE;
@@ -166,7 +166,7 @@ check_totp_enrollment_insert_lookup_round_trip (void)
   WylTotpEnrollment out = { 0 };
   gboolean found = FALSE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "alice.root", &out,
-          &found) != WYRELOG_E_OK) {
+      &found) != WYRELOG_E_OK) {
     g_free (minted_id);
     wyl_totp_enrollment_clear (&out);
     return 44;
@@ -220,7 +220,7 @@ check_totp_enrollment_lookup_unknown_subject (void)
   WylTotpEnrollment out = { 0 };
   gboolean found = TRUE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "nobody", &out,
-          &found) != WYRELOG_E_OK) {
+      &found) != WYRELOG_E_OK) {
     wyl_totp_enrollment_clear (&out);
     return 62;
   }
@@ -264,7 +264,7 @@ check_totp_enrollment_delete_then_lookup_miss (void)
   WylTotpEnrollment out = { 0 };
   gboolean found = TRUE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "carol.svc", &out,
-          &found) != WYRELOG_E_OK) {
+      &found) != WYRELOG_E_OK) {
     wyl_totp_enrollment_clear (&out);
     return 74;
   }
@@ -316,7 +316,7 @@ check_totp_enrollment_update_step_durability (void)
     wyl_totp_enrollment_clear (&enr);
 
     if (wyl_policy_store_totp_enrollment_update_step (store, "bob.admin",
-            56700000) != WYRELOG_E_OK)
+        56700000) != WYRELOG_E_OK)
       return 85;
   }
 
@@ -331,7 +331,7 @@ check_totp_enrollment_update_step_durability (void)
     WylTotpEnrollment out = { 0 };
     gboolean found = FALSE;
     if (wyl_policy_store_totp_enrollment_lookup (store, "bob.admin", &out,
-            &found) != WYRELOG_E_OK) {
+        &found) != WYRELOG_E_OK) {
       wyl_totp_enrollment_clear (&out);
       return 88;
     }
@@ -401,12 +401,12 @@ check_totp_enrollment_two_subjects_isolated (void)
   gboolean found_a = FALSE;
   gboolean found_b = FALSE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "subject.a", &out_a,
-          &found_a) != WYRELOG_E_OK || !found_a) {
+      &found_a) != WYRELOG_E_OK || !found_a) {
     wyl_totp_enrollment_clear (&out_a);
     return 105;
   }
   if (wyl_policy_store_totp_enrollment_lookup (store, "subject.b", &out_b,
-          &found_b) != WYRELOG_E_OK || !found_b) {
+      &found_b) != WYRELOG_E_OK || !found_b) {
     wyl_totp_enrollment_clear (&out_a);
     wyl_totp_enrollment_clear (&out_b);
     return 106;
@@ -607,7 +607,7 @@ check_totp_enrollment_insert_replaces_existing (void)
   WylTotpEnrollment out = { 0 };
   gboolean found = FALSE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "rotator", &out,
-          &found) != WYRELOG_E_OK || !found) {
+      &found) != WYRELOG_E_OK || !found) {
     wyl_totp_enrollment_clear (&out);
     return 165;
   }
@@ -651,7 +651,7 @@ check_totp_enrollment_update_step_absent_subject_is_noop (void)
   WylTotpEnrollment out = { 0 };
   gboolean found = TRUE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "never-enrolled", &out,
-          &found) != WYRELOG_E_OK) {
+      &found) != WYRELOG_E_OK) {
     wyl_totp_enrollment_clear (&out);
     return 183;
   }
@@ -684,9 +684,9 @@ check_apply_principal_failure_counter_overflow_guard (void)
     sqlite3 *db = wyl_policy_store_get_db (store);
 
     g_autofree gchar *insert = g_strdup_printf ("INSERT INTO principal_states "
-        "(subject_id, state, updated_at, failed_attempt_count, locked_at) "
-        "VALUES ('edge.user', 'mfa_required', 1, %" G_GINT64_FORMAT ", NULL);",
-        seeds[i]);
+            "(subject_id, state, updated_at, failed_attempt_count, locked_at) "
+            "VALUES ('edge.user', 'mfa_required', 1, %" G_GINT64_FORMAT ", NULL);",
+            seeds[i]);
     if (sqlite3_exec (db, insert, NULL, NULL, NULL) != SQLITE_OK)
       return 902;
 
@@ -695,15 +695,15 @@ check_apply_principal_failure_counter_overflow_guard (void)
     gint64 out_locked_at = -1;
     gint64 out_event_id = -1;
     if (wyl_policy_store_apply_principal_failure (store, "edge.user", 5,
-            1600000000, &out_state, &out_count, &out_locked_at,
-            &out_event_id) != WYRELOG_E_POLICY)
+        1600000000, &out_state, &out_count, &out_locked_at,
+        &out_event_id) != WYRELOG_E_POLICY)
       return 903;
 
     /* Rollback: the durable counter is untouched (still the seed). */
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2 (db,
-            "SELECT failed_attempt_count FROM principal_states "
-            "WHERE subject_id = 'edge.user';", -1, &stmt, NULL) != SQLITE_OK)
+        "SELECT failed_attempt_count FROM principal_states "
+        "WHERE subject_id = 'edge.user';", -1, &stmt, NULL) != SQLITE_OK)
       return 904;
     if (sqlite3_step (stmt) != SQLITE_ROW) {
       sqlite3_finalize (stmt);
@@ -717,8 +717,8 @@ check_apply_principal_failure_counter_overflow_guard (void)
     /* No principal_event row was emitted. */
     sqlite3_stmt *ev = NULL;
     if (sqlite3_prepare_v2 (db,
-            "SELECT COUNT(*) FROM principal_events "
-            "WHERE subject_id = 'edge.user';", -1, &ev, NULL) != SQLITE_OK)
+        "SELECT COUNT(*) FROM principal_events "
+        "WHERE subject_id = 'edge.user';", -1, &ev, NULL) != SQLITE_OK)
       return 907;
     if (sqlite3_step (ev) != SQLITE_ROW) {
       sqlite3_finalize (ev);

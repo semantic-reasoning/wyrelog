@@ -99,7 +99,7 @@ load_last_verified_step (WylHandle *handle, const gchar *subject_id,
   WylTotpEnrollment out = { 0 };
   gboolean found = FALSE;
   wyrelog_error_t rc = wyl_policy_store_totp_enrollment_lookup (store,
-      subject_id, &out, &found);
+          subject_id, &out, &found);
   if (rc != WYRELOG_E_OK || !found) {
     wyl_totp_enrollment_clear (&out);
     return -1;
@@ -133,7 +133,7 @@ check_validator_rejects_null_proof (void)
 
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.null-proof",
-          &session) != 0)
+      &session) != 0)
     return 11;
 
   if (wyl_mfa_validator_totp (handle, session, NULL, NULL)
@@ -150,7 +150,7 @@ check_validator_rejects_short_proof (void)
     return 20;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.short-proof",
-          &session) != 0)
+      &session) != 0)
     return 21;
   if (wyl_mfa_validator_totp (handle, session, "12345", NULL)
       != WYRELOG_E_INVALID)
@@ -166,7 +166,7 @@ check_validator_rejects_long_proof (void)
     return 30;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.long-proof",
-          &session) != 0)
+      &session) != 0)
     return 31;
   if (wyl_mfa_validator_totp (handle, session, "1234567", NULL)
       != WYRELOG_E_INVALID)
@@ -187,7 +187,7 @@ check_validator_rejects_huge_proof (void)
     return 35;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.huge-proof",
-          &session) != 0)
+      &session) != 0)
     return 36;
   gchar proof[1025];
   memset (proof, '1', 1024);
@@ -206,7 +206,7 @@ check_validator_rejects_non_digit_proof (void)
     return 40;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.non-digit-proof",
-          &session) != 0)
+      &session) != 0)
     return 41;
   if (wyl_mfa_validator_totp (handle, session, "abcdef", NULL)
       != WYRELOG_E_INVALID)
@@ -240,7 +240,7 @@ check_validator_rejects_when_no_enrollment (void)
   WylTotpEnrollment out = { 0 };
   gboolean found = TRUE;
   if (wyl_policy_store_totp_enrollment_lookup (store, "validator.no-enroll",
-          &out, &found) != WYRELOG_E_OK) {
+      &out, &found) != WYRELOG_E_OK) {
     wyl_totp_enrollment_clear (&out);
     return 53;
   }
@@ -260,7 +260,7 @@ check_validator_rejects_wrong_code (void)
     return 60;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.wrong-code",
-          &session) != 0)
+      &session) != 0)
     return 61;
   if (seed_enrollment (handle, "validator.wrong-code") != 0)
     return 62;
@@ -281,7 +281,7 @@ check_validator_rejects_wrong_code (void)
   /* last_verified_step must NOT have advanced. */
   gint64 step_after = 0;
   if (load_last_verified_step (handle, "validator.wrong-code",
-          &step_after) != 0)
+      &step_after) != 0)
     return 65;
   if (step_after != INT64_MIN)
     return 66;
@@ -393,7 +393,7 @@ check_validator_rejects_replay_across_restart (void)
    * the step our code lives in, without driving the validator. */
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_totp_enrollment_update_step (store,
-          "validator.restart", (gint64) step) != WYRELOG_E_OK)
+      "validator.restart", (gint64) step) != WYRELOG_E_OK)
     return 94;
 
   /* Now call the validator with the same code. Must be rejected: the
@@ -412,7 +412,7 @@ read_principal_state (WylHandle *handle, const gchar *subject_id,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean found = FALSE;
   wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
-      subject_id, out_state, out_count, out_locked_at, &found);
+          subject_id, out_state, out_count, out_locked_at, &found);
   if (rc != WYRELOG_E_OK || !found)
     return -1;
   return 0;
@@ -430,7 +430,7 @@ check_validator_locks_after_five_failures (void)
     return 200;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.lockout-five",
-          &session) != 0)
+      &session) != 0)
     return 201;
   if (seed_enrollment (handle, "validator.lockout-five") != 0)
     return 202;
@@ -456,7 +456,7 @@ check_validator_locks_after_five_failures (void)
   gint64 count = -1;
   gint64 locked_at = 0;
   if (read_principal_state (handle, "validator.lockout-five", &st, &count,
-          &locked_at) != 0)
+      &locked_at) != 0)
     return 220;
   if (g_strcmp0 (st, "locked") != 0)
     return 221;
@@ -479,7 +479,7 @@ check_validator_locked_principal_rejects_without_hmac (void)
     return 230;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.locked-now",
-          &session) != 0)
+      &session) != 0)
     return 231;
   if (seed_enrollment (handle, "validator.locked-now") != 0)
     return 232;
@@ -496,8 +496,8 @@ check_validator_locked_principal_rejects_without_hmac (void)
     g_autofree gchar *st = NULL;
     gint64 c = 0, l = 0;
     if (wyl_policy_store_apply_principal_failure (store,
-            "validator.locked-now", 5, (gint64) time (NULL),
-            &st, &c, &l, NULL) != WYRELOG_E_OK)
+        "validator.locked-now", 5, (gint64) time (NULL),
+        &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 234;
   }
 
@@ -519,7 +519,7 @@ check_validator_locked_principal_rejects_without_hmac (void)
   gint64 count = -1;
   gint64 locked_at = 0;
   if (read_principal_state (handle, "validator.locked-now", &st, &count,
-          &locked_at) != 0)
+      &locked_at) != 0)
     return 237;
   if (g_strcmp0 (st, "locked") != 0)
     return 238;
@@ -527,7 +527,7 @@ check_validator_locked_principal_rejects_without_hmac (void)
    * (validator never consulted the secret). */
   gint64 step_after = 0;
   if (load_last_verified_step (handle, "validator.locked-now",
-          &step_after) != 0)
+      &step_after) != 0)
     return 239;
   if (step_after != INT64_MIN)
     return 240;
@@ -547,14 +547,14 @@ check_validator_auto_unlocks_after_window (void)
     return 250;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.auto-unlock",
-          &session) != 0)
+      &session) != 0)
     return 251;
   if (seed_enrollment (handle, "validator.auto-unlock") != 0)
     return 252;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_set_principal_state (store, "validator.auto-unlock",
-          "mfa_required") != WYRELOG_E_OK)
+      "mfa_required") != WYRELOG_E_OK)
     return 253;
   /* Drive 5 failures with locked_at = now - (16 minutes). */
   gint64 ago = (gint64) time (NULL) - (16 * 60);
@@ -562,7 +562,7 @@ check_validator_auto_unlocks_after_window (void)
     g_autofree gchar *st = NULL;
     gint64 c = 0, l = 0;
     if (wyl_policy_store_apply_principal_failure (store,
-            "validator.auto-unlock", 5, ago, &st, &c, &l, NULL) != WYRELOG_E_OK)
+        "validator.auto-unlock", 5, ago, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return 254;
   }
   /* Confirm precondition: row is locked. */
@@ -570,7 +570,7 @@ check_validator_auto_unlocks_after_window (void)
   gint64 pre_count = 0;
   gint64 pre_locked_at = 0;
   if (read_principal_state (handle, "validator.auto-unlock", &pre_state,
-          &pre_count, &pre_locked_at) != 0)
+      &pre_count, &pre_locked_at) != 0)
     return 255;
   if (g_strcmp0 (pre_state, "locked") != 0)
     return 256;
@@ -594,7 +594,7 @@ check_validator_auto_unlocks_after_window (void)
   gint64 post_count = -1;
   gint64 post_locked_at = 0;
   if (read_principal_state (handle, "validator.auto-unlock", &post_state,
-          &post_count, &post_locked_at) != 0)
+      &post_count, &post_locked_at) != 0)
     return 259;
   if (g_strcmp0 (post_state, "unverified") != 0)
     return 260;
@@ -615,7 +615,7 @@ check_validator_resets_counter_on_success (void)
     return 270;
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.reset-on-ok",
-          &session) != 0)
+      &session) != 0)
     return 271;
   if (seed_enrollment (handle, "validator.reset-on-ok") != 0)
     return 272;
@@ -642,7 +642,7 @@ check_validator_resets_counter_on_success (void)
   gint64 count = -1;
   gint64 locked_at = 0;
   if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
-          &locked_at) != 0)
+      &locked_at) != 0)
     return 275;
   if (count != 4 || g_strcmp0 (st, "mfa_required") != 0)
     return 276;
@@ -653,7 +653,7 @@ check_validator_resets_counter_on_success (void)
     return 277;
   g_clear_pointer (&st, g_free);
   if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
-          &locked_at) != 0)
+      &locked_at) != 0)
     return 278;
   if (count != 0)
     return 279;
@@ -664,7 +664,7 @@ check_validator_resets_counter_on_success (void)
     return 280;
   g_clear_pointer (&st, g_free);
   if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
-          &locked_at) != 0)
+      &locked_at) != 0)
     return 281;
   if (count != 1)
     return 282;
@@ -711,7 +711,7 @@ check_handle_default_validator_is_wired (void)
   if (ud != NULL)
     return 113;
   /* Calling through the handle-stored pointer must behave identically
-   * to calling the symbol directly: invalid proof shape -> INVALID. */
+  * to calling the symbol directly: invalid proof shape -> INVALID. */
   g_autoptr (WylSession) session = NULL;
   if (login_mfa_required_session (handle, "validator.wired", &session) != 0)
     return 114;
