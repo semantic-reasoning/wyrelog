@@ -40,11 +40,11 @@ struct _WylSession
 static inline wyl_session_state_t
 wyl_session_state_load_private (const WylSession *session)
 {
-  return (wyl_session_state_t) g_atomic_int_get ((gint *) & session->state);
+  return (wyl_session_state_t) g_atomic_int_get ((gint *) &session->state);
 }
 
 static inline void
 wyl_session_state_store_private (WylSession *session, wyl_session_state_t state)
 {
-  g_atomic_int_set ((gint *) & session->state, (gint) state);
+  g_atomic_int_set ((gint *) &session->state, (gint) state);
 }

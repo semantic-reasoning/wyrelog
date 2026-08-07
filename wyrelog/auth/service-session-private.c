@@ -13,8 +13,8 @@ session_id_is_canonical_non_nil (const wyl_id_t *id)
   gchar encoded[WYL_ID_STRING_BUF];
   wyl_id_t parsed;
   return wyl_id_format (id, encoded, sizeof encoded) == WYRELOG_E_OK
-      && wyl_id_parse (encoded, &parsed) == WYRELOG_E_OK
-      && wyl_id_equal (id, &parsed);
+         && wyl_id_parse (encoded, &parsed) == WYRELOG_E_OK
+         && wyl_id_equal (id, &parsed);
 }
 
 static gboolean
@@ -25,28 +25,28 @@ jti_is_canonical (const gchar *value)
   wyl_id_t parsed;
   gchar canonical[WYL_ID_STRING_BUF];
   return wyl_id_parse (value, &parsed) == WYRELOG_E_OK
-      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
-      && strcmp (value, canonical) == 0;
+         && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+         && strcmp (value, canonical) == 0;
 }
 
 static gboolean
 descriptor_is_valid (const wyl_service_session_descriptor_t *descriptor)
 {
   return descriptor != NULL
-      && session_id_is_canonical_non_nil (&descriptor->session_id)
-      && jti_is_canonical (descriptor->jti)
-      && descriptor->subject_id != NULL
-      && wyl_policy_service_subject_is_valid (descriptor->subject_id,
-      strlen (descriptor->subject_id))
-      && descriptor->tenant_id != NULL
-      && wyl_policy_store_tenant_id_is_valid (descriptor->tenant_id)
-      && descriptor->credential_id != NULL
-      && wyl_service_credential_id_is_canonical (descriptor->credential_id,
-      strlen (descriptor->credential_id))
-      && descriptor->credential_generation != 0
-      && descriptor->issued_at_seconds >= 0
-      && descriptor->issued_at_seconds <= G_MAXINT64 - 300
-      && descriptor->expires_at_seconds == descriptor->issued_at_seconds + 300;
+         && session_id_is_canonical_non_nil (&descriptor->session_id)
+         && jti_is_canonical (descriptor->jti)
+         && descriptor->subject_id != NULL
+         && wyl_policy_service_subject_is_valid (descriptor->subject_id,
+             strlen (descriptor->subject_id))
+         && descriptor->tenant_id != NULL
+         && wyl_policy_store_tenant_id_is_valid (descriptor->tenant_id)
+         && descriptor->credential_id != NULL
+         && wyl_service_credential_id_is_canonical (descriptor->credential_id,
+             strlen (descriptor->credential_id))
+         && descriptor->credential_generation != 0
+         && descriptor->issued_at_seconds >= 0
+         && descriptor->issued_at_seconds <= G_MAXINT64 - 300
+         && descriptor->expires_at_seconds == descriptor->issued_at_seconds + 300;
 }
 
 wyrelog_error_t
@@ -78,30 +78,30 @@ wyl_session_auth_method_t
 wyl_session_get_auth_method_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ? session->auth_method :
-      WYL_SESSION_AUTH_METHOD_LAST_;
+         WYL_SESSION_AUTH_METHOD_LAST_;
 }
 
 gboolean
 wyl_session_is_active_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session)
-      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE;
+         && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE;
 }
 
 gboolean
 wyl_session_is_active_human_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session)
-      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
-      && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
+         && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
+         && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
 }
 
 gboolean
 wyl_session_is_mfa_assured_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session)
-      && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
-      && g_atomic_int_get ((gint *) & session->mfa_assured) != 0;
+         && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
+         && g_atomic_int_get ((gint *) &session->mfa_assured) != 0;
 }
 
 gboolean
@@ -117,9 +117,9 @@ wyl_session_liveness_check_private (const WylSession *session,
   g_autofree gchar *live_actor = wyl_session_dup_username (session);
   g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
   return live_session_id != NULL && live_actor != NULL && live_tenant != NULL
-      && g_strcmp0 (live_session_id, expect_session_id) == 0
-      && g_strcmp0 (live_actor, expect_actor) == 0
-      && g_strcmp0 (live_tenant, expect_tenant) == 0;
+         && g_strcmp0 (live_session_id, expect_session_id) == 0
+         && g_strcmp0 (live_actor, expect_actor) == 0
+         && g_strcmp0 (live_tenant, expect_tenant) == 0;
 }
 
 wyrelog_error_t
@@ -136,28 +136,28 @@ gchar *
 wyl_session_dup_service_jti_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      g_strdup (session->service_jti) : NULL;
+         g_strdup (session->service_jti) : NULL;
 }
 
 gchar *
 wyl_session_dup_service_subject_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      g_strdup (session->service_subject_id) : NULL;
+         g_strdup (session->service_subject_id) : NULL;
 }
 
 gchar *
 wyl_session_dup_service_tenant_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      g_strdup (session->tenant) : NULL;
+         g_strdup (session->tenant) : NULL;
 }
 
 gchar *
 wyl_session_dup_service_credential_id_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      g_strdup (session->service_credential_id) : NULL;
+         g_strdup (session->service_credential_id) : NULL;
 }
 
 guint64
@@ -165,21 +165,21 @@ wyl_session_get_service_credential_generation_private (const
     WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      session->service_credential_generation : 0;
+         session->service_credential_generation : 0;
 }
 
 gint64
 wyl_session_get_service_issued_at_seconds_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      session->service_issued_at_seconds : -1;
+         session->service_issued_at_seconds : -1;
 }
 
 gint64
 wyl_session_get_service_expires_at_seconds_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ?
-      session->service_expires_at_seconds : -1;
+         session->service_expires_at_seconds : -1;
 }
 
 gboolean
@@ -191,16 +191,16 @@ wyl_session_matches_service_tuple_private (const WylSession *session,
 {
   gchar encoded[WYL_ID_STRING_BUF];
   return WYL_IS_SESSION ((gpointer) session)
-      && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
-      && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
-      && session_id != NULL
-      && wyl_id_format (&session->id, encoded, sizeof encoded) == WYRELOG_E_OK
-      && strcmp (encoded, session_id) == 0
-      && g_strcmp0 (session->service_jti, jti) == 0
-      && g_strcmp0 (session->service_subject_id, subject_id) == 0
-      && g_strcmp0 (session->tenant, tenant_id) == 0
-      && g_strcmp0 (session->service_credential_id, credential_id) == 0
-      && session->service_credential_generation == credential_generation
-      && session->service_issued_at_seconds == issued_at_seconds
-      && session->service_expires_at_seconds == expires_at_seconds;
+         && wyl_session_state_load_private (session) == WYL_SESSION_STATE_ACTIVE
+         && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+         && session_id != NULL
+         && wyl_id_format (&session->id, encoded, sizeof encoded) == WYRELOG_E_OK
+         && strcmp (encoded, session_id) == 0
+         && g_strcmp0 (session->service_jti, jti) == 0
+         && g_strcmp0 (session->service_subject_id, subject_id) == 0
+         && g_strcmp0 (session->tenant, tenant_id) == 0
+         && g_strcmp0 (session->service_credential_id, credential_id) == 0
+         && session->service_credential_generation == credential_generation
+         && session->service_issued_at_seconds == issued_at_seconds
+         && session->service_expires_at_seconds == expires_at_seconds;
 }
