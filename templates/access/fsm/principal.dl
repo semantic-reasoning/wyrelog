@@ -4,14 +4,20 @@
 // Copyright (C) 2026 wyrelog authors. Also available under a separate
 // commercial license; see LICENSE.md at the project root.
 //
-// Principal authentication state machine. Five states, seven events,
-// eight transitions (functional integrity constraint: at most one
+// Principal authentication state machine. Five states, eight events,
+// ten transitions (functional integrity constraint: at most one
 // (from, event) -> to row). The terminal state `revoked` has no
 // outgoing edge.
 //
 // States  : unverified, mfa_required, authenticated, locked, revoked.
 // Events  : login_ok, login_skip_mfa, mfa_ok, failed_attempt,
-//           lock, unlock, revoke.
+//           lock, unlock, revoke, logout.
+//
+// `logout` returns an authenticated or in-progress (mfa_required)
+// principal to `unverified` so a token-lost subject can re-authenticate.
+// It has no out-edge from `unverified`, `locked`, or the terminal
+// `revoked` state; a logout attempt from those states is an idempotent
+// no-op upstream (the store CAS matches no row and emits no event).
 //
 // MFA is mandatory on the production path. The `login_skip_mfa`
 // event is permitted by the FSM itself but must be gated upstream
@@ -35,6 +41,8 @@ principal_transition("mfa_required",  "lock",           "locked").
 principal_transition("authenticated", "lock",           "locked").
 principal_transition("authenticated", "revoke",         "revoked").
 principal_transition("locked",        "unlock",         "unverified").
+principal_transition("authenticated", "logout",         "unverified").
+principal_transition("mfa_required",  "logout",         "unverified").
 
 principal_step(From, Ev, To) :- principal_transition(From, Ev, To).
 
