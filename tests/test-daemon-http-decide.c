@@ -143,6 +143,8 @@ typedef struct
   gboolean ready;
 } MainLoopReadyBarrier;
 
+#define POLICY_WRITE_TEST_WAIT_TIMEOUT_US (30 * G_TIME_SPAN_SECOND)
+
 typedef struct
 {
   GMutex mutex;
@@ -237,15 +239,28 @@ check_daemon_policy_write_shutdown_contract (void)
       daemon_policy_close_checkpoint, &race);
   g_autoptr (GThread) shutdown = g_thread_new ("daemon-policy-shutdown",
           daemon_policy_shutdown_thread, &race);
+  gint64 close_deadline =
+      g_get_monotonic_time () + POLICY_WRITE_TEST_WAIT_TIMEOUT_US;
   g_mutex_lock (&race.mutex);
-  while (!race.close_entered)
-    g_cond_wait (&race.changed, &race.mutex);
+  while (!race.close_entered
+      && g_cond_wait_until (&race.changed, &race.mutex, close_deadline))
+    ;
+  gboolean close_seen = race.close_entered;
   gboolean store_was_live = wyl_handle_get_policy_store (handle) != NULL;
   race.allow_write = TRUE;
   g_cond_broadcast (&race.changed);
   g_mutex_unlock (&race.mutex);
   g_thread_join (g_steal_pointer (&writer));
   g_thread_join (g_steal_pointer (&shutdown));
+  if (!close_seen) {
+    g_printerr ("WYRELOG_TEST_DIAG policy_write_shutdown_contract "
+        "close_entered timed out after %ds\n",
+        (gint) (POLICY_WRITE_TEST_WAIT_TIMEOUT_US / G_TIME_SPAN_SECOND));
+    g_cond_clear (&race.changed);
+    g_mutex_clear (&race.mutex);
+    soup_server_disconnect (server);
+    return 1899;
+  }
   gint rc = race.close_observed ? 0 : 1902;
   if (rc == 0 && !store_was_live)
     rc = 1903;
@@ -7376,6 +7391,13 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
   /* Drop the socket: the off-thread watcher must observe the EOF and cancel. */
   raw_parked_request_release (&request, FALSE);
   if (!poll_waiting_writers (fixture.server, 0)) {
+    g_printerr ("WYRELOG_TEST_DIAG policy_write_disconnect_cancel "
+        "expected=%d observed=%d armed=%d\n",
+        POLICY_WRITE_CANCEL_CLIENT_DISCONNECT,
+        wyl_daemon_http_policy_write_last_cancel_reason_for_test
+          (fixture.server),
+        wyl_daemon_http_policy_write_last_watch_armed_for_test
+          (fixture.server));
     result = 5212;
     goto release_all;
   }
@@ -7400,6 +7422,7 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
   result = 0;
 
 release_all:
+  raw_parked_request_release (&request, FALSE);
   g_mutex_lock (&holder.mutex);
   holder.allow_write = TRUE;
   g_cond_broadcast (&holder.changed);
