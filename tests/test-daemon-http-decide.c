@@ -10514,8 +10514,11 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
   gint rc = send_raw_audit (session, base_url, NULL, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL) {
+    g_printerr ("WYRELOG_TEST_DIAG raw_audit_unauthenticated status=%u "
+        "body=%s\n", status, body != NULL ? body : "(null)");
     return 93;
+  }
   if (runtime_audit_events_table_exists (handle, &audit_table_exists) != 0
       || audit_table_exists)
     return 103;
