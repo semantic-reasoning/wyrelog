@@ -214,14 +214,36 @@ test_status_rejects_invalid_timeout (void)
   assert_status_invalid_timeout ("60001");
 }
 
+/*
+ * Join a test server thread that may still be parked in
+ * g_socket_listener_accept.  Every server below accepts exactly one
+ * connection, so the thread only returns on its own if the wyctl under test
+ * actually connected.  It need not: these cases drive wyctl with a deliberately
+ * tight --timeout-ms, and a client that exhausts its budget before the connect
+ * completes exits without ever touching the listener.  The accept has no
+ * deadline of its own, so an unconditional join would block forever and the
+ * whole binary would die on the meson timeout rather than fail a case.
+ * Cancelling first is what bounds it - the cancellable is the documented,
+ * thread-safe way to break a blocking accept, whereas closing the listener from
+ * another thread races with the accept itself.
+ */
+static void
+stop_test_server (GThread *thread, GCancellable *cancel)
+{
+  g_cancellable_cancel (cancel);
+  g_thread_join (thread);
+}
+
 typedef struct
 {
   GSocketListener *listener;
+  GCancellable *cancel;
 } SlowHealthzServer;
 
 typedef struct
 {
   GSocketListener *listener;
+  GCancellable *cancel;
   guint status;
   const gchar *body;
   gchar *request;
@@ -233,7 +255,7 @@ slow_healthz_server_thread (gpointer data)
   SlowHealthzServer *server = data;
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) conn =
-      g_socket_listener_accept (server->listener, NULL, NULL, &error);
+      g_socket_listener_accept (server->listener, NULL, server->cancel, &error);
   if (conn == NULL)
     return NULL;
 
@@ -256,7 +278,7 @@ status_probe_server_thread (gpointer data)
   StatusProbeServer *server = data;
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) conn =
-      g_socket_listener_accept (server->listener, NULL, NULL, &error);
+      g_socket_listener_accept (server->listener, NULL, server->cancel, &error);
   if (conn == NULL)
     return NULL;
 
@@ -332,7 +354,8 @@ test_status_times_out (void)
     "status",
     NULL,
   };
-  SlowHealthzServer server = {.listener = listener };
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
+  SlowHealthzServer server = {.listener = listener, .cancel = accept_cancel };
   GThread *server_thread = g_thread_new ("slow-healthz",
           slow_healthz_server_thread, &server);
   g_autofree gchar *stdout_buf = NULL;
@@ -340,7 +363,7 @@ test_status_times_out (void)
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
@@ -359,8 +382,10 @@ run_status_readiness_case (guint status, const gchar *body,
 {
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_test_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   StatusProbeServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .status = status,
     .body = body,
   };
@@ -381,7 +406,7 @@ run_status_readiness_case (guint status, const gchar *body,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_cmpint (wait_status_is_success (wait_status), ==, expect_success);
   g_assert_cmpstr (stdout_buf, ==, expected_output);
@@ -1110,6 +1135,7 @@ test_policy_validation (void)
 typedef struct
 {
   GSocketListener *listener;
+  GCancellable *cancel;
   const gchar *response_body;
   guint delay_us;
   gchar *request;
@@ -1121,7 +1147,7 @@ policy_check_server_thread (gpointer data)
   PolicyCheckServer *server = data;
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) conn =
-      g_socket_listener_accept (server->listener, NULL, NULL, &error);
+      g_socket_listener_accept (server->listener, NULL, server->cancel, &error);
   if (conn == NULL)
     return NULL;
 
@@ -1186,8 +1212,10 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   PolicyCheckServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .response_body = response_body,
     .delay_us = delay_us,
   };
@@ -1216,7 +1244,7 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_cmpint (wait_status_is_success (wait_status), ==, expect_success);
   g_assert_cmpstr (stdout_buf, ==, expected_output);
@@ -1275,8 +1303,10 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   PolicyCheckServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .response_body = response_body,
     .delay_us = delay_us,
   };
@@ -1309,7 +1339,7 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_cmpint (wait_status_is_success (wait_status),
       ==, expected_output[0] != '\0');
@@ -1373,6 +1403,7 @@ test_audit_query (void)
 typedef struct
 {
   GSocketListener *listener;
+  GCancellable *cancel;
   guint status;
   const gchar *body;
   gchar *request;
@@ -1384,7 +1415,7 @@ policy_mutation_server_thread (gpointer data)
   PolicyMutationServer *server = data;
   g_autoptr (GError) error = NULL;
   g_autoptr (GSocketConnection) conn =
-      g_socket_listener_accept (server->listener, NULL, NULL, &error);
+      g_socket_listener_accept (server->listener, NULL, server->cancel, &error);
   if (conn == NULL)
     return NULL;
 
@@ -1474,8 +1505,10 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .status = 200,
     .body = "{}",
   };
@@ -1510,7 +1543,7 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_true (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "ok\n");
@@ -1565,8 +1598,10 @@ run_policy_permission_status_case (const gchar *command, guint status,
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .status = status,
     .body = "{}",
   };
@@ -1601,7 +1636,7 @@ run_policy_permission_status_case (const gchar *command, guint status,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit);
@@ -1949,8 +1984,10 @@ run_policy_role_success_case (const gchar *command, const gchar *path)
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .status = 200,
     .body = "{}",
   };
@@ -1985,7 +2022,7 @@ run_policy_role_success_case (const gchar *command, const gchar *path)
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_true (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "ok\n");
@@ -2038,8 +2075,10 @@ run_policy_role_status_case (const gchar *command, guint status,
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener,
+    .cancel = accept_cancel,
     .status = status,
     .body = "{}",
   };
@@ -2074,7 +2113,7 @@ run_policy_role_status_case (const gchar *command, guint status,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  g_thread_join (server_thread);
+  stop_test_server (server_thread, accept_cancel);
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit);
