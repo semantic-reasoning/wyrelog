@@ -556,6 +556,15 @@ guint wyl_daemon_http_policy_write_terminal_entries_for_test
   (SoupServer * server);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test
   (SoupServer * server, WylDaemonPolicyWriteFinalizeSnapshot * out_snapshot);
+/* Reason (WylDaemonPolicyWriteCancel: 0 none, 1 client-disconnect, 2 shutdown)
+ * of the most recent cancelled policy WRITE acquisition. */
+gint wyl_daemon_http_policy_write_last_cancel_reason_for_test
+  (SoupServer * server);
+/* 1 when the most recent policy WRITE armed a disconnect watch, 0 when arming
+ * bailed out early, -1 when the context is gone.  Distinguishes "never armed"
+ * from "armed but never observed the peer's EOF". */
+gint wyl_daemon_http_policy_write_last_watch_armed_for_test
+  (SoupServer * server);
 /*
  * Test seam: drive the tenant-gate cross-check between the tenant
  * declared by the request (request_tenant, may be NULL meaning "no
