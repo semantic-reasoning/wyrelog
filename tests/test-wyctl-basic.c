@@ -26,7 +26,7 @@ run_child (gchar **argv, gchar **stdout_buf, gchar **stderr_buf,
   g_autoptr (GError) error = NULL;
 
   g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
-          stdout_buf, stderr_buf, wait_status, &error));
+      stdout_buf, stderr_buf, wait_status, &error));
   g_assert_no_error (error);
 }
 
@@ -37,7 +37,7 @@ run_child_with_env (gchar **argv, gchar **envp, gchar **stdout_buf,
   g_autoptr (GError) error = NULL;
 
   g_assert_true (g_spawn_sync (NULL, argv, envp, G_SPAWN_DEFAULT, NULL, NULL,
-          stdout_buf, stderr_buf, wait_status, &error));
+      stdout_buf, stderr_buf, wait_status, &error));
   g_assert_no_error (error);
 }
 
@@ -56,11 +56,11 @@ make_keyfile_xdg_dir (const gchar *const *keys, const gchar *const *values)
   g_assert_no_error (error);
 
   g_autofree gchar *settings_dir = g_build_filename (xdg, "glib-2.0",
-      "settings", NULL);
+          "settings", NULL);
   g_assert_cmpint (g_mkdir_with_parents (settings_dir, 0700), ==, 0);
 
   g_autofree gchar *keyfile_path = g_build_filename (settings_dir, "keyfile",
-      NULL);
+          NULL);
   g_autoptr (GKeyFile) keyfile = g_key_file_new ();
   for (gsize i = 0; keys != NULL && keys[i] != NULL; i++) {
     g_assert_nonnull (values[i]);
@@ -87,17 +87,17 @@ remove_dir_recursive (const gchar *path)
   /* Walk and unlink children. Tests stage only files we wrote, so the
    * iteration is small. */
   g_autoptr (GFileEnumerator) en = g_file_enumerate_children (file,
-      G_FILE_ATTRIBUTE_STANDARD_NAME ","
-      G_FILE_ATTRIBUTE_STANDARD_TYPE, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-      NULL, &error);
+          G_FILE_ATTRIBUTE_STANDARD_NAME ","
+          G_FILE_ATTRIBUTE_STANDARD_TYPE, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+          NULL, &error);
   if (en != NULL) {
     while (TRUE) {
       g_autoptr (GFileInfo) info = g_file_enumerator_next_file (en, NULL,
-          &error);
+              &error);
       if (info == NULL)
         break;
       g_autofree gchar *child = g_build_filename (path,
-          g_file_info_get_name (info), NULL);
+              g_file_info_get_name (info), NULL);
       if (g_file_info_get_file_type (info) == G_FILE_TYPE_DIRECTORY)
         remove_dir_recursive (child);
       else
@@ -175,7 +175,7 @@ test_status_connection_failure (void)
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (stderr_buf);
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: daemon unavailable:"));
+      "wyctl: daemon unavailable:"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "backtrace"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "assertion"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "tracker"));
@@ -272,8 +272,8 @@ status_probe_server_thread (gpointer data)
   const gchar *body = server->body != NULL ? server->body : "{}";
   g_autofree gchar *response =
       g_strdup_printf ("HTTP/1.1 %u OK\r\nContent-Type: application/json\r\n"
-      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
-      server->status, strlen (body), body);
+          "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+          server->status, strlen (body), body);
   (void) g_output_stream_write (output, response, strlen (response), NULL,
       NULL);
   (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
@@ -292,13 +292,13 @@ listen_url_for_test_server (GSocketListener **out_listener)
   g_autoptr (GSocketAddress) effective_address = NULL;
 
   g_assert_true (g_socket_listener_add_address (listener, socket_address,
-          G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
-          &error));
+      G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
+      &error));
   g_assert_no_error (error);
 
   guint16 port =
       g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS
-      (effective_address));
+            (effective_address));
   *out_listener = g_steal_pointer (&listener);
   return g_strdup_printf ("http://127.0.0.1:%u", port);
 }
@@ -315,13 +315,13 @@ test_status_times_out (void)
   g_autoptr (GSocketAddress) effective_address = NULL;
 
   g_assert_true (g_socket_listener_add_address (listener, socket_address,
-          G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
-          &error));
+      G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
+      &error));
   g_assert_no_error (error);
 
   guint16 port =
       g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS
-      (effective_address));
+            (effective_address));
   g_autofree gchar *daemon_url = g_strdup_printf ("http://127.0.0.1:%u", port);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
@@ -334,7 +334,7 @@ test_status_times_out (void)
   };
   SlowHealthzServer server = {.listener = listener };
   GThread *server_thread = g_thread_new ("slow-healthz",
-      slow_healthz_server_thread, &server);
+          slow_healthz_server_thread, &server);
   g_autofree gchar *stdout_buf = NULL;
   g_autofree gchar *stderr_buf = NULL;
   gint wait_status = 0;
@@ -346,7 +346,7 @@ test_status_times_out (void)
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (stderr_buf);
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: daemon unavailable:"));
+      "wyctl: daemon unavailable:"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "backtrace"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "assertion"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "tracker"));
@@ -365,7 +365,7 @@ run_status_readiness_case (guint status, const gchar *body,
     .body = body,
   };
   GThread *server_thread = g_thread_new ("status-readiness",
-      status_probe_server_thread, &server);
+          status_probe_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -391,7 +391,7 @@ run_status_readiness_case (guint status, const gchar *body,
     g_assert_nonnull (g_strstr_len (stderr_buf, -1, expected_error));
   g_assert_nonnull (server.request);
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "GET /readyz?format=json"));
+      "GET /readyz?format=json"));
 
   g_free (server.request);
 }
@@ -710,7 +710,7 @@ test_audit_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-timestamp"));
+      "wyctl: invalid --guard-timestamp"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -718,7 +718,7 @@ test_audit_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-loc-class"));
+      "wyctl: invalid --guard-loc-class"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -726,7 +726,7 @@ test_audit_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-risk"));
+      "wyctl: invalid --guard-risk"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -741,7 +741,7 @@ test_audit_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: missing --access-token-file"));
+      "wyctl: missing --access-token-file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -749,7 +749,7 @@ test_audit_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: unexpected audit query argument"));
+      "wyctl: unexpected audit query argument"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -764,7 +764,7 @@ test_audit_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: unknown audit command"));
+      "wyctl: unknown audit command"));
 
   g_unlink (token_path);
 }
@@ -790,12 +790,12 @@ test_policy_validation (void)
 
   g_autofree gchar *invalid_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-invalid-token-XXXXXX", &invalid_token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (invalid_token_path, "token-1\nbad\n",
-          -1, &error));
+      -1, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (invalid_token_path, 0600), ==, 0);
 
@@ -807,30 +807,30 @@ test_policy_validation (void)
   {
     const gchar token_with_nul[] = { 't', 'o', 'k', 'e', 'n', '\0', 'b' };
     g_assert_true (g_file_set_contents (nul_token_path, token_with_nul,
-            sizeof token_with_nul, &error));
+        sizeof token_with_nul, &error));
     g_assert_no_error (error);
     g_assert_cmpint (g_chmod (nul_token_path, 0600), ==, 0);
   }
 
   g_autofree gchar *leading_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-leading-token-XXXXXX", &leading_token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (leading_token_path, "\ntoken-1\n", -1,
-          &error));
+      &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (leading_token_path, 0600), ==, 0);
 
   g_autofree gchar *trailing_blank_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-trailing-token-XXXXXX",
-      &trailing_blank_token_path, &error);
+          &trailing_blank_token_path, &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (trailing_blank_token_path,
-          "token-1\n\n", -1, &error));
+      "token-1\n\n", -1, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (trailing_blank_token_path, 0600), ==, 0);
 
@@ -840,7 +840,7 @@ test_policy_validation (void)
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (space_token_path, " token-1\n", -1,
-          &error));
+      &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (space_token_path, 0600), ==, 0);
 
@@ -1016,7 +1016,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: missing --access-token-file"));
+      "wyctl: missing --access-token-file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1025,7 +1025,7 @@ test_policy_validation (void)
   g_assert_cmpstr (stdout_buf, ==, "");
   /* Updated diagnostic from the typed token-file safety helper. */
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: access token file not found"));
+      "wyctl: access token file not found"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1033,7 +1033,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: empty access token file"));
+      "wyctl: empty access token file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1041,7 +1041,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid access token file"));
+      "wyctl: invalid access token file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1049,7 +1049,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid access token file"));
+      "wyctl: invalid access token file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1057,7 +1057,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid access token file"));
+      "wyctl: invalid access token file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1065,7 +1065,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid access token file"));
+      "wyctl: invalid access token file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1073,7 +1073,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid access token file"));
+      "wyctl: invalid access token file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1088,7 +1088,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: unknown policy command"));
+      "wyctl: unknown policy command"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1096,7 +1096,7 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: unexpected policy check argument"));
+      "wyctl: unexpected policy check argument"));
 
   g_unlink (token_path);
   g_unlink (empty_token_path);
@@ -1138,8 +1138,8 @@ policy_check_server_thread (gpointer data)
 
   g_autofree gchar *response =
       g_strdup_printf ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
-      strlen (server->response_body), server->response_body);
+          "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+          strlen (server->response_body), server->response_body);
   (void) g_output_stream_write (output, response, strlen (response), NULL,
       NULL);
   (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
@@ -1158,13 +1158,13 @@ listen_url_for_policy_server (GSocketListener **out_listener)
   g_autoptr (GSocketAddress) effective_address = NULL;
 
   g_assert_true (g_socket_listener_add_address (listener, socket_address,
-          G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
-          &error));
+      G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
+      &error));
   g_assert_no_error (error);
 
   guint16 port =
       g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS
-      (effective_address));
+            (effective_address));
   *out_listener = g_steal_pointer (&listener);
   return g_strdup_printf ("http://127.0.0.1:%u", port);
 }
@@ -1192,7 +1192,7 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
     .delay_us = delay_us,
   };
   GThread *server_thread = g_thread_new ("policy-check",
-      policy_check_server_thread, &server);
+          policy_check_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -1224,7 +1224,7 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
     g_assert_cmpstr (stderr_buf, ==, "");
   else {
     g_autofree gchar *failure = g_strdup_printf ("wyctl: policy %s failed",
-        command);
+            command);
     g_assert_nonnull (g_strstr_len (stderr_buf, -1, failure));
   }
   g_assert_nonnull (server.request);
@@ -1232,10 +1232,10 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
   g_assert_nonnull (g_strstr_len (server.request, -1, "user=alice"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "perm=wr.audit.read"));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "session_token=doc%2F42"));
+      "session_token=doc%2F42"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "Authorization: Bearer token-1"));
+      "Authorization: Bearer token-1"));
 
   g_free (server.request);
   g_unlink (token_path);
@@ -1245,7 +1245,7 @@ static void
 test_policy_check (void)
 {
   run_policy_decision_case
-      ("check", "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}",
+    ("check", "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}",
       "allow\n", TRUE, 0, "1000");
   run_policy_decision_case ("check",
       "{\"decision\":0,\"deny_reason\":\"missing_grant\","
@@ -1281,7 +1281,7 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
     .delay_us = delay_us,
   };
   GThread *server_thread = g_thread_new ("audit-query",
-      policy_check_server_thread, &server);
+          policy_check_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -1318,19 +1318,19 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
     g_assert_cmpstr (stderr_buf, ==, "");
   else
     g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-            "wyctl: audit query failed"));
+        "wyctl: audit query failed"));
   g_assert_nonnull (server.request);
   g_assert_nonnull (g_strstr_len (server.request, -1, "GET /audit/events?"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_timestamp=123"));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "guard_loc_class=public"));
+      "guard_loc_class=public"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_risk=69"));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "filter=decision%3Ddeny"));
+      "filter=decision%3Ddeny"));
   g_assert_null (g_strstr_len (server.request, -1, "session_token="));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "Authorization: Bearer token-1"));
+      "Authorization: Bearer token-1"));
 
   g_free (server.request);
   g_unlink (token_path);
@@ -1340,7 +1340,7 @@ static void
 test_audit_query (void)
 {
   run_audit_query_case
-      ("[{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d001\","
+    ("[{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d001\","
       "\"created_at_us\":1234567,"
       "\"subject_id\":\"ali\\nce\","
       "\"action\":\"read\","
@@ -1400,8 +1400,8 @@ policy_mutation_server_thread (gpointer data)
   const gchar *body = server->body != NULL ? server->body : "{}";
   g_autofree gchar *response =
       g_strdup_printf ("HTTP/1.1 %u OK\r\nContent-Type: application/json\r\n"
-      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
-      server->status, strlen (body), body);
+          "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+          server->status, strlen (body), body);
   (void) g_output_stream_write (output, response, strlen (response), NULL,
       NULL);
   (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
@@ -1464,7 +1464,7 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -1480,7 +1480,7 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
     .body = "{}",
   };
   GThread *server_thread = g_thread_new ("policy-mutation",
-      policy_mutation_server_thread, &server);
+          policy_mutation_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -1524,11 +1524,11 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
   g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_timestamp=123"));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "guard_loc_class=public"));
+      "guard_loc_class=public"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_risk=69"));
   g_assert_null (g_strstr_len (server.request, -1, "session_token="));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "Authorization: Bearer token-1"));
+      "Authorization: Bearer token-1"));
 
   g_free (server.request);
   g_unlink (token_path);
@@ -1555,7 +1555,7 @@ run_policy_permission_status_case (const gchar *command, guint status,
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -1571,7 +1571,7 @@ run_policy_permission_status_case (const gchar *command, guint status,
     .body = "{}",
   };
   GThread *server_thread = g_thread_new ("policy-mutation",
-      policy_mutation_server_thread, &server);
+          policy_mutation_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -1644,7 +1644,7 @@ test_policy_permission_validation (void)
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -1845,7 +1845,7 @@ test_policy_permission_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: missing --access-token-file"));
+      "wyctl: missing --access-token-file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1853,7 +1853,7 @@ test_policy_permission_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-timestamp"));
+      "wyctl: invalid --guard-timestamp"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1861,7 +1861,7 @@ test_policy_permission_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-loc-class"));
+      "wyctl: invalid --guard-loc-class"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1869,7 +1869,7 @@ test_policy_permission_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-risk"));
+      "wyctl: invalid --guard-risk"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1939,7 +1939,7 @@ run_policy_role_success_case (const gchar *command, const gchar *path)
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-role-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -1955,7 +1955,7 @@ run_policy_role_success_case (const gchar *command, const gchar *path)
     .body = "{}",
   };
   GThread *server_thread = g_thread_new ("policy-mutation",
-      policy_mutation_server_thread, &server);
+          policy_mutation_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -1999,11 +1999,11 @@ run_policy_role_success_case (const gchar *command, const gchar *path)
   g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_timestamp=123"));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "guard_loc_class=public"));
+      "guard_loc_class=public"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_risk=69"));
   g_assert_null (g_strstr_len (server.request, -1, "session_token="));
   g_assert_nonnull (g_strstr_len (server.request, -1,
-          "Authorization: Bearer token-1"));
+      "Authorization: Bearer token-1"));
 
   g_free (server.request);
   g_unlink (token_path);
@@ -2028,7 +2028,7 @@ run_policy_role_status_case (const gchar *command, guint status,
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-role-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -2044,7 +2044,7 @@ run_policy_role_status_case (const gchar *command, guint status,
     .body = "{}",
   };
   GThread *server_thread = g_thread_new ("policy-mutation",
-      policy_mutation_server_thread, &server);
+          policy_mutation_server_thread, &server);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -2117,7 +2117,7 @@ test_policy_role_validation (void)
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-role-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -2318,7 +2318,7 @@ test_policy_role_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: missing --access-token-file"));
+      "wyctl: missing --access-token-file"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -2326,7 +2326,7 @@ test_policy_role_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-timestamp"));
+      "wyctl: invalid --guard-timestamp"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -2334,7 +2334,7 @@ test_policy_role_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-loc-class"));
+      "wyctl: invalid --guard-loc-class"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -2342,7 +2342,7 @@ test_policy_role_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid --guard-risk"));
+      "wyctl: invalid --guard-risk"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -2382,7 +2382,7 @@ test_status_gsettings_supplies_daemon_url (void)
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: daemon unavailable: http://127.0.0.1:1"));
+      "wyctl: daemon unavailable: http://127.0.0.1:1"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
 }
 
@@ -2415,9 +2415,9 @@ test_status_cli_overrides_gsettings (void)
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: daemon unavailable: http://127.0.0.1:1"));
+      "wyctl: daemon unavailable: http://127.0.0.1:1"));
   g_assert_null (g_strstr_len (stderr_buf, -1,
-          "from-gsettings.example.invalid"));
+      "from-gsettings.example.invalid"));
 }
 
 /* Drive a wyctl subcommand against a GSettings keyfile that supplies
@@ -2518,7 +2518,7 @@ test_fact_put_gsettings_supplies_daemon_url (void)
 }
 
 /* Build a temporary access-token file with the supplied contents and
- * mode bits, returning the path. The caller g_unlinks and g_frees. */
+* mode bits, returning the path. The caller g_unlinks and g_frees. */
 static gchar *
 write_token_with_mode (const gchar *contents, mode_t mode)
 {
@@ -2542,10 +2542,10 @@ write_token_with_mode (const gchar *contents, mode_t mode)
 }
 
 /* When the access-token file is unsafe, the safety check MUST fire
- * before any HTTP request. Witness: the subcommand's own "<op>
- * failed" diagnostic must be absent, because reaching it requires
- * a successful wyl_client_new + daemon probe. The
- * permissions-too-broad diagnostic must be present in its place. */
+* before any HTTP request. Witness: the subcommand's own "<op>
+* failed" diagnostic must be absent, because reaching it requires
+* a successful wyl_client_new + daemon probe. The
+* permissions-too-broad diagnostic must be present in its place. */
 static void
 test_policy_check_safety_reject_prevents_http (void)
 {
@@ -2572,7 +2572,7 @@ test_policy_check_safety_reject_prevents_http (void)
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: access token file permissions too broad"));
+      "wyctl: access token file permissions too broad"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: policy check failed"));
 }
 
@@ -2601,7 +2601,7 @@ test_audit_query_safety_reject_prevents_http (void)
 
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: access token file permissions too broad"));
+      "wyctl: access token file permissions too broad"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: audit query failed"));
 }
 
@@ -2661,16 +2661,16 @@ test_service_token_preflight_and_malformed_input (void)
   g_autoptr (GError) error = NULL;
   g_autofree gchar *credential_path = NULL;
   gint fd = g_file_open_tmp ("wyctl-service-credential-XXXXXX",
-      &credential_path, &error);
+          &credential_path, &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (credential_path,
-          "credential-secret-canary", -1, &error));
+      "credential-secret-canary", -1, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (credential_path, 0600), ==, 0);
   g_autofree gchar *output_path = g_build_filename (g_get_tmp_dir (),
-      "wyctl-service-token-no-output", NULL);
+          "wyctl-service-token-no-output", NULL);
   g_unlink (output_path);
   gchar *non_loopback_argv[] = {
     WYL_TEST_WYCTL_PATH, "--daemon-url", "http://example.invalid",
@@ -2696,7 +2696,7 @@ test_service_token_preflight_and_malformed_input (void)
   run_child (malformed_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: invalid service credential file"));
+      "wyctl: invalid service credential file"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "credential-secret-canary"));
   g_assert_false (g_file_test (output_path, G_FILE_TEST_EXISTS));
   g_unlink (credential_path);
