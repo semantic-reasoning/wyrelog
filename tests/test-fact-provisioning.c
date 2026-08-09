@@ -112,8 +112,17 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact-provisioning/exact-stage-retry",
       test_prepare_exact_stage_reopens_after_crash);
+#endif
+  /*
+   * Native Windows exact-stage recovery is deliberately fail-closed until
+   * the durable operation-evidence contract lands in #615/#616.  The
+   * production helper therefore does not register the POSIX retry proof on
+   * Windows; keeping this binary built still exercises the portable
+   * authority validation below on every platform.
+   */
   g_test_add_func ("/fact-provisioning/reject-mismatched-authority",
       test_prepare_rejects_mismatched_authority);
   return g_test_run ();
