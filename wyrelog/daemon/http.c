@@ -848,18 +848,25 @@ policy_write_cancel_all_for_shutdown (WylDaemonHttpContext *ctx)
 }
 
 #ifndef G_OS_WIN32
+#ifndef G_IO_RDHUP
+#define G_IO_RDHUP (1 << 13)
+#endif
+
 /* TRUE when the peer has closed the connection (orderly EOF or hard error);
  * FALSE for a spurious readable wake or a live/pipelined byte still buffered.
- * Operates on a plain fd (a dup of the client fd) via recv(MSG_PEEK) only, so
- * it never touches libsoup's GSocket object -- MSG_PEEK is non-destructive and
- * concurrent recv on the shared kernel socket is safe.
+ * Operates on a plain fd (a dup of the client fd) via recv(MSG_PEEK) and IO
+ * condition checks only, so it never touches libsoup's GSocket object --
+ * MSG_PEEK is non-destructive and concurrent recv on the shared kernel socket is safe.
  *
  * POSIX-only, like the arm path that reaches it: the disconnect watch is never
  * created on Windows, so this would be dead code there, and its ssize_t/errno
  * result convention is not what Winsock recv reports. */
 static gboolean
-policy_write_socket_peer_gone (gint fd)
+policy_write_socket_peer_gone (gint fd, GIOCondition condition)
 {
+  if ((condition & (G_IO_HUP | G_IO_ERR | G_IO_RDHUP | G_IO_NVAL)) != 0)
+    return TRUE;
+
   gchar byte = 0;
   int flags = MSG_PEEK;
 #ifdef MSG_DONTWAIT
@@ -879,9 +886,9 @@ struct _PolicyWriteWatch
   gint refcount;                /* atomic */
   GCancellable *cancellable;    /* +1 ref, owned */
   gint fd;                      /* a DUP of the client fd, owned (closed at
-                                * unref); the watcher polls/peeks this fd only,
-                                * never libsoup's live GSocket, so it never
-                                * touches GSocket state libsoup mutates. */
+                                 * unref); the watcher polls/peeks this fd only,
+                                 * never libsoup's live GSocket, so it never
+                                 * touches GSocket state libsoup mutates. */
   gint cancel_reason;           /* atomic WylDaemonPolicyWriteCancel */
   GSource *source;              /* accessed ONLY on the watcher thread */
 };
@@ -926,7 +933,6 @@ policy_write_socket_event (gint fd, GIOCondition condition, gpointer data)
 {
   PolicyWriteWatch *watch = data;
   (void) fd;
-  (void) condition;
   /* Runs on the shared watcher thread and touches ONLY the refcounted heap
    * watch (never the handler's stack write, never libsoup's GSocket), so the
    * cancellable and dup fd stay valid under our ref no matter when the handler
@@ -934,7 +940,7 @@ policy_write_socket_event (gint fd, GIOCondition condition, gpointer data)
    * watch -- nothing to detect. */
   if (g_cancellable_is_cancelled (watch->cancellable))
     return G_SOURCE_REMOVE;
-  if (!policy_write_socket_peer_gone (watch->fd))
+  if (!policy_write_socket_peer_gone (watch->fd, condition))
     return G_SOURCE_CONTINUE;
   g_atomic_int_set (&watch->cancel_reason,
       WYL_DAEMON_POLICY_WRITE_CANCEL_CLIENT_DISCONNECT);
@@ -1025,7 +1031,7 @@ policy_write_watch_arm_cb (gpointer data)
    * mutates from the main-loop thread).  It fires only on the dup fd's kernel
    * conditions and is removed explicitly at disarm. */
   watch->source = g_unix_fd_source_new (watch->fd,
-          G_IO_IN | G_IO_HUP | G_IO_ERR);
+          G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_RDHUP);
   g_source_set_callback (watch->source,
       G_SOURCE_FUNC (policy_write_socket_event),
       policy_write_watch_ref (watch), policy_write_watch_unref);
