@@ -13472,6 +13472,141 @@ wyl_policy_store_graph_provisioning_prepare (wyl_policy_store_t *store,
   return wyl_policy_store_graph_provisioning_read (store, op_uuid, out_record);
 }
 
+wyrelog_error_t
+wyl_policy_store_create_fact_graph_provisioning (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts, gchar **out_storage_uri,
+    gchar *out_op_uuid)
+{
+  if (out_storage_uri != NULL)
+    *out_storage_uri = NULL;
+  if (out_op_uuid != NULL)
+    out_op_uuid[0] = '\0';
+  if (store == NULL || out_op_uuid == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = validate_fact_graph_options (store, opts);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+
+  gboolean tenant_exists = FALSE;
+  rc = wyl_policy_store_tenant_exists (store, opts->tenant_id, &tenant_exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!tenant_exists)
+    return WYRELOG_E_NOT_FOUND;
+
+  gboolean tenant_active = FALSE;
+  rc = wyl_policy_store_tenant_is_active (store, opts->tenant_id,
+          &tenant_active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!tenant_active)
+    return WYRELOG_E_POLICY;
+
+  gboolean graph_exists = FALSE;
+  gboolean graph_sealed = FALSE;
+  rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
+          &graph_exists, &graph_sealed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (graph_sealed)
+    return WYRELOG_E_POLICY;
+
+  /* A graph already under provisioning is resumed idempotently: return its
+   * in-flight operation so the caller drives it to ACTIVE.  Any other existing
+   * lifecycle (legacy, active) is a genuine create conflict. */
+  if (graph_exists) {
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    rc = wyl_policy_store_read_graph_authority (store, opts->tenant_id,
+            opts->graph_id, &authority);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    gboolean provisioning = authority != NULL
+        && authority->lifecycle_state
+        == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING;
+    wyl_policy_graph_authority_record_free (authority);
+    if (!provisioning)
+      return WYRELOG_E_POLICY;
+
+    WylPolicyGraphProvisioningRecord *existing = NULL;
+    rc = graph_provisioning_read_for_graph_locked (store, opts->tenant_id,
+            opts->graph_id, &existing);
+    if (rc != WYRELOG_E_OK)
+      return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+    g_strlcpy (out_op_uuid, existing->op_uuid, WYL_ID_STRING_BUF);
+    wyl_policy_graph_provisioning_record_free (existing);
+    return WYRELOG_E_OK;
+  }
+
+  g_autofree gchar *storage_path = NULL;
+  g_autofree gchar *storage_uri = NULL;
+  rc = materialize_fact_graph_storage (store, opts, &storage_path,
+          &storage_uri);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = insert_fact_graph_metadata (store, opts, storage_path, storage_uri);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_relations; i++) {
+    const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
+    rc = insert_fact_graph_relation_metadata (store, opts, rel);
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < rel->n_columns; j++)
+      rc = insert_fact_graph_column_metadata (store, opts, rel, j);
+  }
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_queries; i++)
+    rc = insert_fact_graph_query_metadata (store, opts, &opts->queries[i]);
+
+  /* Reserve the graph authority (moving the fresh legacy row to provisioning)
+   * and stamp the operation record in the same mutation, so metadata and the
+   * resumable reservation are one atomic, crash-safe commit. */
+  if (rc == WYRELOG_E_OK) {
+    gchar store_uuid[WYL_ID_STRING_BUF];
+    wyl_id_t id;
+    rc = wyl_id_new (&id);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_id_format (&id, store_uuid, WYL_ID_STRING_BUF);
+    if (rc == WYRELOG_E_OK) {
+      WylPolicyGraphProvisioningInput input = {
+        .tenant_id = opts->tenant_id,
+        .graph_id = opts->graph_id,
+        .store_uuid = store_uuid,
+        .format_version = 1,
+        .path_encoding_version = 1,
+        .expected_lifecycle_generation = 0,
+        .expected_reconciliation_generation = 0,
+      };
+      WylPolicyGraphProvisioningRecord *record = NULL;
+      WylPolicyAuthorityMutationResult result =
+          WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+      rc = wyl_policy_store_graph_provisioning_prepare (store, &input, &record,
+              &result);
+      if (rc == WYRELOG_E_OK
+          && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
+        rc = WYRELOG_E_POLICY;
+      if (rc == WYRELOG_E_OK)
+        g_strlcpy (out_op_uuid, record->op_uuid, WYL_ID_STRING_BUF);
+      wyl_policy_graph_provisioning_record_free (record);
+    }
+  }
+
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (out_storage_uri != NULL)
+    *out_storage_uri = g_strdup (storage_uri);
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 graph_provisioning_transition_is_legal (WylPolicyGraphProvisioningPhase from,
     WylPolicyGraphProvisioningPhase to)

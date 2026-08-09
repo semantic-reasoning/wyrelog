@@ -2159,6 +2159,18 @@ wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);
+/* Create a graph as a crash-safe provisioning operation: inserts the metadata
+ * and reserves the graph authority (moving it to provisioning) in one atomic
+ * mutation, then returns the reservation's operation UUID so the caller can
+ * drive the filesystem construction to ACTIVE (via the fact-layer coordinator).
+ * A graph already under provisioning is resumed idempotently: its in-flight
+ * operation UUID is returned without a second reservation.  out_op_uuid must
+ * point to at least WYL_ID_STRING_BUF bytes.  Any other existing lifecycle
+ * (legacy, active, sealed) is a create conflict (WYRELOG_E_POLICY). */
+wyrelog_error_t wyl_policy_store_create_fact_graph_provisioning
+  (wyl_policy_store_t * store,
+    const wyl_policy_fact_graph_create_options_t * opts,
+    gchar ** out_storage_uri, gchar * out_op_uuid);
 wyrelog_error_t wyl_policy_store_foreach_fact_graph (wyl_policy_store_t *
     store, const gchar * tenant_id, wyl_policy_fact_graph_cb cb,
     gpointer user_data);
