@@ -435,7 +435,13 @@ def literal_path(argument: list[Token]) -> str:
         raise GuardError("registration path must be one literal string")
     raw = argument[0].value
     if not re.fullmatch(r'"/[A-Za-z0-9_{}:./-]*"', raw):
-        raise GuardError(f"registration path is not a plain public path: {raw}")
+        # raw is, by construction, the one spelling that just failed the safe
+        # route charset, so it can carry ESC/tab/bidi/homoglyph bytes.  Render
+        # it through the shared ASCII-safe identity so a hostile route literal
+        # cannot forge, merge, or suppress this diagnostic.
+        raise GuardError(
+            "registration path is not a plain public path: "
+            + render_source_identity(raw))
     return raw[1:-1]
 
 
@@ -1560,6 +1566,38 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         raise GuardError("self-test accepted a literal backslash-n marker")
     if newline_message == literal_message:
         raise GuardError("self-test merged newline and backslash-n route paths")
+
+    # #792: a rejected route string-literal must not forge, merge, or suppress
+    # the literal_path diagnostic either.  literal_path renders the offending
+    # token through the same ASCII-safe identity, so every hostile spelling
+    # stays a single ASCII physical line whose rendered identity round-trips.
+    route_messages = []
+    for fragment in hostile_fragments:
+        hostile_raw = '"/a' + fragment + 'b"'
+        try:
+            literal_path([Token("string", hostile_raw, 1, 0)])
+        except GuardError as error:
+            message = str(error)
+        else:
+            raise GuardError("self-test accepted a hostile route literal")
+        if "\n" in message or "\r" in message:
+            raise GuardError("self-test emitted a multi-line route literal")
+        if not message.isascii():
+            raise GuardError("self-test emitted a non-ASCII route literal")
+        if render_source_identity(hostile_raw) not in message:
+            raise GuardError("self-test lost the hostile route literal identity")
+        route_messages.append(message)
+    # A raw-newline literal cannot merge with the distinct backslash-n sibling.
+    route_newline_message = route_messages[0]
+    try:
+        literal_path([Token("string", '"/a\\nb"', 1, 0)])
+    except GuardError as error:
+        route_literal_message = str(error)
+    else:
+        raise GuardError("self-test accepted a literal backslash-n route literal")
+    if route_newline_message == route_literal_message:
+        raise GuardError(
+            "self-test merged newline and backslash-n route literals")
 
     with tempfile.TemporaryDirectory(prefix="wyl-route-guard-") as temporary:
         root = Path(temporary)
