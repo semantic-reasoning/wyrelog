@@ -378,6 +378,37 @@ def check(path: Path) -> list[str]:
             errors.append("test wrapper must not reproduce service resolution")
     except ValueError as exc:
         errors.append(str(exc))
+
+    if "retain_service_decision_authority" in source:
+        retain_owners = {
+            "wyl_daemon_http_resolve_bearer_for_test": "FALSE",
+            "authorize_guarded_session_action_extended": "FALSE",
+            "service_principal_management_authorize_session": "FALSE",
+            "mfa_enroll_authorize": "FALSE",
+            "logout_handler": "FALSE",
+            "decide_handler": "TRUE",
+        }
+        retain_pattern = re.compile(
+            r"\bresolve_bearer_session\s*\([^;]*?\b(TRUE|FALSE)\s*\)", re.S
+        )
+        total_retain_calls = len(retain_pattern.findall(source))
+        if total_retain_calls != len(retain_owners):
+            errors.append(
+                "bearer resolver retain-mode call-site closure mismatch: "
+                f"expected {len(retain_owners)}, found {total_retain_calls}"
+            )
+        for owner, expected_mode in retain_owners.items():
+            try:
+                owner_start, owner_end = function_span(source, owner)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            modes = retain_pattern.findall(source[owner_start:owner_end])
+            if modes != [expected_mode]:
+                errors.append(
+                    f"{owner} must call resolve_bearer_session exactly once "
+                    f"with retain mode {expected_mode}; found {modes}"
+                )
     return errors
 
 

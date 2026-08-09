@@ -62,9 +62,18 @@ test('engine-session-boundary-self-test', python3,
   env : python_strict_encoding_env,
 )
 
+handle_test_object_format = 'elf'
+if host_machine.system() == 'windows'
+  handle_test_object_format = 'pe'
+elif host_machine.system() == 'darwin'
+  handle_test_object_format = 'macho'
+endif
 test('handle-test-seams-not-shipped', python3,
   args : [
     files('../tools/check-handle-test-seam-exports.py'),
+    'absent',
+    handle_test_object_format,
+    'shared',
     libwyrelog.full_path(),
   ],
   depends : libwyrelog,
@@ -1725,6 +1734,20 @@ test_access_decision = executable('test-access-decision',
 )
 
 test('access-decision', test_access_decision)
+
+test_service_decision_authority = executable('test-service-decision-authority',
+  'test-service-decision-authority.c',
+  c_args : [
+    '-DWYL_TEST_HANDLE_SEAMS',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_handle_test_seams_dep],
+)
+
+test('service-decision-authority', test_service_decision_authority,
+  timeout : 60,
+)
 
 test_template_tree = executable('test-template-tree',
   'test-template-tree.c',

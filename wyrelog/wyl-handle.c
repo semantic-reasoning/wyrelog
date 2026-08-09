@@ -836,6 +836,15 @@ wyl_handle_set_engine_replacement_checkpoint_for_test (WylHandle *self,
 }
 
 void
+wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (WylEngineReplacementCheckpoint phase, gpointer data),
+    gpointer data)
+{
+  wyl_handle_set_engine_replacement_checkpoint_for_test (self, checkpoint,
+      data);
+}
+
+void
 wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle *self,
     const gchar *relation, void (*checkpoint) (gpointer data), gpointer data)
 {
@@ -2881,6 +2890,20 @@ preintern_policy_store_principal_state_symbols (const gchar *subject_id,
 
 /* WYL_ENGINE_SESSION_REQUIRES: locked candidate-build callback chain. */
 static wyrelog_error_t
+preintern_policy_store_service_principal_symbols (const
+    wyl_policy_service_principal_info_t *info, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  if (info == NULL || info->subject_id == NULL || info->state == NULL)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, info->subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, info->state);
+}
+
+static wyrelog_error_t
 preintern_policy_store_principal_event_symbols (gint64 event_id,
     const gchar *subject_id, const gchar *event, const gchar *from_state,
     const gchar *to_state, gpointer user_data)
@@ -3028,6 +3051,10 @@ preintern_policy_store_symbols (WylHandle *self,
           preintern_policy_store_principal_state_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_policy_store_foreach_service_principal (self->policy_store,
+      preintern_policy_store_service_principal_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_policy_store_foreach_principal_event (self->policy_store,
           preintern_policy_store_principal_event_symbols, self);
   if (rc != WYRELOG_E_OK)
@@ -3058,6 +3085,9 @@ take_engine_replacement_fault (WylHandle *self, WylEngineReplacementFault fault)
 #endif
 
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
+wyrelog_error_t wyl_handle_load_policy_store_service_principal_states
+  (WylHandle *self);
+
 static wyrelog_error_t
 load_current_engine_pair (WylHandle *self,
     WylEngineSessionStateCapability session_state_capability)
@@ -3121,6 +3151,9 @@ load_current_engine_pair (WylHandle *self,
     return rc;
   RETURN_REPLACEMENT_FAULT (WYL_ENGINE_REPLACEMENT_FAULT_SESSION_EVENTS);
   rc = wyl_handle_load_policy_store_session_events (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_service_principal_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   return WYRELOG_E_OK;
@@ -3999,7 +4032,7 @@ wyl_handle_reconcile_committed_engine_pair (WylHandle *self,
  * an unsafe closure only latches service auth (see the validator above) and
  * still returns WYRELOG_E_OK.
  */
-static wyrelog_error_t
+wyrelog_error_t
 wyl_handle_reload_engine_pair_with_service_auth_write (WylHandle *self,
     WylServiceAuthWriteLease *write_lease)
 {
@@ -4772,6 +4805,72 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
 
 /* WYL_ENGINE_SESSION_REQUIRES: synchronous locked loader callback. */
 static wyrelog_error_t
+insert_policy_store_service_principal_state (const
+    wyl_policy_service_principal_info_t *info, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[2];
+
+  if (info == NULL || info->subject_id == NULL || info->state == NULL)
+    return WYRELOG_E_POLICY;
+  if (!g_str_equal (info->state, "active")
+      && !g_str_equal (info->state, "disabled"))
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol_locked (self, info->subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol_locked (self, info->state, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  wyrelog_error_t fault_rc = WYRELOG_E_OK;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  WylHandleEngineInsertFaultOnce *insert_fault = g_object_get_qdata
+      (G_OBJECT (self), wyl_handle_engine_insert_fault_once_quark ());
+  if (insert_fault != NULL
+      && g_strcmp0 (insert_fault->relation, "service_principal_state") == 0) {
+    fault_rc = insert_fault->rc;
+    g_object_steal_qdata (G_OBJECT (self),
+        wyl_handle_engine_insert_fault_once_quark ());
+    wyl_handle_engine_fault_once_free (insert_fault);
+    return fault_rc;
+  }
+  if (take_engine_fault_once (self,
+      wyl_handle_engine_delta_insert_fault_once_quark (),
+      "service_principal_state", &fault_rc))
+    return fault_rc;
+#endif
+  rc = wyl_engine_owned_insert (self->read_engine,
+      "service_principal_state", row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_engine_owned_insert (self->delta_engine,
+      "service_principal_state", row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (take_engine_fault_once (self,
+      wyl_handle_engine_delta_step_fault_once_quark (),
+      "service_principal_state", &fault_rc))
+    return fault_rc;
+#endif
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_service_principal_states (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_service_principal (self->policy_store,
+      insert_policy_store_service_principal_state, self);
+}
+
+static wyrelog_error_t
 insert_policy_store_principal_event (gint64 event_id, const gchar *subject_id,
     const gchar *event, const gchar *from_state, const gchar *to_state,
     gpointer user_data)
@@ -5131,11 +5230,18 @@ wyl_handle_engine_contains_locked (WylHandle *self, const gchar *relation,
   if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t fault_rc = WYRELOG_E_OK;
+  if (take_engine_fault_once (self,
+          wyl_handle_engine_contains_fault_once_quark (), relation, &fault_rc))
+    return fault_rc;
+
   const gchar *snapshot_relation = relation;
   /* The engine snapshots derived outputs, so principal_state probes use
    * the template mirror while preserving the handle-level relation name. */
   if (g_strcmp0 (relation, "principal_state") == 0)
     snapshot_relation = "principal_state_observed";
+  else if (g_strcmp0 (relation, "service_principal_state") == 0)
+    snapshot_relation = "service_principal_state_observed";
   /* perm_state probes are the public durable replay-observation path. */
   else if (g_strcmp0 (relation, "perm_state") == 0)
     snapshot_relation = "perm_state_observed";

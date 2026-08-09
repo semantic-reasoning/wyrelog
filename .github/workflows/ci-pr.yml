@@ -415,6 +415,7 @@ jobs:
             test-daemon-http-decide \
             test-daemon-http-decide-refresh \
             test-daemon-http-decide-service \
+            test-daemon-http-service-decision \
             test-daemon-http-decide-audit
 
       - name: Test daemon HTTP variants
@@ -423,6 +424,7 @@ jobs:
             daemon-http-decide \
             daemon-http-decide-refresh \
             daemon-http-decide-service \
+            daemon-http-service-decision \
             daemon-http-decide-audit \
             daemon-http-decide-private-symbols \
             --print-errorlogs
