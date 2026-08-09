@@ -856,7 +856,8 @@ policy_write_cancel_all_for_shutdown (WylDaemonHttpContext *ctx)
  * FALSE for a spurious readable wake or a live/pipelined byte still buffered.
  * Operates on a plain fd (a dup of the client fd) via recv(MSG_PEEK) and IO
  * condition checks only, so it never touches libsoup's GSocket object --
- * MSG_PEEK is non-destructive and concurrent recv on the shared kernel socket is safe.
+ * MSG_PEEK is non-destructive and concurrent recv on the shared kernel socket
+ * is safe.
  *
  * POSIX-only, like the arm path that reaches it: the disconnect watch is never
  * created on Windows, so this would be dead code there, and its ssize_t/errno
