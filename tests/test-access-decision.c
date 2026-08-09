@@ -382,6 +382,24 @@ check_decision_rule_bodies (void)
     "allow(U, P, S) :-\n"
         "    allow_guard_base(U, P, S),\n" "    armed(U, P, S).",
     "allow_bool(U, P, S) :- allow(U, P, S).",
+    ".decl service_principal_state(subject: symbol, state: symbol)",
+    ".decl service_request_auth(context: symbol, subject: symbol, tenant: symbol)",
+    ".decl service_principal_state_observed(subject: symbol, state: symbol)",
+    ".decl service_request_auth_observed(context: symbol, subject: symbol,\n"
+        "    tenant: symbol)",
+    ".decl service_armed(context: symbol, user: symbol, perm: symbol, scope: symbol)",
+    ".decl service_allow_bool(context: symbol, user: symbol, perm: symbol,\n"
+        "    scope: symbol)",
+    "service_principal_state_observed(Subject, State) :-\n"
+        "    service_principal_state(Subject, State).",
+    "service_request_auth_observed(Context, Subject, Tenant) :-\n"
+        "    service_request_auth(Context, Subject, Tenant).",
+    "service_armed(Context, U, P, S) :-\n"
+        "    service_request_auth(Context, U, S),\n"
+        "    service_principal_state(U, \"active\"),\n"
+        "    approved_data_plane_permission(P).",
+    "service_allow_bool(Context, U, P, S) :-\n"
+        "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
     ".decl login_skip_mfa_authz(user: symbol)",
     ".decl login_skip_mfa_authz_observed(user: symbol)",
     "login_skip_mfa_authz_observed(U) :-\n" "    login_skip_mfa_authz(U).",

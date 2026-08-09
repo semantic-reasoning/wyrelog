@@ -124,6 +124,19 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
   (WylHandle * self);
+GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
+wyrelog_error_t wyl_handle_reload_engine_pair_with_service_auth_write
+  (WylHandle * self, WylServiceAuthWriteLease * write_lease);
+wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
+    const gchar * symbol, gint64 * out_id);
+wyrelog_error_t wyl_handle_engine_insert (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols,
+    gboolean * out_contains);
+WylEngine *wyl_handle_get_read_engine (WylHandle * self);
 
 /* Private typed capability proving that the caller owns one recursive engine
  * session. Production consumers must use these operations instead of carrying
@@ -162,6 +175,7 @@ wyrelog_error_t wyl_engine_session_set_delta_callback
 wyrelog_error_t wyl_engine_session_replay_delta_insert
   (WylEngineSession * session, const gchar * relation, const gint64 * row,
     gsize ncols);
+
 
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
@@ -229,6 +243,9 @@ void wyl_handle_set_engine_partial_fault_once_for_test (WylHandle * self,
 void wyl_handle_set_engine_replacement_fault_once_for_test (WylHandle * self,
     WylEngineReplacementFault fault);
 void wyl_handle_set_engine_replacement_checkpoint_for_test (WylHandle * self,
+    void (*checkpoint) (WylEngineReplacementCheckpoint phase, gpointer data),
+    gpointer data);
+void wyl_handle_set_reload_decision_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (WylEngineReplacementCheckpoint phase, gpointer data),
     gpointer data);
 void wyl_handle_set_engine_operation_checkpoint_for_test (WylHandle * self,
@@ -573,6 +590,7 @@ typedef WylHandleEngineFaultOnce WylHandleEngineRemoveFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaInsertFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaRemoveFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineDeltaStepFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineContainsFaultOnce;
 
 static inline void
 wyl_handle_engine_fault_once_free (gpointer data)
@@ -595,6 +613,29 @@ static inline GQuark
 wyl_handle_engine_remove_fault_once_quark (void)
 {
   return g_quark_from_static_string ("wyrelog-handle-engine-remove-fault-once");
+}
+
+static inline GQuark
+wyl_handle_engine_contains_fault_once_quark (void)
+{
+  return g_quark_from_static_string
+      ("wyrelog-handle-engine-contains-fault-once");
+}
+
+static inline void
+wyl_handle_set_engine_contains_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineContainsFaultOnce *fault;
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+  fault = g_new0 (WylHandleEngineContainsFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_contains_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
 }
 
 static inline GQuark
