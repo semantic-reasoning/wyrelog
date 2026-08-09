@@ -16,8 +16,8 @@ canonical_uuid (const gchar *value)
   wyl_id_t parsed;
   gchar canonical[WYL_ID_STRING_BUF];
   return value != NULL && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
-      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
-      && g_strcmp0 (value, canonical) == 0;
+         && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+         && g_strcmp0 (value, canonical) == 0;
 }
 
 static gboolean
@@ -25,19 +25,19 @@ record_matches_authority (const WylPolicyGraphProvisioningRecord *record,
     const WylPolicyGraphAuthorityRecord *authority)
 {
   return record != NULL && authority != NULL
-      && (record->phase == WYL_POLICY_GRAPH_PROVISIONING_RESERVED
-      || record->phase == WYL_POLICY_GRAPH_PROVISIONING_STAGED)
-      && canonical_uuid (record->op_uuid) && canonical_uuid (record->store_uuid)
-      && g_strcmp0 (record->tenant_id, authority->tenant_id) == 0
-      && g_strcmp0 (record->graph_id, authority->graph_id) == 0
-      && g_strcmp0 (record->store_uuid, authority->store_uuid) == 0
-      && authority->has_store_identity
-      && authority->lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING
-      && authority->format_version > 0 && authority->path_encoding_version > 0
-      && authority->lifecycle_generation
-      == record->expected_lifecycle_generation
-      && authority->reconciliation_generation
-      == record->expected_reconciliation_generation;
+         && (record->phase == WYL_POLICY_GRAPH_PROVISIONING_RESERVED
+         || record->phase == WYL_POLICY_GRAPH_PROVISIONING_STAGED)
+         && canonical_uuid (record->op_uuid) && canonical_uuid (record->store_uuid)
+         && g_strcmp0 (record->tenant_id, authority->tenant_id) == 0
+         && g_strcmp0 (record->graph_id, authority->graph_id) == 0
+         && g_strcmp0 (record->store_uuid, authority->store_uuid) == 0
+         && authority->has_store_identity
+         && authority->lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING
+         && authority->format_version > 0 && authority->path_encoding_version > 0
+         && authority->lifecycle_generation
+         == record->expected_lifecycle_generation
+         && authority->reconciliation_generation
+         == record->expected_reconciliation_generation;
 }
 
 void
@@ -52,7 +52,8 @@ wyl_fact_graph_provisioning_stage_clear (WylFactGraphProvisioningStage *stage)
   g_clear_pointer (&stage->graph_id, g_free);
   g_clear_pointer (&stage->store_uuid, g_free);
   stage->identity = (WylFactStoreIdentity) {
-  0};
+    0
+  };
 }
 
 wyrelog_error_t
@@ -71,18 +72,18 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
 
   WylFactGraphLocator locator = { 0 };
   wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, record->tenant_id,
-      record->graph_id);
+          record->graph_id);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &out_stage->resolver);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open_directory (&out_stage->resolver, &locator,
-        TRUE, &out_stage->directory);
+            TRUE, &out_stage->directory);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_stage_create_exact (&out_stage->directory,
-        record->op_uuid, &out_stage->stage);
+            record->op_uuid, &out_stage->stage);
   if (rc == WYRELOG_E_BUSY)
     rc = wyl_fact_graph_directory_stage_open_exact (&out_stage->directory,
-        record->op_uuid, &out_stage->stage);
+            record->op_uuid, &out_stage->stage);
   wyl_fact_graph_locator_clear (&locator);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_graph_provisioning_stage_clear (out_stage);
@@ -93,12 +94,12 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
 #ifndef G_OS_WIN32
   WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
   rc = wyl_fact_graph_directory_open_provisioned_final_exact
-      (&out_stage->directory, record->op_uuid, &final);
+        (&out_stage->directory, record->op_uuid, &final);
   wyl_fact_graph_regular_file_clear (&final);
 #else
   gint final_fd = -1;
   rc = wyl_fact_graph_directory_open_file (&out_stage->directory,
-      "facts.duckdb", FALSE, &final_fd);
+          "facts.duckdb", FALSE, &final_fd);
   if (final_fd >= 0)
     _close (final_fd);
 #endif
@@ -120,7 +121,8 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
     return WYRELOG_E_NOMEM;
   }
   out_stage->identity = (WylFactStoreIdentity) {
-  0};
+    0
+  };
   out_stage->identity.tenant_id = out_stage->tenant_id;
   out_stage->identity.graph_id = out_stage->graph_id;
   out_stage->identity.store_uuid = out_stage->store_uuid;

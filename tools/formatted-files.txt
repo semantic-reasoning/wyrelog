@@ -7,6 +7,7 @@ tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
+tests/test-fact-provisioning.c
 tests/test-grant-req.c
 tests/test-handle-id.c
 tests/test-jwt.c
@@ -61,6 +62,8 @@ wyrelog/daemon/signals.h
 wyrelog/error.h
 wyrelog/fact/compound-private.h
 wyrelog/fact/graph-provisioned-pair-internal.h
+wyrelog/fact/provisioning-private.c
+wyrelog/fact/provisioning-private.h
 wyrelog/fact/query-private.h
 wyrelog/fact/reconcile-private.h
 wyrelog/fact/replay-private.h

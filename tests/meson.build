@@ -1348,7 +1348,11 @@ if get_option('enable_fact_store').allowed()
     'fact-test-support.c',
     c_args : fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
+    # provisioning-private.h includes the DuckDB-backed store identity
+    # contract.  Link the configured DuckDB dependency explicitly so the
+    # header's include path is available on Windows as well as POSIX.
+    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+      + fact_test_support_deps,
   )
   test('fact-provisioning', test_fact_provisioning)
 

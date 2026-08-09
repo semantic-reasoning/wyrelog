@@ -30,10 +30,10 @@ typedef struct
     .stage = WYL_FACT_GRAPH_STAGE_INIT }
 
 wyrelog_error_t wyl_fact_graph_provisioning_stage_prepare
-    (const gchar * fact_root, const WylPolicyGraphProvisioningRecord * record,
+  (const gchar * fact_root, const WylPolicyGraphProvisioningRecord * record,
     const WylPolicyGraphAuthorityRecord * authority,
     WylFactGraphProvisioningStage * out_stage);
 void wyl_fact_graph_provisioning_stage_clear
-    (WylFactGraphProvisioningStage * stage);
+  (WylFactGraphProvisioningStage * stage);
 
 G_END_DECLS;
