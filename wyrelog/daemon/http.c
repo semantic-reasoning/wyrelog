@@ -970,11 +970,26 @@ wyl_daemon_policy_write_watcher_start (WylDaemonHttpContext *ctx)
         ("policy-write-watcher", policy_write_watcher_run, ctx);
 }
 
+/* Declared here, defined below: the watcher's single cross-thread marshalling
+ * site and the stop op it dispatches.  watcher_stop quits the loop through that
+ * one site so the "escaped its single site" structural guard stays satisfied. */
+static gboolean policy_write_watch_stop_cb (gpointer data);
+static void policy_write_watch_run_on_watcher (WylDaemonHttpContext *ctx,
+    GSourceFunc cb, PolicyWriteWatch *watch, GMainContext *context);
+
 static void
 wyl_daemon_policy_write_watcher_stop (WylDaemonHttpContext *ctx)
 {
   if (ctx->policy_write_watcher_loop != NULL)
-    g_main_loop_quit (ctx->policy_write_watcher_loop);
+    /* Quit through the watcher's marshalling site, NOT a bare g_main_loop_quit()
+     * from this thread.  g_main_loop_run() unconditionally sets is_running=TRUE,
+     * so a quit issued before the freshly spawned watcher thread has entered
+     * run() is silently overwritten -- the loop then spins forever and the
+     * g_thread_join() below hangs until the harness SIGTERMs the whole test
+     * binary.  Marshalling the quit as a source blocks until the loop actually
+     * dispatches it, so it can never be lost however start and stop interleave. */
+    policy_write_watch_run_on_watcher (ctx, policy_write_watch_stop_cb, NULL,
+        NULL);
   if (ctx->policy_write_watcher_thread != NULL) {
     g_thread_join (ctx->policy_write_watcher_thread);
     ctx->policy_write_watcher_thread = NULL;
@@ -1058,6 +1073,20 @@ policy_write_watch_disarm_cb (gpointer data)
     g_source_destroy (watch->source);
     g_clear_pointer (&watch->source, g_source_unref);
   }
+  policy_write_watch_op_complete (ctx, op);
+  return G_SOURCE_REMOVE;
+}
+
+/* Runs on the watcher thread: quit the loop from inside a dispatch, so the quit
+ * can never be lost to a thread that has not yet entered g_main_loop_run().  No
+ * watch is involved, so the op carries only ctx. */
+static gboolean
+policy_write_watch_stop_cb (gpointer data)
+{
+  PolicyWriteWatchOp *op = data;
+  (void) g_atomic_int_get (&op->ready); /* acquire: observe op fields */
+  WylDaemonHttpContext *ctx = op->ctx;
+  g_main_loop_quit (ctx->policy_write_watcher_loop);
   policy_write_watch_op_complete (ctx, op);
   return G_SOURCE_REMOVE;
 }
