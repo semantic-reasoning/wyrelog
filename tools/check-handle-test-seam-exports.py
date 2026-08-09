@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject deterministic engine-session test seams in production artifacts."""
+"""Reject engine-session test seams from production binary symbols."""
 
 from pathlib import Path
 import re
@@ -8,51 +8,167 @@ import subprocess
 import sys
 
 
-TEST_SEAMS = {
+PROTECTED = {
     "wyl_handle_set_engine_session_checkpoint_for_test",
-    "wyl_handle_set_engine_replacement_checkpoint_for_test",
+    "wyl_handle_set_reload_decision_checkpoint_for_test",
     "wyl_handle_set_engine_operation_checkpoint_for_test",
-    "wyl_handle_set_engine_snapshot_checkpoint_for_test",
     "wyl_handle_set_audit_replay_checkpoint_for_test",
-    "wyl_handle_set_engine_partial_fault_once_for_test",
-    "wyl_handle_set_engine_replacement_fault_once_for_test",
     "wyl_handle_engine_session_locked_for_test",
-    "wyl_handle_engine_session_depth_for_test",
-    "wyl_engine_verification_mutate_keyed_row_for_test",
     "wyl_handle_pending_delta_count_for_test",
-    "wyl_handle_buffer_delta_for_test",
-    "wyl_handle_flush_pending_deltas_for_test",
-    "wyl_policy_store_read_snapshot_finish_fail_once_for_test",
-    "wyl_handle_lock_engine_session",
 }
+SENTINEL = "wyl_init"
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: check-handle-test-seam-exports.py LIBRARY",
+def run(command):
+    result = subprocess.run(command, text=True, encoding="utf-8",
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            check=False)
+    if result.returncode:
+        raise RuntimeError("symbol inspection failed: " + " ".join(command)
+                           + "\n" + result.stdout)
+    return result.stdout
+
+
+def command_candidates(object_format, artifact_kind, artifact):
+    path = str(artifact)
+    if artifact_kind == "archive":
+        if object_format == "pe":
+            return [("llvm-nm", "--defined-only", path),
+                    ("nm", "--defined-only", path),
+                    ("dumpbin", "/nologo", "/symbols", path)]
+        return [("nm", "--defined-only", path),
+                ("llvm-nm", "--defined-only", path)]
+    if artifact_kind != "shared":
+        raise ValueError(f"unsupported artifact kind: {artifact_kind}")
+    if object_format == "elf":
+        return [("nm", "--defined-only", path),
+                ("llvm-nm", "--defined-only", path)]
+    if object_format == "macho":
+        return [("nm", "-U", path),
+                ("llvm-nm", "--defined-only", path)]
+    if object_format == "pe":
+        return [("llvm-readobj", "--coff-exports", path),
+                ("objdump", "-p", path),
+                ("dumpbin", "/nologo", "/exports", path)]
+    raise ValueError(f"unsupported object format: {object_format}")
+
+
+def symbols(object_format, artifact_kind, artifact, which=shutil.which,
+            runner=run):
+    for candidate in command_candidates(object_format, artifact_kind,
+                                        artifact):
+        tool = which(candidate[0])
+        if tool:
+            return runner([tool, *candidate[1:]])
+    raise RuntimeError(f"no {object_format} {artifact_kind} symbol inspector "
+                       "found")
+
+
+def protected_symbols(output):
+    return {symbol for symbol in PROTECTED
+            if re.search(r"(?<![A-Za-z0-9_])_?" + re.escape(symbol)
+                         + r"(?:@\d+)?(?![A-Za-z0-9_])", output)}
+
+
+def contains_symbol(output, symbol):
+    return re.search(r"(?<![A-Za-z0-9_])_?" + re.escape(symbol)
+                     + r"(?:@\d+)?(?![A-Za-z0-9_])", output) is not None
+
+
+def verify_output(expectation, output):
+    if not contains_symbol(output, SENTINEL):
+        raise RuntimeError("symbol inspector output lacks production sentinel: "
+                           + SENTINEL)
+    found = protected_symbols(output)
+    if expectation == "absent" and found:
+        raise RuntimeError("handle test seams present in production library "
+                           "symbols:\n  " + "\n  ".join(sorted(found)))
+    if expectation == "present" and found != PROTECTED:
+        raise RuntimeError("handle test companion is missing protected "
+                           "symbols:\n  "
+                           + "\n  ".join(sorted(PROTECTED - found)))
+
+
+def inspect(expectation, object_format, artifact_kind, artifact,
+            which=shutil.which, runner=run):
+    output = symbols(object_format, artifact_kind, artifact, which, runner)
+    verify_output(expectation, output)
+
+
+def self_test():
+    all_symbols = "\n".join(f"000 T _{symbol}@12" for symbol in PROTECTED)
+    if protected_symbols(all_symbols) != PROTECTED:
+        raise AssertionError("protected export parser missed a test seam")
+    if not contains_symbol("000 T _wyl_init@8\n", SENTINEL):
+        raise AssertionError("production sentinel decoration was not parsed")
+    verify_output("absent", "000 T wyl_init\n")
+    verify_output("present", "000 T wyl_init\n" + all_symbols)
+    allowed = "000 T wyl_handle_engine_session_locked_for_testing\n"
+    if protected_symbols(allowed):
+        raise AssertionError("protected export parser accepted a substring")
+    pe_shared = command_candidates("pe", "shared", Path("library.dll"))
+    if pe_shared[0][0:2] != ("llvm-readobj", "--coff-exports"):
+        raise AssertionError("PE shared inspection must prefer export directory")
+    pe_archive = command_candidates("pe", "archive", Path("library.lib"))
+    if pe_archive[0][0] != "llvm-nm":
+        raise AssertionError("PE archive inspection must prefer defined symbols")
+    def fake_which(tool):
+        return "/fake/" + tool
+
+    for object_format in ("elf", "macho", "pe"):
+        for artifact_kind in ("shared", "archive"):
+            for expectation in ("absent", "present"):
+                for bad_output in ("", "successful but unparsed output"):
+                    calls = []
+
+                    def bad_runner(command, result=bad_output):
+                        calls.append(command)
+                        return result
+
+                    try:
+                        inspect(expectation, object_format, artifact_kind,
+                                Path("library.bin"), fake_which, bad_runner)
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError(
+                            "empty or malformed inspector output did not fail "
+                            "closed")
+                    if len(calls) != 1:
+                        raise AssertionError(
+                            "invalid inspector output fell through")
+    try:
+        inspect("absent", "pe", "shared", Path("library.dll"),
+                lambda unused: None, lambda command: "")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("missing PE export inspector did not fail closed")
+
+
+def main():
+    if sys.argv[1:] == ["--self-test"]:
+        self_test()
+        return 0
+    if (len(sys.argv) != 5
+            or sys.argv[1] not in {"absent", "present"}
+            or sys.argv[2] not in {"elf", "macho", "pe"}
+            or sys.argv[3] not in {"shared", "archive"}):
+        print("usage: check-handle-test-seam-exports.py "
+              "{absent|present} {elf|macho|pe} {shared|archive} ARTIFACT",
               file=sys.stderr)
         return 2
-    artifact = Path(sys.argv[1])
+    expectation = sys.argv[1]
+    object_format = sys.argv[2]
+    artifact_kind = sys.argv[3]
+    artifact = Path(sys.argv[4])
     if not artifact.is_file():
         print(f"library artifact missing: {artifact}", file=sys.stderr)
         return 1
-    tool = shutil.which("llvm-nm") or shutil.which("nm")
-    if tool is None:
-        print("no production-artifact symbol inspector found", file=sys.stderr)
-        return 1
-    result = subprocess.run([tool, "--defined-only", str(artifact)],
-                            check=False, text=True, encoding="utf-8",
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
-    if result.returncode != 0:
-        print(result.stdout, file=sys.stderr)
-        return 1
-    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_@]*", result.stdout))
-    found = sorted(TEST_SEAMS.intersection(token.split("@", 1)[0]
-                                           for token in tokens))
-    if found:
-        print("test-only handle symbols in production artifact:", *found,
-              sep="\n  ", file=sys.stderr)
+    try:
+        inspect(expectation, object_format, artifact_kind, artifact)
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
         return 1
     return 0
 
