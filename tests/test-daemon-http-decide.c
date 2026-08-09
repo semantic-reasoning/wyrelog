@@ -7264,6 +7264,14 @@ policy_write_cancel_fixture_setup (PolicyWriteCancelFixture *fixture,
   if (fixture->http.server == NULL)
     return base_error + 1;
   fixture->server = fixture->http.server;
+  /* Stop the 1s service-auth retirement timer for the lifetime of this fixture.
+   * It periodically takes the coordination WRITE lease, so leaving it running
+   * lets an unrelated maintenance writer park behind the test's held writer in
+   * the same window -- which would make the waiting-writer and quiesce
+   * assertions below race daemon-internal work rather than the request under
+   * test.  Suspending drains any in-flight pass, so after this the only WRITE
+   * activity is the test's own. */
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (fixture->server);
   fixture->thread = g_thread_new ("policy-write-cancel",
           test_http_server_thread_ctx, &fixture->http);
   GSList *uris = soup_server_get_uris (fixture->server);
