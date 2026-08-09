@@ -887,9 +887,9 @@ struct _PolicyWriteWatch
   gint refcount;                /* atomic */
   GCancellable *cancellable;    /* +1 ref, owned */
   gint fd;                      /* a DUP of the client fd, owned (closed at
-                                 * unref); the watcher polls/peeks this fd only,
-                                 * never libsoup's live GSocket, so it never
-                                 * touches GSocket state libsoup mutates. */
+                                * unref); the watcher polls/peeks this fd only,
+                                * never libsoup's live GSocket, so it never
+                                * touches GSocket state libsoup mutates. */
   gint cancel_reason;           /* atomic WylDaemonPolicyWriteCancel */
   GSource *source;              /* accessed ONLY on the watcher thread */
 };
