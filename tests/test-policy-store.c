@@ -5949,6 +5949,87 @@ check_bootstrap_admin_allow_skip_mfa_flag (void)
   return 0;
 }
 
+static gint
+check_store_provisions_fact_graph (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-facts-prov-XXXXXX", &error);
+  if (root == NULL)
+    return 960;
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 961;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 962;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 963;
+
+  const wyl_policy_fact_graph_column_t columns[] = {
+    {"subject", "symbol"},
+    {"object", "symbol"},
+  };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    {"site.edge", columns, G_N_ELEMENTS (columns)},
+  };
+
+  wyl_policy_fact_graph_create_options_t opts =
+      make_fact_graph_options ("tenant-a", "graph-prov", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &opts, NULL,
+      op_uuid) != WYRELOG_E_OK)
+    return 964;
+  if (op_uuid[0] == '\0')
+    return 965;
+
+  gint provisioning_count = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov' AND lifecycle_state='provisioning' "
+      "AND store_uuid IS NOT NULL;", &provisioning_count) != 0)
+    return 966;
+  if (provisioning_count != 1)
+    return 967;
+
+  gint reserved_count = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graph_provisioning WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov' AND phase='reserved';", &reserved_count) != 0)
+    return 968;
+  if (reserved_count != 1)
+    return 969;
+
+  /* Idempotent resume: the same operation UUID, no second reservation. */
+  gchar op_uuid_again[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &opts, NULL,
+      op_uuid_again) != WYRELOG_E_OK)
+    return 970;
+  if (g_strcmp0 (op_uuid, op_uuid_again) != 0)
+    return 971;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graph_provisioning WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov';", &reserved_count) != 0)
+    return 972;
+  if (reserved_count != 1)
+    return 973;
+
+  /* A legacy graph occupying the name is a create conflict, not a resume. */
+  wyl_policy_fact_graph_create_options_t legacy =
+      make_fact_graph_options ("tenant-a", "graph-legacy", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &legacy, NULL) != WYRELOG_E_OK)
+    return 974;
+  gchar op_uuid_conflict[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &legacy, NULL,
+      op_uuid_conflict) != WYRELOG_E_POLICY)
+    return 975;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -5965,6 +6046,8 @@ main (void)
   if ((rc = check_store_manages_tenant_registry ()) != 0)
     return rc;
   if ((rc = check_store_manages_fact_graph_registry ()) != 0)
+    return rc;
+  if ((rc = check_store_provisions_fact_graph ()) != 0)
     return rc;
   if ((rc = check_store_seals_fact_graph_registry ()) != 0)
     return rc;
