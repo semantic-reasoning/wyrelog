@@ -63,13 +63,13 @@ test_prepare_exact_stage_reopens_after_crash (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-provisioning-XXXXXX", &error);
+        ("wyl-fact-provisioning-XXXXXX", &error);
   g_assert_no_error (error);
   WylPolicyGraphProvisioningRecord record = make_record ();
   WylPolicyGraphAuthorityRecord authority = make_authority ();
   WylFactGraphProvisioningStage first = WYL_FACT_GRAPH_PROVISIONING_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_provisioning_stage_prepare (root, &record,
-          &authority, &first), ==, WYRELOG_E_OK);
+      &authority, &first), ==, WYRELOG_E_OK);
   g_assert_cmpstr (first.stage.stage_basename, ==, record.stage_basename);
   g_assert_cmpstr (first.stage.final_basename, ==, "facts.duckdb");
   g_assert_cmpstr (first.identity.tenant_id, ==, record.tenant_id);
@@ -84,7 +84,7 @@ test_prepare_exact_stage_reopens_after_crash (void)
 
   WylFactGraphProvisioningStage retry = WYL_FACT_GRAPH_PROVISIONING_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_provisioning_stage_prepare (root, &record,
-          &authority, &retry), ==, WYRELOG_E_OK);
+      &authority, &retry), ==, WYRELOG_E_OK);
 #ifndef G_OS_WIN32
   g_assert_cmpuint (retry.stage.inode, ==, inode);
 #endif
@@ -97,14 +97,14 @@ test_prepare_rejects_mismatched_authority (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-provisioning-XXXXXX", &error);
+        ("wyl-fact-provisioning-XXXXXX", &error);
   g_assert_no_error (error);
   WylPolicyGraphProvisioningRecord record = make_record ();
   WylPolicyGraphAuthorityRecord authority = make_authority ();
   authority.store_uuid = (gchar *) "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
   WylFactGraphProvisioningStage stage = WYL_FACT_GRAPH_PROVISIONING_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_provisioning_stage_prepare (root, &record,
-          &authority, &stage), ==, WYRELOG_E_INVALID);
+      &authority, &stage), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (g_rmdir (root), ==, 0);
 }
 
