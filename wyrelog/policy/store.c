@@ -11488,10 +11488,33 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
   if (sealed)
     return WYRELOG_E_OK;
 
-  static const gchar *sql =
-      "UPDATE fact_graphs "
-      "SET sealed = 1, sealed_at = unixepoch(), updated_at = unixepoch() "
-      "WHERE tenant_id = ? AND graph_id = ? AND sealed = 0;";
+  /* A provisioned graph is authority-managed: sealing it is a lifecycle
+   * transition (active -> sealed) that must set the legacy sealed flag in the
+   * same update to satisfy the authority invariant, whereas a legacy graph just
+   * sets the flag.  A provisioning or degraded graph cannot be sealed directly. */
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  rc = wyl_policy_store_read_graph_authority (store, tenant_id, graph_id,
+          &authority);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyGraphLifecycleState state = authority->lifecycle_state;
+  wyl_policy_graph_authority_record_free (authority);
+
+  const gchar *sql;
+  if (state == WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED) {
+    sql = "UPDATE fact_graphs "
+        "SET sealed = 1, sealed_at = unixepoch(), updated_at = unixepoch() "
+        "WHERE tenant_id = ? AND graph_id = ? AND sealed = 0;";
+  } else if (state == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE) {
+    sql = "UPDATE fact_graphs "
+        "SET lifecycle_state = 'sealed', sealed = 1, "
+        "lifecycle_generation = lifecycle_generation + 1, "
+        "sealed_at = unixepoch(), updated_at = unixepoch() "
+        "WHERE tenant_id = ? AND graph_id = ? "
+        "AND lifecycle_state = 'active' AND sealed = 0;";
+  } else {
+    return WYRELOG_E_POLICY;
+  }
   rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;

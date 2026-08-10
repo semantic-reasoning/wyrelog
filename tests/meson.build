@@ -580,6 +580,9 @@ if build_client
       test_daemon_http_facts_deps += duckdb_dep
       test_daemon_http_facts_deps += service_exchange_private_dep
     endif
+    if get_option('enable_secure_duckdb_bridge').enabled() and host_machine.system() != 'windows'
+      test_daemon_http_facts_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
+    endif
     test_daemon_http_facts_deps += daemon_http_private_dep
     test_daemon_http_facts = executable('test-daemon-http-facts',
       'test-daemon-http-facts.c',

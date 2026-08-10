@@ -6,6 +6,9 @@
 #include "compound-private.h"
 #include "graph-locator-private.h"
 #include "wyrelog/wyl-engine-private.h"
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "fact/store-open-private.h"
+#endif
 
 #ifdef G_OS_WIN32
 #include <io.h>
@@ -536,16 +539,37 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
 
-  g_autofree gchar *fact_db_path = NULL;
-  wyrelog_error_t rc = resolve_fact_db_path (policy, fact_root, graph_info,
-          &fact_db_path);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
+  wyrelog_error_t rc = WYRELOG_E_OK;
   g_autoptr (wyl_fact_store_t) store = NULL;
-  rc = wyl_fact_store_open (fact_db_path, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  gboolean provisioned = FALSE;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* A provisioning or active graph is read through the live secure handle on
+   * its retained pair, not the raw path open. */
+  {
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    if (wyl_policy_store_read_graph_authority (policy, graph_info->tenant_id,
+        graph_info->graph_id, &authority) == WYRELOG_E_OK
+        && authority != NULL && authority->lifecycle_state
+        != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED)
+      provisioned = TRUE;
+    wyl_policy_graph_authority_record_free (authority);
+  }
+  if (provisioned) {
+    rc = wyl_fact_store_open_provisioned_graph (policy, fact_root,
+            graph_info->tenant_id, graph_info->graph_id, FALSE, &store);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+#endif
+  if (!provisioned) {
+    g_autofree gchar *fact_db_path = NULL;
+    rc = resolve_fact_db_path (policy, fact_root, graph_info, &fact_db_path);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_fact_store_open (fact_db_path, &store);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   g_autoptr (GPtrArray) relations = NULL;
   rc = list_replay_relations (policy, store, graph_info, &relations);
   if (rc != WYRELOG_E_OK)

@@ -37,6 +37,10 @@
 #include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "wyrelog/fact/provisioning-run-private.h"
+#include "wyrelog/fact/store-open-private.h"
+#endif
 #include "wyrelog/auth/service-credential-operation-coordinator-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-recovery-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-status-private.h"
@@ -10661,8 +10665,23 @@ graph_create_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE, &write);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* Crash-safe provisioning create: reserve the graph authority + operation
+   * record atomically, then drive the filesystem construction to ACTIVE.  A
+   * retry of an in-flight provisioning resumes the same operation idempotently.
+   */
+  if (rc == WYRELOG_E_OK) {
+    gchar op_uuid[WYL_ID_STRING_BUF];
+    rc = wyl_policy_store_create_fact_graph_provisioning (write.store, &opts,
+            NULL, op_uuid);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_provisioning_recover (write.store, op_uuid,
+              ctx->fact_root, NULL);
+  }
+#else
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_create_fact_graph (write.store, &opts, NULL);
+#endif
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -11220,8 +11239,23 @@ resolve_http_fact_db_path (WylDaemonHttpContext *ctx,
     rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
             writable, &fd);
   if (rc == WYRELOG_E_NOT_FOUND && writable) {
-    *out_needs_hardening = TRUE;
-    rc = WYRELOG_E_OK;
+    /* Only a legacy-unclassified graph may lazily materialize facts.duckdb.  A
+     * provisioning or active graph's store is the retained pair built by the
+     * provisioning coordinator; a missing file there means an unfinished or
+     * damaged provisioning, which must fail closed rather than create a rogue,
+     * identity-less nlink-1 store that breaks the pair invariant. */
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    wyrelog_error_t auth_rc = wyl_policy_store_read_graph_authority
+          (policy_store, tenant, graph, &authority);
+    if (auth_rc != WYRELOG_E_OK) {
+      rc = auth_rc;
+    } else if (authority != NULL && authority->lifecycle_state
+        == WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED) {
+      *out_needs_hardening = TRUE;
+      rc = WYRELOG_E_OK;
+    }
+    /* Otherwise rc stays WYRELOG_E_NOT_FOUND: the caller fails closed. */
+    wyl_policy_graph_authority_record_free (authority);
   }
   if (rc == WYRELOG_E_OK) {
     *out_path = wyl_fact_graph_directory_descriptive_file (&directory,
@@ -11258,6 +11292,20 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
     wyl_fact_store_t **out_store)
 {
   *out_store = NULL;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* A provisioning or active graph is served by the live secure handle on its
+   * retained pair; only legacy graphs keep the path open below. */
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  if (wyl_policy_store_read_graph_authority (policy_store, tenant, graph,
+      &authority) == WYRELOG_E_OK && authority != NULL
+      && authority->lifecycle_state
+      != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED) {
+    wyl_policy_graph_authority_record_free (authority);
+    return wyl_fact_store_open_provisioned_graph (policy_store, ctx->fact_root,
+               tenant, graph, TRUE, out_store);
+  }
+  wyl_policy_graph_authority_record_free (authority);
+#endif
   g_autofree gchar *path = NULL;
   gboolean needs_hardening = FALSE;
   wyrelog_error_t rc = resolve_http_fact_db_path (ctx, policy_store, tenant,
