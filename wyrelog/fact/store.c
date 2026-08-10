@@ -6,6 +6,22 @@
 #include "compound-private.h"
 #include "store-identity-private.h"
 
+/* Opaque even in non-secure builds so the store handle can carry the live
+ * provisioned-pair bridge as a plain pointer (NULL everywhere but the secure
+ * provisioned open). */
+typedef struct WylSecureDuckdbBridge WylSecureDuckdbBridge;
+
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "fact/graph-locator-private.h"
+#include "fact/secure-duckdb-bridge-private.h"
+
+/* Bind the retained provisioning pair to a bounded namespace.  Defined in the
+ * artifact namespace unit; declared here for the live provisioned open. */
+extern wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair * pair, WylFactArtifactNamespace ** out);
+#endif
+
 struct wyl_fact_store_t
 {
   duckdb_database db;
@@ -16,6 +32,7 @@ struct wyl_fact_store_t
   gchar *identity_store_uuid;
   guint64 identity_format_version;
   guint64 identity_path_encoding_version;
+  WylSecureDuckdbBridge *provisioned_bridge;
 };
 
 static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
@@ -597,6 +614,64 @@ wyl_fact_store_open_identified (const gchar *path,
   return WYRELOG_E_OK;
 }
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+wyrelog_error_t
+wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
+    const WylFactStoreIdentity *identity, gboolean writable,
+    wyl_fact_store_t **out_store)
+{
+  if (out_store != NULL)
+    *out_store = NULL;
+  if (pair == NULL || out_store == NULL
+      || !wyl_fact_store_identity_input_is_valid (identity))
+    return WYRELOG_E_INVALID;
+
+  wyl_fact_store_identity_process_guard_lock ();
+  WylFactArtifactNamespace *namespace_ = NULL;
+  wyrelog_error_t rc =
+      wyl_fact_artifact_namespace_open_provisioned_pair_internal (pair,
+          &namespace_);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
+
+  /* Build a live bounded instance and hand back the C-API handle.  The bridge
+   * keeps only the lease + health; the store owns the instance and closes it. */
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  rc = wyl_secure_duckdb_bridge_open_live_pair (namespace_, writable, &bridge,
+          &db, &conn);
+  wyl_fact_artifact_namespace_free (namespace_);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
+
+  wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
+  self->db = db;
+  self->conn = conn;
+  self->provisioned_bridge = bridge;
+  g_mutex_init (&self->lock);
+  rc = reject_audit_database_unlocked (self);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_close (self);
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
+
+  self->identity_tenant_id = g_strdup (identity->tenant_id);
+  self->identity_graph_id = g_strdup (identity->graph_id);
+  self->identity_store_uuid = g_strdup (identity->store_uuid);
+  self->identity_format_version = identity->format_version;
+  self->identity_path_encoding_version = identity->path_encoding_version;
+  *out_store = self;
+  wyl_fact_store_identity_process_guard_unlock ();
+  return WYRELOG_E_OK;
+}
+#endif
+
 wyrelog_error_t
 wyl_fact_store_open (const gchar *path, wyl_fact_store_t **out_store)
 {
@@ -630,6 +705,14 @@ wyl_fact_store_close (wyl_fact_store_t *store)
     return;
   duckdb_disconnect (&store->conn);
   duckdb_close (&store->db);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* Order matters: the disconnect + close above destruct the instance so its
+   * shutdown checkpoint runs through the bounded filesystem under the lease the
+   * bridge still holds.  Only now is it safe to observe health and release the
+   * lease. */
+  if (store->provisioned_bridge != NULL)
+    (void) wyl_secure_duckdb_bridge_release_live (store->provisioned_bridge);
+#endif
   g_mutex_clear (&store->lock);
   g_free (store->identity_tenant_id);
   g_free (store->identity_graph_id);

@@ -1473,6 +1473,18 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     test('fact-provisioning-run', test_fact_provisioning_run,
       timeout : 60,
     )
+    test_fact_store_provisioned = executable(
+      'test-fact-store-provisioned',
+      'test-fact-store-provisioned.c',
+      'fact-test-support.c',
+      c_args : fact_test_support_c_args + ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE'],
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+        + fact_test_support_deps,
+    )
+    test('fact-store-provisioned', test_fact_store_provisioned,
+      timeout : 60,
+    )
     test_duckdb_after_walstart = executable(
       'test-duckdb-after-walstart',
       'test-secure-duckdb-recording-filesystem.cc',
