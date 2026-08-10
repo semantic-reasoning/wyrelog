@@ -79,6 +79,8 @@ wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
 wyrelog/fact/secure-duckdb-bridge-windows-private.c
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
+wyrelog/fact/store-open-private.c
+wyrelog/fact/store-open-private.h
 wyrelog/fact/store-private.h
 wyrelog/fact/store.c
 wyrelog/handle.h

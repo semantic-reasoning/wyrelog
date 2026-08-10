@@ -4,9 +4,13 @@
 #include <sqlite3.h>
 #include <sys/stat.h>
 
+#include <duckdb.h>
+
 #include "fact-test-support.h"
 #include "fact/provisioning-construct-private.h"
 #include "fact/provisioning-run-private.h"
+#include "fact/store-open-private.h"
+#include "fact/store-private.h"
 
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070545";
 static const gchar seam_op_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
@@ -314,6 +318,56 @@ test_recover_from_verified (void)
   recover_over_published_pair ("verified");
 }
 
+static gboolean
+run_exec (duckdb_connection conn, const gchar *sql)
+{
+  duckdb_result result = { 0 };
+  duckdb_state state = duckdb_query (conn, sql, &result);
+  duckdb_destroy_result (&result);
+  return state == DuckDBSuccess;
+}
+
+/* The dispatch opens an active graph through the provisioned pair: writes via
+ * the live handle persist across close and a fresh dispatch reopen. */
+static void
+test_open_for_graph_serves_active_graph (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-provisioning-run-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  seed_graph (wyl_policy_store_get_db (store), "tenant-run", "graph-run");
+  WylPolicyGraphProvisioningInput input = make_input ("tenant-run", "graph-run");
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (store, &input, root, NULL),
+      ==, WYRELOG_E_OK);
+
+  wyl_fact_store_t *fact_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
+      "tenant-run", "graph-run", TRUE, &fact_store), ==, WYRELOG_E_OK);
+  g_assert_nonnull (fact_store);
+  g_assert_cmpint (wyl_fact_store_create_schema (fact_store), ==, WYRELOG_E_OK);
+  duckdb_connection conn = wyl_fact_store_get_connection (fact_store);
+  g_assert_true (run_exec (conn, "CREATE TABLE probe (x INTEGER);"));
+  g_assert_true (run_exec (conn, "INSERT INTO probe VALUES (1), (2), (3);"));
+  wyl_fact_store_close (fact_store);
+
+  fact_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
+      "tenant-run", "graph-run", FALSE, &fact_store), ==, WYRELOG_E_OK);
+  conn = wyl_fact_store_get_connection (fact_store);
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (conn, "SELECT COUNT(*) FROM probe;", &result),
+      ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, 3);
+  duckdb_destroy_result (&result);
+  wyl_fact_store_close (fact_store);
+
+  remove_root (root);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -330,5 +384,7 @@ main (int argc, char *argv[])
       test_recover_from_staged_write_behind);
   g_test_add_func ("/fact/provisioning-run/recover-from-verified",
       test_recover_from_verified);
+  g_test_add_func ("/fact/provisioning-run/open-for-graph-serves-active-graph",
+      test_open_for_graph_serves_active_graph);
   return g_test_run ();
 }
