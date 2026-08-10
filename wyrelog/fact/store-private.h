@@ -45,6 +45,17 @@ wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
     WylFactStoreIdentityResult * out_result, wyl_fact_store_t ** out_store);
 /* Pathnames are not authority; this legacy handle-returning API is unsuitable
  * for security-sensitive provisioning. */
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
+/* Open a live, secure handle on a retained provisioning pair.  Unlike the raw
+ * path open, this binds by descriptor through the bounded secure filesystem, so
+ * it serves the nlink-2 pair the regular open path refuses.  The returned handle
+ * owns the bounded instance; close it with wyl_fact_store_close.  Identity is
+ * bound from |identity| after the store's kind is revalidated. */
+wyrelog_error_t wyl_fact_store_open_provisioned_pair
+  (WylFactGraphProvisionedPair * pair, const WylFactStoreIdentity * identity,
+    gboolean writable, wyl_fact_store_t ** out_store);
+#endif
 void wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault
     fault);
 void wyl_fact_store_identity_set_validation_test_hook
