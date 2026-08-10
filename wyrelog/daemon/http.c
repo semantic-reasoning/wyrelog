@@ -15338,6 +15338,7 @@ service_management_authority_arm_handler (SoupServer *server,
         rc = WYRELOG_E_OK;
       else if (classify_rc == WYRELOG_E_OK)
         rc = WYRELOG_E_POLICY;
+    }
   }
   g_clear_pointer (&engine_session, wyl_engine_session_release);
   if (rc != WYRELOG_E_OK) {

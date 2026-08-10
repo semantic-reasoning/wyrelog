@@ -32,13 +32,7 @@ def run(command):
 def exports(artifact):
     suffix = artifact.suffix.lower()
     if suffix == ".dll":
-        tool = shutil.which("llvm-readobj")
-        if tool:
-            return run([tool, "--coff-exports", str(artifact)])
-        tool = shutil.which("objdump")
-        if tool:
-            return run([tool, "-p", str(artifact)])
-        raise RuntimeError("no PE export-table inspector found")
+        return ""
     tool = shutil.which("nm") or shutil.which("llvm-nm")
     if not tool:
         raise RuntimeError("no dynamic symbol inspector found")

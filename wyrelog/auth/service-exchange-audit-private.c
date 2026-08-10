@@ -188,7 +188,8 @@ input_is_valid (const wyl_service_exchange_audit_input_t *input)
   return wyl_policy_store_tenant_id_is_valid (tenant);
 }
 
-void wyl_service_exchange_audit_material_clear
+G_GNUC_INTERNAL void
+wyl_service_exchange_audit_material_clear
     (wyl_service_exchange_audit_material_t * material)
 {
   if (material == NULL)
@@ -197,7 +198,7 @@ void wyl_service_exchange_audit_material_clear
   sodium_memzero (material, sizeof *material);
 }
 
-wyrelog_error_t
+G_GNUC_INTERNAL wyrelog_error_t
 wyl_service_exchange_audit_encode (const
     wyl_service_exchange_audit_input_t *input,
     wyl_service_exchange_audit_material_t *out_material)

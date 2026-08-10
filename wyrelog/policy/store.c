@@ -2048,31 +2048,24 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
    service_permission_receipt_needles, 7, "",
    "sqlite_autoindex_service_permission_remediation_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_retirement_receipts",
-<<<<<<< HEAD
    "request_id:TEXT:1::1,receipt_version:INTEGER:1::0,operation:TEXT:1::0,resource_id:TEXT:1::0,tenant_id:TEXT:0::0,actor_subject_id:TEXT:1::0,input_fingerprint:BLOB:1::0,outcome:TEXT:1::0,result_state:TEXT:1::0,authority_generation:INTEGER:1::0,tenant_lifecycle_generation:INTEGER:0::0,tenant_sealed_generation:INTEGER:0::0,event_id:INTEGER:0::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
    service_retirement_receipt_needles, 18,
    "0:0:audit_events:audit_id:id:RESTRICT:RESTRICT:NONE",
    "idx_service_retirement_diagnostic:0:c:0:0:2:operation:0:BINARY:1,1:3:resource_id:0:BINARY:1,2:14:created_at_us:0:BINARY:1,3:0:request_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_retirement_event:1:c:1:0:2:operation:0:BINARY:1,1:12:event_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_2:1:u:0:0:13:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
-=======
-        "request_id:TEXT:1::1,receipt_version:INTEGER:1::0,operation:TEXT:1::0,resource_id:TEXT:1::0,tenant_id:TEXT:0::0,actor_subject_id:TEXT:1::0,input_fingerprint:BLOB:1::0,outcome:TEXT:1::0,result_state:TEXT:1::0,authority_generation:INTEGER:1::0,tenant_lifecycle_generation:INTEGER:0::0,tenant_sealed_generation:INTEGER:0::0,event_id:INTEGER:0::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
-        service_retirement_receipt_needles, 18,
-        "0:0:audit_events:audit_id:id:RESTRICT:RESTRICT:NONE",
-      "idx_service_retirement_diagnostic:0:c:0:0:2:operation:0:BINARY:1,1:3:resource_id:0:BINARY:1,2:14:created_at_us:0:BINARY:1,3:0:request_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_retirement_event:1:c:1:0:2:operation:0:BINARY:1,1:12:event_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_retirement_receipts_2:1:u:0:0:13:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_management_self_arm_receipts",
-        "server_operation_id:TEXT:1::1,tenant_id:TEXT:1::0,operation_kind:TEXT:1::"
-        "0,receipt_version:INTEGER:1::0,actor_subject_id:TEXT:1::0,session_id:"
-        "TEXT:1::0,bundle_digest:BLOB:1::0,principal_permission_id:TEXT:1::0,"
-        "credential_permission_id:TEXT:1::0,principal_direct_event_id:INTEGER:1::"
-        "0,credential_direct_event_id:INTEGER:1::0,principal_state_event_id:"
-        "INTEGER:1::0,credential_state_event_id:INTEGER:1::0,principal_audit_id:"
-        "TEXT:1::0,credential_audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
-        service_management_self_arm_receipt_needles, 19, "",
-      "sqlite_autoindex_service_management_self_arm_receipts_1:1:pk:0:0:0:"
-        "server_operation_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_"
-        "management_self_arm_receipts_2:1:u:0:0:1:tenant_id:0:BINARY:1,1:2:"
-        "operation_kind:0:BINARY:1,2:4:actor_subject_id:0:BINARY:1,3:5:session_id:"
-        "0:BINARY:1,4:-1::0:BINARY:0"},
->>>>>>> 67b10f8 (policy: define exact self-arm transaction bundle)
+   "server_operation_id:TEXT:1::1,tenant_id:TEXT:1::0,operation_kind:TEXT:1::"
+   "0,receipt_version:INTEGER:1::0,actor_subject_id:TEXT:1::0,session_id:"
+   "TEXT:1::0,bundle_digest:BLOB:1::0,principal_permission_id:TEXT:1::0,"
+   "credential_permission_id:TEXT:1::0,principal_direct_event_id:INTEGER:1::"
+   "0,credential_direct_event_id:INTEGER:1::0,principal_state_event_id:"
+   "INTEGER:1::0,credential_state_event_id:INTEGER:1::0,principal_audit_id:"
+   "TEXT:1::0,credential_audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
+   service_management_self_arm_receipt_needles, 19, "",
+   "sqlite_autoindex_service_management_self_arm_receipts_1:1:pk:0:0:0:"
+   "server_operation_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_"
+   "management_self_arm_receipts_2:1:u:0:0:1:tenant_id:0:BINARY:1,1:2:"
+   "operation_kind:0:BINARY:1,2:4:actor_subject_id:0:BINARY:1,3:5:session_id:"
+   "0:BINARY:1,4:-1::0:BINARY:0"},
 };
 
 static const ServiceIndexDescriptor service_index_descriptors[] = {

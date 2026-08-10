@@ -630,7 +630,6 @@ wyl_engine_session_finish_terminal_recovery (WylEngineSession *session,
     if (recovered)
       self->engine_terminal_generation = 0;
     session->terminal_recovery = FALSE;
->>>>>>> 2d3dec9 (policy: enforce terminal engine recovery boundary)
   }
   g_mutex_unlock (&self->engine_terminal_mutex);
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
