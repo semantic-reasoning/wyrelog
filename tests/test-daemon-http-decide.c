@@ -16651,6 +16651,440 @@ replay_retirement_response (ServiceDenialEnv *env, const gchar *method,
   return TRUE;
 }
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  const gchar *operation;
+  guint matches;
+} SelfArmDirectEventProbe;
+
+static wyrelog_error_t
+self_arm_direct_event_probe_cb (const gchar *subject_id, const gchar *perm_id,
+    const gchar *scope, const gchar *operation, gpointer user_data)
+{
+  SelfArmDirectEventProbe *probe = user_data;
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (perm_id, probe->perm_id) == 0
+      && g_strcmp0 (scope, probe->scope) == 0
+      && g_strcmp0 (operation, probe->operation) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static gint
+self_arm_count_direct_events (wyl_policy_store_t *store, const gchar *subject,
+    const gchar *perm, const gchar *scope, guint *out_count)
+{
+  SelfArmDirectEventProbe probe = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = scope,
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_direct_permission_event (store,
+      self_arm_direct_event_probe_cb, &probe) != WYRELOG_E_OK)
+    return -1;
+  *out_count = probe.matches;
+  return 0;
+}
+
+static guint
+self_arm_count_state_events (wyl_policy_store_t *store, const gchar *subject,
+    const gchar *perm, const gchar *scope)
+{
+  PermissionStateProbe probe = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = scope,
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+      permission_state_event_probe_cb, &probe) != WYRELOG_E_OK)
+    return G_MAXUINT;
+  return probe.matches;
+}
+
+/* Seeds wr.system_admin eligibility + the __wr_default anchor + reload, exactly
+ * like the e2e.  The shared env pre-grants BOTH manage perms at
+ * env->session_token (grant present, dormant), so a first self-arm is a
+ * monotone REPAIR unless the caller revokes a grant to force FULL. */
+static gint
+self_arm_bundle_env_ready (ServiceDenialEnv *env)
+{
+  gint rc = service_denial_env_init (env, TRUE, FALSE, FALSE);
+  if (rc != 0)
+    return rc;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
+      "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+      "active") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env->handle) != WYRELOG_E_OK)
+    return 2750;
+  return 0;
+}
+
+static gint
+self_arm_post (ServiceDenialEnv *env, guint *status)
+{
+  g_autofree gchar *body = NULL;
+  return send_raw_service_principal_bearer (env->session, "POST",
+             env->base_url, "/service-management-authority/arm", env->query,
+             env->access_token, "{}", status, &body);
+}
+
+static gboolean
+self_arm_perm_armed (ServiceDenialEnv *env, const gchar *perm)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  gboolean armed = FALSE;
+  if (wyl_policy_store_permission_state_is (store, "human-principal-admin",
+      perm, env->session_token, "armed", &armed) != WYRELOG_E_OK)
+    return FALSE;
+  return armed;
+}
+
+/* Proves BOTH management verbs authorize for the caller's exact session: a
+ * service-principal create (wr.service_principal.manage) followed by a
+ * credential issue (wr.service_credential.manage). */
+static gboolean
+self_arm_both_authorize (ServiceDenialEnv *env, const gchar *worker)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *create_body = g_strdup_printf
+        ("{\"subject_id\":\"svc:tenant-a:%s\",\"display_name\":\"W\"}", worker);
+  if (send_raw_service_principal_bearer (env->session, "POST", env->base_url,
+      "/service-principals", env->query, env->access_token, create_body,
+      &status, &body) != 0 || status != 200)
+    return FALSE;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *path = g_strdup_printf
+        ("/service-principals/svc:tenant-a:%s/credentials", worker);
+  const gchar *issue_body =
+      "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"111111111111111111111111111\","
+      "\"destination\":\"issue.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
+  status = 0;
+  if (send_raw_service_principal_bearer (env->session, "POST", env->base_url,
+      path, env->tenant_query, env->access_token, issue_body, &status,
+      &body) != 0 || status != 200)
+    return FALSE;
+  return TRUE;
+}
+
+/* #747: a precommit fault at any of the up-to-five per-perm rows (for either
+ * perm) rolls the WHOLE bundle back: 500, zero durable change, pair NOT
+ * poisoned, and a follow-up clean self-arm still succeeds. */
+static gint
+check_service_management_self_arm_bundle_precommit_atomic (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = self_arm_bundle_env_ready (&env);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  const gchar *perms[] = {
+    "wr.service_principal.manage", "wr.service_credential.manage",
+  };
+  /* Force FULL for both perms so every row (grant..audit) is reachable. */
+  if (wyl_policy_store_revoke_direct_permission (store, "human-principal-admin",
+      perms[0], env.session_token) != WYRELOG_E_OK
+      || wyl_policy_store_revoke_direct_permission (store,
+      "human-principal-admin", perms[1], env.session_token) != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2760;
+  }
+
+  const WylDaemonSelfArmRowFault rows[] = {
+    WYL_DAEMON_SELF_ARM_ROW_FAULT_GRANT,
+    WYL_DAEMON_SELF_ARM_ROW_FAULT_DIRECT_EVENT,
+    WYL_DAEMON_SELF_ARM_ROW_FAULT_SET_STATE,
+    WYL_DAEMON_SELF_ARM_ROW_FAULT_STATE_EVENT,
+    WYL_DAEMON_SELF_ARM_ROW_FAULT_AUDIT,
+  };
+  for (guint p = 0; p < G_N_ELEMENTS (perms); p++) {
+    for (guint r = 0; r < G_N_ELEMENTS (rows); r++) {
+      wyl_daemon_http_fail_next_self_arm_row_for_test (env.http.server, p,
+          rows[r]);
+      guint status = 0;
+      if (self_arm_post (&env, &status) != 0 || status != 500) {
+        service_denial_env_clear (&env);
+        return 2761;
+      }
+      /* Zero durable change: neither perm armed, no rows appended, and the
+       * pair is NOT poisoned. */
+      if (self_arm_perm_armed (&env, perms[0])
+          || self_arm_perm_armed (&env, perms[1])
+          || wyl_handle_engine_pair_is_poisoned (env.handle)) {
+        service_denial_env_clear (&env);
+        return 2762;
+      }
+      for (guint q = 0; q < G_N_ELEMENTS (perms); q++) {
+        guint direct_events = 1;
+        if (self_arm_count_direct_events (store, "human-principal-admin",
+            perms[q], env.session_token, &direct_events) != 0
+            || direct_events != 0
+            || self_arm_count_state_events (store, "human-principal-admin",
+            perms[q], env.session_token) != 0) {
+          service_denial_env_clear (&env);
+          return 2763;
+        }
+      }
+    }
+  }
+
+  /* A clean follow-up self-arm still succeeds and arms both perms. */
+  guint status = 0;
+  if (self_arm_post (&env, &status) != 0 || status != 200
+      || !self_arm_perm_armed (&env, perms[0])
+      || !self_arm_perm_armed (&env, perms[1])
+      || wyl_handle_engine_pair_is_poisoned (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2764;
+  }
+
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+/* #747: a post-commit verify fault poisons then repairs to a complete pair
+ * (200, both armed, both authorize); a repair that keeps faulting leaves the
+ * pair poisoned (500) so NEITHER perm authorizes -- never exactly-one. */
+static gint
+check_service_management_self_arm_bundle_commit_repair (void)
+{
+  /* Sub-case 1: repair succeeds. */
+  {
+    ServiceDenialEnv env = { 0 };
+    gint rc = self_arm_bundle_env_ready (&env);
+    if (rc != 0) {
+      service_denial_env_clear (&env);
+      return rc;
+    }
+    wyl_daemon_http_fail_next_self_arm_verify_for_test (env.http.server, FALSE);
+    guint status = 0;
+    if (self_arm_post (&env, &status) != 0 || status != 200
+        || !self_arm_perm_armed (&env, "wr.service_principal.manage")
+        || !self_arm_perm_armed (&env, "wr.service_credential.manage")
+        || wyl_handle_engine_pair_is_poisoned (env.handle)
+        || !self_arm_both_authorize (&env, "repairok")) {
+      service_denial_env_clear (&env);
+      return 2770;
+    }
+    service_denial_env_clear (&env);
+  }
+
+  /* Sub-case 2: repair keeps faulting -> stays poisoned -> 500, neither verb
+   * authorizes. */
+  {
+    ServiceDenialEnv env = { 0 };
+    gint rc = self_arm_bundle_env_ready (&env);
+    if (rc != 0) {
+      service_denial_env_clear (&env);
+      return rc;
+    }
+    wyl_daemon_http_fail_next_self_arm_verify_for_test (env.http.server, TRUE);
+    guint status = 0;
+    if (self_arm_post (&env, &status) != 0 || status != 500
+        || !wyl_handle_engine_pair_is_poisoned (env.handle)) {
+      service_denial_env_clear (&env);
+      return 2771;
+    }
+    /* Fail-closed: the management verb no longer authorizes. */
+    guint verb_status = 0;
+    g_autofree gchar *verb_body = NULL;
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+        "/service-principals", env.query, env.access_token,
+        "{\"subject_id\":\"svc:tenant-a:x\",\"display_name\":\"X\"}",
+        &verb_status, &verb_body) != 0 || verb_status == 200) {
+      service_denial_env_clear (&env);
+      return 2772;
+    }
+    service_denial_env_clear (&env);
+  }
+  return 0;
+}
+
+/* #747: arming twice is a durable no-op the second time; per-perm event counts
+ * stay at one and both tuples still verify. */
+static gint
+check_service_management_self_arm_bundle_idempotent_noop (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = self_arm_bundle_env_ready (&env);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  const gchar *perms[] = {
+    "wr.service_principal.manage", "wr.service_credential.manage",
+  };
+  /* Force FULL so each perm mints exactly one direct + one state event. */
+  if (wyl_policy_store_revoke_direct_permission (store, "human-principal-admin",
+      perms[0], env.session_token) != WYRELOG_E_OK
+      || wyl_policy_store_revoke_direct_permission (store,
+      "human-principal-admin", perms[1], env.session_token) != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2780;
+  }
+  guint status = 0;
+  if (self_arm_post (&env, &status) != 0 || status != 200) {
+    service_denial_env_clear (&env);
+    return 2781;
+  }
+  status = 0;
+  if (self_arm_post (&env, &status) != 0 || status != 200) {
+    service_denial_env_clear (&env);
+    return 2782;
+  }
+  for (guint p = 0; p < G_N_ELEMENTS (perms); p++) {
+    guint direct_events = 0;
+    if (!self_arm_perm_armed (&env, perms[p])
+        || self_arm_count_direct_events (store, "human-principal-admin",
+        perms[p], env.session_token, &direct_events) != 0
+        || direct_events != 1
+        || self_arm_count_state_events (store, "human-principal-admin",
+        perms[p], env.session_token) != 1) {
+      service_denial_env_clear (&env);
+      return 2783;
+    }
+  }
+  if (!self_arm_both_authorize (&env, "noopworker")
+      || wyl_handle_engine_pair_is_poisoned (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2784;
+  }
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+/* #747: a mixed COMPLETE/partial pair is completed atomically with no
+ * duplicate events on the already-complete perm; the de-armed (FULL) sibling
+ * is granted+armed in the same bundle. */
+static gint
+check_service_management_self_arm_bundle_monotone_repair (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = self_arm_bundle_env_ready (&env);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  const gchar *perm_a = "wr.service_principal.manage";
+  const gchar *perm_b = "wr.service_credential.manage";
+  /* perm_a COMPLETE (grant pre-seeded + armed); perm_b FULL (no grant). */
+  if (wyl_policy_store_set_permission_state (store, "human-principal-admin",
+      perm_a, env.session_token, "armed") != WYRELOG_E_OK
+      || wyl_policy_store_revoke_direct_permission (store,
+      "human-principal-admin", perm_b, env.session_token) != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2790;
+  }
+  guint status = 0;
+  if (self_arm_post (&env, &status) != 0 || status != 200
+      || !self_arm_perm_armed (&env, perm_a)
+      || !self_arm_perm_armed (&env, perm_b)) {
+    service_denial_env_clear (&env);
+    return 2791;
+  }
+  /* perm_a was already complete: NO new events minted for it. */
+  guint a_direct = 1;
+  if (self_arm_count_direct_events (store, "human-principal-admin", perm_a,
+      env.session_token, &a_direct) != 0 || a_direct != 0
+      || self_arm_count_state_events (store, "human-principal-admin", perm_a,
+      env.session_token) != 0) {
+    service_denial_env_clear (&env);
+    return 2792;
+  }
+  /* perm_b took the FULL path: exactly one direct + one state event. */
+  guint b_direct = 0;
+  if (self_arm_count_direct_events (store, "human-principal-admin", perm_b,
+      env.session_token, &b_direct) != 0 || b_direct != 1
+      || self_arm_count_state_events (store, "human-principal-admin", perm_b,
+      env.session_token) != 1) {
+    service_denial_env_clear (&env);
+    return 2793;
+  }
+  if (!self_arm_both_authorize (&env, "monoworker")
+      || wyl_handle_engine_pair_is_poisoned (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2794;
+  }
+  service_denial_env_clear (&env);
+  return 0;
+}
+
+/* #747: a provenance-ambiguous perm (armed-without-grant, or firing/cooldown)
+ * is rejected and the pair is poisoned, so no lone one-permission authority can
+ * survive; the sibling perm gets zero durable writes. */
+static gint
+check_service_management_self_arm_bundle_contradictory_poison (void)
+{
+  const gchar *perm_a = "wr.service_principal.manage";
+  const gchar *perm_b = "wr.service_credential.manage";
+  const gchar *contradictory_states[] = { "armed", "firing" };
+  for (guint c = 0; c < G_N_ELEMENTS (contradictory_states); c++) {
+    ServiceDenialEnv env = { 0 };
+    gint rc = self_arm_bundle_env_ready (&env);
+    if (rc != 0) {
+      service_denial_env_clear (&env);
+      return rc;
+    }
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+    /* perm_a is contradictory.  For armed-without-grant, revoke its grant; for
+     * firing, the FSM has no legal `grant` edge regardless of the grant. */
+    if (g_strcmp0 (contradictory_states[c], "armed") == 0
+        && wyl_policy_store_revoke_direct_permission (store,
+        "human-principal-admin", perm_a, env.session_token)
+        != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2800;
+    }
+    if (wyl_policy_store_set_permission_state (store, "human-principal-admin",
+        perm_a, env.session_token, contradictory_states[c]) != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+      service_denial_env_clear (&env);
+      return 2801;
+    }
+    guint status = 0;
+    if (self_arm_post (&env, &status) != 0 || status != 500) {
+      service_denial_env_clear (&env);
+      return 2802;
+    }
+    /* Sibling perm_b received ZERO durable writes and the pair is poisoned. */
+    if (self_arm_perm_armed (&env, perm_b)
+        || !wyl_handle_engine_pair_is_poisoned (env.handle)) {
+      service_denial_env_clear (&env);
+      return 2803;
+    }
+    /* Fail-closed: the lone armed perm cannot authorize while poisoned. */
+    guint verb_status = 0;
+    g_autofree gchar *verb_body = NULL;
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+        "/service-principals", env.query, env.access_token,
+        "{\"subject_id\":\"svc:tenant-a:y\",\"display_name\":\"Y\"}",
+        &verb_status, &verb_body) != 0 || verb_status == 200) {
+      service_denial_env_clear (&env);
+      return 2804;
+    }
+    service_denial_env_clear (&env);
+  }
+  return 0;
+}
+
 /* #729: the self-arm route (POST /service-management-authority/arm) lets a
  * live MFA SYSTEM admin arm the two service-management permissions at ITS OWN
  * session, with no store-seam pre-arming. Covers the happy path (self-arm ->
@@ -16671,7 +17105,15 @@ check_service_management_self_arm_end_to_end (void)
    * anchor is what a real daemon's bootstrap-admin provisioning
    * (wyl_policy_store_apply_bootstrap_admin) seeds; mirror that here so the
    * eligibility decide at __wr_default can be satisfied. */
-  if (wyl_policy_store_grant_role_membership (store, "human-principal-admin",
+  /* Revoke the shared env's pre-seeded direct grants so this happy path is a
+   * clean FULL arm (grant + arm both minted by the route), letting the
+   * exactly-one-event assertions below hold. */
+  if (wyl_policy_store_revoke_direct_permission (store, "human-principal-admin",
+      "wr.service_principal.manage", env.session_token) != WYRELOG_E_OK
+      || wyl_policy_store_revoke_direct_permission (store,
+      "human-principal-admin", "wr.service_credential.manage",
+      env.session_token) != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "human-principal-admin",
       "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
       "active") != WYRELOG_E_OK
@@ -16714,6 +17156,39 @@ check_service_management_self_arm_end_to_end (void)
       != WYRELOG_E_OK || !armed_c) {
     service_denial_env_clear (&env);
     return 2703;
+  }
+
+  /* Exactly one direct_permission_event and one permission_state_event per
+   * perm: the atomic bundle publishes each row once, and a response-loss retry
+   * would re-derive the same audit id and dedup. */
+  const gchar *arm_perms[] = {
+    "wr.service_principal.manage", "wr.service_credential.manage",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (arm_perms); i++) {
+    guint direct_events = 0;
+    guint state_events = 0;
+    if (self_arm_count_direct_events (store, "human-principal-admin",
+        arm_perms[i], env.session_token, &direct_events) != 0
+        || direct_events != 1) {
+      service_denial_env_clear (&env);
+      return 2730;
+    }
+    PermissionStateProbe state_event_probe = {
+      .subject_id = "human-principal-admin",
+      .perm_id = arm_perms[i],
+      .scope = env.session_token,
+      .event = "grant",
+      .from_state = "dormant",
+      .to_state = "armed",
+    };
+    if (wyl_policy_store_foreach_permission_state_event (store,
+        permission_state_event_probe_cb, &state_event_probe)
+        != WYRELOG_E_OK || state_event_probe.matches != 1) {
+      service_denial_env_clear (&env);
+      return 2731;
+    }
+    state_events = state_event_probe.matches;
+    (void) state_events;
   }
 
   /* create (wr.service_principal.manage) now authorizes. */
@@ -17653,6 +18128,42 @@ management_checkpoint_mutate_authority (WylHandle *handle,
   if (target_tenant == NULL)
     return WYRELOG_E_INVALID;
   return wyl_policy_store_set_tenant_sealed (store, target_tenant, TRUE);
+}
+
+/* #747: a logout that wins the race between the front-door ALLOW and the
+ * decisive in-write liveness load is observed fail-closed: 403, zero durable
+ * writes, prior pair intact.  The shared SESSION_LOGGED_OUT checkpoint flips
+ * the atomic session-lifecycle word to CLOSED at the race point. */
+static gint
+check_service_management_self_arm_liveness_race_inside_write (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = self_arm_bundle_env_ready (&env);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  const gchar *perm_a = "wr.service_principal.manage";
+  const gchar *perm_b = "wr.service_credential.manage";
+  ManagementCheckpointProbe logout_probe = {
+    .mutation = MANAGEMENT_CHECKPOINT_SESSION_LOGGED_OUT,
+    .server = env.http.server,
+  };
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (env.http.server, management_checkpoint_mutate_authority, &logout_probe);
+  guint status = 0;
+  if (self_arm_post (&env, &status) != 0 || status != 403) {
+    service_denial_env_clear (&env);
+    return 2810;
+  }
+  /* Zero durable writes and the prior pair is intact (not poisoned). */
+  if (self_arm_perm_armed (&env, perm_a) || self_arm_perm_armed (&env, perm_b)
+      || wyl_handle_engine_pair_is_poisoned (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2811;
+  }
+  service_denial_env_clear (&env);
+  return 0;
 }
 
 /* Pair the table-driven response matrix with observable no-effect canaries.
@@ -19480,6 +19991,42 @@ main (void)
       check_service_management_self_arm_scopes_to_session ();
   if (self_arm_scope_rc != 0) {
     result = self_arm_scope_rc;
+    goto cleanup;
+  }
+  gint self_arm_precommit_rc =
+      check_service_management_self_arm_bundle_precommit_atomic ();
+  if (self_arm_precommit_rc != 0) {
+    result = self_arm_precommit_rc;
+    goto cleanup;
+  }
+  gint self_arm_repair_rc =
+      check_service_management_self_arm_bundle_commit_repair ();
+  if (self_arm_repair_rc != 0) {
+    result = self_arm_repair_rc;
+    goto cleanup;
+  }
+  gint self_arm_noop_rc =
+      check_service_management_self_arm_bundle_idempotent_noop ();
+  if (self_arm_noop_rc != 0) {
+    result = self_arm_noop_rc;
+    goto cleanup;
+  }
+  gint self_arm_monotone_rc =
+      check_service_management_self_arm_bundle_monotone_repair ();
+  if (self_arm_monotone_rc != 0) {
+    result = self_arm_monotone_rc;
+    goto cleanup;
+  }
+  gint self_arm_contradiction_rc =
+      check_service_management_self_arm_bundle_contradictory_poison ();
+  if (self_arm_contradiction_rc != 0) {
+    result = self_arm_contradiction_rc;
+    goto cleanup;
+  }
+  gint self_arm_liveness_rc =
+      check_service_management_self_arm_liveness_race_inside_write ();
+  if (self_arm_liveness_rc != 0) {
+    result = self_arm_liveness_rc;
     goto cleanup;
   }
   gint caller_matrix_rc = check_service_management_caller_and_refresh_matrix ();
