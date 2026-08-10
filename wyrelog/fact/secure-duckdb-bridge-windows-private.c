@@ -55,7 +55,7 @@ wyl_fact_store_pinned_set_test_hook (WylFactStorePinnedTestHook hook,
 }
 
 void wyl_fact_store_pinned_set_test_stage_errors
-    (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+  (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
     wyrelog_error_t r5_error)
 {
   (void) authority_error;
@@ -76,5 +76,27 @@ wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
     return WYRELOG_E_INVALID;
   *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
   return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_secure_duckdb_bridge_open_live_pair (WylFactArtifactNamespace *namespace_,
+    gboolean writable, WylSecureDuckdbBridge **out_bridge,
+    duckdb_database *out_db, duckdb_connection *out_conn)
+{
+  (void) namespace_;
+  (void) writable;
+  if (out_bridge != NULL)
+    *out_bridge = NULL;
+  if (out_db != NULL)
+    *out_db = NULL;
+  if (out_conn != NULL)
+    *out_conn = NULL;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_secure_duckdb_bridge_release_live (WylSecureDuckdbBridge *self)
+{
+  return self == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
 }
 #endif

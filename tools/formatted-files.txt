@@ -75,6 +75,8 @@ wyrelog/fact/reconcile-private.h
 wyrelog/fact/replay-private.h
 wyrelog/fact/schema-private.h
 wyrelog/fact/secure-duckdb-artifact-contract-private.h
+wyrelog/fact/secure-duckdb-bridge-private.h
+wyrelog/fact/secure-duckdb-bridge-windows-private.c
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
 wyrelog/handle.h
 wyrelog/perm.h

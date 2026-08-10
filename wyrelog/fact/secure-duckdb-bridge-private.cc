@@ -137,34 +137,46 @@ namespace {
     return result;
   }
 
+  /* Build the bounded secure filesystem into |config| and move its lease +
+   * health onto |bridge|.  Shared by the one-shot and live opens so both apply
+   * an identical hardened configuration. */
   void
-  bridge_populate_bounded (WylSecureDuckdbBridge *bridge,
+  bridge_prepare_bounded_config (WylSecureDuckdbBridge *bridge,
       WylFactArtifactNamespace *namespace_, bool read_only,
-      bool allow_temporary_storage)
+      bool allow_temporary_storage, duckdb::DBConfig *config)
   {
     bridge->mode = read_only ? WYL_SECURE_DUCKDB_VALIDATE_ONLY
         : WYL_SECURE_DUCKDB_INIT_EMPTY;
-    duckdb::DBConfig config;
     auto filesystem =
         wyl_secure_duckdb_filesystem_new (namespace_, read_only,
         allow_temporary_storage);
     bridge->health = filesystem->SharedHealth ();
     bridge->authority_lease.reset (filesystem->DetachLeaseOwnership ());
-    config.options.access_mode = read_only ? duckdb::AccessMode::READ_ONLY
+    config->options.access_mode = read_only ? duckdb::AccessMode::READ_ONLY
         : duckdb::AccessMode::READ_WRITE;
-    config.options.load_extensions = false;
-    config.options.use_temporary_directory =
+    config->options.load_extensions = false;
+    config->options.use_temporary_directory =
         !read_only && allow_temporary_storage;
-    if (config.options.use_temporary_directory)
-      config.options.temporary_directory = filesystem->TemporaryDirectory ();
-    config.SetOptionByName ("enable_external_access", duckdb::Value (false));
-    config.SetOptionByName ("allow_community_extensions",
+    if (config->options.use_temporary_directory)
+      config->options.temporary_directory = filesystem->TemporaryDirectory ();
+    config->SetOptionByName ("enable_external_access", duckdb::Value (false));
+    config->SetOptionByName ("allow_community_extensions",
         duckdb::Value (false));
-    config.SetOptionByName ("autoinstall_known_extensions",
+    config->SetOptionByName ("autoinstall_known_extensions",
         duckdb::Value (false));
-    config.SetOptionByName ("autoload_known_extensions",
+    config->SetOptionByName ("autoload_known_extensions",
         duckdb::Value (false));
-    config.file_system = std::move (filesystem);
+    config->file_system = std::move (filesystem);
+  }
+
+  void
+  bridge_populate_bounded (WylSecureDuckdbBridge *bridge,
+      WylFactArtifactNamespace *namespace_, bool read_only,
+      bool allow_temporary_storage)
+  {
+    duckdb::DBConfig config;
+    bridge_prepare_bounded_config (bridge, namespace_, read_only,
+        allow_temporary_storage, &config);
     bridge->database =
         std::make_unique<duckdb::DuckDB> ("facts.duckdb", &config);
     bridge->connection =
@@ -491,6 +503,70 @@ wyl_secure_duckdb_bridge_finalize (WylSecureDuckdbBridge *self)
   if (self == nullptr)
     return WYRELOG_E_INVALID;
   return bridge_finalize_storage (self, true);
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_open_live_pair (WylFactArtifactNamespace *namespace_,
+    gboolean writable, WylSecureDuckdbBridge **out_bridge,
+    duckdb_database *out_db, duckdb_connection *out_conn)
+{
+  /* The C-API handoff reinterprets the bounded instance as duckdb's internal
+   * DatabaseWrapper (a single shared_ptr<DuckDB>); duckdb_connect/duckdb_close
+   * consume it symmetrically.  Legitimate only against the vendored,
+   * version-pinned amalgamation -- guard the layout so a bump fails loudly. */
+  static_assert (sizeof (duckdb::DatabaseWrapper)
+      == sizeof (duckdb::shared_ptr<duckdb::DuckDB>),
+      "duckdb::DatabaseWrapper must be a single shared_ptr<DuckDB>");
+  if (namespace_ == nullptr || out_bridge == nullptr || out_db == nullptr
+      || out_conn == nullptr)
+    return WYRELOG_E_INVALID;
+  *out_bridge = nullptr;
+  *out_db = nullptr;
+  *out_conn = nullptr;
+
+  try {
+    auto bridge = std::make_unique<WylSecureDuckdbBridge> ();
+    const bool read_only = writable == FALSE;
+    duckdb::DBConfig config;
+    bridge_prepare_bounded_config (bridge.get (), namespace_, read_only,
+        writable != FALSE, &config);
+
+    auto database =
+        duckdb::make_shared_ptr<duckdb::DuckDB> ("facts.duckdb", &config);
+    auto *wrapper = new duckdb::DatabaseWrapper ();
+    wrapper->database = std::move (database);
+    duckdb_database db = reinterpret_cast<duckdb_database> (wrapper);
+    duckdb_connection conn = nullptr;
+    if (duckdb_connect (db, &conn) != DuckDBSuccess) {
+      duckdb_close (&db);
+      return WYRELOG_E_IO;
+    }
+
+    /* The bridge keeps only the lease + health; the instance is owned by the
+     * returned handle so duckdb_close destructs it and checkpoints through the
+     * still-live bounded filesystem under the still-held lease. */
+    bridge->finalized = true;
+    *out_bridge = bridge.release ();
+    *out_db = db;
+    *out_conn = conn;
+    return WYRELOG_E_OK;
+  } catch (...)
+  {
+    return current_exception_error ();
+  }
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_release_live (WylSecureDuckdbBridge *self)
+{
+  if (self == nullptr)
+    return WYRELOG_E_INVALID;
+  /* The handle has already been duckdb_close'd, so any shutdown-checkpoint I/O
+   * fault is now visible in health.  Observe it, then release the lease. */
+  const wyrelog_error_t result = self->health == nullptr ? WYRELOG_E_OK
+      : self->health->Status ();
+  wyl_secure_duckdb_bridge_free (self);
+  return result;
 }
 
 extern "C" void
