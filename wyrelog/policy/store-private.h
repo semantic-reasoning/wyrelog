@@ -397,6 +397,63 @@ wyrelog_error_t wyl_policy_store_transition_graph_authority
     guint64 expected_lifecycle_generation,
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult * out_result);
+
+/* Per-relation schema-version activation authority (issue #545): the FSM that
+ * governs which registered schema version owns a relation's unversioned engine
+ * name.  Backed by fact_relation_activation. */
+typedef enum
+{
+  WYL_POLICY_RELATION_ACTIVATION_UNBOUND,
+  WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+  WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+  WYL_POLICY_RELATION_ACTIVATION_ROLLING_BACK,
+  WYL_POLICY_RELATION_ACTIVATION_DEGRADED,
+} WylPolicyRelationActivationState;
+
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *namespace_id;
+  gchar *relation_name;
+  WylPolicyRelationActivationState lifecycle_state;
+  gboolean has_active_schema_version;
+  guint64 active_schema_version;
+  gboolean has_pending_schema_version;
+  guint64 pending_schema_version;
+  guint64 activation_generation;
+  guint64 reconciliation_generation;
+  gchar *last_error_class;
+} WylPolicyRelationActivationRecord;
+
+void wyl_policy_relation_activation_record_free
+  (WylPolicyRelationActivationRecord * record);
+wyrelog_error_t wyl_policy_store_read_relation_activation
+  (wyl_policy_store_t * store, const gchar * tenant_id, const gchar * graph_id,
+    const gchar * namespace_id, const gchar * relation_name,
+    WylPolicyRelationActivationRecord ** out_record);
+/* Enumerate the active relations of a graph (state='active').  This is the
+* authoritative relation set for replay -- including zero-row relations. */
+wyrelog_error_t wyl_policy_store_list_active_fact_relations
+  (wyl_policy_store_t * store, const gchar * tenant_id, const gchar * graph_id,
+    GPtrArray ** out_records);
+/* Reserve an unbound activation row for a relation (idempotent). */
+wyrelog_error_t wyl_policy_store_reserve_relation_activation
+  (wyl_policy_store_t * store, const gchar * tenant_id, const gchar * graph_id,
+    const gchar * namespace_id, const gchar * relation_name,
+    WylPolicyAuthorityMutationResult * out_result);
+/* Generation-CAS transition of one relation's activation state.  A version is
+ * bound by has_active_schema_version / has_pending_schema_version. */
+wyrelog_error_t wyl_policy_store_transition_relation_activation
+  (wyl_policy_store_t * store, const gchar * tenant_id, const gchar * graph_id,
+    const gchar * namespace_id, const gchar * relation_name,
+    WylPolicyRelationActivationState expected_state,
+    guint64 expected_activation_generation,
+    WylPolicyRelationActivationState target_state,
+    gboolean has_active_schema_version, guint64 active_schema_version,
+    gboolean has_pending_schema_version, guint64 pending_schema_version,
+    const gchar * target_error_class,
+    WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_reconcile_graph_authority
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, guint64 expected_lifecycle_generation,

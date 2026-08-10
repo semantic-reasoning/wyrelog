@@ -2054,6 +2054,120 @@ test_relation_activation_fsm_is_fail_closed (void)
       "fact_relation_activation WHERE lifecycle_state='active';"), ==, 1);
 }
 
+/* #545: the typed C API over the relation-activation FSM reserves, reads,
+ * lists, and transitions with generation-CAS, classifying no-op updates as
+ * replay/stale/not-found and refusing illegal edges fail-closed. */
+static void
+test_relation_activation_typed_api (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-a", "graph-a", FALSE);
+  exec_ok (db, "INSERT INTO fact_namespaces "
+      "(tenant_id,graph_id,namespace_id,created_at,updated_at) "
+      "VALUES ('tenant-a','graph-a','ns',1,1);");
+  exec_ok (db, "INSERT INTO fact_relation_schemas "
+      "(tenant_id,graph_id,namespace_id,relation_name,schema_version,arity,"
+      "created_at,updated_at) VALUES "
+      "('tenant-a','graph-a','ns','rel',1,2,1,1),"
+      "('tenant-a','graph-a','ns','rel',2,2,1,1);");
+
+  WylPolicyAuthorityMutationResult result;
+  /* Reserve creates an unbound row; the second reserve is an idempotent
+   * replay. */
+  g_assert_cmpint (wyl_policy_store_reserve_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_reserve_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+
+  WylPolicyRelationActivationRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_read_relation_activation (store, "tenant-a",
+      "graph-a", "ns", "rel", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (record->lifecycle_state, ==,
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND);
+  g_assert_false (record->has_active_schema_version);
+  g_assert_cmpint (record->activation_generation, ==, 0);
+  wyl_policy_relation_activation_record_free (record);
+
+  /* No active relations are listed yet. */
+  GPtrArray *listed = NULL;
+  g_assert_cmpint (wyl_policy_store_list_active_fact_relations (store,
+      "tenant-a", "graph-a", &listed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (listed->len, ==, 0);
+  g_ptr_array_unref (listed);
+
+  /* unbound(gen0) -> activating pins the pending version and bumps to gen1. */
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 1,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+
+  /* Replaying the same transition from the now-consumed expectation is an
+   * idempotent replay, not a second apply. */
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 1,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+
+  /* A stale expected generation is reported as STALE, not applied. */
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 7,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 1,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE);
+
+  /* activating(gen1) -> active binds the active version and bumps to gen2. */
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, 1,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE, TRUE, 1, FALSE, 0,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+
+  g_assert_cmpint (wyl_policy_store_read_relation_activation (store, "tenant-a",
+      "graph-a", "ns", "rel", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (record->lifecycle_state, ==,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE);
+  g_assert_true (record->has_active_schema_version);
+  g_assert_cmpuint (record->active_schema_version, ==, 1);
+  g_assert_false (record->has_pending_schema_version);
+  g_assert_cmpint (record->activation_generation, ==, 2);
+  wyl_policy_relation_activation_record_free (record);
+
+  /* The active relation is now enumerated. */
+  g_assert_cmpint (wyl_policy_store_list_active_fact_relations (store,
+      "tenant-a", "graph-a", &listed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (listed->len, ==, 1);
+  WylPolicyRelationActivationRecord *first = g_ptr_array_index (listed, 0);
+  g_assert_cmpstr (first->relation_name, ==, "rel");
+  g_assert_cmpuint (first->active_schema_version, ==, 1);
+  g_ptr_array_unref (listed);
+
+  /* An illegal edge (active -> unbound) is refused fail-closed by the guard. */
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "rel",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE, 2,
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, FALSE, 0, FALSE, 0,
+      "none", &result), ==, WYRELOG_E_POLICY);
+
+  /* Transitioning an absent relation reports NOT_FOUND. */
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-a", "graph-a", "ns", "absent",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 1,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2131,5 +2245,7 @@ main (int argc, char **argv)
       test_reconcile_evidence_prepare_rolls_back);
   g_test_add_func ("/policy/graph-authority/relation-activation-fsm",
       test_relation_activation_fsm_is_fail_closed);
+  g_test_add_func ("/policy/graph-authority/relation-activation-typed-api",
+      test_relation_activation_typed_api);
   return g_test_run ();
 }

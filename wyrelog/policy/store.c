@@ -12340,6 +12340,312 @@ reserve_graph_authority_locked (wyl_policy_store_t *store,
   return rc;
 }
 
+#define RELATION_ACTIVATION_SELECT_COLUMNS \
+  "tenant_id,graph_id,namespace_id,relation_name,active_schema_version," \
+  "pending_schema_version,lifecycle_state,activation_generation," \
+  "reconciliation_generation,last_error_class"
+
+static const gchar *
+relation_activation_state_name (WylPolicyRelationActivationState state)
+{
+  switch (state) {
+    case WYL_POLICY_RELATION_ACTIVATION_UNBOUND:
+      return "unbound";
+    case WYL_POLICY_RELATION_ACTIVATION_ACTIVATING:
+      return "activating";
+    case WYL_POLICY_RELATION_ACTIVATION_ACTIVE:
+      return "active";
+    case WYL_POLICY_RELATION_ACTIVATION_ROLLING_BACK:
+      return "rolling_back";
+    case WYL_POLICY_RELATION_ACTIVATION_DEGRADED:
+      return "degraded";
+    default:
+      return NULL;
+  }
+}
+
+static gboolean
+relation_activation_state_from_name (const gchar *name,
+    WylPolicyRelationActivationState *out)
+{
+  if (g_strcmp0 (name, "unbound") == 0)
+    *out = WYL_POLICY_RELATION_ACTIVATION_UNBOUND;
+  else if (g_strcmp0 (name, "activating") == 0)
+    *out = WYL_POLICY_RELATION_ACTIVATION_ACTIVATING;
+  else if (g_strcmp0 (name, "active") == 0)
+    *out = WYL_POLICY_RELATION_ACTIVATION_ACTIVE;
+  else if (g_strcmp0 (name, "rolling_back") == 0)
+    *out = WYL_POLICY_RELATION_ACTIVATION_ROLLING_BACK;
+  else if (g_strcmp0 (name, "degraded") == 0)
+    *out = WYL_POLICY_RELATION_ACTIVATION_DEGRADED;
+  else
+    return FALSE;
+  return TRUE;
+}
+
+void
+wyl_policy_relation_activation_record_free (
+  WylPolicyRelationActivationRecord *record)
+{
+  if (record == NULL)
+    return;
+  g_free (record->tenant_id);
+  g_free (record->graph_id);
+  g_free (record->namespace_id);
+  g_free (record->relation_name);
+  g_free (record->last_error_class);
+  g_free (record);
+}
+
+static wyrelog_error_t
+relation_activation_record_from_row (sqlite3_stmt *stmt,
+    WylPolicyRelationActivationRecord **out_record)
+{
+  WylPolicyRelationActivationRecord *record =
+      g_new0 (WylPolicyRelationActivationRecord, 1);
+  record->tenant_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  record->graph_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 1));
+  record->namespace_id =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 2));
+  record->relation_name =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 3));
+  if (sqlite3_column_type (stmt, 4) != SQLITE_NULL) {
+    record->has_active_schema_version = TRUE;
+    record->active_schema_version = (guint64) sqlite3_column_int64 (stmt, 4);
+  }
+  if (sqlite3_column_type (stmt, 5) != SQLITE_NULL) {
+    record->has_pending_schema_version = TRUE;
+    record->pending_schema_version = (guint64) sqlite3_column_int64 (stmt, 5);
+  }
+  if (!relation_activation_state_from_name (
+        (const gchar *) sqlite3_column_text (stmt, 6),
+        &record->lifecycle_state)) {
+    wyl_policy_relation_activation_record_free (record);
+    return WYRELOG_E_IO;
+  }
+  record->activation_generation = (guint64) sqlite3_column_int64 (stmt, 7);
+  record->reconciliation_generation = (guint64) sqlite3_column_int64 (stmt, 8);
+  record->last_error_class =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 9));
+  *out_record = record;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_read_relation_activation (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name,
+    WylPolicyRelationActivationRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || store->db == NULL || out_record == NULL
+      || tenant_id == NULL || graph_id == NULL || namespace_id == NULL
+      || relation_name == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT " RELATION_ACTIVATION_SELECT_COLUMNS
+          " FROM fact_relation_activation WHERE tenant_id=? AND graph_id=? "
+          "AND namespace_id=? AND relation_name=?;", &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, namespace_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, relation_name) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = relation_activation_record_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_list_active_fact_relations (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, GPtrArray **out_records)
+{
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (store == NULL || store->db == NULL || out_records == NULL
+      || tenant_id == NULL || graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  GPtrArray *records = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) wyl_policy_relation_activation_record_free);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT " RELATION_ACTIVATION_SELECT_COLUMNS
+          " FROM fact_relation_activation WHERE tenant_id=? AND graph_id=? "
+          "AND lifecycle_state='active' AND active_schema_version IS NOT NULL "
+          "ORDER BY namespace_id,relation_name;", &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylPolicyRelationActivationRecord *record = NULL;
+    rc = relation_activation_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (records, record);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (records);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return rc;
+  }
+  *out_records = records;
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_reserve_relation_activation (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name, WylPolicyAuthorityMutationResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || tenant_id == NULL || graph_id == NULL || namespace_id == NULL
+      || relation_name == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "INSERT OR IGNORE INTO fact_relation_activation "
+          "(tenant_id,graph_id,namespace_id,relation_name,created_at,"
+          "updated_at) VALUES (?,?,?,?,unixepoch(),unixepoch());", &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, namespace_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, relation_name) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_DONE)
+      rc = (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+          ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    else
+      *out_result = sqlite3_changes (store->db) == 1
+          ? WYL_POLICY_AUTHORITY_MUTATION_APPLIED
+          : WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+  }
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_transition_relation_activation (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name,
+    WylPolicyRelationActivationState expected_state,
+    guint64 expected_activation_generation,
+    WylPolicyRelationActivationState target_state,
+    gboolean has_active_schema_version, guint64 active_schema_version,
+    gboolean has_pending_schema_version, guint64 pending_schema_version,
+    const gchar *target_error_class,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  const gchar *expected_name = relation_activation_state_name (expected_state);
+  const gchar *target_name = relation_activation_state_name (target_state);
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || tenant_id == NULL || graph_id == NULL || namespace_id == NULL
+      || relation_name == NULL || expected_name == NULL || target_name == NULL
+      || target_error_class == NULL
+      || expected_activation_generation >= G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  /* Every activation transition changes state and bumps the generation. */
+  guint64 target_generation = expected_activation_generation + 1;
+
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "UPDATE fact_relation_activation SET lifecycle_state=?,"
+          "active_schema_version=?,pending_schema_version=?,"
+          "activation_generation=?,last_error_class=?,updated_at=unixepoch() "
+          "WHERE tenant_id=? AND graph_id=? AND namespace_id=? "
+          "AND relation_name=? AND lifecycle_state=? "
+          "AND activation_generation=?;", &stmt);
+  if (rc == WYRELOG_E_OK) {
+    gboolean bound = bind_text (stmt, 1, target_name) == WYRELOG_E_OK
+        && (has_active_schema_version
+            ? sqlite3_bind_int64 (stmt, 2,
+        (sqlite3_int64) active_schema_version)
+            : sqlite3_bind_null (stmt, 2)) == SQLITE_OK
+        && (has_pending_schema_version
+            ? sqlite3_bind_int64 (stmt, 3,
+        (sqlite3_int64) pending_schema_version)
+            : sqlite3_bind_null (stmt, 3)) == SQLITE_OK
+        && sqlite3_bind_int64 (stmt, 4,
+            (sqlite3_int64) target_generation) == SQLITE_OK
+        && bind_text (stmt, 5, target_error_class) == WYRELOG_E_OK
+        && bind_text (stmt, 6, tenant_id) == WYRELOG_E_OK
+        && bind_text (stmt, 7, graph_id) == WYRELOG_E_OK
+        && bind_text (stmt, 8, namespace_id) == WYRELOG_E_OK
+        && bind_text (stmt, 9, relation_name) == WYRELOG_E_OK
+        && bind_text (stmt, 10, expected_name) == WYRELOG_E_OK
+        && sqlite3_bind_int64 (stmt, 11,
+            (sqlite3_int64) expected_activation_generation) == SQLITE_OK;
+    if (!bound)
+      rc = WYRELOG_E_IO;
+  }
+  gboolean applied = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_DONE)
+      rc = (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+          ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    else
+      applied = sqlite3_changes (store->db) == 1;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return rc;
+  }
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_OK;
+  }
+  /* Classify the no-op update by re-reading the current row. */
+  WylPolicyRelationActivationRecord *current = NULL;
+  wyrelog_error_t read_rc = wyl_policy_store_read_relation_activation (store,
+          tenant_id, graph_id, namespace_id, relation_name, &current);
+  if (read_rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+  } else if (read_rc != WYRELOG_E_OK) {
+    rc = read_rc;
+  } else {
+    gboolean at_target = current->lifecycle_state == target_state
+        && current->has_active_schema_version == has_active_schema_version
+        && (!has_active_schema_version
+        || current->active_schema_version == active_schema_version)
+        && current->has_pending_schema_version == has_pending_schema_version
+        && (!has_pending_schema_version
+        || current->pending_schema_version == pending_schema_version);
+    if (at_target && current->activation_generation == target_generation)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+    else if (current->activation_generation != expected_activation_generation)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+    else
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+    wyl_policy_relation_activation_record_free (current);
+  }
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *graph_id, const gchar *store_uuid,
