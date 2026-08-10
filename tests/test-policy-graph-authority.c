@@ -1992,6 +1992,68 @@ test_graph_provisioning_terminal_rolls_back (void)
   g_free (op_uuid);
 }
 
+/* #545: the relation-activation authority FSM is fail-closed. A row starts
+ * unbound, transitions only along legal edges with generation+1, keeps exactly
+ * one active schema version pinned within a state, and rejects illegal edges,
+ * out-of-band generation moves, and non-unbound inserts. */
+static void
+test_relation_activation_fsm_is_fail_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-a", "graph-a", FALSE);
+  exec_ok (db, "INSERT INTO fact_namespaces "
+      "(tenant_id,graph_id,namespace_id,created_at,updated_at) "
+      "VALUES ('tenant-a','graph-a','ns',1,1);");
+  exec_ok (db, "INSERT INTO fact_relation_schemas "
+      "(tenant_id,graph_id,namespace_id,relation_name,schema_version,arity,"
+      "created_at,updated_at) VALUES "
+      "('tenant-a','graph-a','ns','rel',1,2,1,1),"
+      "('tenant-a','graph-a','ns','rel',2,2,1,1);");
+
+  /* Insert must start unbound. */
+  exec_rejected (db, "INSERT INTO fact_relation_activation "
+      "(tenant_id,graph_id,namespace_id,relation_name,lifecycle_state,"
+      "active_schema_version,created_at,updated_at) VALUES "
+      "('tenant-a','graph-a','ns','rel','active',1,1,1);");
+  exec_ok (db, "INSERT INTO fact_relation_activation "
+      "(tenant_id,graph_id,namespace_id,relation_name,created_at,updated_at) "
+      "VALUES ('tenant-a','graph-a','ns','rel',1,1);");
+
+  /* unbound -> active directly (skips activating) is an illegal edge. */
+  exec_rejected (db, "UPDATE fact_relation_activation SET "
+      "lifecycle_state='active',active_schema_version=1,"
+      "activation_generation=1,updated_at=2 WHERE relation_name='rel';");
+  /* unbound -> activating requires generation+1. */
+  exec_ok (db, "UPDATE fact_relation_activation SET lifecycle_state='activating',"
+      "pending_schema_version=1,activation_generation=1,updated_at=2 "
+      "WHERE relation_name='rel';");
+  /* Same-state generation bump is rejected. */
+  exec_rejected (db, "UPDATE fact_relation_activation SET "
+      "activation_generation=2,updated_at=3 WHERE relation_name='rel';");
+  /* activating -> active binds the version. */
+  exec_ok (db, "UPDATE fact_relation_activation SET lifecycle_state='active',"
+      "active_schema_version=1,pending_schema_version=NULL,"
+      "activation_generation=2,updated_at=3 WHERE relation_name='rel';");
+  /* The active version is pinned while the state is unchanged. */
+  exec_rejected (db, "UPDATE fact_relation_activation SET "
+      "active_schema_version=2,updated_at=4 WHERE relation_name='rel';");
+  /* Supersede active(1) -> activating(2) -> active(2). */
+  exec_ok (db, "UPDATE fact_relation_activation SET lifecycle_state='activating',"
+      "pending_schema_version=2,activation_generation=3,updated_at=4 "
+      "WHERE relation_name='rel';");
+  exec_ok (db, "UPDATE fact_relation_activation SET lifecycle_state='active',"
+      "active_schema_version=2,pending_schema_version=NULL,"
+      "activation_generation=4,updated_at=5 WHERE relation_name='rel';");
+
+  g_assert_cmpint (scalar_int64 (db, "SELECT active_schema_version FROM "
+      "fact_relation_activation WHERE relation_name='rel';"), ==, 2);
+  g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM "
+      "fact_relation_activation WHERE lifecycle_state='active';"), ==, 1);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2067,5 +2129,7 @@ main (int argc, char **argv)
   g_test_add_func
     ("/policy/graph-authority/reconcile-evidence-prepare-rolls-back",
       test_reconcile_evidence_prepare_rolls_back);
+  g_test_add_func ("/policy/graph-authority/relation-activation-fsm",
+      test_relation_activation_fsm_is_fail_closed);
   return g_test_run ();
 }
