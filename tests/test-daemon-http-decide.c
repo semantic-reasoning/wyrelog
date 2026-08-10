@@ -7230,6 +7230,26 @@ poll_waiting_writers (SoupServer *server, guint target)
   return FALSE;
 }
 
+/* The coordination waiter can leave the authority queue just before the
+ * request teardown publishes its terminal cancellation reason.  Poll both
+ * observations together so the disconnect assertion does not sample that
+ * short, valid publication window. */
+static gboolean
+poll_waiting_writers_and_cancel_reason (SoupServer *server, guint target,
+    gint expected_reason)
+{
+  for (guint attempt = 0; attempt < 2000; attempt++) {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.waiting_writers == target
+        && wyl_daemon_http_policy_write_last_cancel_reason_for_test (server)
+        == expected_reason)
+      return TRUE;
+    g_usleep (5000);
+  }
+  return FALSE;
+}
+
 typedef struct
 {
   WylHandle *handle;
@@ -7398,7 +7418,8 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
   }
   /* Drop the socket: the off-thread watcher must observe the EOF and cancel. */
   raw_parked_request_release (&request, FALSE);
-  if (!poll_waiting_writers (fixture.server, 0)) {
+  if (!poll_waiting_writers_and_cancel_reason (fixture.server, 0,
+      POLICY_WRITE_CANCEL_CLIENT_DISCONNECT)) {
     g_printerr ("WYRELOG_TEST_DIAG policy_write_disconnect_cancel "
         "expected=%d observed=%d armed=%d\n",
         POLICY_WRITE_CANCEL_CLIENT_DISCONNECT,
