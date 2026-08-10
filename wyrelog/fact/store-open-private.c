@@ -104,8 +104,12 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
       return rc;
   }
 
-  if (authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE) {
-    /* Legacy graphs use the caller's path open; sealed/degraded fail closed. */
+  /* Active and sealed graphs both open the retained pair: sealing blocks new
+   * appends at the request boundary, but the store stays readable and
+   * forgettable (GDPR erasure).  Legacy graphs use the caller's path open;
+   * degraded graphs fail closed. */
+  if (authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      && authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_SEALED) {
     wyl_policy_graph_authority_record_free (authority);
     return WYRELOG_E_POLICY;
   }

@@ -376,6 +376,12 @@ endif
 if get_option('enable_fact_store').allowed()
   wyrelogd_c_args += '-DWYL_HAS_FACT_STORE'
 endif
+# The provisioning coordinator + live secure open are compiled into libwyrelog
+# only on the non-Windows secure branch, so the daemon may reference them only
+# there.  Gate the macro to match, keeping Windows secure builds link-clean.
+if get_option('enable_secure_duckdb_bridge').enabled() and host_machine.system() != 'windows'
+  wyrelogd_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
+endif
 if get_option('enable_break_glass')
   wyrelogd_c_args += '-DWYL_HAS_BREAK_GLASS'
 endif
