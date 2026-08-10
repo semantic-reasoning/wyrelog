@@ -16,6 +16,7 @@ tests/test-handle-id.c
 tests/test-jwt.c
 tests/test-lobac-partial-delta.c
 tests/test-login-req.c
+tests/test-policy-graph-authority.c
 tests/test-policy-store-totp.c
 tests/test-policy-store.c
 tests/test-revoke-req.c
