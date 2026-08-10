@@ -11,7 +11,7 @@
  * provisioned open). */
 typedef struct WylSecureDuckdbBridge WylSecureDuckdbBridge;
 
-#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 #include "fact/graph-locator-private.h"
 #include "fact/secure-duckdb-bridge-private.h"
 
@@ -614,7 +614,7 @@ wyl_fact_store_open_identified (const gchar *path,
   return WYRELOG_E_OK;
 }
 
-#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 wyrelog_error_t
 wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
     const WylFactStoreIdentity *identity, gboolean writable,
@@ -705,7 +705,7 @@ wyl_fact_store_close (wyl_fact_store_t *store)
     return;
   duckdb_disconnect (&store->conn);
   duckdb_close (&store->db);
-#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
   /* Order matters: the disconnect + close above destruct the instance so its
    * shutdown checkpoint runs through the bounded filesystem under the lease the
    * bridge still holds.  Only now is it safe to observe health and release the

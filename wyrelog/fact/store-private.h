@@ -45,7 +45,7 @@ wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
     WylFactStoreIdentityResult * out_result, wyl_fact_store_t ** out_store);
 /* Pathnames are not authority; this legacy handle-returning API is unsuitable
  * for security-sensitive provisioning. */
-#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
 /* Open a live, secure handle on a retained provisioning pair.  Unlike the raw
  * path open, this binds by descriptor through the bounded secure filesystem, so
