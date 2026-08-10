@@ -165,8 +165,8 @@ load_relation_schema (wyl_policy_store_t *policy,
   wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
   gsize n_columns = 0;
   wyrelog_error_t rc = wyl_policy_store_load_fact_relation_schema_columns
-      (policy, graph->tenant_id, graph->graph_id, namespace_id, relation_name,
-      schema_version, &relation_visible, &columns, &n_columns);
+        (policy, graph->tenant_id, graph->graph_id, namespace_id, relation_name,
+          schema_version, &relation_visible, &columns, &n_columns);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -196,7 +196,7 @@ load_relation_schema (wyl_policy_store_t *policy,
   rel->projection_table = wyl_fact_store_projection_table_name (&opts);
   rel->wirelog_relation =
       wyl_fact_replay_wirelog_relation_name (rel->namespace_id,
-      rel->relation_name);
+          rel->relation_name);
   if (rel->namespace_id == NULL || rel->relation_name == NULL
       || rel->projection_table == NULL || rel->wirelog_relation == NULL) {
     replay_relation_free (rel);
@@ -256,7 +256,7 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
     } else {
       ReplayRelation *rel = NULL;
       rc = load_relation_schema (policy, graph, namespace_id, relation_name,
-          (guint32) schema_version, &rel);
+              (guint32) schema_version, &rel);
       if (rc == WYRELOG_E_OK)
         g_ptr_array_add (relations, rel);
     }
@@ -279,7 +279,7 @@ build_graph_program (GPtrArray *relations)
     ReplayRelation *rel = g_ptr_array_index (relations, i);
     const gchar *relation_names[2] = { rel->wirelog_relation, NULL };
     g_autofree gchar *observed_relation = g_strdup_printf ("%s_observed",
-        rel->wirelog_relation);
+            rel->wirelog_relation);
     relation_names[1] = observed_relation;
 
     for (guint decl_idx = 0; decl_idx < G_N_ELEMENTS (relation_names);
@@ -341,7 +341,7 @@ materialize_cell (ReplayMaterializeCtx *ctx,
     if (value == NULL)
       return WYRELOG_E_POLICY;
     wyrelog_error_t rc = wyl_engine_owned_intern_symbol (ctx->engine, value,
-        out);
+            out);
     duckdb_free (value);
     return rc;
   }
@@ -356,8 +356,8 @@ materialize_cell (ReplayMaterializeCtx *ctx,
   if (g_strcmp0 (column->column_type, "compound_ref") == 0) {
     gint64 compound_ref = duckdb_value_int64 (result, col, row);
     wyrelog_error_t rc = wyl_fact_compound_replay_cached (ctx->store,
-        ctx->engine, ctx->tenant_id, ctx->graph_id, ctx->namespace_id,
-        compound_ref, ctx->compound_handles, out);
+            ctx->engine, ctx->tenant_id, ctx->graph_id, ctx->namespace_id,
+            compound_ref, ctx->compound_handles, out);
     if (rc != WYRELOG_E_OK)
       return rc;
     if (*out <= 0)
@@ -451,7 +451,7 @@ replay_relation_into_engine (wyl_fact_store_t *store,
     g_autofree gint64 *wire_row = g_new0 (gint64, rel->n_columns);
     for (gsize c = 0; rc == WYRELOG_E_OK && c < rel->n_columns; c++)
       rc = materialize_cell (&mat, &rel->columns[c], &result, c, r,
-          &wire_row[c]);
+              &wire_row[c]);
     if (rc != WYRELOG_E_OK)
       break;
     gboolean valid = duckdb_value_boolean (&result, rel->n_columns, r);
@@ -471,7 +471,7 @@ replay_relation_into_engine (wyl_fact_store_t *store,
   while (g_hash_table_iter_next (&iter, &key, &value)) {
     (void) key;
     rc = wyl_engine_owned_insert (engine, rel->wirelog_relation,
-        (const gint64 *) value, rel->n_columns);
+            (const gint64 *) value, rel->n_columns);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -487,7 +487,7 @@ replay_relations_into_engine (wyl_fact_store_t *store,
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   for (guint i = 0; relations != NULL && i < relations->len; i++) {
     wyrelog_error_t rc = replay_relation_into_engine (store, graph,
-        g_ptr_array_index (relations, i), engine, compound_handles);
+            g_ptr_array_index (relations, i), engine, compound_handles);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -501,15 +501,15 @@ resolve_fact_db_path (wyl_policy_store_t *policy, const gchar *fact_root,
   *out_path = NULL;
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory (policy,
-      fact_root, graph_info->tenant_id, graph_info->graph_id, FALSE,
-      &directory);
+          fact_root, graph_info->tenant_id, graph_info->graph_id, FALSE,
+          &directory);
   gint fd = -1;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
-        FALSE, &fd);
+            FALSE, &fd);
   if (rc == WYRELOG_E_OK) {
     *out_path = wyl_fact_graph_directory_descriptive_file (&directory,
-        "facts.duckdb");
+            "facts.duckdb");
     if (*out_path == NULL)
       rc = WYRELOG_E_NOMEM;
   }
@@ -538,7 +538,7 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
 
   g_autofree gchar *fact_db_path = NULL;
   wyrelog_error_t rc = resolve_fact_db_path (policy, fact_root, graph_info,
-      &fact_db_path);
+          &fact_db_path);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -607,7 +607,7 @@ collect_graph_spec (const wyl_policy_fact_graph_info_t *info,
   spec->info.owner_scope = g_strdup (info->owner_scope);
   spec->info.sealed = info->sealed;
   wyrelog_error_t rc = wyl_fact_graph_key_init (&spec->key, info->tenant_id,
-      info->graph_id);
+          info->graph_id);
   if (rc != WYRELOG_E_OK && rc != WYRELOG_E_INVALID) {
     owned_graph_spec_free (spec);
     return rc;
@@ -633,7 +633,7 @@ build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
       || g_strcmp0 (key->graph_id, ctx->info->graph_id) != 0)
     return WYRELOG_E_INTERNAL;
   return wyl_fact_replay_open_graph_engine (ctx->policy, ctx->fact_root,
-      ctx->info, out_engine);
+             ctx->info, out_engine);
 }
 
 wyrelog_error_t
@@ -655,7 +655,7 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
   g_autoptr (GPtrArray) specs =
       g_ptr_array_new_with_free_func (owned_graph_spec_free);
   wyrelog_error_t rc = wyl_policy_store_foreach_fact_graph (policy, NULL,
-      collect_graph_spec, specs);
+          collect_graph_spec, specs);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -670,7 +670,7 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     }
     GraphBuildCtx build = { policy, fact_root, &spec->info };
     wyrelog_error_t graph_rc = wyl_fact_graph_runtime_manager_refresh
-        (runtime_manager, &spec->key, build_graph_engine, &build, NULL);
+          (runtime_manager, &spec->key, build_graph_engine, &build, NULL);
     if (graph_rc == WYRELOG_E_OK)
       summary.graphs_loaded++;
     else
@@ -678,7 +678,7 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     g_ptr_array_add (seen_keys, &spec->key);
   }
   rc = wyl_fact_graph_runtime_manager_retire_unseen (runtime_manager,
-      (const WylFactGraphKey * const *) seen_keys->pdata, seen_keys->len);
+          (const WylFactGraphKey * const *) seen_keys->pdata, seen_keys->len);
   if (out_summary != NULL)
     *out_summary = summary;
   return rc;
