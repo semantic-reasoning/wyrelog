@@ -75,13 +75,13 @@ insert_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id,
 {
   g_autofree gchar *sql =
       g_strdup_printf
-      ("INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-      "VALUES ('%s',%d,1,1);" "INSERT INTO fact_graphs "
-      "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
-      "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
-      "('%s','%s','file:///legacy','/legacy',1,'%s',%d,1,1,NULL);",
-      tenant_id, sealed ? 1 : 0, tenant_id, graph_id, tenant_id,
-      sealed ? 1 : 0);
+        ("INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
+          "VALUES ('%s',%d,1,1);" "INSERT INTO fact_graphs "
+          "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+          "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
+          "('%s','%s','file:///legacy','/legacy',1,'%s',%d,1,1,NULL);",
+          tenant_id, sealed ? 1 : 0, tenant_id, graph_id, tenant_id,
+          sealed ? 1 : 0);
   exec_ok (db, sql);
 }
 
@@ -139,21 +139,21 @@ test_fresh_schema_is_legacy_unclassified (void)
   for (gsize i = 0; i < G_N_ELEMENTS (graph_columns); i++)
     assert_column (db, "fact_graphs", graph_columns[i]);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_master WHERE type='table' "
-          "AND name='fact_graph_provisioning';"), ==, 1);
+      "SELECT count(*) FROM sqlite_master WHERE type='table' "
+      "AND name='fact_graph_provisioning';"), ==, 1);
 
   insert_graph (db, "tenant-fresh", "graph-fresh", FALSE);
   g_autofree gchar *tenant_state = scalar_text (db,
-      "SELECT lifecycle_state FROM tenants " "WHERE tenant_id='tenant-fresh';");
+          "SELECT lifecycle_state FROM tenants " "WHERE tenant_id='tenant-fresh';");
   g_autofree gchar *graph_state = scalar_text (db,
-      "SELECT lifecycle_state FROM fact_graphs "
-      "WHERE tenant_id='tenant-fresh' AND graph_id='graph-fresh';");
+          "SELECT lifecycle_state FROM fact_graphs "
+          "WHERE tenant_id='tenant-fresh' AND graph_id='graph-fresh';");
   g_assert_cmpstr (tenant_state, ==, "legacy_unclassified");
   g_assert_cmpstr (graph_state, ==, "legacy_unclassified");
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT lifecycle_generation + reconciliation_generation "
-          "FROM fact_graphs WHERE tenant_id='tenant-fresh' "
-          "AND graph_id='graph-fresh';"), ==, 0);
+      "SELECT lifecycle_generation + reconciliation_generation "
+      "FROM fact_graphs WHERE tenant_id='tenant-fresh' "
+      "AND graph_id='graph-fresh';"), ==, 0);
 }
 
 static void
@@ -166,9 +166,9 @@ test_provisioning_schema_is_fail_closed (void)
   insert_graph (db, "tenant-provision", "graph-provision", FALSE);
   WylPolicyAuthorityMutationResult mutation;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-provision", "graph-provision",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", 1, 1, 0, 0,
-          &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision", "graph-provision",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", 1, 1, 0, 0,
+      &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   exec_ok (db,
       "INSERT INTO fact_graph_provisioning "
@@ -180,8 +180,8 @@ test_provisioning_schema_is_fail_closed (void)
       "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite',1,0,"
       "'reserved',0,1,1);");
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_graph_provisioning WHERE op_uuid="
-          "'01890f47-3c4b-7cc2-b8c4-dc0c0c070544';"), ==, 1);
+      "SELECT count(*) FROM fact_graph_provisioning WHERE op_uuid="
+      "'01890f47-3c4b-7cc2-b8c4-dc0c0c070544';"), ==, 1);
   exec_rejected (db,
       "UPDATE fact_graph_provisioning SET stage_basename='foreign.sqlite';");
   exec_rejected (db,
@@ -194,9 +194,9 @@ test_provisioning_schema_is_fail_closed (void)
       "0,0,'reserved',0,1,1);");
   insert_graph (db, "tenant-invalid-variant", "graph-invalid-variant", FALSE);
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-invalid-variant", "graph-invalid-variant",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070549", 1, 1, 0, 0,
-          &mutation), ==, WYRELOG_E_OK);
+      "tenant-invalid-variant", "graph-invalid-variant",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070549", 1, 1, 0, 0,
+      &mutation), ==, WYRELOG_E_OK);
   exec_rejected (db,
       "INSERT INTO fact_graph_provisioning "
       "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
@@ -234,10 +234,10 @@ test_provisioning_schema_is_fail_closed (void)
   exec_rejected (db,
       "UPDATE fact_graph_provisioning SET phase='active',updated_at=6;");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision", "graph-provision",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
-          &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision", "graph-provision",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   /* A direct graph transition leaves a detectable stranded operation until
    * recovery advances the operation's terminal phase. */
@@ -248,33 +248,33 @@ test_provisioning_schema_is_fail_closed (void)
   exec_ok (db,
       "UPDATE fact_graph_provisioning SET phase='active',updated_at=7;");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision", "graph-provision",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
-          &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision", "graph-provision",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==,
       WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision", "graph-provision",
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
-          2, 0, &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision", "graph-provision",
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
+      2, 0, &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision", "graph-provision",
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE,
-          3, 0, &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision", "graph-provision",
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE,
+      3, 0, &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision", "graph-provision",
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
-          4, 0, &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision", "graph-provision",
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
+      4, 0, &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_reconcile_graph_authority (store,
-          "tenant-provision", "graph-provision", 5, 0, &mutation), ==,
+      "tenant-provision", "graph-provision", 5, 0, &mutation), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
 }
@@ -290,9 +290,9 @@ test_provisioning_degraded_terminal_coupling (void)
   insert_graph (db, "tenant-provision-degraded", "graph-provision-degraded",
       FALSE);
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-provision-degraded", "graph-provision-degraded",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070553", 1, 1, 0, 0,
-          &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision-degraded", "graph-provision-degraded",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070553", 1, 1, 0, 0,
+      &mutation), ==, WYRELOG_E_OK);
   exec_ok (db,
       "INSERT INTO fact_graph_provisioning "
       "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
@@ -303,10 +303,10 @@ test_provisioning_degraded_terminal_coupling (void)
       "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070554.sqlite',"
       "1,0,'reserved',0,1,1);");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision-degraded", "graph-provision-degraded",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
-          1, 0, &mutation), ==, WYRELOG_E_OK);
+      "tenant-provision-degraded", "graph-provision-degraded",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
+      1, 0, &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
@@ -325,9 +325,9 @@ test_dangling_provisioning_record_fails_closed (void)
   insert_graph (db, "tenant-dangling", "graph-dangling", FALSE);
   WylPolicyAuthorityMutationResult mutation;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-dangling", "graph-dangling",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070551", 1, 1, 0, 0,
-          &mutation), ==, WYRELOG_E_OK);
+      "tenant-dangling", "graph-dangling",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070551", 1, 1, 0, 0,
+      &mutation), ==, WYRELOG_E_OK);
   exec_ok (db,
       "INSERT INTO fact_graph_provisioning "
       "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
@@ -359,8 +359,8 @@ test_malformed_provisioning_schema_fails_closed (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
-          "name='fact_graph_provisioning';"), ==, 1);
+      "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
+      "name='fact_graph_provisioning';"), ==, 1);
 }
 
 static void
@@ -480,9 +480,9 @@ test_pre_sealed_generation_guards_migrate (void)
       "('pre-guard-open',0,1,1),('pre-guard-sealed',1,1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM tenants WHERE "
-          "(tenant_id='pre-guard-open' AND sealed_generation=0) OR "
-          "(tenant_id='pre-guard-sealed' AND sealed_generation=1);"), ==, 2);
+      "SELECT count(*) FROM tenants WHERE "
+      "(tenant_id='pre-guard-open' AND sealed_generation=0) OR "
+      "(tenant_id='pre-guard-sealed' AND sealed_generation=1);"), ==, 2);
   exec_rejected (db,
       "UPDATE tenants SET sealed=0 WHERE tenant_id='pre-guard-sealed';");
   exec_rejected (db,
@@ -505,12 +505,12 @@ test_unknown_preexisting_tenant_guard_fails_closed (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_table_info('tenants') "
-          "WHERE name='sealed_generation';"), ==, 0);
+      "SELECT count(*) FROM pragma_table_info('tenants') "
+      "WHERE name='sealed_generation';"), ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND "
-          "name='tenant_authority_insert_guard' AND "
-          "sql LIKE '%unowned tenant guard%';"), ==, 1);
+      "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND "
+      "name='tenant_authority_insert_guard' AND "
+      "sql LIKE '%unowned tenant guard%';"), ==, 1);
 }
 
 static void
@@ -528,26 +528,26 @@ test_pre_537_rows_migrate_idempotently (void)
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM fact_graphs;"), ==,
       2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_graphs "
-          "WHERE lifecycle_state='legacy_unclassified' "
-          "AND lifecycle_generation=0 AND reconciliation_generation=0 "
-          "AND store_uuid IS NULL AND format_version IS NULL "
-          "AND path_encoding_version IS NULL AND last_error_class='none';"),
+      "SELECT count(*) FROM fact_graphs "
+      "WHERE lifecycle_state='legacy_unclassified' "
+      "AND lifecycle_generation=0 AND reconciliation_generation=0 "
+      "AND store_uuid IS NULL AND format_version IS NULL "
+      "AND path_encoding_version IS NULL AND last_error_class='none';"),
       ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM tenants "
-          "WHERE tenant_id IN ('tenant-open','tenant-sealed') "
-          "AND lifecycle_state='legacy_unclassified' "
-          "AND lifecycle_generation=0 AND reconciliation_generation=0;"),
+      "SELECT count(*) FROM tenants "
+      "WHERE tenant_id IN ('tenant-open','tenant-sealed') "
+      "AND lifecycle_state='legacy_unclassified' "
+      "AND lifecycle_generation=0 AND reconciliation_generation=0;"),
       ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM tenants WHERE"
-          " (tenant_id='tenant-open' AND sealed=0 AND sealed_generation=0) OR"
-          " (tenant_id='tenant-sealed' AND sealed=1 AND sealed_generation=1);"),
+      "SELECT count(*) FROM tenants WHERE"
+      " (tenant_id='tenant-open' AND sealed=0 AND sealed_generation=0) OR"
+      " (tenant_id='tenant-sealed' AND sealed=1 AND sealed_generation=1);"),
       ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sum(sealed) FROM fact_graphs WHERE graph_id IN "
-          "('graph-open','graph-sealed');"), ==, 1);
+      "SELECT sum(sealed) FROM fact_graphs WHERE graph_id IN "
+      "('graph-open','graph-sealed');"), ==, 1);
 }
 
 static void
@@ -576,11 +576,11 @@ test_graph_identity_and_state_constraints (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (legacy_bypasses); i++) {
     g_autofree gchar *sql = g_strdup_printf ("UPDATE fact_graphs SET "
-        "store_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c07398%" G_GSIZE_FORMAT
-        "',format_version=1,path_encoding_version=1,%s,"
-        "lifecycle_generation=1,reconciliation_generation=1 "
-        "WHERE tenant_id='tenant-b' AND graph_id='graph-b';", i,
-        legacy_bypasses[i]);
+            "store_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c07398%" G_GSIZE_FORMAT
+            "',format_version=1,path_encoding_version=1,%s,"
+            "lifecycle_generation=1,reconciliation_generation=1 "
+            "WHERE tenant_id='tenant-b' AND graph_id='graph-b';", i,
+            legacy_bypasses[i]);
     exec_rejected (db, sql);
   }
   exec_rejected (db,
@@ -705,23 +705,23 @@ test_tenant_state_constraints (void)
 
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-generic",
-          &created), ==, WYRELOG_E_OK);
+      &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
-          "tenant-generic", TRUE), ==, WYRELOG_E_OK);
+      "tenant-generic", TRUE), ==, WYRELOG_E_OK);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sealed_generation FROM tenants"
-          " WHERE tenant_id='tenant-generic';"), ==, 1);
+      "SELECT sealed_generation FROM tenants"
+      " WHERE tenant_id='tenant-generic';"), ==, 1);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
-          "tenant-generic", TRUE), ==, WYRELOG_E_OK);
+      "tenant-generic", TRUE), ==, WYRELOG_E_OK);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sealed_generation FROM tenants"
-          " WHERE tenant_id='tenant-generic';"), ==, 1);
+      "SELECT sealed_generation FROM tenants"
+      " WHERE tenant_id='tenant-generic';"), ==, 1);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
-          "tenant-generic", FALSE), ==, WYRELOG_E_OK);
+      "tenant-generic", FALSE), ==, WYRELOG_E_OK);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sealed_generation FROM tenants"
-          " WHERE tenant_id='tenant-generic';"), ==, 2);
+      "SELECT sealed_generation FROM tenants"
+      " WHERE tenant_id='tenant-generic';"), ==, 2);
 }
 
 static void
@@ -740,12 +740,12 @@ test_tenant_sealed_generation_overflow (void)
       " VALUES ('tenant-max',0,9223372036854775807,1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "tenant-max",
-          TRUE), ==, WYRELOG_E_POLICY);
+      TRUE), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sealed FROM tenants WHERE tenant_id='tenant-max';"), ==, 0);
+      "SELECT sealed FROM tenants WHERE tenant_id='tenant-max';"), ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sealed_generation FROM tenants"
-          " WHERE tenant_id='tenant-max';"), ==, G_MAXINT64);
+      "SELECT sealed_generation FROM tenants"
+      " WHERE tenant_id='tenant-max';"), ==, G_MAXINT64);
 }
 
 static void
@@ -776,14 +776,14 @@ test_integer_domain_constraints (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_graphs); i++) {
     g_autofree gchar *sql = g_strdup_printf ("INSERT INTO fact_graphs "
-        "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
-        "owner_scope,sealed,lifecycle_state,store_uuid,format_version,"
-        "path_encoding_version,lifecycle_generation,"
-        "reconciliation_generation,created_at,updated_at) VALUES "
-        "('tenant-canonical','graph-%" G_GSIZE_FORMAT "','file:///graph',"
-        "'/graph',1,'tenant-canonical',0,'provisioning',"
-        "'01890f47-3c4b-7cc2-b8c4-dc0c0c073%03" G_GSIZE_FORMAT "'," "%s,1,1);",
-        i, i, invalid_graphs[i]);
+            "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+            "owner_scope,sealed,lifecycle_state,store_uuid,format_version,"
+            "path_encoding_version,lifecycle_generation,"
+            "reconciliation_generation,created_at,updated_at) VALUES "
+            "('tenant-canonical','graph-%" G_GSIZE_FORMAT "','file:///graph',"
+            "'/graph',1,'tenant-canonical',0,'provisioning',"
+            "'01890f47-3c4b-7cc2-b8c4-dc0c0c073%03" G_GSIZE_FORMAT "'," "%s,1,1);",
+            i, i, invalid_graphs[i]);
     exec_rejected (db, sql);
   }
 }
@@ -800,7 +800,7 @@ test_typed_authority_reads_and_lists (void)
 
   WylPolicyTenantAuthorityRecord *tenant = NULL;
   g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "tenant-a",
-          &tenant), ==, WYRELOG_E_OK);
+      &tenant), ==, WYRELOG_E_OK);
   g_assert_nonnull (tenant);
   g_assert_cmpstr (tenant->tenant_id, ==, "tenant-a");
   g_assert_cmpint (tenant->lifecycle_state, ==,
@@ -812,12 +812,12 @@ test_typed_authority_reads_and_lists (void)
 
   tenant = GINT_TO_POINTER (1);
   g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "missing",
-          &tenant), ==, WYRELOG_E_NOT_FOUND);
+      &tenant), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (tenant);
 
   WylPolicyGraphAuthorityRecord *graph = NULL;
   g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "tenant-b",
-          "graph-b", &graph), ==, WYRELOG_E_OK);
+      "graph-b", &graph), ==, WYRELOG_E_OK);
   g_assert_nonnull (graph);
   g_assert_cmpstr (graph->tenant_id, ==, "tenant-b");
   g_assert_cmpstr (graph->graph_id, ==, "graph-b");
@@ -833,20 +833,20 @@ test_typed_authority_reads_and_lists (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpuint (tenants->len, ==, 3);
   WylPolicyTenantAuthorityRecord *listed_tenant = g_ptr_array_index (tenants,
-      1);
+          1);
   g_assert_cmpstr (listed_tenant->tenant_id, ==, "tenant-a");
   g_ptr_array_unref (tenants);
 
   GPtrArray *graphs = NULL;
   g_assert_cmpint (wyl_policy_store_list_graph_authorities (store, NULL,
-          &graphs), ==, WYRELOG_E_OK);
+      &graphs), ==, WYRELOG_E_OK);
   g_assert_cmpuint (graphs->len, ==, 2);
   WylPolicyGraphAuthorityRecord *listed_graph = g_ptr_array_index (graphs, 0);
   g_assert_cmpstr (listed_graph->tenant_id, ==, "tenant-a");
   g_ptr_array_unref (graphs);
   graphs = NULL;
   g_assert_cmpint (wyl_policy_store_list_graph_authorities (store, "tenant-b",
-          &graphs), ==, WYRELOG_E_OK);
+      &graphs), ==, WYRELOG_E_OK);
   g_assert_cmpuint (graphs->len, ==, 1);
   listed_graph = g_ptr_array_index (graphs, 0);
   g_assert_cmpstr (listed_graph->graph_id, ==, "graph-b");
@@ -854,10 +854,10 @@ test_typed_authority_reads_and_lists (void)
 
   graph = GINT_TO_POINTER (1);
   g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "tenant-b",
-          "missing", &graph), ==, WYRELOG_E_NOT_FOUND);
+      "missing", &graph), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (graph);
   g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "", "x",
-          &graph), ==, WYRELOG_E_INVALID);
+      &graph), ==, WYRELOG_E_INVALID);
 
   exec_ok (db,
       "DROP TRIGGER fact_graph_authority_update_guard;"
@@ -866,7 +866,7 @@ test_typed_authority_reads_and_lists (void)
       "lifecycle_state='provisioning',lifecycle_generation=1 "
       "WHERE tenant_id='tenant-b' AND graph_id='graph-b';");
   g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "tenant-b",
-          "graph-b", &graph), ==, WYRELOG_E_POLICY);
+      "graph-b", &graph), ==, WYRELOG_E_POLICY);
   g_assert_null (graph);
 }
 
@@ -920,108 +920,108 @@ test_reservation_and_cross_connection_cas (void)
   WylPolicyAuthorityMutationResult result;
   exec_ok (db, "BEGIN IMMEDIATE;");
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (second,
-          "tenant-cas", "graph-cas",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
+      "tenant-cas", "graph-cas",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_BUSY);
   exec_ok (db, "ROLLBACK;");
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (first,
-          "tenant-cas", "graph-cas",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
+      "tenant-cas", "graph-cas",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (second,
-          "tenant-cas", "graph-cas",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
+      "tenant-cas", "graph-cas",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (second,
-          "tenant-cas", "graph-duplicate",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
+      "tenant-cas", "graph-duplicate",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073101", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   WylPolicyGraphAuthorityRecord *duplicate = NULL;
   g_assert_cmpint (wyl_policy_store_read_graph_authority (first, "tenant-cas",
-          "graph-duplicate", &duplicate), ==, WYRELOG_E_OK);
+      "graph-duplicate", &duplicate), ==, WYRELOG_E_OK);
   g_assert_false (duplicate->has_store_identity);
   g_assert_cmpint (duplicate->lifecycle_state, ==,
       WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED);
   wyl_policy_graph_authority_record_free (duplicate);
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (second,
-          "tenant-cas", "graph-sealed-legacy",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073104", 1, 1, 0, 0, &result), ==,
+      "tenant-cas", "graph-sealed-legacy",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073104", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
 
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
-          "tenant-cas", "graph-cas",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1,
-          0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1,
+      0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (second,
-          "tenant-cas", "graph-cas",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_REPLAY,
-          1, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_REPLAY,
+      1, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (second,
-          "tenant-cas", "graph-cas",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1,
-          0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1,
+      0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
 
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
-          "tenant-cas", "graph-cas", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_ERROR_NONE, 2, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_ERROR_NONE, 2, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
-          "tenant-cas", "graph-cas", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_REPLAY,
-          2, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_REPLAY,
+      2, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
-          "tenant-cas", "graph-cas", WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 3,
-          0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas", WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 3,
+      0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   g_assert_cmpint (wyl_policy_store_reconcile_graph_authority (first,
-          "tenant-cas", "graph-cas", 3, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas", 3, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_reconcile_graph_authority (second,
-          "tenant-cas", "graph-cas", 3, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-cas", 3, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
 
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (first,
-          "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result),
+      "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (second,
-          "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result),
+      "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (first,
-          "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
-          WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
+      "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (second,
-          "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
-          WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
+      "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (first,
-          "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_SEALING,
-          WYL_POLICY_TENANT_LIFECYCLE_SEALED, 2, 1, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_SEALING,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALED, 2, 1, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (first,
-          "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_SEALED,
-          WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 3, 1, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", WYL_POLICY_TENANT_LIFECYCLE_SEALED,
+      WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 3, 1, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
 
@@ -1037,22 +1037,22 @@ test_reservation_and_cross_connection_cas (void)
       "9223372036854775807,1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
-          "tenant-cas", "graph-max", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
-          G_MAXINT64, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-cas", "graph-max", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
+      G_MAXINT64, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   WylPolicyGraphAuthorityRecord *max_graph = NULL;
   g_assert_cmpint (wyl_policy_store_read_graph_authority (first, "tenant-cas",
-          "graph-max", &max_graph), ==, WYRELOG_E_OK);
+      "graph-max", &max_graph), ==, WYRELOG_E_OK);
   g_assert_cmpuint (max_graph->lifecycle_generation, ==, G_MAXINT64);
   g_assert_cmpint (max_graph->lifecycle_state, ==,
       WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
   wyl_policy_graph_authority_record_free (max_graph);
 
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (first,
-          "tenant-cas", "missing",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073103", 1, 1, 0, 0, &result), ==,
+      "tenant-cas", "missing",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073103", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND);
 
@@ -1075,7 +1075,7 @@ prepare_graph_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
 
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store, tenant_id,
-          graph_id, store_uuid, 1, 1, 0, 0, &result), ==, WYRELOG_E_OK);
+      graph_id, store_uuid, 1, 1, 0, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 1;
   if (state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING)
@@ -1088,17 +1088,17 @@ prepare_graph_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
       target == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED ?
       WYL_POLICY_GRAPH_ERROR_REPLAY : WYL_POLICY_GRAPH_ERROR_NONE;
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          target, error, 1, 0, &result), ==, WYRELOG_E_OK);
+      tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      target, error, 1, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 2;
   if (state != WYL_POLICY_GRAPH_LIFECYCLE_SEALED)
     return;
 
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE, 2,
-          0, &result), ==, WYRELOG_E_OK);
+      tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE, 2,
+      0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 3;
 }
@@ -1108,14 +1108,14 @@ graph_matrix_edge_is_legal (WylPolicyGraphLifecycleState from,
     WylPolicyGraphLifecycleState to)
 {
   return (from == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING
-      && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
-          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
-      || (from == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
-      && (to == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
-          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
-      || (from == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
-      && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
-          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED));
+         && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+         || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
+         || (from == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+         && (to == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+         || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
+         || (from == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+         && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+         || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED));
 }
 
 static void
@@ -1124,8 +1124,8 @@ prepare_tenant_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
     guint64 *out_lifecycle_generation, guint64 *out_reconciliation_generation)
 {
   g_autofree gchar *insert = g_strdup_printf ("INSERT INTO tenants "
-      "(tenant_id,sealed,created_at,updated_at) VALUES ('%s',0,1,1);",
-      tenant_id);
+          "(tenant_id,sealed,created_at,updated_at) VALUES ('%s',0,1,1);",
+          tenant_id);
   exec_ok (db, insert);
   *out_lifecycle_generation = 0;
   *out_reconciliation_generation = 0;
@@ -1134,7 +1134,7 @@ prepare_tenant_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
 
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
-          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result), ==,
+      tenant_id, WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 1;
@@ -1143,8 +1143,8 @@ prepare_tenant_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
     return;
 
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
-          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
-          WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
+      tenant_id, WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 2;
@@ -1152,16 +1152,16 @@ prepare_tenant_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
     return;
 
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
-          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_SEALING,
-          WYL_POLICY_TENANT_LIFECYCLE_SEALED, 2, 1, &result), ==, WYRELOG_E_OK);
+      tenant_id, WYL_POLICY_TENANT_LIFECYCLE_SEALING,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALED, 2, 1, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 3;
   if (state == WYL_POLICY_TENANT_LIFECYCLE_SEALED)
     return;
 
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
-          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_SEALED,
-          WYL_POLICY_TENANT_LIFECYCLE_UNSEALING, 3, 1, &result), ==,
+      tenant_id, WYL_POLICY_TENANT_LIFECYCLE_SEALED,
+      WYL_POLICY_TENANT_LIFECYCLE_UNSEALING, 3, 1, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   *out_lifecycle_generation = 4;
@@ -1172,15 +1172,15 @@ tenant_matrix_edge_is_legal (WylPolicyTenantLifecycleState from,
     WylPolicyTenantLifecycleState to)
 {
   return (from == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
-      && to == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
-      || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALING
-      && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
-          || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED))
-      || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALED
-      && to == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING)
-      || (from == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING
-      && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
-          || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED));
+         && to == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
+         || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+         && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+         || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED))
+         || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALED
+         && to == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING)
+         || (from == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING
+         && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+         || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED));
 }
 
 static void
@@ -1201,9 +1201,9 @@ test_complete_transition_matrices (void)
   for (gsize i = 0; i < G_N_ELEMENTS (graph_states); i++) {
     for (gsize j = 0; j < G_N_ELEMENTS (graph_states); j++, sequence++) {
       g_autofree gchar *tenant = g_strdup_printf ("tenant-gmatrix-%u",
-          sequence);
+              sequence);
       g_autofree gchar *graph = g_strdup_printf ("graph-gmatrix-%u",
-          sequence);
+              sequence);
       g_autofree gchar *uuid =
           g_strdup_printf ("01890f47-3c4b-7cc2-b8c4-dc0c0c%06u", sequence);
       guint64 lifecycle_generation, reconciliation_generation;
@@ -1214,8 +1214,8 @@ test_complete_transition_matrices (void)
           WYL_POLICY_GRAPH_ERROR_REPLAY : WYL_POLICY_GRAPH_ERROR_NONE;
       WylPolicyAuthorityMutationResult result;
       g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-              tenant, graph, graph_states[i], graph_states[j], error,
-              lifecycle_generation, reconciliation_generation, &result), ==,
+          tenant, graph, graph_states[i], graph_states[j], error,
+          lifecycle_generation, reconciliation_generation, &result), ==,
           WYRELOG_E_OK);
       g_assert_cmpint (result, ==,
           graph_matrix_edge_is_legal (graph_states[i], graph_states[j]) ?
@@ -1234,14 +1234,14 @@ test_complete_transition_matrices (void)
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_states); i++) {
     for (gsize j = 0; j < G_N_ELEMENTS (tenant_states); j++, sequence++) {
       g_autofree gchar *tenant = g_strdup_printf ("tenant-tmatrix-%u",
-          sequence);
+              sequence);
       guint64 lifecycle_generation, reconciliation_generation;
       prepare_tenant_matrix_state (store, db, tenant, tenant_states[i],
           &lifecycle_generation, &reconciliation_generation);
       WylPolicyAuthorityMutationResult result;
       g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
-              tenant, tenant_states[i], tenant_states[j],
-              lifecycle_generation, reconciliation_generation, &result), ==,
+          tenant, tenant_states[i], tenant_states[j],
+          lifecycle_generation, reconciliation_generation, &result), ==,
           WYRELOG_E_OK);
       g_assert_cmpint (result, ==,
           tenant_matrix_edge_is_legal (tenant_states[i], tenant_states[j]) ?
@@ -1296,45 +1296,45 @@ test_complete_transition_tables_and_overflow (void)
 
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-transitions", "graph-pd",
-          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
-          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_PATH, 0,
-          0, &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", "graph-pd",
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_PATH, 0,
+      0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-transitions", "graph-as",
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE, 0, 0,
-          &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", "graph-as",
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE, 0, 0,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-transitions", "graph-as",
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
-          &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", "graph-as",
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-transitions", "graph-sd",
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
-          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
-          WYL_POLICY_GRAPH_ERROR_INTERNAL, 0, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", "graph-sd",
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+      WYL_POLICY_GRAPH_ERROR_INTERNAL, 0, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_reconcile_graph_authority (store,
-          "tenant-transitions", "graph-reconciliation-max", 0, G_MAXINT64,
-          &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", "graph-reconciliation-max", 0, G_MAXINT64,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-transitions", "graph-lifecycle-max",
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
-          G_MAXINT64, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", "graph-lifecycle-max",
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
+      G_MAXINT64, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
 
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
-          "tenant-transitions", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
-          &result), ==, WYRELOG_E_OK);
+      "tenant-transitions", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   const WylPolicyTenantLifecycleState tenant_path[] = {
     WYL_POLICY_TENANT_LIFECYCLE_SEALING,
@@ -1353,20 +1353,20 @@ test_complete_transition_tables_and_overflow (void)
   guint64 lifecycle_generation = 1;
   for (gsize i = 0; i < G_N_ELEMENTS (tenant_path); i++) {
     g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
-            "tenant-transitions", tenant_state, tenant_path[i],
-            lifecycle_generation, 1, &result), ==, WYRELOG_E_OK);
+        "tenant-transitions", tenant_state, tenant_path[i],
+        lifecycle_generation, 1, &result), ==, WYRELOG_E_OK);
     g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
     tenant_state = tenant_path[i];
     lifecycle_generation++;
   }
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
-          "tenant-reconciliation-max", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0,
-          G_MAXINT64, &result), ==, WYRELOG_E_OK);
+      "tenant-reconciliation-max", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0,
+      G_MAXINT64, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
-          "tenant-lifecycle-max", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
-          WYL_POLICY_TENANT_LIFECYCLE_SEALING, G_MAXINT64, 0, &result), ==,
+      "tenant-lifecycle-max", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALING, G_MAXINT64, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
@@ -1384,24 +1384,24 @@ test_nested_transaction_uses_savepoint (void)
   exec_ok (db, "BEGIN;");
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-nested", "graph-nested",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073105", 1, 1, 0, 0, &result), ==,
+      "tenant-nested", "graph-nested",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073105", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_false (sqlite3_get_autocommit (db));
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_graphs "
-          "WHERE tenant_id='tenant-nested' AND graph_id='graph-nested' "
-          "AND lifecycle_state='provisioning' AND lifecycle_generation=1;"),
+      "SELECT count(*) FROM fact_graphs "
+      "WHERE tenant_id='tenant-nested' AND graph_id='graph-nested' "
+      "AND lifecycle_state='provisioning' AND lifecycle_generation=1;"),
       ==, 1);
 
   exec_ok (db, "ROLLBACK;");
   g_assert_true (sqlite3_get_autocommit (db));
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_graphs "
-          "WHERE tenant_id='tenant-nested' AND graph_id='graph-nested' "
-          "AND lifecycle_state='legacy_unclassified' "
-          "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 1);
+      "SELECT count(*) FROM fact_graphs "
+      "WHERE tenant_id='tenant-nested' AND graph_id='graph-nested' "
+      "AND lifecycle_state='legacy_unclassified' "
+      "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 1);
 }
 
 static void
@@ -1429,13 +1429,13 @@ test_mutation_faults_roll_back (void)
     wyl_policy_store_graph_authority_mutation_fail_once (store, stages[i]);
     WylPolicyAuthorityMutationResult result;
     g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-            tenants[i], graphs[i], uuids[i], 1, 1, 0, 0, &result), ==,
+        tenants[i], graphs[i], uuids[i], 1, 1, 0, 0, &result), ==,
         WYRELOG_E_IO);
     g_assert_true (sqlite3_get_autocommit (db));
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM fact_graphs WHERE "
-            "lifecycle_state='legacy_unclassified' "
-            "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 3);
+        "SELECT count(*) FROM fact_graphs WHERE "
+        "lifecycle_state='legacy_unclassified' "
+        "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 3);
   }
 
   exec_ok (db,
@@ -1446,23 +1446,23 @@ test_mutation_faults_roll_back (void)
       WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-fault-nested", "graph-fault-nested",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c073303", 1, 1, 0, 0, &result), ==,
+      "tenant-fault-nested", "graph-fault-nested",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073303", 1, 1, 0, 0, &result), ==,
       WYRELOG_E_IO);
   g_assert_false (sqlite3_get_autocommit (db));
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM tenants "
-          "WHERE tenant_id='tenant-outer-marker';"), ==, 1);
+      "SELECT count(*) FROM tenants "
+      "WHERE tenant_id='tenant-outer-marker';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_graphs "
-          "WHERE tenant_id='tenant-fault-nested' "
-          "AND graph_id='graph-fault-nested' "
-          "AND lifecycle_state='legacy_unclassified' "
-          "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 1);
+      "SELECT count(*) FROM fact_graphs "
+      "WHERE tenant_id='tenant-fault-nested' "
+      "AND graph_id='graph-fault-nested' "
+      "AND lifecycle_state='legacy_unclassified' "
+      "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 1);
   exec_ok (db, "COMMIT;");
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM tenants "
-          "WHERE tenant_id='tenant-outer-marker';"), ==, 1);
+      "SELECT count(*) FROM tenants "
+      "WHERE tenant_id='tenant-outer-marker';"), ==, 1);
 }
 
 static void
@@ -1478,15 +1478,15 @@ test_fresh_migration_failures_reopen_and_retry (void)
     wyl_policy_store_graph_authority_migration_fail_once (store, stage);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_IO);
     g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
-            "SELECT count(*) FROM sqlite_master WHERE name IN "
-            "('idx_fact_graphs_store_uuid',"
-            "'tenant_authority_insert_guard',"
-            "'tenant_authority_update_guard',"
-            "'fact_graph_authority_insert_guard',"
-            "'fact_graph_authority_update_guard');"), ==, 0);
+        "SELECT count(*) FROM sqlite_master WHERE name IN "
+        "('idx_fact_graphs_store_uuid',"
+        "'tenant_authority_insert_guard',"
+        "'tenant_authority_update_guard',"
+        "'fact_graph_authority_insert_guard',"
+        "'fact_graph_authority_update_guard');"), ==, 0);
     g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
-            "name='tenants';"), ==, 0);
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
+        "name='tenants';"), ==, 0);
     wyl_policy_store_close (store);
 
     store = NULL;
@@ -1515,8 +1515,8 @@ test_legacy_failure_preserves_rows_and_retries (void)
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM fact_graphs;"), ==,
       1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_table_info('fact_graphs') "
-          "WHERE name='store_uuid';"), ==, 0);
+      "SELECT count(*) FROM pragma_table_info('fact_graphs') "
+      "WHERE name='store_uuid';"), ==, 0);
   wyl_policy_store_close (store);
 
   store = NULL;
@@ -1524,9 +1524,9 @@ test_legacy_failure_preserves_rows_and_retries (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   db = wyl_policy_store_get_db (store);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_graphs WHERE "
-          "tenant_id='tenant-legacy' AND graph_id='graph-legacy' AND "
-          "sealed=1 AND lifecycle_state='legacy_unclassified';"), ==, 1);
+      "SELECT count(*) FROM fact_graphs WHERE "
+      "tenant_id='tenant-legacy' AND graph_id='graph-legacy' AND "
+      "sealed=1 AND lifecycle_state='legacy_unclassified';"), ==, 1);
   wyl_policy_store_close (store);
   cleanup_store_path (root, path);
 }
@@ -1543,12 +1543,12 @@ test_malformed_preexisting_object_fails_closed (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_table_info('fact_graphs') "
-          "WHERE name='store_uuid';"), ==, 0);
+      "SELECT count(*) FROM pragma_table_info('fact_graphs') "
+      "WHERE name='store_uuid';"), ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_master WHERE type='index' AND "
-          "name='idx_fact_graphs_store_uuid' AND "
-          "sql LIKE '%graph_id%';"), ==, 1);
+      "SELECT count(*) FROM sqlite_master WHERE type='index' AND "
+      "name='idx_fact_graphs_store_uuid' AND "
+      "sql LIKE '%graph_id%';"), ==, 1);
 }
 
 static void
@@ -1564,11 +1564,11 @@ test_preexisting_column_without_constraint_fails_closed (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
-          "name='lifecycle_state';"), ==, 1);
+      "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
+      "name='lifecycle_state';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
-          "name='lifecycle_generation';"), ==, 0);
+      "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
+      "name='lifecycle_generation';"), ==, 0);
 }
 
 static void
@@ -1583,13 +1583,13 @@ test_constraint_comment_spoof_fails_closed (void)
       "DEFAULT 'legacy_unclassified' /* CHECK(lifecycle_state IN "
       "('legacy_unclassified','active','sealing','sealed','unsealing')) */;");
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT instr(sql,'CHECK(lifecycle_state IN') > 0 "
-          "FROM sqlite_master WHERE type='table' AND name='tenants';"), ==, 1);
+      "SELECT instr(sql,'CHECK(lifecycle_state IN') > 0 "
+      "FROM sqlite_master WHERE type='table' AND name='tenants';"), ==, 1);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
-          "name='lifecycle_generation';"), ==, 0);
+      "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
+      "name='lifecycle_generation';"), ==, 0);
 }
 
 static void
@@ -1610,12 +1610,12 @@ test_preexisting_invalid_row_fails_closed (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM tenants WHERE tenant_id='tenant-invalid' "
-          "AND typeof(lifecycle_generation)='text';"), ==, 1);
+      "SELECT count(*) FROM tenants WHERE tenant_id='tenant-invalid' "
+      "AND typeof(lifecycle_generation)='text';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND "
-          "name IN ('tenant_authority_insert_guard',"
-          "'tenant_authority_update_guard');"), ==, 0);
+      "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND "
+      "name IN ('tenant_authority_insert_guard',"
+      "'tenant_authority_update_guard');"), ==, 0);
 }
 
 static void
@@ -1651,7 +1651,7 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   wyrelog_error_t prepare_rc = wyl_policy_store_reconcile_journal_prepare
-      (store, &input, &record, &result);
+        (store, &input, &record, &result);
   g_assert_cmpint (prepare_rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_nonnull (record);
@@ -1662,22 +1662,22 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
   record = NULL;
 
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_OK);
+      &record, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   wyl_policy_fact_reconcile_journal_record_free (record);
   record = NULL;
 #define ASSERT_EVIDENCE_STALE(value) G_STMT_START { \
-  input.source_evidence = (value); \
-  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input, \
-          &record, &result), ==, WYRELOG_E_OK); \
-  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE); \
-  g_assert_null (record); \
+    input.source_evidence = (value); \
+    g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input, \
+        &record, &result), ==, WYRELOG_E_OK); \
+    g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE); \
+    g_assert_null (record); \
 } G_STMT_END
   WylPolicyFactReconcileArtifactEvidence changed = evidence;
   changed.version = 2;
   input.source_evidence = changed;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_INVALID);
+      &record, &result), ==, WYRELOG_E_INVALID);
   changed = evidence;
   changed.posix_device++;
   ASSERT_EVIDENCE_STALE (changed);
@@ -1691,7 +1691,7 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
   changed.digest_algorithm = 2;
   input.source_evidence = changed;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_INVALID);
+      &record, &result), ==, WYRELOG_E_INVALID);
   changed = evidence;
   changed.digest[0] ^= 1;
   ASSERT_EVIDENCE_STALE (changed);
@@ -1705,32 +1705,32 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
 #undef ASSERT_EVIDENCE_STALE
   input.source_evidence = evidence;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
-          WYL_POLICY_FACT_RECONCILE_PREPARED,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+      WYL_POLICY_FACT_RECONCILE_PREPARED,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
-          WYL_POLICY_FACT_RECONCILE_PREPARED,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+      WYL_POLICY_FACT_RECONCILE_PREPARED,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
-          WYL_POLICY_FACT_RECONCILE_MOVING,
-          WYL_POLICY_FACT_RECONCILE_DONE, 1, &result), ==, WYRELOG_E_OK);
+      WYL_POLICY_FACT_RECONCILE_MOVING,
+      WYL_POLICY_FACT_RECONCILE_DONE, 1, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
   GPtrArray *records = NULL;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_list (store,
-          "tenant-journal", &records), ==, WYRELOG_E_OK);
+      "tenant-journal", &records), ==, WYRELOG_E_OK);
   g_assert_cmpuint (records->len, ==, 1);
   g_ptr_array_unref (records);
   input.source_relative_path = "../escape/facts.duckdb";
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_INVALID);
+      &record, &result), ==, WYRELOG_E_INVALID);
   input.source_relative_path = "legacy/./facts.duckdb";
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_INVALID);
+      &record, &result), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
-          (WylPolicyFactReconcileJournalState) - 1,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_INVALID);
+      (WylPolicyFactReconcileJournalState) - 1,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_INVALID);
 }
 
 static void
@@ -1750,20 +1750,20 @@ test_reconcile_journal_evidence_fails_closed (void)
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_OK);
+      &record, &result), ==, WYRELOG_E_OK);
   wyl_policy_fact_reconcile_journal_record_free (record);
   exec_rejected (db, "UPDATE fact_reconcile_journal SET source_size_bytes=24;");
   exec_ok (db, "DROP TRIGGER fact_reconcile_evidence_immutable;"
       "UPDATE fact_reconcile_journal SET source_digest=NULL;");
   g_assert_cmpint (wyl_policy_store_reconcile_journal_read (store,
-          input.op_uuid, &record), ==, WYRELOG_E_POLICY);
+      input.op_uuid, &record), ==, WYRELOG_E_POLICY);
   GPtrArray *records = NULL;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_list (store,
-          "tenant-evidence", &records), ==, WYRELOG_E_POLICY);
+      "tenant-evidence", &records), ==, WYRELOG_E_POLICY);
   g_assert_null (records);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store,
-          input.op_uuid, WYL_POLICY_FACT_RECONCILE_PREPARED,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_POLICY);
+      input.op_uuid, WYL_POLICY_FACT_RECONCILE_PREPARED,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_POLICY);
 }
 
 static void
@@ -1799,10 +1799,10 @@ test_reconcile_evidence_prepare_rolls_back (void)
   wyl_policy_store_graph_authority_mutation_fail_once (store,
       WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_IO);
+      &record, &result), ==, WYRELOG_E_IO);
   g_assert_null (record);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM fact_reconcile_journal;"), ==, 0);
+      "SELECT count(*) FROM fact_reconcile_journal;"), ==, 0);
 }
 
 static void
@@ -1825,7 +1825,7 @@ test_graph_provisioning_private_api (void)
   WylPolicyGraphProvisioningRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_OK);
+      &record, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_nonnull (record);
   g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_RESERVED);
@@ -1837,19 +1837,19 @@ test_graph_provisioning_private_api (void)
   wyl_policy_graph_provisioning_record_free (record);
   record = NULL;
   g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_OK);
+      &record, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpstr (record->op_uuid, ==, op_uuid);
   wyl_policy_graph_provisioning_record_free (record);
   record = NULL;
 
   g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
-          &record), ==, WYRELOG_E_OK);
+      &record), ==, WYRELOG_E_OK);
   g_assert_cmpstr (record->op_uuid, ==, op_uuid);
   wyl_policy_graph_provisioning_record_free (record);
   record = NULL;
   g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
-          "01890F47-3C4B-7CC2-B8C4-DC0C0C070601", &record), ==,
+      "01890F47-3C4B-7CC2-B8C4-DC0C0C070601", &record), ==,
       WYRELOG_E_INVALID);
 
   const WylPolicyGraphProvisioningPhase phases[] = {
@@ -1861,29 +1861,29 @@ test_graph_provisioning_private_api (void)
   };
   for (gsize i = 0; i + 1 < G_N_ELEMENTS (phases); i++) {
     g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
-            op_uuid, phases[i], phases[i + 1], 0,
-            WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+        op_uuid, phases[i], phases[i + 1], 0,
+        WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
     g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   }
   g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
-          op_uuid, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
-          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
-          WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+      op_uuid, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+      WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
+      WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_autofree gchar *lifecycle_state = scalar_text (db,
-      "SELECT lifecycle_state FROM fact_graphs "
-      "WHERE tenant_id='tenant-provision-api' AND graph_id='graph-provision-api';");
+          "SELECT lifecycle_state FROM fact_graphs "
+          "WHERE tenant_id='tenant-provision-api' AND graph_id='graph-provision-api';");
   g_assert_cmpstr (lifecycle_state, ==, "active");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
-          "tenant-provision-api", "graph-provision-api",
-          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
-          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
-          2, 0, &result), ==, WYRELOG_E_OK);
+      "tenant-provision-api", "graph-provision-api",
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
+      2, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
-          op_uuid, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
-          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
-          WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+      op_uuid, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+      WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
+      WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE);
   g_free (op_uuid);
 }
@@ -1898,9 +1898,9 @@ test_graph_provisioning_blob_phase_fails_closed (void)
   insert_graph (db, "tenant-provision-blob", "graph-provision-blob", FALSE);
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
-          "tenant-provision-blob", "graph-provision-blob",
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070611", 1, 1, 0, 0,
-          &result), ==, WYRELOG_E_OK);
+      "tenant-provision-blob", "graph-provision-blob",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070611", 1, 1, 0, 0,
+      &result), ==, WYRELOG_E_OK);
   exec_ok (db, "DROP TRIGGER fact_graph_provisioning_insert_guard;"
       "PRAGMA ignore_check_constraints=ON;"
       "INSERT INTO fact_graph_provisioning "
@@ -1913,7 +1913,7 @@ test_graph_provisioning_blob_phase_fails_closed (void)
       "CAST('reserved' AS BLOB),0,1,1);");
   WylPolicyGraphProvisioningRecord *record = NULL;
   g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070610", &record), ==,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070610", &record), ==,
       WYRELOG_E_POLICY);
   g_assert_null (record);
 }
@@ -1936,12 +1936,12 @@ test_graph_provisioning_prepare_rolls_back_reservation (void)
   wyl_policy_store_graph_authority_mutation_fail_once (store,
       WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_IO);
+      &record, &result), ==, WYRELOG_E_IO);
   g_assert_null (record);
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM "
-          "fact_graph_provisioning;"), ==, 0);
+      "fact_graph_provisioning;"), ==, 0);
   g_assert_cmpstr (scalar_text (db, "SELECT lifecycle_state FROM fact_graphs "
-          "WHERE tenant_id='tenant-provision-fault' AND graph_id='graph-provision-fault';"),
+      "WHERE tenant_id='tenant-provision-fault' AND graph_id='graph-provision-fault';"),
       ==, "legacy_unclassified");
 }
 
@@ -1963,7 +1963,7 @@ test_graph_provisioning_terminal_rolls_back (void)
   WylPolicyGraphProvisioningRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_OK);
+      &record, &result), ==, WYRELOG_E_OK);
   gchar *op_uuid = g_strdup (record->op_uuid);
   wyl_policy_graph_provisioning_record_free (record);
   const WylPolicyGraphProvisioningPhase phases[] = {
@@ -1974,19 +1974,19 @@ test_graph_provisioning_terminal_rolls_back (void)
   };
   for (gsize i = 0; i + 1 < G_N_ELEMENTS (phases); i++)
     g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
-            op_uuid, phases[i], phases[i + 1], 0,
-            WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+        op_uuid, phases[i], phases[i + 1], 0,
+        WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
   wyl_policy_store_graph_authority_mutation_fail_once (store,
       WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
-          op_uuid, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
-          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
-          WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_IO);
+      op_uuid, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
+      WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
+      WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_IO);
   g_assert_cmpstr (scalar_text (db, "SELECT lifecycle_state FROM fact_graphs "
-          "WHERE tenant_id='tenant-provision-terminal' AND graph_id='graph-provision-terminal';"),
+      "WHERE tenant_id='tenant-provision-terminal' AND graph_id='graph-provision-terminal';"),
       ==, "provisioning");
   g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
-          &record), ==, WYRELOG_E_OK);
+      &record), ==, WYRELOG_E_OK);
   g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED);
   wyl_policy_graph_provisioning_record_free (record);
   g_free (op_uuid);
@@ -2059,13 +2059,13 @@ main (int argc, char **argv)
   g_test_add_func ("/policy/graph-authority/reconcile-journal-cas",
       test_reconcile_journal_prepare_read_list_and_cas);
   g_test_add_func
-      ("/policy/graph-authority/reconcile-journal-evidence-fails-closed",
+    ("/policy/graph-authority/reconcile-journal-evidence-fails-closed",
       test_reconcile_journal_evidence_fails_closed);
   g_test_add_func
-      ("/policy/graph-authority/reconcile-evidence-trigger-verified",
+    ("/policy/graph-authority/reconcile-evidence-trigger-verified",
       test_reconcile_evidence_trigger_is_verified);
   g_test_add_func
-      ("/policy/graph-authority/reconcile-evidence-prepare-rolls-back",
+    ("/policy/graph-authority/reconcile-evidence-prepare-rolls-back",
       test_reconcile_evidence_prepare_rolls_back);
   return g_test_run ();
 }
