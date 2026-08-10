@@ -147,7 +147,8 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       'fact/secure-duckdb-file-handle-private.cc',
       'fact/secure-duckdb-filesystem-private.cc',
       'fact/provisioning-construct-private.c',
-      'fact/provisioning-run-private.c')
+      'fact/provisioning-run-private.c',
+      'fact/store-open-private.c')
     wyrelog_override_options += 'cpp_std=c++17'
   endif
   wyrelog_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
