@@ -66,7 +66,7 @@ open_duckdb_identified (const gchar *path, gboolean read_only,
     return WYRELOG_E_IO;
   if (duckdb_set_config (config, "threads", "1") != DuckDBSuccess
       || (read_only && duckdb_set_config (config, "access_mode", "READ_ONLY")
-          != DuckDBSuccess)) {
+      != DuckDBSuccess)) {
     duckdb_destroy_config (&config);
     return WYRELOG_E_IO;
   }
@@ -288,7 +288,7 @@ reject_audit_database_unlocked (wyl_fact_store_t *store)
   gboolean has_audit_events = FALSE;
   gboolean has_fact_metadata = FALSE;
   wyrelog_error_t rc = table_exists_unlocked (store, "audit_events",
-      &has_audit_events);
+          &has_audit_events);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = table_exists_unlocked (store, "fact_store_metadata", &has_fact_metadata);
@@ -301,8 +301,8 @@ reject_audit_database_unlocked (wyl_fact_store_t *store)
 
   duckdb_result result = { 0 };
   if (duckdb_query (store->conn,
-          "SELECT value FROM fact_store_metadata WHERE key = 'store_kind';",
-          &result) != DuckDBSuccess) {
+      "SELECT value FROM fact_store_metadata WHERE key = 'store_kind';",
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
   }
@@ -326,7 +326,7 @@ metadata_value_unlocked (wyl_fact_store_t *store, const gchar *key,
 
   *out_value = NULL;
   if (duckdb_prepare (store->conn,
-          "SELECT value FROM fact_store_metadata WHERE key = ?;", &stmt)
+      "SELECT value FROM fact_store_metadata WHERE key = ?;", &stmt)
       != DuckDBSuccess)
     return WYRELOG_E_IO;
   if (duckdb_bind_varchar (stmt, 1, key) != DuckDBSuccess) {
@@ -362,8 +362,8 @@ insert_metadata_value_unlocked (wyl_fact_store_t *store, const gchar *key,
 {
   duckdb_prepared_statement stmt = NULL;
   if (duckdb_prepare (store->conn,
-          "INSERT INTO fact_store_metadata (key, value) VALUES (?, ?);",
-          &stmt) != DuckDBSuccess)
+      "INSERT INTO fact_store_metadata (key, value) VALUES (?, ?);",
+      &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, key)
       | duckdb_bind_varchar (stmt, 2, value);
@@ -382,12 +382,12 @@ validate_store_scope_unlocked (wyl_fact_store_t *store, const gchar *tenant_id,
 {
   if (store->identity_tenant_id != NULL)
     return g_strcmp0 (store->identity_tenant_id, tenant_id) == 0
-        && g_strcmp0 (store->identity_graph_id, graph_id) == 0 ?
-        WYRELOG_E_OK : WYRELOG_E_POLICY;
+           && g_strcmp0 (store->identity_graph_id, graph_id) == 0 ?
+           WYRELOG_E_OK : WYRELOG_E_POLICY;
 
   gboolean has_fact_metadata = FALSE;
   wyrelog_error_t rc = table_exists_unlocked (store, "fact_store_metadata",
-      &has_fact_metadata);
+          &has_fact_metadata);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!has_fact_metadata)
@@ -414,13 +414,13 @@ validate_store_scope_unlocked (wyl_fact_store_t *store, const gchar *tenant_id,
   }
 
   return g_strcmp0 (stored_tenant, tenant_id) == 0
-      && g_strcmp0 (stored_graph, graph_id) == 0 ? WYRELOG_E_OK :
-      WYRELOG_E_POLICY;
+         && g_strcmp0 (stored_graph, graph_id) == 0 ? WYRELOG_E_OK :
+         WYRELOG_E_POLICY;
 }
 
 
 void wyl_fact_store_identity_set_validation_test_hook
-    (WylFactStoreIdentityValidationTestHook hook, gpointer user_data)
+  (WylFactStoreIdentityValidationTestHook hook, gpointer user_data)
 {
   G_LOCK (identity_validation_test_hook);
   identity_validation_test_hook = hook;
@@ -437,12 +437,12 @@ fact_identity_bind_param (duckdb_prepared_statement statement, idx_t index,
       return duckdb_bind_null (statement, index) == DuckDBSuccess;
     case WYL_FACT_STORE_IDENTITY_CELL_INT64:
       return duckdb_bind_int64 (statement, index, cell->as.int64_value)
-          == DuckDBSuccess;
+             == DuckDBSuccess;
     case WYL_FACT_STORE_IDENTITY_CELL_BYTES:
       return cell->as.bytes.data != NULL
-          && duckdb_bind_varchar_length (statement, index,
-          (const gchar *) cell->as.bytes.data, cell->as.bytes.length)
-          == DuckDBSuccess;
+             && duckdb_bind_varchar_length (statement, index,
+                 (const gchar *) cell->as.bytes.data, cell->as.bytes.length)
+             == DuckDBSuccess;
   }
   return FALSE;
 }
@@ -562,7 +562,7 @@ wyl_fact_store_open_identified (const gchar *path,
   wyl_fact_store_identity_process_guard_lock ();
   wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
   wyrelog_error_t rc = open_duckdb_identified (path,
-      mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &self->db);
+          mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &self->db);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     g_free (self);
@@ -671,48 +671,48 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
   wyrelog_error_t rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (store->conn,
-        "CREATE TABLE IF NOT EXISTS fact_store_metadata ("
-        "  key VARCHAR PRIMARY KEY,"
-        "  value VARCHAR NOT NULL"
-        ");"
-        "INSERT OR IGNORE INTO fact_store_metadata (key, value) "
-        "VALUES ('store_kind', 'wyrelog.fact');"
-        "CREATE TABLE IF NOT EXISTS fact_batches ("
-        "  batch_id VARCHAR PRIMARY KEY,"
-        "  tenant_id VARCHAR NOT NULL,"
-        "  graph_id VARCHAR NOT NULL,"
-        "  namespace_id VARCHAR NOT NULL,"
-        "  relation_name VARCHAR NOT NULL,"
-        "  schema_version BIGINT NOT NULL,"
-        "  source VARCHAR,"
-        "  request_id VARCHAR,"
-        "  idempotency_key VARCHAR NOT NULL UNIQUE,"
-        "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
-        "  row_count BIGINT NOT NULL,"
-        "  content_hash VARCHAR NOT NULL,"
-        "  created_at_us BIGINT NOT NULL"
-        ");"
-        "CREATE TABLE IF NOT EXISTS fact_event_log ("
-        "  seq BIGINT PRIMARY KEY,"
-        "  batch_id VARCHAR NOT NULL,"
-        "  tenant_id VARCHAR NOT NULL,"
-        "  graph_id VARCHAR NOT NULL,"
-        "  namespace_id VARCHAR NOT NULL,"
-        "  relation_name VARCHAR NOT NULL,"
-        "  schema_version BIGINT NOT NULL,"
-        "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
-        "  created_at_us BIGINT NOT NULL,"
-        "  valid BOOLEAN NOT NULL,"
-        "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)" ");"
-        "CREATE TABLE IF NOT EXISTS fact_forget_audit ("
-        "  id            BIGINT PRIMARY KEY,"
-        "  batch_id      VARCHAR NOT NULL,"
-        "  tenant_id     VARCHAR NOT NULL,"
-        "  graph_id      VARCHAR NOT NULL,"
-        "  operator      VARCHAR NOT NULL,"
-        "  reason        VARCHAR NOT NULL,"
-        "  rows_purged   BIGINT NOT NULL,"
-        "  created_at_us BIGINT NOT NULL" ");");
+            "CREATE TABLE IF NOT EXISTS fact_store_metadata ("
+            "  key VARCHAR PRIMARY KEY,"
+            "  value VARCHAR NOT NULL"
+            ");"
+            "INSERT OR IGNORE INTO fact_store_metadata (key, value) "
+            "VALUES ('store_kind', 'wyrelog.fact');"
+            "CREATE TABLE IF NOT EXISTS fact_batches ("
+            "  batch_id VARCHAR PRIMARY KEY,"
+            "  tenant_id VARCHAR NOT NULL,"
+            "  graph_id VARCHAR NOT NULL,"
+            "  namespace_id VARCHAR NOT NULL,"
+            "  relation_name VARCHAR NOT NULL,"
+            "  schema_version BIGINT NOT NULL,"
+            "  source VARCHAR,"
+            "  request_id VARCHAR,"
+            "  idempotency_key VARCHAR NOT NULL UNIQUE,"
+            "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+            "  row_count BIGINT NOT NULL,"
+            "  content_hash VARCHAR NOT NULL,"
+            "  created_at_us BIGINT NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS fact_event_log ("
+            "  seq BIGINT PRIMARY KEY,"
+            "  batch_id VARCHAR NOT NULL,"
+            "  tenant_id VARCHAR NOT NULL,"
+            "  graph_id VARCHAR NOT NULL,"
+            "  namespace_id VARCHAR NOT NULL,"
+            "  relation_name VARCHAR NOT NULL,"
+            "  schema_version BIGINT NOT NULL,"
+            "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+            "  created_at_us BIGINT NOT NULL,"
+            "  valid BOOLEAN NOT NULL,"
+            "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)" ");"
+            "CREATE TABLE IF NOT EXISTS fact_forget_audit ("
+            "  id            BIGINT PRIMARY KEY,"
+            "  batch_id      VARCHAR NOT NULL,"
+            "  tenant_id     VARCHAR NOT NULL,"
+            "  graph_id      VARCHAR NOT NULL,"
+            "  operator      VARCHAR NOT NULL,"
+            "  reason        VARCHAR NOT NULL,"
+            "  rows_purged   BIGINT NOT NULL,"
+            "  created_at_us BIGINT NOT NULL" ");");
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   g_mutex_unlock (&store->lock);
@@ -733,8 +733,8 @@ validate_batch_compound_refs (wyl_fact_store_t *store,
         continue;
       gboolean exists = FALSE;
       wyrelog_error_t rc = wyl_fact_compound_ref_exists (store,
-          batch->tenant_id, batch->graph_id, batch->namespace_id,
-          value->as.compound_ref, &exists);
+              batch->tenant_id, batch->graph_id, batch->namespace_id,
+              value->as.compound_ref, &exists);
       if (rc != WYRELOG_E_OK)
         return rc;
       if (!exists)
@@ -767,7 +767,7 @@ wyl_fact_store_projection_table_name (const
   g_autofree gchar *tenant = hex_identifier ("t", schema->tenant_id);
   g_autofree gchar *graph = hex_identifier ("g", schema->graph_id);
   return g_strdup_printf ("rel_%s_%s_%s_%s_v%u", tenant, graph, ns, rel,
-      schema->schema_version);
+             schema->schema_version);
 }
 
 static wyrelog_error_t
@@ -778,8 +778,8 @@ validate_projection_shape_unlocked (wyl_fact_store_t *store,
   duckdb_result result = { 0 };
   g_autofree gchar *sql =
       g_strdup_printf
-      ("SELECT name, type, \"notnull\" FROM pragma_table_info('%s') ORDER BY cid;",
-      table_name);
+        ("SELECT name, type, \"notnull\" FROM pragma_table_info('%s') ORDER BY cid;",
+          table_name);
   if (duckdb_query (store->conn, sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -796,7 +796,7 @@ validate_projection_shape_unlocked (wyl_fact_store_t *store,
     gboolean notnull = duckdb_value_int64 (&result, 2, i) != 0;
     gboolean ok = g_strcmp0 (name, schema->columns[i].column_name) == 0
         && g_strcmp0 (type,
-        duckdb_type_for_column (schema->columns[i].column_type)) == 0
+            duckdb_type_for_column (schema->columns[i].column_type)) == 0
         && notnull == !schema->columns[i].nullable;
     duckdb_free (name);
     duckdb_free (type);
@@ -841,12 +841,12 @@ validate_projection_shape_unlocked (wyl_fact_store_t *store,
 
   g_autofree gchar *unique_sql =
       g_strdup_printf
-      ("SELECT COUNT(*) FROM duckdb_constraints() WHERE table_name = '%s' "
-      "AND constraint_type = 'UNIQUE' "
-      "AND len(constraint_column_names) = 2 "
-      "AND list_contains(constraint_column_names, '__wyl_batch_id') "
-      "AND list_contains(constraint_column_names, '__wyl_row_index');",
-      table_name);
+        ("SELECT COUNT(*) FROM duckdb_constraints() WHERE table_name = '%s' "
+          "AND constraint_type = 'UNIQUE' "
+          "AND len(constraint_column_names) = 2 "
+          "AND list_contains(constraint_column_names, '__wyl_batch_id') "
+          "AND list_contains(constraint_column_names, '__wyl_row_index');",
+          table_name);
   if (duckdb_query (store->conn, unique_sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -893,7 +893,7 @@ wyl_fact_store_ensure_projection (wyl_fact_store_t *store,
   rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
     rc = validate_store_scope_unlocked (store, schema->tenant_id,
-        schema->graph_id, TRUE);
+            schema->graph_id, TRUE);
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (store->conn, ddl->str);
   if (rc == WYRELOG_E_OK)
@@ -985,7 +985,7 @@ next_sequence_unlocked (wyl_fact_store_t *store, gint64 *out_seq)
 {
   duckdb_result result = { 0 };
   if (duckdb_query (store->conn,
-          "SELECT COALESCE(MAX(seq), 0) + 1 FROM fact_event_log;", &result)
+      "SELECT COALESCE(MAX(seq), 0) + 1 FROM fact_event_log;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -1018,10 +1018,10 @@ insert_batch_unlocked (wyl_fact_store_t *store,
       | (batch->source != NULL ? duckdb_bind_varchar (stmt, 7, batch->source)
       : duckdb_bind_null (stmt, 7))
       | (batch->request_id != NULL ? duckdb_bind_varchar (stmt, 8,
-          batch->request_id) : duckdb_bind_null (stmt, 8))
+      batch->request_id) : duckdb_bind_null (stmt, 8))
       | duckdb_bind_varchar (stmt, 9, batch->idempotency_key)
       | duckdb_bind_varchar (stmt, 10,
-      batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" : "assert")
+          batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" : "assert")
       | duckdb_bind_int64 (stmt, 11, (gint64) batch->n_rows)
       | duckdb_bind_varchar (stmt, 12, content_hash)
       | duckdb_bind_int64 (stmt, 13, created_at_us);
@@ -1073,7 +1073,7 @@ append_value (duckdb_appender appender, const wyl_fact_value_t *value)
 {
   if (value->type == WYL_FACT_VALUE_NULL)
     return duckdb_append_null (appender) == DuckDBSuccess ? WYRELOG_E_OK :
-        WYRELOG_E_IO;
+           WYRELOG_E_IO;
   switch (value->type) {
     case WYL_FACT_VALUE_SYMBOL:
     case WYL_FACT_VALUE_STRING:
@@ -1081,13 +1081,13 @@ append_value (duckdb_appender appender, const wyl_fact_value_t *value)
           ? WYRELOG_E_OK : WYRELOG_E_IO;
     case WYL_FACT_VALUE_INT64:
       return duckdb_append_int64 (appender, value->as.int64_value)
-          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+             == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
     case WYL_FACT_VALUE_BOOL:
       return duckdb_append_bool (appender, value->as.bool_value)
-          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+             == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
     case WYL_FACT_VALUE_COMPOUND_REF:
       return duckdb_append_int64 (appender, value->as.compound_ref)
-          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+             == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
     case WYL_FACT_VALUE_NULL:
     default:
       return WYRELOG_E_INVALID;
@@ -1122,7 +1122,7 @@ wyl_fact_store_append_batch (wyl_fact_store_t *store,
   rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
     rc = validate_store_scope_unlocked (store, batch->tenant_id,
-        batch->graph_id, FALSE);
+            batch->graph_id, FALSE);
   if (rc == WYRELOG_E_OK)
     rc = existing_batch_matches_unlocked (store, batch, content_hash, &exists);
   if (rc == WYRELOG_E_OK && exists) {
@@ -1217,7 +1217,7 @@ wyl_fact_store_retract_batch (wyl_fact_store_t *store,
     return WYRELOG_E_NOMEM;
   batch_copy->op = WYL_FACT_STORE_OP_RETRACT;
   wyrelog_error_t rc = wyl_fact_store_append_batch (store, schema, batch_copy,
-      out_inserted);
+          out_inserted);
   g_free (batch_copy);
   return rc;
 }
@@ -1403,16 +1403,16 @@ select_valid_rows_for_batch_unlocked (wyl_fact_store_t *store,
   }
 
   wyl_fact_value_t *values = g_new0 (wyl_fact_value_t,
-      (gsize) n_rows * schema->n_columns);
+          (gsize) n_rows * schema->n_columns);
   gchar **owned_strings = g_new0 (gchar *,
-      (gsize) n_rows * schema->n_columns);
+          (gsize) n_rows * schema->n_columns);
   wyl_fact_row_t *rows = g_new0 (wyl_fact_row_t, (gsize) n_rows);
   wyrelog_error_t rc = WYRELOG_E_OK;
   for (idx_t r = 0; rc == WYRELOG_E_OK && r < n_rows; r++) {
     for (gsize c = 0; rc == WYRELOG_E_OK && c < schema->n_columns; c++) {
       gsize idx = (gsize) r * schema->n_columns + c;
       rc = read_projection_value (&result, c, r, &schema->columns[c],
-          &values[idx], &owned_strings[idx]);
+              &values[idx], &owned_strings[idx]);
     }
     rows[r].values = &values[(gsize) r * schema->n_columns];
     rows[r].n_values = schema->n_columns;
@@ -1503,7 +1503,7 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
   if (rc != WYRELOG_E_OK)
     goto unlock_return;
   rc = validate_store_scope_unlocked (store, schema->tenant_id,
-      schema->graph_id, FALSE);
+          schema->graph_id, FALSE);
   if (rc != WYRELOG_E_OK)
     goto unlock_return;
 
@@ -1528,8 +1528,8 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
   }
 
   rc = select_valid_rows_for_batch_unlocked (store, schema, table,
-      trigger_batch_id, &select_values, &owned_strings, &select_rows,
-      &n_select_rows);
+          trigger_batch_id, &select_values, &owned_strings, &select_rows,
+          &n_select_rows);
   if (rc != WYRELOG_E_OK)
     goto unlock_return;
 
@@ -1543,12 +1543,12 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
   }
 
   rc = existing_batch_matches_unlocked (store, &batch_meta, content_hash,
-      &existing);
+          &existing);
   if (rc != WYRELOG_E_OK)
     goto unlock_return;
   if (existing) {
     /* Idempotent replay: same batch_id + idempotency_key match an existing
-     * retract row with identical content. Report the recorded row_count. */
+    * retract row with identical content. Report the recorded row_count. */
     if (out_row_count != NULL)
       *out_row_count = (gint64) n_select_rows;
     rc = WYRELOG_E_OK;
@@ -1713,8 +1713,8 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
   /* 2. DELETE fact_event_log rows (must precede fact_batches due to FK). */
   {
     g_autofree gchar *sql = g_strdup_printf
-        ("DELETE FROM fact_event_log WHERE batch_id = %s;",
-        batch_id_lit->str);
+          ("DELETE FROM fact_event_log WHERE batch_id = %s;",
+            batch_id_lit->str);
     rc = exec_sql (store->conn, sql);
     if (rc != WYRELOG_E_OK)
       goto forget_unlock;
@@ -1723,8 +1723,8 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
   /* 3. DELETE fact_batches row. */
   {
     g_autofree gchar *sql = g_strdup_printf
-        ("DELETE FROM fact_batches WHERE batch_id = %s;",
-        batch_id_lit->str);
+          ("DELETE FROM fact_batches WHERE batch_id = %s;",
+            batch_id_lit->str);
     rc = exec_sql (store->conn, sql);
     if (rc != WYRELOG_E_OK)
       goto forget_unlock;
@@ -1766,14 +1766,14 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
 
     gint64 now_us = g_get_real_time ();
     g_autofree gchar *audit_sql = g_strdup_printf
-        ("INSERT INTO fact_forget_audit "
-        "(id, batch_id, tenant_id, graph_id, operator, reason, "
-        " rows_purged, created_at_us) "
-        "VALUES ("
-        "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit),"
-        " %s, %s, %s, %s, %s," " %" G_GINT64_FORMAT ", %" G_GINT64_FORMAT ");",
-        batch_id_lit->str, tid_lit->str, gid_lit->str,
-        op_lit->str, reason_lit->str, rows_purged, now_us);
+          ("INSERT INTO fact_forget_audit "
+            "(id, batch_id, tenant_id, graph_id, operator, reason, "
+            " rows_purged, created_at_us) "
+            "VALUES ("
+            "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit),"
+            " %s, %s, %s, %s, %s," " %" G_GINT64_FORMAT ", %" G_GINT64_FORMAT ");",
+            batch_id_lit->str, tid_lit->str, gid_lit->str,
+            op_lit->str, reason_lit->str, rows_purged, now_us);
     rc = exec_sql (store->conn, audit_sql);
     if (rc != WYRELOG_E_OK)
       goto forget_unlock;

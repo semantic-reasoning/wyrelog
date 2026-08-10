@@ -10,6 +10,7 @@ tests/test-decide-resp.c
 tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
 tests/test-fact-provisioning.c
+tests/test-fact-store-provisioned.c
 tests/test-grant-req.c
 tests/test-handle-id.c
 tests/test-jwt.c
@@ -78,6 +79,8 @@ wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
 wyrelog/fact/secure-duckdb-bridge-windows-private.c
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
+wyrelog/fact/store-private.h
+wyrelog/fact/store.c
 wyrelog/handle.h
 wyrelog/perm.h
 wyrelog/policy/service-permission-maintenance-private.c
