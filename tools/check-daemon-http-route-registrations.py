@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-from _diag_path import render_source_identity
+from _diag_path import escape_ascii_identity, render_source_identity
 
 
 SOUP_API = "soup_server_add_handler"
@@ -653,7 +653,9 @@ def scan_source(path: Path) -> list[Registration]:
             if token.value not in {PREFIX_API, RAW_SINGLETON_API, EXACT_API}:
                 raise GuardError(f"alternate ownership API: {token.value}")
             if owner != SERVER_OWNER:
-                raise GuardError(f"registration outside {SERVER_OWNER}: {owner}")
+                raise GuardError(
+                    "registration outside "
+                    f"{SERVER_OWNER}: {escape_ascii_identity(owner)}")
             if len(arguments) != 5 or render(arguments[0]) != "server":
                 raise GuardError("unrecognized registration signature")
             registrations.append(Registration(
@@ -1681,6 +1683,32 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         for name, mutant in mutants.items():
             write_exact_fixture(source_path, mutant)
             expect_failure(root, name)
+
+        # #799: a registrar whose enclosing function name carries a non-ASCII
+        # homoglyph (the owner token is lexed with Unicode-aware isalpha) must
+        # be rejected with a single-line ASCII diagnostic whose rendered owner
+        # identity round-trips -- the homoglyph cannot leak raw into stderr.
+        homoglyph_owner = "аbc"  # Cyrillic 'a' (U+0430) then b, c.
+        homoglyph_source = baseline + (
+            f"static void {homoglyph_owner}(void) {{\n"
+            f"  {EXACT_API} /* registration */ ( server, \"/hidden\", "
+            "callback, data, NULL );\n"
+            "}\n")
+        if homoglyph_owner.isascii():
+            raise GuardError("homoglyph owner fixture is not homoglyphic")
+        write_exact_fixture(source_path, homoglyph_source)
+        try:
+            check_root(root)
+        except GuardError as error:
+            owner_message = str(error)
+        else:
+            raise GuardError("self-test accepted a homoglyph registrar owner")
+        if "\n" in owner_message or "\r" in owner_message:
+            raise GuardError("self-test emitted a multi-line owner diagnostic")
+        if not owner_message.isascii():
+            raise GuardError("self-test emitted a non-ASCII owner diagnostic")
+        if escape_ascii_identity(homoglyph_owner) not in owner_message:
+            raise GuardError("self-test lost the hostile owner identity")
 
         hidden_header = daemon / "hidden-route.h"
         write_exact_fixture(
