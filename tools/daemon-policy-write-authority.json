@@ -1,15 +1,15 @@
 {
-  "aggregate": "31adddae0afef53cc46d5ac2270e9b593b54e95f29c4687924449de1dc17ed8f",
+  "aggregate": "19a51192bc55f86a14d935d0d76ec487bc44499c9803c4217308a13dfa070e66",
   "directives": {
-    "count": 471,
-    "sha256": "5a0b9a51a73fa4b7038f5ddfa7bf19e39416f1b1ebce8aea349ae3bc5af90109"
+    "count": 480,
+    "sha256": "6c970e30c4db93fed008901f5c737eecae37af78f4cb30359b9abd5c44167462"
   },
   "functions": {
     "direct_permission_mutation_handler": "a92ce39084b189af1cc8a3fa09412338b774397d870852ad20fb3c08ec5a4656",
     "ensure_policy_permission_exists": "9a12fb60ed4158b55ac94f121d3eed9817d0c851069cf1d9aa36287952906d5f",
     "ensure_policy_role_exists": "a690de0724da0211c1f115f0921869df174a712e45ddc95e65ee0549b5ccbb6d",
     "facts_route_handler": "62dd7486e97fcd74e8da667212815473916a2274621b68155732816678891262",
-    "graph_create_handler": "6c0776b20d23532360fde6c718d11155fc1eb18ebbab6a8544c8c05221226f31",
+    "graph_create_handler": "96360b4081beaea808dc2f45adb63f6fdd08f8da2ef68651efffe95254632686",
     "graph_seal_handler": "20de670e2ba1113434d625487e28839b434da79e82ea20a2ec74d32cdebf956f",
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
     "mfa_enroll_confirm_handler": "6cc30363c707becfa081f40cb66c1cba37c6a29687fe1f217303d5c123fb785d",
