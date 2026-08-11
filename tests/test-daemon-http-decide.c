@@ -16729,6 +16729,30 @@ self_arm_count_state_events (wyl_policy_store_t *store, const gchar *subject,
   return probe.matches;
 }
 
+/* Counts authoritative self-arm audit rows for (subject, perm, scope),
+ * ignoring request_id/timestamp so a re-arm's distinct row is counted.  These
+ * rows are appended to the policy store by the bundle regardless of the
+ * WYL_HAS_AUDIT mirror, so the count is valid in the audit-disabled build. */
+static guint
+self_arm_count_audit_rows (wyl_policy_store_t *store, const gchar *subject,
+    const gchar *perm, const gchar *scope)
+{
+  AuditEventProbe probe = {
+    .subject_id = subject,
+    .action = "permission_state.grant",
+    .resource_id = perm,
+    .deny_reason = "grant",
+    .deny_origin = scope,
+    .request_id = NULL,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+      &probe) != WYRELOG_E_OK)
+    return G_MAXUINT;
+  return probe.matches;
+}
+
 /* Seeds wr.system_admin eligibility + the __wr_default anchor + reload, exactly
  * like the e2e.  The shared env pre-grants BOTH manage perms at
  * env->session_token (grant present, dormant), so a first self-arm is a
@@ -17103,6 +17127,93 @@ check_service_management_self_arm_bundle_contradictory_poison (void)
     }
     service_denial_env_clear (&env);
   }
+  return 0;
+}
+
+/* #790: a genuine revoke-then-re-arm at the same session scope records a NEW
+ * distinct authoritative audit row.  Before the fix the audit id was derived
+ * only from (subject, perm, scope), so the second cycle re-appended the same id
+ * with a fresh timestamp -> append_audit_event_full returned E_POLICY -> a
+ * permanent fail-closed 500.  Folding the per-cycle permission-state-event id
+ * into the audit id makes each cycle's row distinct, while a plain same-attempt
+ * retry (COMPLETE short-circuit) still appends no duplicate audit/state
+ * evidence.  A status 200 with the audit count advancing to 2 is itself proof
+ * the id changed: a same-id re-append would have failed closed with 500. */
+static gint
+check_service_management_self_arm_bundle_rearm_distinct_audit (void)
+{
+  const gchar *perm_a = "wr.service_principal.manage";
+  const gchar *perm_b = "wr.service_credential.manage";
+  ServiceDenialEnv env = { 0 };
+  gint rc = self_arm_bundle_env_ready (&env);
+  if (rc != 0) {
+    service_denial_env_clear (&env);
+    return rc;
+  }
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  const gchar *subject = "human-principal-admin";
+  const gchar *scope = env.session_token;
+
+  /* First arm (REPAIR: grant present, dormant): one audit row + one state
+   * event per perm. */
+  guint status = 0;
+  if (self_arm_post (&env, &status) != 0 || status != 200
+      || !self_arm_perm_armed (&env, perm_a)
+      || !self_arm_perm_armed (&env, perm_b)) {
+    service_denial_env_clear (&env);
+    return 2790;
+  }
+  if (self_arm_count_audit_rows (store, subject, perm_a, scope) != 1
+      || self_arm_count_audit_rows (store, subject, perm_b, scope) != 1
+      || self_arm_count_state_events (store, subject, perm_a, scope) != 1) {
+    service_denial_env_clear (&env);
+    return 2791;
+  }
+
+  /* Plain same-attempt retry (no intervening change): the COMPLETE short-circuit
+   * appends nothing, so the counts are unchanged (response-loss dedup). */
+  if (self_arm_post (&env, &status) != 0 || status != 200) {
+    service_denial_env_clear (&env);
+    return 2792;
+  }
+  if (self_arm_count_audit_rows (store, subject, perm_a, scope) != 1
+      || self_arm_count_state_events (store, subject, perm_a, scope) != 1) {
+    service_denial_env_clear (&env);
+    return 2793;
+  }
+
+  /* Return both perms to dormant (grant retained) so the re-arm is a genuine new
+   * REPAIR cycle at the SAME scope -- the pre-fix audit-id collision case. */
+  if (wyl_policy_store_set_permission_state (store, subject, perm_a, scope,
+      "dormant") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, subject, perm_b, scope,
+      "dormant") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
+    service_denial_env_clear (&env);
+    return 2794;
+  }
+
+  /* Re-arm succeeds (was 500) and records a NEW distinct audit row per perm. */
+  if (self_arm_post (&env, &status) != 0 || status != 200
+      || !self_arm_perm_armed (&env, perm_a)
+      || !self_arm_perm_armed (&env, perm_b)) {
+    service_denial_env_clear (&env);
+    return 2795;
+  }
+  if (self_arm_count_audit_rows (store, subject, perm_a, scope) != 2
+      || self_arm_count_audit_rows (store, subject, perm_b, scope) != 2
+      || self_arm_count_state_events (store, subject, perm_a, scope) != 2) {
+    service_denial_env_clear (&env);
+    return 2796;
+  }
+
+  /* Both verbs still authorize for the exact session and the pair is healthy. */
+  if (!self_arm_both_authorize (&env, "rearmworker")
+      || wyl_handle_engine_pair_is_poisoned (env.handle)) {
+    service_denial_env_clear (&env);
+    return 2797;
+  }
+  service_denial_env_clear (&env);
   return 0;
 }
 
@@ -20048,6 +20159,12 @@ main (void)
       check_service_management_self_arm_liveness_race_inside_write ();
   if (self_arm_liveness_rc != 0) {
     result = self_arm_liveness_rc;
+    goto cleanup;
+  }
+  gint self_arm_rearm_audit_rc =
+      check_service_management_self_arm_bundle_rearm_distinct_audit ();
+  if (self_arm_rearm_audit_rc != 0) {
+    result = self_arm_rearm_audit_rc;
     goto cleanup;
   }
   gint caller_matrix_rc = check_service_management_caller_and_refresh_matrix ();
