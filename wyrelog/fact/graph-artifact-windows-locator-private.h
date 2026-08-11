@@ -31,7 +31,7 @@ wyrelog_error_t
 wyl_fact_artifact_win_locator_revalidate (WylFactArtifactWinLocator * locator);
 /* Identity evidence only; this never exposes a directory HANDLE or spelling. */
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_locator_identity
-    (const WylFactArtifactWinLocator *);
+  (const WylFactArtifactWinLocator *);
 void wyl_fact_artifact_win_locator_free (WylFactArtifactWinLocator * locator);
 
 /* Open one exact, single-component child relative to the held graph HANDLE.
@@ -52,7 +52,7 @@ wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator * locator,
  * not a caller-borrowed HANDLE operation, so lifecycle publication can flush
  * a closed working capability without reopening by pathname. */
 wyrelog_error_t wyl_fact_artifact_win_entry_flush
-    (WylFactArtifactWinLocator * locator, WylFactArtifactWinEntry * entry);
+  (WylFactArtifactWinLocator * locator, WylFactArtifactWinEntry * entry);
 /* Both operations initialize |out_effect|.  APPLIED means the kernel accepted
  * the linearization operation; a subsequent directory flush may still fail
  * and must be reported separately by the namespace. */
@@ -95,7 +95,7 @@ wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator *
  * enable_windows_artifact_test_hooks: a shipped library declares neither this
  * hook nor its disarm below, and its flush path holds no armable state. */
 void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
-    (DWORD error);
+  (DWORD error);
 /* Disarms the hook above and reports what was armed, ERROR_SUCCESS when
  * nothing was.  The substitution is consumed only when a directory flush is
  * actually reached, so a caller that arms it and then never flushes leaves it
@@ -105,7 +105,10 @@ void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
  * an arming caller into a partially updated state.  It can only establish a
  * clean-run property: a caller that aborts never reaches its own disarm. */
 DWORD wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test
-    (void);
+  (void);
+void wyl_fact_artifact_win_locator_fail_next_rename_status_for_test
+  (NTSTATUS status);
+NTSTATUS wyl_fact_artifact_win_locator_take_next_rename_status_for_test (void);
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
@@ -117,25 +120,25 @@ void wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry * entry);
  * host spelling or CRT descriptor and can create/open only single-component
  * regular children below the exact protected directory identity. */
 wyrelog_error_t wyl_fact_artifact_win_locator_create_directory
-    (WylFactArtifactWinLocator *, const gchar * name,
+  (WylFactArtifactWinLocator *, const gchar * name,
     WylFactArtifactWinDirectory **);
 wyrelog_error_t wyl_fact_artifact_win_directory_revalidate
-    (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *);
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *);
 wyrelog_error_t wyl_fact_artifact_win_directory_open_file
-    (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     const gchar * name, ACCESS_MASK, gboolean create_new,
     WylFactArtifactWinEntry **);
 wyrelog_error_t wyl_fact_artifact_win_directory_entry_revalidate
-    (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     WylFactArtifactWinEntry *);
 wyrelog_error_t wyl_fact_artifact_win_directory_entry_issue_working_handle
-    (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     WylFactArtifactWinEntry *, HANDLE *);
 wyrelog_error_t wyl_fact_artifact_win_directory_entry_delete_exact
-    (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     WylFactArtifactWinEntry *, WylFactArtifactWinMutationEffect *);
 wyrelog_error_t wyl_fact_artifact_win_directory_delete_empty
-    (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     WylFactArtifactWinMutationEffect *);
 void wyl_fact_artifact_win_directory_free (WylFactArtifactWinDirectory *);
 

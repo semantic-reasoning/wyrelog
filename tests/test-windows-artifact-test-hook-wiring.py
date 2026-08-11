@@ -24,10 +24,13 @@ OPTION = "enable_windows_artifact_test_hooks"
 HOOK_SYMBOLS = (
     "wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test",
     "wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test",
+    "wyl_fact_artifact_win_locator_fail_next_rename_status_for_test",
+    "wyl_fact_artifact_win_locator_take_next_rename_status_for_test",
     "wyl_fact_artifact_win_namespace_set_test_fault",
     "wyl_fact_artifact_win_namespace_take_test_fault",
     "win_namespace_fault_take",
     "next_directory_flush_error",
+    "next_rename_status",
     "win_namespace_test_fault",
     "WylFactArtifactWinNamespaceTestFault",
     "WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_",

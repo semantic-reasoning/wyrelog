@@ -68,6 +68,7 @@ struct WylFactArtifactWinLocator
    * re-query the effective token at a later I/O boundary: impersonation or a
    * token change must not silently widen the authority of existing entries. */
   PSID owner;
+  gboolean unsupported_rename_class_logged;
 };
 struct WylFactArtifactWinEntry
 {
@@ -84,6 +85,7 @@ struct WylFactArtifactWinDirectory
 
 #ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
 static volatile LONG next_directory_flush_error;
+static volatile LONG next_rename_status;
 
 void
 wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test (DWORD error)
@@ -95,7 +97,19 @@ DWORD
 wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test (void)
 {
   return (DWORD) InterlockedExchange (&next_directory_flush_error,
-      ERROR_SUCCESS);
+             ERROR_SUCCESS);
+}
+
+void
+wyl_fact_artifact_win_locator_fail_next_rename_status_for_test (NTSTATUS status)
+{
+  InterlockedExchange (&next_rename_status, (LONG) status);
+}
+
+NTSTATUS
+wyl_fact_artifact_win_locator_take_next_rename_status_for_test (void)
+{
+  return (NTSTATUS) InterlockedExchange (&next_rename_status, 0);
 }
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
@@ -104,7 +118,7 @@ nt_create_file (void)
 {
   HMODULE module = GetModuleHandleW (L"ntdll.dll");
   return module == NULL ? NULL : (WylNtCreateFile) GetProcAddress (module,
-      "NtCreateFile");
+             "NtCreateFile");
 }
 
 static WylNtSetInformationFile
@@ -112,7 +126,7 @@ nt_set_information_file (void)
 {
   HMODULE module = GetModuleHandleW (L"ntdll.dll");
   return module == NULL ? NULL : (WylNtSetInformationFile) GetProcAddress
-      (module, "NtSetInformationFile");
+           (module, "NtSetInformationFile");
 }
 
 static gboolean
@@ -126,7 +140,7 @@ identity_equal (const WylFactGraphWinIdentity *a,
     const WylFactGraphWinIdentity *b)
 {
   return a->volume_serial == b->volume_serial
-      && memcmp (a->file_id, b->file_id, sizeof a->file_id) == 0;
+         && memcmp (a->file_id, b->file_id, sizeof a->file_id) == 0;
 }
 
 static wyrelog_error_t
@@ -164,9 +178,23 @@ nt_unsupported_class (NTSTATUS status)
 {
   switch ((ULONG) status) {
     case 0xC00000BBUL:         /* STATUS_NOT_SUPPORTED */
-    case 0xC00000C0UL:         /* STATUS_INVALID_PARAMETER */
+    case 0xC00000C0UL:         /* STATUS_NOT_IMPLEMENTED */
     case 0xC0000003UL:         /* STATUS_INVALID_INFO_CLASS */
     case 0xC000000DUL:         /* STATUS_INVALID_PARAMETER */
+    case 0xC0000010UL:         /* STATUS_INVALID_DEVICE_REQUEST */
+      return TRUE;
+    default:
+      return FALSE;
+  }
+}
+
+static gboolean
+nt_unsupported_info_class (NTSTATUS status)
+{
+  switch ((ULONG) status) {
+    case 0xC00000BBUL:         /* STATUS_NOT_SUPPORTED */
+    case 0xC00000C0UL:         /* STATUS_NOT_IMPLEMENTED */
+    case 0xC0000003UL:         /* STATUS_INVALID_INFO_CLASS */
     case 0xC0000010UL:         /* STATUS_INVALID_DEVICE_REQUEST */
       return TRUE;
     default:
@@ -193,8 +221,8 @@ file_identity (HANDLE handle, gboolean directory,
   if (!valid_handle (handle) || out_identity == NULL)
     return WYRELOG_E_INVALID;
   if (!GetFileInformationByHandleEx (handle, FileBasicInfo, &basic,
-          sizeof basic) || !GetFileInformationByHandleEx (handle,
-          FileStandardInfo, &standard, sizeof standard)
+      sizeof basic) || !GetFileInformationByHandleEx (handle,
+      FileStandardInfo, &standard, sizeof standard)
       || !GetFileInformationByHandleEx (handle, FileIdInfo, &id, sizeof id))
     return WYRELOG_E_IO;
   if (((basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory
@@ -225,9 +253,9 @@ terminal_handle_matches_identity (HANDLE handle, gboolean directory,
       || !GetHandleInformation (handle, &flags)
       || (flags & HANDLE_FLAG_INHERIT) != 0
       || !GetFileInformationByHandleEx (handle, FileBasicInfo, &basic,
-          sizeof basic)
+      sizeof basic)
       || !GetFileInformationByHandleEx (handle, FileStandardInfo, &standard,
-          sizeof standard)
+      sizeof standard)
       || !GetFileInformationByHandleEx (handle, FileIdInfo, &id, sizeof id)
       || ((basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory
       || (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
@@ -243,7 +271,7 @@ close_directory_if_exact (WylFactArtifactWinDirectory *directory)
 {
   if (directory != NULL && valid_handle (directory->handle)
       && terminal_handle_matches_identity (directory->handle, TRUE,
-          &directory->identity))
+      &directory->identity))
     CloseHandle (directory->handle);
   return WYRELOG_E_OK;
 }
@@ -252,8 +280,8 @@ static gboolean
 safe_component (const gchar *name)
 {
   return name != NULL && name[0] != '\0' && g_utf8_validate (name, -1, NULL)
-      && strcmp (name, ".") != 0 && strcmp (name, "..") != 0
-      && strpbrk (name, "/\\:") == NULL;
+         && strcmp (name, ".") != 0 && strcmp (name, "..") != 0
+         && strpbrk (name, "/\\:") == NULL;
 }
 
 static wyrelog_error_t
@@ -303,9 +331,9 @@ validate_named_entry (HANDLE directory, const gchar *name,
       gsize units = current->file_name_length / sizeof (WCHAR);
       if (units == (gsize) wanted_units
           && CompareStringOrdinal (current->file_name, (int) units, wanted,
-              (int) wanted_units, FALSE) == CSTR_EQUAL) {
+          (int) wanted_units, FALSE) == CSTR_EQUAL) {
         if (memcmp (&current->file_id, identity->file_id,
-                sizeof current->file_id) != 0)
+            sizeof current->file_id) != 0)
           return WYRELOG_E_POLICY;
         matches++;
       }
@@ -336,7 +364,7 @@ wyl_fact_artifact_win_locator_new (const WylFactGraphDirectory *directory,
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!DuplicateHandle (GetCurrentProcess (), (HANDLE) directory->graph_handle,
-          GetCurrentProcess (), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+      GetCurrentProcess (), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
     rc = WYRELOG_E_IO;
     goto out_token;
   }
@@ -347,7 +375,7 @@ wyl_fact_artifact_win_locator_new (const WylFactGraphDirectory *directory,
   }
   rc = file_identity (duplicate, TRUE, &observed);
   if (rc != WYRELOG_E_OK || !identity_equal (&observed,
-          &directory->graph_identity)) {
+      &directory->graph_identity)) {
     CloseHandle (duplicate);
     rc = rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
     goto out_token;
@@ -434,7 +462,7 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
     return rc;
   if (create_new) {
     rc = wyl_fact_graph_win_owner_only_security_init_for_user (&security,
-        locator->owner, 0);
+            locator->owner, 0);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -447,12 +475,12 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
   attributes.SecurityDescriptor = create_new ? &security.descriptor : NULL;
   NTSTATUS status = create (&handle,
-      access | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, &attributes,
-      &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      create_new ? FILE_CREATE : FILE_OPEN,
-      FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
-      | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+          access | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, &attributes,
+          &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          create_new ? FILE_CREATE : FILE_OPEN,
+          FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
+          | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
   wyl_fact_graph_win_owner_only_security_clear (&security);
   if (status < 0 || !valid_handle (handle))
     return nt_error (status);
@@ -465,7 +493,7 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
     rc = validate_named_entry (locator->directory, name, &identity);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_win_validate_protected_owner_acl_for_user (handle,
-        locator->owner, 0);
+            locator->owner, 0);
   if (rc != WYRELOG_E_OK) {
     CloseHandle (handle);
     return rc;
@@ -509,7 +537,7 @@ wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator *locator,
   rc = validate_named_entry (locator->directory, entry->name, &entry->identity);
   return rc == WYRELOG_E_OK
       ? wyl_fact_graph_win_validate_protected_owner_acl_for_user
-      (entry->handle, locator->owner, 0) : rc;
+           (entry->handle, locator->owner, 0) : rc;
 }
 
 wyrelog_error_t
@@ -538,7 +566,7 @@ wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinLocator
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!DuplicateHandle (GetCurrentProcess (), entry->handle,
-          GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+      GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return WYRELOG_E_IO;
   if (!SetHandleInformation (*out_handle, HANDLE_FLAG_INHERIT, 0)) {
     CloseHandle (*out_handle);
@@ -564,7 +592,6 @@ entry_rename (WylFactArtifactWinLocator *locator,
   g_autofree gunichar2 *wide = NULL;
   glong units = 0;
   IO_STATUS_BLOCK iosb = { 0 };
-  NTSTATUS status;
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
   if (out_effect == NULL)
@@ -577,6 +604,14 @@ entry_rename (WylFactArtifactWinLocator *locator,
   if ((rc = wide_component (destination, &wide, &units)) != WYRELOG_E_OK)
     return rc;
   gsize bytes = (gsize) units * sizeof (WCHAR);
+  NTSTATUS status = 0;
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  NTSTATUS injected_status =
+      wyl_fact_artifact_win_locator_take_next_rename_status_for_test ();
+  if (injected_status != 0) {
+    status = injected_status;
+  } else
+#endif
   if (replace_existing) {
     /* The replaced link's file is still open through the caller's own
      * destination authority, and the kernel refuses a classic replace on the
@@ -602,7 +637,7 @@ entry_rename (WylFactArtifactWinLocator *locator,
     info->file_name_length = (ULONG) bytes;
     memcpy (info->file_name, wide, bytes);
     status = set (entry->handle, &iosb, info, (ULONG) size,
-        WYL_NT_FILE_RENAME_INFO_EX_CLASS);
+            WYL_NT_FILE_RENAME_INFO_EX_CLASS);
     g_free (info);
   } else {
     /* No target link exists here, so the open-count rule never applies and
@@ -616,17 +651,20 @@ entry_rename (WylFactArtifactWinLocator *locator,
     info->file_name_length = (ULONG) bytes;
     memcpy (info->file_name, wide, bytes);
     status = set (entry->handle, &iosb, info, (ULONG) size,
-        WYL_NT_FILE_RENAME_INFO_CLASS);
+            WYL_NT_FILE_RENAME_INFO_CLASS);
     g_free (info);
   }
   if (status < 0) {
     /* A missing class and a denied authority both map to POLICY.  Label the
      * capability gap here so the two stay distinguishable without widening
      * the public error ABI. */
-    if (replace_existing && nt_unsupported_class (status))
-      WYL_LOG_WARN (WYL_LOG_SECTION_IO, "native artifact replacement is "
+    if (replace_existing && nt_unsupported_info_class (status)
+        && locator != NULL && !locator->unsupported_rename_class_logged) {
+      locator->unsupported_rename_class_logged = TRUE;
+      WYL_LOG_INFO (WYL_LOG_SECTION_IO, "native artifact replacement is "
           "unsupported by this kernel or filesystem (status 0x%08lX)",
           (unsigned long) status);
+    }
     return nt_mutation_error (status);
   }
   g_free (entry->name);
@@ -675,7 +713,7 @@ wyl_fact_artifact_win_entry_delete_exact (WylFactArtifactWinLocator *locator,
   WylFileDispositionInfo info = { TRUE };
   IO_STATUS_BLOCK iosb = { 0 };
   NTSTATUS status = set (entry->handle, &iosb, &info, sizeof info,
-      WYL_NT_FILE_DISPOSITION_INFO_CLASS);
+          WYL_NT_FILE_DISPOSITION_INFO_CLASS);
   if (status < 0)
     return nt_mutation_error (status);
   *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED;
@@ -736,7 +774,7 @@ wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry *entry)
    * mutate a foreign object. */
   if (valid_handle (entry->handle)
       && terminal_handle_matches_identity (entry->handle, FALSE,
-          &entry->identity))
+      &entry->identity))
     CloseHandle (entry->handle);
   g_free (entry->name);
   g_free (entry);
@@ -770,7 +808,7 @@ wyl_fact_artifact_win_locator_create_directory (WylFactArtifactWinLocator
       || (rc = wide_component (name, &wide, &units)) != WYRELOG_E_OK)
     return rc;
   rc = wyl_fact_graph_win_owner_only_security_init_for_user (&security,
-      locator->owner, 0);
+          locator->owner, 0);
   if (rc != WYRELOG_E_OK)
     return rc;
   object_name.Length = (USHORT) (units * sizeof (WCHAR));
@@ -782,13 +820,13 @@ wyl_fact_artifact_win_locator_create_directory (WylFactArtifactWinLocator
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
   attributes.SecurityDescriptor = &security.descriptor;
   NTSTATUS status = create (&handle,
-      FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_READ_ATTRIBUTES | READ_CONTROL
-      | DELETE | SYNCHRONIZE, &attributes, &iosb, NULL,
-      FILE_ATTRIBUTE_DIRECTORY,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_CREATE,
-      FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT |
-      FILE_SYNCHRONOUS_IO_NONALERT,
-      NULL, 0);
+          FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_READ_ATTRIBUTES | READ_CONTROL
+          | DELETE | SYNCHRONIZE, &attributes, &iosb, NULL,
+          FILE_ATTRIBUTE_DIRECTORY,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_CREATE,
+          FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT |
+          FILE_SYNCHRONOUS_IO_NONALERT,
+          NULL, 0);
   wyl_fact_graph_win_owner_only_security_clear (&security);
   if (status < 0 || !valid_handle (handle))
     return nt_error (status);
@@ -801,7 +839,7 @@ wyl_fact_artifact_win_locator_create_directory (WylFactArtifactWinLocator
     rc = validate_named_entry (locator->directory, name, &identity);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_win_validate_protected_owner_acl_for_user (handle,
-        locator->owner, 0);
+            locator->owner, 0);
   if (rc != WYRELOG_E_OK) {
     CloseHandle (handle);
     return rc;
@@ -840,10 +878,10 @@ wyl_fact_artifact_win_directory_revalidate (WylFactArtifactWinLocator *locator,
   if (rc != WYRELOG_E_OK || !identity_equal (&observed, &directory->identity))
     return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
   rc = validate_named_entry (locator->directory, directory->name,
-      &directory->identity);
+          &directory->identity);
   return rc == WYRELOG_E_OK
       ? wyl_fact_graph_win_validate_protected_owner_acl_for_user
-      (directory->handle, locator->owner, 0) : rc;
+           (directory->handle, locator->owner, 0) : rc;
 }
 
 wyrelog_error_t
@@ -872,7 +910,7 @@ wyl_fact_artifact_win_directory_open_file (WylFactArtifactWinLocator *locator,
       || (rc = wide_component (name, &wide, &units)) != WYRELOG_E_OK)
     return rc;
   if (create_new && (rc = wyl_fact_graph_win_owner_only_security_init_for_user
-          (&security, locator->owner, 0)) != WYRELOG_E_OK)
+        (&security, locator->owner, 0)) != WYRELOG_E_OK)
     return rc;
   object_name.Length = (USHORT) (units * sizeof (WCHAR));
   object_name.MaximumLength = object_name.Length;
@@ -883,12 +921,12 @@ wyl_fact_artifact_win_directory_open_file (WylFactArtifactWinLocator *locator,
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
   attributes.SecurityDescriptor = create_new ? &security.descriptor : NULL;
   NTSTATUS status = create (&handle,
-      access | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, &attributes,
-      &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      create_new ? FILE_CREATE : FILE_OPEN,
-      FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
-      | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+          access | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, &attributes,
+          &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          create_new ? FILE_CREATE : FILE_OPEN,
+          FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
+          | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
   wyl_fact_graph_win_owner_only_security_clear (&security);
   if (status < 0 || !valid_handle (handle))
     return nt_error (status);
@@ -901,7 +939,7 @@ wyl_fact_artifact_win_directory_open_file (WylFactArtifactWinLocator *locator,
     rc = validate_named_entry (directory->handle, name, &identity);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_win_validate_protected_owner_acl_for_user (handle,
-        locator->owner, 0);
+            locator->owner, 0);
   if (rc != WYRELOG_E_OK) {
     CloseHandle (handle);
     return rc;
@@ -926,7 +964,7 @@ wyl_fact_artifact_win_directory_entry_revalidate (WylFactArtifactWinLocator
   WylFactGraphWinIdentity observed = { 0 };
   DWORD flags = 0;
   wyrelog_error_t rc = wyl_fact_artifact_win_directory_revalidate (locator,
-      directory);
+          directory);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (entry == NULL || !valid_handle (entry->handle)
@@ -939,12 +977,12 @@ wyl_fact_artifact_win_directory_entry_revalidate (WylFactArtifactWinLocator
   rc = validate_named_entry (directory->handle, entry->name, &entry->identity);
   return rc == WYRELOG_E_OK
       ? wyl_fact_graph_win_validate_protected_owner_acl_for_user
-      (entry->handle, locator->owner, 0) : rc;
+           (entry->handle, locator->owner, 0) : rc;
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_win_directory_entry_issue_working_handle
-    (WylFactArtifactWinLocator * locator,
+wyl_fact_artifact_win_directory_entry_issue_working_handle
+  (WylFactArtifactWinLocator * locator,
     WylFactArtifactWinDirectory * directory, WylFactArtifactWinEntry * entry,
     HANDLE * out_handle) {
   if (out_handle != NULL)
@@ -952,11 +990,11 @@ wyrelog_error_t
   if (out_handle == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = wyl_fact_artifact_win_directory_entry_revalidate
-      (locator, directory, entry);
+        (locator, directory, entry);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!DuplicateHandle (GetCurrentProcess (), entry->handle,
-          GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+      GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return WYRELOG_E_IO;
   if (!SetHandleInformation (*out_handle, HANDLE_FLAG_INHERIT, 0)) {
     CloseHandle (*out_handle);
@@ -982,11 +1020,11 @@ wyl_fact_artifact_win_directory_entry_delete_exact (WylFactArtifactWinLocator
   if (set == NULL)
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc = wyl_fact_artifact_win_directory_entry_revalidate
-      (locator, directory, entry);
+        (locator, directory, entry);
   if (rc != WYRELOG_E_OK)
     return rc;
   NTSTATUS status = set (entry->handle, &iosb, &info, sizeof info,
-      WYL_NT_FILE_DISPOSITION_INFO_CLASS);
+          WYL_NT_FILE_DISPOSITION_INFO_CLASS);
   if (status < 0)
     return nt_mutation_error (status);
   *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED;
@@ -1008,11 +1046,11 @@ wyl_fact_artifact_win_directory_delete_empty (WylFactArtifactWinLocator
   if (set == NULL)
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc = wyl_fact_artifact_win_directory_revalidate (locator,
-      directory);
+          directory);
   if (rc != WYRELOG_E_OK)
     return rc;
   NTSTATUS status = set (directory->handle, &iosb, &info, sizeof info,
-      WYL_NT_FILE_DISPOSITION_INFO_CLASS);
+          WYL_NT_FILE_DISPOSITION_INFO_CLASS);
   if (status < 0)
     return nt_mutation_error (status);
   *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED;

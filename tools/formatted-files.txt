@@ -7,6 +7,7 @@ tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
+tests/test-fact-artifact-namespace-windows.c
 tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
 tests/test-fact-provisioning.c
@@ -65,6 +66,8 @@ wyrelog/daemon/signals.c
 wyrelog/daemon/signals.h
 wyrelog/error.h
 wyrelog/fact/compound-private.h
+wyrelog/fact/graph-artifact-windows-locator-private.c
+wyrelog/fact/graph-artifact-windows-locator-private.h
 wyrelog/fact/graph-provisioned-pair-internal.h
 wyrelog/fact/provisioning-construct-private.c
 wyrelog/fact/provisioning-construct-private.h
