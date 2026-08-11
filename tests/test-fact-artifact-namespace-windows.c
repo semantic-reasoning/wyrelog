@@ -570,20 +570,37 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
   namespace_ = open_namespace_at_path (path, FALSE, &graph);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
       &lease), ==, WYRELOG_E_OK);
-  /* GitHub Windows runners permit unprivileged symlink creation.  A failure
-   * is still a hard test failure: silently skipping would leave the reparse
-   * substitution acceptance requirement unproven. */
+  /* Minting the reparse spelling takes either Developer Mode, which the
+   * unprivileged flag asks for, or SeCreateSymbolicLinkPrivilege, which the
+   * unflagged call uses.  Ask for each in turn before concluding that this
+   * machine offers neither: a refusal of the flagged form alone says only
+   * that Developer Mode is off, not that the privilege is absent.
+   *
+   * An account holding neither -- the service account the Windows runner
+   * executes as -- cannot mint the adversary at all, so the case reports a
+   * skip rather than failing on an environment it cannot create.  What that
+   * gives up is narrow: the hard-link phase above still drives the same
+   * identity predicate, and only FILE_OPEN_REPARSE_POINT in the sidecar open,
+   * which is what makes the attribute observable instead of followed, goes
+   * unproven where the skip fires.  Issue #808 tracks restoring it. */
   await_deleted_artifact_name ("reparse", wal_path, wal_wide);
   if (!CreateSymbolicLinkW (wal_wide, main_wide,
-      SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+      SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)
+      && !CreateSymbolicLinkW (wal_wide, main_wide, 0)) {
     DWORD create_error = GetLastError ();
-    if (create_error == ERROR_PRIVILEGE_NOT_HELD) {
-      g_test_skip ("unprivileged symlink creation (CreateSymbolicLinkW) not permitted in this environment");
-    } else {
-      DWORD probe_attrs = GetFileAttributesW (wal_wide);
-      DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
-          ? GetLastError () : ERROR_SUCCESS;
+    DWORD probe_attrs = GetFileAttributesW (wal_wide);
+    DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
+        ? GetLastError () : ERROR_SUCCESS;
 
+    if (create_error == ERROR_PRIVILEGE_NOT_HELD) {
+      g_autofree gchar *message = g_strdup_printf
+            ("reparse substitution unproven: operation=CreateSymbolicLinkW "
+              "stage=reparse create-error=%lu probe-attrs=0x%08lx "
+              "probe-error=%lu", (unsigned long) create_error,
+              (unsigned long) probe_attrs, (unsigned long) probe_error);
+
+      g_test_skip (message);
+    } else {
       g_error ("artifact substitution failed: operation=CreateSymbolicLinkW "
           "stage=reparse path=%s create-error=%lu "
           "probe-attrs=0x%08lx probe-error=%lu",
@@ -594,11 +611,15 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
     g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
         WYL_FACT_ARTIFACT_WAL, FALSE, &sidecar), ==, WYRELOG_E_POLICY);
     g_assert_null (sidecar);
+    /* Retiring the reparse name belongs to the branch that minted it, not to
+     * the cleanup below.  g_test_skip does not return, so every step after
+     * this block runs on the skip path too, where this name never existed.
+     * The rejected open closed its handle, so the name is deletable here. */
+    g_assert_true (DeleteFileW (wal_wide));
   }
   wyl_fact_artifact_win_lease_free (lease);
   wyl_fact_artifact_win_namespace_free (namespace_);
   g_assert_true (CloseHandle (graph));
-  g_assert_true (DeleteFileW (wal_wide));
   g_assert_true (DeleteFileW (main_wide));
   {
     g_autofree gchar *lock_path =
