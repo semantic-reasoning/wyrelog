@@ -15117,8 +15117,8 @@ typedef enum
 typedef struct
 {
   const gchar *perm;
-  const WylAuditEvent *audit_event;
-  const gchar *audit_id;
+  WylAuditEvent *audit_event;
+  gchar audit_id[WYL_ID_STRING_BUF];
   gint64 event_id;
 } SelfArmPerm;
 
@@ -15126,6 +15126,7 @@ typedef struct
 {
   const gchar *actor;
   const gchar *scope;
+  const gchar *request_id;
   SelfArmPerm perms[G_N_ELEMENTS (self_arm_managed_perms)];
   SelfArmOutcome outcome;
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -15135,17 +15136,22 @@ typedef struct
 #endif
 } SelfArmBundle;
 
-/* Derives a stable UUIDv7-shaped audit id from (actor, perm, scope, action).
- * A response-loss retry re-derives the SAME id, so the store's id-keyed audit
- * append dedups the authoritative evidence instead of minting a duplicate.
+/* Derives a UUIDv7-shaped audit id from (actor, perm, scope, event_id, action).
+ * The permission-state-event id makes the id unique per real arm cycle: a
+ * genuine revoke-then-re-arm at the same scope writes a new state event whose
+ * strictly-increasing AUTOINCREMENT id yields a new, distinct audit id, so the
+ * new authoritative row no longer collides with the prior cycle's row.  A
+ * same-attempt retry never reaches this path (it reclassifies COMPLETE and
+ * appends nothing), so response-loss dedup is preserved by classification.
  * new_from_fields requires an id that wyl_id_parse accepts, so the version and
- * variant nibbles are forced onto the SHA-256 digest of the stable key. */
+ * variant nibbles are forced onto the SHA-256 digest of the key. */
 static gboolean
 self_arm_derive_audit_id (const gchar *actor, const gchar *perm,
-    const gchar *scope, gchar out[WYL_ID_STRING_BUF])
+    const gchar *scope, gint64 event_id, gchar out[WYL_ID_STRING_BUF])
 {
-  g_autofree gchar *key = g_strdup_printf ("%s|%s|%s|permission_state.grant",
-          actor, perm, scope);
+  g_autofree gchar *key = g_strdup_printf (
+    "%s|%s|%s|%" G_GINT64_FORMAT "|permission_state.grant",
+    actor, perm, scope, event_id);
   g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
           key, -1);
   if (digest == NULL || strlen (digest) < 32)
@@ -15163,7 +15169,7 @@ self_arm_derive_audit_id (const gchar *actor, const gchar *perm,
 static wyrelog_error_t
 self_arm_append_audit (wyl_policy_store_t *store, const SelfArmPerm *perm)
 {
-  if (perm->audit_event == NULL || perm->audit_id == NULL)
+  if (perm->audit_event == NULL)
     return WYRELOG_E_OK;
   gboolean inserted = FALSE;
   return wyl_policy_store_append_audit_event_full (store, perm->audit_id,
@@ -15247,6 +15253,18 @@ self_arm_mutate_one (wyl_policy_store_t *store, SelfArmBundle *bundle,
           perm->perm, bundle->scope, "grant", "dormant", "armed", &perm->event_id);
   if (rc != WYRELOG_E_OK)
     return rc;
+  /* Build the authoritative audit id + event HERE, folding in the just-written
+   * state-event id, so a genuine re-arm gets a distinct row.  This runs only on
+   * the REPAIR/FULL append path (COMPLETE returned above), inside the same
+   * committed-publication transaction, so a build failure rolls the bundle
+   * back cleanly. */
+  if (!self_arm_derive_audit_id (bundle->actor, perm->perm, bundle->scope,
+      perm->event_id, perm->audit_id)
+      || wyl_audit_event_new_from_fields (perm->audit_id, g_get_real_time (),
+      bundle->actor, "permission_state.grant", perm->perm, "grant",
+      bundle->scope, bundle->request_id, WYL_DECISION_ALLOW,
+      &perm->audit_event) != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
   if (SELF_ARM_ROW_FAULT (WYL_DAEMON_SELF_ARM_ROW_FAULT_AUDIT))
     return WYRELOG_E_IO;
   rc = self_arm_append_audit (store, perm);
@@ -15437,32 +15455,20 @@ service_management_authority_arm_handler (SoupServer *server,
     return;
   }
 
-  /* Deterministic per-perm audit ids so a response-loss retry re-derives the
-   * same authoritative audit evidence rather than duplicating it. */
-  WylAuditEvent *audit_events[G_N_ELEMENTS (self_arm_managed_perms)] = { NULL };
-  gchar audit_ids[G_N_ELEMENTS (self_arm_managed_perms)][WYL_ID_STRING_BUF] =
-  { {0}};
+  /* The authoritative per-perm audit id + event are built inside the bundle
+   * mutation (folding the just-written state-event id), so a genuine re-arm at
+   * this scope records a distinct row while a same-attempt retry appends
+   * nothing.  Here we only seed the fixed identity of each slot. */
   SelfArmBundle bundle = {
     .actor = auth.actor,
     .scope = scope,
+    .request_id = request_id,
     .outcome = SELF_ARM_OUTCOME_OK,
   };
   for (guint i = 0; i < G_N_ELEMENTS (self_arm_managed_perms); i++) {
     bundle.perms[i].perm = self_arm_managed_perms[i];
     bundle.perms[i].event_id = -1;
-    if (!self_arm_derive_audit_id (auth.actor, self_arm_managed_perms[i], scope,
-        audit_ids[i])
-        || wyl_audit_event_new_from_fields (audit_ids[i], g_get_real_time (),
-        auth.actor, "permission_state.grant", self_arm_managed_perms[i],
-        "grant", scope, request_id, WYL_DECISION_ALLOW, &audit_events[i])
-        != WYRELOG_E_OK) {
-      for (guint j = 0; j < i; j++)
-        g_clear_object (&audit_events[j]);
-      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_AUTHORITY_FAILED);
-      return;
-    }
-    bundle.perms[i].audit_event = audit_events[i];
-    bundle.perms[i].audit_id = audit_ids[i];
+    bundle.perms[i].audit_event = NULL;
   }
 #ifdef WYL_TEST_DAEMON_HTTP
   gboolean verify_fail_persistent = FALSE;
@@ -15521,11 +15527,13 @@ service_management_authority_arm_handler (SoupServer *server,
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK)
-    for (guint i = 0; i < G_N_ELEMENTS (audit_events); i++)
-      (void) wyl_audit_mirror_event (ctx->handle, audit_events[i]);
+    for (guint i = 0; i < G_N_ELEMENTS (bundle.perms); i++)
+      if (bundle.perms[i].audit_event != NULL)
+        (void) wyl_audit_mirror_event (ctx->handle,
+            bundle.perms[i].audit_event);
 #endif
-  for (guint i = 0; i < G_N_ELEMENTS (audit_events); i++)
-    g_clear_object (&audit_events[i]);
+  for (guint i = 0; i < G_N_ELEMENTS (bundle.perms); i++)
+    g_clear_object (&bundle.perms[i].audit_event);
 
   if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
     rc = wyl_daemon_policy_write_record_primary (&write, rc);

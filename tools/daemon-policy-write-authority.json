@@ -1,5 +1,5 @@
 {
-  "aggregate": "7aa8e6c0934ef43b5879202795856652f64f7d7be56fdca3a133af99a77c25a6",
+  "aggregate": "0a66ca6ce3f593d478f0dc7b85d50a94fa9d50b58460c42b52d298b143264534",
   "directives": {
     "count": 496,
     "sha256": "822c158cf9cc2527c744f35bcb82ab5cecc63188b8754bec68f31887d509260f"
@@ -27,7 +27,7 @@
     "schema_register_handler": "cca2dcf77243a09eb507e04101679eb0bed4f2bf0c343cf0226726ab600734e8",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
     "service_credential_operation_recover_execute": "1395b3874bcb04c6c69203b4bf19e8b23ef43829e31b998a3763286dc32936ca",
-    "service_management_authority_arm_handler": "e0a84ea4cf441a60c554036de0d943bc6e0a6e0e1df867bfc33c7e9cbe8ea59a",
+    "service_management_authority_arm_handler": "dca8cbd735c6556d67cc87a9ff10822e1eee882c40fc6c6aa67cef3ae999d17b",
     "set_fact_op_json": "5f16d82dcc774aaa8ffd55e2c7f7b3615a8613057e845260d621aec96371c2e3",
     "set_graph_mutation_json": "2998f2e32e7e0c62f5fee43854b7e88402141e32ddabe5e1969e25b55cd86ecd",
     "set_json_error": "c07b4fa386e9cb51e5a41f1a53b126f02d89b326862d2dc66f63804f41858c34",
