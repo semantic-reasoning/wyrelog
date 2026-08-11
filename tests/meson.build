@@ -1198,14 +1198,16 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
   #
   # It also requires enable_windows_artifact_test_hooks (#741): every case in
   # this binary runs through the WinFaultGuard fixture, which arms and disarms
-  # both native artifact fault hooks between cases, so the binary cannot be
-  # built against a shipped library that does not contain them. The Windows CI
-  # jobs that run this test enable the option explicitly.
+  # both native artifact fault hooks between cases.
+  #
+  # To support both default_library=static and default_library=shared on
+  # Windows without exporting private test-only symbols from libwyrelog.dll,
+  # this binary links against wyrelog_handle_test_seams_dep (#654).
   test_fact_artifact_namespace_windows = executable(
     'test-fact-artifact-namespace-windows',
     'test-fact-artifact-namespace-windows.c',
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep],
+    dependencies : [wyrelog_handle_test_seams_dep],
   )
   test('fact-artifact-namespace-windows',
     test_fact_artifact_namespace_windows,
