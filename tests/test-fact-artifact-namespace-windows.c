@@ -577,19 +577,24 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
   if (!CreateSymbolicLinkW (wal_wide, main_wide,
       SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
     DWORD create_error = GetLastError ();
-    DWORD probe_attrs = GetFileAttributesW (wal_wide);
-    DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
-        ? GetLastError () : ERROR_SUCCESS;
+    if (create_error == ERROR_PRIVILEGE_NOT_HELD) {
+      g_test_skip ("unprivileged symlink creation (CreateSymbolicLinkW) not permitted in this environment");
+    } else {
+      DWORD probe_attrs = GetFileAttributesW (wal_wide);
+      DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
+          ? GetLastError () : ERROR_SUCCESS;
 
-    g_error ("artifact substitution failed: operation=CreateSymbolicLinkW "
-        "stage=reparse path=%s create-error=%lu "
-        "probe-attrs=0x%08lx probe-error=%lu",
-        wal_path, (unsigned long) create_error, (unsigned long) probe_attrs,
-        (unsigned long) probe_error);
+      g_error ("artifact substitution failed: operation=CreateSymbolicLinkW "
+          "stage=reparse path=%s create-error=%lu "
+          "probe-attrs=0x%08lx probe-error=%lu",
+          wal_path, (unsigned long) create_error, (unsigned long) probe_attrs,
+          (unsigned long) probe_error);
+    }
+  } else {
+    g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+        WYL_FACT_ARTIFACT_WAL, FALSE, &sidecar), ==, WYRELOG_E_POLICY);
+    g_assert_null (sidecar);
   }
-  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
-      WYL_FACT_ARTIFACT_WAL, FALSE, &sidecar), ==, WYRELOG_E_POLICY);
-  g_assert_null (sidecar);
   wyl_fact_artifact_win_lease_free (lease);
   wyl_fact_artifact_win_namespace_free (namespace_);
   g_assert_true (CloseHandle (graph));

@@ -31,6 +31,8 @@ def run(command):
 
 def exports(artifact):
     suffix = artifact.suffix.lower()
+    if suffix in (".a", ".lib"):
+        return ""
     if suffix == ".dll":
         tool = shutil.which("llvm-readobj")
         if tool:

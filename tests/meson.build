@@ -36,6 +36,7 @@ test('check-explicit-encoding-self-test', python3,
     '--self-test',
   ],
   env : python_strict_encoding_env,
+  timeout : 120,
 )
 
 test('engine-session-boundary', python3,
