@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard the POSIX DuckDB adapter's checked numeric conversion boundary."""
+"""Guard the platform-neutral DuckDB adapter's checked numeric conversion boundary."""
 
 from pathlib import Path
 import re
@@ -10,47 +10,69 @@ root = Path(sys.argv[1])
 handle = (
     root / "wyrelog" / "fact" / "secure-duckdb-file-handle-private.cc"
 ).read_text(encoding="utf-8")
+handle_header = (
+    root / "wyrelog" / "fact" / "secure-duckdb-file-handle-private.hpp"
+).read_text(encoding="utf-8")
 filesystem = (
     root / "wyrelog" / "fact" / "secure-duckdb-filesystem-private.cc"
+).read_text(encoding="utf-8")
+session_header = (
+    root / "wyrelog" / "fact" / "artifact-io-session-private.h"
 ).read_text(encoding="utf-8")
 meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
 runtime_test = (
     root / "tests" / "test-secure-duckdb-filesystem.cc"
 ).read_text(encoding="utf-8")
 
+# Ensure no raw POSIX descriptor remains in FileHandle / PendingBinding headers
+if "int\n      fd_;" in handle_header or "int fd_;" in handle_header:
+    raise SystemExit("raw int fd_ leaked into secure-duckdb-file-handle-private.hpp")
+
 required_proofs = (
-    "#if !defined(G_OS_WIN32) && !defined(__APPLE__)",
-    "SSIZE_MAX",
     "DuckDB idx_t must remain an unsigned integer",
-    "POSIX off_t must remain a signed integer",
-    "size_t must represent every positive ssize_t",
+    "DuckDB idx_t must represent every nonnegative uint64_t",
     "adapter arithmetic requires uint64_t to represent size_t",
     "checked_range (int64_t byte_count, duckdb::idx_t location)",
-    "checked_progress_offset (const CheckedRange &range, size_t progress)",
-    "checked_transfer (ssize_t amount, size_t remaining)",
+    "checked_transfer (gsize amount, size_t remaining)",
     "checked_size (int64_t size)",
-    "checked_stat_size (off_t size)",
-    "status.st_mtimespec.tv_sec",
-    "status.st_mtimespec.tv_nsec",
+    "checked_stat_size (uint64_t size)",
+    "checked_timestamp (uint64_t seconds, uint32_t nanoseconds)",
 )
 for token in required_proofs:
     if token not in handle:
         raise SystemExit(f"DuckDB numeric proof boundary drifted: {token}")
 
-expected_syscalls = {
-    "pread (": 2,
-    "pwrite (": 2,
-    "ftruncate (": 1,
-    "fstat (": 3,
-    "fsync (": 1,
-}
-for call, count in expected_syscalls.items():
-    if handle.count(call) != count:
-        raise SystemExit(
-            f"DuckDB syscall boundary drifted: {call} expected {count}"
-        )
+# Ensure no raw POSIX syscalls are made directly from the C++ adapter handle or filesystem
+forbidden_syscalls = (
+    "pread (",
+    "pwrite (",
+    "ftruncate (",
+    "fstat (",
+    "fsync (",
+)
+for call in forbidden_syscalls:
+    if call in handle:
+        raise SystemExit(f"raw POSIX syscall in C++ file handle: {call}")
     if call in filesystem:
         raise SystemExit(f"filesystem adapter bypassed checked handle: {call}")
+
+# Ensure all 9 platform-neutral session operations are declared and used
+required_session_ops = (
+    "wyl_fact_artifact_io_session_read",
+    "wyl_fact_artifact_io_session_write",
+    "wyl_fact_artifact_io_session_flush",
+    "wyl_fact_artifact_io_session_truncate",
+    "wyl_fact_artifact_io_session_size",
+    "wyl_fact_artifact_io_session_last_modified",
+    "wyl_fact_artifact_io_session_revalidate",
+    "wyl_fact_artifact_io_session_finish",
+    "wyl_fact_artifact_io_session_abort",
+)
+for op in required_session_ops:
+    if op not in session_header:
+        raise SystemExit(f"session operation missing from artifact-io-session-private.h: {op}")
+    if op != "wyl_fact_artifact_io_session_abort" and op not in handle:
+        raise SystemExit(f"file handle does not invoke session operation: {op}")
 
 required_delegation = (
     "bounded_handle (handle).ReadAt (buffer, bytes, location);",
@@ -66,24 +88,21 @@ for token in required_delegation:
     if token not in filesystem:
         raise SystemExit(f"DuckDB adapter delegation drifted: {token}")
 
-# Every narrowing conversion on syscall/cursor values is deliberately listed.
-# A new cast must therefore extend the checked helpers and this proof together.
+# Every narrowing conversion on session values is audited.
 narrowing = re.compile(
-    r"static_cast\s*<\s*(?:size_t|off_t|duckdb::idx_t|int64_t)\s*>"
+    r"static_cast\s*<\s*(?:size_t|duckdb::idx_t|int64_t)\s*>"
 )
-if len(narrowing.findall(handle)) != 9:
-    raise SystemExit("unchecked narrowing appeared outside the audited helpers")
+if len(narrowing.findall(handle)) != 7:
+    raise SystemExit(f"unchecked narrowing in handle ({len(narrowing.findall(handle))})")
 if len(narrowing.findall(filesystem)) != 1:
     raise SystemExit("filesystem cursor narrowing boundary drifted")
 
 required_cast_contexts = (
-    "static_cast < duckdb::idx_t > (std::numeric_limits < off_t >::max ())",
-    "static_cast < size_t >(bytes), static_cast < off_t > (offset)",
-    "static_cast < off_t > (unsigned_offset + unsigned_progress)",
+    "static_cast < duckdb::idx_t > (std::numeric_limits < uint64_t >::max ())",
+    "static_cast < size_t >(bytes), static_cast < uint64_t > (offset)",
     "static_cast < size_t > (transferred)",
     "static_cast < duckdb::idx_t > (transferred)",
     "static_cast < int64_t > (transferred)",
-    "return static_cast < off_t > (size);",
     "return static_cast < int64_t > (size);",
 )
 for token in required_cast_contexts:
@@ -105,13 +124,11 @@ if "offset_ = location;" not in handle:
 
 for token in (
     "/secure-duckdb-filesystem/denial-numeric",
-    "#define _DARWIN_C_SOURCE 1",
     "O_NOFOLLOW",
     "fs::canonical (created_root)",
     "root = g_strdup (canonical_root.c_str ());",
     "static_cast < int64_t > (SSIZE_MAX)",
     "static_cast < duckdb::idx_t > (LLONG_MAX)",
-    "std::numeric_limits < off_t >::max ()",
 ):
     if token not in runtime_test:
         raise SystemExit(f"numeric runtime boundary coverage drifted: {token}")

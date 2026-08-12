@@ -146,6 +146,7 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc',
       'fact/secure-duckdb-file-handle-private.cc',
       'fact/secure-duckdb-filesystem-private.cc',
+      'fact/artifact-io-session-posix-private.c',
       'fact/provisioning-construct-private.c',
       'fact/provisioning-run-private.c',
       'fact/store-open-private.c')

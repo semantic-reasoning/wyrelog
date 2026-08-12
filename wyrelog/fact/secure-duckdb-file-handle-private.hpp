@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 
+#include "fact/artifact-io-session-private.h"
 #include "fact/graph-artifact-namespace-private.h"
 
 class WylSecureDuckdbFileSystem;
@@ -20,21 +21,16 @@ private:
   wyrelog_error_t error_ = WYRELOG_E_OK;
 };
 
-enum class WylSecureDuckdbBindingKind
-{
-  WRITER_MAIN,
-  READER_MAIN,
-  WRITER_SIDECAR,
-  READER_WAL,
-  TEMP_CHILD,
-};
-
-/* Own the provider-issued descriptor/binding pair until FileHandle
- * construction has completed.  In particular, duckdb::make_uniq may throw
- * before the FileHandle constructor is entered. */
+/* Own the provider-issued session until FileHandle construction has
+ * completed.  In particular, duckdb::make_uniq may throw before the
+ * FileHandle constructor is entered. */
 class WylSecureDuckdbPendingBinding final
 {
 public:
+  WylSecureDuckdbPendingBinding (
+    const std::shared_ptr<WylSecureDuckdbHealth> &,
+    WylFactArtifactIoSession *) noexcept;
+#ifndef G_OS_WIN32
   WylSecureDuckdbPendingBinding (
     const std::shared_ptr<WylSecureDuckdbHealth> &,
     WylFactArtifactMainBinding *, int) noexcept;
@@ -50,6 +46,7 @@ public:
   WylSecureDuckdbPendingBinding (
     const std::shared_ptr<WylSecureDuckdbHealth> &,
     WylFactDuckdbTempChildBinding *, int) noexcept;
+#endif
   ~WylSecureDuckdbPendingBinding ();
   WylSecureDuckdbPendingBinding (
     const WylSecureDuckdbPendingBinding &) = delete;
@@ -62,45 +59,26 @@ public:
 private:
   friend class WylSecureDuckdbFileHandle;
 
-  WylSecureDuckdbPendingBinding (
-    const std::shared_ptr<WylSecureDuckdbHealth> &,
-    WylSecureDuckdbBindingKind, int) noexcept;
   void
   Release () noexcept;
   wyrelog_error_t
-  RevalidateFd () const noexcept;
+  RevalidateSession () const noexcept;
   bool
-  HasBinding () const noexcept;
+  HasSession () const noexcept;
   wyrelog_error_t
   CheckedClose () noexcept;
   void
-  FreeBinding () noexcept;
+  FreeSession () noexcept;
 
   std::shared_ptr<WylSecureDuckdbHealth>
   health_;
-  WylSecureDuckdbBindingKind
-      kind_;
-  int
-      fd_;
-  union
-  {
-    WylFactArtifactMainBinding *
-        writer_main;
-    WylFactArtifactReaderMainBinding *
-        reader_main;
-    WylFactArtifactSidecarBinding *
-        writer_sidecar;
-    WylFactArtifactReaderWalBinding *
-        reader_wal;
-    WylFactDuckdbTempChildBinding *
-        temp_child;
-  } binding_;
+  WylFactArtifactIoSession *
+      session_ = nullptr;
 };
 
 /* A DuckDB working descriptor is useful only together with its provider
- * binding.  This class never closes a raw descriptor behind the provider:
- * every I/O boundary and the terminal close validate the actual descriptor
- * number through the authority that issued it. */
+ * session.  This class never operates on raw file descriptors: every I/O
+ * boundary and terminal close operates through the platform-neutral session. */
 class WylSecureDuckdbFileHandle final: public
 duckdb::FileHandle
 {
@@ -148,43 +126,26 @@ private:
   friend class WylSecureDuckdbFileSystem;
 
   wyrelog_error_t
-  RevalidateFd () const;
+  RevalidateSession () const;
   void
   RevalidateUnlocked () const;
-  wyrelog_error_t
-  CheckedClose ();
-  void
-  FreeBinding ();
   void
   RequireHealthy () const;
   [[noreturn]] void
   PoisonAndReject (wyrelog_error_t, const char *) const;
+#ifndef G_OS_WIN32
   WylFactArtifactSidecarBinding *
   DetachSidecarBindingForMove ();
+#endif
 
   WylSecureDuckdbFileSystem *
       owner_;
   std::shared_ptr<WylSecureDuckdbHealth>
   health_;
-  WylSecureDuckdbBindingKind
-      kind_;
   WylFactArtifactName
       sidecar_artifact_ = WYL_FACT_ARTIFACT_MAIN;
-  int
-      fd_;
-  union
-  {
-    WylFactArtifactMainBinding *
-        writer_main;
-    WylFactArtifactReaderMainBinding *
-        reader_main;
-    WylFactArtifactSidecarBinding *
-        writer_sidecar;
-    WylFactArtifactReaderWalBinding *
-        reader_wal;
-    WylFactDuckdbTempChildBinding *
-        temp_child;
-  } binding_;
+  WylFactArtifactIoSession *
+      session_ = nullptr;
   mutable
   std::mutex
       mutex_;

@@ -66,6 +66,8 @@ wyrelog/daemon/service-credential-handoff-private.h
 wyrelog/daemon/signals.c
 wyrelog/daemon/signals.h
 wyrelog/error.h
+wyrelog/fact/artifact-io-session-posix-private.c
+wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/compound-private.h
 wyrelog/fact/graph-artifact-windows-locator-private.c
 wyrelog/fact/graph-artifact-windows-locator-private.h
@@ -86,6 +88,7 @@ wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
 wyrelog/fact/secure-duckdb-bridge-windows-private.c
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
+wyrelog/fact/secure-duckdb-filesystem-test-faults-private.h
 wyrelog/fact/store-open-private.c
 wyrelog/fact/store-open-private.h
 wyrelog/fact/store-private.h
