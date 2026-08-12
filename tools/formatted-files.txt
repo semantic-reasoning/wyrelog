@@ -1,4 +1,5 @@
 tests/fact-test-support.h
+tests/test-audit-emit.c
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
 tests/test-daemon-http-decide.c
