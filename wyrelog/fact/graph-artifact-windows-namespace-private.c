@@ -370,7 +370,7 @@ wyl_fact_artifact_win_binding_open_io_session (WylFactArtifactWinBinding
     rc = wyl_fact_artifact_win_entry_revalidate (binding->namespace_->locator,
             binding->entry);
   return rc ==
-         WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
+         WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state, TRUE,
              out_session) : rc;
 }
 
@@ -412,6 +412,7 @@ struct WylFactArtifactWinSidecarBinding
   WylFactArtifactWinIoState *io_state;
   WylFactArtifactName name;
   gboolean creator;
+  gboolean writable;
   gboolean active;
   gboolean io_open;
   GMutex mutex;
@@ -694,7 +695,7 @@ wyl_fact_artifact_win_main_binding_open_io_session
     rc = wyl_fact_artifact_win_entry_revalidate (binding->lease->
             namespace_->locator, binding->lease->namespace_->main_entry);
   return rc ==
-         WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
+         WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state, TRUE,
              out_session) : rc;
 }
 
@@ -742,7 +743,7 @@ sidecar_revalidate_locked (WylFactArtifactWinSidecarBinding *binding,
 
 wyrelog_error_t
 wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
-    WylFactArtifactName sidecar, gboolean create_new,
+    WylFactArtifactName sidecar, gboolean create_new, gboolean writable,
     WylFactArtifactWinSidecarBinding **out_binding)
 {
   WylFactArtifactWinSidecarBinding *binding;
@@ -755,8 +756,10 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
     return WYRELOG_E_POLICY;
   if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
     return rc;
+  ACCESS_MASK access_mask = writable ? (GENERIC_READ | GENERIC_WRITE | DELETE)
+      : GENERIC_READ;
   rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator,
-          name_for (sidecar), GENERIC_READ | GENERIC_WRITE | DELETE, create_new,
+          name_for (sidecar), access_mask, create_new,
           &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -769,6 +772,7 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
   binding->entry = entry;
   binding->name = sidecar;
   binding->creator = create_new;
+  binding->writable = writable;
   binding->active = TRUE;
   binding->io_open = FALSE;     /* session state, not a raw HANDLE, gates mutation */
   g_mutex_init (&binding->mutex);
@@ -799,7 +803,7 @@ wyl_fact_artifact_win_sidecar_binding_open_io_session
   g_mutex_lock (&binding->mutex);
   rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
+    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, binding->writable, out_session);
   g_mutex_unlock (&binding->mutex);
   return rc;
 }
@@ -1029,7 +1033,7 @@ wyl_fact_artifact_win_temp_binding_open_io_session
   g_mutex_lock (&binding->mutex);
   rc = replacement_temp_check_locked (binding, FALSE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
+    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, TRUE, out_session);
   g_mutex_unlock (&binding->mutex);
   return rc;
 }
@@ -1354,7 +1358,7 @@ wyl_fact_artifact_win_temp_token_open_io_session (WylFactArtifactWinTempToken
   g_mutex_lock (&token->mutex);
   rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_io_session_open (token->io_state, out_session);
+    rc = wyl_fact_artifact_win_io_session_open (token->io_state, TRUE, out_session);
   g_mutex_unlock (&token->mutex);
   return rc;
 }
@@ -1679,6 +1683,7 @@ struct WylFactArtifactWinTempChildBinding
   WylFactArtifactWinTempChild *child;
   WylFactArtifactWinWorkingHandle *working;
   WylFactArtifactWinIoState *io_state;
+  gboolean writable;
   gboolean active;
   gboolean io_open;
 };
@@ -1900,7 +1905,7 @@ wyl_fact_artifact_win_temp_root_create_child (WylFactArtifactWinTempRoot *root,
 
 wyrelog_error_t
 wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *child,
-    WylFactArtifactWinTempChildBinding **out_binding)
+    gboolean writable, WylFactArtifactWinTempChildBinding **out_binding)
 {
   WylFactArtifactWinTempChildBinding *binding;
   HANDLE issued = INVALID_HANDLE_VALUE;
@@ -1950,6 +1955,7 @@ wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *child,
   binding->child = temp_child_ref (child);
   wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
       temp_child_ref (child), (GDestroyNotify) temp_child_unref);
+  binding->writable = writable;
   binding->active = TRUE;
   binding->io_open = FALSE;
   g_ptr_array_add (child->bindings, binding);
@@ -1972,7 +1978,7 @@ wyl_fact_artifact_win_temp_child_binding_open_io_session
   g_mutex_lock (&binding->child->mutex);
   rc = temp_child_check (binding->child);
   if (rc == WYRELOG_E_OK && binding->active)
-    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
+    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, binding->writable, out_session);
   /* A second session is ordinary contention, not evidence that the binding
    * or child has been substituted.  Preserve the first session and let it
    * finish; only integrity/transport failures revoke this authority. */
@@ -2132,5 +2138,248 @@ void
 wyl_fact_artifact_win_temp_root_free (WylFactArtifactWinTempRoot *root)
 {
   temp_root_unref (root);
+}
+
+struct WylFactDuckdbTempOrphanEvidence
+{
+  gchar *logical_name;
+  WylFactGraphWinIdentity identity;
+};
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_child_exists (
+  WylFactArtifactWinTempRoot *root, const gchar *name, gboolean *out_exists)
+{
+  wyrelog_error_t rc;
+  WylFactArtifactWinEntry *entry = NULL;
+
+  if (out_exists != NULL)
+    *out_exists = FALSE;
+
+  if (root == NULL || name == NULL || out_exists == NULL || !temp_child_name (name))
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&root->mutex);
+  rc = temp_root_check (root);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_open_file (
+      root->lease->namespace_->locator, root->directory, name,
+      GENERIC_READ, FALSE, &entry);
+  g_mutex_unlock (&root->mutex);
+
+  if (rc == WYRELOG_E_OK) {
+    *out_exists = TRUE;
+    wyl_fact_artifact_win_entry_free (entry);
+  } else if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_exists = FALSE;
+    rc = WYRELOG_E_OK;
+  }
+
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_snapshot_children (
+  WylFactArtifactWinTempRoot *root, GPtrArray **out_children_names)
+{
+  wyrelog_error_t rc;
+  GPtrArray *names = NULL;
+
+  if (out_children_names != NULL)
+    *out_children_names = NULL;
+
+  if (root == NULL || out_children_names == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&root->mutex);
+  rc = temp_root_check (root);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_list_entries (
+      root->lease->namespace_->locator, root->directory, &names);
+  g_mutex_unlock (&root->mutex);
+
+  if (rc == WYRELOG_E_OK)
+    *out_children_names = names;
+  else if (names != NULL)
+    g_ptr_array_free (names, TRUE);
+
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_create_child_binding (
+  WylFactArtifactWinTempRoot *root, const gchar *name, gboolean writable,
+  WylFactArtifactWinTempChildBinding **out_binding)
+{
+  WylFactArtifactWinTempChild *child = NULL;
+  wyrelog_error_t rc;
+
+  if (out_binding != NULL)
+    *out_binding = NULL;
+
+  if (root == NULL || name == NULL || out_binding == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_win_temp_root_create_child (root, name, &child);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_fact_artifact_win_temp_child_open (child, writable, out_binding);
+  wyl_fact_artifact_win_temp_child_free (child);
+  return rc;
+}
+
+struct WylFactArtifactWinTempOrphanEvidence
+{
+  gchar *logical_name;
+  WylFactGraphWinIdentity identity;
+};
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_create_with_orphan_evidence (
+  WylFactArtifactWinLease *lease, WylFactArtifactWinTempRoot **out_root,
+  WylFactArtifactWinTempOrphanEvidence **out_evidence)
+{
+  WylFactArtifactWinTempRoot *root = NULL;
+  WylFactArtifactWinTempOrphanEvidence *ev = NULL;
+  wyrelog_error_t rc;
+
+  if (out_root != NULL)
+    *out_root = NULL;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+
+  if (lease == NULL || out_root == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_win_lease_create_temp_root (lease, &root);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (out_evidence != NULL) {
+    ev = g_try_new0 (WylFactArtifactWinTempOrphanEvidence, 1);
+    if (ev == NULL) {
+      wyl_fact_artifact_win_temp_root_free (root);
+      return WYRELOG_E_NOMEM;
+    }
+    ev->logical_name = wyl_fact_artifact_win_temp_root_dup_logical_name (root);
+    WylFactArtifactWinEntry *dir_entry = wyl_fact_artifact_win_directory_get_entry (root->directory);
+    if (dir_entry != NULL)
+      ev->identity = *wyl_fact_artifact_win_entry_identity (dir_entry);
+    *out_evidence = ev;
+  }
+
+  *out_root = root;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (
+  WylFactArtifactWinTempRoot *root, const gchar *name, gboolean writable,
+  WylFactArtifactWinTempChildBinding **out_binding,
+  WylFactArtifactWinTempOrphanEvidence **out_evidence)
+{
+  WylFactArtifactWinTempChildBinding *binding = NULL;
+  WylFactArtifactWinTempOrphanEvidence *ev = NULL;
+  wyrelog_error_t rc;
+
+  if (out_binding != NULL)
+    *out_binding = NULL;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+
+  if (root == NULL || name == NULL || out_binding == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_win_temp_root_create_child_binding (root, name, writable, &binding);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (out_evidence != NULL) {
+    ev = g_try_new0 (WylFactArtifactWinTempOrphanEvidence, 1);
+    if (ev == NULL) {
+      wyl_fact_artifact_win_temp_child_binding_free (binding);
+      return WYRELOG_E_NOMEM;
+    }
+    ev->logical_name = g_strdup (name);
+    WylFactArtifactWinEntry *child_entry = binding->child->entry;
+    if (child_entry != NULL)
+      ev->identity = *wyl_fact_artifact_win_entry_identity (child_entry);
+    *out_evidence = ev;
+  }
+
+  *out_binding = binding;
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_fact_artifact_win_temp_orphan_evidence_free (WylFactArtifactWinTempOrphanEvidence *evidence)
+{
+  if (evidence == NULL)
+    return;
+  g_free (evidence->logical_name);
+  g_free (evidence);
+}
+
+GBytes *
+wyl_fact_artifact_win_temp_orphan_evidence_bytes (const WylFactArtifactWinTempOrphanEvidence *evidence)
+{
+  if (evidence == NULL || evidence->logical_name == NULL)
+    return NULL;
+  gsize name_len = strlen (evidence->logical_name);
+  gsize total_len = name_len + 1 + sizeof (WylFactGraphWinIdentity);
+  guint8 *buf = g_try_malloc (total_len);
+  if (buf == NULL)
+    return NULL;
+  memcpy (buf, evidence->logical_name, name_len + 1);
+  memcpy (buf + name_len + 1, &evidence->identity, sizeof (WylFactGraphWinIdentity));
+  return g_bytes_new_take (buf, total_len);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_namespace_open_provisioned_pair_internal (
+  WylFactArtifactWinLocator *locator, WylFactArtifactWinEntry *main_entry,
+  WylFactArtifactWinEntry *lock_entry,
+  WylFactArtifactWinNamespace **out_namespace)
+{
+  WylFactArtifactWinNamespace *ns;
+  HANDLE lock_handle = INVALID_HANDLE_VALUE;
+  wyrelog_error_t rc;
+
+  if (out_namespace != NULL)
+    *out_namespace = NULL;
+
+  if (locator == NULL || main_entry == NULL || lock_entry == NULL
+      || out_namespace == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_win_entry_issue_working_handle (locator, lock_entry,
+          &lock_handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  ns = g_try_new0 (WylFactArtifactWinNamespace, 1);
+  if (ns == NULL) {
+    CloseHandle (lock_handle);
+    return WYRELOG_E_NOMEM;
+  }
+
+  rc = wyl_fact_artifact_win_lock_domain_open (
+    wyl_fact_artifact_win_locator_identity (locator),
+    wyl_fact_artifact_win_entry_identity (lock_entry), lock_handle,
+    &ns->lock_domain);
+  if (rc != WYRELOG_E_OK) {
+    g_free (ns);
+    return rc;
+  }
+
+  ns->locator = locator;
+  ns->main_entry = main_entry;
+  ns->lock_entry = lock_entry;
+  ns->active = TRUE;
+  g_atomic_int_set (&ns->references, 1);
+
+  *out_namespace = ns;
+  return WYRELOG_E_OK;
 }
 #endif

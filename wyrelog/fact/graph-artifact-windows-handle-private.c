@@ -32,6 +32,7 @@ struct WylFactArtifactWinIoSession
 {
   WylFactArtifactWinIoState *state;
   HANDLE handle;
+  gboolean writable;
   gboolean active;
 };
 
@@ -104,7 +105,7 @@ session_check (WylFactArtifactWinIoSession *session)
   }
   g_mutex_unlock (&session->state->mutex);
   rc = wyl_fact_artifact_win_working_handle_revalidate (session->
-      state->working);
+          state->working);
   if (rc == WYRELOG_E_OK && session->state->validator != NULL)
     rc = session->state->validator (session->state->validator_context);
   if (rc != WYRELOG_E_OK) {
@@ -170,7 +171,7 @@ wyl_fact_artifact_win_io_state_is_aborted (WylFactArtifactWinIoState *state)
 
 wyrelog_error_t
 wyl_fact_artifact_win_io_session_open (WylFactArtifactWinIoState *state,
-    WylFactArtifactWinIoSession **out_session)
+    gboolean writable, WylFactArtifactWinIoSession **out_session)
 {
   WylFactArtifactWinIoSession *session;
   wyrelog_error_t rc;
@@ -193,9 +194,11 @@ wyl_fact_artifact_win_io_session_open (WylFactArtifactWinIoState *state,
     g_mutex_unlock (&state->mutex);
     return WYRELOG_E_NOMEM;
   }
+  DWORD access_options = writable ? DUPLICATE_SAME_ACCESS : 0;
+  DWORD desired_access = writable ? 0 : GENERIC_READ;
   if (!DuplicateHandle (GetCurrentProcess (), state->working->guardian,
-          GetCurrentProcess (), &session->handle, 0, FALSE,
-          DUPLICATE_SAME_ACCESS)
+      GetCurrentProcess (), &session->handle, desired_access, FALSE,
+      access_options)
       || !SetHandleInformation (session->handle, HANDLE_FLAG_INHERIT, 0)) {
     DWORD error = GetLastError ();
     if (session->handle != INVALID_HANDLE_VALUE)
@@ -207,6 +210,7 @@ wyl_fact_artifact_win_io_session_open (WylFactArtifactWinIoState *state,
   state->session_live = TRUE;
   g_atomic_int_inc (&state->references);
   session->state = state;
+  session->writable = writable;
   session->active = TRUE;
   *out_session = session;
   g_mutex_unlock (&state->mutex);
@@ -280,6 +284,8 @@ wyl_fact_artifact_win_io_session_write (WylFactArtifactWinIoSession *session,
   if (session == NULL || buffer == NULL || out_written == NULL
       || length > G_MAXUINT32)
     return WYRELOG_E_INVALID;
+  if (!session->writable)
+    return WYRELOG_E_POLICY;
   if ((rc = session_check (session)) != WYRELOG_E_OK)
     return rc;
   ov.Offset = (DWORD) offset;
@@ -299,7 +305,7 @@ wyl_fact_artifact_win_io_session_seek (WylFactArtifactWinIoSession *session,
   if (out_position != NULL)
     *out_position = 0;
   if (session == NULL || out_position == NULL || (method != FILE_BEGIN
-          && method != FILE_CURRENT && method != FILE_END))
+      && method != FILE_CURRENT && method != FILE_END))
     return WYRELOG_E_INVALID;
   if ((rc = session_check (session)) != WYRELOG_E_OK)
     return rc;
@@ -335,6 +341,8 @@ wyl_fact_artifact_win_io_session_truncate (WylFactArtifactWinIoSession *session,
   wyrelog_error_t rc;
   if (session == NULL)
     return WYRELOG_E_INVALID;
+  if (!session->writable)
+    return WYRELOG_E_POLICY;
   if ((rc = session_check (session)) != WYRELOG_E_OK)
     return rc;
   if (!SetFilePointerEx (session->handle, move, NULL, FILE_BEGIN)
@@ -352,7 +360,76 @@ wyl_fact_artifact_win_io_session_flush (WylFactArtifactWinIoSession *session)
   if ((rc = session_check (session)) != WYRELOG_E_OK)
     return rc;
   return FlushFileBuffers (session->handle) ? WYRELOG_E_OK :
-      win_error (GetLastError ());
+         win_error (GetLastError ());
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_io_session_query_metadata (
+  WylFactArtifactWinIoSession *session, guint64 *out_size, guint64 *out_sec,
+  guint32 *out_nsec, WylFactGraphWinIdentity *out_identity)
+{
+  FILE_STANDARD_INFO std_info = { 0 };
+  FILE_BASIC_INFO basic_info = { 0 };
+  FILE_ID_INFO id_info = { 0 };
+  wyrelog_error_t rc;
+
+  if (out_size != NULL)
+    *out_size = 0;
+  if (out_sec != NULL)
+    *out_sec = 0;
+  if (out_nsec != NULL)
+    *out_nsec = 0;
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof (*out_identity));
+
+  if (session == NULL || out_size == NULL || out_sec == NULL
+      || out_nsec == NULL || out_identity == NULL)
+    return WYRELOG_E_INVALID;
+
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
+
+  if (!GetFileInformationByHandleEx (session->handle, FileStandardInfo,
+      &std_info, sizeof (std_info)))
+    return win_error (GetLastError ());
+
+  if (!GetFileInformationByHandleEx (session->handle, FileBasicInfo,
+      &basic_info, sizeof (basic_info)))
+    return win_error (GetLastError ());
+
+  if (!GetFileInformationByHandleEx (session->handle, FileIdInfo,
+      &id_info, sizeof (id_info)))
+    return win_error (GetLastError ());
+
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
+
+  *out_size = (guint64) std_info.EndOfFile.QuadPart;
+
+  ULARGE_INTEGER ull;
+  ull.LowPart = basic_info.LastWriteTime.LowPart;
+  ull.HighPart = basic_info.LastWriteTime.HighPart;
+  guint64 intervals = ull.QuadPart;
+  guint64 posix_sec = 0;
+  guint32 posix_nsec = 0;
+  if (intervals >= 116444736000000000ULL) {
+    guint64 epoch_100ns = intervals - 116444736000000000ULL;
+    posix_sec = epoch_100ns / 10000000ULL;
+    posix_nsec = (guint32) ((epoch_100ns % 10000000ULL) * 100ULL);
+  }
+  *out_sec = posix_sec;
+  *out_nsec = posix_nsec;
+
+  out_identity->volume_serial = (guint64) id_info.VolumeSerialNumber;
+  memcpy (out_identity->file_id, &id_info.FileId, sizeof (out_identity->file_id));
+
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_io_session_revalidate (WylFactArtifactWinIoSession *session)
+{
+  return session_check (session);
 }
 
 static wyrelog_error_t
@@ -384,7 +461,7 @@ identity_equal (const WylFactGraphWinIdentity *a,
     const WylFactGraphWinIdentity *b)
 {
   return a->volume_serial == b->volume_serial
-      && memcmp (a->file_id, b->file_id, sizeof a->file_id) == 0;
+         && memcmp (a->file_id, b->file_id, sizeof a->file_id) == 0;
 }
 
 static wyrelog_error_t
@@ -398,7 +475,7 @@ read_identity (HANDLE handle, WylFactGraphWinIdentity *out_identity)
   if (!GetFileInformationByHandle (handle, &basic))
     return win_error (GetLastError ());
   if ((basic.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY
-              | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
+      | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
       || basic.nNumberOfLinks != 1)
     return WYRELOG_E_POLICY;
   out_identity->volume_serial = info.VolumeSerialNumber;
@@ -445,10 +522,10 @@ terminal_guardian_matches_identity (const WylFactArtifactWinWorkingHandle
       || !GetHandleInformation (binding->guardian, &flags)
       || (flags & HANDLE_FLAG_INHERIT) != 0
       || !GetFileInformationByHandleEx (binding->guardian, FileIdInfo, &info,
-          sizeof info)
+      sizeof info)
       || !GetFileInformationByHandle (binding->guardian, &basic)
       || (basic.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY
-              | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+      | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
     return FALSE;
   observed.volume_serial = info.VolumeSerialNumber;
   memcpy (observed.file_id, info.FileId.Identifier, sizeof observed.file_id);
@@ -487,7 +564,7 @@ wyl_fact_artifact_win_working_handle_adopt (HANDLE issued_handle,
    * guardian is an independently duplicated kernel handle, so raw close or
    * reuse of the source cannot affect namespace ownership. */
   if (!DuplicateHandle (GetCurrentProcess (), issued_handle,
-          GetCurrentProcess (), &guardian, 0, FALSE, DUPLICATE_SAME_ACCESS))
+      GetCurrentProcess (), &guardian, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return win_error (GetLastError ());
   if (!SetHandleInformation (guardian, HANDLE_FLAG_INHERIT, 0)) {
     DWORD error = GetLastError ();

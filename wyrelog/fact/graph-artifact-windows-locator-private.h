@@ -128,6 +128,11 @@ wyrelog_error_t wyl_fact_artifact_win_directory_open_file
   (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     const gchar * name, ACCESS_MASK, gboolean create_new,
     WylFactArtifactWinEntry **);
+WylFactArtifactWinEntry *wyl_fact_artifact_win_directory_get_entry
+  (WylFactArtifactWinDirectory *);
+wyrelog_error_t wyl_fact_artifact_win_directory_list_entries
+  (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
+    GPtrArray ** out_entries);
 wyrelog_error_t wyl_fact_artifact_win_directory_entry_revalidate
   (WylFactArtifactWinLocator *, WylFactArtifactWinDirectory *,
     WylFactArtifactWinEntry *);

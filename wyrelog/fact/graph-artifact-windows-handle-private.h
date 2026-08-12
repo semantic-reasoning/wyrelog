@@ -27,12 +27,12 @@ typedef wyrelog_error_t (*WylFactArtifactWinIoValidator) (gpointer);
  * session have released it, which makes binding/lease teardown safe while an
  * operation is in flight. */
 wyrelog_error_t wyl_fact_artifact_win_io_state_new
-    (WylFactArtifactWinWorkingHandle *, WylFactArtifactWinIoState **);
+  (WylFactArtifactWinWorkingHandle *, WylFactArtifactWinIoState **);
 /* Attach one already-retained owner reference (normally binding→lease or
  * binding→namespace).  The state consumes that reference exactly once, only
  * after the binding and every session reference have gone away. */
 void wyl_fact_artifact_win_io_state_retain_lifetime
-    (WylFactArtifactWinIoState *, gpointer owner, GDestroyNotify owner_unref);
+  (WylFactArtifactWinIoState *, gpointer owner, GDestroyNotify owner_unref);
 /* Installs one construction-time association validator.  It owns |context|
  * until state teardown and is run at every typed I/O boundary in addition to
  * guardian FileId validation. */
@@ -40,27 +40,33 @@ void wyl_fact_artifact_win_io_state_set_validator (WylFactArtifactWinIoState *,
     WylFactArtifactWinIoValidator, gpointer context, GDestroyNotify);
 void wyl_fact_artifact_win_io_state_free (WylFactArtifactWinIoState *);
 gboolean wyl_fact_artifact_win_io_state_has_session
-    (WylFactArtifactWinIoState *);
+  (WylFactArtifactWinIoState *);
 gboolean wyl_fact_artifact_win_io_state_is_aborted
-    (WylFactArtifactWinIoState *);
+  (WylFactArtifactWinIoState *);
 wyrelog_error_t wyl_fact_artifact_win_io_session_open
-    (WylFactArtifactWinIoState *, WylFactArtifactWinIoSession **);
+  (WylFactArtifactWinIoState *, gboolean writable,
+    WylFactArtifactWinIoSession **);
 wyrelog_error_t wyl_fact_artifact_win_io_session_read
-    (WylFactArtifactWinIoSession *, guint64, gpointer, gsize, gsize *);
+  (WylFactArtifactWinIoSession *, guint64, gpointer, gsize, gsize *);
 wyrelog_error_t wyl_fact_artifact_win_io_session_write
-    (WylFactArtifactWinIoSession *, guint64, gconstpointer, gsize, gsize *);
+  (WylFactArtifactWinIoSession *, guint64, gconstpointer, gsize, gsize *);
 wyrelog_error_t wyl_fact_artifact_win_io_session_seek
-    (WylFactArtifactWinIoSession *, gint64, DWORD, guint64 *);
+  (WylFactArtifactWinIoSession *, gint64, DWORD, guint64 *);
 wyrelog_error_t wyl_fact_artifact_win_io_session_size
-    (WylFactArtifactWinIoSession *, guint64 *);
+  (WylFactArtifactWinIoSession *, guint64 *);
 wyrelog_error_t wyl_fact_artifact_win_io_session_truncate
-    (WylFactArtifactWinIoSession *, guint64);
+  (WylFactArtifactWinIoSession *, guint64);
 wyrelog_error_t wyl_fact_artifact_win_io_session_flush
-    (WylFactArtifactWinIoSession *);
+  (WylFactArtifactWinIoSession *);
+wyrelog_error_t wyl_fact_artifact_win_io_session_query_metadata
+  (WylFactArtifactWinIoSession *, guint64 *out_size, guint64 *out_sec,
+    guint32 *out_nsec, WylFactGraphWinIdentity *out_identity);
+wyrelog_error_t wyl_fact_artifact_win_io_session_revalidate
+  (WylFactArtifactWinIoSession *);
 /* finish and abort both close only the private session duplicate.  They never
  * inspect, validate, or close a caller-supplied numeric HANDLE. */
 wyrelog_error_t wyl_fact_artifact_win_io_session_finish
-    (WylFactArtifactWinIoSession *);
+  (WylFactArtifactWinIoSession *);
 void wyl_fact_artifact_win_io_session_abort (WylFactArtifactWinIoSession *);
 
 /* Adopt one already-open regular-file HANDLE.  The binding records the exact

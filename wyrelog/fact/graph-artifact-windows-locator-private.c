@@ -1066,4 +1066,68 @@ wyl_fact_artifact_win_directory_free (WylFactArtifactWinDirectory *directory)
   g_free (directory->name);
   g_free (directory);
 }
+
+WylFactArtifactWinEntry *
+wyl_fact_artifact_win_directory_get_entry (WylFactArtifactWinDirectory *directory)
+{
+  if (directory == NULL)
+    return NULL;
+  return (WylFactArtifactWinEntry *) directory;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_directory_list_entries (WylFactArtifactWinLocator *locator,
+    WylFactArtifactWinDirectory *directory, GPtrArray **out_entries)
+{
+  BYTE buffer[64 * 1024];
+  gboolean restart = TRUE;
+  GPtrArray *entries = NULL;
+  wyrelog_error_t rc;
+
+  if (out_entries != NULL)
+    *out_entries = NULL;
+
+  if (locator == NULL || directory == NULL || out_entries == NULL)
+    return WYRELOG_E_INVALID;
+
+  if ((rc = wyl_fact_artifact_win_directory_revalidate (locator, directory))
+      != WYRELOG_E_OK)
+    return rc;
+
+  entries = g_ptr_array_new_with_free_func (g_free);
+
+  for (;;) {
+    FILE_INFO_BY_HANDLE_CLASS klass = (FILE_INFO_BY_HANDLE_CLASS)
+        (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO
+        : WYL_FILE_ID_EXTD_DIRECTORY_INFO);
+    if (!GetFileInformationByHandleEx (directory->handle, klass, buffer, sizeof buffer)) {
+      DWORD error = GetLastError ();
+      if (error == ERROR_NO_MORE_FILES)
+        break;
+      g_ptr_array_free (entries, TRUE);
+      return error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    }
+    restart = FALSE;
+    WylFileIdExtdDirInfo *current = (WylFileIdExtdDirInfo *) buffer;
+    for (;;) {
+      gsize units = current->file_name_length / sizeof (WCHAR);
+      if (units > 0) {
+        gchar *utf8_name = g_utf16_to_utf8 (current->file_name, (glong) units, NULL, NULL, NULL);
+        if (utf8_name != NULL) {
+          if (g_strcmp0 (utf8_name, ".") != 0 && g_strcmp0 (utf8_name, "..") != 0) {
+            g_ptr_array_add (entries, utf8_name);
+          } else {
+            g_free (utf8_name);
+          }
+        }
+      }
+      if (current->next_entry_offset == 0)
+        break;
+      current = (WylFileIdExtdDirInfo *) ((BYTE *) current + current->next_entry_offset);
+    }
+  }
+
+  *out_entries = entries;
+  return WYRELOG_E_OK;
+}
 #endif
