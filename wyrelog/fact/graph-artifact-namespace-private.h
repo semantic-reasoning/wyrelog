@@ -5,20 +5,44 @@
 #include "wyrelog/error.h"
 #include "fact/graph-locator-private.h"
 
-G_BEGIN_DECLS typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
+G_BEGIN_DECLS
+/*
+ * Windows builds compile fact/graph-artifact-windows-namespace-private.c in
+ * place of the POSIX fact/graph-artifact-namespace-private.c, so on that
+ * platform the neutral names must alias the real Windows structs declared in
+ * fact/graph-artifact-windows-namespace-private.h.  Declaring both spellings
+ * unconditionally would be a conflicting typedef under -std=c17: a repeated
+ * typedef is legal only when it names the same type, and struct
+ * WylFactArtifactNamespace is not struct WylFactArtifactWinNamespace.
+ */
+#ifdef G_OS_WIN32
+typedef struct WylFactArtifactWinNamespace WylFactArtifactNamespace;
+typedef struct WylFactArtifactWinLease WylFactArtifactMutationLease;
+typedef struct WylFactArtifactWinSidecarBinding WylFactArtifactSidecarBinding;
+typedef struct WylFactArtifactWinMainBinding WylFactArtifactMainBinding;
+typedef struct WylFactArtifactWinMainBinding WylFactArtifactReaderMainBinding;
+typedef struct WylFactArtifactWinSidecarBinding WylFactArtifactReaderWalBinding;
+typedef struct WylFactArtifactWinTempRoot WylFactDuckdbTempRoot;
+typedef struct WylFactArtifactWinTempChild WylFactDuckdbTempChild;
+typedef struct WylFactArtifactWinTempChildBinding WylFactDuckdbTempChildBinding;
+typedef struct WylFactArtifactWinTempOrphanEvidence
+    WylFactDuckdbTempOrphanEvidence;
+#else
+typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
-typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
 typedef struct WylFactArtifactSidecarBinding WylFactArtifactSidecarBinding;
 typedef struct WylFactArtifactMainBinding WylFactArtifactMainBinding;
 typedef struct WylFactArtifactReaderMainBinding
     WylFactArtifactReaderMainBinding;
 typedef struct WylFactArtifactReaderWalBinding WylFactArtifactReaderWalBinding;
-typedef struct WylFactArtifactTempRecoveryEvidence
-    WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
 typedef struct WylFactDuckdbTempChild WylFactDuckdbTempChild;
 typedef struct WylFactDuckdbTempChildBinding WylFactDuckdbTempChildBinding;
 typedef struct WylFactDuckdbTempOrphanEvidence WylFactDuckdbTempOrphanEvidence;
+#endif
+typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
+typedef struct WylFactArtifactTempRecoveryEvidence
+    WylFactArtifactTempRecoveryEvidence;
 typedef gboolean (*WylFactDuckdbTempChildVisitor) (WylFactDuckdbTempChild *,
     const gchar * logical_name, gpointer user_data);
 

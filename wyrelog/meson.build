@@ -47,7 +47,6 @@ wyrelog_sources = files(
   'audit/event.c',
   'daemon/auth-registry-private.c',
   'fact/graph-locator-private.c',
-  'fact/graph-artifact-namespace-private.c',
   'fact/reconcile-private.c',
   'fact/reconcile-move-private.c',
   'fact/root-writer-lease-private.c',
@@ -84,6 +83,10 @@ if host_machine.system() == 'windows'
   wyrelog_sources += files('fact/graph-artifact-windows-locator-private.c')
   wyrelog_sources += files('fact/graph-artifact-windows-lock-private.c')
   wyrelog_sources += files('fact/graph-artifact-windows-namespace-private.c')
+  wyrelog_sources += files('fact/artifact-io-session-windows-private.c')
+else
+  wyrelog_sources += files('fact/graph-artifact-namespace-private.c')
+  wyrelog_sources += files('fact/artifact-io-session-posix-private.c')
 endif
 
 wyrelog_deps = [
@@ -140,18 +143,14 @@ if get_option('enable_fact_store').allowed()
   wyrelog_c_args += '-DWYL_HAS_FACT_STORE'
 endif
 if get_option('enable_secure_duckdb_bridge').enabled()
-  if host_machine.system() == 'windows'
-    wyrelog_sources += files('fact/secure-duckdb-bridge-windows-private.c')
-  else
-    wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc',
-      'fact/secure-duckdb-file-handle-private.cc',
-      'fact/secure-duckdb-filesystem-private.cc',
-      'fact/artifact-io-session-posix-private.c',
-      'fact/provisioning-construct-private.c',
-      'fact/provisioning-run-private.c',
-      'fact/store-open-private.c')
-    wyrelog_override_options += 'cpp_std=c++17'
-  endif
+  wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc',
+    'fact/secure-duckdb-file-handle-private.cc',
+    'fact/secure-duckdb-filesystem-private.cc',
+    'fact/provisioning-construct-private.c',
+    'fact/provisioning-run-private.c',
+    'fact/store-open-private.c')
+
+  wyrelog_override_options += 'cpp_std=c++17'
   wyrelog_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
 endif
 if get_option('require_template_manifest')

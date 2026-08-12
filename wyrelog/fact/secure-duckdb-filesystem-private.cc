@@ -481,7 +481,6 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
   if (read_only_ && flags.OpenForWriting ())
     io_reject ("write through validate-only bridge");
 
-  int fd = -1;
   std::optional<WylSecureDuckdbPendingBinding> pending;
   duckdb::unique_ptr < WylSecureDuckdbFileHandle > result;
   const auto make_handle = [&] (WylFactArtifactName artifact) {
@@ -503,59 +502,42 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
     if (flags.ExclusiveCreate () || flags.CreatePrivateFile ()
         || flags.OverwriteExistingFile ())
       io_reject ("main replacement");
-    if (read_only_) {
-      WylFactArtifactReaderMainBinding *binding = nullptr;
-      const auto open_result =
-          wyl_fact_artifact_reader_guard_open_main_binding (lease_, &binding,
-              &fd);
-      pending.emplace (health_, binding, fd);
-      RequireOk (open_result, "open reader main");
-      result = make_handle (WYL_FACT_ARTIFACT_MAIN);
-    } else {
-      WylFactArtifactMainBinding *binding = nullptr;
-      const auto open_result =
-          wyl_fact_artifact_mutation_lease_open_main_binding (lease_, &binding,
-              &fd);
-      pending.emplace (health_, binding, fd);
-      RequireOk (open_result, "open writer main");
-      result = make_handle (WYL_FACT_ARTIFACT_MAIN);
-    }
+    WylFactArtifactIoSession *session = nullptr;
+    const auto open_result = read_only_
+        ? wyl_fact_artifact_io_session_open_reader_main (lease_, &session)
+        : wyl_fact_artifact_io_session_open_writer_main (lease_, &session);
+    pending.emplace (health_, session);
+    RequireOk (open_result, read_only_ ? "open reader main" : "open writer main");
+    result = make_handle (WYL_FACT_ARTIFACT_MAIN);
   } else if (logical.kind == LogicalKind::SIDECAR) {
     if (read_only_) {
       if (logical.artifact != WYL_FACT_ARTIFACT_WAL)
         io_reject ("validate-only non-WAL sidecar");
-      WylFactArtifactReaderWalBinding *binding = nullptr;
+      WylFactArtifactIoSession *session = nullptr;
       const auto open_result =
-          wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease_,
-              &binding, &fd);
-      pending.emplace (health_, binding, fd);
+          wyl_fact_artifact_io_session_open_reader_wal (lease_, &session);
+      pending.emplace (health_, session);
       if (is_missing (open_result) && flags.ReturnNullIfNotExists ())
         return nullptr;
       RequireOk (open_result, "open reader WAL");
       result = make_handle (logical.artifact);
     } else {
-      WylFactArtifactSidecarBinding *binding = nullptr;
+      WylFactArtifactIoSession *session = nullptr;
       wyrelog_error_t open_result = WYRELOG_E_NOT_FOUND;
       const bool strict_create = flags.ExclusiveCreate ()
           || flags.CreatePrivateFile ();
       if (!strict_create) {
-        open_result = flags.OpenForWriting ()
-            ?
-            wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
-              (lease_, logical.artifact, TRUE, &binding, &fd)
-            : wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease_,
-                logical.artifact, FALSE, FALSE, &binding, &fd);
-        pending.emplace (health_, binding, fd);
+        open_result = wyl_fact_artifact_io_session_open_sidecar (
+          lease_, logical.artifact, FALSE, flags.OpenForWriting (), &session);
+        pending.emplace (health_, session);
       }
       if (is_missing (open_result)
           && (flags.CreateFileIfNotExists () || strict_create)) {
         pending.reset ();
-        binding = nullptr;
-        fd = -1;
-        open_result =
-            wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease_,
-                logical.artifact, TRUE, flags.OpenForWriting (), &binding, &fd);
-        pending.emplace (health_, binding, fd);
+        session = nullptr;
+        open_result = wyl_fact_artifact_io_session_open_sidecar (
+          lease_, logical.artifact, TRUE, flags.OpenForWriting (), &session);
+        pending.emplace (health_, session);
       }
       if (open_result != WYRELOG_E_OK) {
         if (is_missing (open_result) && flags.ReturnNullIfNotExists ())
@@ -571,7 +553,7 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
     if (read_only_)
       io_reject ("temporary file through validate-only bridge");
     auto *child = FindTempChild (logical.child);
-    WylFactDuckdbTempChildBinding *binding = nullptr;
+    WylFactArtifactIoSession *session = nullptr;
     WylFactDuckdbTempOrphanEvidence *evidence = nullptr;
     wyrelog_error_t open_result;
     bool created_now = false;
@@ -579,10 +561,10 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
         || flags.CreatePrivateFile ();
     if (child == nullptr && (flags.CreateFileIfNotExists () || strict_create)) {
       WylFactDuckdbTempChild *created = nullptr;
-      open_result =
-          wyl_fact_duckdb_temp_root_create_child_binding (temp_root_,
-              logical.child.c_str (), &created, &binding, &fd, &evidence);
-      pending.emplace (health_, binding, fd);
+      open_result = wyl_fact_artifact_io_session_create_temp_child (
+        temp_root_, logical.child.c_str (), flags.OpenForWriting (),
+        &created, &session, &evidence);
+      pending.emplace (health_, session);
       if (evidence != nullptr) {
         health_->Poison (open_result == WYRELOG_E_OK
             ? WYRELOG_E_POLICY : open_result);
@@ -611,10 +593,9 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
         created_now = true;
       }
     } else if (child != nullptr && !strict_create) {
-      open_result =
-          wyl_fact_duckdb_temp_child_open_binding (child,
-              flags.OpenForWriting (), &binding, &fd);
-      pending.emplace (health_, binding, fd);
+      open_result = wyl_fact_artifact_io_session_open_existing_temp_child (
+        child, flags.OpenForWriting (), &session);
+      pending.emplace (health_, session);
     } else {
       open_result = child == nullptr ? WYRELOG_E_NOT_FOUND : WYRELOG_E_POLICY;
     }
@@ -896,25 +877,19 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
   }
   if (logical.kind == LogicalKind::LOCK)
     io_reject ("lock pathname observation");
-  int fd = -1;
   wyrelog_error_t result;
   bool provisioned_empty_main = false;
   if (logical.kind == LogicalKind::MAIN) {
     if (read_only_) {
-      WylFactArtifactReaderMainBinding *binding = nullptr;
-      result =
-          wyl_fact_artifact_reader_guard_open_main_binding (lease_, &binding,
-              &fd);
+      WylFactArtifactIoSession *session = nullptr;
+      result = wyl_fact_artifact_io_session_open_reader_main (lease_, &session);
       if (result == WYRELOG_E_OK) {
-        result = wyl_fact_artifact_reader_main_binding_close (binding, &fd);
-        wyl_fact_artifact_reader_main_binding_free (binding);
+        result = wyl_fact_artifact_io_session_finish (session);
       }
     } else {
-      WylFactArtifactMainBinding *binding = nullptr;
-      result =
-          wyl_fact_artifact_mutation_lease_open_main_binding (lease_, &binding,
-              &fd);
-      WylSecureDuckdbPendingBinding pending (health_, binding, fd);
+      WylFactArtifactIoSession *session = nullptr;
+      result = wyl_fact_artifact_io_session_open_writer_main (lease_, &session);
+      WylSecureDuckdbPendingBinding pending (health_, session);
       RequireOk (result, "open writer main for existence");
       duckdb::unique_ptr<WylSecureDuckdbFileHandle> handle;
       try {
@@ -922,8 +897,8 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
               WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_HANDLE_ALLOCATION))
           throw std::bad_alloc ();
         handle = duckdb::make_uniq<WylSecureDuckdbFileHandle> (*this, health_,
-               path, writer_main_existing_flags (),
-               WYL_FACT_ARTIFACT_MAIN, std::move (pending));
+            path, writer_main_existing_flags (),
+            WYL_FACT_ARTIFACT_MAIN, std::move (pending));
       }
       catch (const std::bad_alloc &)
       {
@@ -947,22 +922,17 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
   } else if (read_only_) {
     if (logical.artifact != WYL_FACT_ARTIFACT_WAL)
       io_reject ("validate-only sidecar existence");
-    WylFactArtifactReaderWalBinding *binding = nullptr;
-    result =
-        wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease_,
-            &binding, &fd);
+    WylFactArtifactIoSession *session = nullptr;
+    result = wyl_fact_artifact_io_session_open_reader_wal (lease_, &session);
     if (result == WYRELOG_E_OK) {
-      result = wyl_fact_artifact_reader_wal_binding_close (binding, &fd);
-      wyl_fact_artifact_reader_wal_binding_free (binding);
+      result = wyl_fact_artifact_io_session_finish (session);
     }
   } else {
-    WylFactArtifactSidecarBinding *binding = nullptr;
-    result =
-        wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease_,
-            logical.artifact, FALSE, FALSE, &binding, &fd);
+    WylFactArtifactIoSession *session = nullptr;
+    result = wyl_fact_artifact_io_session_open_sidecar (
+      lease_, logical.artifact, FALSE, FALSE, &session);
     if (result == WYRELOG_E_OK) {
-      result = wyl_fact_artifact_sidecar_binding_close (binding, &fd);
-      wyl_fact_artifact_sidecar_binding_free (binding);
+      result = wyl_fact_artifact_io_session_finish (session);
     }
   }
   if (result == WYRELOG_E_OK) {
