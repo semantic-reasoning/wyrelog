@@ -117,26 +117,26 @@ typedef enum
 } WylFactArtifactPairAccessForTest;
 void wyl_fact_artifact_namespace_pair_access_reset_for_test (void);
 gboolean wyl_fact_artifact_namespace_pair_access_observed_for_test
-    (WylFactArtifactPairAccessForTest access, gint expected_access_mode);
+  (WylFactArtifactPairAccessForTest access, gint expected_access_mode);
 #endif
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
 void wyl_fact_artifact_namespace_set_test_fault
-    (WylFactArtifactNamespaceTestFault fault);
+  (WylFactArtifactNamespaceTestFault fault);
 gboolean wyl_fact_artifact_namespace_test_fault_was_consumed
-    (WylFactArtifactNamespaceTestFault fault);
+  (WylFactArtifactNamespaceTestFault fault);
 
 /* Imports a CLOEXEC duplicate of the caller-held canonical facts.duckdb
  * identity.  The caller retains ownership of main_file; construction checks
  * the held fd, declared identity, and dirfd-relative fixed name before and
  * after publishing the namespace. */
 wyrelog_error_t wyl_fact_artifact_namespace_open
-    (const WylFactGraphDirectory * directory,
+  (const WylFactGraphDirectory * directory,
     const WylFactGraphRegularFile * main_file,
     WylFactArtifactNamespace ** out_namespace);
 void wyl_fact_artifact_namespace_free (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_revalidate
-    (WylFactArtifactNamespace * namespace_);
+  (WylFactArtifactNamespace * namespace_);
 /* Cooperative graph-directory contract: the held directory remains owned by
  * the effective UID with exact mode 0700, while facts.duckdb.lock remains a
  * same-owner regular file with exact mode 0600 and nlink 1.  Only an exclusive
@@ -155,11 +155,11 @@ wyrelog_error_t wyl_fact_artifact_namespace_revalidate
  * fd will prolong the lock.  Fork after multithreading is not a supported
  * synchronization guarantee. */
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_reader_guard
-    (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
+  (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
-    (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
+  (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_revalidate
-    (WylFactArtifactMutationLease *);
+  (WylFactArtifactMutationLease *);
 void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
 /* Binds the already-imported canonical facts.duckdb for validate-only I/O.
  * This is a reader-guard-only capability: it opens the existing fixed name
@@ -169,33 +169,33 @@ void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
  * reads, seeks, and close.  Validation failure terminally revokes the binding
  * without closing a possibly reused foreign descriptor. */
 wyrelog_error_t wyl_fact_artifact_reader_guard_open_main_binding
-    (WylFactArtifactMutationLease *,
+  (WylFactArtifactMutationLease *,
     WylFactArtifactReaderMainBinding ** out_binding, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_reader_main_binding_revalidate
-    (WylFactArtifactReaderMainBinding *);
+  (WylFactArtifactReaderMainBinding *);
 wyrelog_error_t wyl_fact_artifact_reader_main_binding_revalidate_fd
-    (WylFactArtifactReaderMainBinding *, gint working_fd);
+  (WylFactArtifactReaderMainBinding *, gint working_fd);
 /* On success, closes and sets *working_fd to -1, consuming the binding.  On
  * validation failure it leaves *working_fd untouched because it may already
  * name a foreign descriptor. */
 wyrelog_error_t wyl_fact_artifact_reader_main_binding_close
-    (WylFactArtifactReaderMainBinding *, gint * working_fd);
+  (WylFactArtifactReaderMainBinding *, gint * working_fd);
 void wyl_fact_artifact_reader_main_binding_free
-    (WylFactArtifactReaderMainBinding *);
+  (WylFactArtifactReaderMainBinding *);
 /* Binds the existing fixed live WAL only for validate-only reader I/O.  It
  * accepts a reader guard, never creates a sidecar, and returns a pinned
  * O_RDONLY/CLOEXEC/NOFOLLOW/NONBLOCK descriptor for facts.duckdb.wal. */
 wyrelog_error_t wyl_fact_artifact_reader_guard_open_existing_wal_binding
-    (WylFactArtifactMutationLease *,
+  (WylFactArtifactMutationLease *,
     WylFactArtifactReaderWalBinding ** out_binding, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_reader_wal_binding_revalidate
-    (WylFactArtifactReaderWalBinding *);
+  (WylFactArtifactReaderWalBinding *);
 wyrelog_error_t wyl_fact_artifact_reader_wal_binding_revalidate_fd
-    (WylFactArtifactReaderWalBinding *, gint working_fd);
+  (WylFactArtifactReaderWalBinding *, gint working_fd);
 wyrelog_error_t wyl_fact_artifact_reader_wal_binding_close
-    (WylFactArtifactReaderWalBinding *, gint * working_fd);
+  (WylFactArtifactReaderWalBinding *, gint * working_fd);
 void wyl_fact_artifact_reader_wal_binding_free
-    (WylFactArtifactReaderWalBinding *);
+  (WylFactArtifactReaderWalBinding *);
 /* Binds the already-imported canonical facts.duckdb for in-place DuckDB I/O.
  * This is deliberately not a pathname capability: it requires an exclusive
  * lease, opens only the existing fixed name with O_RDWR/CLOEXEC/NOFOLLOW, and
@@ -208,33 +208,33 @@ void wyl_fact_artifact_reader_wal_binding_free
  * binding, but never closes a possibly reused foreign descriptor.  As with #612, an
  * uncooperative same-UID writer can still race the final check and syscall. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_main_binding
-    (WylFactArtifactMutationLease *, WylFactArtifactMainBinding ** out_binding,
+  (WylFactArtifactMutationLease *, WylFactArtifactMainBinding ** out_binding,
     gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_main_binding_revalidate
-    (WylFactArtifactMainBinding *);
+  (WylFactArtifactMainBinding *);
 wyrelog_error_t wyl_fact_artifact_main_binding_revalidate_fd
-    (WylFactArtifactMainBinding *, gint working_fd);
+  (WylFactArtifactMainBinding *, gint working_fd);
 /* On success, closes and sets *working_fd to -1, then terminally consumes the
  * binding.  On validation failure it leaves *working_fd untouched because its
  * number could already refer to a foreign descriptor. */
 wyrelog_error_t wyl_fact_artifact_main_binding_close
-    (WylFactArtifactMainBinding *, gint * working_fd);
+  (WylFactArtifactMainBinding *, gint * working_fd);
 void wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *);
 /* Generic fixed-sidecar mutation is retired: WAL/checkpoint/recovery creation
  * and writable opens require SidecarBinding. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
-    (WylFactArtifactMutationLease *, WylFactArtifactName name,
+  (WylFactArtifactMutationLease *, WylFactArtifactName name,
     gboolean create, gboolean writable, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp
-    (WylFactArtifactMutationLease *, const gchar * token,
+  (WylFactArtifactMutationLease *, const gchar * token,
     gboolean create, gboolean writable, gint * out_fd);
 /* Binds a fixed DuckDB sidecar to an exclusive #612 mutation lease.  Only WAL,
- * checkpoint, and recovery sidecars are accepted; main and lock are never
- * replaceable.  This authority serializes cooperative writers; portable POSIX
- * cannot compare-and-swap a same-UID writer that bypasses the held lease.
- * The binding owns a lease reference and the caller owns both it and out_fd. */
+* checkpoint, and recovery sidecars are accepted; main and lock are never
+* replaceable.  This authority serializes cooperative writers; portable POSIX
+* cannot compare-and-swap a same-UID writer that bypasses the held lease.
+* The binding owns a lease reference and the caller owns both it and out_fd. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
-    (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
+  (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
     gboolean create, gboolean writable,
     WylFactArtifactSidecarBinding ** out_binding, gint * out_fd);
 /* Reopens an already-existing fixed sidecar for DuckDB recovery.  This is a
@@ -251,31 +251,31 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * mutation contract, this does not claim to close POSIX's final-check to
  * syscall window against an uncooperative same-UID participant. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
-    (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
+  (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
     gboolean writable, WylFactArtifactSidecarBinding ** out_binding,
     gint * out_fd);
 /* Call at both sides of a DuckDB I/O boundary.  It rechecks the exclusive
  * lease plus imported main, graph directory, lock, named sidecar, and pinned
  * descriptor identities without granting any additional pathname authority. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate
-    (WylFactArtifactSidecarBinding *);
+  (WylFactArtifactSidecarBinding *);
 /* Revalidates both held sidecar authority and the caller's actual working
  * descriptor.  Descriptor-number reuse therefore fails closed rather than
  * validating only the sidecar pin. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate_fd
-    (WylFactArtifactSidecarBinding *, gint working_fd);
+  (WylFactArtifactSidecarBinding *, gint working_fd);
 /* On success, closes and sets *working_fd to -1, consuming only the issued
  * I/O descriptor while retaining lifecycle authority for retirement.  On
  * validation failure it revokes the whole binding but leaves *working_fd
  * untouched because its number could already refer to a foreign descriptor. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_close
-    (WylFactArtifactSidecarBinding *, gint * working_fd);
+  (WylFactArtifactSidecarBinding *, gint * working_fd);
 /* Publishes the exact bound sidecar under a distinct absent fixed sidecar
  * name, using a platform no-replace primitive.  A live issued descriptor is
  * rejected; raw close/reuse revokes the binding without renaming.  After the rename linearizes,
  * the binding identifies destination even if durability reporting fails. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
-    (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
+  (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
 /* Atomically replaces an existing bound WAL with an exact bound checkpoint or
  * recovery artifact.  Both bindings must belong to the same exclusive lease
  * and both issued working descriptors must have been consumed by checked
@@ -287,7 +287,7 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
  * retry, including when a rename error cannot be classified as the exact pre-
  * or post-replacement namespace state. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_replace_existing_wal
-    (WylFactArtifactSidecarBinding * source,
+  (WylFactArtifactSidecarBinding * source,
     WylFactArtifactSidecarBinding * destination,
     WylFactArtifactSidecarReplaceResult * out_result);
 /* Retires only the exact currently-bound WAL/checkpoint/recovery artifact.
@@ -303,7 +303,7 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_replace_existing_wal
  * rejected without unlinking, while any observed external removal is terminal
  * reconciliation rather than a successful cleanup claim. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_retire
-    (WylFactArtifactSidecarBinding *, WylFactArtifactSidecarRetireResult *);
+  (WylFactArtifactSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
 /* Atomically replaces the exact bound fixed sidecar with the exact owner
  * temporary artifact.  Both bindings must retain the same exclusive lease,
@@ -311,133 +311,133 @@ void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
  * after rename linearizes, source becomes terminal and destination identifies
  * the replacement even when directory durability reporting fails. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_replace_sidecar
-    (WylFactArtifactTempBinding *, WylFactArtifactSidecarBinding *);
+  (WylFactArtifactTempBinding *, WylFactArtifactSidecarBinding *);
 /* Binds tmp-<token> to the exact regular file opened through an existing
  * lease.  The binding retains the lease until _free, so its directory/lock
  * authority cannot disappear while later lifecycle operations use it.  The
  * caller owns both the binding and out_fd. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp_binding
-    (WylFactArtifactMutationLease *, const gchar * token,
+  (WylFactArtifactMutationLease *, const gchar * token,
     gboolean create, gboolean writable,
     WylFactArtifactTempBinding ** out_binding, gint * out_fd);
 /* Reopens only the file identity captured by an owner binding.  A
  * non-creator binding grants only the fd returned at construction time: it
  * cannot reopen, mutate, rename, unlink, or export recovery evidence. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_open
-    (WylFactArtifactTempBinding *, gboolean writable, gint * out_fd);
+  (WylFactArtifactTempBinding *, gboolean writable, gint * out_fd);
 /* An owner binding consumes its exact temporary artifact.  A successful
  * unlink makes the binding terminal even when the subsequent durability or
  * post-mutation check reports an error. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_unlink
-    (WylFactArtifactTempBinding *);
+  (WylFactArtifactTempBinding *);
 /* Renames an owner binding only within its held namespace.  The destination
  * must be a distinct valid temporary token and must not exist.  After a
  * successful rename the binding names the destination even if durability or
  * post-mutation validation reports an error. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_rename
-    (WylFactArtifactTempBinding *, const gchar * destination_token);
+  (WylFactArtifactTempBinding *, const gchar * destination_token);
 void wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *);
 /* Recovery evidence is an immutable, serializable identity record issued from
  * a live owner binding.  It is not a pathname authority: recovery accepts it
  * only with a matching exclusive lease and matching on-disk identity. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_export_recovery_evidence
-    (WylFactArtifactTempBinding *, WylFactArtifactTempRecoveryEvidence **);
+  (WylFactArtifactTempBinding *, WylFactArtifactTempRecoveryEvidence **);
 void wyl_fact_artifact_temp_recovery_evidence_free
-    (WylFactArtifactTempRecoveryEvidence *);
+  (WylFactArtifactTempRecoveryEvidence *);
 wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_encode
-    (const WylFactArtifactTempRecoveryEvidence *, GBytes ** out_bytes);
+  (const WylFactArtifactTempRecoveryEvidence *, GBytes ** out_bytes);
 wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_decode
-    (GBytes *, WylFactArtifactTempRecoveryEvidence **);
+  (GBytes *, WylFactArtifactTempRecoveryEvidence **);
 /* Missing artifacts are idempotently recovered.  Existing artifacts must
  * match every evidence identity field before dirfd-relative unlink. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_recover_temp
-    (WylFactArtifactMutationLease *,
+  (WylFactArtifactMutationLease *,
     const WylFactArtifactTempRecoveryEvidence *);
 /* Retired generic pathname mutators; valid fixed artifact names fail closed.
  * TempBinding and SidecarBinding carry the only mutation authority. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
-    (WylFactArtifactMutationLease *, WylFactArtifactName name);
+  (WylFactArtifactMutationLease *, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_rename
-    (WylFactArtifactMutationLease *, WylFactArtifactName source,
+  (WylFactArtifactMutationLease *, WylFactArtifactName source,
     WylFactArtifactName destination);
 wyrelog_error_t wyl_fact_artifact_namespace_open_file
-    (WylFactArtifactNamespace * namespace_, WylFactArtifactName name,
+  (WylFactArtifactNamespace * namespace_, WylFactArtifactName name,
     gboolean create, gboolean writable, gint * out_fd);
 /* Deprecated mutation entry points are retained only to fail closed with
  * WYRELOG_E_POLICY; use the exclusive mutation-lease variants above. */
 wyrelog_error_t wyl_fact_artifact_namespace_unlink
-    (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
+  (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_namespace_sync
-    (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
+  (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
 /* Retained for source compatibility only; it always fails closed.  Raw flock
  * descriptors cannot carry the namespace lifetime/identity invariants. */
 wyrelog_error_t wyl_fact_artifact_namespace_lock
-    (WylFactArtifactNamespace * namespace_, gboolean exclusive, gint * out_fd);
+  (WylFactArtifactNamespace * namespace_, gboolean exclusive, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_namespace_open_temp
-    (WylFactArtifactNamespace * namespace_, const gchar * token,
+  (WylFactArtifactNamespace * namespace_, const gchar * token,
     gboolean create, gboolean writable, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_namespace_rename
-    (WylFactArtifactNamespace * namespace_, WylFactArtifactName source,
+  (WylFactArtifactNamespace * namespace_, WylFactArtifactName source,
     WylFactArtifactName destination);
 wyrelog_error_t wyl_fact_artifact_namespace_sync_directory
-    (WylFactArtifactNamespace * namespace_);
+  (WylFactArtifactNamespace * namespace_);
 
 /* These APIs deliberately expose neither the physical root spelling nor a
  * directory descriptor.  A root cannot be reopened or adopted after its live
  * authority is released.  The exclusive lease, imported main binding, graph
  * directory, and lock are revalidated around every mutation. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create
-    (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **);
+  (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **);
 /* On a post-mkdir failure before file identity is observable, returns POLICY
  * and required orphan evidence.  Evidence is terminal telemetry only: there
  * is intentionally no reopen/adopt/delete API for it. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_with_orphan_evidence
-    (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **,
+  (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **,
     WylFactDuckdbTempOrphanEvidence **);
 void wyl_fact_duckdb_temp_orphan_evidence_free
-    (WylFactDuckdbTempOrphanEvidence *);
+  (WylFactDuckdbTempOrphanEvidence *);
 gchar *wyl_fact_duckdb_temp_orphan_evidence_dup_logical_name
-    (const WylFactDuckdbTempOrphanEvidence *);
+  (const WylFactDuckdbTempOrphanEvidence *);
 /* A canonical virtual spelling identifies this live authority to #596.  It
  * is not a host path and cannot be converted into a dirfd/HANDLE. */
 gchar *wyl_fact_duckdb_temp_root_dup_logical_name (WylFactDuckdbTempRoot *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_child_exists
-    (WylFactDuckdbTempRoot *, const gchar * duckdb_name, gboolean * out_exists);
+  (WylFactDuckdbTempRoot *, const gchar * duckdb_name, gboolean * out_exists);
 /* Calls visitor only for a complete, identity-verified snapshot.  The name is
- * DuckDB's logical child spelling, never a host path or reusable authority. */
+* DuckDB's logical child spelling, never a host path or reusable authority. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_foreach_child
-    (WylFactDuckdbTempRoot *, WylFactDuckdbTempChildVisitor, gpointer);
+  (WylFactDuckdbTempRoot *, WylFactDuckdbTempChildVisitor, gpointer);
 gchar *wyl_fact_duckdb_temp_child_dup_logical_name (WylFactDuckdbTempChild *);
 void wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_child
-    (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
+  (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
     WylFactDuckdbTempChild **, gint * out_fd);
 /* The evidence output is required because a child may have been created but
  * not identity-bound when this returns POLICY. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
-    (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
+  (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
     WylFactDuckdbTempChild **, gint * out_fd,
     WylFactDuckdbTempOrphanEvidence **);
 wyrelog_error_t wyl_fact_duckdb_temp_child_open
-    (WylFactDuckdbTempChild *, gboolean writable, gint * out_fd);
+  (WylFactDuckdbTempChild *, gboolean writable, gint * out_fd);
 /* The DuckDB adapter must use this identity-bound provider, rather than the
  * compatibility raw child-open APIs above.  It proves the actual issued
  * descriptor at every I/O boundary and never exports a host pathname. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_child_binding
-    (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
+  (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
     WylFactDuckdbTempChild **, WylFactDuckdbTempChildBinding **, gint * out_fd,
     WylFactDuckdbTempOrphanEvidence **);
 wyrelog_error_t wyl_fact_duckdb_temp_child_open_binding
-    (WylFactDuckdbTempChild *, gboolean writable,
+  (WylFactDuckdbTempChild *, gboolean writable,
     WylFactDuckdbTempChildBinding **, gint * out_fd);
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate
-    (WylFactDuckdbTempChildBinding *);
+  (WylFactDuckdbTempChildBinding *);
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate_fd
-    (WylFactDuckdbTempChildBinding *, gint working_fd);
+  (WylFactDuckdbTempChildBinding *, gint working_fd);
 /* On success consumes only the issued working descriptor.  A validation
  * failure revokes but never closes a potentially reused foreign descriptor. */
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_close
-    (WylFactDuckdbTempChildBinding *, gint * working_fd);
+  (WylFactDuckdbTempChildBinding *, gint * working_fd);
 /* Free never closes a caller-owned issued descriptor.  Freeing while it is
  * live leaves an irreversible child-retirement barrier, because its eventual
  * external close cannot be proven through this provider. */
@@ -445,11 +445,11 @@ void wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *);
 /* On success, returns owned WylFactDuckdbTempChild entries only.  Any
  * unbound/foreign entry makes enumeration fail with no partial array. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_list_children
-    (WylFactDuckdbTempRoot *, GPtrArray ** out_children);
+  (WylFactDuckdbTempRoot *, GPtrArray ** out_children);
 wyrelog_error_t wyl_fact_duckdb_temp_child_retire
-    (WylFactDuckdbTempChild *, WylFactDuckdbTempRetireResult *);
+  (WylFactDuckdbTempChild *, WylFactDuckdbTempRetireResult *);
 void wyl_fact_duckdb_temp_child_free (WylFactDuckdbTempChild *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_retire
-    (WylFactDuckdbTempRoot *, WylFactDuckdbTempRetireResult *);
+  (WylFactDuckdbTempRoot *, WylFactDuckdbTempRetireResult *);
 
 G_END_DECLS
