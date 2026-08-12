@@ -19,7 +19,45 @@ typedef enum
   WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD
 } WylFactArtifactIoSessionKind;
 
-/* POSIX constructor helpers */
+/* High-level platform-neutral openers */
+
+wyrelog_error_t wyl_fact_artifact_io_session_open_writer_main (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactIoSession **out_session);
+
+wyrelog_error_t wyl_fact_artifact_io_session_open_reader_main (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactIoSession **out_session);
+
+wyrelog_error_t wyl_fact_artifact_io_session_open_sidecar (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactName artifact,
+  gboolean create_if_missing,
+  gboolean writable,
+  WylFactArtifactIoSession **out_session);
+
+wyrelog_error_t wyl_fact_artifact_io_session_open_reader_wal (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactIoSession **out_session);
+
+wyrelog_error_t wyl_fact_artifact_io_session_create_temp_root (
+  WylFactArtifactMutationLease *lease,
+  WylFactDuckdbTempRoot **out_root);
+
+wyrelog_error_t wyl_fact_artifact_io_session_create_temp_child (
+  WylFactDuckdbTempRoot *root,
+  const gchar *name,
+  gboolean writable,
+  WylFactDuckdbTempChild **out_child,
+  WylFactArtifactIoSession **out_session,
+  WylFactDuckdbTempOrphanEvidence **out_evidence);
+
+wyrelog_error_t wyl_fact_artifact_io_session_open_existing_temp_child (
+  WylFactDuckdbTempChild *child,
+  gboolean writable,
+  WylFactArtifactIoSession **out_session);
+
+/* POSIX low-level constructor helpers */
 #ifndef G_OS_WIN32
 wyrelog_error_t wyl_fact_artifact_io_session_new_writer_main (
   WylFactArtifactMainBinding *binding,
@@ -45,6 +83,10 @@ wyrelog_error_t wyl_fact_artifact_io_session_new_temp_child (
   WylFactDuckdbTempChildBinding *binding,
   int fd,
   WylFactArtifactIoSession **out_session);
+
+WylFactArtifactSidecarBinding *
+wyl_fact_artifact_io_session_detach_writer_sidecar (
+  WylFactArtifactIoSession *session);
 #endif /* !G_OS_WIN32 */
 
 /* Platform-neutral bounded I/O session API */
@@ -97,12 +139,9 @@ void wyl_fact_artifact_io_session_free (
 void wyl_fact_artifact_io_session_abort (
   WylFactArtifactIoSession *session);
 
-#ifndef G_OS_WIN32
-/* Detach sidecar binding from session for atomic replacement (POSIX) */
-WylFactArtifactSidecarBinding *
-wyl_fact_artifact_io_session_detach_writer_sidecar (
-  WylFactArtifactIoSession *session);
-#endif
+wyrelog_error_t wyl_fact_artifact_io_session_version_tag (
+  WylFactArtifactIoSession *session,
+  gchar **out_tag);
 
 G_END_DECLS
 

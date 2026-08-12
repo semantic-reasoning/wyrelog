@@ -37,6 +37,318 @@ win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
 }
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
+wyrelog_error_t
+wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
+    WylFactArtifactName a, gboolean c, gboolean w, gint *out_fd)
+{
+  (void) n;
+  (void) a;
+  (void) c;
+  (void) w;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
+    WylFactArtifactName a, gboolean c, gboolean w, gint *out_fd)
+{
+  (void) l;
+  (void) a;
+  (void) c;
+  (void) w;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
+    const gchar *n, gboolean c, gboolean w, gint *out_fd)
+{
+  (void) l;
+  (void) n;
+  (void) c;
+  (void) w;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_temp_binding (
+  WylFactArtifactMutationLease *l, const gchar *n, gboolean c, gboolean w,
+  WylFactArtifactTempBinding **b, gint *out_fd)
+{
+  (void) l;
+  (void) n;
+  (void) c;
+  (void) w;
+  if (b != NULL)
+    *b = NULL;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *b)
+{
+  (void) b;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *b,
+    const gchar *n)
+{
+  (void) b;
+  (void) n;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_export_recovery_evidence (
+  WylFactArtifactTempBinding *b, WylFactArtifactTempRecoveryEvidence **e)
+{
+  (void) b;
+  if (e != NULL)
+    *e = NULL;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
+    const WylFactArtifactTempRecoveryEvidence *e)
+{
+  (void) l;
+  (void) e;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
+    const WylFactGraphRegularFile *m, WylFactArtifactNamespace **n)
+{
+  (void) d;
+  (void) m;
+  if (n != NULL)
+    *n = NULL;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_revalidate (WylFactArtifactMainBinding *b)
+{
+  (void) b;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_main_binding_revalidate (
+  WylFactArtifactReaderMainBinding *b)
+{
+  (void) b;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_wal_binding_revalidate (
+  WylFactArtifactReaderWalBinding *b)
+{
+  (void) b;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding *b,
+    WylFactArtifactSidecarRetireResult *r)
+{
+  (void) b;
+  if (r != NULL)
+    *r = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (
+  WylFactArtifactMutationLease *l, WylFactArtifactName a, gboolean w,
+  WylFactArtifactSidecarBinding **b, gint *out_fd)
+{
+  (void) l;
+  (void) a;
+  (void) w;
+  if (b != NULL)
+    *b = NULL;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_revalidate_fd (
+  WylFactArtifactSidecarBinding *b, gint fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding *b,
+    gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_main_binding (
+  WylFactArtifactMutationLease *l, WylFactArtifactMainBinding **b,
+  gint *out_fd)
+{
+  (void) l;
+  if (b != NULL)
+    *b = NULL;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_revalidate_fd (WylFactArtifactMainBinding *b,
+    gint fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_close (WylFactArtifactMainBinding *b, gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_guard_open_main_binding (
+  WylFactArtifactMutationLease *l, WylFactArtifactReaderMainBinding **b,
+  gint *out_fd)
+{
+  (void) l;
+  if (b != NULL)
+    *b = NULL;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_main_binding_revalidate_fd (
+  WylFactArtifactReaderMainBinding *b, gint fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_main_binding_close (
+  WylFactArtifactReaderMainBinding *b, gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_guard_open_existing_wal_binding (
+  WylFactArtifactMutationLease *l, WylFactArtifactReaderWalBinding **b,
+  gint *out_fd)
+{
+  (void) l;
+  if (b != NULL)
+    *b = NULL;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_wal_binding_revalidate_fd (
+  WylFactArtifactReaderWalBinding *b, gint fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_reader_wal_binding_close (
+  WylFactArtifactReaderWalBinding *b, gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return WYRELOG_E_POLICY;
+}
+
+void
+wyl_fact_artifact_reader_wal_binding_free (WylFactArtifactReaderWalBinding *b)
+{
+  (void) b;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_replace_existing_wal (
+  WylFactArtifactSidecarBinding *s, WylFactArtifactSidecarBinding *d,
+  WylFactArtifactSidecarReplaceResult *r)
+{
+  (void) s;
+  (void) d;
+  if (r != NULL)
+    *r = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_acquire_mutation_lease (
+  WylFactArtifactNamespace *n, WylFactArtifactMutationLease **l)
+{
+  (void) n;
+  if (l != NULL)
+    *l = NULL;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *r,
+    const gchar *n, gboolean *e)
+{
+  (void) r;
+  (void) n;
+  if (e != NULL)
+    *e = FALSE;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_create_with_orphan_evidence (
+  WylFactArtifactMutationLease *l, WylFactDuckdbTempRoot **r,
+  WylFactDuckdbTempOrphanEvidence **e)
+{
+  (void) l;
+  if (r == NULL)
+    return WYRELOG_E_INVALID;
+  *r = NULL;
+  if (e != NULL)
+    *e = NULL;
+  return WYRELOG_E_POLICY;
+}
+
 struct WylFactArtifactWinNamespace
 {
   WylFactArtifactWinLocator *locator;

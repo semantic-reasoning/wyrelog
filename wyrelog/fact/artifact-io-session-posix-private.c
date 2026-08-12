@@ -57,9 +57,11 @@ io_session_close_binding (WylFactArtifactIoSession *session)
   if (session == NULL || session->fd < 0)
     return WYRELOG_E_OK;
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   if (wyl_secure_duckdb_filesystem_take_test_fault (
         WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION))
     (void) close (session->fd);
+#endif
 
   int fd = session->fd;
   wyrelog_error_t rc = WYRELOG_E_POLICY;
@@ -423,6 +425,190 @@ wyl_fact_artifact_io_session_detach_writer_sidecar (
   WylFactArtifactSidecarBinding *ret = session->binding.writer_sidecar;
   session->binding.writer_sidecar = NULL;
   return ret;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_open_writer_main (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactIoSession **out_session)
+{
+  WylFactArtifactMainBinding *binding = NULL;
+  int fd = -1;
+  wyrelog_error_t rc;
+
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (lease == NULL || out_session == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_mutation_lease_open_main_binding (lease, &binding, &fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_artifact_io_session_new_writer_main (binding, fd, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_open_reader_main (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactIoSession **out_session)
+{
+  WylFactArtifactReaderMainBinding *binding = NULL;
+  int fd = -1;
+  wyrelog_error_t rc;
+
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (lease == NULL || out_session == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_reader_guard_open_main_binding (lease, &binding, &fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_artifact_io_session_new_reader_main (binding, fd, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_open_sidecar (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactName artifact,
+  gboolean create_if_missing,
+  gboolean writable,
+  WylFactArtifactIoSession **out_session)
+{
+  WylFactArtifactSidecarBinding *binding = NULL;
+  int fd = -1;
+  wyrelog_error_t rc;
+
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (lease == NULL || out_session == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (!create_if_missing)
+    rc = wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease, artifact, writable, &binding, &fd);
+  else
+    rc = wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease, artifact, create_if_missing, writable, &binding, &fd);
+
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_artifact_io_session_new_writer_sidecar (binding, fd, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_open_reader_wal (
+  WylFactArtifactMutationLease *lease,
+  WylFactArtifactIoSession **out_session)
+{
+  WylFactArtifactReaderWalBinding *binding = NULL;
+  int fd = -1;
+  wyrelog_error_t rc;
+
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (lease == NULL || out_session == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease, &binding, &fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_artifact_io_session_new_reader_wal (binding, fd, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_create_temp_root (
+  WylFactArtifactMutationLease *lease,
+  WylFactDuckdbTempRoot **out_root)
+{
+  return wyl_fact_duckdb_temp_root_create (lease, out_root);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_create_temp_child (
+  WylFactDuckdbTempRoot *root,
+  const gchar *name,
+  gboolean writable,
+  WylFactDuckdbTempChild **out_child,
+  WylFactArtifactIoSession **out_session,
+  WylFactDuckdbTempOrphanEvidence **out_evidence)
+{
+  WylFactDuckdbTempChildBinding *binding = NULL;
+  int fd = -1;
+  wyrelog_error_t rc;
+
+  if (out_child != NULL)
+    *out_child = NULL;
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+
+  if (root == NULL || name == NULL || out_session == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_duckdb_temp_root_create_child_binding (root, name, out_child, &binding, &fd, out_evidence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_artifact_io_session_new_temp_child (binding, fd, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_open_existing_temp_child (
+  WylFactDuckdbTempChild *child,
+  gboolean writable,
+  WylFactArtifactIoSession **out_session)
+{
+  WylFactDuckdbTempChildBinding *binding = NULL;
+  int fd = -1;
+  wyrelog_error_t rc;
+
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (child == NULL || out_session == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_duckdb_temp_child_open_binding (child, writable, &binding, &fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_artifact_io_session_new_temp_child (binding, fd, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_io_session_version_tag (
+  WylFactArtifactIoSession *session,
+  gchar **out_tag)
+{
+  guint64 size = 0;
+  wyrelog_error_t rc;
+
+  if (out_tag != NULL)
+    *out_tag = NULL;
+  if (session == NULL || session->fd < 0 || out_tag == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = io_session_revalidate_unlocked (session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  struct stat st;
+  if (fstat (session->fd, &st) != 0)
+    return WYRELOG_E_IO;
+
+  rc = io_session_revalidate_unlocked (session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  size = (guint64) st.st_size;
+  *out_tag = g_strdup_printf ("posix:%llu:%llu:%" G_GUINT64_FORMAT,
+          (unsigned long long) st.st_dev,
+          (unsigned long long) st.st_ino,
+          size);
+  return *out_tag != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
 }
 
 #endif /* !G_OS_WIN32 */

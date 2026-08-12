@@ -1188,7 +1188,7 @@ test('fact-graph-locator', test_fact_graph_locator)
 test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   'test-fact-artifact-namespace.c',
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep],
+  dependencies : [wyrelog_handle_test_seams_dep],
 )
 test('fact-artifact-namespace', test_fact_artifact_namespace)
 if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
