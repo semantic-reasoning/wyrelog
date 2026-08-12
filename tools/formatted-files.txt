@@ -67,9 +67,12 @@ wyrelog/daemon/signals.c
 wyrelog/daemon/signals.h
 wyrelog/error.h
 wyrelog/fact/compound-private.h
+wyrelog/fact/graph-artifact-windows-handle-private.c
+wyrelog/fact/graph-artifact-windows-handle-private.h
 wyrelog/fact/graph-artifact-windows-locator-private.c
 wyrelog/fact/graph-artifact-windows-locator-private.h
 wyrelog/fact/graph-artifact-windows-namespace-private.c
+wyrelog/fact/graph-artifact-windows-namespace-private.h
 wyrelog/fact/graph-provisioned-pair-internal.h
 wyrelog/fact/provisioning-construct-private.c
 wyrelog/fact/provisioning-construct-private.h
