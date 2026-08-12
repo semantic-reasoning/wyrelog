@@ -133,7 +133,7 @@ policy_get_audit_event_for_request (WylHandle *handle, const gchar *request_id,
   sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
 
   if (sqlite3_prepare_v2 (db, "SELECT id, created_at_us FROM audit_events "
-          "WHERE request_id = ?;", -1, &stmt, NULL) != SQLITE_OK
+      "WHERE request_id = ?;", -1, &stmt, NULL) != SQLITE_OK
       || sqlite3_bind_text (stmt, 1, request_id, -1, SQLITE_TRANSIENT)
       != SQLITE_OK) {
     sqlite3_finalize (stmt);
@@ -158,7 +158,7 @@ policy_get_audit_event_for_subject_action (WylHandle *handle,
   sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
 
   if (sqlite3_prepare_v2 (db, "SELECT id, created_at_us FROM audit_events "
-          "WHERE subject_id = ? AND action = ?;", -1, &stmt, NULL)
+      "WHERE subject_id = ? AND action = ?;", -1, &stmt, NULL)
       != SQLITE_OK
       || sqlite3_bind_text (stmt, 1, subject, -1, SQLITE_TRANSIENT) != SQLITE_OK
       || sqlite3_bind_text (stmt, 2, action, -1, SQLITE_TRANSIENT)
@@ -265,19 +265,19 @@ check_projected_lifecycle_event (WylHandle *handle, const gchar *request_id,
   gboolean contains = FALSE;
   g_autofree gchar *id = NULL;
   if (!policy_get_audit_event_for_request (handle, request_id, &id,
-          &created_at_us)
+      &created_at_us)
       || !runtime_event_matches (handle, id, "admin", action, resource,
-          request_id)
+      request_id)
       || contains_audit_event_fact (handle, id, created_at_us, "allow",
-          &contains) != WYRELOG_E_OK || !contains
+      &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_subject", id,
-          "admin", &contains) != WYRELOG_E_OK || !contains
+      "admin", &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_action", id,
-          action, &contains) != WYRELOG_E_OK || !contains
+      action, &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_resource", id,
-          resource, &contains) != WYRELOG_E_OK || !contains
+      resource, &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_request_id", id,
-          request_id, &contains) != WYRELOG_E_OK || !contains)
+      request_id, &contains) != WYRELOG_E_OK || !contains)
     return FALSE;
   *out_id = g_steal_pointer (&id);
   return TRUE;
@@ -327,12 +327,12 @@ verify_reconciled_audit_projection (WylHandle *handle, gpointer data)
   gint64 attempts = -1;
   gint64 count = -1;
   if (!policy_get_audit_intention_state (handle, verify->expected_id, &state,
-          &attempts) || g_strcmp0 (state, "committed") != 0
+      &attempts) || g_strcmp0 (state, "committed") != 0
       || attempts != verify->expected_attempt_count
       || !runtime_count_audit_rows (handle, verify->expected_id, &count)
       || count != 1
       || !check_projected_lifecycle_event (handle, verify->request_id,
-          verify->action, verify->resource, &projected_id)
+      verify->action, verify->resource, &projected_id)
       || g_strcmp0 (projected_id, verify->expected_id) != 0)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
@@ -346,13 +346,13 @@ verify_reconciled_audit_fact (WylHandle *handle, gpointer data)
   gint64 count = -1;
 
   if (contains_audit_event_fact (handle, verify->id, verify->created_at_us,
-          verify->decision, &contains) != WYRELOG_E_OK || !contains
+      verify->decision, &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_subject",
-          verify->id, verify->subject, &contains) != WYRELOG_E_OK || !contains
+      verify->id, verify->subject, &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_action",
-          verify->id, verify->action, &contains) != WYRELOG_E_OK || !contains
+      verify->id, verify->action, &contains) != WYRELOG_E_OK || !contains
       || contains_audit_event_attr_fact (handle, "audit_event_resource",
-          verify->id, verify->resource, &contains) != WYRELOG_E_OK || !contains)
+      verify->id, verify->resource, &contains) != WYRELOG_E_OK || !contains)
     return WYRELOG_E_POLICY;
   const gchar *relations[] = {
     "audit_event_deny_reason",
@@ -368,7 +368,7 @@ verify_reconciled_audit_fact (WylHandle *handle, gpointer data)
     if (values[i] == NULL)
       continue;
     if (contains_audit_event_attr_fact (handle, relations[i], verify->id,
-            values[i], &contains) != WYRELOG_E_OK || !contains)
+        values[i], &contains) != WYRELOG_E_OK || !contains)
       return WYRELOG_E_POLICY;
   }
   if (!runtime_count_audit_rows (handle, verify->id, &count)
@@ -384,7 +384,7 @@ verify_reconciled_symbol_row (WylHandle *handle, gpointer data)
   gboolean contains = FALSE;
 
   if (contains_audit_event_attr_fact (handle, verify->relation, verify->id,
-          verify->value, &contains) != WYRELOG_E_OK
+      verify->value, &contains) != WYRELOG_E_OK
       || contains != verify->expected)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
@@ -404,19 +404,19 @@ poisoned_audit_engine_access_is_closed (WylHandle *handle)
       || wyl_handle_get_delta_engine (handle) != NULL || session == NULL)
     return FALSE;
   if (wyl_engine_session_intern_symbol (session, "session-poison-probe",
-          &symbol_id) != WYRELOG_E_INVALID
+      &symbol_id) != WYRELOG_E_INVALID
       || wyl_engine_session_contains (session, "session_active", row, 1,
-          &contains) != WYRELOG_E_INVALID)
+      &contains) != WYRELOG_E_INVALID)
     return FALSE;
   g_clear_pointer (&session, wyl_engine_session_release);
 
   return wyl_handle_intern_engine_symbol (handle, "poison-probe", &symbol_id)
-      == WYRELOG_E_INVALID
-      && wyl_handle_engine_contains (handle, "session_active", row, 1,
-      &contains) == WYRELOG_E_INVALID
-      && wyl_handle_load_policy_store_audit_events (handle)
-      == WYRELOG_E_INVALID
-      && wyl_handle_reload_engine_pair (handle) == WYRELOG_E_INVALID;
+         == WYRELOG_E_INVALID
+         && wyl_handle_engine_contains (handle, "session_active", row, 1,
+             &contains) == WYRELOG_E_INVALID
+         && wyl_handle_load_policy_store_audit_events (handle)
+         == WYRELOG_E_INVALID
+         && wyl_handle_reload_engine_pair (handle) == WYRELOG_E_INVALID;
 }
 
 static gint
@@ -430,7 +430,7 @@ check_service_lifecycle_audit_reconciliation (void)
   guint8 key_bytes[32] = { 0 };
   memset (key_bytes, 0x42, sizeof key_bytes);
   if (!g_file_set_contents (key, (const gchar *) key_bytes, sizeof key_bytes,
-          NULL))
+      NULL))
     return 700;
   g_autofree gchar *key_spec = g_strdup_printf ("file:%s", key);
   WylHandleOpenOptions options = {
@@ -445,40 +445,40 @@ check_service_lifecycle_audit_reconciliation (void)
     return 701;
   wyl_service_principal_t principal = { 0 };
   if (wyl_service_principal_create (handle, "svc:audit:worker", "worker",
-          "admin", "sla-principal", &principal) != WYRELOG_E_OK)
+      "admin", "sla-principal", &principal) != WYRELOG_E_OK)
     return 702;
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-          "sla-tenant", &created) != WYRELOG_E_OK)
+      "sla-tenant", &created) != WYRELOG_E_OK)
     return 703;
   wyl_service_credential_issue_result_t issued = { 0 }, rotated = { 0 };
   if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
-          "admin", "sla-issue", 0, &issued) != WYRELOG_E_OK)
+      "admin", "sla-issue", 0, &issued) != WYRELOG_E_OK)
     return 704;
   gsize issue_len = 0;
   const gchar *issue_secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &issue_len);
+        (issued.secret, &issue_len);
   g_autofree gchar *issue_copy = g_strndup (issue_secret, issue_len);
   if (wyl_service_credential_rotate (handle, issued.credential.credential_id,
-          "admin", "sla-rotate", 0, &rotated) != WYRELOG_E_OK)
+      "admin", "sla-rotate", 0, &rotated) != WYRELOG_E_OK)
     return 705;
   gsize rotate_len = 0;
   const gchar *rotate_secret = wyl_service_credential_secret_peek_encoded
-      (rotated.secret, &rotate_len);
+        (rotated.secret, &rotate_len);
   g_autofree gchar *rotate_copy = g_strndup (rotate_secret, rotate_len);
   wyl_service_credential_t revoked = { 0 };
   if (wyl_service_credential_revoke (handle,
-          rotated.credential.credential_id, "admin", revoke_request_id,
-          &revoked)
+      rotated.credential.credential_id, "admin", revoke_request_id,
+      &revoked)
       != WYRELOG_E_OK)
     return 706;
   wyl_service_credential_clear (&revoked);
   sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (db, "SELECT count(*) FROM audit_intentions WHERE "
-          "state='pending' AND (request_id LIKE 'sla-%' OR "
-          "request_id=?);", -1, &stmt, NULL) != SQLITE_OK
+      "state='pending' AND (request_id LIKE 'sla-%' OR "
+      "request_id=?);", -1, &stmt, NULL) != SQLITE_OK
       || sqlite3_bind_text (stmt, 1, revoke_request_id, -1, SQLITE_STATIC)
       != SQLITE_OK || sqlite3_step (stmt) != SQLITE_ROW
       || sqlite3_column_int64 (stmt, 0) != 4)
@@ -486,9 +486,9 @@ check_service_lifecycle_audit_reconciliation (void)
   sqlite3_finalize (stmt);
   g_autofree gchar *pattern = g_strdup_printf ("%%%s%%", rotate_copy);
   if (sqlite3_prepare_v2 (db, "SELECT count(*) FROM audit_events WHERE "
-          "coalesce(subject_id,'')||coalesce(action,'')||"
-          "coalesce(resource_id,'')||coalesce(request_id,'') LIKE ?;", -1,
-          &stmt, NULL) != SQLITE_OK)
+      "coalesce(subject_id,'')||coalesce(action,'')||"
+      "coalesce(resource_id,'')||coalesce(request_id,'') LIKE ?;", -1,
+      &stmt, NULL) != SQLITE_OK)
     return 708;
   sqlite3_bind_text (stmt, 1, pattern, -1, SQLITE_TRANSIENT);
   if (sqlite3_step (stmt) != SQLITE_ROW || sqlite3_column_int64 (stmt, 0) != 0)
@@ -508,16 +508,16 @@ check_service_lifecycle_audit_reconciliation (void)
   g_autofree gchar *rotate_id = NULL;
   g_autofree gchar *revoke_id = NULL;
   if (!check_projected_lifecycle_event (handle, "sla-principal",
-          "service.principal.create", "svc:audit:worker", &principal_id)
+      "service.principal.create", "svc:audit:worker", &principal_id)
       || !check_projected_lifecycle_event (handle, "sla-issue",
-          "service.credential.issue", issued.credential.credential_id,
-          &issue_id)
+      "service.credential.issue", issued.credential.credential_id,
+      &issue_id)
       || !check_projected_lifecycle_event (handle, "sla-rotate",
-          "service.credential.rotate", issued.credential.credential_id,
-          &rotate_id)
+      "service.credential.rotate", issued.credential.credential_id,
+      &rotate_id)
       || !check_projected_lifecycle_event (handle, revoke_request_id,
-          "service.credential.revoke", rotated.credential.credential_id,
-          &revoke_id))
+      "service.credential.revoke", rotated.credential.credential_id,
+      &revoke_id))
     return 712;
   guint principal_facts = 0, issue_facts = 0, rotate_facts = 0,
       revoke_facts = 0;
@@ -550,12 +550,12 @@ check_service_lifecycle_audit_reconciliation (void)
 
   wyl_service_credential_issue_result_t fault = { 0 };
   if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
-          "admin", "sla-fault", 0, &fault) != WYRELOG_E_OK)
+      "admin", "sla-fault", 0, &fault) != WYRELOG_E_OK)
     return 715;
   g_autofree gchar *fault_id = NULL;
   gint64 fault_created_at_us = 0;
   if (fault.secret == NULL || !policy_get_audit_event_for_request (handle,
-          "sla-fault", &fault_id, &fault_created_at_us))
+      "sla-fault", &fault_id, &fault_created_at_us))
     return 716;
   wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
       WYRELOG_E_INTERNAL);
@@ -568,7 +568,7 @@ check_service_lifecycle_audit_reconciliation (void)
       || g_strcmp0 (state, "failed") != 0 || attempts != 1
       || !runtime_count_audit_rows (handle, fault_id, &count) || count != 0
       || wyl_service_credential_get (handle, fault.credential.credential_id,
-          &persisted) != WYRELOG_E_OK
+      &persisted) != WYRELOG_E_OK
       || g_strcmp0 (persisted.state, "active") != 0)
     return 718;
   wyl_service_credential_clear (&persisted);
@@ -583,24 +583,24 @@ check_service_lifecycle_audit_reconciliation (void)
     .expected_attempt_count = 1,
   };
   if (wyl_handle_reconcile_committed_engine_pair (handle,
-          verify_reconciled_audit_projection, &fault_verify) != WYRELOG_E_OK
+      verify_reconciled_audit_projection, &fault_verify) != WYRELOG_E_OK
       || wyl_handle_engine_pair_is_poisoned (handle)
       || !wyl_handle_engine_pair_is_ready (handle))
     return 734;
   g_autofree gchar *projected_id = NULL;
   if (!check_projected_lifecycle_event (handle, "sla-fault",
-          "service.credential.issue", fault.credential.credential_id,
-          &projected_id) || g_strcmp0 (projected_id, fault_id) != 0)
+      "service.credential.issue", fault.credential.credential_id,
+      &projected_id) || g_strcmp0 (projected_id, fault_id) != 0)
     return 738;
 
   wyl_service_credential_issue_result_t sink = { 0 };
   if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
-          "admin", "sla-sink", 0, &sink) != WYRELOG_E_OK)
+      "admin", "sla-sink", 0, &sink) != WYRELOG_E_OK)
     return 720;
   g_autofree gchar *sink_id = NULL;
   gint64 sink_created_at_us = 0;
   if (sink.secret == NULL || !policy_get_audit_event_for_request (handle,
-          "sla-sink", &sink_id, &sink_created_at_us))
+      "sla-sink", &sink_id, &sink_created_at_us))
     return 721;
   wyl_audit_conn_fail_insert_once (wyl_handle_get_audit_conn (handle));
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_IO)
@@ -616,34 +616,34 @@ check_service_lifecycle_audit_reconciliation (void)
   g_clear_pointer (&state, g_free);
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK
       || !policy_get_audit_intention_state (handle, sink_id, &state,
-          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
+      &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
       || !runtime_count_audit_rows (handle, sink_id, &count) || count != 1)
     return 724;
   g_clear_pointer (&projected_id, g_free);
   if (!check_projected_lifecycle_event (handle, "sla-sink",
-          "service.credential.issue", sink.credential.credential_id,
-          &projected_id) || g_strcmp0 (projected_id, sink_id) != 0
+      "service.credential.issue", sink.credential.credential_id,
+      &projected_id) || g_strcmp0 (projected_id, sink_id) != 0
       || !wirelog_event_fact_count (handle, sink_id, &projected_facts)
       || projected_facts != sink_facts)
     return 735;
 
   wyl_service_credential_issue_result_t restart_failed = { 0 };
   if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
-          "admin", "sla-restart-failed", 0, &restart_failed) != WYRELOG_E_OK)
+      "admin", "sla-restart-failed", 0, &restart_failed) != WYRELOG_E_OK)
     return 725;
   g_autofree gchar *restart_failed_id = NULL;
   gint64 ignored_created_at_us = 0;
   if (!policy_get_audit_event_for_request (handle, "sla-restart-failed",
-          &restart_failed_id, &ignored_created_at_us))
+      &restart_failed_id, &ignored_created_at_us))
     return 726;
   wyl_service_credential_issue_result_t restart_pending = { 0 };
   if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
-          "admin", "sla-restart-pending", 0, &restart_pending)
+      "admin", "sla-restart-pending", 0, &restart_pending)
       != WYRELOG_E_OK)
     return 729;
   g_autofree gchar *restart_pending_id = NULL;
   if (!policy_get_audit_event_for_request (handle, "sla-restart-pending",
-          &restart_pending_id, &ignored_created_at_us))
+      &restart_pending_id, &ignored_created_at_us))
     return 730;
   wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
       WYRELOG_E_INTERNAL);
@@ -651,11 +651,11 @@ check_service_lifecycle_audit_reconciliation (void)
     return 727;
   g_clear_pointer (&state, g_free);
   if (!policy_get_audit_intention_state (handle, restart_failed_id, &state,
-          &attempts) || g_strcmp0 (state, "failed") != 0 || attempts != 1)
+      &attempts) || g_strcmp0 (state, "failed") != 0 || attempts != 1)
     return 728;
   g_clear_pointer (&state, g_free);
   if (!policy_get_audit_intention_state (handle, restart_pending_id, &state,
-          &attempts))
+      &attempts))
     return 741;
   if (g_strcmp0 (state, "pending") != 0)
     return 742;
@@ -675,64 +675,66 @@ check_service_lifecycle_audit_reconciliation (void)
     return 731;
   g_clear_pointer (&state, g_free);
   if (!policy_get_audit_intention_state (handle, restart_failed_id, &state,
-          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
+      &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
       || !runtime_count_audit_rows (handle, restart_failed_id, &count)
       || count != 1)
     return 732;
   g_clear_pointer (&state, g_free);
   if (!policy_get_audit_intention_state (handle, restart_pending_id, &state,
-          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 0
+      &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 0
       || !runtime_count_audit_rows (handle, restart_pending_id, &count)
       || count != 1)
     return 733;
   guint restart_failed_facts = 0, restart_pending_facts = 0;
   if (!wirelog_event_fact_count (handle, restart_failed_id,
-          &restart_failed_facts) || restart_failed_facts == 0
+      &restart_failed_facts) || restart_failed_facts == 0
       || !wirelog_event_fact_count (handle, restart_pending_id,
-          &restart_pending_facts) || restart_pending_facts == 0)
+      &restart_pending_facts) || restart_pending_facts == 0)
     return 736;
   g_object_unref (handle);
   handle = NULL;
   if (wyl_handle_open_with_options (&options, &handle) != WYRELOG_E_OK
       || !wirelog_event_fact_count (handle, restart_failed_id,
-          &projected_facts) || projected_facts != restart_failed_facts
+      &projected_facts) || projected_facts != restart_failed_facts
       || !wirelog_event_fact_count (handle, restart_pending_id,
-          &projected_facts) || projected_facts != restart_pending_facts)
+      &projected_facts) || projected_facts != restart_pending_facts)
     return 737;
 
   for (guint corruption = 0; corruption < 4; corruption++) {
     g_autofree gchar *request_id = g_strdup_printf ("sla-corrupt-%u",
-        corruption);
+            corruption);
     wyl_service_credential_issue_result_t corrupt = { 0 };
     if (wyl_service_credential_issue (handle, "svc:audit:worker",
-            "sla-tenant", "admin", request_id, 0, &corrupt)
+        "sla-tenant", "admin", request_id, 0, &corrupt)
         != WYRELOG_E_OK || corrupt.secret == NULL)
       return 738 + (gint) corruption *10;
     g_autofree gchar *corrupt_id = NULL;
     gint64 corrupt_created_at_us = 0;
     if (!policy_get_audit_event_for_request (handle, request_id, &corrupt_id,
-            &corrupt_created_at_us))
+        &corrupt_created_at_us))
       return 739 + (gint) corruption *10;
 
     wyrelog_error_t corrupt_rc = WYRELOG_E_OK;
     if (corruption == 0) {
       /* Expected NULL deny_reason with a stale fact. */
       corrupt_rc = insert_symbol_row2 (handle,
-          "audit_event_deny_reason_input", corrupt_id, "stale-reason");
+              "audit_event_deny_reason_input", corrupt_id, "stale-reason");
     } else if (corruption == 2) {
       /* A base without the six sanctioned attribute projections. */
       corrupt_rc = insert_audit_base_fact (handle, corrupt_id,
-          corrupt_created_at_us);
+              corrupt_created_at_us);
     } else {
       corrupt_rc = wyl_handle_insert_audit_fact (handle, corrupt_id,
-          corrupt_created_at_us, "admin", "service.credential.issue",
-          corrupt.credential.credential_id, NULL, NULL, request_id,
-          WYL_DECISION_ALLOW);
+              corrupt_created_at_us, "admin", "service.credential.issue",
+              corrupt.credential.credential_id, NULL, NULL, request_id,
+              WYL_DECISION_ALLOW);
       if (corrupt_rc == WYRELOG_E_OK) {
+        /* Wirelog 0.54 deduplicates identical facts; keep this fixture a
+         * genuine projection conflict rather than an idempotent duplicate. */
         corrupt_rc = insert_symbol_row2 (handle,
-            "audit_event_action_input", corrupt_id,
-            corruption == 1 ? "service.credential.mismatch"
-            : "service.credential.issue");
+                "audit_event_action_input", corrupt_id,
+                corruption == 1 ? "service.credential.mismatch"
+            : "service.credential.duplicate");
       }
     }
     if (corrupt_rc != WYRELOG_E_OK)
@@ -740,7 +742,7 @@ check_service_lifecycle_audit_reconciliation (void)
 
     guint corrupt_facts = 0, facts_after = 0;
     gboolean counted_before = wirelog_event_fact_count (handle, corrupt_id,
-        &corrupt_facts);
+            &corrupt_facts);
     wyrelog_error_t reconcile_rc =
         wyl_handle_load_policy_store_audit_events (handle);
     if (!counted_before || corrupt_facts == 0
@@ -750,11 +752,11 @@ check_service_lifecycle_audit_reconciliation (void)
     g_clear_pointer (&state, g_free);
     wyl_service_credential_t authority = { 0 };
     if (!policy_get_audit_intention_state (handle, corrupt_id, &state,
-            &attempts) || g_strcmp0 (state, "failed") != 0 || attempts != 1
+        &attempts) || g_strcmp0 (state, "failed") != 0 || attempts != 1
         || !runtime_count_audit_rows (handle, corrupt_id, &count) || count != 0
         || corrupt.secret == NULL
         || wyl_service_credential_get (handle,
-            corrupt.credential.credential_id, &authority) != WYRELOG_E_OK
+        corrupt.credential.credential_id, &authority) != WYRELOG_E_OK
         || g_strcmp0 (authority.state, "active") != 0)
       return 742 + (gint) corruption *10;
     wyl_service_credential_clear (&authority);
@@ -767,7 +769,7 @@ check_service_lifecycle_audit_reconciliation (void)
       .expected_attempt_count = 1,
     };
     if (wyl_handle_reconcile_committed_engine_pair (handle,
-            verify_reconciled_audit_projection, &corrupt_verify)
+        verify_reconciled_audit_projection, &corrupt_verify)
         != WYRELOG_E_OK || wyl_handle_engine_pair_is_poisoned (handle)
         || !wyl_handle_engine_pair_is_ready (handle)
         || !wirelog_event_fact_count (handle, corrupt_id, &facts_after)
@@ -807,7 +809,7 @@ policy_count_rows (wyl_policy_store_t *store, const gchar *sql,
 {
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK)
+      NULL) != SQLITE_OK)
     return FALSE;
 
   gboolean ok = FALSE;
@@ -826,7 +828,7 @@ policy_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-          "SELECT COUNT(*) FROM audit_events WHERE id = ?;", -1, &stmt, NULL)
+      "SELECT COUNT(*) FROM audit_events WHERE id = ?;", -1, &stmt, NULL)
       != SQLITE_OK)
     return FALSE;
   if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
@@ -851,8 +853,8 @@ policy_get_audit_intention_state (WylHandle *handle, const gchar *id,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-          "SELECT state, attempt_count FROM audit_intentions "
-          "WHERE audit_id = ?;", -1, &stmt, NULL) != SQLITE_OK)
+      "SELECT state, attempt_count FROM audit_intentions "
+      "WHERE audit_id = ?;", -1, &stmt, NULL) != SQLITE_OK)
     return FALSE;
   if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
@@ -878,7 +880,7 @@ runtime_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
   duckdb_result result = { 0 };
 
   if (duckdb_prepare (conn,
-          "SELECT COUNT(*) FROM audit_events WHERE id = ?;", &stmt)
+      "SELECT COUNT(*) FROM audit_events WHERE id = ?;", &stmt)
       != DuckDBSuccess)
     return FALSE;
   if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
@@ -975,7 +977,7 @@ contains_audit_event_fact (WylHandle *handle, const gchar *id,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_engine_contains (handle, "audit_event", row, 3,
-      out_contains);
+             out_contains);
 }
 
 static wyrelog_error_t
@@ -1021,7 +1023,7 @@ count_audit_attr_facts (WylHandle *handle, const gchar *relation,
 
   AuditFactCount count = { relation, audit_id, 0 };
   rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle), relation,
-      count_audit_fact_cb, &count);
+          count_audit_fact_cb, &count);
   if (rc != WYRELOG_E_OK)
     return rc;
   *out_count = count.matches;
@@ -1063,19 +1065,19 @@ check_live_audit_projection_for_action (WylHandle *handle, const gchar *action,
   gboolean contains = FALSE;
 
   if (contains_audit_event_fact (handle, id, created_at_us, "allow",
-          &contains) != WYRELOG_E_OK || !contains)
+      &contains) != WYRELOG_E_OK || !contains)
     rc = base_code + 4;
   else if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
-          subject, &contains) != WYRELOG_E_OK || !contains)
+      subject, &contains) != WYRELOG_E_OK || !contains)
     rc = base_code + 5;
   else if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
-          action, &contains) != WYRELOG_E_OK || !contains)
+      action, &contains) != WYRELOG_E_OK || !contains)
     rc = base_code + 6;
   else if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
-          resource, &contains) != WYRELOG_E_OK || !contains)
+      resource, &contains) != WYRELOG_E_OK || !contains)
     rc = base_code + 7;
   else if (contains_audit_event_attr_fact (handle,
-          "audit_event_deny_origin", id, origin, &contains) != WYRELOG_E_OK
+      "audit_event_deny_origin", id, origin, &contains) != WYRELOG_E_OK
       || !contains)
     rc = base_code + 8;
 
@@ -1088,15 +1090,15 @@ static wyrelog_error_t
 insert_not_armed_decide_fixture (WylHandle *handle)
 {
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
-      "wr.audit-role", "wr.audit-permission");
+          "wr.audit-role", "wr.audit-permission");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", "audit-user",
-      "wr.audit-role", "audit-scope");
+          "wr.audit-role", "audit-scope");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", "audit-user",
-      "authenticated");
+          "authenticated");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "session_state", "audit-scope", "active");
@@ -1109,26 +1111,26 @@ static wyrelog_error_t
 insert_allow_decide_fixture (WylHandle *handle)
 {
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
-      "wr.audit-allow-role", "wr.audit-allow");
+          "wr.audit-allow-role", "wr.audit-allow");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", "audit-allow-user",
-      "wr.audit-allow-role", "audit-allow-scope");
+          "wr.audit-allow-role", "audit-allow-scope");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", "audit-allow-user",
-      "authenticated");
+          "authenticated");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "session_state", "audit-allow-scope",
-      "active");
+          "active");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row1 (handle, "session_active", "active");
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row4 (handle, "perm_state", "audit-allow-user",
-      "wr.audit-allow", "audit-allow-scope", "armed");
+             "wr.audit-allow", "audit-allow-scope", "armed");
 }
 
 static gint
@@ -1153,7 +1155,7 @@ check_emit_inserts_a_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT COUNT(*) FROM audit_events;", &result) != DuckDBSuccess) {
+      "SELECT COUNT(*) FROM audit_events;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
     return 12;
@@ -1195,9 +1197,9 @@ check_emit_persists_event_fields (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT id, subject_id, action, resource_id, deny_reason, "
-          "deny_origin, request_id, decision "
-          "FROM audit_events;", &result) != DuckDBSuccess) {
+      "SELECT id, subject_id, action, resource_id, deny_reason, "
+      "deny_origin, request_id, decision "
+      "FROM audit_events;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
     return 22;
@@ -1285,7 +1287,7 @@ check_query_events_json_filters_rows (void)
 
   g_autofree gchar *action_json = NULL;
   if (wyl_audit_conn_query_events_json (conn, "action(\"read\")",
-          &action_json) != WYRELOG_E_OK) {
+      &action_json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 144;
   }
@@ -1298,41 +1300,41 @@ check_query_events_json_filters_rows (void)
 
   g_autofree gchar *reason_json = NULL;
   if (wyl_audit_conn_query_events_json (conn, "deny_reason(\"not_armed\")",
-          &reason_json) != WYRELOG_E_OK) {
+      &reason_json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 1540;
   }
   if (g_strstr_len (reason_json, -1, "\"subject_id\":\"json-bob\"") == NULL
       || g_strstr_len (reason_json, -1, "\"subject_id\":\"json-alice\"")
       != NULL || g_strstr_len (reason_json, -1,
-          "\"deny_origin\":\"perm_state\"") == NULL) {
+      "\"deny_origin\":\"perm_state\"") == NULL) {
     g_object_unref (handle);
     return 1541;
   }
 
   g_autofree gchar *origin_json = NULL;
   if (wyl_audit_conn_query_events_json (conn, "deny_origin(\"perm_state\")",
-          &origin_json) != WYRELOG_E_OK) {
+      &origin_json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 1542;
   }
   if (g_strstr_len (origin_json, -1, "\"subject_id\":\"json-bob\"") == NULL
       || g_strstr_len (origin_json, -1, "\"subject_id\":\"json-alice\"")
       != NULL || g_strstr_len (origin_json, -1,
-          "\"deny_reason\":\"not_armed\"") == NULL) {
+      "\"deny_reason\":\"not_armed\"") == NULL) {
     g_object_unref (handle);
     return 1543;
   }
 
   g_autofree gchar *request_json = NULL;
   if (wyl_audit_conn_query_events_json (conn, "request_id(\"req-json-bob\")",
-          &request_json) != WYRELOG_E_OK) {
+      &request_json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 1544;
   }
   if (g_strstr_len (request_json, -1, "\"subject_id\":\"json-bob\"")
       == NULL || g_strstr_len (request_json, -1,
-          "\"request_id\":\"req-json-bob\"") == NULL
+      "\"request_id\":\"req-json-bob\"") == NULL
       || g_strstr_len (request_json, -1, "\"subject_id\":\"json-alice\"")
       != NULL) {
     g_object_unref (handle);
@@ -1376,14 +1378,14 @@ check_query_events_json_filters_rows (void)
 
   g_autofree gchar *compound_decision_json = NULL;
   if (wyl_audit_conn_query_events_json (conn, "decision(\"allow\")",
-          &compound_decision_json) != WYRELOG_E_OK) {
+      &compound_decision_json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 150;
   }
   if (g_strstr_len (compound_decision_json, -1,
-          "\"subject_id\":\"json-alice\"") == NULL
+      "\"subject_id\":\"json-alice\"") == NULL
       || g_strstr_len (compound_decision_json, -1,
-          "\"subject_id\":\"json-bob\"") != NULL
+      "\"subject_id\":\"json-bob\"") != NULL
       || g_strstr_len (compound_decision_json, -1, "\"decision\":1")
       == NULL) {
     g_object_unref (handle);
@@ -1421,7 +1423,7 @@ check_emit_mirrors_policy_store_row (void)
       "SELECT subject_id, action, resource_id, deny_reason, deny_origin, "
       "decision FROM audit_events WHERE id = ?;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
-          NULL) != SQLITE_OK) {
+      NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 162;
   }
@@ -1437,19 +1439,19 @@ check_emit_mirrors_policy_store_row (void)
   if (step_rc != SQLITE_ROW)
     rc = 164;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 0),
-          "policy-audit-user") != 0)
+      "policy-audit-user") != 0)
     rc = 165;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
-          "audit.write") != 0)
+      "audit.write") != 0)
     rc = 166;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
-          "audit-log") != 0)
+      "audit-log") != 0)
     rc = 167;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 3),
-          "allowed") != 0)
+      "allowed") != 0)
     rc = 168;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
-          "test") != 0)
+      "test") != 0)
     rc = 169;
   else if (sqlite3_column_int (stmt, 5) != WYL_DECISION_ALLOW)
     rc = 170;
@@ -1459,7 +1461,7 @@ check_emit_mirrors_policy_store_row (void)
     g_autofree gchar *state = NULL;
     gint64 attempt_count = -1;
     if (!policy_get_audit_intention_state (handle, expected_id, &state,
-            &attempt_count))
+        &attempt_count))
       rc = 500;
     else if (g_strcmp0 (state, "committed") != 0 || attempt_count != 0)
       rc = 501;
@@ -1478,7 +1480,7 @@ check_policy_store_audit_replay_loads_runtime_query (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   static const gchar *replay_id = "01890c10-2e3f-7000-8000-000000000003";
   if (wyl_policy_store_append_audit_event (store, replay_id, 789, NULL,
-          "audit.replay", "replay-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      "audit.replay", "replay-resource", NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 172;
@@ -1486,9 +1488,9 @@ check_policy_store_audit_replay_loads_runtime_query (void)
   static const gchar *full_replay_id = "01890c10-2e3f-7000-8000-000000000012";
   gboolean full_inserted = FALSE;
   if (wyl_policy_store_append_audit_event_full (store, full_replay_id, 790,
-          "replay-user", "audit.replay.full", "replay-full-resource",
-          "not_armed", "perm_state", "req-replay-full", WYL_DECISION_DENY,
-          &full_inserted) != WYRELOG_E_OK) {
+      "replay-user", "audit.replay.full", "replay-full-resource",
+      "not_armed", "perm_state", "req-replay-full", WYL_DECISION_DENY,
+      &full_inserted) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 205;
   }
@@ -1509,9 +1511,9 @@ check_policy_store_audit_replay_loads_runtime_query (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result count_result;
   if (duckdb_query (duck_conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE id = '01890c10-2e3f-7000-8000-000000000003';",
-          &count_result) != DuckDBSuccess) {
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE id = '01890c10-2e3f-7000-8000-000000000003';",
+      &count_result) != DuckDBSuccess) {
     duckdb_destroy_result (&count_result);
     g_object_unref (handle);
     return 183;
@@ -1525,14 +1527,14 @@ check_policy_store_audit_replay_loads_runtime_query (void)
 
   g_autofree gchar *json = NULL;
   if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
-          "action(\"audit.replay\")", &json) != WYRELOG_E_OK) {
+      "action(\"audit.replay\")", &json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 174;
   }
 
   gint rc = 0;
   if (g_strstr_len (json, -1,
-          "\"id\":\"01890c10-2e3f-7000-8000-000000000003\"") == NULL)
+      "\"id\":\"01890c10-2e3f-7000-8000-000000000003\"") == NULL)
     rc = 175;
   else if (g_strstr_len (json, -1, "\"created_at_us\":789") == NULL)
     rc = 176;
@@ -1556,20 +1558,20 @@ check_policy_store_audit_replay_loads_runtime_query (void)
 
   g_clear_pointer (&json, g_free);
   if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
-          "action(\"audit.replay.full\")", &json) != WYRELOG_E_OK) {
+      "action(\"audit.replay.full\")", &json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 206;
   }
 
   if (g_strstr_len (json, -1,
-          "\"id\":\"01890c10-2e3f-7000-8000-000000000012\"") == NULL)
+      "\"id\":\"01890c10-2e3f-7000-8000-000000000012\"") == NULL)
     rc = 207;
   else if (g_strstr_len (json, -1, "\"created_at_us\":790") == NULL)
     rc = 208;
   else if (g_strstr_len (json, -1, "\"subject_id\":\"replay-user\"") == NULL)
     rc = 209;
   else if (g_strstr_len (json, -1,
-          "\"resource_id\":\"replay-full-resource\"") == NULL)
+      "\"resource_id\":\"replay-full-resource\"") == NULL)
     rc = 210;
   else if (g_strstr_len (json, -1, "\"deny_reason\":\"not_armed\"") == NULL)
     rc = 211;
@@ -1596,9 +1598,9 @@ check_policy_store_audit_intention_reconciles_runtime_query (void)
   static const gchar *id = "01890c10-2e3f-7000-8000-000000000013";
   gboolean inserted = FALSE;
   if (wyl_policy_store_record_audit_intention_full (store, id, 891,
-          "reconcile-user", "audit.reconcile", "reconcile-resource",
-          "not_armed", "perm_state", "req-reconcile", WYL_DECISION_DENY,
-          &inserted) != WYRELOG_E_OK) {
+      "reconcile-user", "audit.reconcile", "reconcile-resource",
+      "not_armed", "perm_state", "req-reconcile", WYL_DECISION_DENY,
+      &inserted) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 509;
   }
@@ -1661,10 +1663,10 @@ check_poisoned_engine_rejects_audit_replay (void)
   static const gchar *id = "01890c10-2e3f-7000-8000-000000000745";
   gboolean inserted = FALSE;
   if (wyl_policy_store_record_audit_intention_full
-      (wyl_handle_get_policy_store (handle), id, 745, "poison-replay-user",
-          "audit.poison.replay", "poison-replay-resource", NULL, NULL,
-          "req-poison-replay", WYL_DECISION_ALLOW,
-          &inserted) != WYRELOG_E_OK || !inserted)
+        (wyl_handle_get_policy_store (handle), id, 745, "poison-replay-user",
+      "audit.poison.replay", "poison-replay-resource", NULL, NULL,
+      "req-poison-replay", WYL_DECISION_ALLOW,
+      &inserted) != WYRELOG_E_OK || !inserted)
     return 520;
 
   wyl_handle_poison_engine_pair (handle);
@@ -1725,7 +1727,7 @@ check_emit_replays_runtime_query_after_table_loss (void)
 
   g_autofree gchar *json = NULL;
   if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
-          "action(\"audit.runtime.replay\")", &json) != WYRELOG_E_OK) {
+      "action(\"audit.runtime.replay\")", &json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 437;
   }
@@ -1750,25 +1752,25 @@ check_audit_conn_insert_event_idempotence (void)
   wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
   static const gchar *id = "01890c10-2e3f-7000-8000-000000000004";
   if (wyl_audit_conn_insert_event (conn, id, 890, "same-user",
-          "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 186;
   }
   if (wyl_audit_conn_insert_event (conn, id, 890, "same-user",
-          "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 187;
   }
   if (wyl_audit_conn_insert_event (conn, id, 890, "same-user",
-          "different.action", "same-resource", NULL, NULL,
-          WYL_DECISION_ALLOW) != WYRELOG_E_POLICY) {
+      "different.action", "same-resource", NULL, NULL,
+      WYL_DECISION_ALLOW) != WYRELOG_E_POLICY) {
     g_object_unref (handle);
     return 188;
   }
   if (wyl_audit_conn_insert_event (conn, "not-a-uuid", 890, "same-user",
-          "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_INVALID) {
     g_object_unref (handle);
     return 189;
@@ -1777,8 +1779,8 @@ check_audit_conn_insert_event_idempotence (void)
   duckdb_connection duck_conn = wyl_audit_conn_get_connection (conn);
   duckdb_result result;
   if (duckdb_query (duck_conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE id = '01890c10-2e3f-7000-8000-000000000004';", &result)
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE id = '01890c10-2e3f-7000-8000-000000000004';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -1860,16 +1862,16 @@ check_policy_store_audit_replay_rolls_back_corrupt_row (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   static const gchar *valid_id = "01890c10-2e3f-7000-8000-000000000005";
   if (wyl_policy_store_append_audit_event (store, valid_id, 901,
-          "valid-user", "valid.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      "valid-user", "valid.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 200;
   }
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "INSERT INTO audit_events "
-          "(id, created_at_us, action, decision) "
-          "VALUES ('not-a-uuid', 902, 'bad.action', 1);",
-          NULL, NULL, NULL) != SQLITE_OK) {
+      "INSERT INTO audit_events "
+      "(id, created_at_us, action, decision) "
+      "VALUES ('not-a-uuid', 902, 'bad.action', 1);",
+      NULL, NULL, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 201;
   }
@@ -1883,8 +1885,8 @@ check_policy_store_audit_replay_rolls_back_corrupt_row (void)
   duckdb_result result;
   memset (&result, 0, sizeof (result));
   if (duckdb_query (duck_conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE id = '01890c10-2e3f-7000-8000-000000000005';", &result)
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE id = '01890c10-2e3f-7000-8000-000000000005';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -1943,7 +1945,7 @@ check_decide_persists_representative_deny_reason (void)
       "AND deny_reason = 'not_armed' "
       "AND deny_origin = 'perm_state' AND decision = 0;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), policy_sql, -1,
-          &stmt, NULL) != SQLITE_OK) {
+      &stmt, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 3002;
   }
@@ -2013,17 +2015,17 @@ check_decide_persists_representative_deny_reason (void)
 
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, audit_id_copy, created_at_us, "deny",
-          &contains) != WYRELOG_E_OK || !contains) {
+      &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 3008;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason",
-          audit_id_copy, "not_armed", &contains) != WYRELOG_E_OK || !contains) {
+      audit_id_copy, "not_armed", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 3009;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin",
-          audit_id_copy, "perm_state", &contains) != WYRELOG_E_OK
+      audit_id_copy, "perm_state", &contains) != WYRELOG_E_OK
       || !contains) {
     g_object_unref (handle);
     return 3010;
@@ -2056,7 +2058,7 @@ check_decide_allows_when_runtime_audit_projection_fails (void)
   duckdb_destroy_result (&result);
   memset (&result, 0, sizeof (result));
   if (duckdb_query (conn,
-          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2084,7 +2086,7 @@ check_decide_allows_when_runtime_audit_projection_fails (void)
   sqlite3_stmt *stmt = NULL;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), audit_sql, -1,
-          &stmt, NULL) != SQLITE_OK) {
+      &stmt, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 55;
   }
@@ -2093,7 +2095,7 @@ check_decide_allows_when_runtime_audit_projection_fails (void)
       || sqlite3_bind_text (stmt, 2, "audit-allow-user", -1, SQLITE_TRANSIENT)
       != SQLITE_OK
       || sqlite3_bind_text (stmt, 3, "audit-allow-scope", -1,
-          SQLITE_TRANSIENT) != SQLITE_OK
+      SQLITE_TRANSIENT) != SQLITE_OK
       || sqlite3_bind_int (stmt, 4, WYL_DECISION_ALLOW) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     g_object_unref (handle);
@@ -2127,22 +2129,22 @@ check_decide_allows_when_runtime_audit_projection_fails (void)
 
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, id, created_at_us, "allow",
-          &contains) != WYRELOG_E_OK || !contains) {
+      &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 302;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
-          "wr.audit-allow", &contains) != WYRELOG_E_OK || !contains) {
+      "wr.audit-allow", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 303;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
-          "audit-allow-user", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-allow-user", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 305;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
-          "audit-allow-scope", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-allow-scope", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 306;
   }
@@ -2160,10 +2162,10 @@ check_permission_grant_rolls_back_on_store_audit_failure (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_permission_grant_audit "
-          "BEFORE INSERT ON audit_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
-          NULL, NULL, NULL) != SQLITE_OK) {
+      "CREATE TRIGGER fail_permission_grant_audit "
+      "BEFORE INSERT ON audit_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+      NULL, NULL, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 58;
   }
@@ -2179,8 +2181,8 @@ check_permission_grant_rolls_back_on_store_audit_failure (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (store,
-          "audit-grant-rollback-user", "site.audit-grant-rollback",
-          "audit-grant-rollback-scope", &exists) != WYRELOG_E_OK) {
+      "audit-grant-rollback-user", "site.audit-grant-rollback",
+      "audit-grant-rollback-scope", &exists) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 60;
   }
@@ -2200,17 +2202,17 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 246;
   if (seed_audit_role_permission (handle, "site.audit-role-rollback",
-          "site.audit-role-rollback.read") != 0) {
+      "site.audit-role-rollback.read") != 0) {
     g_object_unref (handle);
     return 69;
   }
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_role_grant_audit "
-          "BEFORE INSERT ON audit_events "
-          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
-          NULL, NULL, NULL) != SQLITE_OK) {
+      "CREATE TRIGGER fail_role_grant_audit "
+      "BEFORE INSERT ON audit_events "
+      "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+      NULL, NULL, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 70;
   }
@@ -2226,8 +2228,8 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store,
-          "audit-role-rollback-user", "site.audit-role-rollback",
-          "audit-role-rollback-scope", &exists) != WYRELOG_E_OK) {
+      "audit-role-rollback-user", "site.audit-role-rollback",
+      "audit-role-rollback-scope", &exists) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 72;
   }
@@ -2270,13 +2272,13 @@ check_permission_grant_survives_runtime_audit_failure (void)
   sqlite3_stmt *stmt = NULL;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-          "SELECT COUNT(*) FROM audit_events WHERE action = ?;", -1, &stmt,
-          NULL) != SQLITE_OK) {
+      "SELECT COUNT(*) FROM audit_events WHERE action = ?;", -1, &stmt,
+      NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 65;
   }
   if (sqlite3_bind_text (stmt, 1, "permission_grant", -1,
-          SQLITE_TRANSIENT) != SQLITE_OK) {
+      SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     g_object_unref (handle);
     return 66;
@@ -2328,8 +2330,8 @@ check_login_survives_runtime_audit_failure (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gint64 count = -1;
   if (!policy_count_rows (store,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'login_skip_mfa';", &count)) {
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'login_skip_mfa';", &count)) {
     g_object_unref (handle);
     return 250;
   }
@@ -2338,8 +2340,8 @@ check_login_survives_runtime_audit_failure (void)
     return 251;
   }
   if (!policy_count_rows (store,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'session_state';", &count)) {
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'session_state';", &count)) {
     g_object_unref (handle);
     return 252;
   }
@@ -2380,9 +2382,9 @@ check_session_transition_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'session_state' "
-          "AND deny_origin = 'active';", &result)
+      "SELECT subject_id, action, resource_id, deny_origin, decision "
+      "FROM audit_events WHERE action = 'session_state' "
+      "AND deny_origin = 'active';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2444,8 +2446,8 @@ check_login_session_state_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'session_state';", &result)
+      "SELECT subject_id, action, resource_id, deny_origin, decision "
+      "FROM audit_events WHERE action = 'session_state';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2506,10 +2508,10 @@ check_principal_transition_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_reason, "
-          "deny_origin, decision "
-          "FROM audit_events WHERE action = 'principal_state' "
-          "AND deny_origin = 'mfa_required';", &result)
+      "SELECT subject_id, action, resource_id, deny_reason, "
+      "deny_origin, decision "
+      "FROM audit_events WHERE action = 'principal_state' "
+      "AND deny_origin = 'mfa_required';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2570,9 +2572,9 @@ check_login_principal_state_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_reason, "
-          "deny_origin, decision "
-          "FROM audit_events WHERE action = 'principal_state';", &result)
+      "SELECT subject_id, action, resource_id, deny_reason, "
+      "deny_origin, decision "
+      "FROM audit_events WHERE action = 'principal_state';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2635,9 +2637,9 @@ check_login_skip_mfa_emits_canonical_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_reason, "
-          "deny_origin, decision "
-          "FROM audit_events WHERE action = 'login_skip_mfa';", &result)
+      "SELECT subject_id, action, resource_id, deny_reason, "
+      "deny_origin, decision "
+      "FROM audit_events WHERE action = 'login_skip_mfa';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2701,9 +2703,9 @@ check_denied_login_skip_mfa_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_reason, "
-          "deny_origin, decision "
-          "FROM audit_events WHERE action = 'login_skip_mfa';", &result)
+      "SELECT subject_id, action, resource_id, deny_reason, "
+      "deny_origin, decision "
+      "FROM audit_events WHERE action = 'login_skip_mfa';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -2771,8 +2773,8 @@ check_denied_login_skip_mfa_reports_audit_failure (void)
   g_autofree gchar *audit_id = NULL;
   gint64 created_at_us = -1;
   if (!policy_get_audit_event_for_subject_action (handle,
-          "audit-skip-mfa-fail-user", "login_skip_mfa", &audit_id,
-          &created_at_us) || audit_id == NULL || created_at_us <= 0
+      "audit-skip-mfa-fail-user", "login_skip_mfa", &audit_id,
+      &created_at_us) || audit_id == NULL || created_at_us <= 0
       || !poisoned_audit_engine_access_is_closed (handle)) {
     g_object_unref (handle);
     return 228;
@@ -2784,7 +2786,7 @@ check_denied_login_skip_mfa_reports_audit_failure (void)
     .expected = FALSE,
   };
   if (wyl_handle_reconcile_committed_engine_pair (handle,
-          verify_reconciled_symbol_row, &verify) != WYRELOG_E_OK
+      verify_reconciled_symbol_row, &verify) != WYRELOG_E_OK
       || wyl_handle_engine_pair_is_poisoned (handle)
       || !wyl_handle_engine_pair_is_ready (handle)) {
     g_object_unref (handle);
@@ -2804,10 +2806,10 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_skip_mfa_principal_audit "
-          "BEFORE INSERT ON audit_events WHEN NEW.action = 'login_skip_mfa' "
-          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
-          NULL, NULL, NULL) != SQLITE_OK) {
+      "CREATE TRIGGER fail_skip_mfa_principal_audit "
+      "BEFORE INSERT ON audit_events WHEN NEW.action = 'login_skip_mfa' "
+      "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+      NULL, NULL, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 231;
   }
@@ -2829,11 +2831,11 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
   gboolean contains = FALSE;
   gint64 authenticated[2];
   if (intern_symbol (handle, "audit-skip-mfa-store-fail-user",
-          &authenticated[0]) != WYRELOG_E_OK
+      &authenticated[0]) != WYRELOG_E_OK
       || intern_symbol (handle, "authenticated", &authenticated[1])
       != WYRELOG_E_OK
       || wyl_handle_engine_contains (handle, "principal_state", authenticated,
-          2, &contains) != WYRELOG_E_OK) {
+      2, &contains) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 234;
   }
@@ -2844,7 +2846,7 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
 
   gint64 count = -1;
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_states;",
-          &count)) {
+      &count)) {
     g_object_unref (handle);
     return 254;
   }
@@ -2853,7 +2855,7 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
     return 255;
   }
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_events;",
-          &count)) {
+      &count)) {
     g_object_unref (handle);
     return 256;
   }
@@ -2883,10 +2885,10 @@ check_login_session_state_rolls_back_on_store_audit_failure (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "CREATE TRIGGER fail_session_state_audit "
-          "BEFORE INSERT ON audit_events WHEN NEW.action = 'session_state' "
-          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
-          NULL, NULL, NULL) != SQLITE_OK) {
+      "CREATE TRIGGER fail_session_state_audit "
+      "BEFORE INSERT ON audit_events WHEN NEW.action = 'session_state' "
+      "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+      NULL, NULL, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 237;
   }
@@ -2905,7 +2907,7 @@ check_login_session_state_rolls_back_on_store_audit_failure (void)
 
   gint64 count = -1;
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM session_states;",
-          &count)) {
+      &count)) {
     g_object_unref (handle);
     return 240;
   }
@@ -2915,7 +2917,7 @@ check_login_session_state_rolls_back_on_store_audit_failure (void)
   }
 
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_states;",
-          &count)) {
+      &count)) {
     g_object_unref (handle);
     return 242;
   }
@@ -2924,7 +2926,7 @@ check_login_session_state_rolls_back_on_store_audit_failure (void)
     return 243;
   }
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM session_events;",
-          &count)) {
+      &count)) {
     g_object_unref (handle);
     return 244;
   }
@@ -2933,7 +2935,7 @@ check_login_session_state_rolls_back_on_store_audit_failure (void)
     return 245;
   }
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_events;",
-          &count)) {
+      &count)) {
     g_object_unref (handle);
     return 260;
   }
@@ -2974,8 +2976,8 @@ check_permission_grant_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'permission_grant';", &result)
+      "SELECT subject_id, action, resource_id, deny_origin, decision "
+      "FROM audit_events WHERE action = 'permission_grant';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -3011,7 +3013,7 @@ check_permission_grant_emits_audit_row (void)
   duckdb_destroy_result (&result);
   if (rc == 0)
     rc = check_live_audit_projection_for_action (handle, "permission_grant",
-        "audit-grant-user", "audit-grant-scope", "site.audit-grant", 129);
+            "audit-grant-user", "audit-grant-scope", "site.audit-grant", 129);
   g_object_unref (handle);
   return rc;
 }
@@ -3037,9 +3039,9 @@ check_permission_grant_actor_emits_audit_subject (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id FROM audit_events "
-          "WHERE action = 'permission_grant' "
-          "AND deny_origin = 'site.audit-grant-actor';", &result)
+      "SELECT subject_id FROM audit_events "
+      "WHERE action = 'permission_grant' "
+      "AND deny_origin = 'site.audit-grant-actor';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -3091,8 +3093,8 @@ check_permission_revoke_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'permission_revoke';", &result)
+      "SELECT subject_id, action, resource_id, deny_origin, decision "
+      "FROM audit_events WHERE action = 'permission_revoke';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -3128,7 +3130,7 @@ check_permission_revoke_emits_audit_row (void)
   duckdb_destroy_result (&result);
   if (rc == 0)
     rc = check_live_audit_projection_for_action (handle, "permission_revoke",
-        "audit-revoke-user", "audit-revoke-scope", "site.audit-revoke", 1390);
+            "audit-revoke-user", "audit-revoke-scope", "site.audit-revoke", 1390);
   g_object_unref (handle);
   return rc;
 }
@@ -3159,7 +3161,7 @@ check_role_grant_emits_audit_row (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
   if (seed_audit_role_permission (handle, "site.audit-role-grant",
-          "site.audit-role-grant.read") != 0) {
+      "site.audit-role-grant.read") != 0) {
     g_object_unref (handle);
     return 141;
   }
@@ -3177,8 +3179,8 @@ check_role_grant_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'role_grant';", &result)
+      "SELECT subject_id, action, resource_id, deny_origin, decision "
+      "FROM audit_events WHERE action = 'role_grant';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -3214,8 +3216,8 @@ check_role_grant_emits_audit_row (void)
   duckdb_destroy_result (&result);
   if (rc == 0)
     rc = check_live_audit_projection_for_action (handle, "role_grant",
-        "audit-role-grant-user", "audit-role-grant-scope",
-        "site.audit-role-grant", 1490);
+            "audit-role-grant-user", "audit-role-grant-scope",
+            "site.audit-role-grant", 1490);
   g_object_unref (handle);
   return rc;
 }
@@ -3227,7 +3229,7 @@ check_role_revoke_emits_audit_row (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
   if (seed_audit_role_permission (handle, "site.audit-role-revoke",
-          "site.audit-role-revoke.read") != 0) {
+      "site.audit-role-revoke.read") != 0) {
     g_object_unref (handle);
     return 151;
   }
@@ -3254,8 +3256,8 @@ check_role_revoke_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'role_revoke';", &result)
+      "SELECT subject_id, action, resource_id, deny_origin, decision "
+      "FROM audit_events WHERE action = 'role_revoke';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -3291,8 +3293,8 @@ check_role_revoke_emits_audit_row (void)
   duckdb_destroy_result (&result);
   if (rc == 0)
     rc = check_live_audit_projection_for_action (handle, "role_revoke",
-        "audit-role-revoke-user", "audit-role-revoke-scope",
-        "site.audit-role-revoke", 1600);
+            "audit-role-revoke-user", "audit-role-revoke-scope",
+            "site.audit-role-revoke", 1600);
   g_object_unref (handle);
   return rc;
 }
@@ -3347,27 +3349,27 @@ check_emit_projects_wirelog_facts_immediately (void)
     return 195;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
-          "audit-live-user", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-live-user", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 196;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
-          "audit-live-action", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-live-action", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 197;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
-          "audit-live-resource", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-live-resource", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 198;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason", id,
-          "not_armed", &contains) != WYRELOG_E_OK || !contains) {
+      "not_armed", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 199;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin", id,
-          "perm_state", &contains) != WYRELOG_E_OK || !contains) {
+      "perm_state", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 200;
   }
@@ -3401,7 +3403,7 @@ check_emit_projects_sparse_wirelog_facts_immediately (void)
     return 203;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
-          "audit-live-sparse-action", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-live-sparse-action", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 204;
   }
@@ -3453,11 +3455,11 @@ check_audit_projection_classification_is_read_only (void)
   };
   gboolean absent = FALSE;
   if (wyl_handle_classify_audit_projection_for_test (handle, &projection,
-          &absent) != WYRELOG_E_OK || !absent
+      &absent) != WYRELOG_E_OK || !absent
       || wyl_handle_get_read_engine (handle) != read_engine
       || wyl_handle_get_delta_engine (handle) != delta_engine
       || wyl_handle_policy_store_validate_generation (handle, store,
-          generation) != WYRELOG_E_OK)
+      generation) != WYRELOG_E_OK)
     return 512;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   gint64 symbol = 0;
@@ -3465,7 +3467,7 @@ check_audit_projection_classification_is_read_only (void)
       || wyl_engine_session_lookup_symbol (session, projection.id, &symbol)
       != WYRELOG_E_NOT_FOUND
       || wyl_engine_session_lookup_symbol (session, projection.action,
-          &symbol) != WYRELOG_E_NOT_FOUND)
+      &symbol) != WYRELOG_E_NOT_FOUND)
     return 513;
   g_clear_pointer (&session, wyl_engine_session_release);
 
@@ -3478,7 +3480,7 @@ check_audit_projection_classification_is_read_only (void)
       || wyl_handle_get_read_engine (handle) != read_engine
       || wyl_handle_get_delta_engine (handle) != delta_engine
       || wyl_handle_policy_store_validate_generation (handle, store,
-          generation) != WYRELOG_E_OK)
+      generation) != WYRELOG_E_OK)
     return 514;
   return 0;
 }
@@ -3528,10 +3530,10 @@ check_general_publication_rejects_nested_engine_sessions (void)
     .publication_rc = WYRELOG_E_INTERNAL,
   };
   if (wyl_handle_engine_set_delta_callback (handle,
-          nested_publication_probe_cb, &probe) != WYRELOG_E_OK
+      nested_publication_probe_cb, &probe) != WYRELOG_E_OK
       || insert_symbol_row3 (handle, "member_of",
-          "nested-callback-source-user", "nested-callback-source-role",
-          "nested-callback-source-scope") != WYRELOG_E_OK
+      "nested-callback-source-user", "nested-callback-source-role",
+      "nested-callback-source-scope") != WYRELOG_E_OK
       || probe.calls == 0 || probe.publication_rc != WYRELOG_E_BUSY
       || wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
       != WYRELOG_E_OK)
@@ -3540,13 +3542,13 @@ check_general_publication_rejects_nested_engine_sessions (void)
   gboolean exists = TRUE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_direct_permission_exists (store,
-          "nested-publication-user", "site.nested-publication",
-          "nested-publication-scope", &exists) != WYRELOG_E_OK || exists)
+      "nested-publication-user", "site.nested-publication",
+      "nested-publication-scope", &exists) != WYRELOG_E_OK || exists)
     return 518;
   if (wyl_policy_store_direct_permission_exists (store,
-          "nested-callback-publication-user",
-          "site.nested-callback-publication", "nested-callback-scope",
-          &exists) != WYRELOG_E_OK || exists)
+      "nested-callback-publication-user",
+      "site.nested-callback-publication", "nested-callback-scope",
+      &exists) != WYRELOG_E_OK || exists)
     return 519;
   return 0;
 }
@@ -3600,7 +3602,7 @@ check_emit_reports_live_projection_failure (void)
     .resource = "audit-live-fail-resource",
   };
   if (wyl_handle_reconcile_committed_engine_pair (handle,
-          verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
+      verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
       || wyl_handle_engine_pair_is_poisoned (handle)
       || !wyl_handle_engine_pair_is_ready (handle)) {
     g_object_unref (handle);
@@ -3662,7 +3664,7 @@ check_failed_duplicate_emit_keeps_durable_rows (void)
   }
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, id, created_at_us, "allow",
-          &contains) != WYRELOG_E_OK || !contains) {
+      &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 232;
   }
@@ -3720,7 +3722,7 @@ check_emit_rolls_back_partial_live_projection_failure (void)
     g_autofree gchar *state = NULL;
     gint64 attempt_count = -1;
     if (!policy_get_audit_intention_state (handle, id, &state,
-            &attempt_count) || g_strcmp0 (state, "pending") != 0
+        &attempt_count) || g_strcmp0 (state, "pending") != 0
         || attempt_count != 0) {
       g_object_unref (handle);
       return (gint) (410 + i);
@@ -3738,7 +3740,7 @@ check_emit_rolls_back_partial_live_projection_failure (void)
       .request_id = "req-partial",
     };
     if (wyl_handle_reconcile_committed_engine_pair (handle,
-            verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
+        verify_reconciled_audit_fact, &verify) != WYRELOG_E_OK
         || wyl_handle_engine_pair_is_poisoned (handle)
         || !wyl_handle_engine_pair_is_ready (handle)) {
       g_object_unref (handle);
@@ -3773,11 +3775,11 @@ check_denied_login_skip_mfa_projects_audit_fact (void)
   gboolean contains = FALSE;
   gint64 authenticated[2];
   if (intern_symbol (handle, "audit-live-skip-mfa-denied-user",
-          &authenticated[0]) != WYRELOG_E_OK
+      &authenticated[0]) != WYRELOG_E_OK
       || intern_symbol (handle, "authenticated", &authenticated[1])
       != WYRELOG_E_OK
       || wyl_handle_engine_contains (handle, "principal_state", authenticated,
-          2, &contains) != WYRELOG_E_OK) {
+      2, &contains) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 220;
   }
@@ -3790,8 +3792,8 @@ check_denied_login_skip_mfa_projects_audit_fact (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT id FROM audit_events WHERE action = 'login_skip_mfa';",
-          &result) != DuckDBSuccess) {
+      "SELECT id FROM audit_events WHERE action = 'login_skip_mfa';",
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
     return 222;
@@ -3803,7 +3805,7 @@ check_denied_login_skip_mfa_projects_audit_fact (void)
   }
   const gchar *audit_id = duckdb_value_varchar (&result, 0, 0);
   if (contains_audit_event_attr_fact (handle, "audit_event_action",
-          audit_id, "login_skip_mfa", &contains) != WYRELOG_E_OK || !contains) {
+      audit_id, "login_skip_mfa", &contains) != WYRELOG_E_OK || !contains) {
     duckdb_free ((void *) audit_id);
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -3827,9 +3829,9 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
   static const gchar *full_id = "01890c10-2e3f-7000-8000-000000000010";
   gboolean full_inserted = FALSE;
   if (wyl_policy_store_append_audit_event_full (store, full_id, 1001,
-          "audit-fact-user", "audit-fact-action", "audit-fact-resource",
-          "not_armed", "perm_state", "req-audit-fact", WYL_DECISION_DENY,
-          &full_inserted) != WYRELOG_E_OK) {
+      "audit-fact-user", "audit-fact-action", "audit-fact-resource",
+      "not_armed", "perm_state", "req-audit-fact", WYL_DECISION_DENY,
+      &full_inserted) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 162;
   }
@@ -3854,39 +3856,39 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
     return 164;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_subject", full_id,
-          "audit-fact-user", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-fact-user", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 165;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_action", full_id,
-          "audit-fact-action", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-fact-action", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 166;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_resource", full_id,
-          "audit-fact-resource", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-fact-resource", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 167;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason",
-          full_id, "not_armed", &contains) != WYRELOG_E_OK || !contains) {
+      full_id, "not_armed", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 168;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin",
-          full_id, "perm_state", &contains) != WYRELOG_E_OK || !contains) {
+      full_id, "perm_state", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 169;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_request_id",
-          full_id, "req-audit-fact", &contains) != WYRELOG_E_OK || !contains) {
+      full_id, "req-audit-fact", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 193;
   }
 
   static const gchar *sparse_id = "01890c10-2e3f-7000-8000-000000000011";
   if (wyl_policy_store_append_audit_event (store, sparse_id, 1002, NULL,
-          "audit-sparse-action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      "audit-sparse-action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
       != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 170;
@@ -3901,7 +3903,7 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
     return 172;
   }
   if (contains_audit_event_attr_fact (handle, "audit_event_action", sparse_id,
-          "audit-sparse-action", &contains) != WYRELOG_E_OK || !contains) {
+      "audit-sparse-action", &contains) != WYRELOG_E_OK || !contains) {
     g_object_unref (handle);
     return 173;
   }
@@ -3920,7 +3922,7 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
   for (gsize i = 0; i < G_N_ELEMENTS (optional_counts); i++) {
     guint count = 0;
     if (count_audit_attr_facts (handle, optional_counts[i].relation,
-            sparse_id, &count) != WYRELOG_E_OK) {
+        sparse_id, &count) != WYRELOG_E_OK) {
       g_object_unref (handle);
       return (gint) (174 + i);
     }
