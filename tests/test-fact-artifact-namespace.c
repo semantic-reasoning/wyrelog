@@ -3679,10 +3679,14 @@ static void
 test_duckdb_temp_root (void)
 {
 #ifdef G_OS_WIN32
+  /* Windows now reaches the real temp-root authority rather than the
+   * WYRELOG_E_POLICY placeholder that stood in while this surface was
+   * unimplemented, so a NULL lease is an argument-shape error here exactly as
+   * it is on POSIX. */
   WylFactDuckdbTempRoot *root = (gpointer) 0x1;
   WylFactDuckdbTempOrphanEvidence *evidence = NULL;
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence
-        (NULL, &root, &evidence), ==, WYRELOG_E_POLICY);
+        (NULL, &root, &evidence), ==, WYRELOG_E_INVALID);
   g_assert_null (root);
   g_assert_null (evidence);
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence
