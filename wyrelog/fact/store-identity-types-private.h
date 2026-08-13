@@ -78,7 +78,7 @@ typedef void (*WylFactStorePairPreflightTestHook)
  * returns no live DuckDB handle, and is the storage handoff intended for
  * #611/#544. */
 wyrelog_error_t wyl_fact_store_open_identified_pinned
-    (WylFactArtifactNamespace * namespace_,
+  (WylFactArtifactNamespace * namespace_,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
 #ifndef G_OS_WIN32
@@ -86,20 +86,20 @@ wyrelog_error_t wyl_fact_store_open_identified_pinned
  * DuckDB filesystem.  It accepts no artifact pathname or descriptor and is
  * the only callable API that consumes this operation-bound authority. */
 wyrelog_error_t wyl_fact_store_open_identified_provisioned_pair_pinned
-    (WylFactGraphProvisionedPair * pair,
+  (WylFactGraphProvisionedPair * pair,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
 void wyl_fact_store_pinned_set_pair_test_hook_for_test
-    (WylFactStorePinnedTestHook hook, gpointer user_data);
+  (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_pair_preflight_hook_for_test
-    (WylFactStorePairPreflightTestHook hook, gpointer user_data);
+  (WylFactStorePairPreflightTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_pair_preflight_error_for_test
-    (WylFactStorePairPreflightForTest seam, wyrelog_error_t error);
+  (WylFactStorePairPreflightForTest seam, wyrelog_error_t error);
 #endif
 void wyl_fact_store_pinned_set_test_hook
-    (WylFactStorePinnedTestHook hook, gpointer user_data);
+  (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_test_stage_errors
-    (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+  (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
     wyrelog_error_t r5_error);
 
 G_END_DECLS;
