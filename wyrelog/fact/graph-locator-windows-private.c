@@ -1452,6 +1452,65 @@ wyl_fact_graph_directory_open_provisioned_final_exact
   return WYRELOG_E_POLICY;
 }
 
+/* What is unrepresentable on Windows is the POSIX *proof*, not the pair: this
+* locator rejects NumberOfLinks != 1 for every regular file it hands out, so a
+* retained nlink==2 hard link cannot exist here.  The native substitute is a
+* WylFactGraphWinOperationEvidence tuple, and the openers that consume one
+* are already written and tested here:
+* wyl_fact_graph_directory_stage_open_exact_with_evidence,
+* wyl_fact_graph_directory_open_provisioned_final_with_evidence and
+* wyl_fact_graph_stage_publish_with_evidence.  The namespace end of the
+* chain is written too, in
+* fact/graph-artifact-windows-namespace-private.c, though it takes a locator
+* and entries rather than an evidence tuple.
+*
+* What is missing is narrower: this neutral signature carries no evidence, so
+* it cannot reach any of them, and nothing persists a tuple either --
+* fact_graph_provisioning has no evidence column, so an operation cannot be
+* reconstituted across a restart.  An in-process caller that still holds its
+* stage could build a pair today through an evidence-bearing variant; that
+* variant does not exist yet.  Until it does, adopting `facts.duckdb` by name
+* would give Windows a materially weaker contract than POSIX enforces, so
+* every entry point below that can produce or validate a pair fails closed. */
+wyrelog_error_t
+wyl_fact_graph_directory_open_provisioned_pair_exact
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphProvisionedPair ** out_pair)
+{
+  if (out_pair != NULL)
+    *out_pair = NULL;
+  (void) directory;
+  (void) operation_uuid;
+  return WYRELOG_E_POLICY;
+}
+
+/* No pair can be constructed on this platform, so these only ever observe the
+ * NULL that the failed opener leaves behind.  They stay total anyway: the
+ * neutral contract says a pair is refcounted and revalidatable, and a caller
+ * that ignores the open failure must not fall off a cliff here.  _ref answers
+ * NULL rather than echoing its argument: it takes no reference, so handing one
+ * back would be a count this file cannot honour once a real pair lands. */
+WylFactGraphProvisionedPair *
+wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair * pair)
+{
+  (void) pair;
+  return NULL;
+}
+
+void
+wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair)
+{
+  (void) pair;
+}
+
+wyrelog_error_t
+wyl_fact_graph_provisioned_pair_revalidate
+  (WylFactGraphProvisionedPair * pair)
+{
+  (void) pair;
+  return WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
     const gchar *operation_uuid, WylFactGraphStage *out_stage)

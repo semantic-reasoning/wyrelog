@@ -4,13 +4,15 @@
 #include <glib.h>
 
 #include "wyrelog/error.h"
+/* WylFactArtifactNamespace aliases a different real struct per platform -- on
+ * Windows it is struct WylFactArtifactWinNamespace -- so re-declaring it here
+ * as struct WylFactArtifactNamespace is a conflicting typedef.  Take it from
+ * its owner instead.  WylFactGraphProvisionedPair arrives through the same
+ * include, though its owner is fact/graph-locator-private.h one edge further
+ * on. */
+#include "fact/graph-artifact-namespace-private.h"
 
 G_BEGIN_DECLS;
-
-typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
-#ifndef G_OS_WIN32
-typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
-#endif
 
 typedef struct
 {
@@ -65,14 +67,12 @@ typedef enum
 
 typedef void (*WylFactStorePinnedTestHook) (WylFactStorePinnedRendezvous,
     gpointer user_data);
-#ifndef G_OS_WIN32
 typedef enum
 {
   WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY = 0,
 } WylFactStorePairPreflightForTest;
 typedef void (*WylFactStorePairPreflightTestHook)
   (WylFactStorePairPreflightForTest seam, gpointer user_data);
-#endif
 
 /* The one-shot pinned API consumes only a caller-held artifact namespace,
  * returns no live DuckDB handle, and is the storage handoff intended for
@@ -81,7 +81,6 @@ wyrelog_error_t wyl_fact_store_open_identified_pinned
   (WylFactArtifactNamespace * namespace_,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
-#ifndef G_OS_WIN32
 /* One-shot handoff from the exact retained provisioning pair into the bounded
  * DuckDB filesystem.  It accepts no artifact pathname or descriptor and is
  * the only callable API that consumes this operation-bound authority. */
@@ -95,7 +94,6 @@ void wyl_fact_store_pinned_set_pair_preflight_hook_for_test
   (WylFactStorePairPreflightTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_pair_preflight_error_for_test
   (WylFactStorePairPreflightForTest seam, wyrelog_error_t error);
-#endif
 void wyl_fact_store_pinned_set_test_hook
   (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_test_stage_errors

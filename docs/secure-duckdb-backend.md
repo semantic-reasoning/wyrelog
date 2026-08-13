@@ -87,8 +87,14 @@ An upgrade is a security-contract change, not a dependency-only update.
    tests.
 5. Run `secure-duckdb-recording-filesystem`,
    `secure-duckdb-filesystem`, and `secure-duckdb-bridge` from the pinned
-   source build on Linux and macOS. Windows must continue to compile and
-   return `WYRELOG_E_POLICY` until its native runtime authority is implemented.
+   source build on Linux and macOS. Windows builds the same pinned source and
+   runs `secure-duckdb-bridge`, `secure-duckdb-recording-filesystem` and
+   `fact-artifact-namespace-windows`: the bridge object is platform-neutral
+   and succeeds there. What still returns
+   `WYRELOG_E_POLICY` on Windows is every artifact-bound authority -- the
+   provisioned pair, the neutral namespace open, and the fixed WAL
+   replacement -- so no production path reaches a live store. Do not read a
+   green Windows lane as native runtime authority.
 
 The POSIX CI jobs execute the real adapter target; compilation or recording
 evidence alone is not an acceptance signal.

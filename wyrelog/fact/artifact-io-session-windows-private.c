@@ -320,6 +320,35 @@ wyl_fact_artifact_io_session_revalidate (WylFactArtifactIoSession *session)
   return wyl_fact_artifact_win_io_session_revalidate (session->win_session);
 }
 
+/* Checked close of the working handle only.  Unlike finish, the sidecar
+ * binding and the session husk both survive, so a fixed WAL replacement can
+ * still adopt the binding through detach_writer_sidecar; the caller releases
+ * the husk itself. */
+wyrelog_error_t
+wyl_fact_artifact_io_session_close (WylFactArtifactIoSession *session)
+{
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (session->win_session != NULL) {
+    rc = wyl_fact_artifact_win_io_session_finish (session->win_session);
+    session->win_session = NULL;
+  }
+  return rc;
+}
+
+WylFactArtifactSidecarBinding *
+wyl_fact_artifact_io_session_detach_writer_sidecar (
+  WylFactArtifactIoSession *session)
+{
+  if (session == NULL
+      || session->kind != WYL_FACT_ARTIFACT_IO_SESSION_WRITER_SIDECAR)
+    return NULL;
+  WylFactArtifactWinSidecarBinding *binding = session->sidecar_binding;
+  session->sidecar_binding = NULL;
+  return binding;
+}
+
 wyrelog_error_t
 wyl_fact_artifact_io_session_finish (WylFactArtifactIoSession *session)
 {
@@ -477,6 +506,62 @@ wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *root,
     const gchar *name, gboolean *out_exists)
 {
   return wyl_fact_artifact_win_temp_root_child_exists (root, name, out_exists);
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  return wyl_fact_artifact_win_temp_child_retire (child, out_result);
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  return wyl_fact_artifact_win_temp_root_retire (root, out_result);
+}
+
+/* This narrows the neutral listing contract in two ways, both unreachable
+ * today because no Windows caller can obtain a temp root.
+ *
+ * First, the native root enumerates by logical name rather than by child
+ * object, so the visitor receives NULL for the child and the name it asked
+ * for.  The only in-tree visitor, collect_temp_child in the bounded DuckDB
+ * filesystem, takes the name and deliberately ignores the child.  A visitor
+ * that dereferences the child must not be used through this path.
+ *
+ * Second, and the more consequential once this goes live: POSIX walks the
+ * root's tracked child authorities under the lease and refuses the whole
+ * enumeration if any is inactive, so a foreign entry can never be reported.
+ * This walks the directory unfiltered, so it would report one.  Retiring the
+ * narrowing means pointing the caller at
+ * wyl_fact_duckdb_temp_root_list_children, which is names-only by design, and
+ * letting this fail closed. */
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_foreach_child (WylFactDuckdbTempRoot *root,
+    WylFactDuckdbTempChildVisitor visitor, gpointer data)
+{
+  GPtrArray *names = NULL;
+  wyrelog_error_t rc;
+
+  if (root == NULL || visitor == NULL)
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_fact_artifact_win_temp_root_snapshot_children (root, &names);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  for (guint i = 0; i < names->len; i++) {
+    const gchar *name = g_ptr_array_index (names, i);
+    if (!visitor (NULL, name, data)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+  }
+
+  g_ptr_array_unref (names);
+  return rc;
 }
 
 void
