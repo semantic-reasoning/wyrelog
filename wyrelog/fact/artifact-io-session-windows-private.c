@@ -1,7 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+/* G_OS_WIN32 is defined by <glib.h>, which arrives through the first include
+ * below.  The platform guard must therefore follow the includes, not precede
+ * them, or the whole translation unit compiles to nothing on every platform. */
+#include "fact/artifact-io-session-private.h"
+
 #ifdef G_OS_WIN32
 
-#include "fact/artifact-io-session-private.h"
 #include "fact/graph-artifact-windows-handle-private.h"
 #include "fact/graph-artifact-windows-namespace-private.h"
 #include <stdio.h>
@@ -62,7 +66,7 @@ wyl_fact_artifact_io_session_open_reader_main (
   if (lease == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  rc = wyl_fact_artifact_win_reader_lease_open_main (lease, &binding);
+  rc = wyl_fact_artifact_win_lease_open_main (lease, &binding);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -136,7 +140,9 @@ wyl_fact_artifact_io_session_open_reader_wal (
   if (lease == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  rc = wyl_fact_artifact_win_reader_lease_open_sidecar (lease, WYL_FACT_ARTIFACT_WAL, &binding);
+  /* The reader WAL session is an existing-only, read-only open. */
+  rc = wyl_fact_artifact_win_lease_open_sidecar (lease, WYL_FACT_ARTIFACT_WAL,
+          FALSE, FALSE, &binding);
   if (rc != WYRELOG_E_OK)
     return rc;
 
