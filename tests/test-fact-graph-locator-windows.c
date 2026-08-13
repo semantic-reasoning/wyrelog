@@ -1497,6 +1497,47 @@ test_exact_evidence_revalidates_after_last_checkpoints (void)
   }
 }
 
+/* The provisioned-pair authority is deliberately unreachable on Windows: the
+ * POSIX proof is a retained nlink==2 hard link, and this locator rejects
+ * NumberOfLinks != 1 for every regular file it returns, so that proof cannot
+ * exist here.  Pin that it fails closed rather than degrading to a name-only
+ * adoption, and that the refcount helpers stay total so a caller that ignores
+ * the failure cannot fault. */
+static void
+test_provisioned_pair_fails_closed (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphProvisionedPair *pair = (gpointer) 0x1;
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact (&graph,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070570", &pair), ==, WYRELOG_E_POLICY);
+  g_assert_null (pair);
+
+  /* The exact-final opener one level down refuses for the same reason, so no
+   * caller can route around the pair authority to reach facts.duckdb. */
+  WylFactGraphRegularFile final_file =
+      (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
+        (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070570", &final_file), ==,
+      WYRELOG_E_POLICY);
+
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (wyl_fact_graph_provisioned_pair_ref (NULL));
+  wyl_fact_graph_provisioned_pair_free (NULL);
+
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1535,6 +1576,8 @@ main (int argc, char **argv)
       test_exact_evidence_rejects_name_substitution);
   g_test_add_func ("/fact-graph-locator/windows/exact-evidence-last-checkpoint",
       test_exact_evidence_revalidates_after_last_checkpoints);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-fails-closed",
+      test_provisioned_pair_fails_closed);
   return g_test_run ();
 }
 #endif

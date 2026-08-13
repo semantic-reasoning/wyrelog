@@ -133,10 +133,8 @@ private:
   RequireHealthy () const;
   [[noreturn]] void
   PoisonAndReject (wyrelog_error_t, const char *) const;
-#ifndef G_OS_WIN32
   WylFactArtifactSidecarBinding *
   DetachSidecarBindingForMove ();
-#endif
 
   WylSecureDuckdbFileSystem *
       owner_;

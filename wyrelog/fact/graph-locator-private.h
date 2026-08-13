@@ -95,13 +95,18 @@ typedef struct
   gpointer checkpoint_data;
 } WylFactGraphDirectory;
 
-#ifndef G_OS_WIN32
-/* Opaque authority for one exact retained POSIX provisioning pair.  It owns
+/* Opaque authority for one exact retained provisioning pair.  It owns
  * independent root/tenant/graph and final-file handles and pins the identity
  * verified by the #595 exact opener; callers cannot retarget it by changing
- * either retained name. */
+ * either retained name.
+ *
+ * POSIX binds a retained nlink==2 hard-link pair.  Windows has no
+ * representation yet and no code path that produces one: its locator rejects
+ * NumberOfLinks != 1 for every regular file it hands out, so that proof is
+ * unrepresentable there, and its authority fails closed.  A
+ * WylFactGraphWinOperationEvidence tuple is the intended substitute, pending a
+ * durable place to record it. */
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
-#endif
 
 typedef struct
 {
@@ -231,7 +236,8 @@ wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphRegularFile * out_final);
-#ifndef G_OS_WIN32
+/* Windows has no name-only adoption path, so its implementation of the opener
+ * fails closed; see fact/graph-locator-windows-private.c. */
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphProvisionedPair ** out_pair);
@@ -240,7 +246,6 @@ WylFactGraphProvisionedPair *wyl_fact_graph_provisioned_pair_ref
 void wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair);
 wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate
   (WylFactGraphProvisionedPair * pair);
-#endif
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *
     directory, WylFactGraphStage * stage);

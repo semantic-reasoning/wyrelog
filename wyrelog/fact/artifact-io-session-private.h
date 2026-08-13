@@ -83,13 +83,19 @@ wyrelog_error_t wyl_fact_artifact_io_session_new_temp_child (
   WylFactDuckdbTempChildBinding *binding,
   int fd,
   WylFactArtifactIoSession **out_session);
-
-WylFactArtifactSidecarBinding *
-wyl_fact_artifact_io_session_detach_writer_sidecar (
-  WylFactArtifactIoSession *session);
 #endif /* !G_OS_WIN32 */
 
 /* Platform-neutral bounded I/O session API */
+
+/* Surrenders a closed writer-sidecar binding to the caller, leaving the
+ * session a husk that owns nothing.  Both platforms retain the binding across
+ * wyl_fact_artifact_io_session_close so a fixed WAL replacement can adopt it,
+ * though only POSIX implements that replacement today; on Windows
+ * wyl_fact_artifact_sidecar_binding_replace_existing_wal still fails closed.
+ * Returns NULL for any other session kind. */
+WylFactArtifactSidecarBinding *
+wyl_fact_artifact_io_session_detach_writer_sidecar (
+  WylFactArtifactIoSession *session);
 
 WylFactArtifactIoSessionKind wyl_fact_artifact_io_session_get_kind (
   const WylFactArtifactIoSession *session);

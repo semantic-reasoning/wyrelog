@@ -2,7 +2,7 @@
 #include "fact/secure-duckdb-file-handle-private.hpp"
 #include "fact/secure-duckdb-filesystem-private.hpp"
 
-#include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -35,19 +35,28 @@ namespace {
     int64_t result;
   };
 
+/* The POSIX bound on one transfer and on an addressable endpoint.  SSIZE_MAX
+ * itself is POSIX-only and absent under clang-cl, so name the same quantity
+ * portably: ptrdiff_t is the signed counterpart of size_t on every supported
+ * target, so this equals SSIZE_MAX on glibc, musl and Darwin and stays
+ * correct on LLP64 Windows.  Deliberately not INT64_MAX, which would widen
+ * the accepted range on 32-bit POSIX and weaken the rejection below. */
+  constexpr uint64_t adapter_transfer_max =
+      static_cast < uint64_t > (std::numeric_limits < std::ptrdiff_t >::max ());
+
 /* This is the single adapter conversion boundary.  Validate a complete
  * request before buffer access, session operation, or cursor mutation. */
   CheckedRange checked_range (int64_t byte_count, duckdb::idx_t location)
   {
-    if (byte_count < 0 || static_cast < uint64_t > (byte_count)
-        > static_cast < uint64_t > (SSIZE_MAX)
+    if (byte_count < 0
+        || static_cast < uint64_t > (byte_count) > adapter_transfer_max
         || location
         > static_cast < duckdb::idx_t > (std::numeric_limits < uint64_t >::max ()))
       io_reject ("numeric conversion");
     const auto bytes = static_cast < uint64_t > (byte_count);
     const auto offset = static_cast < uint64_t > (location);
-    if (offset > static_cast < uint64_t > (SSIZE_MAX)
-        || bytes > static_cast < uint64_t > (SSIZE_MAX) - offset)
+    if (offset > adapter_transfer_max
+        || bytes > adapter_transfer_max - offset)
       io_reject ("numeric endpoint");
     return {
              static_cast < size_t >(bytes), static_cast < uint64_t > (offset)
@@ -233,11 +242,9 @@ WylSecureDuckdbFileHandle::WylSecureDuckdbFileHandle (
     PoisonAndReject (WYRELOG_E_POLICY, "constructor session validation");
   }
   pending.Release ();
-#ifndef G_OS_WIN32
   if (wyl_fact_artifact_io_session_get_kind (session_)
       == WYL_FACT_ARTIFACT_IO_SESSION_WRITER_SIDECAR)
     owner_->RegisterSidecarHandle (this);
-#endif
 }
 
 WylSecureDuckdbFileHandle::~WylSecureDuckdbFileHandle ()
@@ -248,9 +255,7 @@ WylSecureDuckdbFileHandle::~WylSecureDuckdbFileHandle ()
     /* A provider that cannot prove descriptor identity deliberately leaves it
      * open; a destructor must not raw-close a possibly reused foreign fd. */
   }
-#ifndef G_OS_WIN32
   owner_->UnregisterSidecarHandle (this);
-#endif
 }
 
 void
@@ -481,7 +486,6 @@ WylSecureDuckdbFileHandle::Close ()
     std::lock_guard<std::mutex> lock (mutex_);
     if (session_ == nullptr)
       return;
-#ifndef G_OS_WIN32
     if (wyl_fact_artifact_io_session_get_kind (session_)
         == WYL_FACT_ARTIFACT_IO_SESSION_WRITER_SIDECAR) {
       /* A closed WAL sidecar binding is handed to the filesystem so a later
@@ -495,20 +499,16 @@ WylSecureDuckdbFileHandle::Close ()
       if (close_result != WYRELOG_E_OK)
         PoisonAndReject (close_result, "checked close");
     } else {
-#endif
-    const auto close_result = wyl_fact_artifact_io_session_finish (session_);
-    session_ = nullptr;
-    if (close_result != WYRELOG_E_OK)
-      PoisonAndReject (close_result, "checked close");
-#ifndef G_OS_WIN32
-  }
-#endif
+      const auto close_result = wyl_fact_artifact_io_session_finish (session_);
+      session_ = nullptr;
+      if (close_result != WYRELOG_E_OK)
+        PoisonAndReject (close_result, "checked close");
+    }
   }
   if (closed_sidecar != nullptr)
     owner_->AdoptClosedSidecarBinding (sidecar_artifact_, closed_sidecar);
 }
 
-#ifndef G_OS_WIN32
 WylFactArtifactSidecarBinding *
 WylSecureDuckdbFileHandle::DetachSidecarBindingForMove ()
 {
@@ -533,4 +533,3 @@ WylSecureDuckdbFileHandle::DetachSidecarBindingForMove ()
   session_ = nullptr;
   return sidecar;
 }
-#endif
