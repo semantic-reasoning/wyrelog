@@ -38,19 +38,6 @@ win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
 wyrelog_error_t
-wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
-    WylFactArtifactName a, gboolean c, gboolean w, gint *out_fd)
-{
-  (void) n;
-  (void) a;
-  (void) c;
-  (void) w;
-  if (out_fd != NULL)
-    *out_fd = -1;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
 wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
     WylFactArtifactName a, gboolean c, gboolean w, gint *out_fd)
 {
@@ -311,41 +298,6 @@ wyl_fact_artifact_sidecar_binding_replace_existing_wal (
   (void) d;
   if (r != NULL)
     *r = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_namespace_acquire_mutation_lease (
-  WylFactArtifactNamespace *n, WylFactArtifactMutationLease **l)
-{
-  (void) n;
-  if (l != NULL)
-    *l = NULL;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *r,
-    const gchar *n, gboolean *e)
-{
-  (void) r;
-  (void) n;
-  if (e != NULL)
-    *e = FALSE;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_duckdb_temp_root_create_with_orphan_evidence (
-  WylFactArtifactMutationLease *l, WylFactDuckdbTempRoot **r,
-  WylFactDuckdbTempOrphanEvidence **e)
-{
-  (void) l;
-  if (r == NULL)
-    return WYRELOG_E_INVALID;
-  *r = NULL;
-  if (e != NULL)
-    *e = NULL;
   return WYRELOG_E_POLICY;
 }
 
