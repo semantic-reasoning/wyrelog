@@ -116,19 +116,19 @@ test_security_init (TestSecurity *security, BYTE ace_flags,
   if (security->acl == NULL
       || !InitializeAcl (security->acl, acl_length, ACL_REVISION)
       || !AddAccessAllowedAceEx (security->acl, ACL_REVISION, ace_flags,
-          FILE_ALL_ACCESS, security->user)
+      FILE_ALL_ACCESS, security->user)
       || !InitializeSecurityDescriptor (&security->descriptor,
-          SECURITY_DESCRIPTOR_REVISION)
+      SECURITY_DESCRIPTOR_REVISION)
       || !SetSecurityDescriptorOwner (&security->descriptor, security->user,
-          FALSE)
+      FALSE)
       || !SetSecurityDescriptorDacl (&security->descriptor, TRUE,
-          security->acl, FALSE)) {
+      security->acl, FALSE)) {
     test_security_clear (security);
     return FALSE;
   }
   if (protected_dacl
       && !SetSecurityDescriptorControl (&security->descriptor,
-          SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
+      SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
     test_security_clear (security);
     return FALSE;
   }
@@ -180,8 +180,8 @@ native_directory_exists (const gchar *path)
     return FALSE;
   DWORD attributes = GetFileAttributesW ((LPCWSTR) wide);
   return attributes != INVALID_FILE_ATTRIBUTES
-      && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
-      && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+         && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+         && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 }
 
 static gchar *
@@ -216,7 +216,7 @@ unique_path (const gchar *prefix)
   g_autofree gchar *temp = long_path (g_get_tmp_dir ());
   g_autofree gchar *uuid = g_uuid_string_random ();
   g_autofree gchar *name = g_strdup_printf ("%s-%lu-%s", prefix,
-      (gulong) GetCurrentProcessId (), uuid);
+          (gulong) GetCurrentProcessId (), uuid);
   if (temp == NULL)
     return NULL;
   return g_build_filename (temp, name, NULL);
@@ -231,7 +231,7 @@ create_private_directory (const gchar *path)
 
   if (wide == NULL
       || !test_security_init (&security,
-          OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, TRUE))
+      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, TRUE))
     return FALSE;
   created = CreateDirectoryW ((LPCWSTR) wide, &security.attributes);
   test_security_clear (&security);
@@ -252,21 +252,21 @@ create_insecure_directory (const gchar *path)
 
   if (wide == NULL
       || !test_security_init (&security,
-          OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FALSE))
+      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FALSE))
     return FALSE;
   created = CreateDirectoryW ((LPCWSTR) wide, &security.attributes);
   if (created)
     handle = CreateFileW ((LPCWSTR) wide, READ_CONTROL | WRITE_DAC,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS
-        | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS
+            | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   if (handle != INVALID_HANDLE_VALUE) {
     DWORD error = SetSecurityInfo (handle, SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-        NULL, NULL, security.acl, NULL);
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            NULL, NULL, security.acl, NULL);
     if (error == ERROR_SUCCESS)
       error = GetSecurityInfo (handle, SE_FILE_OBJECT,
-          DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &persisted);
+              DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &persisted);
     if (error == ERROR_SUCCESS && persisted != NULL
         && GetSecurityDescriptorControl (persisted, &control, &revision))
       unprotected = (control & SE_DACL_PROTECTED) == 0;
@@ -301,16 +301,16 @@ create_extra_ace_directory (const gchar *path)
   acl = g_malloc0 (acl_length);
   if (acl == NULL || !InitializeAcl (acl, acl_length, ACL_REVISION)
       || !AddAccessAllowedAceEx (acl, ACL_REVISION,
-          OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FILE_ALL_ACCESS, user)
+      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FILE_ALL_ACCESS, user)
       || !AddAccessAllowedAceEx (acl, ACL_REVISION,
-          OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FILE_GENERIC_READ,
-          everyone)
+      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FILE_GENERIC_READ,
+      everyone)
       || !InitializeSecurityDescriptor (&descriptor,
-          SECURITY_DESCRIPTOR_REVISION)
+      SECURITY_DESCRIPTOR_REVISION)
       || !SetSecurityDescriptorOwner (&descriptor, user, FALSE)
       || !SetSecurityDescriptorDacl (&descriptor, TRUE, acl, FALSE)
       || !SetSecurityDescriptorControl (&descriptor, SE_DACL_PROTECTED,
-          SE_DACL_PROTECTED))
+      SE_DACL_PROTECTED))
     goto out;
   attributes.nLength = sizeof attributes;
   attributes.lpSecurityDescriptor = &descriptor;
@@ -333,8 +333,8 @@ create_private_file (const gchar *path, const gchar *contents)
   if (wide == NULL || !test_security_init (&security, 0, TRUE))
     return FALSE;
   handle = CreateFileW ((LPCWSTR) wide, GENERIC_READ | GENERIC_WRITE | DELETE,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      &security.attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          &security.attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
   test_security_clear (&security);
   if (handle == INVALID_HANDLE_VALUE)
     return FALSE;
@@ -349,9 +349,9 @@ create_insecure_file (const gchar *path, const gchar *contents)
 {
   g_autofree gunichar2 *wide = wide_path (path);
   HANDLE handle = wide != NULL ? CreateFileW ((LPCWSTR) wide,
-      GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE
-      | FILE_SHARE_DELETE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-      NULL) : INVALID_HANDLE_VALUE;
+          GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE
+          | FILE_SHARE_DELETE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+          NULL) : INVALID_HANDLE_VALUE;
   DWORD written = 0;
   gsize length = strlen (contents);
   gboolean ok;
@@ -370,8 +370,8 @@ file_has_security (const gchar *path, PSID expected_owner,
 {
   g_autofree gunichar2 *wide = wide_path (path);
   HANDLE handle = wide != NULL ? CreateFileW ((LPCWSTR) wide, READ_CONTROL,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL)
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL)
       : INVALID_HANDLE_VALUE;
   PSECURITY_DESCRIPTOR descriptor = NULL;
   PSID owner = NULL;
@@ -387,8 +387,8 @@ file_has_security (const gchar *path, PSID expected_owner,
   if (handle == INVALID_HANDLE_VALUE)
     return FALSE;
   DWORD error = GetSecurityInfo (handle, SE_FILE_OBJECT,
-      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
-      &dacl, NULL, &descriptor);
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
+          &dacl, NULL, &descriptor);
   if (error == ERROR_SUCCESS && descriptor != NULL && owner != NULL
       && IsValidSid (owner) && EqualSid (owner, expected_owner)
       && GetSecurityDescriptorControl (descriptor, &control, &revision)
@@ -396,11 +396,11 @@ file_has_security (const gchar *path, PSID expected_owner,
       && GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted)
       && present && dacl != NULL && !defaulted
       && GetAclInformation (dacl, &size, sizeof size, AclSizeInformation)
-      && size.AceCount == 1 && GetAce (dacl, 0, (LPVOID *) & ace)
+      && size.AceCount == 1 && GetAce (dacl, 0, (LPVOID *) &ace)
       && ace != NULL && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE
       && ace->Header.AceFlags == expected_ace_flags
       && ace->Mask == FILE_ALL_ACCESS) {
-    PSID ace_sid = (PSID) & ace->SidStart;
+    PSID ace_sid = (PSID) &ace->SidStart;
     valid = IsValidSid (ace_sid) && EqualSid (ace_sid, expected_ace_sid);
   }
   if (descriptor != NULL)
@@ -447,7 +447,7 @@ remove_tree_no_follow (const gchar *path)
           || wcscmp (entry.cFileName, L"..") == 0)
         continue;
       g_autofree gchar *name = g_utf16_to_utf8 ((gunichar2 *) entry.cFileName,
-          -1, NULL, NULL, NULL);
+              -1, NULL, NULL, NULL);
       g_assert_nonnull (name);
       g_autofree gchar *child = g_build_filename (path, name, NULL);
       remove_tree_no_follow (child);
@@ -475,7 +475,7 @@ move_path (const gchar *source, const gchar *destination)
   g_autofree gunichar2 *wide_source = wide_path (source);
   g_autofree gunichar2 *wide_destination = wide_path (destination);
   return wide_source != NULL && wide_destination != NULL
-      && MoveFileExW ((LPCWSTR) wide_source, (LPCWSTR) wide_destination, 0);
+         && MoveFileExW ((LPCWSTR) wide_source, (LPCWSTR) wide_destination, 0);
 }
 
 static gboolean
@@ -493,7 +493,7 @@ create_directory_junction (const gchar *junction, const gchar *target)
   substitute = g_new (wchar_t, wcslen ((wchar_t *) wide_target) + 5);
   if (substitute == NULL
       || swprintf (substitute, wcslen ((wchar_t *) wide_target) + 5,
-          L"\\??\\%ls", (wchar_t *) wide_target) < 0)
+      L"\\??\\%ls", (wchar_t *) wide_target) < 0)
     return FALSE;
   gsize substitute_bytes = wcslen (substitute) * sizeof (wchar_t);
   gsize target_bytes = wcslen ((wchar_t *) wide_target) * sizeof (wchar_t);
@@ -504,8 +504,8 @@ create_directory_junction (const gchar *junction, const gchar *target)
       || !CreateDirectoryW ((LPCWSTR) wide_junction, NULL))
     return FALSE;
   handle = CreateFileW ((LPCWSTR) wide_junction, GENERIC_WRITE, 0, NULL,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-      NULL);
+          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+          NULL);
   if (handle == INVALID_HANDLE_VALUE)
     goto fail;
   data = g_malloc0 (total);
@@ -520,7 +520,7 @@ create_directory_junction (const gchar *junction, const gchar *target)
   memcpy ((guint8 *) data->path_buffer + data->print_offset,
       wide_target, target_bytes);
   gboolean ok = DeviceIoControl (handle, FSCTL_SET_REPARSE_POINT, data,
-      (DWORD) total, NULL, 0, &returned, NULL);
+          (DWORD) total, NULL, 0, &returned, NULL);
   CloseHandle (handle);
   if (ok)
     return TRUE;
@@ -536,7 +536,8 @@ init_locator (WylFactGraphLocator *locator, const gchar *tenant,
     const gchar *graph)
 {
   *locator = (WylFactGraphLocator) {
-  0};
+    0
+  };
   g_assert_cmpint (wyl_fact_graph_locator_init (locator, tenant, graph), ==,
       WYRELOG_E_OK);
 }
@@ -550,7 +551,7 @@ open_graph (const gchar *root, WylFactGraphLocator *locator,
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (resolver, locator,
-          TRUE, directory), ==, WYRELOG_E_OK);
+      TRUE, directory), ==, WYRELOG_E_OK);
 }
 
 static void
@@ -575,7 +576,7 @@ test_create_revalidate_and_component_lengths (void)
 
   init_locator (&locator, too_long, "graph");
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          TRUE, &graph), ==, WYRELOG_E_POLICY);
+      TRUE, &graph), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
@@ -603,7 +604,7 @@ test_rejects_reserved_names_and_uppercase_alias (void)
         wyl_fact_graph_directory_descriptive_file (&graph, reserved[i]);
     g_assert_null (path);
     g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-            reserved[i], &stage), !=, WYRELOG_E_OK);
+        reserved[i], &stage), !=, WYRELOG_E_OK);
     wyl_fact_graph_stage_clear (&stage);
   }
   wyl_fact_graph_directory_clear (&graph);
@@ -618,7 +619,7 @@ test_rejects_reserved_names_and_uppercase_alias (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          FALSE, &graph), ==, WYRELOG_E_POLICY);
+      FALSE, &graph), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
@@ -650,12 +651,12 @@ test_rejects_insecure_acls (void)
   g_clear_pointer (&root, g_free);
   root = make_root ();
   g_autofree gchar *tenant = g_build_filename (root,
-      locator.tenant_component, NULL);
+          locator.tenant_component, NULL);
   g_assert_true (create_insecure_directory (tenant));
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          FALSE, &graph), ==, WYRELOG_E_POLICY);
+      FALSE, &graph), ==, WYRELOG_E_POLICY);
   wyl_fact_graph_resolver_clear (&resolver);
   remove_tree_no_follow (root);
 
@@ -665,12 +666,12 @@ test_rejects_insecure_acls (void)
   tenant = g_build_filename (root, locator.tenant_component, NULL);
   g_assert_true (create_private_directory (tenant));
   g_autofree gchar *graph_path = g_build_filename (tenant,
-      locator.graph_component, NULL);
+          locator.graph_component, NULL);
   g_assert_true (create_insecure_directory (graph_path));
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          FALSE, &graph), ==, WYRELOG_E_POLICY);
+      FALSE, &graph), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
@@ -714,7 +715,7 @@ test_file_replacement_checkpoint_fails_closed (void)
   graph.checkpoint_data = &race;
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, -1);
   g_assert_true (race.fired);
   g_autofree gchar *contents = NULL;
@@ -764,9 +765,9 @@ test_replacement_checkpoints_fail_closed (void)
   open_graph (root, &locator, &resolver, &graph);
   wyl_fact_graph_directory_clear (&graph);
   g_autofree gchar *tenant = g_build_filename (root,
-      locator.tenant_component, NULL);
+          locator.tenant_component, NULL);
   g_autofree gchar *graph_path = g_build_filename (tenant,
-      locator.graph_component, NULL);
+          locator.graph_component, NULL);
   static const gchar *points[] = {
     "root-opened", "tenant-opened", "graph-opened",
   };
@@ -782,7 +783,7 @@ test_replacement_checkpoints_fail_closed (void)
     wyl_fact_graph_resolver_set_checkpoint_for_test (&resolver,
         replace_directory_checkpoint, &race);
     g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-            &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
+        &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
     restore_replacement (&race);
   }
 
@@ -810,30 +811,30 @@ test_reparse_points_fail_closed (void)
       WYRELOG_E_POLICY);
 
   g_autofree gchar *tenant = g_build_filename (root,
-      locator.tenant_component, NULL);
+          locator.tenant_component, NULL);
   g_assert_true (create_directory_junction (tenant, target));
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          FALSE, &graph), ==, WYRELOG_E_POLICY);
+      FALSE, &graph), ==, WYRELOG_E_POLICY);
   remove_tree_no_follow (tenant);
 
   g_assert_true (create_private_directory (tenant));
   g_autofree gchar *graph_path = g_build_filename (tenant,
-      locator.graph_component, NULL);
+          locator.graph_component, NULL);
   g_assert_true (create_directory_junction (graph_path, target));
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          FALSE, &graph), ==, WYRELOG_E_POLICY);
+      FALSE, &graph), ==, WYRELOG_E_POLICY);
   remove_tree_no_follow (graph_path);
 
   g_assert_true (create_private_directory (graph_path));
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
-          FALSE, &graph), ==, WYRELOG_E_OK);
+      FALSE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *file = g_build_filename (graph_path, "facts.duckdb", NULL);
   g_assert_true (create_directory_junction (file, target));
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, -1);
 
   wyl_fact_graph_directory_clear (&graph);
@@ -860,24 +861,24 @@ test_file_acl_hardening (void)
       wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
   g_assert_true (create_insecure_file (file, "db"));
   g_assert_true (file_has_security (file, token_owner, token_user,
-          INHERITED_ACE, FALSE));
+      INHERITED_ACE, FALSE));
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_secure_file_mode (&graph,
-          "facts.duckdb"), ==, WYRELOG_E_OK);
+      "facts.duckdb"), ==, WYRELOG_E_OK);
   g_assert_true (file_has_security (file, token_user, token_user, 0, TRUE));
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (_close (fd), ==, 0);
 
   g_autofree gchar *private_file =
       wyl_fact_graph_directory_descriptive_file (&graph, "private.duckdb");
   g_assert_true (create_private_file (private_file, "db"));
   g_assert_cmpint (wyl_fact_graph_directory_secure_file_mode (&graph,
-          "private.duckdb"), ==, WYRELOG_E_OK);
+      "private.duckdb"), ==, WYRELOG_E_OK);
   g_assert_true (file_has_security (private_file, token_user, token_user, 0,
-          TRUE));
+      TRUE));
 
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
@@ -891,7 +892,7 @@ create_hardlink (const gchar *existing, const gchar *linkname)
   g_autofree gunichar2 *wide_existing = wide_path (existing);
   g_autofree gunichar2 *wide_link = wide_path (linkname);
   return wide_existing != NULL && wide_link != NULL
-      && CreateHardLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_existing, NULL);
+         && CreateHardLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_existing, NULL);
 }
 
 static void
@@ -914,7 +915,7 @@ test_relative_regular_open_and_reject_aliases (void)
   g_assert_true (create_private_directory (nested));
   g_assert_true (create_private_file (path, "duck"));
   g_autofree gchar *relative = g_strdup_printf ("%s/%s/legacy/nested/"
-      "facts.duckdb", locator.tenant_component, locator.graph_component);
+          "facts.duckdb", locator.tenant_component, locator.graph_component);
   g_assert_true (wyl_fact_graph_relative_path_is_valid (relative));
   static const gchar *invalid[] = {
     "", "/", ".", "..", "tenant//graph", "tenant/./graph",
@@ -924,21 +925,21 @@ test_relative_regular_open_and_reject_aliases (void)
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
     g_assert_false (wyl_fact_graph_relative_path_is_valid (invalid[i]));
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          relative, &file), ==, WYRELOG_E_OK);
+      relative, &file), ==, WYRELOG_E_OK);
   g_assert_cmpuint (file.size_bytes, ==, 4);
   gchar contents[5] = { 0 };
   DWORD read_bytes = 0;
   g_assert_true (ReadFile ((HANDLE) file.handle, contents, 4, &read_bytes,
-          NULL));
+      NULL));
   g_assert_cmpuint (read_bytes, ==, 4);
   g_assert_cmpstr (contents, ==, "duck");
   wyl_fact_graph_regular_file_clear (&file);
 
   g_autofree gchar *hardlink = g_build_filename (nested, "facts-hard.duckdb",
-      NULL);
+          NULL);
   g_assert_true (create_hardlink (path, hardlink));
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          relative, &file), ==, WYRELOG_E_POLICY);
+      relative, &file), ==, WYRELOG_E_POLICY);
   g_autofree gunichar2 *wide_hardlink = wide_path (hardlink);
   g_assert_true (wide_hardlink != NULL
       && DeleteFileW ((LPCWSTR) wide_hardlink));
@@ -946,24 +947,24 @@ test_relative_regular_open_and_reject_aliases (void)
   g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
   g_assert_true (create_private_directory (outside));
   g_autofree gchar *branch_link = g_build_filename (graph_path, "legacy-link",
-      NULL);
+          NULL);
   g_assert_true (create_directory_junction (branch_link, legacy));
   g_autofree gchar *branch_relative = g_strdup_printf ("%s/%s/legacy-link/"
-      "nested/facts.duckdb", locator.tenant_component,
-      locator.graph_component);
+          "nested/facts.duckdb", locator.tenant_component,
+          locator.graph_component);
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          branch_relative, &file), ==, WYRELOG_E_POLICY);
+      branch_relative, &file), ==, WYRELOG_E_POLICY);
   g_autofree gunichar2 *wide_branch_link = wide_path (branch_link);
   g_assert_true (wide_branch_link != NULL
       && RemoveDirectoryW ((LPCWSTR) wide_branch_link));
 
   g_autofree gchar *final_link = g_build_filename (legacy, "facts.duckdb",
-      NULL);
+          NULL);
   g_assert_true (create_directory_junction (final_link, outside));
   g_autofree gchar *final_relative = g_strdup_printf ("%s/%s/legacy/"
-      "facts.duckdb", locator.tenant_component, locator.graph_component);
+          "facts.duckdb", locator.tenant_component, locator.graph_component);
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          final_relative, &file), ==, WYRELOG_E_POLICY);
+      final_relative, &file), ==, WYRELOG_E_POLICY);
   g_autofree gunichar2 *wide_final_link = wide_path (final_link);
   g_assert_true (wide_final_link != NULL
       && RemoveDirectoryW ((LPCWSTR) wide_final_link));
@@ -987,7 +988,7 @@ test_stage_roundtrip_and_abort (void)
   init_locator (&locator, "tenant", "graph");
   open_graph (root, &locator, &resolver, &graph);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-          "facts.duckdb", &stage), ==, WYRELOG_E_OK);
+      "facts.duckdb", &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (_write (stage.fd, "duck", 4), ==, 4);
   g_assert_cmpint (wyl_fact_graph_stage_sync (&stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
@@ -995,17 +996,17 @@ test_stage_roundtrip_and_abort (void)
   g_assert_cmpint (stage.fd, ==, -1);
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
   gchar buffer[5] = { 0 };
   g_assert_cmpint (_read (fd, buffer, 4), ==, 4);
   g_assert_cmpstr (buffer, ==, "duck");
   g_assert_cmpint (_close (fd), ==, 0);
 
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-          "aborted.duckdb", &stage), ==, WYRELOG_E_OK);
+      "aborted.duckdb", &stage), ==, WYRELOG_E_OK);
   g_autofree gchar *stage_path = g_build_filename (root,
-      locator.tenant_component, locator.graph_component,
-      stage.stage_basename, NULL);
+          locator.tenant_component, locator.graph_component,
+          stage.stage_basename, NULL);
   g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
   g_assert_cmpint (wyl_fact_graph_stage_abort (&graph, &stage), ==,
       WYRELOG_E_OK);
@@ -1033,16 +1034,16 @@ test_stage_attack_bindings (void)
   init_locator (&locator_b, "tenant", "b");
   open_graph (root, &locator_a, &resolver, &graph_a);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator_b, TRUE, &graph_b), ==, WYRELOG_E_OK);
+      &locator_b, TRUE, &graph_b), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph_a,
-          "cross.duckdb", &stage), ==, WYRELOG_E_OK);
+      "cross.duckdb", &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_publish (&graph_b, &stage), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_graph_stage_abort (&graph_a, &stage), ==,
       WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph_a,
-          "foreign.duckdb", &stage), ==, WYRELOG_E_OK);
+      "foreign.duckdb", &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (_write (stage.fd, "owned", 5), ==, 5);
   g_autofree gchar *final =
       wyl_fact_graph_directory_descriptive_file (&graph_a, "foreign.duckdb");
@@ -1055,11 +1056,11 @@ test_stage_attack_bindings (void)
   wyl_fact_graph_stage_clear (&stage);
 
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph_a,
-          "replaced.duckdb", &stage), ==, WYRELOG_E_OK);
+      "replaced.duckdb", &stage), ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph_a);
   g_autofree gchar *named_stage = g_build_filename (graph_path,
-      stage.stage_basename, NULL);
+          stage.stage_basename, NULL);
   g_autofree gchar *aside = g_strdup_printf ("%s-aside", named_stage);
   g_assert_true (move_path (named_stage, aside));
   g_assert_true (create_private_file (named_stage, "replacement"));
@@ -1108,7 +1109,7 @@ test_publish_retries_converge (void)
     WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
     PublishFault fault = {.point = points[i] };
     g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph, final,
-            &stage), ==, WYRELOG_E_OK);
+        &stage), ==, WYRELOG_E_OK);
     g_assert_cmpint (_write (stage.fd, "retry", 5), ==, 5);
     graph.checkpoint = fail_publish_once;
     graph.checkpoint_data = &fault;
@@ -1153,17 +1154,17 @@ test_exact_stage_creation_boundaries_fail_closed (void)
     graph.checkpoint = fail_publish_once;
     graph.checkpoint_data = &fault;
     g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-            operations[i], &stage), ==, WYRELOG_E_IO);
+        operations[i], &stage), ==, WYRELOG_E_IO);
     g_assert_true (fault.fired);
     g_assert_cmpint (stage.fd, ==, -1);
     g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
-        (&stage, &evidence), ==, WYRELOG_E_INVALID);
+          (&stage, &evidence), ==, WYRELOG_E_INVALID);
     graph.checkpoint = NULL;
     graph.checkpoint_data = NULL;
     /* No returned evidence means the durable coordinator cannot adopt the
-     * crash seam merely because the canonical UUID-derived name exists. */
+    * crash seam merely because the canonical UUID-derived name exists. */
     g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-            operations[i], &stage), ==, WYRELOG_E_POLICY);
+        operations[i], &stage), ==, WYRELOG_E_POLICY);
   }
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
@@ -1200,35 +1201,35 @@ test_exact_evidence_publish_recovery_converges (void)
     init_locator (&locator, "tenant", "graph");
     open_graph (root, &locator, &resolver, &graph);
     g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-            operations[i], &stage), ==, WYRELOG_E_OK);
+        operations[i], &stage), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
-        (&stage, &evidence), ==, WYRELOG_E_OK);
+          (&stage, &evidence), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
-        (&graph, operations[i], &evidence, &reopened), ==, WYRELOG_E_OK);
+          (&graph, operations[i], &evidence, &reopened), ==, WYRELOG_E_OK);
     wyl_fact_graph_stage_clear (&reopened);
     g_assert_cmpint (_write (stage.fd, "recovery", 8), ==, 8);
     graph.checkpoint = fail_publish_once;
     graph.checkpoint_data = &fault;
     g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
-            &stage, &evidence), ==, WYRELOG_E_IO);
+        &stage, &evidence), ==, WYRELOG_E_IO);
     g_assert_true (fault.fired);
     graph.checkpoint = NULL;
     graph.checkpoint_data = NULL;
     foreign = evidence;
     foreign.artifact_identity.file_id[0] ^= 1;
     g_assert_cmpint
-        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
-            operations[i], &foreign, &final), ==, WYRELOG_E_POLICY);
+      (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+        operations[i], &foreign, &final), ==, WYRELOG_E_POLICY);
     g_assert_cmpint
-        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
-            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+      (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+        operations[i], &evidence, &final), ==, WYRELOG_E_OK);
     wyl_fact_graph_regular_file_clear (&final);
     g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
-            &stage, &evidence), ==, WYRELOG_E_OK);
+        &stage, &evidence), ==, WYRELOG_E_OK);
     g_assert_cmpint (stage.fd, ==, -1);
     g_assert_cmpint
-        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
-            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+      (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+        operations[i], &evidence, &final), ==, WYRELOG_E_OK);
     wyl_fact_graph_regular_file_clear (&final);
     wyl_fact_graph_stage_clear (&stage);
     wyl_fact_graph_stage_clear (&reopened);
@@ -1267,14 +1268,14 @@ test_exact_evidence_restart_recovers_final (void)
     init_locator (&locator, "tenant", "graph");
     open_graph (root, &locator, &resolver, &graph);
     g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-            operations[i], &stage), ==, WYRELOG_E_OK);
+        operations[i], &stage), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
-        (&stage, &evidence), ==, WYRELOG_E_OK);
+          (&stage, &evidence), ==, WYRELOG_E_OK);
     g_assert_cmpint (_write (stage.fd, "restart", 7), ==, 7);
     graph.checkpoint = fail_publish_once;
     graph.checkpoint_data = &fault;
     g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
-            &stage, &evidence), ==, WYRELOG_E_IO);
+        &stage, &evidence), ==, WYRELOG_E_IO);
     g_assert_true (fault.fired);
 
     /* Simulate process loss: no stage, graph, or resolver HANDLE crosses the
@@ -1288,21 +1289,21 @@ test_exact_evidence_restart_recovers_final (void)
     g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
         WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-            &locator, FALSE, &graph), ==, WYRELOG_E_OK);
+        &locator, FALSE, &graph), ==, WYRELOG_E_OK);
 
     foreign = evidence;
     foreign.artifact_identity.file_id[0] ^= 1;
     g_assert_cmpint
-        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
-            operations[i], &foreign, &final), ==, WYRELOG_E_POLICY);
+      (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+        operations[i], &foreign, &final), ==, WYRELOG_E_POLICY);
     g_assert_cmpint
-        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
-            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+      (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+        operations[i], &evidence, &final), ==, WYRELOG_E_OK);
     wyl_fact_graph_regular_file_clear (&final);
     /* Recovery is idempotent once the evidence-bound final is visible. */
     g_assert_cmpint
-        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
-            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+      (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+        operations[i], &evidence, &final), ==, WYRELOG_E_OK);
     wyl_fact_graph_regular_file_clear (&final);
     wyl_fact_graph_directory_clear (&graph);
     wyl_fact_graph_resolver_clear (&resolver);
@@ -1329,46 +1330,46 @@ test_exact_stage_creation_mints_operation_evidence (void)
   init_locator (&locator, "tenant", "graph");
   open_graph (root, &locator, &resolver, &graph);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          operation, &stage), ==, WYRELOG_E_OK);
+      operation, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpstr (stage.stage_basename, ==,
       "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite");
   g_assert_cmpstr (stage.final_basename, ==, "facts.duckdb");
   g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
-          &evidence), ==, WYRELOG_E_OK);
+      &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpuint (evidence.version, ==,
       WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION);
   g_assert_cmpint (memcmp (&evidence.graph_identity, &graph.graph_identity,
-          sizeof evidence.graph_identity), ==, 0);
+      sizeof evidence.graph_identity), ==, 0);
   g_assert_cmpint (memcmp (&evidence.artifact_identity, &stage.identity,
-          sizeof evidence.artifact_identity), ==, 0);
+      sizeof evidence.artifact_identity), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          operation, &reopened), ==, WYRELOG_E_BUSY);
+      operation, &reopened), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          operation, &reopened), ==, WYRELOG_E_POLICY);
+      operation, &reopened), ==, WYRELOG_E_POLICY);
   wrong_evidence = evidence;
   wrong_evidence.artifact_identity.file_id[0] ^= 1;
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
-      (&graph, operation, &wrong_evidence, &reopened), ==, WYRELOG_E_POLICY);
+        (&graph, operation, &wrong_evidence, &reopened), ==, WYRELOG_E_POLICY);
   wrong_operation = evidence;
   wrong_operation.operation_uuid[0] ^= 1;
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
-      (&graph, operation, &wrong_operation, &reopened), ==, WYRELOG_E_POLICY);
+        (&graph, operation, &wrong_operation, &reopened), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
-      (&graph, operation, &evidence, &reopened), ==, WYRELOG_E_OK);
+        (&graph, operation, &evidence, &reopened), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
-          &reopened, &evidence), ==, WYRELOG_E_OK);
+      &reopened, &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, operation, &final), ==, WYRELOG_E_POLICY);
+        (&graph, operation, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
-      (&graph, operation, &wrong_evidence, &final), ==, WYRELOG_E_POLICY);
+        (&graph, operation, &wrong_evidence, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
-      (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070547", &evidence, &final),
+        (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070547", &evidence, &final),
       ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
-      (&graph, operation, &evidence, &final), ==, WYRELOG_E_OK);
+        (&graph, operation, &evidence, &final), ==, WYRELOG_E_OK);
   wyl_fact_graph_regular_file_clear (&final);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          "01890f47-3c4b-6cc2-b8c4-dc0c0c070544", &reopened), ==,
+      "01890f47-3c4b-6cc2-b8c4-dc0c0c070544", &reopened), ==,
       WYRELOG_E_INVALID);
   wyl_fact_graph_stage_clear (&stage);
   wyl_fact_graph_stage_clear (&reopened);
@@ -1394,9 +1395,9 @@ test_exact_evidence_rejects_name_substitution (void)
   init_locator (&locator, "tenant", "graph");
   open_graph (root, &locator, &resolver, &graph);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          stage_operation, &stage), ==, WYRELOG_E_OK);
+      stage_operation, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
-          &evidence), ==, WYRELOG_E_OK);
+      &evidence), ==, WYRELOG_E_OK);
   g_autofree gchar *stage_path =
       wyl_fact_graph_directory_descriptive_file (&graph, stage.stage_basename);
   g_autofree gchar *stage_aside = g_strdup_printf ("%s-aside", stage_path);
@@ -1404,24 +1405,24 @@ test_exact_evidence_rejects_name_substitution (void)
   g_assert_true (create_private_file (stage_path, "foreign-stage"));
   WylFactGraphStage reopened = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
-      (&graph, stage_operation, &evidence, &reopened), ==, WYRELOG_E_POLICY);
+        (&graph, stage_operation, &evidence, &reopened), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph, &stage,
-          &evidence), ==, WYRELOG_E_POLICY);
+      &evidence), ==, WYRELOG_E_POLICY);
   wyl_fact_graph_stage_clear (&stage);
 
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          final_operation, &stage), ==, WYRELOG_E_OK);
+      final_operation, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
-          &evidence), ==, WYRELOG_E_OK);
+      &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph, &stage,
-          &evidence), ==, WYRELOG_E_OK);
+      &evidence), ==, WYRELOG_E_OK);
   g_autofree gchar *final_path =
       wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
   g_autofree gchar *final_aside = g_strdup_printf ("%s-aside", final_path);
   g_assert_true (move_path (final_path, final_aside));
   g_assert_true (create_private_file (final_path, "foreign-final"));
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
-      (&graph, final_operation, &evidence, &final), ==, WYRELOG_E_POLICY);
+        (&graph, final_operation, &evidence, &final), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_regular_file_clear (&final);
   wyl_fact_graph_stage_clear (&stage);
@@ -1455,12 +1456,12 @@ test_exact_evidence_revalidates_after_last_checkpoints (void)
     init_locator (&locator, "tenant", "graph");
     open_graph (root, &locator, &resolver, &graph);
     g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-            operations[i], &stage), ==, WYRELOG_E_OK);
+        operations[i], &stage), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
-        (&stage, &evidence), ==, WYRELOG_E_OK);
+          (&stage, &evidence), ==, WYRELOG_E_OK);
     if (i == 1)
       g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
-              &stage, &evidence), ==, WYRELOG_E_OK);
+          &stage, &evidence), ==, WYRELOG_E_OK);
     g_autofree gchar *final_path =
         wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
     g_autofree gchar *aside = g_strdup_printf ("%s-raced", final_path);
@@ -1473,12 +1474,12 @@ test_exact_evidence_revalidates_after_last_checkpoints (void)
     graph.checkpoint_data = &race;
     if (i == 0) {
       g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
-              &stage, &evidence), ==, WYRELOG_E_POLICY);
+          &stage, &evidence), ==, WYRELOG_E_POLICY);
       g_assert_cmpint (stage.fd, >=, 0);
     } else {
       g_assert_cmpint
-          (wyl_fact_graph_directory_open_provisioned_final_with_evidence
-          (&graph, operations[i], &evidence, &final), ==, WYRELOG_E_POLICY);
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence
+            (&graph, operations[i], &evidence, &final), ==, WYRELOG_E_POLICY);
       g_assert_null (final.handle);
     }
     g_assert_true (race.fired);
