@@ -486,7 +486,12 @@ wyl_fact_artifact_io_session_open_sidecar (
   if (lease == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  if (!create_if_missing)
+  /* The two underlying authorities partition this space and each rejects the
+   * other's half with WYRELOG_E_POLICY.  The narrow recovery authority is
+   * writable-only and never creates; the general one refuses a writable open
+   * that is not also a create.  Only (!create_if_missing && writable) belongs
+   * to the recovery authority. */
+  if (!create_if_missing && writable)
     rc = wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease, artifact, writable, &binding, &fd);
   else
     rc = wyl_fact_artifact_mutation_lease_open_sidecar_binding (lease, artifact, create_if_missing, writable, &binding, &fd);

@@ -20,6 +20,7 @@
 #include <unistd.h>
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/artifact-io-session-private.h"
 
 #ifndef G_OS_WIN32
 static gchar *
@@ -1807,6 +1808,92 @@ test_existing_sidecar_reopen (void)
   g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
   g_assert_cmpint (g_rmdir (root), ==, 0);
 #endif
+}
+#endif
+
+#ifndef G_OS_WIN32
+/* The bounded session opener demultiplexes onto two mutually exclusive
+ * artifact authorities: the recovery authority is writable-only and never
+ * creates, while the general authority refuses a writable open that is not
+ * also a create.  Pin every (create, writable) outcome so a dispatch that
+ * sends a read-only reopen to the recovery authority -- which answers
+ * WYRELOG_E_POLICY before it ever reaches the filesystem -- cannot regress
+ * unnoticed behind the DuckDB integration suite. */
+static void
+test_io_session_sidecar_dispatch (void)
+{
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  WylFactArtifactMutationLease *lease = NULL;
+  WylFactArtifactIoSession *session = NULL;
+  g_autofree gchar *root = make_root ();
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+      TRUE, &directory), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&directory);
+  g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+
+  /* An absent sidecar reports absence, not a policy refusal: the adapter
+   * relies on NOT_FOUND to fall through to its creating open. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &session), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_null (session);
+
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &session), ==, WYRELOG_E_OK);
+  g_assert_nonnull (session);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+
+  /* The regression: a read-only reopen of an extant sidecar must reach the
+   * general authority. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &session), ==, WYRELOG_E_OK);
+  g_assert_nonnull (session);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+
+  /* A writable reopen without create is the recovery authority's one cell. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, &session), ==, WYRELOG_E_OK);
+  g_assert_nonnull (session);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+
+  /* A read-only create stays with the general authority. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, FALSE, &session), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (session);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+
+  wyl_fact_artifact_mutation_lease_free (lease);
+  wyl_fact_artifact_namespace_free (namespace_);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_MAIN);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_WAL);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_CHECKPOINT);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_LOCK);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_autofree gchar *tenant_path = g_path_get_dirname (graph_path);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
 }
 #endif
 
@@ -3999,6 +4086,10 @@ main (int argc, char **argv)
       test_reader_main_binding);
   g_test_add_func ("/fact-artifact-namespace/existing-sidecar-reopen",
       test_existing_sidecar_reopen);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/fact-artifact-namespace/io-session-sidecar-dispatch",
+      test_io_session_sidecar_dispatch);
+#endif
   g_test_add_func ("/fact-artifact-namespace/duckdb-temp-root",
       test_duckdb_temp_root);
   return g_test_run ();
