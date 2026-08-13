@@ -51,7 +51,7 @@ typedef struct
   guint64 inode;
 #endif
   gchar *path;
-    wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
+  wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
   gpointer checkpoint_data;
 } WylFactGraphResolver;
 
@@ -91,7 +91,7 @@ typedef struct
   gchar *root_path;
   gchar *tenant_component;
   gchar *graph_component;
-    wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
+  wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
   gpointer checkpoint_data;
 } WylFactGraphDirectory;
 
@@ -163,14 +163,14 @@ wyrelog_error_t wyl_fact_graph_resolver_revalidate (WylFactGraphResolver *
     resolver);
 void wyl_fact_graph_resolver_clear (WylFactGraphResolver * resolver);
 void wyl_fact_graph_resolver_set_checkpoint_for_test
-    (WylFactGraphResolver * resolver,
+  (WylFactGraphResolver * resolver,
     wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data),
     gpointer user_data);
 wyrelog_error_t wyl_fact_graph_resolver_open_directory
-    (WylFactGraphResolver * resolver, const WylFactGraphLocator * locator,
+  (WylFactGraphResolver * resolver, const WylFactGraphLocator * locator,
     gboolean create, WylFactGraphDirectory * out_directory);
 wyrelog_error_t wyl_fact_graph_resolver_open_relative_regular
-    (WylFactGraphResolver * resolver, const gchar * relative_path,
+  (WylFactGraphResolver * resolver, const gchar * relative_path,
     WylFactGraphRegularFile * out_file);
 void wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile * file);
 void wyl_fact_graph_directory_clear (WylFactGraphDirectory * directory);
@@ -179,49 +179,49 @@ gchar *wyl_fact_graph_directory_descriptive_path (const WylFactGraphDirectory
 gchar *wyl_fact_graph_directory_descriptive_file (const WylFactGraphDirectory
     * directory, const gchar * basename);
 wyrelog_error_t wyl_fact_graph_directory_open_file
-    (WylFactGraphDirectory * directory, const gchar * basename,
+  (WylFactGraphDirectory * directory, const gchar * basename,
     gboolean writable, gint * out_fd);
 wyrelog_error_t wyl_fact_graph_directory_secure_file_mode
-    (WylFactGraphDirectory * directory, const gchar * basename);
+  (WylFactGraphDirectory * directory, const gchar * basename);
 wyrelog_error_t wyl_fact_graph_directory_stage_create
-    (WylFactGraphDirectory * directory, const gchar * final_basename,
+  (WylFactGraphDirectory * directory, const gchar * final_basename,
     WylFactGraphStage * out_stage);
 /* Create exactly one durable provisioning stage.  |operation_uuid| must be a
  * canonical UUIDv7; the locator derives `provision-<uuidv7>.sqlite` and the
  * fixed `facts.duckdb` final name internally.  This API never generates
  * identifiers and never reuses an existing entry.  EEXIST is BUSY. */
 wyrelog_error_t wyl_fact_graph_directory_stage_create_exact
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);
 /* Reopen only the exact persisted provisioning-stage name.  This never
  * creates a file; absence is NOT_FOUND.  A returned handle proves current
  * resolver-relative binding, not pre-crash provenance. */
 wyrelog_error_t wyl_fact_graph_directory_stage_open_exact
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);
 #ifdef G_OS_WIN32
 /* Return the versioned evidence minted by exact stage creation/reopen.  This
  * is private locator metadata; #544 owns its durable record and ordering. */
 wyrelog_error_t wyl_fact_graph_stage_get_windows_operation_evidence
-    (const WylFactGraphStage * stage,
+  (const WylFactGraphStage * stage,
     WylFactGraphWinOperationEvidence * out_evidence);
 /* Reopen only the canonical UUIDv7-derived stage after exact equality with
  * durable operation evidence.  UUID-only stage reopen remains fail-closed on
  * Windows because a name does not establish provenance. */
 wyrelog_error_t wyl_fact_graph_directory_stage_open_exact_with_evidence
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     const WylFactGraphWinOperationEvidence * expected_evidence,
     WylFactGraphStage * out_stage);
 /* Open the fixed native final only after exact evidence equality.  This is
  * the Windows replacement for the POSIX retained hard-link-pair API. */
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_with_evidence
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     const WylFactGraphWinOperationEvidence * expected_evidence,
     WylFactGraphRegularFile * out_final);
 /* Publish the evidence-bound exact stage with a no-replace native rename.
- * The expected tuple must be the same tuple returned at stage creation. */
+* The expected tuple must be the same tuple returned at stage creation. */
 wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
-    (WylFactGraphDirectory * directory, WylFactGraphStage * stage,
+  (WylFactGraphDirectory * directory, WylFactGraphStage * stage,
     const WylFactGraphWinOperationEvidence * expected_evidence);
 #endif
 /* Open the intentionally retained `stage + facts.duckdb` provisioning pair.
@@ -229,17 +229,17 @@ wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
  * This is read-only and accepts only a secure nlink=2 pair whose two names
  * identify the same file; callers must still validate the held DB identity. */
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_exact
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphRegularFile * out_final);
 #ifndef G_OS_WIN32
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphProvisionedPair ** out_pair);
 WylFactGraphProvisionedPair *wyl_fact_graph_provisioned_pair_ref
-    (WylFactGraphProvisionedPair * pair);
+  (WylFactGraphProvisionedPair * pair);
 void wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair);
 wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate
-    (WylFactGraphProvisionedPair * pair);
+  (WylFactGraphProvisionedPair * pair);
 #endif
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *
