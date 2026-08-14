@@ -40,7 +40,7 @@ lookup_graph_storage_path (wyl_policy_store_t *store, const gchar *tenant_id,
 {
   GraphPathProbe probe = { tenant_id, graph_id, NULL };
   if (wyl_policy_store_foreach_fact_graph (store, tenant_id,
-          capture_graph_path_cb, &probe) != WYRELOG_E_OK)
+      capture_graph_path_cb, &probe) != WYRELOG_E_OK)
     return NULL;
   return probe.storage_path;
 }
@@ -53,14 +53,14 @@ tamper_graph_storage_path (const gchar *policy_path, const gchar *tenant_id,
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_open (policy_path, &db), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "UPDATE fact_graphs SET storage_path=? "
-          "WHERE tenant_id=? AND graph_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
+      "UPDATE fact_graphs SET storage_path=? "
+      "WHERE tenant_id=? AND graph_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, storage_path, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 2, tenant_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 3, graph_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
   sqlite3_close (db);
@@ -128,7 +128,7 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
     .n_relations = G_N_ELEMENTS (graph_relations),
   };
   g_assert_cmpint (wyl_policy_store_create_fact_graph (store, &graph_opts,
-          NULL), ==, WYRELOG_E_OK);
+      NULL), ==, WYRELOG_E_OK);
 
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
@@ -136,9 +136,9 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
     {"expedited", "bool", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
-      graph_id, columns, G_N_ELEMENTS (columns));
+          graph_id, columns, G_N_ELEMENTS (columns));
   g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (store,
-          &schema), ==, WYRELOG_E_OK);
+      &schema), ==, WYRELOG_E_OK);
 }
 
 static wyl_policy_fact_relation_schema_options_t
@@ -184,17 +184,17 @@ create_compound_graph_with_schemas (wyl_policy_store_t *store,
     .n_relations = G_N_ELEMENTS (graph_relations),
   };
   g_assert_cmpint (wyl_policy_store_create_fact_graph (store, &graph_opts,
-          NULL), ==, WYRELOG_E_OK);
+      NULL), ==, WYRELOG_E_OK);
 
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"route", "compound_ref", FALSE, TRUE},
   };
   for (guint i = 0; i < G_N_ELEMENTS (graph_relations); i++) {
     wyl_policy_fact_relation_schema_options_t schema = make_route_schema
-        (tenant_id, graph_id, graph_relations[i].relation_name, columns,
-        G_N_ELEMENTS (columns));
+          (tenant_id, graph_id, graph_relations[i].relation_name, columns,
+            G_N_ELEMENTS (columns));
     g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (store,
-            &schema), ==, WYRELOG_E_OK);
+        &schema), ==, WYRELOG_E_OK);
   }
 }
 
@@ -204,10 +204,10 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
 {
   (void) root;
   g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
-      tenant_id, graph_id);
+          tenant_id, graph_id);
   g_assert_nonnull (storage_path);
   g_autofree gchar *fact_path = g_build_filename (storage_path,
-      "facts.duckdb", NULL);
+          "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
   g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
@@ -218,7 +218,7 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
     {"expedited", "bool", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
-      graph_id, columns, G_N_ELEMENTS (columns));
+          graph_id, columns, G_N_ELEMENTS (columns));
 
   wyl_fact_value_t values1[] = {
     {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-a"},
@@ -247,7 +247,7 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
   };
   gboolean inserted = FALSE;
   g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch1,
-          &inserted), ==, WYRELOG_E_OK);
+      &inserted), ==, WYRELOG_E_OK);
   g_assert_true (inserted);
 
   wyl_fact_value_t values2[] = {
@@ -272,12 +272,63 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
     .n_rows = G_N_ELEMENTS (rows2),
   };
   g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch2,
-          &inserted), ==, WYRELOG_E_OK);
+      &inserted), ==, WYRELOG_E_OK);
   g_assert_true (inserted);
   g_clear_pointer (&store, wyl_fact_store_close);
   g_autoptr (GError) error = NULL;
   g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
   g_assert_no_error (error);
+}
+
+static void
+append_order_batch_version (wyl_policy_store_t *policy, const gchar *root,
+    const gchar *tenant_id, const gchar *graph_id, guint32 schema_version,
+    const gchar *batch_id, const gchar *order_id)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          tenant_id, graph_id);
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  schema.schema_version = schema_version;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = order_id},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 99},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+  };
+  wyl_fact_row_t rows[] = {{values, G_N_ELEMENTS (values)}};
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = schema_version,
+    .source = "test",
+    .idempotency_key = batch_id,
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+      &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
+  (void) root;
 }
 
 static void
@@ -325,10 +376,10 @@ append_compound_route_batches (wyl_policy_store_t *policy,
     const gchar *tenant_id, const gchar *graph_id)
 {
   g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
-      tenant_id, graph_id);
+          tenant_id, graph_id);
   g_assert_nonnull (storage_path);
   g_autofree gchar *fact_path = g_build_filename (storage_path,
-      "facts.duckdb", NULL);
+          "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
   g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
@@ -344,7 +395,7 @@ append_compound_route_batches (wyl_policy_store_t *policy,
   const gint64 refs[] = { child_ref, parent_ref };
   for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
     wyl_policy_fact_relation_schema_options_t schema = make_route_schema
-        (tenant_id, graph_id, relations[i], columns, G_N_ELEMENTS (columns));
+          (tenant_id, graph_id, relations[i], columns, G_N_ELEMENTS (columns));
     wyl_fact_value_t values[] = {
       {.type = WYL_FACT_VALUE_COMPOUND_REF,.as.compound_ref = refs[i]},
     };
@@ -368,7 +419,7 @@ append_compound_route_batches (wyl_policy_store_t *policy,
     };
     gboolean inserted = FALSE;
     g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
-            &inserted), ==, WYRELOG_E_OK);
+        &inserted), ==, WYRELOG_E_OK);
     g_assert_true (inserted);
   }
   g_clear_pointer (&store, wyl_fact_store_close);
@@ -400,7 +451,7 @@ static void
 assert_replayed_order_b_only (WylEngine *engine)
 {
   g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
-      ("shop.ns", "orders-rel");
+        ("shop.ns", "orders-rel");
   g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
   SnapshotProbe probe = { observed, 0, FALSE };
   g_assert_cmpint (wyl_engine_snapshot (engine, observed, snapshot_cb, &probe),
@@ -422,11 +473,11 @@ assert_handle_replayed_order_b_only (WylHandle *handle,
     const gchar *tenant_id, const gchar *graph_id)
 {
   g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
-      ("shop.ns", "orders-rel");
+        ("shop.ns", "orders-rel");
   g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
   SnapshotProbe probe = { observed, 0, FALSE };
   g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle, tenant_id,
-          graph_id, observed, handle_snapshot_cb, &probe), ==, WYRELOG_E_OK);
+      graph_id, observed, handle_snapshot_cb, &probe), ==, WYRELOG_E_OK);
   g_assert_cmpuint (probe.count, ==, 1);
   g_assert_true (probe.saw_order_b);
 }
@@ -475,7 +526,7 @@ assert_handle_stale_fact_status (WylHandle *handle)
 {
   FactStatusProbe probe = { 0 };
   g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
-          fact_status_cb, &probe), ==, WYRELOG_E_OK);
+      fact_status_cb, &probe), ==, WYRELOG_E_OK);
   g_assert_cmpuint (probe.total, ==, 2);
   g_assert_cmpuint (probe.ready, ==, 0);
   g_assert_cmpuint (probe.unavailable, ==, 2);
@@ -488,7 +539,7 @@ assert_handle_fact_status (WylHandle *handle)
 {
   FactStatusProbe probe = { 0 };
   g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
-          fact_status_cb, &probe), ==, WYRELOG_E_OK);
+      fact_status_cb, &probe), ==, WYRELOG_E_OK);
   g_assert_cmpuint (probe.total, ==, 2);
   g_assert_cmpuint (probe.ready, ==, 1);
   g_assert_cmpuint (probe.unavailable, ==, 1);
@@ -502,7 +553,7 @@ assert_handle_fact_status (WylHandle *handle)
   g_assert_nonnull (strstr (json, "\"tenant_id\":\"tenant-b\""));
   g_assert_nonnull (strstr (json, "\"graph_id\":\"orders\""));
   g_assert_nonnull (strstr (json,
-          "\"last_error_class\":\"store_unavailable\""));
+      "\"last_error_class\":\"store_unavailable\""));
   g_assert_null (strstr (json, "facts.duckdb"));
   g_assert_null (strstr (json, "storage_path"));
 }
@@ -531,11 +582,11 @@ static gint64
 snapshot_single_compound_handle (WylEngine *engine, const gchar *relation_name)
 {
   g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
-      ("logistics", relation_name);
+        ("logistics", relation_name);
   g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
   CompoundSnapshotProbe probe = { observed, 0, 0 };
   g_assert_cmpint (wyl_engine_snapshot (engine, observed, compound_snapshot_cb,
-          &probe), ==, WYRELOG_E_OK);
+      &probe), ==, WYRELOG_E_OK);
   g_assert_cmpuint (probe.count, >, 0);
   g_assert_cmpint (probe.handle, >, 0);
   return probe.handle;
@@ -547,7 +598,7 @@ test_direct_replay_retracts_and_mangles (void)
   TEST ("direct replay loads net facts with mangled relation names");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-replay-XXXXXX", &error);
+        ("wyl-fact-replay-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -558,7 +609,7 @@ test_direct_replay_retracts_and_mangles (void)
 
   GraphPathProbe info_probe = { "tenant-a", "orders", NULL };
   g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
-          capture_graph_path_cb, &info_probe), ==, WYRELOG_E_OK);
+      capture_graph_path_cb, &info_probe), ==, WYRELOG_E_OK);
   g_assert_nonnull (info_probe.storage_path);
   wyl_policy_fact_graph_info_t info = {
     .tenant_id = "tenant-a",
@@ -568,7 +619,7 @@ test_direct_replay_retracts_and_mangles (void)
   };
   g_autoptr (WylEngine) engine = NULL;
   g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
-          &engine), ==, WYRELOG_E_OK);
+      &engine), ==, WYRELOG_E_OK);
   assert_replayed_order_b_only (engine);
   g_free (info_probe.storage_path);
   g_clear_pointer (&engine, wyl_engine_close);
@@ -582,7 +633,7 @@ test_direct_replay_shares_compounds_across_relations (void)
   TEST ("direct replay keeps compound handles graph scoped across relations");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-replay-compound-XXXXXX", &error);
+        ("wyl-fact-replay-compound-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -593,7 +644,7 @@ test_direct_replay_shares_compounds_across_relations (void)
 
   GraphPathProbe info_probe = { "tenant-a", "shipments", NULL };
   g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
-          capture_graph_path_cb, &info_probe), ==, WYRELOG_E_OK);
+      capture_graph_path_cb, &info_probe), ==, WYRELOG_E_OK);
   g_assert_nonnull (info_probe.storage_path);
   wyl_policy_fact_graph_info_t info = {
     .tenant_id = "tenant-a",
@@ -603,14 +654,133 @@ test_direct_replay_shares_compounds_across_relations (void)
   };
   g_autoptr (WylEngine) engine = NULL;
   g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
-          &engine), ==, WYRELOG_E_OK);
+      &engine), ==, WYRELOG_E_OK);
 
   gint64 child_handle = snapshot_single_compound_handle (engine,
-      "shipment-route");
+          "shipment-route");
   gint64 parent_handle = snapshot_single_compound_handle (engine,
-      "shipment-audit");
+          "shipment-audit");
   g_assert_cmpint (child_handle, >, 0);
   g_assert_cmpint (parent_handle, >, 0);
+  g_free (info_probe.storage_path);
+  g_clear_pointer (&engine, wyl_engine_close);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
+static void
+test_direct_replay_declares_registered_empty_relation (void)
+{
+  TEST ("direct replay declares an active registered empty projection");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-empty-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (root);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "empty");
+
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "empty");
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) fact_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &fact_store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (fact_store), ==,
+      WYRELOG_E_OK);
+  /* No projection exists and fact_batches is empty. Replay must still
+   * declare the registry-authoritative relation as typed empty; projection
+   * creation belongs to schema/projection provisioning. */
+  g_clear_pointer (&fact_store, wyl_fact_store_close);
+  g_autoptr (GError) secure_error = NULL;
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &secure_error));
+  g_assert_no_error (secure_error);
+
+  GPtrArray *active = NULL;
+  g_assert_cmpint (wyl_policy_store_list_active_fact_relations (policy,
+      "tenant-a", "empty", &active), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (active->len, ==, 1);
+  g_ptr_array_unref (active);
+
+  GraphPathProbe info_probe = { "tenant-a", "empty", NULL };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
+      capture_graph_path_cb, &info_probe), ==, WYRELOG_E_OK);
+  g_assert_nonnull (info_probe.storage_path);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "empty",
+    .storage_path = info_probe.storage_path,
+    .schema_version = 1,
+  };
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+      &engine), ==, WYRELOG_E_OK);
+
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+  SnapshotProbe probe = { observed, 0, FALSE };
+  g_assert_cmpint (wyl_engine_snapshot (engine, observed, snapshot_cb, &probe),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.count, ==, 0);
+
+  g_free (info_probe.storage_path);
+  g_clear_pointer (&engine, wyl_engine_close);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
+static void
+test_direct_replay_uses_active_schema_version (void)
+{
+  TEST ("direct replay ignores batches from inactive schema versions");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-active-version-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema
+        ("tenant-a", "orders", columns, G_N_ELEMENTS (columns));
+  schema.schema_version = 2;
+  const wyl_policy_fact_relation_schema_query_t v2_query = {
+    .query_name = "orders-v2",
+    .required_permission_id = "wr.datalog.query",
+    .max_rows = WYL_POLICY_FACT_QUERY_DEFAULT_MAX_ROWS,
+  };
+  schema.queries = &v2_query;
+  schema.n_queries = 1;
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &schema), ==, WYRELOG_E_OK);
+  append_order_batch_version (policy, root, "tenant-a", "orders", 2,
+      "batch-v2", "order-v2");
+
+  GraphPathProbe info_probe = { "tenant-a", "orders", NULL };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
+      capture_graph_path_cb, &info_probe), ==, WYRELOG_E_OK);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .storage_path = info_probe.storage_path,
+    .schema_version = 1,
+  };
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+      &engine), ==, WYRELOG_E_OK);
+  assert_replayed_order_b_only (engine);
   g_free (info_probe.storage_path);
   g_clear_pointer (&engine, wyl_engine_close);
   g_clear_pointer (&policy, wyl_policy_store_close);
@@ -629,7 +799,7 @@ test_compound_replay_cache_reuses_nested_child (void)
   TEST ("compound replay cache reuses nested child handles");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-replay-cache-XXXXXX", &error);
+        ("wyl-fact-replay-cache-XXXXXX", &error);
   g_assert_no_error (error);
   g_autofree gchar *fact_path = g_build_filename (root, "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
@@ -642,23 +812,23 @@ test_compound_replay_cache_reuses_nested_child (void)
 
   g_autoptr (WylEngine) engine = NULL;
   g_assert_cmpint (wyl_engine_open_source
-      (".decl shipment(route: path/2 side)\n", 1, &engine), ==, WYRELOG_E_OK);
+        (".decl shipment(route: path/2 side)\n", 1, &engine), ==, WYRELOG_E_OK);
   g_autoptr (GHashTable) handles =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   gint64 parent_handle = 0;
   g_assert_cmpint (wyl_fact_compound_replay_cached (store, engine, "tenant-a",
-          "shipments", "logistics", parent_ref, handles, &parent_handle), ==,
+      "shipments", "logistics", parent_ref, handles, &parent_handle), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (parent_handle, >, 0);
   g_autofree gchar *child_key = test_compound_cache_key ("logistics",
-      child_ref);
+          child_ref);
   gint64 *nested_child_handle = g_hash_table_lookup (handles, child_key);
   g_assert_nonnull (nested_child_handle);
   g_assert_cmpint (*nested_child_handle, >, 0);
 
   gint64 direct_child_handle = 0;
   g_assert_cmpint (wyl_fact_compound_replay_cached (store, engine, "tenant-a",
-          "shipments", "logistics", child_ref, handles, &direct_child_handle),
+      "shipments", "logistics", child_ref, handles, &direct_child_handle),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (direct_child_handle, ==, *nested_child_handle);
   g_clear_pointer (&engine, wyl_engine_close);
@@ -672,10 +842,10 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   TEST ("handle replay replaces graph engines and isolates corrupt graphs");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-replay-handle-XXXXXX", &error);
+        ("wyl-fact-replay-handle-XXXXXX", &error);
   g_assert_no_error (error);
   g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
-      NULL);
+          NULL);
   g_autofree gchar *bad_path = NULL;
   g_autofree gchar *good_path = NULL;
 
@@ -696,17 +866,17 @@ test_handle_replay_is_idempotent_and_graph_local (void)
     sqlite3 *policy_db = wyl_policy_store_get_db (policy);
     g_assert_nonnull (policy_db);
     g_assert_cmpint (sqlite3_exec (policy_db,
-            "INSERT INTO fact_graphs "
-            "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
-            "owner_scope,sealed,created_at,updated_at) "
-            "SELECT tenant_id,'invalid graph','fact://invalid',storage_path,"
-            "schema_version,owner_scope,0,unixepoch(),unixepoch() "
-            "FROM fact_graphs WHERE tenant_id='tenant-a' AND "
-            "graph_id='orders';", NULL, NULL, NULL), ==, SQLITE_OK);
+        "INSERT INTO fact_graphs "
+        "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+        "owner_scope,sealed,created_at,updated_at) "
+        "SELECT tenant_id,'invalid graph','fact://invalid',storage_path,"
+        "schema_version,owner_scope,0,unixepoch(),unixepoch() "
+        "FROM fact_graphs WHERE tenant_id='tenant-a' AND "
+        "graph_id='orders';", NULL, NULL, NULL), ==, SQLITE_OK);
     g_autofree gchar *bad_fact_path = g_build_filename (bad_path,
-        "facts.duckdb", NULL);
+            "facts.duckdb", NULL);
     g_assert_true (g_file_set_contents (bad_fact_path, "not a database", -1,
-            NULL));
+        NULL));
     g_assert_true (wyl_test_secure_regular_file (bad_fact_path, &error));
     g_assert_no_error (error);
   }
@@ -722,14 +892,14 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
   SnapshotProbe unavailable = { 0 };
   g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
-          "tenant-b", "orders", "unused", handle_snapshot_cb,
-          &unavailable), ==, WYRELOG_E_POLICY);
+      "tenant-b", "orders", "unused", handle_snapshot_cb,
+      &unavailable), ==, WYRELOG_E_POLICY);
   assert_handle_fact_status (handle);
 
   g_autofree gchar *good_fact_path = g_build_filename (good_path,
-      "facts.duckdb", NULL);
+          "facts.duckdb", NULL);
   g_assert_true (g_file_set_contents (good_fact_path, "not a database", -1,
-          NULL));
+      NULL));
   g_assert_true (wyl_test_secure_regular_file (good_fact_path, &error));
   g_assert_no_error (error);
 
@@ -743,28 +913,30 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   assert_handle_stale_fact_status (handle);
 
   sqlite3 *policy_db = wyl_policy_store_get_db
-      (wyl_handle_get_policy_store (handle));
+        (wyl_handle_get_policy_store (handle));
   g_assert_nonnull (policy_db);
   g_assert_cmpint (sqlite3_exec (policy_db,
-          "DELETE FROM fact_relation_query_allowlist;"
-          "DELETE FROM fact_relation_schema_columns;"
-          "DELETE FROM fact_relation_schemas;"
-          "DELETE FROM fact_namespaces;"
-          "DELETE FROM fact_graph_query_allowlist;"
-          "DELETE FROM fact_graph_relation_columns;"
-          "DELETE FROM fact_graph_relations;"
-          "DELETE FROM fact_graphs;", NULL, NULL, NULL), ==, SQLITE_OK);
+      "DELETE FROM fact_relation_activation;"
+      "DELETE FROM fact_relation_query_allowlist;"
+      "DELETE FROM fact_relation_schema_columns;"
+      "DELETE FROM fact_relation_schemas;"
+      "DELETE FROM fact_namespaces;"
+      "DELETE FROM fact_graph_query_allowlist;"
+      "DELETE FROM fact_graph_relation_columns;"
+      "DELETE FROM fact_graph_relations;"
+      "DELETE FROM fact_graphs;", NULL, NULL, NULL), ==, SQLITE_OK);
   memset (&summary, 0, sizeof summary);
   g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
       WYRELOG_E_OK);
   g_assert_cmpuint (summary.graphs_seen, ==, 0);
   g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
-          "tenant-a", "orders", "unused", handle_snapshot_cb, &(SnapshotProbe) {
-          0}
+      "tenant-a", "orders", "unused", handle_snapshot_cb, &(SnapshotProbe) {
+    0
+  }
       ), ==, WYRELOG_E_NOT_FOUND);
   FactStatusProbe swept = { 0 };
   g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
-          fact_status_cb, &swept), ==, WYRELOG_E_OK);
+      fact_status_cb, &swept), ==, WYRELOG_E_OK);
   g_assert_cmpuint (swept.total, ==, 0);
   g_clear_object (&handle);
   remove_tree (root);
@@ -776,12 +948,12 @@ test_handle_replay_rejects_fact_root_replacement (void)
   TEST ("handle replay retains the startup fact-root identity");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *base = wyl_test_make_secure_fact_root
-      ("wyl-fact-replay-pin-XXXXXX", &error);
+        ("wyl-fact-replay-pin-XXXXXX", &error);
   g_assert_no_error (error);
   g_autofree gchar *root = g_build_filename (base, "facts", NULL);
   g_autofree gchar *old_root = g_build_filename (base, "facts-old", NULL);
   g_autofree gchar *policy_path = g_build_filename (base, "policy.sqlite",
-      NULL);
+          NULL);
   g_assert_true (wyl_test_create_secure_directory (root, &error));
   g_assert_no_error (error);
 
@@ -820,6 +992,10 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
+  g_test_add_func ("/fact-replay/direct-empty",
+      test_direct_replay_declares_registered_empty_relation);
+  g_test_add_func ("/fact-replay/active-version",
+      test_direct_replay_uses_active_schema_version);
   g_test_add_func ("/fact-replay/compound-shared",
       test_direct_replay_shares_compounds_across_relations);
   g_test_add_func ("/fact-replay/compound-cache-nested",
