@@ -6,7 +6,6 @@
 
 G_BEGIN_DECLS;
 
-#ifndef G_OS_WIN32
 /* Crash-safe staged construction of a new per-graph DuckDB store from a durable
  * provisioning record and its authority.  Stages an exact provisioning file,
  * fsyncs it, atomically publishes it as the retained facts.duckdb pair (one
@@ -17,10 +16,14 @@ G_BEGIN_DECLS;
  * crash at any seam leaves the store recoverable by the record's operation UUID.
  * This is the fresh happy-path FS primitive; crash recovery and resume of an
  * already-published pair are owned by the provisioning coordinator, not here.
- * POSIX-only for now: the secure handoff consumes the exact retained pair. */
+ *
+ * Windows publishes by rename rather than by link, so its anti-swap witness is
+ * the operation-evidence tuple captured before that rename rather than a
+ * retained pair; the description above is the POSIX shape.  Note the fresh
+ * path only: a stage left behind by an interrupted construct cannot be
+ * reopened on Windows, so that operation UUID is spent.  See #816. */
 wyrelog_error_t wyl_fact_graph_provisioning_construct (const gchar * fact_root,
     const WylPolicyGraphProvisioningRecord * record,
     const WylPolicyGraphAuthorityRecord * authority);
-#endif
 
 G_END_DECLS;
