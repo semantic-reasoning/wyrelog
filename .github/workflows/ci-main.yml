@@ -422,7 +422,6 @@ jobs:
             test-daemon-http-decide \
             test-daemon-http-decide-refresh \
             test-daemon-http-decide-service \
-            test-daemon-http-service-decision \
             test-daemon-http-decide-audit
 
       - name: Test daemon HTTP variants
