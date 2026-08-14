@@ -210,6 +210,21 @@ load_relation_schema (wyl_policy_store_t *policy,
   return WYRELOG_E_OK;
 }
 
+static gchar *
+replay_relation_seen_key (const gchar *namespace_id, const gchar *relation_name)
+{
+  return g_strconcat (namespace_id, "\x1f", relation_name, NULL);
+}
+
+/* Enumerates the relations to replay for one graph.  The policy activation
+ * registry is authoritative (#545): every relation it lists active contributes
+ * EXACTLY ONE schema version, so a registered-but-never-appended relation is
+ * still declared, and two schema versions of one relation can never both be
+ * declared (which would collide on the unversioned wirelog relation name).
+ * Relations not yet owned by the registry fall back to the historical
+ * fact_batches enumeration, per (namespace, relation), so graphs predating
+ * schema convergence keep replaying exactly as before -- the union is strictly
+ * additive and cannot regress an existing graph. */
 static wyrelog_error_t
 list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
     const wyl_policy_fact_graph_info_t *graph, GPtrArray **out_relations)
@@ -218,6 +233,39 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   if (conn == NULL || graph == NULL)
     return WYRELOG_E_INVALID;
+
+  g_autoptr (GPtrArray) relations =
+      g_ptr_array_new_with_free_func (replay_relation_free);
+  g_autoptr (GHashTable) seen =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
+  g_autoptr (GPtrArray) active = NULL;
+  wyrelog_error_t rc = wyl_policy_store_list_active_fact_relations (policy,
+          graph->tenant_id, graph->graph_id, &active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  for (guint i = 0; rc == WYRELOG_E_OK && active != NULL && i < active->len;
+      i++) {
+    const WylPolicyRelationActivationRecord *record =
+        g_ptr_array_index (active, i);
+    if (!record->has_active_schema_version
+        || record->active_schema_version == 0
+        || record->active_schema_version > G_MAXUINT32) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    ReplayRelation *rel = NULL;
+    rc = load_relation_schema (policy, graph, record->namespace_id,
+            record->relation_name, (guint32) record->active_schema_version,
+            &rel);
+    if (rc == WYRELOG_E_OK) {
+      g_ptr_array_add (relations, rel);
+      g_hash_table_add (seen, replay_relation_seen_key (record->namespace_id,
+          record->relation_name));
+    }
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
@@ -239,9 +287,6 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
   }
   duckdb_destroy_prepare (&stmt);
 
-  g_autoptr (GPtrArray) relations =
-      g_ptr_array_new_with_free_func (replay_relation_free);
-  wyrelog_error_t rc = WYRELOG_E_OK;
   for (idx_t row = 0; rc == WYRELOG_E_OK && row < duckdb_row_count (&result);
       row++) {
     if (duckdb_value_is_null (&result, 0, row)
@@ -257,11 +302,15 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
         || schema_version > G_MAXUINT32) {
       rc = WYRELOG_E_POLICY;
     } else {
-      ReplayRelation *rel = NULL;
-      rc = load_relation_schema (policy, graph, namespace_id, relation_name,
-              (guint32) schema_version, &rel);
-      if (rc == WYRELOG_E_OK)
-        g_ptr_array_add (relations, rel);
+      g_autofree gchar *key = replay_relation_seen_key (namespace_id,
+              relation_name);
+      if (!g_hash_table_contains (seen, key)) {
+        ReplayRelation *rel = NULL;
+        rc = load_relation_schema (policy, graph, namespace_id, relation_name,
+                (guint32) schema_version, &rel);
+        if (rc == WYRELOG_E_OK)
+          g_ptr_array_add (relations, rel);
+      }
     }
     duckdb_free (namespace_id);
     duckdb_free (relation_name);
