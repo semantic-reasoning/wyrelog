@@ -115,7 +115,7 @@ member_of_input_key_equal (gconstpointer a, gconstpointer b)
   const WylMemberOfInputKey *lhs = a;
   const WylMemberOfInputKey *rhs = b;
   return lhs->subject == rhs->subject && lhs->role == rhs->role
-      && lhs->scope == rhs->scope;
+         && lhs->scope == rhs->scope;
 }
 
 static guint64
@@ -154,7 +154,7 @@ reserve_accepted_input (WylEngine *self, const gchar *relation,
       return WYRELOG_E_INVALID;
     WylMemberOfInputKey key = { row[0], row[1], row[2] };
     guint64 row_count = session_state_input_count
-        (self->member_of_input_rows, &key);
+          (self->member_of_input_rows, &key);
     if (row_count == G_MAXUINT64)
       return WYRELOG_E_INTERNAL;
     set_session_state_input_count (self->member_of_input_rows, &key,
@@ -170,9 +170,9 @@ reserve_accepted_input (WylEngine *self, const gchar *relation,
 
   WylSessionStateInputKey key = { row[0], row[1] };
   guint64 row_count = session_state_input_count
-      (self->session_state_input_rows, &key);
+        (self->session_state_input_rows, &key);
   guint64 scope_total = session_state_input_count
-      (self->session_state_input_totals, &row[0]);
+        (self->session_state_input_totals, &row[0]);
   if (row_count == G_MAXUINT64 || scope_total == G_MAXUINT64)
     return WYRELOG_E_INTERNAL;
 
@@ -191,7 +191,7 @@ rollback_accepted_input_reservation (WylEngine *self, const gchar *relation,
   if (g_strcmp0 (relation, "member_of") == 0) {
     WylMemberOfInputKey key = { row[0], row[1], row[2] };
     guint64 row_count = session_state_input_count
-        (self->member_of_input_rows, &key);
+          (self->member_of_input_rows, &key);
     g_assert_cmpuint (row_count, >, 0);
     set_session_state_input_count (self->member_of_input_rows, &key,
         row_count - 1, sizeof key);
@@ -199,9 +199,9 @@ rollback_accepted_input_reservation (WylEngine *self, const gchar *relation,
   }
   WylSessionStateInputKey key = { row[0], row[1] };
   guint64 row_count = session_state_input_count
-      (self->session_state_input_rows, &key);
+        (self->session_state_input_rows, &key);
   guint64 scope_total = session_state_input_count
-      (self->session_state_input_totals, &row[0]);
+        (self->session_state_input_totals, &row[0]);
   g_assert_cmpuint (row_count, >, 0);
   g_assert_cmpuint (scope_total, >, 0);
   set_session_state_input_count (self->session_state_input_rows, &key,
@@ -237,9 +237,9 @@ precheck_accepted_input_remove (WylEngine *self, const gchar *relation,
 
   WylSessionStateInputKey key = { row[0], row[1] };
   guint64 row_count = session_state_input_count
-      (self->session_state_input_rows, &key);
+        (self->session_state_input_rows, &key);
   guint64 scope_total = session_state_input_count
-      (self->session_state_input_totals, &row[0]);
+        (self->session_state_input_totals, &row[0]);
   if (row_count == 0)
     return WYRELOG_E_NOT_FOUND;
   if (scope_total < row_count)
@@ -257,7 +257,7 @@ decode_hex_field (const gchar *field_name, const gchar *hex, guint8 *out,
 
   gsize parsed_len = 0;
   if (sodium_hex2bin (out, out_len, hex, strlen (hex), NULL, &parsed_len,
-          NULL) != 0 || parsed_len != out_len) {
+      NULL) != 0 || parsed_len != out_len) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template manifest has invalid %s hex", field_name);
     return WYRELOG_E_POLICY;
@@ -294,17 +294,17 @@ canonical_migration_payload (const gchar *id, guint64 sequence,
     const gchar *operation, const gchar *reserved_namespace)
 {
   return g_strdup_printf ("id=%s\nsequence=%" G_GUINT64_FORMAT
-      "\nfrom_version=%" G_GUINT64_FORMAT "\nto_version=%" G_GUINT64_FORMAT
-      "\nsemantics=%s\noperation=%s\n" "reserved_namespace=%s\n", id, sequence,
-      from_version, to_version, semantics, operation, reserved_namespace);
+             "\nfrom_version=%" G_GUINT64_FORMAT "\nto_version=%" G_GUINT64_FORMAT
+             "\nsemantics=%s\noperation=%s\n" "reserved_namespace=%s\n", id, sequence,
+             from_version, to_version, semantics, operation, reserved_namespace);
 }
 
 static gboolean
 migration_operation_is_append_only (const gchar *operation)
 {
   return g_strcmp0 (operation, "baseline") == 0
-      || g_strcmp0 (operation, "additive") == 0
-      || g_strcmp0 (operation, "supersession") == 0;
+         || g_strcmp0 (operation, "additive") == 0
+         || g_strcmp0 (operation, "supersession") == 0;
 }
 
 static gint
@@ -329,7 +329,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   gint64 sequence = g_key_file_get_int64 (key_file, "migration", "sequence",
-      &error);
+          &error);
   if (error != NULL || sequence < 0 || sequence > G_MAXUINT32
       || (guint32) sequence != expected_sequence) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
@@ -347,7 +347,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   g_autofree gchar *id = g_key_file_get_string (key_file, "migration", "id",
-      &error);
+          &error);
   if (error != NULL || id == NULL || id[0] == '\0') {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact has invalid id: %s", name);
@@ -356,14 +356,14 @@ verify_migration_artifact (const gchar *path, const gchar *name,
 
   if (g_hash_table_contains (seen_ids, id)
       || g_hash_table_contains (seen_sequences, GUINT_TO_POINTER ((guint)
-              sequence))) {
+      sequence))) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact is duplicated: %s", name);
     return WYRELOG_E_POLICY;
   }
 
   gint64 from_version = g_key_file_get_int64 (key_file, "migration",
-      "from_version", &error);
+          "from_version", &error);
   if (error != NULL || from_version < 0 || from_version > G_MAXUINT32
       || (guint32) from_version != expected_from_version) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
@@ -372,7 +372,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   gint64 to_version = g_key_file_get_int64 (key_file, "migration",
-      "to_version", &error);
+          "to_version", &error);
   if (error != NULL || to_version < from_version || to_version > G_MAXUINT32) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact has invalid to_version: %s", name);
@@ -380,7 +380,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   g_autofree gchar *semantics = g_key_file_get_string (key_file, "migration",
-      "semantics", &error);
+          "semantics", &error);
   if (error != NULL || g_strcmp0 (semantics, "append-only") != 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact rejects append-only semantics: %s", name);
@@ -388,7 +388,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   g_autofree gchar *operation = g_key_file_get_string (key_file, "migration",
-      "operation", &error);
+          "operation", &error);
   if (error != NULL || !migration_operation_is_append_only (operation)) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact has non append-only operation: %s", name);
@@ -396,7 +396,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   g_autofree gchar *reserved_namespace = g_key_file_get_string (key_file,
-      "migration", "reserved_namespace", &error);
+          "migration", "reserved_namespace", &error);
   if (error != NULL || g_strcmp0 (reserved_namespace, "wr.") != 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact violates reserved namespace: %s", name);
@@ -404,11 +404,11 @@ verify_migration_artifact (const gchar *path, const gchar *name,
   }
 
   g_autofree gchar *hash_hex = g_key_file_get_string (key_file, "migration",
-      "sha256", &error);
+          "sha256", &error);
   g_autofree gchar *public_key_hex = g_key_file_get_string (key_file,
-      "signature", "public_key", &error);
+          "signature", "public_key", &error);
   g_autofree gchar *signature_hex = g_key_file_get_string (key_file,
-      "signature", "ed25519", &error);
+          "signature", "ed25519", &error);
   if (error != NULL) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact is missing signed identity: %s", name);
@@ -417,13 +417,13 @@ verify_migration_artifact (const gchar *path, const gchar *name,
 
   guint8 expected_hash[crypto_hash_sha256_BYTES];
   wyrelog_error_t rc = decode_hex_field ("migration sha256", hash_hex,
-      expected_hash, sizeof expected_hash);
+          expected_hash, sizeof expected_hash);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   g_autofree gchar *payload = canonical_migration_payload (id,
-      (guint64) sequence, (guint64) from_version, (guint64) to_version,
-      semantics, operation, reserved_namespace);
+          (guint64) sequence, (guint64) from_version, (guint64) to_version,
+          semantics, operation, reserved_namespace);
   guint8 actual_hash[crypto_hash_sha256_BYTES];
   crypto_hash_sha256 (actual_hash, (const guint8 *) payload, strlen (payload));
   if (sodium_memcmp (actual_hash, expected_hash, sizeof actual_hash) != 0) {
@@ -434,12 +434,12 @@ verify_migration_artifact (const gchar *path, const gchar *name,
 
   guint8 public_key[crypto_sign_PUBLICKEYBYTES];
   rc = decode_hex_field ("migration public_key", public_key_hex, public_key,
-      sizeof public_key);
+          sizeof public_key);
   if (rc != WYRELOG_E_OK)
     return rc;
   guint8 signature[crypto_sign_BYTES];
   rc = decode_hex_field ("migration ed25519", signature_hex, signature,
-      sizeof signature);
+          sizeof signature);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -449,7 +449,7 @@ verify_migration_artifact (const gchar *path, const gchar *name,
       strlen (WYL_ENGINE_TEMPLATE_MIGRATION_SIGNATURE_CONTEXT));
   g_byte_array_append (signed_payload, actual_hash, sizeof actual_hash);
   if (crypto_sign_verify_detached (signature, signed_payload->data,
-          signed_payload->len, public_key) != 0) {
+      signed_payload->len, public_key) != 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template migration artifact signature verification failed: %s", name);
     return WYRELOG_E_CRYPTO;
@@ -479,7 +479,7 @@ verify_template_migrations (const gchar *template_dir,
   }
 
   g_autofree gchar *dir_path = g_build_filename (template_dir,
-      migration_path, NULL);
+          migration_path, NULL);
   g_autoptr (GDir) dir = g_dir_open (dir_path, 0, NULL);
   if (dir == NULL) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
@@ -501,16 +501,16 @@ verify_template_migrations (const gchar *template_dir,
   g_ptr_array_sort (names, compare_string_ptr);
 
   g_autoptr (GHashTable) seen_ids = g_hash_table_new_full (g_str_hash,
-      g_str_equal, g_free, NULL);
+          g_str_equal, g_free, NULL);
   g_autoptr (GHashTable) seen_sequences = g_hash_table_new (g_direct_hash,
-      g_direct_equal);
+          g_direct_equal);
   guint32 expected_from_version = template_version;
   for (guint i = 0; i < names->len; i++) {
     const gchar *name = g_ptr_array_index (names, i);
     g_autofree gchar *path = g_build_filename (dir_path, name, NULL);
     guint32 to_version = 0;
     wyrelog_error_t rc = verify_migration_artifact (path, name, i,
-        expected_from_version, seen_ids, seen_sequences, &to_version);
+            expected_from_version, seen_ids, seen_sequences, &to_version);
     if (rc != WYRELOG_E_OK)
       return rc;
     expected_from_version = to_version;
@@ -550,13 +550,13 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
   g_autoptr (GKeyFile) key_file = g_key_file_new ();
   g_autoptr (GError) error = NULL;
   if (!g_key_file_load_from_file (key_file, manifest_path,
-          G_KEY_FILE_NONE, &error)) {
+      G_KEY_FILE_NONE, &error)) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT, "unreadable template manifest");
     return WYRELOG_E_IO;
   }
 
   gint64 version = g_key_file_get_int64 (key_file, "template",
-      "version", &error);
+          "version", &error);
   if (error != NULL || version < 0 || version > G_MAXUINT32) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template manifest has invalid version");
@@ -564,7 +564,7 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
   }
 
   g_autofree gchar *migration_semantics = g_key_file_get_string (key_file,
-      "template", "migration_semantics", &error);
+          "template", "migration_semantics", &error);
   if (error != NULL || g_strcmp0 (migration_semantics, "append-only") != 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template manifest rejects non append-only migration semantics");
@@ -572,16 +572,16 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
   }
 
   g_autofree gchar *migration_path = g_key_file_get_string (key_file,
-      "template", "migration_path", NULL);
+          "template", "migration_path", NULL);
   g_autofree gchar *hash_hex = g_key_file_get_string (key_file, "template",
-      "sha256", &error);
+          "sha256", &error);
   if (error != NULL) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT, "template manifest is missing sha256");
     return WYRELOG_E_POLICY;
   }
 
   g_autofree gchar *public_key_hex = g_key_file_get_string (key_file,
-      "signature", "public_key", &error);
+          "signature", "public_key", &error);
   if (error != NULL) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template manifest is missing signature public key");
@@ -589,7 +589,7 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
   }
 
   g_autofree gchar *signature_hex = g_key_file_get_string (key_file,
-      "signature", "ed25519", &error);
+          "signature", "ed25519", &error);
   if (error != NULL) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template manifest is missing Ed25519 signature");
@@ -598,13 +598,13 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
 
   guint8 expected_hash[crypto_hash_sha256_BYTES];
   wyrelog_error_t rc = decode_hex_field ("sha256", hash_hex, expected_hash,
-      sizeof expected_hash);
+          sizeof expected_hash);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   guint8 public_key[crypto_sign_PUBLICKEYBYTES];
   rc = decode_hex_field ("public_key", public_key_hex, public_key,
-      sizeof public_key);
+          sizeof public_key);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -627,7 +627,7 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
       strlen (WYL_ENGINE_TEMPLATE_SIGNATURE_CONTEXT));
   g_byte_array_append (signed_payload, actual_hash, sizeof actual_hash);
   if (crypto_sign_verify_detached (signature, signed_payload->data,
-          signed_payload->len, public_key) != 0) {
+      signed_payload->len, public_key) != 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "template manifest signature verification failed");
     return WYRELOG_E_CRYPTO;
@@ -636,7 +636,7 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
   guint32 migration_count = 0;
   guint32 latest_migration_version = 0;
   rc = verify_template_migrations (template_dir, migration_path,
-      (guint32) version, &migration_count, &latest_migration_version);
+          (guint32) version, &migration_count, &latest_migration_version);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -645,7 +645,7 @@ wyl_engine_inspect_template_artifact (const gchar *template_dir,
     info_out->migration_count = migration_count;
     info_out->latest_migration_version = latest_migration_version;
     g_autofree gchar *actual_hash_hex = hex_encode (actual_hash,
-        sizeof actual_hash);
+            sizeof actual_hash);
     g_strlcpy (info_out->sha256_hex, actual_hash_hex,
         sizeof info_out->sha256_hex);
   }
@@ -659,7 +659,7 @@ wyl_engine_verify_template_manifest (const gchar *template_dir,
 {
   WylTemplateArtifactInfo info = { 0 };
   wyrelog_error_t rc = wyl_engine_inspect_template_artifact (template_dir,
-      dl_src, dl_src_len, require_manifest, &info);
+          dl_src, dl_src_len, require_manifest, &info);
   if (rc == WYRELOG_E_OK && template_version_out != NULL)
     *template_version_out = info.version;
   return rc;
@@ -705,7 +705,7 @@ WylEngineSessionStateCapability
 wyl_engine_session_state_capability (WylEngine *self)
 {
   return WYL_IS_ENGINE (self) ? self->session_state_capability :
-      WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
+         WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
 }
 
 static void
@@ -741,12 +741,12 @@ wyl_engine_init (WylEngine *self)
   self->symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
   self->session_state_input_rows = g_hash_table_new_full
-      (session_state_input_key_hash, session_state_input_key_equal, g_free,
-      g_free);
+        (session_state_input_key_hash, session_state_input_key_equal, g_free,
+          g_free);
   self->session_state_input_totals =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
   self->member_of_input_rows = g_hash_table_new_full
-      (member_of_input_key_hash, member_of_input_key_equal, g_free, g_free);
+        (member_of_input_key_hash, member_of_input_key_equal, g_free, g_free);
   self->mode = WYL_ENGINE_MODE_NONE;
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     self->dl_src_logical_paths[i] = NULL;
@@ -801,7 +801,7 @@ load_templates_internal (const gchar *template_dir,
         g_clear_error (&err);
         g_clear_pointer (&path, g_free);
         path = g_build_filename (template_dir,
-            WYL_ENGINE_LEGACY_DECISION_TEMPLATE, NULL);
+                WYL_ENGINE_LEGACY_DECISION_TEMPLATE, NULL);
         logical_path = WYL_ENGINE_LEGACY_DECISION_TEMPLATE;
         if (g_file_get_contents (path, &contents, &len, &err)) {
           WYL_LOG_INFO (WYL_LOG_SECTION_BOOT,
@@ -835,8 +835,8 @@ load_templates_internal (const gchar *template_dir,
   }
 
   wyrelog_error_t rc = wyl_engine_verify_template_manifest (template_dir,
-      combined->str, combined->len, require_template_manifest,
-      NULL);
+          combined->str, combined->len, require_template_manifest,
+          NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -849,8 +849,10 @@ load_templates_internal (const gchar *template_dir,
 }
 
 static WylEngineSessionStateCapability
-inspect_session_state_capability (const gchar *source)
+inspect_session_state_capability (const gchar *source, gboolean *reject_input)
 {
+  if (reject_input != NULL)
+    *reject_input = FALSE;
   wirelog_error_t parse_error = WIRELOG_OK;
   wirelog_program_t *program = wirelog_parse_string (source, &parse_error);
   if (program == NULL || parse_error != WIRELOG_OK) {
@@ -858,13 +860,22 @@ inspect_session_state_capability (const gchar *source)
       wirelog_program_free (program);
     return WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
   }
+  /* Parsed metadata is authoritative and available before the easy facade
+  * can open any adapter or file. Reject even an undeclared relation: the
+  * parser records .input directives independently of .decl collection. */
+  if (wirelog_program_relation_has_input (program, "session_state")) {
+    if (reject_input != NULL)
+      *reject_input = TRUE;
+    wirelog_program_free (program);
+    return WYL_ENGINE_SESSION_STATE_INCOMPATIBLE;
+  }
   const wirelog_schema_t *schema = wirelog_program_get_schema (program,
-      "session_state");
+          "session_state");
   int64_t *inline_facts = NULL;
   uint32_t inline_rows = 0;
   uint32_t inline_cols = 0;
   int inline_rc = wirelog_program_get_facts (program, "session_state",
-      &inline_facts, &inline_rows, &inline_cols);
+          &inline_facts, &inline_rows, &inline_cols);
   const wirelog_ir_node_t *derived_head =
       wirelog_program_get_relation_ir (program, "session_state");
   /* The accepted-input witness is complete only when every row can enter
@@ -890,11 +901,11 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
 {
   return load_templates_internal (template_dir,
 #ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
-      TRUE,
+             TRUE,
 #else
-      FALSE,
+             FALSE,
 #endif
-      dl_src_out, dl_src_len_out);
+             dl_src_out, dl_src_len_out);
 }
 
 /* --- Public API ---------------------------------------------------- */
@@ -916,9 +927,18 @@ wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = load_templates_internal (template_dir,
-      require_template_manifest, &dl_src, &dl_src_len);
+          require_template_manifest, &dl_src, &dl_src_len);
   if (rc != WYRELOG_E_OK)
     return rc;
+
+  gboolean reject_input = FALSE;
+  const WylEngineSessionStateCapability session_state_capability =
+      inspect_session_state_capability (dl_src, &reject_input);
+  if (reject_input) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+    return WYRELOG_E_POLICY;
+  }
 
   wirelog_easy_open_opts_t opts = {
     .size = sizeof (opts),
@@ -929,8 +949,6 @@ wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
 
   wirelog_easy_session_t *session = NULL;
   wirelog_error_t wl_rc = wirelog_easy_open_opts (dl_src, &opts, &session);
-  const WylEngineSessionStateCapability session_state_capability =
-      inspect_session_state_capability (dl_src);
 
   /* FC4: zero-fill the policy source buffer before freeing to avoid leaving
    * policy text in core dumps or swap.  Use the tracked length rather than
@@ -969,11 +987,11 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
 {
   return wyl_engine_open_with_options (template_dir, num_workers,
 #ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
-      TRUE,
+             TRUE,
 #else
-      FALSE,
+             FALSE,
 #endif
-      out);
+             out);
 }
 
 wyrelog_error_t
@@ -984,6 +1002,12 @@ wyl_engine_open_source (const gchar *dl_src, guint32 num_workers,
     *out = NULL;
   if (dl_src == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+
+  gboolean reject_input = FALSE;
+  const WylEngineSessionStateCapability session_state_capability =
+      inspect_session_state_capability (dl_src, &reject_input);
+  if (reject_input)
+    return WYRELOG_E_POLICY;
 
   wirelog_easy_open_opts_t opts = {
     .size = sizeof (wirelog_easy_open_opts_t),
@@ -1001,7 +1025,7 @@ wyl_engine_open_source (const gchar *dl_src, guint32 num_workers,
 
   WylEngine *engine = g_object_new (WYL_TYPE_ENGINE, NULL);
   engine->session = session;
-  engine->session_state_capability = inspect_session_state_capability (dl_src);
+  engine->session_state_capability = session_state_capability;
   engine->mode = WYL_ENGINE_MODE_NONE;
   *out = engine;
   return WYRELOG_E_OK;
@@ -1088,7 +1112,7 @@ wyl_engine_make_compound_unchecked (WylEngine *self, const gchar *functor,
   uint64_t handle = WIRELOG_COMPOUND_HANDLE_NULL;
   wirelog_error_t wl_rc =
       wirelog_easy_make_compound (self->session, functor, (uint32_t) nargs,
-      args, &handle);
+          args, &handle);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
@@ -1117,7 +1141,7 @@ wyl_engine_make_compound (WylEngine *self, const gchar *functor,
     return WYRELOG_E_INVALID;
 
   return wyl_engine_make_compound_unchecked (self, functor, args, nargs,
-      out_id);
+             out_id);
 }
 
 wyrelog_error_t
@@ -1125,7 +1149,7 @@ wyl_engine_owned_make_compound (WylEngine *self, const gchar *functor,
     const wirelog_compound_arg_t *args, gsize nargs, gint64 *out_id)
 {
   return wyl_engine_make_compound_unchecked (self, functor, args, nargs,
-      out_id);
+             out_id);
 }
 
 static wyrelog_error_t
@@ -1143,13 +1167,13 @@ wyl_engine_insert_unchecked (WylEngine *self, const gchar *relation,
 
   gboolean witness_reserved = FALSE;
   wyrelog_error_t rc = reserve_accepted_input (self, relation, row,
-      ncols, &witness_reserved);
+          ncols, &witness_reserved);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   wirelog_error_t wl_rc =
       wirelog_easy_insert (self->session, relation, (const int64_t *) row,
-      (uint32_t) ncols);
+          (uint32_t) ncols);
   rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK && witness_reserved)
     rollback_accepted_input_reservation (self, relation, row);
@@ -1237,8 +1261,8 @@ wyl_engine_snapshot (WylEngine *self, const gchar *relation,
 
   wyl_engine_tuple_cookie_t cookie = { cb, user_data };
   wirelog_error_t wl_rc = wirelog_easy_snapshot (self->session, relation,
-      wyl_engine_tuple_trampoline,
-      &cookie);
+          wyl_engine_tuple_trampoline,
+          &cookie);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc == WYRELOG_E_OK) {
     self->mode = WYL_ENGINE_MODE_SNAPSHOT;
@@ -1283,7 +1307,7 @@ wyl_engine_set_delta_callback_unchecked (WylEngine *self, WylDeltaCallback cb,
 
   wirelog_error_t wl_rc =
       wirelog_easy_set_delta_cb (self->session, wyl_engine_delta_trampoline,
-      new_cookie);
+          new_cookie);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK) {
     g_free (new_cookie);
@@ -1333,13 +1357,13 @@ wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
 
   gboolean witness_tracked = FALSE;
   wyrelog_error_t rc = precheck_accepted_input_remove (self, relation,
-      row, ncols, &witness_tracked);
+          row, ncols, &witness_tracked);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   wirelog_error_t wl_rc =
       wirelog_easy_remove (self->session, relation, (const int64_t *) row,
-      (uint32_t) ncols);
+          (uint32_t) ncols);
   rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc == WYRELOG_E_OK && witness_tracked)
     rollback_accepted_input_reservation (self, relation, row);
@@ -1365,7 +1389,7 @@ wyl_engine_owned_get_accepted_session_state (WylEngine *self,
     return WYRELOG_E_INVALID;
 
   guint64 scope_total = session_state_input_count
-      (self->session_state_input_totals, &scope);
+        (self->session_state_input_totals, &scope);
   if (scope_total != 1)
     return WYRELOG_E_POLICY;
 

@@ -77,7 +77,7 @@ copy_real_templates_to (const gchar *dest_dir)
 
   for (gsize i = 0; i < G_N_ELEMENTS (files); i++) {
     g_autofree gchar *src = g_build_filename (WYL_TEST_TEMPLATE_DIR,
-        files[i], NULL);
+            files[i], NULL);
     g_autofree gchar *dst = g_build_filename (dest_dir, files[i], NULL);
     g_autofree gchar *contents = NULL;
     gsize len = 0;
@@ -128,9 +128,9 @@ copy_migrations_to (const gchar *dest_dir)
     return FALSE;
 
   g_autofree gchar *src = g_build_filename (WYL_TEST_TEMPLATE_DIR,
-      "migrations", "0000-baseline.ini", NULL);
+          "migrations", "0000-baseline.ini", NULL);
   g_autofree gchar *dst = g_build_filename (dst_dir, "0000-baseline.ini",
-      NULL);
+          NULL);
   g_autofree gchar *contents = NULL;
   gsize len = 0;
   g_autoptr (GError) err = NULL;
@@ -209,7 +209,7 @@ test_engine_open_eager_build_surfaces_errors (void)
 
   /* Overwrite lobac/decision.dl with deliberately malformed content. */
   if (!write_file_in_dir (tmpdir, "lobac/decision.dl",
-          "this is not valid datalog ((((\n")) {
+      "this is not valid datalog ((((\n")) {
     rmdir_recursive (tmpdir);
     return 12;
   }
@@ -376,7 +376,7 @@ test_engine_open_canonical_read_error_beats_legacy (void)
     return 102;
   }
   g_autofree gchar *legacy_dst = g_build_filename (tmpdir, "decision.dl",
-      NULL);
+          NULL);
   if (!g_file_set_contents (legacy_dst, contents, (gssize) len, &err)) {
     rmdir_recursive (tmpdir);
     return 103;
@@ -471,6 +471,79 @@ test_engine_rejects_derived_session_state_capability (void)
   if (wyl_engine_session_state_capability (engine)
       != WYL_ENGINE_SESSION_STATE_INCOMPATIBLE)
     return 189;
+  return 0;
+}
+
+static gint
+test_engine_rejects_session_state_input_before_open (void)
+{
+  static const gchar source[] =
+      ".decl session_state(scope: symbol, state: symbol)\n"
+      ".input session_state(filename=\"/wyrelog/should-not-be-opened\")\n";
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open_source (source, 1, &engine);
+  if (rc != WYRELOG_E_POLICY || engine != NULL) {
+    g_printerr ("test_engine_rejects_session_state_input_before_open: "
+        "expected policy rejection with no engine, got %d\n", (int) rc);
+    if (engine != NULL)
+      g_object_unref (engine);
+    return 190;
+  }
+  return 0;
+}
+
+static gint
+test_engine_rejects_undeclared_session_state_input (void)
+{
+  static const gchar source[] =
+      ".input session_state(filename=\"/wyrelog/should-not-be-opened\")\n";
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open_source (source, 1, &engine);
+  if (rc != WYRELOG_E_POLICY || engine != NULL) {
+    g_printerr ("test_engine_rejects_undeclared_session_state_input: "
+        "expected policy rejection with no engine, got %d\n", (int) rc);
+    if (engine != NULL)
+      g_object_unref (engine);
+    return 191;
+  }
+  return 0;
+}
+
+static gint
+test_engine_template_path_rejects_session_state_input_before_open (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL || !copy_real_templates_to (tmpdir)) {
+    if (tmpdir != NULL)
+      rmdir_recursive (tmpdir);
+    return 192;
+  }
+  g_autofree gchar *decision = g_build_filename (tmpdir, "lobac",
+          "decision.dl", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (decision, &contents, &len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 193;
+  }
+  g_autoptr (GString) source = g_string_new_len (contents, (gssize) len);
+  g_string_append (source,
+      ".input session_state(filename=\"/wyrelog/should-not-be-opened\")\n");
+  if (!g_file_set_contents (decision, source->str, -1, &err)) {
+    rmdir_recursive (tmpdir);
+    return 194;
+  }
+
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open_with_options (tmpdir, 1, FALSE,
+          &engine);
+  rmdir_recursive (tmpdir);
+  if (rc != WYRELOG_E_POLICY || engine != NULL) {
+    if (engine != NULL)
+      g_object_unref (engine);
+    return 195;
+  }
   return 0;
 }
 
@@ -661,7 +734,7 @@ test_template_manifest_validates_canonical (void)
 
   guint32 template_version = G_MAXUINT32;
   rc = wyl_engine_verify_template_manifest (WYL_TEST_TEMPLATE_DIR, dl_src,
-      dl_src_len, TRUE, &template_version);
+          dl_src_len, TRUE, &template_version);
   if (rc != WYRELOG_E_OK)
     goto done;
   if (template_version != 0) {
@@ -677,7 +750,7 @@ test_template_manifest_validates_canonical (void)
       g_string_append_c (crlf_src, dl_src[i]);
     }
     rc = wyl_engine_verify_template_manifest (WYL_TEST_TEMPLATE_DIR,
-        crlf_src->str, crlf_src->len, TRUE, &template_version);
+            crlf_src->str, crlf_src->len, TRUE, &template_version);
   }
 
 done:
@@ -702,7 +775,7 @@ test_template_manifest_rejects_tampered_template (void)
     return 121;
   }
   if (!write_file_in_dir (tmpdir, "fsm/principal.dl",
-          "% tampered principal template\n")) {
+      "% tampered principal template\n")) {
     rmdir_recursive (tmpdir);
     return 122;
   }
@@ -710,7 +783,7 @@ test_template_manifest_rejects_tampered_template (void)
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
-      &dl_src_len);
+          &dl_src_len);
   if (dl_src != NULL) {
     memset (dl_src, 0, dl_src_len);
     g_free (dl_src);
@@ -752,7 +825,7 @@ test_template_manifest_rejects_retraction_migrations (void)
     return 133;
   }
   g_autoptr (GString) bad = g_string_new_len (contents,
-      (gssize) (pos - contents));
+          (gssize) (pos - contents));
   g_string_append (bad, "migration_semantics=retraction");
   g_string_append (bad, pos + strlen (needle));
   if (!g_file_set_contents (manifest_path, bad->str, -1, &err)) {
@@ -763,7 +836,7 @@ test_template_manifest_rejects_retraction_migrations (void)
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
-      &dl_src_len);
+          &dl_src_len);
   if (dl_src != NULL) {
     memset (dl_src, 0, dl_src_len);
     g_free (dl_src);
@@ -790,7 +863,7 @@ test_template_artifact_info_reports_identity (void)
 
   WylTemplateArtifactInfo info = { 0 };
   rc = wyl_engine_inspect_template_artifact (WYL_TEST_TEMPLATE_DIR, dl_src,
-      dl_src_len, TRUE, &info);
+          dl_src_len, TRUE, &info);
 
   memset (dl_src, 0, dl_src_len);
   g_free (dl_src);
@@ -801,7 +874,7 @@ test_template_artifact_info_reports_identity (void)
       info.latest_migration_version != 0)
     return 142;
   if (g_strcmp0 (info.sha256_hex,
-          "e4c15199c77002a4dc20e9d80f5cb51c2d4bac21969703d2770fddbfdd3595b4")
+      "e4c15199c77002a4dc20e9d80f5cb51c2d4bac21969703d2770fddbfdd3595b4")
       != 0)
     return 143;
   return 0;
@@ -821,7 +894,7 @@ test_template_artifact_rejects_missing_migration (void)
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
-      &dl_src_len);
+          &dl_src_len);
   if (dl_src != NULL) {
     memset (dl_src, 0, dl_src_len);
     g_free (dl_src);
@@ -847,9 +920,9 @@ test_template_artifact_rejects_duplicate_migration (void)
     return 161;
   }
   g_autofree gchar *src = g_build_filename (tmpdir, "migrations",
-      "0000-baseline.ini", NULL);
+          "0000-baseline.ini", NULL);
   g_autofree gchar *dst = g_build_filename (tmpdir, "migrations",
-      "0001-duplicate.ini", NULL);
+          "0001-duplicate.ini", NULL);
   g_autofree gchar *contents = NULL;
   gsize len = 0;
   g_autoptr (GError) err = NULL;
@@ -862,7 +935,7 @@ test_template_artifact_rejects_duplicate_migration (void)
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
-      &dl_src_len);
+          &dl_src_len);
   if (dl_src != NULL) {
     memset (dl_src, 0, dl_src_len);
     g_free (dl_src);
@@ -885,7 +958,7 @@ test_template_artifact_rejects_tampered_migration_signature (void)
     return 171;
   }
   g_autofree gchar *path = g_build_filename (tmpdir, "migrations",
-      "0000-baseline.ini", NULL);
+          "0000-baseline.ini", NULL);
   g_autofree gchar *contents = NULL;
   gsize len = 0;
   g_autoptr (GError) err = NULL;
@@ -899,7 +972,7 @@ test_template_artifact_rejects_tampered_migration_signature (void)
     return 173;
   }
   g_autoptr (GString) bad = g_string_new_len (contents,
-      (gssize) (pos - contents));
+          (gssize) (pos - contents));
   g_string_append (bad, "operation=additive");
   g_string_append (bad, pos + strlen ("operation=baseline"));
   if (!g_file_set_contents (path, bad->str, -1, &err)) {
@@ -910,7 +983,7 @@ test_template_artifact_rejects_tampered_migration_signature (void)
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
-      &dl_src_len);
+          &dl_src_len);
   if (dl_src != NULL) {
     memset (dl_src, 0, dl_src_len);
     g_free (dl_src);
@@ -933,7 +1006,7 @@ test_template_artifact_rejects_reserved_namespace_violation (void)
     return 181;
   }
   g_autofree gchar *path = g_build_filename (tmpdir, "migrations",
-      "0000-baseline.ini", NULL);
+          "0000-baseline.ini", NULL);
   g_autofree gchar *contents = NULL;
   gsize len = 0;
   g_autoptr (GError) err = NULL;
@@ -947,7 +1020,7 @@ test_template_artifact_rejects_reserved_namespace_violation (void)
     return 183;
   }
   g_autoptr (GString) bad = g_string_new_len (contents,
-      (gssize) (pos - contents));
+          (gssize) (pos - contents));
   g_string_append (bad, "reserved_namespace=customer.");
   g_string_append (bad, pos + strlen ("reserved_namespace=wr."));
   if (!g_file_set_contents (path, bad->str, -1, &err)) {
@@ -958,7 +1031,7 @@ test_template_artifact_rejects_reserved_namespace_violation (void)
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
   wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
-      &dl_src_len);
+          &dl_src_len);
   if (dl_src != NULL) {
     memset (dl_src, 0, dl_src_len);
     g_free (dl_src);
@@ -1006,6 +1079,16 @@ main (void)
   if ((rc = test_engine_rejects_derived_session_state_capability ()) != 0)
     return rc;
 
+  if ((rc = test_engine_rejects_session_state_input_before_open ()) != 0)
+    return rc;
+
+  if ((rc = test_engine_rejects_undeclared_session_state_input ()) != 0)
+    return rc;
+
+  if ((rc = test_engine_template_path_rejects_session_state_input_before_open ())
+      != 0)
+    return rc;
+
   if ((rc = test_engine_close_then_finalize_safe ()) != 0)
     return rc;
 
@@ -1037,11 +1120,11 @@ main (void)
     return rc;
 
   if ((rc =
-          test_template_artifact_rejects_tampered_migration_signature ()) != 0)
+      test_template_artifact_rejects_tampered_migration_signature ()) != 0)
     return rc;
 
   if ((rc =
-          test_template_artifact_rejects_reserved_namespace_violation ()) != 0)
+      test_template_artifact_rejects_reserved_namespace_violation ()) != 0)
     return rc;
 
   return 0;

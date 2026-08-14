@@ -1,4 +1,4 @@
 [wrap-git]
 url = https://github.com/semantic-reasoning/wirelog.git
-revision = v0.54.0
+revision = cdf9b79368ecac33549d7a3c876d837dcdb74b63
 depth = 1
