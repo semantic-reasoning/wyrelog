@@ -41,6 +41,18 @@ wyrelog_error_t wyl_fact_graph_provisioning_run (wyl_policy_store_t * store,
 wyrelog_error_t wyl_fact_graph_provisioning_recover (wyl_policy_store_t * store,
     const gchar * op_uuid, const gchar * fact_root,
     WylPolicyGraphProvisioningRecord ** out_record);
+
+/* Reconcile one relation reserved in ACTIVATING state.  The caller must hold
+ * the writable, graph-scoped fact-store lease.  Projection preparation and
+ * exact validation complete before the policy generation-CAS publishes ACTIVE;
+ * failures retain the previous active version and mark the activation
+ * DEGRADED.  This deliberately does not refresh replay state. */
+wyrelog_error_t wyl_fact_relation_activation_reconcile
+  (wyl_policy_store_t * policy_store, wyl_fact_store_t * fact_store,
+    const gchar * tenant_id, const gchar * graph_id,
+    const gchar * namespace_id, const gchar * relation_name,
+    guint64 expected_activation_generation,
+    WylPolicyAuthorityMutationResult * out_result);
 #endif
 
 G_END_DECLS;
