@@ -1444,6 +1444,18 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   )
   test('secure-duckdb-recording-filesystem',
     test_secure_duckdb_recording_filesystem)
+  test_fact_provisioning_construct = executable(
+    'test-fact-provisioning-construct',
+    'test-fact-provisioning-construct.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+      + fact_test_support_deps,
+  )
+  test('fact-provisioning-construct', test_fact_provisioning_construct,
+    timeout : 60,
+  )
   if host_machine.system() != 'windows'
     test_secure_duckdb_filesystem = executable(
       'test-secure-duckdb-filesystem',
@@ -1454,18 +1466,6 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     )
     test('secure-duckdb-filesystem', test_secure_duckdb_filesystem,
       timeout : 120,
-    )
-    test_fact_provisioning_construct = executable(
-      'test-fact-provisioning-construct',
-      'test-fact-provisioning-construct.c',
-      'fact-test-support.c',
-      c_args : fact_test_support_c_args,
-      include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
-        + fact_test_support_deps,
-    )
-    test('fact-provisioning-construct', test_fact_provisioning_construct,
-      timeout : 60,
     )
     test_fact_provisioning_run = executable(
       'test-fact-provisioning-run',
