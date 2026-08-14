@@ -74,6 +74,12 @@ gchar *wyl_fact_store_projection_table_name (const
 wyrelog_error_t wyl_fact_store_ensure_projection (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     gchar ** out_table_name);
+/* Read-only projection preflight.  A missing projection is reported as
+ * WYRELOG_E_OK with |out_exists| FALSE; an existing malformed projection is
+ * rejected with WYRELOG_E_POLICY and |out_exists| TRUE. */
+wyrelog_error_t wyl_fact_store_validate_projection (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    gboolean * out_exists);
 wyrelog_error_t wyl_fact_store_append_batch (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted);
