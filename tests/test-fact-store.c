@@ -81,7 +81,7 @@ check_fact_store_thread_budget (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-store-threads-XXXXXX",
-      &error);
+          &error);
   if (dir == NULL)
     return 100;
   g_autofree gchar *path = g_build_filename (dir, "fact.db", NULL);
@@ -94,8 +94,8 @@ check_fact_store_thread_budget (void)
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   g_autofree gchar *threads = NULL;
   if (!query_text (conn,
-          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
-          &threads) || g_strcmp0 (threads, "1") != 0)
+      "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+      &threads) || g_strcmp0 (threads, "1") != 0)
     return 103;
 
   g_autoptr (wyl_fact_store_t) memory_store = NULL;
@@ -104,8 +104,8 @@ check_fact_store_thread_budget (void)
   if (wyl_fact_store_create_schema (memory_store) != WYRELOG_E_OK)
     return 105;
   if (!query_text (wyl_fact_store_get_connection (memory_store),
-          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
-          &threads) || g_strcmp0 (threads, "1") != 0)
+      "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+      &threads) || g_strcmp0 (threads, "1") != 0)
     return 106;
   return 0;
 }
@@ -126,7 +126,7 @@ check_fact_store_appends_idempotently (void)
     {"status", "symbol", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   g_autofree gchar *table = NULL;
   if (wyl_fact_store_ensure_projection (store, &schema, &table)
       != WYRELOG_E_OK)
@@ -145,7 +145,7 @@ check_fact_store_appends_idempotently (void)
 
   const gsize n_rows = 10000;
   wyl_fact_value_t *values = g_new0 (wyl_fact_value_t,
-      n_rows * G_N_ELEMENTS (columns));
+          n_rows * G_N_ELEMENTS (columns));
   wyl_fact_row_t *rows = g_new0 (wyl_fact_row_t, n_rows);
   gchar **order_ids = g_new0 (gchar *, n_rows);
   gchar **customer_ids = g_new0 (gchar *, n_rows);
@@ -200,7 +200,7 @@ check_fact_store_appends_idempotently (void)
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   gint64 count = 0;
   g_autofree gchar *count_sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;",
-      table);
+          table);
   if (!count_i64 (conn, count_sql, &count) || count != (gint64) n_rows)
     return 16;
   if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_batches;", &count)
@@ -211,19 +211,19 @@ check_fact_store_appends_idempotently (void)
     return 18;
 
   g_autofree gchar *type_sql = g_strdup_printf
-      ("SELECT type FROM pragma_table_info('%s') WHERE name = 'amount';",
-      table);
+        ("SELECT type FROM pragma_table_info('%s') WHERE name = 'amount';",
+          table);
   g_autofree gchar *amount_type = NULL;
   if (!query_text (conn, type_sql, &amount_type)
       || g_strcmp0 (amount_type, "BIGINT") != 0)
     return 19;
   if (!count_i64 (conn,
-          "SELECT COUNT(*) FROM pragma_table_info('fact_event_log') "
-          "WHERE lower(type) LIKE '%json%';", &count) || count != 0)
+      "SELECT COUNT(*) FROM pragma_table_info('fact_event_log') "
+      "WHERE lower(type) LIKE '%json%';", &count) || count != 0)
     return 20;
   g_autofree gchar *scope_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE __wyl_tenant_id = 'tenant-a' "
-      "AND __wyl_graph_id = 'orders';", table);
+        ("SELECT COUNT(*) FROM %s WHERE __wyl_tenant_id = 'tenant-a' "
+          "AND __wyl_graph_id = 'orders';", table);
   if (!count_i64 (conn, scope_sql, &count) || count != (gint64) n_rows)
     return 201;
 
@@ -269,7 +269,7 @@ check_fact_store_retracts_idempotently (void)
     {"expedited", "bool", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   g_autofree gchar *table = NULL;
   if (wyl_fact_store_ensure_projection (store, &schema, &table)
       != WYRELOG_E_OK)
@@ -329,7 +329,7 @@ check_fact_store_retracts_idempotently (void)
   };
   inserted = FALSE;
   if (wyl_fact_store_retract_batch (store, &schema, &retract_a_batch,
-          &inserted) != WYRELOG_E_OK || !inserted)
+      &inserted) != WYRELOG_E_OK || !inserted)
     return 104;
 
   duckdb_connection conn = wyl_fact_store_get_connection (store);
@@ -338,32 +338,32 @@ check_fact_store_retracts_idempotently (void)
    * append an invalid tombstone. Replay applies both events in sequence to
    * derive the effective state; the projection table itself retains both. */
   g_autofree gchar *order_a_valid_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
-      "AND __wyl_valid = TRUE;", table);
+        ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
+          "AND __wyl_valid = TRUE;", table);
   if (!count_i64 (conn, order_a_valid_sql, &count) || count != 1)
     return 105;
   g_autofree gchar *order_a_invalid_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
-      "AND __wyl_valid = FALSE;", table);
+        ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
+          "AND __wyl_valid = FALSE;", table);
   if (!count_i64 (conn, order_a_invalid_sql, &count) || count != 1)
     return 106;
   g_autofree gchar *order_b_valid_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-b' "
-      "AND __wyl_valid = TRUE;", table);
+        ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-b' "
+          "AND __wyl_valid = TRUE;", table);
   if (!count_i64 (conn, order_b_valid_sql, &count) || count != 1)
     return 107;
 
   /* Confirm batch op was recorded as retract. */
   g_autofree gchar *batch_op = NULL;
   if (!query_text (conn,
-          "SELECT op FROM fact_batches WHERE batch_id = 'batch-2';",
-          &batch_op) || g_strcmp0 (batch_op, "retract") != 0)
+      "SELECT op FROM fact_batches WHERE batch_id = 'batch-2';",
+      &batch_op) || g_strcmp0 (batch_op, "retract") != 0)
     return 108;
 
   /* Case 2: idempotent retry -> inserted=FALSE. */
   inserted = TRUE;
   if (wyl_fact_store_retract_batch (store, &schema, &retract_a_batch,
-          &inserted) != WYRELOG_E_OK || inserted)
+      &inserted) != WYRELOG_E_OK || inserted)
     return 110;
 
   /* Case 3: non-existent row retract -> WYRELOG_E_OK (silent ok). */
@@ -390,11 +390,11 @@ check_fact_store_retracts_idempotently (void)
   };
   inserted = FALSE;
   if (wyl_fact_store_retract_batch (store, &schema, &retract_c_batch,
-          &inserted) != WYRELOG_E_OK || !inserted)
+      &inserted) != WYRELOG_E_OK || !inserted)
     return 120;
   g_autofree gchar *order_c_invalid_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-c' "
-      "AND __wyl_valid = FALSE;", table);
+        ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-c' "
+          "AND __wyl_valid = FALSE;", table);
   if (!count_i64 (conn, order_c_invalid_sql, &count) || count != 1)
     return 121;
 
@@ -408,7 +408,7 @@ check_fact_store_retracts_idempotently (void)
   wrong_scope_batch.graph_id = "graph-b";
   wrong_scope_batch.idempotency_key = "retract:3";
   if (wyl_fact_store_retract_batch (store, &wrong_schema, &wrong_scope_batch,
-          NULL) != WYRELOG_E_POLICY)
+      NULL) != WYRELOG_E_POLICY)
     return 130;
 
   return 0;
@@ -481,7 +481,7 @@ check_retract_by_id_normal_three_rows (void)
   };
   RetractByIdFixture fix = { 0 };
   gint rc_init = retract_by_id_fixture_init (&fix, columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   if (rc_init != 0)
     return 1000 + rc_init;
 
@@ -499,7 +499,7 @@ check_retract_by_id_normal_three_rows (void)
     {values + 4, 2},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "trigger-1",
-          "seed:1", rows, 3) != 0) {
+      "seed:1", rows, 3) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1010;
   }
@@ -507,8 +507,8 @@ check_retract_by_id_normal_three_rows (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   wyrelog_error_t rc = wyl_fact_store_retract_by_batch_id (fix.store,
-      &fix.schema, "trigger-1", "retract-1", "unit-test", "request-1",
-      "idem:retract:1", &inserted, &row_count);
+          &fix.schema, "trigger-1", "retract-1", "unit-test", "request-1",
+          "idem:retract:1", &inserted, &row_count);
   if (rc != WYRELOG_E_OK || !inserted || row_count != 3) {
     retract_by_id_fixture_clear (&fix);
     return 1020;
@@ -520,23 +520,23 @@ check_retract_by_id_normal_three_rows (void)
    * __wyl_valid=TRUE; the retract adds NEW tombstone rows for retract-1
    * with __wyl_valid=FALSE — it does NOT flip existing rows in-place. */
   g_autofree gchar *trigger_valid_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = TRUE "
-      "AND __wyl_batch_id = 'trigger-1';", fix.table);
+        ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = TRUE "
+          "AND __wyl_batch_id = 'trigger-1';", fix.table);
   if (!count_i64 (conn, trigger_valid_sql, &count) || count != 3) {
     retract_by_id_fixture_clear (&fix);
     return 1030;
   }
   g_autofree gchar *invalid_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = FALSE "
-      "AND __wyl_batch_id = 'retract-1';", fix.table);
+        ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = FALSE "
+          "AND __wyl_batch_id = 'retract-1';", fix.table);
   if (!count_i64 (conn, invalid_sql, &count) || count != 3) {
     retract_by_id_fixture_clear (&fix);
     return 1040;
   }
   g_autofree gchar *batch_op = NULL;
   if (!query_text (conn,
-          "SELECT op FROM fact_batches WHERE batch_id = 'retract-1';",
-          &batch_op) || g_strcmp0 (batch_op, "retract") != 0) {
+      "SELECT op FROM fact_batches WHERE batch_id = 'retract-1';",
+      &batch_op) || g_strcmp0 (batch_op, "retract") != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1050;
   }
@@ -560,14 +560,14 @@ check_retract_by_id_idempotent_replay (void)
     {values, 1},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
-          "seed:1", rows, 1) != 0) {
+      "seed:1", rows, 1) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1101;
   }
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_OK || !inserted || row_count != 1) {
     retract_by_id_fixture_clear (&fix);
     return 1102;
@@ -576,7 +576,7 @@ check_retract_by_id_idempotent_replay (void)
   inserted = TRUE;
   row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_OK || inserted) {
     retract_by_id_fixture_clear (&fix);
     return 1103;
@@ -606,14 +606,14 @@ check_retract_by_id_second_retract_same_trigger (void)
     {values, 1},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
-          "seed:1", rows, 1) != 0) {
+      "seed:1", rows, 1) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1201;
   }
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_OK || !inserted || row_count != 1) {
     retract_by_id_fixture_clear (&fix);
     return 1202;
@@ -624,7 +624,7 @@ check_retract_by_id_second_retract_same_trigger (void)
   inserted = FALSE;
   row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new-2", "src", "req", "idem-2", &inserted, &row_count)
+      "new-2", "src", "req", "idem-2", &inserted, &row_count)
       != WYRELOG_E_OK || !inserted || row_count != 1) {
     retract_by_id_fixture_clear (&fix);
     return 1203;
@@ -633,8 +633,8 @@ check_retract_by_id_second_retract_same_trigger (void)
   duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
   gint64 count = 0;
   if (!count_i64 (conn,
-          "SELECT COUNT(*) FROM fact_batches WHERE op = 'retract';",
-          &count) || count != 2) {
+      "SELECT COUNT(*) FROM fact_batches WHERE op = 'retract';",
+      &count) || count != 2) {
     retract_by_id_fixture_clear (&fix);
     return 1204;
   }
@@ -654,8 +654,8 @@ check_retract_by_id_not_found (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   wyrelog_error_t rc = wyl_fact_store_retract_by_batch_id (fix.store,
-      &fix.schema, "missing", "new-1", "src", "req", "idem-1", &inserted,
-      &row_count);
+          &fix.schema, "missing", "new-1", "src", "req", "idem-1", &inserted,
+          &row_count);
   if (rc != WYRELOG_E_NOT_FOUND) {
     retract_by_id_fixture_clear (&fix);
     return 1301;
@@ -680,7 +680,7 @@ check_retract_by_id_trigger_is_retract_batch (void)
     {values, 1},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "seed",
-          "seed:1", rows, 1) != 0) {
+      "seed:1", rows, 1) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1401;
   }
@@ -699,7 +699,7 @@ check_retract_by_id_trigger_is_retract_batch (void)
     .n_rows = 1,
   };
   if (wyl_fact_store_retract_batch (fix.store, &fix.schema, &retract_batch,
-          NULL) != WYRELOG_E_OK) {
+      NULL) != WYRELOG_E_OK) {
     retract_by_id_fixture_clear (&fix);
     return 1402;
   }
@@ -707,7 +707,7 @@ check_retract_by_id_trigger_is_retract_batch (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "ret",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_POLICY) {
     retract_by_id_fixture_clear (&fix);
     return 1403;
@@ -732,7 +732,7 @@ check_retract_by_id_scope_mismatch (void)
     {values, 1},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
-          "seed:1", rows, 1) != 0) {
+      "seed:1", rows, 1) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1501;
   }
@@ -742,7 +742,7 @@ check_retract_by_id_scope_mismatch (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &wrong, "trig",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_POLICY) {
     retract_by_id_fixture_clear (&fix);
     return 1502;
@@ -751,7 +751,7 @@ check_retract_by_id_scope_mismatch (void)
   wyl_policy_fact_relation_schema_options_t wrong_tenant = fix.schema;
   wrong_tenant.tenant_id = "tenant-other";
   if (wyl_fact_store_retract_by_batch_id (fix.store, &wrong_tenant, "trig",
-          "new-2", "src", "req", "idem-2", &inserted, &row_count)
+      "new-2", "src", "req", "idem-2", &inserted, &row_count)
       != WYRELOG_E_POLICY) {
     retract_by_id_fixture_clear (&fix);
     return 1503;
@@ -782,14 +782,14 @@ check_retract_by_id_exceeds_max_rows (void)
   }
   gint result = 0;
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "huge",
-          "seed:1", rows, n_rows) != 0) {
+      "seed:1", rows, n_rows) != 0) {
     result = 1601;
     goto cleanup;
   }
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "huge",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_POLICY) {
     result = 1602;
     goto cleanup;
@@ -820,7 +820,7 @@ check_retract_by_id_schema_version_mismatch (void)
     {values, 1},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
-          "seed:1", rows, 1) != 0) {
+      "seed:1", rows, 1) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1701;
   }
@@ -829,7 +829,7 @@ check_retract_by_id_schema_version_mismatch (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &bumped, "trig",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_POLICY) {
     retract_by_id_fixture_clear (&fix);
     return 1702;
@@ -850,49 +850,49 @@ check_retract_by_id_invalid_args (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (NULL, &fix.schema, "trig",
-          "new", "src", "req", "idem", &inserted, &row_count)
+      "new", "src", "req", "idem", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1801;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, NULL, "trig",
-          "new", "src", "req", "idem", &inserted, &row_count)
+      "new", "src", "req", "idem", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1802;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, NULL,
-          "new", "src", "req", "idem", &inserted, &row_count)
+      "new", "src", "req", "idem", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1803;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "",
-          "new", "src", "req", "idem", &inserted, &row_count)
+      "new", "src", "req", "idem", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1804;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          NULL, "src", "req", "idem", &inserted, &row_count)
+      NULL, "src", "req", "idem", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1805;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "", "src", "req", "idem", &inserted, &row_count)
+      "", "src", "req", "idem", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1806;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new", "src", "req", NULL, &inserted, &row_count)
+      "new", "src", "req", NULL, &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1807;
   }
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new", "src", "req", "", &inserted, &row_count)
+      "new", "src", "req", "", &inserted, &row_count)
       != WYRELOG_E_INVALID) {
     retract_by_id_fixture_clear (&fix);
     return 1808;
@@ -928,7 +928,7 @@ check_retract_by_id_partial_already_retracted (void)
     {values + 4, 2},
   };
   if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
-          "seed:1", rows, 3) != 0) {
+      "seed:1", rows, 3) != 0) {
     retract_by_id_fixture_clear (&fix);
     return 1901;
   }
@@ -963,7 +963,7 @@ check_retract_by_id_partial_already_retracted (void)
   gboolean inserted = FALSE;
   gint64 row_count = -1;
   if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
-          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      "new-1", "src", "req", "idem-1", &inserted, &row_count)
       != WYRELOG_E_OK || !inserted || row_count != 3) {
     retract_by_id_fixture_clear (&fix);
     return 1903;
@@ -972,8 +972,8 @@ check_retract_by_id_partial_already_retracted (void)
   gint64 count = 0;
   /* 3 tombstone rows for new-1 must exist with __wyl_valid=FALSE. */
   g_autofree gchar *tombstone_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = FALSE "
-      "AND __wyl_batch_id = 'new-1';", fix.table);
+        ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = FALSE "
+          "AND __wyl_batch_id = 'new-1';", fix.table);
   if (!count_i64 (conn, tombstone_sql, &count) || count != 3) {
     retract_by_id_fixture_clear (&fix);
     return 1904;
@@ -1060,7 +1060,7 @@ expect_projection_drift_rejected (const wyl_policy_fact_relation_schema_column_t
       make_schema (columns, n_columns);
   g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
   g_autofree gchar *sql = g_strdup_printf
-      ("CREATE TABLE %s (%s);", table, projection_columns_sql);
+        ("CREATE TABLE %s (%s);", table, projection_columns_sql);
   duckdb_result drift_result = { 0 };
   if (duckdb_query (wyl_fact_store_get_connection (store), sql, &drift_result)
       != DuckDBSuccess) {
@@ -1082,31 +1082,31 @@ check_fact_store_rejects_schema_drift (void)
     {"amount", "int64", FALSE, TRUE},
   };
   gint rc = expect_projection_drift_rejected (required_columns,
-      G_N_ELEMENTS (required_columns),
-      "order_id VARCHAR NOT NULL, amount BIGINT NOT NULL, "
-      "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
-      "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
-      "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL", 30);
+          G_N_ELEMENTS (required_columns),
+          "order_id VARCHAR NOT NULL, amount BIGINT NOT NULL, "
+          "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
+          "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
+          "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL", 30);
   if (rc != 0)
     return rc;
 
   rc = expect_projection_drift_rejected (required_columns,
-      G_N_ELEMENTS (required_columns),
-      "order_id VARCHAR NOT NULL, amount VARCHAR NOT NULL, "
-      "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
-      "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
-      "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
-      "UNIQUE (__wyl_batch_id, __wyl_row_index)", 40);
+          G_N_ELEMENTS (required_columns),
+          "order_id VARCHAR NOT NULL, amount VARCHAR NOT NULL, "
+          "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
+          "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
+          "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
+          "UNIQUE (__wyl_batch_id, __wyl_row_index)", 40);
   if (rc != 0)
     return rc;
 
   rc = expect_projection_drift_rejected (required_columns,
-      G_N_ELEMENTS (required_columns),
-      "order_id VARCHAR NOT NULL, amount BIGINT NOT NULL, "
-      "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
-      "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
-      "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
-      "UNIQUE (__wyl_batch_id, __wyl_row_index, amount)", 50);
+          G_N_ELEMENTS (required_columns),
+          "order_id VARCHAR NOT NULL, amount BIGINT NOT NULL, "
+          "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
+          "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
+          "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
+          "UNIQUE (__wyl_batch_id, __wyl_row_index, amount)", 50);
   if (rc != 0)
     return rc;
 
@@ -1114,15 +1114,77 @@ check_fact_store_rejects_schema_drift (void)
     {"note", "string", TRUE, TRUE},
   };
   rc = expect_projection_drift_rejected (nullable_columns,
-      G_N_ELEMENTS (nullable_columns),
-      "note VARCHAR NOT NULL, __wyl_tenant_id VARCHAR NOT NULL, "
-      "__wyl_graph_id VARCHAR NOT NULL, __wyl_seq BIGINT NOT NULL, "
-      "__wyl_batch_id VARCHAR NOT NULL, __wyl_row_index BIGINT NOT NULL, "
-      "__wyl_valid BOOLEAN NOT NULL, "
-      "UNIQUE (__wyl_batch_id, __wyl_row_index)", 60);
+          G_N_ELEMENTS (nullable_columns),
+          "note VARCHAR NOT NULL, __wyl_tenant_id VARCHAR NOT NULL, "
+          "__wyl_graph_id VARCHAR NOT NULL, __wyl_seq BIGINT NOT NULL, "
+          "__wyl_batch_id VARCHAR NOT NULL, __wyl_row_index BIGINT NOT NULL, "
+          "__wyl_valid BOOLEAN NOT NULL, "
+          "UNIQUE (__wyl_batch_id, __wyl_row_index)", 60);
   if (rc != 0)
     return rc;
 
+  return 0;
+}
+
+static gint
+check_fact_store_projection_validation (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 70;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL)
+      != WYRELOG_E_OK)
+    return 71;
+  g_autofree gchar *initial_table =
+      wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *drop_sql = g_strdup_printf ("DROP TABLE %s;",
+          initial_table);
+  duckdb_result drop_result = { 0 };
+  if (duckdb_query (wyl_fact_store_get_connection (store), drop_sql,
+      &drop_result) != DuckDBSuccess) {
+    duckdb_destroy_result (&drop_result);
+    return 72;
+  }
+  duckdb_destroy_result (&drop_result);
+  gboolean exists = TRUE;
+  if (wyl_fact_store_validate_projection (store, &schema, &exists)
+      != WYRELOG_E_OK || exists)
+    return 73;
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL)
+      != WYRELOG_E_OK
+      || wyl_fact_store_validate_projection (store, &schema, &exists)
+      != WYRELOG_E_OK || !exists)
+    return 74;
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL)
+      != WYRELOG_E_OK)
+    return 75;
+
+  wyl_policy_fact_relation_schema_options_t malformed = schema;
+  malformed.schema_version = 2;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&malformed);
+  g_autofree gchar *sql = g_strdup_printf
+        ("CREATE TABLE %s (order_id VARCHAR NOT NULL, amount VARCHAR NOT NULL, "
+          "__wyl_tenant_id VARCHAR NOT NULL, __wyl_graph_id VARCHAR NOT NULL, "
+          "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
+          "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
+          "UNIQUE (__wyl_batch_id, __wyl_row_index));", table);
+  duckdb_result result = { 0 };
+  if (duckdb_query (wyl_fact_store_get_connection (store), sql, &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 76;
+  }
+  duckdb_destroy_result (&result);
+  if (wyl_fact_store_validate_projection (store, &malformed, &exists)
+      != WYRELOG_E_POLICY || !exists)
+    return 77;
   return 0;
 }
 
@@ -1135,7 +1197,7 @@ check_fact_store_rejects_audit_shape (void)
     return 80;
   g_autofree gchar *path = g_build_filename (dir, "audit.duckdb", NULL);
   if (!create_duckdb_with_sql (path,
-          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);"))
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);"))
     return 81;
 
   wyl_fact_store_t *store = NULL;
@@ -1146,11 +1208,11 @@ check_fact_store_rejects_audit_shape (void)
   (void) g_remove (path);
   g_autofree gchar *mixed_path = g_build_filename (dir, "mixed.duckdb", NULL);
   if (!create_duckdb_with_sql (mixed_path,
-          "CREATE TABLE fact_store_metadata (key VARCHAR PRIMARY KEY, "
-          "value VARCHAR NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES "
-          "('store_kind', 'wyrelog.fact');"
-          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);"))
+      "CREATE TABLE fact_store_metadata (key VARCHAR PRIMARY KEY, "
+      "value VARCHAR NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES "
+      "('store_kind', 'wyrelog.fact');"
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);"))
     return 83;
   if (wyl_fact_store_open (mixed_path, &store) != WYRELOG_E_POLICY) {
     wyl_fact_store_close (store);
@@ -1159,10 +1221,10 @@ check_fact_store_rejects_audit_shape (void)
   (void) g_remove (mixed_path);
   g_autofree gchar *wrong_path = g_build_filename (dir, "wrong.duckdb", NULL);
   if (!create_duckdb_with_sql (wrong_path,
-          "CREATE TABLE fact_store_metadata (key VARCHAR PRIMARY KEY, "
-          "value VARCHAR NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES "
-          "('store_kind', 'wyrelog.audit');"))
+      "CREATE TABLE fact_store_metadata (key VARCHAR PRIMARY KEY, "
+      "value VARCHAR NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES "
+      "('store_kind', 'wyrelog.audit');"))
     return 85;
   if (wyl_fact_store_open (wrong_path, &store) != WYRELOG_E_POLICY) {
     wyl_fact_store_close (store);
@@ -1179,14 +1241,14 @@ check_fact_store_rejects_audit_shape (void)
     {"order_id", "symbol", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   if (wyl_fact_store_ensure_projection (live_store, &schema, NULL)
       != WYRELOG_E_OK)
     return 89;
   duckdb_result audit_result = { 0 };
   if (duckdb_query (wyl_fact_store_get_connection (live_store),
-          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);",
-          &audit_result) != DuckDBSuccess) {
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);",
+      &audit_result) != DuckDBSuccess) {
     duckdb_destroy_result (&audit_result);
     return 90;
   }
@@ -1235,7 +1297,7 @@ check_fact_forget_basic (void)
     {"amount", "int64", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   g_autofree gchar *table = NULL;
   if (wyl_fact_store_ensure_projection (store, &schema, &table)
       != WYRELOG_E_OK)
@@ -1282,15 +1344,15 @@ check_fact_forget_basic (void)
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   gint64 count = 0;
   g_autofree gchar *proj_sql = g_strdup_printf
-      ("SELECT COUNT(*) FROM %s;", table);
+        ("SELECT COUNT(*) FROM %s;", table);
   if (!count_i64 (conn, proj_sql, &count) || count != 0)
     return 2005;
   if (!count_i64 (conn,
-          "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'forget-me';",
-          &count) || count != 0)
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'forget-me';",
+      &count) || count != 0)
     return 2006;
   if (!count_i64 (conn,
-          "SELECT COUNT(*) FROM fact_forget_audit;", &count) || count != 1)
+      "SELECT COUNT(*) FROM fact_forget_audit;", &count) || count != 1)
     return 2007;
   return 0;
 }
@@ -1309,7 +1371,7 @@ check_fact_forget_not_found (void)
     {"order_id", "symbol", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
     return 2102;
 
@@ -1346,8 +1408,8 @@ check_fact_forget_audit_table_exists (void)
     return 21;
   gint64 count = -1;
   if (!count_i64 (wyl_fact_store_get_connection (store),
-          "SELECT COUNT(*) FROM information_schema.tables "
-          "WHERE table_name = 'fact_forget_audit';", &count))
+      "SELECT COUNT(*) FROM information_schema.tables "
+      "WHERE table_name = 'fact_forget_audit';", &count))
     return 22;
   if (count != 1)
     return 23;
@@ -1377,7 +1439,7 @@ identified_open_is (const gchar *path, const WylFactStoreIdentity *identity,
   wyl_fact_store_t *store = (wyl_fact_store_t *) 0x1;
   WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   wyrelog_error_t rc = wyl_fact_store_open_identified (path, identity, mode,
-      &result, &store);
+          &result, &store);
   gboolean valid = rc == expected_rc && result == expected_result
       && ((rc == WYRELOG_E_OK) == (store != NULL));
   wyl_fact_store_close (store);
@@ -1394,8 +1456,8 @@ check_fact_store_identity_basic (void)
   g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
 
   if (!identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_IO,
-          WYL_FACT_STORE_IDENTITY_RESULT_OPEN))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_IO,
+      WYL_FACT_STORE_IDENTITY_RESULT_OPEN))
     return 2201;
   if (g_file_test (path, G_FILE_TEST_EXISTS))
     return 2202;
@@ -1403,13 +1465,13 @@ check_fact_store_identity_basic (void)
   wyl_fact_store_t *store = NULL;
   WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   if (wyl_fact_store_open_identified (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result, &store)
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result, &store)
       != WYRELOG_E_OK || result != WYL_FACT_STORE_IDENTITY_RESULT_NONE
       || store == NULL)
     return 2203;
   gint64 count = 0;
   if (!count_i64 (wyl_fact_store_get_connection (store),
-          "SELECT COUNT(*) FROM main.fact_store_metadata;", &count)
+      "SELECT COUNT(*) FROM main.fact_store_metadata;", &count)
       || count != 6)
     return 2204;
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
@@ -1418,7 +1480,7 @@ check_fact_store_identity_basic (void)
     {"order_id", "symbol", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
-      G_N_ELEMENTS (columns));
+          G_N_ELEMENTS (columns));
   if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
     return 2213;
   const wyl_fact_value_t value = {
@@ -1450,114 +1512,114 @@ check_fact_store_identity_basic (void)
   wyl_fact_store_close (store);
 
   if (!identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE)
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE))
     return 2206;
 
   WylFactStoreIdentity foreign = test_identity;
   foreign.tenant_id = "tenant-b";
   if (!identified_open_is (path, &foreign,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2207;
   foreign = test_identity;
   foreign.graph_id = "other";
   if (!identified_open_is (path, &foreign,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2208;
   foreign = test_identity;
   foreign.store_uuid = "01890f47-3c4b-6cc2-b8c4-dc0c0c073988";
   if (!identified_open_is (path, &foreign,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2209;
 
   foreign = test_identity;
   foreign.path_encoding_version = 2;
   if (!identified_open_is (path, &foreign,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
     return 2210;
   foreign = test_identity;
   foreign.format_version = 2;
   if (!identified_open_is (path, &foreign,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
     return 2211;
   foreign = test_identity;
   foreign.store_uuid = "01890F47-3c4b-6cc2-b8c4-dc0c0c073989";
   store = (wyl_fact_store_t *) 0x1;
   result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   if (wyl_fact_store_open_identified (path, &foreign,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result, &store)
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result, &store)
       != WYRELOG_E_INVALID || store != NULL)
     return 2212;
 
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='2' "
-          "WHERE key='path_encoding_version';")
+      "UPDATE fact_store_metadata SET value='2' "
+      "WHERE key='path_encoding_version';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
     return 2215;
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='01' "
-          "WHERE key='path_encoding_version';")
+      "UPDATE fact_store_metadata SET value='01' "
+      "WHERE key='path_encoding_version';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
     return 2219;
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='0' "
-          "WHERE key='path_encoding_version';")
+      "UPDATE fact_store_metadata SET value='0' "
+      "WHERE key='path_encoding_version';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
     return 2220;
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='1' "
-          "WHERE key='path_encoding_version';"
-          "UPDATE fact_store_metadata SET value='2' "
-          "WHERE key='format_version';")
+      "UPDATE fact_store_metadata SET value='1' "
+      "WHERE key='path_encoding_version';"
+      "UPDATE fact_store_metadata SET value='2' "
+      "WHERE key='format_version';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
     return 2216;
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='0' "
-          "WHERE key='format_version';")
+      "UPDATE fact_store_metadata SET value='0' "
+      "WHERE key='format_version';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
     return 2221;
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='1' "
-          "WHERE key='format_version';"
-          "UPDATE fact_store_metadata SET value='wyrelog.audit' "
-          "WHERE key='store_kind';")
+      "UPDATE fact_store_metadata SET value='1' "
+      "WHERE key='format_version';"
+      "UPDATE fact_store_metadata SET value='wyrelog.audit' "
+      "WHERE key='store_kind';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2222;
   if (!create_duckdb_with_sql (path,
-          "UPDATE fact_store_metadata SET value='wyrelog.fact' "
-          "WHERE key='store_kind';"
-          "INSERT INTO fact_store_metadata VALUES ('unknown','value');")
+      "UPDATE fact_store_metadata SET value='wyrelog.fact' "
+      "WHERE key='store_kind';"
+      "INSERT INTO fact_store_metadata VALUES ('unknown','value');")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2223;
   if (!create_duckdb_with_sql (path,
-          "DELETE FROM fact_store_metadata WHERE key='unknown';"
-          "UPDATE fact_store_metadata SET value="
-          "'01890F47-3c4b-6cc2-b8c4-dc0c0c073989' WHERE key='store_uuid';")
+      "DELETE FROM fact_store_metadata WHERE key='unknown';"
+      "UPDATE fact_store_metadata SET value="
+      "'01890F47-3c4b-6cc2-b8c4-dc0c0c073989' WHERE key='store_uuid';")
       || !identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2217;
 
   g_remove (path);
@@ -1590,112 +1652,112 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
   g_autofree gchar *policy = g_build_filename (dir, "policy.sqlite", NULL);
 
   if (!create_duckdb_with_sql (partial,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact');")
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact');")
       || !identified_open_is (partial, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2301;
 
   if (!create_duckdb_with_sql (duplicate,
-          "CREATE TABLE fact_store_metadata(key VARCHAR,value VARCHAR NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact'),('store_kind','wyrelog.fact'),"
-          "('format_version','1'),('store_uuid',"
-          "'01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
-          "('path_encoding_version','1'),('tenant_id','tenant-a'),"
-          "('graph_id','orders');")
+      "CREATE TABLE fact_store_metadata(key VARCHAR,value VARCHAR NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact'),('store_kind','wyrelog.fact'),"
+      "('format_version','1'),('store_uuid',"
+      "'01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
+      "('path_encoding_version','1'),('tenant_id','tenant-a'),"
+      "('graph_id','orders');")
       || !identified_open_is (duplicate, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2302;
 
   if (!create_duckdb_with_sql (foreign, "CREATE TABLE unrelated(value INT);")
       || !identified_open_is (foreign, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2303;
 
   if (!create_duckdb_with_sql (noncanonical,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact'),('format_version','01'),"
-          "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
-          "('path_encoding_version','1'),('tenant_id','tenant-a'),"
-          "('graph_id','orders');")
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact'),('format_version','01'),"
+      "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
+      "('path_encoding_version','1'),('tenant_id','tenant-a'),"
+      "('graph_id','orders');")
       || !identified_open_is (noncanonical, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
     return 2304;
 
   if (!identified_open_is (mixed, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE)
       || !create_duckdb_with_sql (mixed,
-          "CREATE TABLE audit_events(seq BIGINT PRIMARY KEY);")
+      "CREATE TABLE audit_events(seq BIGINT PRIMARY KEY);")
       || !identified_open_is (mixed, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2305;
 
   if (!create_duckdb_with_sql (extra_index,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
-          TEST_IDENTITY_ROWS
-          "CREATE INDEX extra_metadata_index ON fact_store_metadata(value);")
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
+      TEST_IDENTITY_ROWS
+      "CREATE INDEX extra_metadata_index ON fact_store_metadata(value);")
       || !identified_open_is (extra_index, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2306;
 
   if (!create_duckdb_with_sql (extra_column,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL,extra VARCHAR);"
-          TEST_IDENTITY_ROWS)
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL,extra VARCHAR);"
+      TEST_IDENTITY_ROWS)
       || !identified_open_is (extra_column, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2307;
 
   if (!create_duckdb_with_sql (defaulted,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL DEFAULT 'x');"
-          TEST_IDENTITY_ROWS)
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL DEFAULT 'x');"
+      TEST_IDENTITY_ROWS)
       || !identified_open_is (defaulted, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2308;
 
   if (!create_duckdb_with_sql (collated,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR COLLATE nocase PRIMARY KEY,"
-          "value VARCHAR COLLATE nocase NOT NULL);" TEST_IDENTITY_ROWS)
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR COLLATE nocase PRIMARY KEY,"
+      "value VARCHAR COLLATE nocase NOT NULL);" TEST_IDENTITY_ROWS)
       || !identified_open_is (collated, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2312;
 
   if (!create_duckdb_with_sql (composite,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR NOT NULL,value VARCHAR NOT NULL,"
-          "PRIMARY KEY(key,value));" TEST_IDENTITY_ROWS)
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR NOT NULL,value VARCHAR NOT NULL,"
+      "PRIMARY KEY(key,value));" TEST_IDENTITY_ROWS)
       || !identified_open_is (composite, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2313;
 
   if (create_duckdb_with_sql (embedded_nul,
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
-          TEST_IDENTITY_ROWS
-          "UPDATE fact_store_metadata SET value='tenant' || chr(0) || '-a' "
-          "WHERE key='tenant_id';")
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
+      TEST_IDENTITY_ROWS
+      "UPDATE fact_store_metadata SET value='tenant' || chr(0) || '-a' "
+      "WHERE key='tenant_id';")
       && !identified_open_is (embedded_nul, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2309;
 
   g_autoptr (wyl_policy_store_t) policy_store = NULL;
@@ -1704,8 +1766,8 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
     return 2310;
   g_clear_pointer (&policy_store, wyl_policy_store_close);
   if (!identified_open_is (policy, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2311;
 
   g_remove (partial);
@@ -1731,23 +1793,23 @@ check_fact_store_identity_rolls_back (void)
       fault <= WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT; fault++) {
     g_autoptr (GError) error = NULL;
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-rollback-XXXXXX",
-        &error);
+            &error);
     if (dir == NULL)
       return 2400 + fault;
     g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
     wyl_fact_store_identity_set_test_fault (
-        (WylFactStoreIdentityTestFault) fault);
+      (WylFactStoreIdentityTestFault) fault);
     if (!identified_open_is (path, &test_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_INTERNAL,
-            WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL))
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_INTERNAL,
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL))
       return 2410 + fault;
     if (!identified_open_is (path, &test_identity,
-            WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-            WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+        WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+        WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
       return 2420 + fault;
     if (!identified_open_is (path, &test_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
-            WYL_FACT_STORE_IDENTITY_RESULT_NONE))
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+        WYL_FACT_STORE_IDENTITY_RESULT_NONE))
       return 2430 + fault;
     g_remove (path);
     g_rmdir (dir);
@@ -1780,7 +1842,7 @@ identity_open_thread (gpointer data)
 
   wyl_fact_store_t *store = NULL;
   thread->rc = wyl_fact_store_open_identified (thread->path, thread->identity,
-      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &thread->result, &store);
+          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &thread->result, &store);
   wyl_fact_store_close (store);
   return NULL;
 }
@@ -1798,15 +1860,17 @@ run_identity_race (const gchar *path,
   g_mutex_init (&mutex);
   g_cond_init (&cond);
   *left = (IdentityThread) {
-  path, left_identity, &mutex, &cond, &waiting, &go,
-        WYRELOG_E_INTERNAL, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL};
+    path, left_identity, &mutex, &cond, &waiting, &go,
+    WYRELOG_E_INTERNAL, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL
+  };
   *right = (IdentityThread) {
-  path, right_identity, &mutex, &cond, &waiting, &go,
-        WYRELOG_E_INTERNAL, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL};
+    path, right_identity, &mutex, &cond, &waiting, &go,
+    WYRELOG_E_INTERNAL, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL
+  };
   GThread *left_thread = g_thread_new ("identity-left",
-      identity_open_thread, left);
+          identity_open_thread, left);
   GThread *right_thread = g_thread_new ("identity-right",
-      identity_open_thread, right);
+          identity_open_thread, right);
   g_mutex_lock (&mutex);
   while (waiting != 2)
     g_cond_wait (&cond, &mutex);
@@ -1824,9 +1888,9 @@ static gboolean
 identity_race_outcome_is_retryable (const IdentityThread *thread)
 {
   return (thread->rc == WYRELOG_E_OK
-      && thread->result == WYL_FACT_STORE_IDENTITY_RESULT_NONE)
-      || (thread->rc == WYRELOG_E_IO
-      && thread->result == WYL_FACT_STORE_IDENTITY_RESULT_OPEN);
+         && thread->result == WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+         || (thread->rc == WYRELOG_E_IO
+         && thread->result == WYL_FACT_STORE_IDENTITY_RESULT_OPEN);
 }
 
 static gint
@@ -1834,7 +1898,7 @@ check_fact_store_identity_concurrency (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-concurrency-XXXXXX",
-      &error);
+          &error);
   if (dir == NULL)
     return 2500;
   g_autofree gchar *same_path = g_build_filename (dir, "same.db", NULL);
@@ -1845,11 +1909,11 @@ check_fact_store_identity_concurrency (void)
       || !identity_race_outcome_is_retryable (&right)
       || (left.rc != WYRELOG_E_OK && right.rc != WYRELOG_E_OK)
       || !identified_open_is (same_path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE)
       || !identified_open_is (same_path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE))
     return 2501;
 
   g_autofree gchar *conflict_path = g_build_filename (dir, "conflict.db", NULL);
@@ -1871,13 +1935,13 @@ check_fact_store_identity_concurrency (void)
   const WylFactStoreIdentity *loser_identity =
       left_won ? &other : &test_identity;
   if (!identified_open_is (conflict_path,
-          winner_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE))
+      winner_identity,
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE))
     return 2503;
   if (!identified_open_is (conflict_path, loser_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2504;
 
   g_remove (same_path);
@@ -1899,11 +1963,11 @@ identity_snapshot_mutate (duckdb_database db, gpointer user_data)
   duckdb_result update = { 0 };
   if (duckdb_connect (db, &writer) == DuckDBSuccess) {
     mutation->updated = duckdb_query (writer,
-        "BEGIN TRANSACTION;"
-        "UPDATE main.fact_store_metadata SET value="
-        "'01890f47-3c4b-6cc2-b8c4-dc0c0c073988' WHERE key='store_uuid';"
-        "CREATE TABLE main.audit_events(seq BIGINT PRIMARY KEY);"
-        "COMMIT;", &update) == DuckDBSuccess;
+            "BEGIN TRANSACTION;"
+            "UPDATE main.fact_store_metadata SET value="
+            "'01890f47-3c4b-6cc2-b8c4-dc0c0c073988' WHERE key='store_uuid';"
+            "CREATE TABLE main.audit_events(seq BIGINT PRIMARY KEY);"
+            "COMMIT;", &update) == DuckDBSuccess;
   }
   duckdb_destroy_result (&update);
   duckdb_disconnect (&writer);
@@ -1914,26 +1978,26 @@ check_fact_store_identity_validation_snapshot (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-snapshot-XXXXXX",
-      &error);
+          &error);
   if (dir == NULL)
     return 2600;
   g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
   if (!identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE))
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE))
     return 2601;
 
   IdentitySnapshotMutation mutation = { FALSE };
   wyl_fact_store_identity_set_validation_test_hook
-      (identity_snapshot_mutate, &mutation);
+    (identity_snapshot_mutate, &mutation);
   if (!identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
-          WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE)
       || !mutation.updated)
     return 2603;
   if (!identified_open_is (path, &test_identity,
-          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+      WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
     return 2604;
 
   g_remove (path);
@@ -1978,6 +2042,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_schema_drift ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_projection_validation ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_audit_shape ();
