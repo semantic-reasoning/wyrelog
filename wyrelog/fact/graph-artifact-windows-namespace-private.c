@@ -5,6 +5,7 @@
 #include "fact/graph-artifact-windows-handle-private.h"
 #include "fact/graph-artifact-windows-lock-private.h"
 #include "fact/graph-artifact-windows-locator-private.h"
+#include "fact/graph-provisioned-pair-internal.h"
 
 #include <string.h>
 
@@ -289,23 +290,6 @@ wyl_fact_artifact_reader_wal_binding_free (WylFactArtifactReaderWalBinding *b)
   (void) b;
 }
 
-/* Only the neutral, pair-bound entry point is missing on Windows: the native
- * adoption path wyl_fact_artifact_win_namespace_adopt_entries_for_test
- * below is real and covered by tests/test-fact-artifact-namespace-windows.c.
- * This one still fails closed: forwarding a constructed pair to a namespace
- * is the next commit's work.  A pair itself can now be built from in-process
- * operation evidence; see
- * wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence in
- * fact/graph-locator-windows-private.c. */
-G_GNUC_INTERNAL wyrelog_error_t
-wyl_fact_artifact_namespace_open_provisioned_pair_internal (
-  WylFactGraphProvisionedPair *pair, WylFactArtifactNamespace **out_namespace)
-{
-  if (out_namespace != NULL)
-    *out_namespace = NULL;
-  (void) pair;
-  return WYRELOG_E_POLICY;
-}
 
 wyrelog_error_t
 wyl_fact_artifact_sidecar_binding_replace_existing_wal (
@@ -325,6 +309,10 @@ struct WylFactArtifactWinNamespace
   WylFactArtifactWinEntry *main_entry;
   WylFactArtifactWinEntry *lock_entry;
   WylFactArtifactWinLockDomain *lock_domain;
+  /* Held for lifetime when this namespace was adopted from a provisioned pair,
+   * so the pair's authority cannot be released underneath it, and so the
+   * hot-path re-proof below has something to re-prove.  NULL otherwise. */
+  WylFactGraphProvisionedPair *provisioned_pair;
   gboolean active;
   gint references;
 };
@@ -351,6 +339,9 @@ namespace_unref (WylFactArtifactWinNamespace *namespace_)
   wyl_fact_artifact_win_entry_free (namespace_->lock_entry);
   wyl_fact_artifact_win_entry_free (namespace_->main_entry);
   wyl_fact_artifact_win_locator_free (namespace_->locator);
+  /* After the locator: release derived authority before the authority it was
+   * derived from. */
+  wyl_fact_graph_provisioned_pair_free (namespace_->provisioned_pair);
   g_free (namespace_);
 }
 
@@ -551,6 +542,14 @@ wyl_fact_artifact_win_namespace_revalidate (WylFactArtifactWinNamespace
   if (namespace_ == NULL || !namespace_->active)
     return WYRELOG_E_POLICY;
   rc = wyl_fact_artifact_win_locator_revalidate (namespace_->locator);
+  /* A pair-backed namespace re-proves its provenance here too.  The bound form
+   * is used deliberately: this sits on every lease acquisition and every I/O
+   * session open, and the full form re-walks the absolute path from the volume
+   * root.  See wyl_fact_graph_provisioned_pair_revalidate_bound for what that
+   * leaves out. */
+  if (rc == WYRELOG_E_OK && namespace_->provisioned_pair != NULL)
+    rc = wyl_fact_graph_provisioned_pair_revalidate_bound
+          (namespace_->provisioned_pair);
   if (rc != WYRELOG_E_OK)
     namespace_->active = FALSE;
   return rc;
@@ -2616,6 +2615,58 @@ wyl_fact_artifact_win_temp_orphan_evidence_bytes (const WylFactArtifactWinTempOr
   memcpy (buf, evidence->logical_name, name_len + 1);
   memcpy (buf + name_len + 1, &evidence->identity, sizeof (WylFactGraphWinIdentity));
   return g_bytes_new_take (buf, total_len);
+}
+
+/* Adopt a namespace from a provisioned pair.  The pair's own handle is never
+ * handed to another module: a non-inheritable duplicate is passed instead, and
+ * wyl_fact_artifact_win_namespace_new_with_main re-proves it independently --
+ * FileId against the evidence, exact name, NumberOfLinks == 1, protected
+ * owner-only DACL -- before reopening facts.duckdb for itself.  The duplicate
+ * is closed here because that import does not consume it.
+ *
+ * The pair is revalidated on both sides of the import so a substitution racing
+ * the window is caught rather than straddling it, and a reference is retained
+ * for the namespace's lifetime. */
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal (
+  WylFactGraphProvisionedPair *pair, WylFactArtifactNamespace **out_namespace)
+{
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactGraphRegularFile view =
+      (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  HANDLE duplicate = INVALID_HANDLE_VALUE;
+  HANDLE self = GetCurrentProcess ();
+
+  if (out_namespace != NULL)
+    *out_namespace = NULL;
+  if (pair == NULL || out_namespace == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (!DuplicateHandle (self, pair->held_final_handle, self, &duplicate, 0,
+      FALSE, DUPLICATE_SAME_ACCESS))
+    return WYRELOG_E_IO;
+
+  view.handle = duplicate;
+  view.identity = pair->evidence.artifact_identity;
+  rc = wyl_fact_artifact_win_namespace_new_with_main (&pair->directory, &view,
+          &namespace_);
+  CloseHandle (duplicate);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_namespace_free (namespace_);
+    return rc;
+  }
+
+  namespace_->provisioned_pair = wyl_fact_graph_provisioned_pair_ref (pair);
+  *out_namespace = namespace_;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
