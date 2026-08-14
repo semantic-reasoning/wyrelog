@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include <string.h>
 
@@ -2738,7 +2739,180 @@ test_io_session_read_only_access_intent (void)
 /* A row that must leave nothing armed omits both expectation fields; the
  * assertion above pins the two clean values to the zero that the omitted
  * initializers supply. */
+static void
+remove_tree_for_test (const gchar *path)
+{
+  g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
+  if (dir != NULL) {
+    const gchar *name;
+    while ((name = g_dir_read_name (dir)) != NULL) {
+      g_autofree gchar *child = g_build_filename (path, name, NULL);
+      if (g_file_test (child, G_FILE_TEST_IS_DIR))
+        remove_tree_for_test (child);
+      else
+        g_remove (child);
+    }
+  }
+  g_rmdir (path);
+}
+
+/* Declared where it is used rather than in a header: the neutral pair-bound
+ * opener is the storage seam consumed by fact/store.c and the secure DuckDB
+ * bridge, both of which declare it locally too. */
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
+
+/* The resolver requires a protected owner-only fact root, so a bare
+ * g_dir_make_tmp directory is refused.  Build one with the same production
+ * helper the locator uses. */
+static gchar *
+provisioned_root (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *parent = g_dir_make_tmp ("wyl-pair-ns-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (parent);
+
+  gchar *root = g_build_filename (parent, "root", NULL);
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (root, -1, NULL, NULL, NULL);
+  WylFactGraphWinOwnerOnlySecurity security = { 0 };
+  SECURITY_ATTRIBUTES attributes = { 0 };
+
+  g_assert_nonnull (wide);
+  g_assert_cmpint (wyl_fact_graph_win_owner_only_security_init (&security,
+      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE), ==, WYRELOG_E_OK);
+  attributes.nLength = sizeof attributes;
+  attributes.lpSecurityDescriptor = &security.descriptor;
+  g_assert_true (CreateDirectoryW ((LPCWSTR) wide, &attributes));
+  wyl_fact_graph_win_owner_only_security_clear (&security);
+  return root;
+}
+
+/* Publish an exact stage and adopt the published final as a pair, capturing
+ * the evidence before the publishing rename forgets it. */
+static WylFactGraphProvisionedPair *
+provisioned_pair_for_test (const gchar *root, const gchar *operation,
+    WylFactGraphLocator *locator, WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *graph)
+{
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  g_assert_cmpint (wyl_fact_graph_locator_init (locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (resolver, locator,
+      TRUE, graph), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (graph,
+      operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
+      &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (graph, &stage,
+      &evidence), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+  g_assert_nonnull (pair);
+  return pair;
+}
+
+/* The pair reaches a real namespace, and the namespace does not borrow the
+ * pair's authority handle: it holds its own. */
+static void
+test_namespace_from_provisioned_pair (void)
+{
+  g_autofree gchar *root = provisioned_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactNamespace *ns = NULL;
+
+  WylFactGraphProvisionedPair *pair = provisioned_pair_for_test (root,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c0705a0", &locator, &resolver, &graph);
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (NULL, &ns), ==, WYRELOG_E_INVALID);
+  g_assert_null (ns);
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &ns), ==, WYRELOG_E_OK);
+  g_assert_nonnull (ns);
+
+  /* The adopted namespace is usable: a mutation lease and a sidecar session
+   * both go through the same authorities a namespace opened any other way
+   * would use. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns,
+      &lease), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_lease_free (lease);
+
+  /* The namespace took a reference, so releasing the caller's does not revoke
+   * it -- and the hot-path re-proof still passes afterwards. */
+  wyl_fact_graph_provisioned_pair_free (pair);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_revalidate (ns), ==,
+      WYRELOG_E_OK);
+
+  wyl_fact_artifact_win_namespace_free (ns);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_for_test (root);
+}
+
+/* The hook is what makes the pair's provenance live rather than a
+ * construction-time fact.  Unprotect the graph directory's DACL under a
+ * pair-backed namespace and the next revalidation must revoke it; delete the
+ * revalidate_bound call from wyl_fact_artifact_win_namespace_revalidate and
+ * this goes green, because the locator's own revalidation only re-proves its
+ * directory handle's FileId. */
+static void
+test_namespace_from_pair_revokes_on_directory_acl_rewrite (void)
+{
+  g_autofree gchar *root = provisioned_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactArtifactNamespace *ns = NULL;
+
+  WylFactGraphProvisionedPair *pair = provisioned_pair_for_test (root,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c0705a1", &locator, &resolver, &graph);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_revalidate (ns), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *graph_path = g_build_filename (root,
+          locator.tenant_component, locator.graph_component, NULL);
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (graph_path, -1, NULL, NULL,
+          NULL);
+  g_assert_nonnull (wide);
+  g_assert_cmpint (SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+      NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_revalidate (ns), ==,
+      WYRELOG_E_POLICY);
+  /* Revocation is terminal: the namespace does not recover on a later call. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_revalidate (ns), ==,
+      WYRELOG_E_POLICY);
+
+  wyl_fact_artifact_win_namespace_free (ns);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_for_test (root);
+}
+
 static const WinGuardedCase win_guarded_cases[] = {
+  {"/fact/artifact-namespace/windows/provisioned-pair/namespace",
+   test_namespace_from_provisioned_pair},
+  {"/fact/artifact-namespace/windows/provisioned-pair/revoke-on-acl",
+   test_namespace_from_pair_revokes_on_directory_acl_rewrite},
   {"/fact/artifact-namespace/windows/working-handle/adopt-close",
    test_working_handle_adopt_noninherit_close_once},
   {"/fact/artifact-namespace/windows/io-session/lifetime-singleton",
