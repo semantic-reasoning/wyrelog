@@ -142,7 +142,8 @@ What actually runs on Windows (build evidence, `.github/workflows/ci-*.yml`,
 - Builds `wyctl` and `wyrelogd` with clang-cl and vcpkg-provided dependencies,
   across `fact_store`/`secure_bridge` matrix legs.
 - Native gates on the secure-bridge leg: `secure-duckdb-bridge`,
-  `secure-duckdb-recording-filesystem`, `fact-artifact-namespace-windows`.
+  `secure-duckdb-recording-filesystem`, `fact-artifact-namespace-windows`,
+  `fact-provisioning-construct`.
 - The default leg runs `meson test -C builddir --print-errorlogs --suite
   wyrelog` (the POSIX-only SC e2e tests do not register here, by design).
 
@@ -166,7 +167,8 @@ against these authoritative artifacts:
    (`ubuntu-latest`) and macOS (`macos-latest`) runners; the Linux leg runs the
    `meson test ... --suite wyrelog` packaged suite. The `build-windows` job
    provides the Windows runner and its named native gates
-   (`secure-duckdb-bridge`, `fact-artifact-namespace-windows`).
+   (`secure-duckdb-bridge`, `secure-duckdb-recording-filesystem`,
+   `fact-artifact-namespace-windows`, `fact-provisioning-construct`).
 3. **C-unit evidence** —
    `tests/test-service-credential-operation-coordinator-execute.c` covers the
    #380 orphan-recovery portion at unit scope (arming the same real seam); the
