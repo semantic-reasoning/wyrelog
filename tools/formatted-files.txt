@@ -8,6 +8,7 @@ tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
+tests/test-engine.c
 tests/test-fact-artifact-namespace-windows.c
 tests/test-fact-artifact-namespace.c
 tests/test-fact-graph-locator-windows.c
@@ -118,6 +119,7 @@ wyrelog/wyl-boot.c
 wyrelog/wyl-client-private.h
 wyrelog/wyl-common-private.h
 wyrelog/wyl-dl-static-private.h
+wyrelog/wyl-engine.c
 wyrelog/wyl-events-private.h
 wyrelog/wyl-fsm-permission-scope-private.h
 wyrelog/wyl-fsm-permission-scope.c
