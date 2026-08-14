@@ -88,13 +88,18 @@ An upgrade is a security-contract change, not a dependency-only update.
 5. Run `secure-duckdb-recording-filesystem`,
    `secure-duckdb-filesystem`, and `secure-duckdb-bridge` from the pinned
    source build on Linux and macOS. Windows builds the same pinned source and
-   runs `secure-duckdb-bridge`, `secure-duckdb-recording-filesystem` and
-   `fact-artifact-namespace-windows`: the bridge object is platform-neutral
-   and succeeds there. What still returns
-   `WYRELOG_E_POLICY` on Windows is every artifact-bound authority -- the
-   provisioned pair, the neutral namespace open, and the fixed WAL
-   replacement -- so no production path reaches a live store. Do not read a
-   green Windows lane as native runtime authority.
+   runs `secure-duckdb-bridge`, `secure-duckdb-recording-filesystem`,
+   `fact-artifact-namespace-windows` and `fact-provisioning-construct`: the
+   bridge object is platform-neutral and succeeds there. Windows can now
+   construct a provisioned pair, open a namespace from it, and run DuckDB
+   against the published `facts.duckdb` through the bounded filesystem -- but
+   only from operation evidence held in the constructing process (#815). The
+   name-only `open_provisioned_pair_exact` and the fixed WAL replacement still
+   return `WYRELOG_E_POLICY`, and a pair cannot survive a restart until the
+   evidence tuple has a durable home (#816). What Windows still has no route to
+   is a live `wyl_fact_store_t` handle: `wyl_fact_store_open_provisioned_pair`
+   and `wyl_fact_store_open_provisioned_graph` are compiled out there. Do not
+   read a green Windows lane as native runtime authority.
 
 The POSIX CI jobs execute the real adapter target; compilation or recording
 evidence alone is not an acceptance signal.
