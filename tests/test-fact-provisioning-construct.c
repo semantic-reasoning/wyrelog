@@ -63,9 +63,6 @@ remove_root (const gchar *root)
   (void) g_rmdir (root);
 }
 
-/* Construction stages, publishes, and initializes+validates exact identity,
- * leaving the retained facts.duckdb pair at nlink 2: both the final and staged
- * names bind the same inode, the anti-swap invariant the secure open requires. */
 #ifdef G_OS_WIN32
 /* Read the identity and link count the POSIX arm gets from stat. */
 static gboolean
@@ -88,6 +85,11 @@ file_information (const gchar *path, BY_HANDLE_FILE_INFORMATION *out_info)
 }
 #endif
 
+/* Construction stages, publishes, and initializes+validates exact identity.
+ * POSIX leaves the retained facts.duckdb pair at nlink 2: both the final and
+ * staged names bind the same inode, the anti-swap invariant the secure open
+ * requires.  Windows publishes by rename, so its witness is the operation
+ * evidence rather than a second name; each arm asserts its own shape. */
 static void
 test_construct_publishes_verified_single_store (void)
 {
@@ -169,7 +171,14 @@ test_construct_never_overwrites_published_store (void)
   g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
       &authority), ==, WYRELOG_E_POLICY);
 
-  /* Unchanged: same FileId, same size, still a single link. */
+  /* The rename freed the stage name, so this retry re-creates it before the
+   * final-exists gate refuses, and stage_clear only closes the descriptor.  A
+   * rejected Windows retry therefore leaves an orphan provisioning file where
+   * POSIX creates nothing (its stage_create_exact answers BUSY against the
+   * retained pair).  Deliberately not asserted: pinning it would make the #816
+   * fix a test change.  What the store owes either way is asserted below.
+   *
+   * Unchanged: same FileId, same size, still a single link. */
   BY_HANDLE_FILE_INFORMATION after = { 0 };
   g_assert_true (file_information (final_path, &after));
   g_assert_cmpuint (after.nFileIndexHigh, ==, before.nFileIndexHigh);
