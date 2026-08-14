@@ -10499,6 +10499,52 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
         "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
     return rc;
   }
+  /* Backfill the relation activation authority only when a relation has one
+   * registered schema version.  Multiple historical versions do not contain
+   * enough information to infer the winning authority and remain unbound for
+   * explicit reconciliation. */
+  rc = exec_sql (store->db,
+          "DROP TABLE IF EXISTS temp.wyl_fact_activation_backfill;"
+          "CREATE TEMP TABLE wyl_fact_activation_backfill AS "
+          "SELECT tenant_id,graph_id,namespace_id,relation_name "
+          "FROM fact_relation_schemas s WHERE NOT EXISTS (SELECT 1 FROM "
+          "fact_relation_activation a WHERE a.tenant_id=s.tenant_id "
+          "AND a.graph_id=s.graph_id AND a.namespace_id=s.namespace_id "
+          "AND a.relation_name=s.relation_name) GROUP BY tenant_id,graph_id,"
+          "namespace_id,relation_name HAVING COUNT(*)=1;"
+          "INSERT OR IGNORE INTO fact_relation_activation "
+          "(tenant_id,graph_id,namespace_id,relation_name,lifecycle_state,"
+          "activation_generation,reconciliation_generation,last_error_class,"
+          "created_at,updated_at) "
+          "SELECT s.tenant_id,s.graph_id,s.namespace_id,s.relation_name,"
+          "'unbound',0,0,'none',MIN(s.created_at),MAX(s.updated_at) "
+          "FROM fact_relation_schemas s INNER JOIN temp.wyl_fact_activation_backfill b "
+          "ON b.tenant_id=s.tenant_id AND b.graph_id=s.graph_id "
+          "AND b.namespace_id=s.namespace_id AND b.relation_name=s.relation_name "
+          "GROUP BY s.tenant_id,s.graph_id,s.namespace_id,s.relation_name;"
+          "UPDATE fact_relation_activation SET lifecycle_state='activating',"
+          "pending_schema_version=(SELECT MIN(s.schema_version) FROM "
+          "fact_relation_schemas s WHERE s.tenant_id=fact_relation_activation.tenant_id "
+          "AND s.graph_id=fact_relation_activation.graph_id "
+          "AND s.namespace_id=fact_relation_activation.namespace_id "
+          "AND s.relation_name=fact_relation_activation.relation_name),"
+          "activation_generation=1,updated_at=unixepoch() "
+          "WHERE lifecycle_state='unbound' AND EXISTS (SELECT 1 FROM "
+          "temp.wyl_fact_activation_backfill b WHERE b.tenant_id=fact_relation_activation.tenant_id "
+          "AND b.graph_id=fact_relation_activation.graph_id "
+          "AND b.namespace_id=fact_relation_activation.namespace_id "
+          "AND b.relation_name=fact_relation_activation.relation_name);"
+          "UPDATE fact_relation_activation SET lifecycle_state='active',"
+          "active_schema_version=pending_schema_version,pending_schema_version=NULL,"
+          "activation_generation=2,updated_at=unixepoch() "
+          "WHERE lifecycle_state='activating' AND activation_generation=1 "
+          "AND EXISTS (SELECT 1 FROM temp.wyl_fact_activation_backfill b "
+          "WHERE b.tenant_id=fact_relation_activation.tenant_id "
+          "AND b.graph_id=fact_relation_activation.graph_id "
+          "AND b.namespace_id=fact_relation_activation.namespace_id "
+          "AND b.relation_name=fact_relation_activation.relation_name);");
+  if (rc != WYRELOG_E_OK)
+    return rc;
   sqlite3_stmt *stmt = NULL;
   gboolean has_request_id = FALSE;
   if (sqlite3_prepare_v2 (store->db, "PRAGMA table_info(audit_events);", -1,
@@ -14358,6 +14404,95 @@ insert_fact_relation_query_metadata (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+/* A schema registration is the first authoritative declaration of a
+ * relation.  Seed its activation row as active only when no activation row
+ * exists yet; later schema versions remain registered but inactive until the
+ * projection/transition coordinator explicitly supersedes the current one.
+ * Keeping this in the registration transaction prevents replay from seeing a
+ * schema row without its corresponding relation authority. */
+static wyrelog_error_t
+initialize_relation_activation (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *insert_sql =
+      "INSERT OR IGNORE INTO fact_relation_activation "
+      "(tenant_id,graph_id,namespace_id,relation_name,created_at,updated_at) "
+      "VALUES (?,?,?,?,unixepoch(),unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, insert_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, opts->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, opts->graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, opts->namespace_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, opts->relation_name) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  gboolean inserted = step_rc == SQLITE_DONE && sqlite3_changes (store->db) == 1;
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+        ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  if (!inserted)
+    return WYRELOG_E_OK;
+
+  static const gchar *activating_sql =
+      "UPDATE fact_relation_activation SET lifecycle_state='activating',"
+      "pending_schema_version=?,activation_generation=1,"
+      "updated_at=unixepoch() WHERE tenant_id=? AND graph_id=? "
+      "AND namespace_id=? AND relation_name=? AND lifecycle_state='unbound' "
+      "AND activation_generation=0;";
+  rc = prepare_stmt (store->db, activating_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) opts->schema_version)
+      != SQLITE_OK || bind_text (stmt, 2, opts->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, opts->graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, opts->namespace_id) != WYRELOG_E_OK
+      || bind_text (stmt, 5, opts->relation_name) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  step_rc = sqlite3_step (stmt);
+  gboolean activating = step_rc == SQLITE_DONE && sqlite3_changes (store->db) == 1;
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+        ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  if (!activating)
+    return WYRELOG_E_POLICY;
+
+  static const gchar *active_sql =
+      "UPDATE fact_relation_activation SET lifecycle_state='active',"
+      "active_schema_version=?,pending_schema_version=NULL,"
+      "activation_generation=2,updated_at=unixepoch() "
+      "WHERE tenant_id=? AND graph_id=? AND namespace_id=? "
+      "AND relation_name=? AND lifecycle_state='activating' "
+      "AND activation_generation=1 AND pending_schema_version=?;";
+  rc = prepare_stmt (store->db, active_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) opts->schema_version)
+      != SQLITE_OK || bind_text (stmt, 2, opts->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, opts->graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, opts->namespace_id) != WYRELOG_E_OK
+      || bind_text (stmt, 5, opts->relation_name) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64) opts->schema_version)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  step_rc = sqlite3_step (stmt);
+  gboolean active = step_rc == SQLITE_DONE && sqlite3_changes (store->db) == 1;
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+        ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  return active ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *opts)
@@ -14392,6 +14527,8 @@ wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
     };
     rc = insert_fact_relation_query_metadata (store, opts, &default_query);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = initialize_relation_activation (store, opts);
   if (rc != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return rc;
