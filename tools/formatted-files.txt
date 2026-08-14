@@ -74,6 +74,7 @@ wyrelog/fact/artifact-io-session-posix-private.c
 wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/artifact-io-session-windows-private.c
 wyrelog/fact/compound-private.h
+wyrelog/fact/graph-artifact-namespace-private.c
 wyrelog/fact/graph-artifact-namespace-private.h
 wyrelog/fact/graph-artifact-windows-handle-private.c
 wyrelog/fact/graph-artifact-windows-handle-private.h

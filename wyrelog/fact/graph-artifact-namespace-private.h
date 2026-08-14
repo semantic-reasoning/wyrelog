@@ -344,6 +344,16 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp_binding
   (WylFactArtifactMutationLease *, const gchar * token,
     gboolean create, gboolean writable,
     WylFactArtifactTempBinding ** out_binding, gint * out_fd);
+#ifndef G_OS_WIN32
+/* Create a temporary artifact with a server-generated UUIDv4 token.  The
+ * token is returned for durable recovery evidence and is retried on the
+ * bounded number of O_EXCL collisions.  Windows has a separately tracked
+ * token producer contract. */
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp_binding_generated
+  (WylFactArtifactMutationLease *, gboolean writable,
+    gchar ** out_token, WylFactArtifactTempBinding ** out_binding,
+    gint * out_fd);
+#endif
 /* Reopens only the file identity captured by an owner binding.  A
  * non-creator binding grants only the fd returned at construction time: it
  * cannot reopen, mutate, rename, unlink, or export recovery evidence. */

@@ -10,6 +10,7 @@
 #include "fact/graph-provisioned-pair-internal.h"
 #endif
 #include "wyl-id-private.h"
+#include <sodium.h>
 #include <string.h>
 
 #ifdef G_OS_WIN32
@@ -48,14 +49,14 @@ closed (void)
 }
 
 void wyl_fact_artifact_namespace_set_test_fault
-    (WylFactArtifactNamespaceTestFault fault)
+  (WylFactArtifactNamespaceTestFault fault)
 {
   (void) fault;
 }
 
 gboolean
-    wyl_fact_artifact_namespace_test_fault_was_consumed
-    (WylFactArtifactNamespaceTestFault fault) {
+wyl_fact_artifact_namespace_test_fault_was_consumed
+  (WylFactArtifactNamespaceTestFault fault) {
   (void) fault;
   return FALSE;
 }
@@ -130,15 +131,15 @@ wyl_fact_artifact_reader_guard_open_main_binding (WylFactArtifactMutationLease
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_main_binding_revalidate
-    (WylFactArtifactReaderMainBinding * b) {
+wyl_fact_artifact_reader_main_binding_revalidate
+  (WylFactArtifactReaderMainBinding * b) {
   (void) b;
   return closed ();
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_main_binding_revalidate_fd
-    (WylFactArtifactReaderMainBinding * b, gint fd) {
+wyl_fact_artifact_reader_main_binding_revalidate_fd
+  (WylFactArtifactReaderMainBinding * b, gint fd) {
   (void) b;
   (void) fd;
   return closed ();
@@ -160,8 +161,8 @@ wyl_fact_artifact_reader_main_binding_free (WylFactArtifactReaderMainBinding *b)
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_guard_open_existing_wal_binding
-    (WylFactArtifactMutationLease * l, WylFactArtifactReaderWalBinding ** b,
+wyl_fact_artifact_reader_guard_open_existing_wal_binding
+  (WylFactArtifactMutationLease * l, WylFactArtifactReaderWalBinding ** b,
     gint * fd) {
   (void) l;
   if (b)
@@ -180,8 +181,8 @@ wyl_fact_artifact_reader_wal_binding_revalidate (WylFactArtifactReaderWalBinding
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_wal_binding_revalidate_fd
-    (WylFactArtifactReaderWalBinding * b, gint fd) {
+wyl_fact_artifact_reader_wal_binding_revalidate_fd
+  (WylFactArtifactReaderWalBinding * b, gint fd) {
   (void) b;
   (void) fd;
   return closed ();
@@ -203,8 +204,8 @@ wyl_fact_artifact_reader_wal_binding_free (WylFactArtifactReaderWalBinding *b)
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_mutation_lease_open_main_binding
-    (WylFactArtifactMutationLease * l, WylFactArtifactMainBinding ** b,
+wyl_fact_artifact_mutation_lease_open_main_binding
+  (WylFactArtifactMutationLease * l, WylFactArtifactMainBinding ** b,
     gint * fd) {
   (void) l;
   if (b)
@@ -272,8 +273,8 @@ wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_mutation_lease_open_sidecar_binding
-    (WylFactArtifactMutationLease * l, WylFactArtifactName a, gboolean c,
+wyl_fact_artifact_mutation_lease_open_sidecar_binding
+  (WylFactArtifactMutationLease * l, WylFactArtifactName a, gboolean c,
     gboolean w, WylFactArtifactSidecarBinding ** b, gint * o) {
   (void) l;
   (void) a;
@@ -287,8 +288,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
-    (WylFactArtifactMutationLease * l, WylFactArtifactName a, gboolean w,
+wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+  (WylFactArtifactMutationLease * l, WylFactArtifactName a, gboolean w,
     WylFactArtifactSidecarBinding ** b, gint * o) {
   (void) l;
   (void) a;
@@ -326,16 +327,16 @@ wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding *b,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_sidecar_binding_publish_no_replace
-    (WylFactArtifactSidecarBinding * b, WylFactArtifactName a) {
+wyl_fact_artifact_sidecar_binding_publish_no_replace
+  (WylFactArtifactSidecarBinding * b, WylFactArtifactName a) {
   (void) b;
   (void) a;
   return closed ();
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_sidecar_binding_replace_existing_wal
-    (WylFactArtifactSidecarBinding * source,
+wyl_fact_artifact_sidecar_binding_replace_existing_wal
+  (WylFactArtifactSidecarBinding * source,
     WylFactArtifactSidecarBinding * destination,
     WylFactArtifactSidecarReplaceResult * out_result) {
   (void) source;
@@ -414,8 +415,8 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *b,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_temp_binding_export_recovery_evidence
-    (WylFactArtifactTempBinding * b, WylFactArtifactTempRecoveryEvidence ** e) {
+wyl_fact_artifact_temp_binding_export_recovery_evidence
+  (WylFactArtifactTempBinding * b, WylFactArtifactTempRecoveryEvidence ** e) {
   (void) b;
   if (e)
     *e = NULL;
@@ -423,7 +424,7 @@ wyrelog_error_t
 }
 
 void wyl_fact_artifact_temp_recovery_evidence_free
-    (WylFactArtifactTempRecoveryEvidence * e)
+  (WylFactArtifactTempRecoveryEvidence * e)
 {
   (void) e;
 }
@@ -565,8 +566,8 @@ wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *l,
 }
 
 wyrelog_error_t
-    wyl_fact_duckdb_temp_root_create_with_orphan_evidence
-    (WylFactArtifactMutationLease * l, WylFactDuckdbTempRoot ** out_root,
+wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+  (WylFactArtifactMutationLease * l, WylFactDuckdbTempRoot ** out_root,
     WylFactDuckdbTempOrphanEvidence ** out_evidence) {
   (void) l;
   if (out_root)
@@ -585,7 +586,7 @@ wyl_fact_duckdb_temp_orphan_evidence_free (WylFactDuckdbTempOrphanEvidence *e)
 }
 
 gchar *wyl_fact_duckdb_temp_orphan_evidence_dup_logical_name
-    (const WylFactDuckdbTempOrphanEvidence * e)
+  (const WylFactDuckdbTempOrphanEvidence * e)
 {
   (void) e;
   return NULL;
@@ -646,8 +647,8 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
 }
 
 wyrelog_error_t
-    wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
-    (WylFactDuckdbTempRoot * root, const gchar * name,
+wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
+  (WylFactDuckdbTempRoot * root, const gchar * name,
     WylFactDuckdbTempChild ** out_child, gint * out_fd,
     WylFactDuckdbTempOrphanEvidence ** out_evidence)
 {
@@ -706,14 +707,14 @@ wyl_fact_duckdb_temp_child_open_binding (WylFactDuckdbTempChild *child,
 }
 
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate
-    (WylFactDuckdbTempChildBinding * binding)
+  (WylFactDuckdbTempChildBinding * binding)
 {
   (void) binding;
   return closed ();
 }
 
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate_fd
-    (WylFactDuckdbTempChildBinding * binding, gint fd)
+  (WylFactDuckdbTempChildBinding * binding, gint fd)
 {
   (void) binding;
   (void) fd;
@@ -721,7 +722,7 @@ wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate_fd
 }
 
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_close
-    (WylFactDuckdbTempChildBinding * binding, gint * fd)
+  (WylFactDuckdbTempChildBinding * binding, gint * fd)
 {
   (void) binding;
   if (fd)
@@ -896,9 +897,8 @@ struct WylFactDuckdbTempOrphanEvidence
   gchar *logical_name;
 };
 static const gchar *names[] =
-    { "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
-  "facts.duckdb.wal.recovery", "facts.duckdb.lock", NULL
-};
+{ "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
+  "facts.duckdb.wal.recovery", "facts.duckdb.lock", NULL};
 
 static GMutex lock_domains_mutex;
 static GPtrArray *lock_domains;
@@ -908,20 +908,20 @@ static gint pair_access_modes[3] = { -1, -1, -1 };
 
 static WylFactDuckdbTempChild *duckdb_temp_child_ref (WylFactDuckdbTempChild *);
 static wyrelog_error_t duckdb_temp_child_matches_unlocked
-    (WylFactDuckdbTempChild *);
+  (WylFactDuckdbTempChild *);
 static void duckdb_temp_child_binding_revoke_unlocked
-    (WylFactDuckdbTempChildBinding *);
+  (WylFactDuckdbTempChildBinding *);
 static wyrelog_error_t duckdb_temp_child_binding_revalidate_unlocked
-    (WylFactDuckdbTempChildBinding *);
+  (WylFactDuckdbTempChildBinding *);
 static wyrelog_error_t duckdb_temp_child_binding_revalidate_fd_unlocked
-    (WylFactDuckdbTempChildBinding *, gint);
+  (WylFactDuckdbTempChildBinding *, gint);
 static wyrelog_error_t duckdb_temp_set_orphan_evidence (const gchar *,
     WylFactDuckdbTempOrphanEvidence **);
 static void release_lock_domain (WylFactArtifactNamespace *);
 static wyrelog_error_t namespace_test_substitute_regular
-    (WylFactArtifactNamespace *, const gchar *, gboolean);
+  (WylFactArtifactNamespace *, const gchar *, gboolean);
 static wyrelog_error_t namespace_test_substitute_fifo
-    (WylFactArtifactNamespace *, const gchar *);
+  (WylFactArtifactNamespace *, const gchar *);
 
 void
 wyl_fact_artifact_namespace_pair_access_reset_for_test (void)
@@ -931,11 +931,11 @@ wyl_fact_artifact_namespace_pair_access_reset_for_test (void)
 }
 
 gboolean
-    wyl_fact_artifact_namespace_pair_access_observed_for_test
-    (WylFactArtifactPairAccessForTest access, gint expected_access_mode) {
+wyl_fact_artifact_namespace_pair_access_observed_for_test
+  (WylFactArtifactPairAccessForTest access, gint expected_access_mode) {
   return access >= WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN
-      && access <= WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING
-      && g_atomic_int_get (&pair_access_modes[access]) == expected_access_mode;
+         && access <= WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING
+         && g_atomic_int_get (&pair_access_modes[access]) == expected_access_mode;
 }
 
 static void
@@ -951,14 +951,14 @@ namespace_fault_take (WylFactArtifactNamespaceTestFault fault)
 {
   gboolean consumed =
       g_atomic_int_compare_and_exchange (&namespace_test_fault, fault,
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
+          WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
   if (consumed)
     g_atomic_int_set (&namespace_consumed_test_fault, fault);
   return consumed;
 }
 
 void wyl_fact_artifact_namespace_set_test_fault
-    (WylFactArtifactNamespaceTestFault fault)
+  (WylFactArtifactNamespaceTestFault fault)
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
@@ -971,11 +971,11 @@ void wyl_fact_artifact_namespace_set_test_fault
 }
 
 gboolean
-    wyl_fact_artifact_namespace_test_fault_was_consumed
-    (WylFactArtifactNamespaceTestFault fault) {
+wyl_fact_artifact_namespace_test_fault_was_consumed
+  (WylFactArtifactNamespaceTestFault fault) {
   return fault != WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
-      && g_atomic_int_compare_and_exchange (&namespace_consumed_test_fault,
-      fault, WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
+         && g_atomic_int_compare_and_exchange (&namespace_consumed_test_fault,
+             fault, WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
 }
 
 static const gchar *
@@ -994,7 +994,7 @@ static gboolean
 sidecar_name (WylFactArtifactName n)
 {
   return n == WYL_FACT_ARTIFACT_WAL || n == WYL_FACT_ARTIFACT_CHECKPOINT
-      || n == WYL_FACT_ARTIFACT_RECOVERY;
+         || n == WYL_FACT_ARTIFACT_RECOVERY;
 }
 
 static wyrelog_error_t
@@ -1020,7 +1020,7 @@ check_generic (WylFactArtifactNamespace *n)
       || (guint64) held.st_dev != n->main_device
       || (guint64) held.st_ino != n->main_inode
       || fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
       || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
       || (guint64) named.st_uid != n->owner
       || (guint64) named.st_dev != n->main_device
@@ -1055,7 +1055,7 @@ check_provisioned_pair (WylFactArtifactNamespace *n)
   gint read_flags = fcntl (n->main_fd, F_GETFL);
   gint write_flags = fcntl (n->writable_main_fd, F_GETFL);
   return read_flags >= 0 && (read_flags & O_ACCMODE) == O_RDONLY
-      && write_flags >= 0 && (write_flags & O_ACCMODE) == O_RDWR
+         && write_flags >= 0 && (write_flags & O_ACCMODE) == O_RDWR
       ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
@@ -1126,12 +1126,12 @@ lock_stat_matches (WylFactArtifactNamespace *n, gint fd,
       || (guint64) held.st_dev != device || (guint64) held.st_ino != inode)
     return WYRELOG_E_POLICY;
   if (fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK), &named,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     return WYRELOG_E_POLICY;
   return S_ISREG (named.st_mode) && named.st_nlink == 1
-      && (named.st_mode & 07777) == 0600
-      && (guint64) named.st_uid == n->owner
-      && (guint64) named.st_dev == device && (guint64) named.st_ino == inode
+         && (named.st_mode & 07777) == 0600
+         && (guint64) named.st_uid == n->owner
+         && (guint64) named.st_dev == device && (guint64) named.st_ino == inode
       ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
@@ -1140,7 +1140,7 @@ lock_open_error (gint error)
 {
   return error == ELOOP || error == EISDIR || error == ENOTDIR
       ? WYRELOG_E_POLICY :
-      (error == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO);
+         (error == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO);
 }
 
 /* The retained pin is never used for flock.  Every guard gets a separately
@@ -1157,12 +1157,12 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
 
   if (n->lock_pin_fd < 0) {
     gint pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
-        O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL,
-        0600);
+            O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL,
+            0600);
     gboolean created = pin >= 0;
     if (pin < 0 && errno == EEXIST)
       pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
-          O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+              O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (pin < 0)
       return lock_open_error (errno);
     if (created && fchmod (pin, 0600) != 0) {
@@ -1181,14 +1181,13 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
     /* An EEXIST opener may race the creator before its durability barrier.
      * Fsyncing in both paths makes publication wait for one directory barrier. */
     if (namespace_fault_take
-        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC)
+          (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC)
         || fsync (n->fd) != 0) {
       close (pin);
       return WYRELOG_E_IO;
     }
     if (namespace_fault_take
-        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY))
-    {
+          (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY)){
       close (pin);
       return WYRELOG_E_POLICY;
     }
@@ -1202,10 +1201,10 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
   }
 
   if (lock_stat_matches (n, n->lock_pin_fd, n->lock_device,
-          n->lock_inode) != WYRELOG_E_OK)
+      n->lock_inode) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
   gint fd = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
-      O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+          O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0)
     return lock_open_error (errno);
   if (lock_stat_matches (n, fd, n->lock_device, n->lock_inode)
@@ -1251,7 +1250,7 @@ pin_lock_domain (WylFactArtifactNamespace *n)
     n->lock_domain = domain;
     domain->references++;
     wyrelog_error_t r = lock_stat_matches (n, pin, n->lock_device,
-        n->lock_inode);
+            n->lock_inode);
     if (r != WYRELOG_E_OK) {
       domain->references--;
       n->lock_domain = NULL;
@@ -1345,7 +1344,7 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
       || (guint64) main_stat.st_dev != main_file->device
       || (guint64) main_stat.st_ino != main_file->inode
       || fstatat (fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named_main,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_main.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_main.st_mode)
       || named_main.st_nlink != 1 || (named_main.st_mode & 07777) != 0600
       || named_main.st_uid != geteuid ()
       || (guint64) named_main.st_dev != main_file->device
@@ -1383,8 +1382,8 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
 }
 
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_fact_artifact_namespace_open_provisioned_pair_internal
-    (WylFactGraphProvisionedPair * pair, WylFactArtifactNamespace ** o)
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair * pair, WylFactArtifactNamespace ** o)
 {
   if (o != NULL)
     *o = NULL;
@@ -1409,24 +1408,24 @@ G_GNUC_INTERNAL wyrelog_error_t
   struct stat directory, main, writable_main;
   if (rc == WYRELOG_E_OK
       && (fstat (fd, &directory) != 0 || !S_ISDIR (directory.st_mode)
-          || (directory.st_mode & 07777) != 0700
-          || directory.st_uid != geteuid ()
-          || (guint64) directory.st_dev != pair->directory.graph_device
-          || (guint64) directory.st_ino != pair->directory.graph_inode
-          || fstat (main_fd, &main) != 0 || !S_ISREG (main.st_mode)
-          || main.st_nlink != 2 || (main.st_mode & 07777) != 0600
-          || main.st_uid != geteuid ()
-          || (guint64) main.st_dev != pair->expected_device
-          || (guint64) main.st_ino != pair->expected_inode
-          || (fcntl (main_fd, F_GETFL) & O_ACCMODE) != O_RDONLY
-          || fstat (writable_main_fd, &writable_main) != 0
-          || !S_ISREG (writable_main.st_mode)
-          || writable_main.st_nlink != 2
-          || (writable_main.st_mode & 07777) != 0600
-          || writable_main.st_uid != geteuid ()
-          || (guint64) writable_main.st_dev != pair->expected_device
-          || (guint64) writable_main.st_ino != pair->expected_inode
-          || (fcntl (writable_main_fd, F_GETFL) & O_ACCMODE) != O_RDWR))
+      || (directory.st_mode & 07777) != 0700
+      || directory.st_uid != geteuid ()
+      || (guint64) directory.st_dev != pair->directory.graph_device
+      || (guint64) directory.st_ino != pair->directory.graph_inode
+      || fstat (main_fd, &main) != 0 || !S_ISREG (main.st_mode)
+      || main.st_nlink != 2 || (main.st_mode & 07777) != 0600
+      || main.st_uid != geteuid ()
+      || (guint64) main.st_dev != pair->expected_device
+      || (guint64) main.st_ino != pair->expected_inode
+      || (fcntl (main_fd, F_GETFL) & O_ACCMODE) != O_RDONLY
+      || fstat (writable_main_fd, &writable_main) != 0
+      || !S_ISREG (writable_main.st_mode)
+      || writable_main.st_nlink != 2
+      || (writable_main.st_mode & 07777) != 0600
+      || writable_main.st_uid != geteuid ()
+      || (guint64) writable_main.st_dev != pair->expected_device
+      || (guint64) writable_main.st_ino != pair->expected_inode
+      || (fcntl (writable_main_fd, F_GETFL) & O_ACCMODE) != O_RDWR))
     rc = WYRELOG_E_POLICY;
   if (rc != WYRELOG_E_OK) {
     close (fd);
@@ -1490,7 +1489,7 @@ acquire_lease (WylFactArtifactNamespace *n, gboolean exclusive,
   if (flock (fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0) {
     close (fd);
     return errno == EWOULDBLOCK || errno == EAGAIN ? WYRELOG_E_BUSY :
-        WYRELOG_E_IO;
+           WYRELOG_E_IO;
   }
   WylFactArtifactMutationLease *lease =
       g_new0 (WylFactArtifactMutationLease, 1);
@@ -1536,7 +1535,7 @@ lease_revalidate_unlocked (WylFactArtifactMutationLease *l)
       || l->lock_inode != l->namespace_->lock_inode)
     return WYRELOG_E_POLICY;
   return lock_stat_matches (l->namespace_, l->lock_fd, l->lock_device,
-      l->lock_inode);
+             l->lock_inode);
 }
 
 /* Main binding reports a genuinely absent fixed name as NOT_FOUND, while
@@ -1561,7 +1560,7 @@ lease_revalidate_without_named_main_unlocked (WylFactArtifactMutationLease *l)
       || (guint64) held_lock.st_dev != l->lock_device
       || (guint64) held_lock.st_ino != l->lock_inode
       || fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK), &named_lock,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_lock.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_lock.st_mode)
       || named_lock.st_nlink != 1 || (named_lock.st_mode & 07777) != 0600
       || (guint64) named_lock.st_uid != n->owner
       || (guint64) named_lock.st_dev != l->lock_device
@@ -1606,7 +1605,7 @@ namespace_test_main_open_aba (WylFactArtifactNamespace *n)
   if (renameat (n->fd, main_name, n->fd, temporary) != 0)
     return WYRELOG_E_IO;
   gint foreign = openat (n->fd, main_name,
-      O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (foreign < 0) {
     (void) renameat (n->fd, temporary, n->fd, main_name);
     return WYRELOG_E_IO;
@@ -1629,7 +1628,7 @@ duplicate_imported_main (WylFactArtifactNamespace *n, gint *out_fd)
   if (!n || !out_fd || check (n) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA))
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA))
     return namespace_test_main_open_aba (n);
   gint fd = duplicate_cloexec (n->main_fd);
   if (fd < 0 || check (n) != WYRELOG_E_OK) {
@@ -1697,7 +1696,7 @@ main_binding_matches_unlocked (WylFactArtifactMainBinding *binding)
       || binding->device != namespace_->main_device
       || binding->inode != namespace_->main_inode
       || fstatat (namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
       || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
       || (guint64) named.st_uid != namespace_->owner
       || (guint64) named.st_dev != binding->device
@@ -1733,11 +1732,11 @@ duckdb_temp_child_binding_new (WylFactDuckdbTempChild *child, gint fd,
   wyrelog_error_t result = duckdb_temp_child_matches_unlocked (child);
   struct stat st;
   if (result == WYRELOG_E_OK && (fstat (fd, &st) != 0
-          || !S_ISREG (st.st_mode) || st.st_nlink != 1
-          || (st.st_mode & 07777) != 0600
-          || (guint64) st.st_uid != lease->namespace_->owner
-          || (guint64) st.st_dev != child->device
-          || (guint64) st.st_ino != child->inode))
+      || !S_ISREG (st.st_mode) || st.st_nlink != 1
+      || (st.st_mode & 07777) != 0600
+      || (guint64) st.st_uid != lease->namespace_->owner
+      || (guint64) st.st_dev != child->device
+      || (guint64) st.st_ino != child->inode))
     result = WYRELOG_E_POLICY;
   WylFactDuckdbTempChildBinding *binding = result == WYRELOG_E_OK
       ? g_new0 (WylFactDuckdbTempChildBinding, 1) : NULL;
@@ -1751,9 +1750,9 @@ duckdb_temp_child_binding_new (WylFactDuckdbTempChild *child, gint fd,
     child->io_revoked = FALSE;
     g_ptr_array_add (child->bindings, binding);
     gboolean fault = namespace_fault_take
-        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_BINDING_POST_OPEN_IDENTITY);
+          (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_BINDING_POST_OPEN_IDENTITY);
     if (fault || duckdb_temp_child_binding_revalidate_fd_unlocked (binding,
-            fd) != WYRELOG_E_OK) {
+        fd) != WYRELOG_E_OK) {
       if (fault)
         duckdb_temp_child_binding_revoke_unlocked (binding);
       g_ptr_array_remove_fast (child->bindings, binding);
@@ -1789,7 +1788,7 @@ wyl_fact_duckdb_temp_root_create_child_binding (WylFactDuckdbTempRoot *root,
   gint fd = -1;
   wyrelog_error_t result =
       wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence (root, name,
-      &child, &fd, out_evidence);
+          &child, &fd, out_evidence);
   if (result != WYRELOG_E_OK)
     return result;
   WylFactDuckdbTempChildBinding *binding = NULL;
@@ -1804,9 +1803,9 @@ wyl_fact_duckdb_temp_root_create_child_binding (WylFactDuckdbTempRoot *root,
      * recovery telemetry instead of losing the otherwise unnameable orphan. */
     if (retired != WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED) {
       g_autofree gchar *logical_name = g_strdup_printf ("%s/%s",
-          root->logical_name, name);
+              root->logical_name, name);
       if (!logical_name || duckdb_temp_set_orphan_evidence (logical_name,
-              out_evidence) != WYRELOG_E_OK)
+          out_evidence) != WYRELOG_E_OK)
         result = WYRELOG_E_NOMEM;
     }
     wyl_fact_duckdb_temp_child_free (child);
@@ -1831,7 +1830,7 @@ wyl_fact_duckdb_temp_child_open_binding (WylFactDuckdbTempChild *child,
     return WYRELOG_E_INVALID;
   gint fd = -1;
   wyrelog_error_t result = wyl_fact_duckdb_temp_child_open (child, writable,
-      &fd);
+          &fd);
   if (result != WYRELOG_E_OK)
     return result;
   result = duckdb_temp_child_binding_new (child, fd, out_binding);
@@ -1864,7 +1863,7 @@ wyl_fact_duckdb_temp_child_binding_revalidate_fd (WylFactDuckdbTempChildBinding
   WylFactArtifactMutationLease *lease = b->child->root->lease;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = duckdb_temp_child_binding_revalidate_fd_unlocked (b,
-      fd);
+          fd);
   g_mutex_unlock (&lease->mutex);
   return result;
 }
@@ -1878,7 +1877,7 @@ wyl_fact_duckdb_temp_child_binding_close (WylFactDuckdbTempChildBinding *b,
   WylFactArtifactMutationLease *lease = b->child->root->lease;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = duckdb_temp_child_binding_revalidate_fd_unlocked (b,
-      *fd);
+          *fd);
   if (result == WYRELOG_E_OK) {
     gint issued = *fd;
     *fd = -1;
@@ -1924,14 +1923,14 @@ main_binding_revalidate_fd_unlocked (WylFactArtifactMainBinding *binding,
       binding->lease->namespace_->provisioned_pair != NULL ? 2 : 1;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
-          || !S_ISREG (working.st_mode)
-          || (guint64) working.st_nlink != required_links
-          || (working.st_mode & 07777) != 0600
-          || (guint64) working.st_uid != binding->lease->namespace_->owner
-          || (guint64) working.st_dev != binding->device
-          || (guint64) working.st_ino != binding->inode
-          || (binding->lease->namespace_->provisioned_pair != NULL
-              && !fd_access_mode_is (working_fd, O_RDWR))))
+      || !S_ISREG (working.st_mode)
+      || (guint64) working.st_nlink != required_links
+      || (working.st_mode & 07777) != 0600
+      || (guint64) working.st_uid != binding->lease->namespace_->owner
+      || (guint64) working.st_dev != binding->device
+      || (guint64) working.st_ino != binding->inode
+      || (binding->lease->namespace_->provisioned_pair != NULL
+      && !fd_access_mode_is (working_fd, O_RDWR))))
     result = WYRELOG_E_POLICY;
   if (result != WYRELOG_E_OK)
     binding->active = FALSE;
@@ -1939,8 +1938,8 @@ main_binding_revalidate_fd_unlocked (WylFactArtifactMainBinding *binding,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_mutation_lease_open_main_binding
-    (WylFactArtifactMutationLease * lease,
+wyl_fact_artifact_mutation_lease_open_main_binding
+  (WylFactArtifactMutationLease * lease,
     WylFactArtifactMainBinding ** out_binding, gint * out_fd) {
   if (out_binding)
     *out_binding = NULL;
@@ -1958,16 +1957,16 @@ wyrelog_error_t
   struct stat named;
   if (lease->namespace_->provisioned_pair == NULL
       && fstatat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
-          &named, AT_SYMLINK_NOFOLLOW) != 0) {
+      &named, AT_SYMLINK_NOFOLLOW) != 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
     goto done;
   }
   if (lease->namespace_->provisioned_pair == NULL
       && (!S_ISREG (named.st_mode) || named.st_nlink != 1
-          || (named.st_mode & 07777) != 0600
-          || (guint64) named.st_uid != lease->namespace_->owner
-          || (guint64) named.st_dev != lease->namespace_->main_device
-          || (guint64) named.st_ino != lease->namespace_->main_inode)) {
+      || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_uid != lease->namespace_->owner
+      || (guint64) named.st_dev != lease->namespace_->main_device
+      || (guint64) named.st_ino != lease->namespace_->main_inode)) {
     result = WYRELOG_E_POLICY;
     goto done;
   }
@@ -1975,7 +1974,7 @@ wyrelog_error_t
   if (result != WYRELOG_E_OK)
     goto done;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
     result = lease->namespace_->provisioned_pair != NULL
         ? WYRELOG_E_POLICY : namespace_test_main_open_aba (lease->namespace_);
     goto done;
@@ -1985,7 +1984,7 @@ wyrelog_error_t
     result = duplicate_imported_writable_main (lease->namespace_, &fd);
   else
     fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
-        O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+            O_RDWR | O_CLOEXEC | O_NOFOLLOW);
   if (result != WYRELOG_E_OK)
     goto done;
   if (lease->namespace_->provisioned_pair != NULL)
@@ -1997,11 +1996,10 @@ wyrelog_error_t
     goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE)){
     result = lease->namespace_->provisioned_pair != NULL
         ? WYRELOG_E_POLICY : namespace_test_substitute_regular
-        (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
+          (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
     if (result != WYRELOG_E_OK) {
       close (fd);
       goto done;
@@ -2054,7 +2052,7 @@ wyl_fact_artifact_main_binding_revalidate_fd (WylFactArtifactMainBinding
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = main_binding_revalidate_fd_unlocked (binding,
-      working_fd);
+          working_fd);
   g_mutex_unlock (&binding->lease->mutex);
   return result;
 }
@@ -2067,7 +2065,7 @@ wyl_fact_artifact_main_binding_close (WylFactArtifactMainBinding *binding,
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = main_binding_revalidate_fd_unlocked (binding,
-      *working_fd);
+          *working_fd);
   if (result == WYRELOG_E_OK) {
     gint fd = *working_fd;
     *working_fd = -1;
@@ -2104,7 +2102,7 @@ reader_main_binding_matches_unlocked (WylFactArtifactReaderMainBinding *binding)
       || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
       || (namespace_->provisioned_pair != NULL
-          && !fd_access_mode_is (binding->pin_fd, O_RDONLY))
+      && !fd_access_mode_is (binding->pin_fd, O_RDONLY))
       || binding->device != namespace_->main_device
       || binding->inode != namespace_->main_inode
       || check (namespace_) != WYRELOG_E_OK)
@@ -2127,8 +2125,8 @@ reader_main_binding_revalidate_unlocked (WylFactArtifactReaderMainBinding
 }
 
 static wyrelog_error_t
-    reader_main_binding_revalidate_fd_unlocked
-    (WylFactArtifactReaderMainBinding * binding, gint working_fd)
+reader_main_binding_revalidate_fd_unlocked
+  (WylFactArtifactReaderMainBinding * binding, gint working_fd)
 {
   wyrelog_error_t result = reader_main_binding_revalidate_unlocked (binding);
   struct stat working;
@@ -2136,14 +2134,14 @@ static wyrelog_error_t
       binding->lease->namespace_->provisioned_pair != NULL ? 2 : 1;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
-          || !S_ISREG (working.st_mode)
-          || (guint64) working.st_nlink != required_links
-          || (working.st_mode & 07777) != 0600
-          || (guint64) working.st_uid != binding->lease->namespace_->owner
-          || (guint64) working.st_dev != binding->device
-          || (guint64) working.st_ino != binding->inode
-          || (binding->lease->namespace_->provisioned_pair != NULL
-              && !fd_access_mode_is (working_fd, O_RDONLY))))
+      || !S_ISREG (working.st_mode)
+      || (guint64) working.st_nlink != required_links
+      || (working.st_mode & 07777) != 0600
+      || (guint64) working.st_uid != binding->lease->namespace_->owner
+      || (guint64) working.st_dev != binding->device
+      || (guint64) working.st_ino != binding->inode
+      || (binding->lease->namespace_->provisioned_pair != NULL
+      && !fd_access_mode_is (working_fd, O_RDONLY))))
     result = WYRELOG_E_POLICY;
   if (result != WYRELOG_E_OK)
     binding->active = FALSE;
@@ -2151,8 +2149,8 @@ static wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_guard_open_main_binding
-    (WylFactArtifactMutationLease * lease,
+wyl_fact_artifact_reader_guard_open_main_binding
+  (WylFactArtifactMutationLease * lease,
     WylFactArtifactReaderMainBinding ** out_binding, gint * out_fd) {
   if (out_binding)
     *out_binding = NULL;
@@ -2168,16 +2166,15 @@ wyrelog_error_t
     goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_MAIN_BINDING_PRE_OPEN_FIFO)){
     result = lease->namespace_->provisioned_pair != NULL
         ? WYRELOG_E_POLICY : namespace_test_substitute_fifo
-        (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN));
+          (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN));
     if (result != WYRELOG_E_OK)
       goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)) {
     result = lease->namespace_->provisioned_pair != NULL
         ? WYRELOG_E_POLICY : namespace_test_main_open_aba (lease->namespace_);
     goto done;
@@ -2187,7 +2184,7 @@ wyrelog_error_t
     result = duplicate_imported_main (lease->namespace_, &fd);
   else
     fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
-        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (result != WYRELOG_E_OK)
     goto done;
   if (lease->namespace_->provisioned_pair != NULL)
@@ -2199,11 +2196,10 @@ wyrelog_error_t
     goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE)){
     result = lease->namespace_->provisioned_pair != NULL
         ? WYRELOG_E_POLICY : namespace_test_substitute_regular
-        (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
+          (lease->namespace_, name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
     if (result != WYRELOG_E_OK) {
       close (fd);
       goto done;
@@ -2219,7 +2215,7 @@ wyrelog_error_t
     goto done;
   }
   WylFactArtifactReaderMainBinding *binding = g_new0
-      (WylFactArtifactReaderMainBinding, 1);
+        (WylFactArtifactReaderMainBinding, 1);
   binding->lease = mutation_lease_ref (lease);
   binding->pin_fd = pin_fd;
   binding->device = pinned.st_dev;
@@ -2239,8 +2235,8 @@ done:
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_main_binding_revalidate
-    (WylFactArtifactReaderMainBinding * binding) {
+wyl_fact_artifact_reader_main_binding_revalidate
+  (WylFactArtifactReaderMainBinding * binding) {
   if (!binding || !binding->lease)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
@@ -2250,25 +2246,25 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_main_binding_revalidate_fd
-    (WylFactArtifactReaderMainBinding * binding, gint working_fd) {
+wyl_fact_artifact_reader_main_binding_revalidate_fd
+  (WylFactArtifactReaderMainBinding * binding, gint working_fd) {
   if (!binding || !binding->lease)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = reader_main_binding_revalidate_fd_unlocked (binding,
-      working_fd);
+          working_fd);
   g_mutex_unlock (&binding->lease->mutex);
   return result;
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_main_binding_close
-    (WylFactArtifactReaderMainBinding * binding, gint * working_fd) {
+wyl_fact_artifact_reader_main_binding_close
+  (WylFactArtifactReaderMainBinding * binding, gint * working_fd) {
   if (!binding || !binding->lease || !working_fd)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = reader_main_binding_revalidate_fd_unlocked (binding,
-      *working_fd);
+          *working_fd);
   if (result == WYRELOG_E_OK) {
     const gint fd = *working_fd;
     *working_fd = -1;
@@ -2280,7 +2276,7 @@ wyrelog_error_t
 }
 
 void wyl_fact_artifact_reader_main_binding_free
-    (WylFactArtifactReaderMainBinding * binding)
+  (WylFactArtifactReaderMainBinding * binding)
 {
   if (!binding)
     return;
@@ -2302,7 +2298,7 @@ reader_wal_binding_matches_unlocked (WylFactArtifactReaderWalBinding *binding)
       || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
       || fstatat (namespace_->fd, name_for (WYL_FACT_ARTIFACT_WAL), &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
       || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
       || (guint64) named.st_uid != namespace_->owner
       || (guint64) named.st_dev != binding->device
@@ -2327,18 +2323,18 @@ reader_wal_binding_revalidate_unlocked (WylFactArtifactReaderWalBinding
 }
 
 static wyrelog_error_t
-    reader_wal_binding_revalidate_fd_unlocked
-    (WylFactArtifactReaderWalBinding * binding, gint working_fd)
+reader_wal_binding_revalidate_fd_unlocked
+  (WylFactArtifactReaderWalBinding * binding, gint working_fd)
 {
   wyrelog_error_t result = reader_wal_binding_revalidate_unlocked (binding);
   struct stat working;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
-          || !S_ISREG (working.st_mode) || working.st_nlink != 1
-          || (working.st_mode & 07777) != 0600
-          || (guint64) working.st_uid != binding->lease->namespace_->owner
-          || (guint64) working.st_dev != binding->device
-          || (guint64) working.st_ino != binding->inode))
+      || !S_ISREG (working.st_mode) || working.st_nlink != 1
+      || (working.st_mode & 07777) != 0600
+      || (guint64) working.st_uid != binding->lease->namespace_->owner
+      || (guint64) working.st_dev != binding->device
+      || (guint64) working.st_ino != binding->inode))
     result = WYRELOG_E_POLICY;
   if (result != WYRELOG_E_OK)
     binding->active = FALSE;
@@ -2346,8 +2342,8 @@ static wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_guard_open_existing_wal_binding
-    (WylFactArtifactMutationLease * lease,
+wyl_fact_artifact_reader_guard_open_existing_wal_binding
+  (WylFactArtifactMutationLease * lease,
     WylFactArtifactReaderWalBinding ** out_binding, gint * out_fd) {
   if (out_binding)
     *out_binding = NULL;
@@ -2362,15 +2358,14 @@ wyrelog_error_t
     goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_WAL_BINDING_PRE_OPEN_FIFO))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_WAL_BINDING_PRE_OPEN_FIFO)){
     result = namespace_test_substitute_fifo (lease->namespace_,
-        name_for (WYL_FACT_ARTIFACT_WAL));
+            name_for (WYL_FACT_ARTIFACT_WAL));
     if (result != WYRELOG_E_OK)
       goto done;
   }
   gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_WAL),
-      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+          O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
         : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
@@ -2387,7 +2382,7 @@ wyrelog_error_t
     goto done;
   }
   WylFactArtifactReaderWalBinding *binding = g_new0
-      (WylFactArtifactReaderWalBinding, 1);
+        (WylFactArtifactReaderWalBinding, 1);
   binding->lease = mutation_lease_ref (lease);
   binding->pin_fd = pin_fd;
   binding->device = pinned.st_dev;
@@ -2407,8 +2402,8 @@ done:
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_wal_binding_revalidate
-    (WylFactArtifactReaderWalBinding * binding) {
+wyl_fact_artifact_reader_wal_binding_revalidate
+  (WylFactArtifactReaderWalBinding * binding) {
   if (!binding || !binding->lease)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
@@ -2418,25 +2413,25 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_wal_binding_revalidate_fd
-    (WylFactArtifactReaderWalBinding * binding, gint working_fd) {
+wyl_fact_artifact_reader_wal_binding_revalidate_fd
+  (WylFactArtifactReaderWalBinding * binding, gint working_fd) {
   if (!binding || !binding->lease)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = reader_wal_binding_revalidate_fd_unlocked (binding,
-      working_fd);
+          working_fd);
   g_mutex_unlock (&binding->lease->mutex);
   return result;
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_reader_wal_binding_close
-    (WylFactArtifactReaderWalBinding * binding, gint * working_fd) {
+wyl_fact_artifact_reader_wal_binding_close
+  (WylFactArtifactReaderWalBinding * binding, gint * working_fd) {
   if (!binding || !binding->lease || !working_fd)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = reader_wal_binding_revalidate_fd_unlocked (binding,
-      *working_fd);
+          *working_fd);
   if (result == WYRELOG_E_OK) {
     const gint fd = *working_fd;
     *working_fd = -1;
@@ -2448,7 +2443,7 @@ wyrelog_error_t
 }
 
 void wyl_fact_artifact_reader_wal_binding_free
-    (WylFactArtifactReaderWalBinding * binding)
+  (WylFactArtifactReaderWalBinding * binding)
 {
   if (!binding)
     return;
@@ -2539,7 +2534,7 @@ wyl_fact_artifact_namespace_lock (WylFactArtifactNamespace *n, gboolean ex,
 }
 
 static gboolean
-temp_token_valid (const gchar *token)
+temp_token_legacy_valid (const gchar *token)
 {
   if (!token || !*token || strlen (token) > 48)
     return FALSE;
@@ -2549,13 +2544,34 @@ temp_token_valid (const gchar *token)
   return TRUE;
 }
 
+static gboolean
+temp_token_valid (const gchar *token)
+{
+  if (token == NULL || strlen (token) != 36
+      || token[8] != '-' || token[13] != '-' || token[18] != '-'
+      || token[23] != '-')
+    return FALSE;
+  for (gsize i = 0; i < 36; i++) {
+    if (i == 8 || i == 13 || i == 18 || i == 23)
+      continue;
+    if (!(g_ascii_isdigit (token[i])
+        || (token[i] >= 'a' && token[i] <= 'f')))
+      return FALSE;
+  }
+  if (token[14] != '4')
+    return FALSE;
+  return token[19] == '8' || token[19] == '9' || token[19] == 'a'
+         || token[19] == 'b';
+}
+
 wyrelog_error_t
 open_temp_unchecked (WylFactArtifactNamespace *n,
     const gchar *token, gboolean create, gboolean writable, gint *out_fd)
 {
   if (out_fd)
     *out_fd = -1;
-  if (!out_fd || !temp_token_valid (token))
+  if (!out_fd || (create ? !temp_token_valid (token)
+                         : !temp_token_legacy_valid (token)))
     return WYRELOG_E_INVALID;
   if (check (n) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
@@ -2565,7 +2581,8 @@ open_temp_unchecked (WylFactArtifactNamespace *n,
     flags |= O_CREAT | O_EXCL;
   gint fd = openat (n->fd, name, flags, 0600);
   if (fd < 0)
-    return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+    return errno == EEXIST ? WYRELOG_E_BUSY
+        : errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
   struct stat s;
   if (fstat (fd, &s) != 0 || !S_ISREG (s.st_mode) || s.st_nlink != 1
       || check (n) != WYRELOG_E_OK) {
@@ -2746,6 +2763,47 @@ done:
   return r;
 }
 
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_temp_binding_generated
+  (WylFactArtifactMutationLease *l, gboolean writable, gchar **out_token,
+    WylFactArtifactTempBinding **out_binding, gint *out_fd)
+{
+  enum { MAX_TOKEN_COLLISION_RETRIES = 8 };
+  if (out_token != NULL)
+    *out_token = NULL;
+  if (out_binding != NULL)
+    *out_binding = NULL;
+  if (out_fd != NULL)
+    *out_fd = -1;
+  if (l == NULL || out_token == NULL || out_binding == NULL || out_fd == NULL)
+    return WYRELOG_E_INVALID;
+  for (guint attempt = 0; attempt < MAX_TOKEN_COLLISION_RETRIES; attempt++) {
+    guint8 bytes[16];
+    randombytes_buf (bytes, sizeof bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    g_autofree gchar *token = g_strdup_printf (
+      "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+      bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+      bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+      bytes[12], bytes[13], bytes[14], bytes[15]);
+    if (token == NULL)
+      return WYRELOG_E_NOMEM;
+    WylFactArtifactTempBinding *binding = NULL;
+    wyrelog_error_t rc =
+        wyl_fact_artifact_mutation_lease_open_temp_binding (l, token, TRUE,
+            writable, &binding, out_fd);
+    if (rc == WYRELOG_E_OK) {
+      *out_token = g_steal_pointer (&token);
+      *out_binding = binding;
+      return WYRELOG_E_OK;
+    }
+    if (rc != WYRELOG_E_BUSY && rc != WYRELOG_E_NOT_FOUND)
+      return rc;
+  }
+  return WYRELOG_E_IO;
+}
+
 void
 wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *binding)
 {
@@ -2851,7 +2909,7 @@ wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *binding)
   close (binding->pin_fd);
   binding->pin_fd = -1;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC)
       || fsync (lease->namespace_->fd) != 0)
     r = WYRELOG_E_IO;
   else
@@ -2873,7 +2931,7 @@ rename_no_replace (gint dirfd, const gchar *source, const gchar *destination)
 #define RENAME_NOREPLACE 1
 #endif
   if (syscall (SYS_renameat2, dirfd, source, dirfd, destination,
-          RENAME_NOREPLACE) == 0)
+      RENAME_NOREPLACE) == 0)
     return WYRELOG_E_OK;
   if (errno == EEXIST)
     return WYRELOG_E_POLICY;
@@ -2895,7 +2953,7 @@ rename_no_replace (gint dirfd, const gchar *source, const gchar *destination)
 }
 
 /* Private deterministic seam: model a same-UID pathname substitution after a
- * caller's earlier validation.  Production callers never invoke this path. */
+* caller's earlier validation.  Production callers never invoke this path. */
 static wyrelog_error_t
 namespace_test_substitute_regular (WylFactArtifactNamespace *namespace_,
     const gchar *name, gboolean replace_existing)
@@ -2903,7 +2961,7 @@ namespace_test_substitute_regular (WylFactArtifactNamespace *namespace_,
   if (replace_existing && unlinkat (namespace_->fd, name, 0) != 0)
     return WYRELOG_E_IO;
   gint fd = openat (namespace_->fd, name,
-      O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0)
     return errno == EEXIST ? WYRELOG_E_POLICY : WYRELOG_E_IO;
   close (fd);
@@ -2917,7 +2975,7 @@ namespace_test_substitute_fifo (WylFactArtifactNamespace *namespace_,
   if (unlinkat (namespace_->fd, name, 0) != 0)
     return WYRELOG_E_IO;
   return mkfifoat (namespace_->fd, name, 0600) == 0 ? WYRELOG_E_OK :
-      WYRELOG_E_IO;
+         WYRELOG_E_IO;
 }
 
 static wyrelog_error_t
@@ -2938,7 +2996,7 @@ sidecar_binding_matches_unlocked (WylFactArtifactSidecarBinding *binding)
       || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
       || fstatat (lease->namespace_->fd, name_for (binding->sidecar), &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
       || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
       || (guint64) named.st_uid != lease->namespace_->owner
       || (guint64) named.st_dev != binding->device
@@ -2948,7 +3006,7 @@ sidecar_binding_matches_unlocked (WylFactArtifactSidecarBinding *binding)
 }
 
 static void sidecar_binding_revoke_unlocked
-    (WylFactArtifactSidecarBinding * binding);
+  (WylFactArtifactSidecarBinding * binding);
 
 static wyrelog_error_t
 sidecar_binding_revalidate_unlocked (WylFactArtifactSidecarBinding *binding)
@@ -3006,8 +3064,8 @@ sidecar_binding_revalidate_fd_unlocked (WylFactArtifactSidecarBinding *binding,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_mutation_lease_open_sidecar_binding
-    (WylFactArtifactMutationLease * lease, WylFactArtifactName sidecar,
+wyl_fact_artifact_mutation_lease_open_sidecar_binding
+  (WylFactArtifactMutationLease * lease, WylFactArtifactName sidecar,
     gboolean create, gboolean writable,
     WylFactArtifactSidecarBinding ** out_binding, gint * out_fd) {
   if (out_binding)
@@ -3023,7 +3081,7 @@ wyrelog_error_t
   if (result != WYRELOG_E_OK)
     goto done;
   result = open_file_unchecked (lease->namespace_, sidecar, create, writable,
-      out_fd);
+          out_fd);
   if (result != WYRELOG_E_OK) {
     /* The strict creator never adopts an extant name.  EEXIST is deliberately
      * normalized by the narrow sidecar authority to POLICY, so a recovery
@@ -3031,7 +3089,7 @@ wyrelog_error_t
     if (create && result == WYRELOG_E_IO) {
       struct stat collision;
       if (fstatat (lease->namespace_->fd, name_for (sidecar), &collision,
-              AT_SYMLINK_NOFOLLOW) == 0)
+          AT_SYMLINK_NOFOLLOW) == 0)
         result = WYRELOG_E_POLICY;
     }
     goto done;
@@ -3048,7 +3106,7 @@ wyrelog_error_t
     goto fail_fd;
   }
   WylFactArtifactSidecarBinding *binding = g_new0
-      (WylFactArtifactSidecarBinding, 1);
+        (WylFactArtifactSidecarBinding, 1);
   binding->lease = mutation_lease_ref (lease);
   binding->sidecar = sidecar;
   binding->pin_fd = pin_fd;
@@ -3076,8 +3134,8 @@ done:
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
-    (WylFactArtifactMutationLease * lease, WylFactArtifactName sidecar,
+wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+  (WylFactArtifactMutationLease * lease, WylFactArtifactName sidecar,
     gboolean writable, WylFactArtifactSidecarBinding ** out_binding,
     gint * out_fd) {
   if (out_binding)
@@ -3096,7 +3154,7 @@ wyrelog_error_t
     goto done;
 
   gint fd = openat (lease->namespace_->fd, name_for (sidecar),
-      O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+          O_RDWR | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
         : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
@@ -3113,7 +3171,7 @@ wyrelog_error_t
     goto done;
   }
   WylFactArtifactSidecarBinding *binding = g_new0
-      (WylFactArtifactSidecarBinding, 1);
+        (WylFactArtifactSidecarBinding, 1);
   binding->lease = mutation_lease_ref (lease);
   binding->sidecar = sidecar;
   binding->pin_fd = pin_fd;
@@ -3157,7 +3215,7 @@ wyl_fact_artifact_sidecar_binding_revalidate_fd (WylFactArtifactSidecarBinding
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = sidecar_binding_revalidate_fd_unlocked (binding,
-      working_fd);
+          working_fd);
   g_mutex_unlock (&binding->lease->mutex);
   return result;
 }
@@ -3170,7 +3228,7 @@ wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = sidecar_binding_revalidate_fd_unlocked (binding,
-      *working_fd);
+          *working_fd);
   if (result == WYRELOG_E_OK) {
     gint fd = *working_fd;
     *working_fd = -1;
@@ -3196,8 +3254,8 @@ wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *binding)
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_sidecar_binding_publish_no_replace
-    (WylFactArtifactSidecarBinding * binding, WylFactArtifactName destination) {
+wyl_fact_artifact_sidecar_binding_publish_no_replace
+  (WylFactArtifactSidecarBinding * binding, WylFactArtifactName destination) {
   if (!binding || !sidecar_name (destination))
     return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = binding->lease;
@@ -3213,7 +3271,7 @@ wyrelog_error_t
    * reason to proceed with a rename. */
   if (binding->io_open) {
     if (sidecar_binding_working_fd_matches_unlocked (binding,
-            binding->working_fd) != WYRELOG_E_OK)
+        binding->working_fd) != WYRELOG_E_OK)
       sidecar_binding_revoke_unlocked (binding);
     result = WYRELOG_E_POLICY;
     goto done;
@@ -3233,17 +3291,16 @@ wyrelog_error_t
   const gchar *source_name = name_for (binding->sidecar);
   const gchar *destination_name = name_for (destination);
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_PUBLISH_PRE_RENAME_INSERT))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_PUBLISH_PRE_RENAME_INSERT)){
     result =
         namespace_test_substitute_regular (lease->namespace_, destination_name,
-        FALSE);
+            FALSE);
     if (result != WYRELOG_E_OK)
       goto done;
   }
   struct stat final_destination;
   if (fstatat (lease->namespace_->fd, destination_name, &final_destination,
-          AT_SYMLINK_NOFOLLOW) == 0) {
+      AT_SYMLINK_NOFOLLOW) == 0) {
     result = WYRELOG_E_POLICY;
     goto done;
   }
@@ -3257,7 +3314,7 @@ wyrelog_error_t
     goto done;
   }
   result = rename_no_replace (lease->namespace_->fd, source_name,
-      destination_name);
+          destination_name);
   if (result != WYRELOG_E_OK) {
     wyrelog_error_t post = lease_revalidate_sidecar_unlocked (lease);
     if (post != WYRELOG_E_OK)
@@ -3273,9 +3330,9 @@ wyrelog_error_t
     result = post;
   struct stat source_stat, destination_stat;
   if (fstatat (lease->namespace_->fd, source_name, &source_stat,
-          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
+      AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
       || fstatat (lease->namespace_->fd, destination_name, &destination_stat,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (destination_stat.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (destination_stat.st_mode)
       || destination_stat.st_nlink != 1
       || (guint64) destination_stat.st_dev != binding->device
       || (guint64) destination_stat.st_ino != binding->inode)
@@ -3286,8 +3343,8 @@ done:
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_sidecar_binding_replace_existing_wal
-    (WylFactArtifactSidecarBinding * source,
+wyl_fact_artifact_sidecar_binding_replace_existing_wal
+  (WylFactArtifactSidecarBinding * source,
     WylFactArtifactSidecarBinding * destination,
     WylFactArtifactSidecarReplaceResult * out_result) {
   if (out_result)
@@ -3304,7 +3361,7 @@ wyrelog_error_t
 
   if (!lease->exclusive || !source->active || !destination->active
       || (source->sidecar != WYL_FACT_ARTIFACT_CHECKPOINT
-          && source->sidecar != WYL_FACT_ARTIFACT_RECOVERY)
+      && source->sidecar != WYL_FACT_ARTIFACT_RECOVERY)
       || destination->sidecar != WYL_FACT_ARTIFACT_WAL) {
     result = WYRELOG_E_POLICY;
     goto done;
@@ -3315,11 +3372,11 @@ wyrelog_error_t
   if (source->io_open || destination->io_open) {
     if (source->io_open
         && sidecar_binding_working_fd_matches_unlocked (source,
-            source->working_fd) != WYRELOG_E_OK)
+        source->working_fd) != WYRELOG_E_OK)
       sidecar_binding_revoke_unlocked (source);
     if (destination->io_open
         && sidecar_binding_working_fd_matches_unlocked (destination,
-            destination->working_fd) != WYRELOG_E_OK)
+        destination->working_fd) != WYRELOG_E_OK)
       sidecar_binding_revoke_unlocked (destination);
     result = WYRELOG_E_POLICY;
     goto done;
@@ -3334,13 +3391,13 @@ wyrelog_error_t
 
   /* The exact source identity is stable before the namespace change. */
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_SOURCE_FSYNC)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_SOURCE_FSYNC)
       || fsync (source->pin_fd) != 0) {
     result = WYRELOG_E_IO;
     goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_PRE_RENAME)) {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_PRE_RENAME)) {
     result = WYRELOG_E_IO;
     goto done;
   }
@@ -3355,12 +3412,12 @@ wyrelog_error_t
   const gchar *source_name = name_for (source->sidecar);
   const gchar *destination_name = name_for (destination->sidecar);
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME)) {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME)) {
     result = WYRELOG_E_IO;
     goto done;
   }
   gboolean ambiguous_rename_fault = namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME_AMBIGUOUS);
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_RENAME_AMBIGUOUS);
   gint rename_result;
   gint rename_error;
   if (ambiguous_rename_fault) {
@@ -3372,21 +3429,21 @@ wyrelog_error_t
     rename_result = -1;
   } else {
     rename_result = renameat (lease->namespace_->fd, source_name,
-        lease->namespace_->fd, destination_name);
+            lease->namespace_->fd, destination_name);
     rename_error = errno;
   }
   if (rename_result != 0) {
     struct stat named_source, named_destination;
     gboolean unchanged =
         fstatat (lease->namespace_->fd, source_name, &named_source,
-        AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG (named_source.st_mode)
+            AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG (named_source.st_mode)
         && named_source.st_nlink == 1
         && (named_source.st_mode & 07777) == 0600
         && (guint64) named_source.st_uid == lease->namespace_->owner
         && (guint64) named_source.st_dev == source->device
         && (guint64) named_source.st_ino == source->inode
         && fstatat (lease->namespace_->fd, destination_name,
-        &named_destination, AT_SYMLINK_NOFOLLOW) == 0
+            &named_destination, AT_SYMLINK_NOFOLLOW) == 0
         && S_ISREG (named_destination.st_mode)
         && named_destination.st_nlink == 1
         && (named_destination.st_mode & 07777) == 0600
@@ -3399,9 +3456,9 @@ wyrelog_error_t
        * source or destination authority if a platform reports ambiguity. */
       gboolean replaced =
           fstatat (lease->namespace_->fd, source_name, &named_source,
-          AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT
+              AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT
           && fstatat (lease->namespace_->fd, destination_name,
-          &named_destination, AT_SYMLINK_NOFOLLOW) == 0
+              &named_destination, AT_SYMLINK_NOFOLLOW) == 0
           && S_ISREG (named_destination.st_mode)
           && named_destination.st_nlink == 1
           && (guint64) named_destination.st_dev == source->device
@@ -3446,21 +3503,19 @@ wyrelog_error_t
   old_destination_pin = -1;
 
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_LINEARIZATION))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_LINEARIZATION)){
     if (result == WYRELOG_E_OK)
       result = WYRELOG_E_IO;
     goto terminal;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_DIRECTORY_FSYNC)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_DIRECTORY_FSYNC)
       || fsync (lease->namespace_->fd) != 0) {
     if (result == WYRELOG_E_OK)
       result = WYRELOG_E_IO;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION)){
     result = WYRELOG_E_POLICY;
     goto terminal;
   }
@@ -3470,13 +3525,13 @@ wyrelog_error_t
     sidecar_binding_revoke_unlocked (destination);
     result = WYRELOG_E_POLICY;
   } else if (fstatat (lease->namespace_->fd, source_name, &absent_source,
-          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
+      AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
     result = WYRELOG_E_POLICY;
   } else if (sidecar_binding_revalidate_unlocked (destination)
       != WYRELOG_E_OK) {
     result = WYRELOG_E_POLICY;
   } else if (fstatat (lease->namespace_->fd, destination_name,
-          &named_destination, AT_SYMLINK_NOFOLLOW) != 0
+      &named_destination, AT_SYMLINK_NOFOLLOW) != 0
       || !S_ISREG (named_destination.st_mode)
       || named_destination.st_nlink != 1
       || (guint64) named_destination.st_dev != destination->device
@@ -3514,7 +3569,7 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
   }
   if (binding->io_open) {
     if (sidecar_binding_working_fd_matches_unlocked (binding,
-            binding->working_fd) != WYRELOG_E_OK)
+        binding->working_fd) != WYRELOG_E_OK)
       sidecar_binding_revoke_unlocked (binding);
     result = WYRELOG_E_POLICY;
     goto done;
@@ -3554,8 +3609,7 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
     goto done;
   }
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE)){
     result = namespace_test_substitute_regular (lease->namespace_, name, TRUE);
     if (result != WYRELOG_E_OK)
       goto done;
@@ -3587,7 +3641,7 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
      * call performed durable cleanup.  It is terminal reconciliation. */
     binding->active = FALSE;
     result = post_mutation_check_unlocked (lease,
-        unlink_error == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+            unlink_error == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO);
     *out_result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
     goto terminal;
   }
@@ -3596,19 +3650,18 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
    * post-operation check, so an error can never leave deletion authority. */
   binding->active = FALSE;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC)
       || fsync (lease->namespace_->fd) != 0)
     result = WYRELOG_E_IO;
   else
     result = WYRELOG_E_OK;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY))
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY))
     result = WYRELOG_E_POLICY;
   else
     result = post_mutation_check_unlocked (lease, result);
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_SUBSTITUTE))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_SUBSTITUTE)){
     wyrelog_error_t substitution =
         namespace_test_substitute_regular (lease->namespace_, name, FALSE);
     if (substitution != WYRELOG_E_OK)
@@ -3633,8 +3686,8 @@ done:
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_temp_binding_replace_sidecar
-    (WylFactArtifactTempBinding * source,
+wyl_fact_artifact_temp_binding_replace_sidecar
+  (WylFactArtifactTempBinding * source,
     WylFactArtifactSidecarBinding * destination) {
   if (!source || !destination || source->lease != destination->lease)
     return WYRELOG_E_POLICY;
@@ -3659,7 +3712,7 @@ wyrelog_error_t
       || (guint64) source_pinned.st_dev != source->device
       || (guint64) source_pinned.st_ino != source->inode
       || fstatat (lease->namespace_->fd, source_name, &source_named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (source_named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (source_named.st_mode)
       || source_named.st_nlink != 1
       || (guint64) source_named.st_dev != source->device
       || (guint64) source_named.st_ino != source->inode
@@ -3674,11 +3727,10 @@ wyrelog_error_t
   }
   const gchar *destination_name = name_for (destination->sidecar);
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE)){
     result =
         namespace_test_substitute_regular (lease->namespace_, destination_name,
-        TRUE);
+            TRUE);
     if (result != WYRELOG_E_OK)
       goto done;
   }
@@ -3688,14 +3740,14 @@ wyrelog_error_t
     goto done;
   }
   gboolean renamed = renameat (lease->namespace_->fd, source_name,
-      lease->namespace_->fd, destination_name) == 0;
+          lease->namespace_->fd, destination_name) == 0;
   gint rename_errno = errno;
   if (!renamed) {
     struct stat after_source, after_destination;
     if (fstatat (lease->namespace_->fd, source_name, &after_source,
-            AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT
+        AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT
         && fstatat (lease->namespace_->fd, destination_name,
-            &after_destination, AT_SYMLINK_NOFOLLOW) == 0
+        &after_destination, AT_SYMLINK_NOFOLLOW) == 0
         && S_ISREG (after_destination.st_mode)
         && after_destination.st_nlink == 1
         && (guint64) after_destination.st_dev == source->device
@@ -3724,17 +3776,16 @@ wyrelog_error_t
     source->active = FALSE;
   }
   if (renamed && namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE))
-  {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE)){
     wyrelog_error_t substitution =
         namespace_test_substitute_regular (lease->namespace_, destination_name,
-        TRUE);
+            TRUE);
     if (substitution != WYRELOG_E_OK)
       result = substitution;
   }
   if (renamed && (!namespace_fault_take
-          (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC)
-          && fsync (lease->namespace_->fd) == 0)) {
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC)
+      && fsync (lease->namespace_->fd) == 0)) {
     /* Keep a prior syscall error: it is durable-state uncertainty, not a
      * successful operation report. */
   } else if (result == WYRELOG_E_OK) {
@@ -3744,10 +3795,10 @@ wyrelog_error_t
     result = WYRELOG_E_POLICY;
   struct stat old_source, named_destination;
   if (fstatat (lease->namespace_->fd, source_name, &old_source,
-          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
+      AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
       || sidecar_binding_matches_unlocked (destination) != WYRELOG_E_OK
       || fstatat (lease->namespace_->fd, destination_name, &named_destination,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_destination.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_destination.st_mode)
       || named_destination.st_nlink != 1
       || (guint64) named_destination.st_dev != destination->device
       || (guint64) named_destination.st_ino != destination->inode)
@@ -3796,7 +3847,7 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
       || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
       || fstatat (lease->namespace_->fd, source, &source_stat,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (source_stat.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (source_stat.st_mode)
       || source_stat.st_nlink != 1
       || (guint64) source_stat.st_dev != binding->device
       || (guint64) source_stat.st_ino != binding->inode) {
@@ -3804,7 +3855,7 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
     goto done;
   }
   if (fstatat (lease->namespace_->fd, destination, &destination_stat,
-          AT_SYMLINK_NOFOLLOW) == 0) {
+      AT_SYMLINK_NOFOLLOW) == 0) {
     r = WYRELOG_E_POLICY;
     goto done;
   }
@@ -3819,23 +3870,23 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
   }
 
   /* rename is the linearization point.  The old token must never be exposed
-   * by a live binding after this point, including an fsync failure below. */
+  * by a live binding after this point, including an fsync failure below. */
   g_free (binding->token);
   binding->token = g_steal_pointer (&next_token);
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC)
       || fsync (lease->namespace_->fd) != 0)
     r = WYRELOG_E_IO;
   else
     r = WYRELOG_E_OK;
   r = post_mutation_check_unlocked (lease, r);
   if (fstatat (lease->namespace_->fd, source, &source_stat,
-          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
+      AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
     r = WYRELOG_E_POLICY;
     goto done;
   }
   if (fstatat (lease->namespace_->fd, destination, &destination_stat,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (destination_stat.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (destination_stat.st_mode)
       || destination_stat.st_nlink != 1
       || (guint64) destination_stat.st_dev != binding->device
       || (guint64) destination_stat.st_ino != binding->inode) {
@@ -3848,8 +3899,8 @@ done:
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_temp_binding_export_recovery_evidence
-    (WylFactArtifactTempBinding * binding,
+wyl_fact_artifact_temp_binding_export_recovery_evidence
+  (WylFactArtifactTempBinding * binding,
     WylFactArtifactTempRecoveryEvidence ** out_evidence) {
   if (out_evidence)
     *out_evidence = NULL;
@@ -3900,7 +3951,7 @@ done:
 }
 
 void wyl_fact_artifact_temp_recovery_evidence_free
-    (WylFactArtifactTempRecoveryEvidence * evidence)
+  (WylFactArtifactTempRecoveryEvidence * evidence)
 {
   if (!evidence)
     return;
@@ -3910,6 +3961,11 @@ void wyl_fact_artifact_temp_recovery_evidence_free
 
 #define TEMP_EVIDENCE_MAGIC "WTR1"
 #define TEMP_EVIDENCE_HEADER_SIZE 53
+
+/* WTR1 records carrying pre-#820 caller tokens are intentionally rejected by
+ * the UUIDv4 token check below.  They remain inspectable as bytes, but cannot
+ * be used as recovery authority; callers must create a new binding and export
+ * fresh evidence. */
 
 wyrelog_error_t
 wyl_fact_artifact_temp_recovery_evidence_encode (const
@@ -3924,9 +3980,8 @@ wyl_fact_artifact_temp_recovery_evidence_encode (const
   memcpy (data, TEMP_EVIDENCE_MAGIC, 4);
   data[4] = (guint8) token_size;
   const guint64 fields[] = { evidence->directory_device,
-    evidence->directory_inode, evidence->lock_device, evidence->lock_inode,
-    evidence->artifact_device, evidence->artifact_inode
-  };
+                             evidence->directory_inode, evidence->lock_device, evidence->lock_inode,
+                             evidence->artifact_device, evidence->artifact_inode};
   for (guint i = 0; i < G_N_ELEMENTS (fields); i++) {
     const guint64 network = GUINT64_TO_BE (fields[i]);
     memcpy (data + 5 + i * sizeof network, &network, sizeof network);
@@ -3953,15 +4008,14 @@ wyl_fact_artifact_temp_recovery_evidence_decode (GBytes *bytes,
   WylFactArtifactTempRecoveryEvidence *evidence =
       g_new0 (WylFactArtifactTempRecoveryEvidence, 1);
   evidence->token = g_strndup ((const gchar *) data + TEMP_EVIDENCE_HEADER_SIZE,
-      data[4]);
+          data[4]);
   if (!temp_token_valid (evidence->token)) {
     wyl_fact_artifact_temp_recovery_evidence_free (evidence);
     return WYRELOG_E_INVALID;
   }
   guint64 *fields[] = { &evidence->directory_device,
-    &evidence->directory_inode, &evidence->lock_device, &evidence->lock_inode,
-    &evidence->artifact_device, &evidence->artifact_inode
-  };
+                        &evidence->directory_inode, &evidence->lock_device, &evidence->lock_inode,
+                        &evidence->artifact_device, &evidence->artifact_inode};
   for (guint i = 0; i < G_N_ELEMENTS (fields); i++) {
     guint64 network;
     memcpy (&network, data + 5 + i * sizeof network, sizeof network);
@@ -4007,7 +4061,7 @@ wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
     goto done;
   }
   r = !namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC)
       && fsync (l->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
   r = post_mutation_check_unlocked (l, r);
   if (fstatat (l->namespace_->fd, name, &artifact, AT_SYMLINK_NOFOLLOW) == 0
@@ -4112,7 +4166,7 @@ duckdb_temp_child_name_is_valid (const gchar *name)
     while (g_ascii_isdigit (*p))
       p++;
     return p != digits && (digits[0] == '0' ? p == digits + 1 :
-        digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
+           digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
   }
   if (!g_str_has_prefix (name, block))
     return FALSE;
@@ -4121,14 +4175,14 @@ duckdb_temp_child_name_is_valid (const gchar *name)
   while (g_ascii_isdigit (*p))
     p++;
   return p != digits && (digits[0] == '0' ? p == digits + 1 :
-      digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+         digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
 }
 
 static gboolean
 duckdb_temp_storage_name_is_valid (const gchar *name)
 {
   return duckdb_temp_child_name_is_valid (name)
-      && g_str_has_prefix (name, "duckdb_temp_storage_");
+         && g_str_has_prefix (name, "duckdb_temp_storage_");
 }
 
 static wyrelog_error_t
@@ -4136,7 +4190,7 @@ duckdb_temp_set_orphan_evidence (const gchar *logical_name,
     WylFactDuckdbTempOrphanEvidence **out_evidence)
 {
   WylFactDuckdbTempOrphanEvidence *e = g_new0
-      (WylFactDuckdbTempOrphanEvidence, 1);
+        (WylFactDuckdbTempOrphanEvidence, 1);
   if (!e)
     return WYRELOG_E_NOMEM;
   e->logical_name = g_strdup (logical_name);
@@ -4161,7 +4215,7 @@ duckdb_temp_root_matches_unlocked (WylFactDuckdbTempRoot *root)
       || (guint64) held.st_dev != root->device
       || (guint64) held.st_ino != root->inode
       || fstatat (lease->namespace_->fd, root->name, &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR (named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR (named.st_mode)
       || (named.st_mode & 07777) != 0700
       || (guint64) named.st_uid != lease->namespace_->owner
       || (guint64) named.st_dev != root->device
@@ -4171,7 +4225,7 @@ duckdb_temp_root_matches_unlocked (WylFactDuckdbTempRoot *root)
 }
 
 static wyrelog_error_t duckdb_temp_root_audit_unlocked
-    (WylFactDuckdbTempRoot * root);
+  (WylFactDuckdbTempRoot * root);
 
 /* Creation is not reported until the parent-directory durability barrier has
  * completed.  If a later check fails, the freshly minted entry is still held
@@ -4188,7 +4242,7 @@ duckdb_temp_root_discard_unpublished_unlocked (WylFactDuckdbTempRoot *root)
     return errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
   root->active = FALSE;
   return fsync (lease->namespace_->fd) == 0
-      && lease_revalidate_unlocked (lease) == WYRELOG_E_OK
+         && lease_revalidate_unlocked (lease) == WYRELOG_E_OK
       ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
@@ -4205,7 +4259,7 @@ duckdb_temp_child_matches_unlocked (WylFactDuckdbTempChild *child)
       || (guint64) held.st_dev != child->device
       || (guint64) held.st_ino != child->inode
       || fstatat (child->root->fd, child->name, &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
       || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
       || (guint64) named.st_uid != child->root->lease->namespace_->owner
       || (guint64) named.st_dev != child->device
@@ -4248,11 +4302,11 @@ duckdb_temp_child_binding_revalidate_fd_unlocked (WylFactDuckdbTempChildBinding
   wyrelog_error_t result = duckdb_temp_child_binding_revalidate_unlocked (b);
   struct stat st;
   if (result == WYRELOG_E_OK && (!b->io_open || fd < 0 || fd != b->working_fd
-          || fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
-          || (st.st_mode & 07777) != 0600
-          || (guint64) st.st_uid != b->child->root->lease->namespace_->owner
-          || (guint64) st.st_dev != b->child->device
-          || (guint64) st.st_ino != b->child->inode))
+      || fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
+      || (st.st_mode & 07777) != 0600
+      || (guint64) st.st_uid != b->child->root->lease->namespace_->owner
+      || (guint64) st.st_dev != b->child->device
+      || (guint64) st.st_ino != b->child->inode))
     result = WYRELOG_E_POLICY;
   if (result != WYRELOG_E_OK)
     duckdb_temp_child_binding_revoke_unlocked (b);
@@ -4275,7 +4329,7 @@ duckdb_temp_child_io_barrier_unlocked (WylFactDuckdbTempChild *child)
     if (b->io_open) {
       live = TRUE;
       if (duckdb_temp_child_binding_revalidate_fd_unlocked (b,
-              b->working_fd) != WYRELOG_E_OK)
+          b->working_fd) != WYRELOG_E_OK)
         continue;
     }
   }
@@ -4296,7 +4350,7 @@ duckdb_temp_child_discard_unpublished_unlocked (WylFactDuckdbTempChild *child)
     child->pin_fd = -1;
   }
   return fsync (root->fd) == 0
-      && duckdb_temp_root_audit_unlocked (root) == WYRELOG_E_OK
+         && duckdb_temp_root_audit_unlocked (root) == WYRELOG_E_OK
       ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
@@ -4320,7 +4374,7 @@ duckdb_temp_root_audit_unlocked (WylFactDuckdbTempRoot *root)
   if (duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
   gint fd = openat (root->fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC
-      | O_NOFOLLOW);
+          | O_NOFOLLOW);
   DIR *dir = fd >= 0 ? fdopendir (fd) : NULL;
   if (!dir) {
     if (fd >= 0)
@@ -4370,8 +4424,8 @@ wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
 }
 
 wyrelog_error_t
-    wyl_fact_duckdb_temp_root_create_with_orphan_evidence
-    (WylFactArtifactMutationLease * lease, WylFactDuckdbTempRoot ** out_root,
+wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+  (WylFactArtifactMutationLease * lease, WylFactDuckdbTempRoot ** out_root,
     WylFactDuckdbTempOrphanEvidence ** out_evidence) {
   if (out_root)
     *out_root = NULL;
@@ -4398,17 +4452,17 @@ wyrelog_error_t
     goto done;
   }
   gint fd = openat (lease->namespace_->fd, name,
-      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   struct stat st;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY)
       || fd < 0 || fstat (fd, &st) != 0) {
     if (fd >= 0)
       close (fd);
     g_autofree gchar *logical_name = g_strdup_printf ("wyrelog-duckdb-temp:%s",
-        uuid);
+            uuid);
     if (!logical_name || duckdb_temp_set_orphan_evidence (logical_name,
-            out_evidence) != WYRELOG_E_OK) {
+        out_evidence) != WYRELOG_E_OK) {
       result = WYRELOG_E_NOMEM;
       goto done;
     }
@@ -4424,11 +4478,11 @@ wyrelog_error_t
     .active = TRUE,
   };
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_OPEN_IDENTITY)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_OPEN_IDENTITY)
       || !S_ISDIR (st.st_mode)
       || (st.st_mode & 07777) != 0700 || st.st_uid != geteuid ()) {
     wyrelog_error_t discard = duckdb_temp_root_discard_unpublished_unlocked
-        (&temporary);
+          (&temporary);
     close (fd);
     result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     goto done;
@@ -4436,7 +4490,7 @@ wyrelog_error_t
   WylFactDuckdbTempRoot *root = g_new0 (WylFactDuckdbTempRoot, 1);
   if (!root) {
     wyrelog_error_t discard = duckdb_temp_root_discard_unpublished_unlocked
-        (&temporary);
+          (&temporary);
     close (fd);
     result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_NOMEM;
     goto done;
@@ -4452,7 +4506,7 @@ wyrelog_error_t
   root->children = g_ptr_array_new ();
   if (!root->logical_name || !root->children
       || namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_MKDIR)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_MKDIR)
       || fsync (lease->namespace_->fd) != 0
       || duckdb_temp_root_audit_unlocked (root) != WYRELOG_E_OK) {
     wyrelog_error_t discard = root->children
@@ -4479,7 +4533,7 @@ wyl_fact_duckdb_temp_orphan_evidence_free (WylFactDuckdbTempOrphanEvidence *e)
 }
 
 gchar *wyl_fact_duckdb_temp_orphan_evidence_dup_logical_name
-    (const WylFactDuckdbTempOrphanEvidence * e)
+  (const WylFactDuckdbTempOrphanEvidence * e)
 {
   return e ? g_strdup (e->logical_name) : NULL;
 }
@@ -4535,7 +4589,7 @@ wyl_fact_duckdb_temp_root_foreach_child (WylFactDuckdbTempRoot *root,
   GPtrArray *snapshot = NULL;
   if (result == WYRELOG_E_OK) {
     snapshot = g_ptr_array_new_with_free_func ((GDestroyNotify)
-        wyl_fact_duckdb_temp_child_free);
+            wyl_fact_duckdb_temp_child_free);
     if (!snapshot)
       result = WYRELOG_E_NOMEM;
   }
@@ -4588,8 +4642,8 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
 }
 
 wyrelog_error_t
-    wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
-    (WylFactDuckdbTempRoot * root, const gchar * name,
+wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
+  (WylFactDuckdbTempRoot * root, const gchar * name,
     WylFactDuckdbTempChild ** out_child, gint * out_fd,
     WylFactDuckdbTempOrphanEvidence ** out_evidence)
 {
@@ -4618,20 +4672,20 @@ wyrelog_error_t
     goto done;
   }
   gint fd = openat (root->fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC
-      | O_NOFOLLOW, 0600);
+          | O_NOFOLLOW, 0600);
   if (fd < 0) {
     result = errno == EEXIST ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     goto done;
   }
   struct stat st;
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_PRE_IDENTITY)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_PRE_IDENTITY)
       || fstat (fd, &st) != 0) {
     close (fd);
     g_autofree gchar *logical_name = g_strdup_printf ("%s/%s",
-        root->logical_name, name);
+            root->logical_name, name);
     result = logical_name ? duckdb_temp_set_orphan_evidence (logical_name,
-        out_evidence) : WYRELOG_E_NOMEM;
+            out_evidence) : WYRELOG_E_NOMEM;
     if (result == WYRELOG_E_OK)
       result = WYRELOG_E_POLICY;
     goto done;
@@ -4645,11 +4699,11 @@ wyrelog_error_t
     .active = TRUE,
   };
   if (namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY)
       || !S_ISREG (st.st_mode) || st.st_nlink != 1
       || (st.st_mode & 07777) != 0600 || st.st_uid != geteuid ()) {
     wyrelog_error_t discard = duckdb_temp_child_discard_unpublished_unlocked
-        (&temporary);
+          (&temporary);
     if (temporary.pin_fd >= 0)
       close (temporary.pin_fd);
     result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
@@ -4659,7 +4713,7 @@ wyrelog_error_t
   if (!child || !(child->name = g_strdup (name))) {
     g_free (child);
     wyrelog_error_t discard = duckdb_temp_child_discard_unpublished_unlocked
-        (&temporary);
+          (&temporary);
     if (temporary.pin_fd >= 0)
       close (temporary.pin_fd);
     result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_NOMEM;
@@ -4676,7 +4730,7 @@ wyrelog_error_t
     g_ptr_array_add (root->children, child);
   if (!child->active || !child->bindings
       || namespace_fault_take
-      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
       || fsync (fd) != 0 || fsync (root->fd) != 0
       || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK
       || duckdb_temp_root_audit_unlocked (root) != WYRELOG_E_OK) {
@@ -4712,7 +4766,7 @@ wyl_fact_duckdb_temp_child_open (WylFactDuckdbTempChild *child,
   if (result != WYRELOG_E_OK)
     goto done;
   gint fd = openat (child->root->fd, child->name,
-      (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW);
+          (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
     goto done;
@@ -4753,7 +4807,7 @@ wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
    * open makes every audit start at the first entry and prevents an earlier
    * list from hiding later foreign children. */
   gint scan_fd = openat (root->fd, ".",
-      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   DIR *dir = scan_fd >= 0 ? fdopendir (scan_fd) : NULL;
   if (!dir) {
     if (scan_fd >= 0)
@@ -4762,7 +4816,7 @@ wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
     goto done;
   }
   listed = g_ptr_array_new_with_free_func ((GDestroyNotify)
-      wyl_fact_duckdb_temp_child_free);
+          wyl_fact_duckdb_temp_child_free);
   if (!listed) {
     closedir (dir);
     result = WYRELOG_E_NOMEM;
@@ -4878,7 +4932,7 @@ wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
    * raw-close/reuse cannot hide behind an earlier valid sibling binding. */
   for (guint i = 0; i < root->children->len; i++)
     if (duckdb_temp_child_io_barrier_unlocked (g_ptr_array_index
-            (root->children, i)) != WYRELOG_E_OK) {
+          (root->children, i)) != WYRELOG_E_OK) {
       result = WYRELOG_E_POLICY;
       goto done;
     }
@@ -4897,7 +4951,7 @@ wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
   if (fsync (lease->namespace_->fd) != 0)
     result = WYRELOG_E_IO;
   else if (fstatat (lease->namespace_->fd, root->name, &(struct stat) { 0 },
-          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
+      AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
       || lease_revalidate_unlocked (lease) != WYRELOG_E_OK)
     result = WYRELOG_E_POLICY;
   else
