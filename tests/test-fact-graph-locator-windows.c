@@ -470,12 +470,27 @@ make_root (void)
 }
 
 static gboolean
-move_path (const gchar *source, const gchar *destination)
+move_path_full (const gchar *source, const gchar *destination, DWORD *out_error)
 {
   g_autofree gunichar2 *wide_source = wide_path (source);
   g_autofree gunichar2 *wide_destination = wide_path (destination);
-  return wide_source != NULL && wide_destination != NULL
-         && MoveFileExW ((LPCWSTR) wide_source, (LPCWSTR) wide_destination, 0);
+  if (out_error != NULL)
+    *out_error = ERROR_SUCCESS;
+  if (wide_source == NULL || wide_destination == NULL)
+    return FALSE;
+  if (MoveFileExW ((LPCWSTR) wide_source, (LPCWSTR) wide_destination, 0))
+    return TRUE;
+  /* Capture before the g_autofree cleanups run: they do not set last-error on
+   * success today, but reading it across them is a fragile contract. */
+  if (out_error != NULL)
+    *out_error = GetLastError ();
+  return FALSE;
+}
+
+static gboolean
+move_path (const gchar *source, const gchar *destination)
+{
+  return move_path_full (source, destination, NULL);
 }
 
 static gboolean
@@ -1497,14 +1512,12 @@ test_exact_evidence_revalidates_after_last_checkpoints (void)
   }
 }
 
-/* The provisioned-pair authority is deliberately unreachable on Windows: the
- * POSIX proof is a retained nlink==2 hard link, and this locator rejects
- * NumberOfLinks != 1 for every regular file it returns, so that proof cannot
- * exist here.  Pin that it fails closed rather than degrading to a name-only
- * adoption, and that the refcount helpers stay total so a caller that ignores
- * the failure cannot fault. */
+/* The name-only form stays fail-closed: an operation UUID derives a name, and
+ * a name is not provenance here.  The refcount helpers stay total so a caller
+ * that ignores the refusal cannot fault, and they answer exactly what POSIX
+ * answers for the same inputs. */
 static void
-test_provisioned_pair_fails_closed (void)
+test_provisioned_pair_neutral_form_fails_closed (void)
 {
   g_autofree gchar *root = make_root ();
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
@@ -1528,11 +1541,420 @@ test_provisioned_pair_fails_closed (void)
       WYRELOG_E_POLICY);
 
   g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (NULL), ==,
-      WYRELOG_E_POLICY);
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (NULL), ==,
+      WYRELOG_E_INVALID);
   g_assert_null (wyl_fact_graph_provisioned_pair_ref (NULL));
   wyl_fact_graph_provisioned_pair_free (NULL);
 
   wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
+/* Publish an exact stage and adopt the result as a pair, capturing the
+ * evidence before the publishing rename forgets it. */
+static void
+provisioned_pair_publish (const gchar *root, const gchar *operation,
+    WylFactGraphLocator *locator, WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *graph, WylFactGraphWinOperationEvidence *evidence)
+{
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+
+  init_locator (locator, "tenant", "graph");
+  open_graph (root, locator, resolver, graph);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (graph,
+      operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
+      evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (_write (stage.fd, "provisioned", 11), ==, 11);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (graph, &stage,
+      evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (stage.fd, ==, -1);
+  wyl_fact_graph_stage_clear (&stage);
+}
+
+/* Read the published final through the proven evidence opener, so a rejected
+ * adoption can be shown to have left it untouched. */
+static void
+provisioned_pair_final_state (WylFactGraphDirectory *graph,
+    const gchar *operation, const WylFactGraphWinOperationEvidence *evidence,
+    WylFactGraphWinIdentity *out_identity, guint64 *out_size)
+{
+  WylFactGraphRegularFile final = (WylFactGraphRegularFile)
+      WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_final_with_evidence (graph,
+      operation, evidence, &final), ==, WYRELOG_E_OK);
+  *out_identity = final.identity;
+  *out_size = final.size_bytes;
+  wyl_fact_graph_regular_file_clear (&final);
+}
+
+/* The pair is adopted from in-process evidence, survives the caller clearing
+ * its own directory, and refuses every substitution without mutating the
+ * published final. */
+static void
+test_provisioned_pair_evidence_form (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070580";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+      &evidence);
+
+  WylFactGraphWinIdentity before = { 0 };
+  guint64 before_size = 0;
+  provisioned_pair_final_state (&graph, operation, &evidence, &before,
+      &before_size);
+
+  /* Every field of the tuple is load-bearing, and a rejected adoption must not
+   * touch the published final. */
+  static const gsize tamper_offsets[] = { 0, 7, 15 };
+  for (gsize i = 0; i < G_N_ELEMENTS (tamper_offsets); i++) {
+    WylFactGraphWinOperationEvidence foreign = evidence;
+    foreign.artifact_identity.file_id[tamper_offsets[i]] ^= 1;
+    g_assert_cmpint
+      (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+          (&graph, operation, &foreign, &pair), ==, WYRELOG_E_POLICY);
+    g_assert_null (pair);
+  }
+
+  WylFactGraphWinOperationEvidence foreign = evidence;
+  foreign.graph_identity.volume_serial ^= 1;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &foreign, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_null (pair);
+
+  foreign = evidence;
+  foreign.operation_uuid[0] ^= 1;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &foreign, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_null (pair);
+
+  foreign = evidence;
+  foreign.version = 0;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &foreign, &pair), ==, WYRELOG_E_INVALID);
+  g_assert_null (pair);
+
+  /* Correct evidence against a different operation's UUID. */
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070581", &evidence, &pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (pair);
+
+  WylFactGraphWinIdentity after = { 0 };
+  guint64 after_size = 0;
+  provisioned_pair_final_state (&graph, operation, &evidence, &after,
+      &after_size);
+  g_assert_cmpuint (before.volume_serial, ==, after.volume_serial);
+  g_assert_cmpint (memcmp (before.file_id, after.file_id,
+      sizeof before.file_id), ==, 0);
+  g_assert_cmpuint (before_size, ==, after_size);
+
+  /* The happy path, and the refcount round-trip. */
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+  g_assert_nonnull (pair);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_OK);
+  g_assert_true (wyl_fact_graph_provisioned_pair_ref (pair) == pair);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  /* The pair cloned the directory, so the caller clearing its own copy must
+   * not disturb it.  A borrowed directory would be a dangling read here. */
+  wyl_fact_graph_directory_clear (&graph);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_OK);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
+/* Every rejection above is produced by the evidence opener before the pair
+ * authority runs, so none of it exercises the new code.  These cases race the
+ * two seams the pair adds and replace the graph directory out from under a
+ * live pair, which is the only way to reach the checks this commit introduces:
+ * delete revalidate_named_child from _revalidate_bound, or the owner check, or
+ * the doubled re-check, and one of these fails. */
+static void
+test_provisioned_pair_construction_races_fail_closed (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070582";
+  static const gchar *const points[] = {
+    "provisioned-pair-pre-writable-open",
+    "provisioned-pair-post-writable-open",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (points); i++) {
+    g_autofree gchar *root = make_root ();
+    WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+    WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+    WylFactGraphLocator locator = { 0 };
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    WylFactGraphProvisionedPair *pair = (gpointer) 0x1;
+
+    provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+        &evidence);
+
+    g_autofree gchar *final_path = g_build_filename (root,
+            locator.tenant_component, locator.graph_component, "facts.duckdb",
+            NULL);
+    g_autofree gchar *aside = g_strdup_printf ("%s-raced", final_path);
+    ReplacementRace race = {
+      .expected_point = points[i],
+      .target = final_path,
+      .aside = aside,
+    };
+    graph.checkpoint = replace_file_checkpoint;
+    graph.checkpoint_data = &race;
+    g_assert_cmpint
+      (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+          (&graph, operation, &evidence, &pair), ==, WYRELOG_E_POLICY);
+    g_assert_true (race.fired);
+    g_assert_null (pair);
+    graph.checkpoint = NULL;
+    graph.checkpoint_data = NULL;
+
+    restore_replacement (&race);
+    wyl_fact_graph_directory_clear (&graph);
+    wyl_fact_graph_locator_clear (&locator);
+    wyl_fact_graph_resolver_clear (&resolver);
+    remove_tree_no_follow (root);
+  }
+}
+
+/* A live pair holds facts.duckdb open inside the graph directory, so Windows
+ * refuses to rename that directory out from under it -- the attack POSIX has
+ * to detect after the fact cannot even be staged here.  Assert that, then
+ * exercise what IS reachable: the fixed final can still be replaced, because
+ * the locator opens with FILE_SHARE_DELETE, and both revalidation forms must
+ * refuse afterwards.  Delete named_regular_bound_check from either form and
+ * this fails. */
+static void
+test_provisioned_pair_final_replacement_fails_closed (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070583";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+      &evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *graph_path = g_build_filename (root,
+          locator.tenant_component, locator.graph_component, NULL);
+  g_autofree gchar *dir_aside = g_strdup_printf ("%s-raced", graph_path);
+  g_assert_false (move_path (graph_path, dir_aside));
+
+  g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
+          NULL);
+  g_autofree gchar *aside = g_strdup_printf ("%s-raced", final_path);
+  g_assert_true (move_path (final_path, aside));
+  g_assert_true (create_private_file (final_path, "replacement"));
+
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+
+  g_assert_cmpint (g_unlink (final_path), ==, 0);
+  g_assert_true (move_path (aside, final_path));
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
+/* Rewriting the final's DACL under a live pair must revoke it.  This fires on
+ * the LIVE-token path -- named_regular_bound_check re-checks SE_DACL_PROTECTED
+ * through the process token, and that is the bit being cleared here.  The
+ * pinned-SID half of provisioned_pair_owner_check is not what this exercises
+ * and cannot be: wyl_fact_graph_win_token_identity_init reads the process
+ * token, which thread impersonation does not change, so proving the two apart
+ * needs a second account. */
+static void
+test_provisioned_pair_acl_rewrite_fails_closed (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070584";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+      &evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+
+  g_autofree gchar *final_path = g_build_filename (root,
+          locator.tenant_component, locator.graph_component, "facts.duckdb",
+          NULL);
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (final_path, -1, NULL, NULL,
+          NULL);
+  g_assert_nonnull (wide);
+  /* An inheritable, unprotected DACL is exactly what the owner-only contract
+   * refuses; SetNamedSecurityInfoW clears SE_DACL_PROTECTED for us. */
+  g_assert_cmpint (SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+      NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
+
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_POLICY);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
+/* Unprotect a directory's DACL under a live pair.  Both forms revalidate the
+ * graph directory with strict ACL, but only the full form re-walks the fact
+ * root, so the root case is exactly the documented residual and the graph case
+ * is the positive control for revalidate_named_child in the bound form: delete
+ * that call and the second half goes green. */
+static void
+unprotect_dacl (const gchar *path)
+{
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wide);
+  g_assert_cmpint (SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+      NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
+}
+
+static void
+test_provisioned_pair_revalidation_differential (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c07058a";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+      &evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+
+  /* Above the graph directory: only the full form looks there.  This is the
+   * documented residual, as an executable fact rather than an argument. */
+  unprotect_dacl (root);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_OK);
+
+  /* The graph directory itself: the bound form must refuse too, and
+   * revalidate_named_child is the only thing in it that can. */
+  g_autofree gchar *graph_path = g_build_filename (root,
+          locator.tenant_component, locator.graph_component, NULL);
+  unprotect_dacl (graph_path);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_bound (pair), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_POLICY);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
+/* Observation, not a contract: in this fixture a live pair leaves the graph
+ * directory un-renameable, and releasing it lifts that.  What refuses is the
+ * open final inside the subtree, not the pair's directory handles -- those are
+ * opened FILE_SHARE_READ | WRITE | DELETE and do not pin their own rename, and
+ * a share conflict would report ERROR_SHARING_VIOLATION rather than the
+ * ERROR_ACCESS_DENIED asserted below.
+ *
+ * This is still not a contract.  The locator requires only DRIVE_FIXED and
+ * non-remote, and a ReFS Dev Drive satisfies both while carrying no
+ * subtree-rename rule, so this could invert with the runner image while
+ * nothing in wyrelog changed.  Nothing may be removed on the strength of it;
+ * the substitution window above the graph directory does not need a rename at
+ * all -- see provisioned-pair-differential. */
+static void
+test_provisioned_pair_pins_ancestor_chain (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c07058b";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+      &evidence);
+  g_autofree gchar *graph_path = g_build_filename (root,
+          locator.tenant_component, locator.graph_component, NULL);
+  g_autofree gchar *graph_aside = g_strdup_printf ("%s-raced", graph_path);
+
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+  DWORD move_error = ERROR_SUCCESS;
+  g_assert_false (move_path_full (graph_path, graph_aside, &move_error));
+  /* ERROR_ACCESS_DENIED is the subtree rule; a share conflict would report
+   * ERROR_SHARING_VIOLATION and would mean a different mechanism refused. */
+  g_assert_cmpint (move_error, ==, ERROR_ACCESS_DENIED);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
+      WYRELOG_E_OK);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  g_assert_true (move_path (graph_path, graph_aside));
+  g_assert_true (move_path (graph_aside, graph_path));
+
   wyl_fact_graph_locator_clear (&locator);
   wyl_fact_graph_resolver_clear (&resolver);
   remove_tree_no_follow (root);
@@ -1576,8 +1998,20 @@ main (int argc, char **argv)
       test_exact_evidence_rejects_name_substitution);
   g_test_add_func ("/fact-graph-locator/windows/exact-evidence-last-checkpoint",
       test_exact_evidence_revalidates_after_last_checkpoints);
-  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-fails-closed",
-      test_provisioned_pair_fails_closed);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-neutral-form",
+      test_provisioned_pair_neutral_form_fails_closed);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-evidence-form",
+      test_provisioned_pair_evidence_form);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-races",
+      test_provisioned_pair_construction_races_fail_closed);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-final-replace",
+      test_provisioned_pair_final_replacement_fails_closed);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-acl-rewrite",
+      test_provisioned_pair_acl_rewrite_fails_closed);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-differential",
+      test_provisioned_pair_revalidation_differential);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-ancestor-pin",
+      test_provisioned_pair_pins_ancestor_chain);
   return g_test_run ();
 }
 #endif

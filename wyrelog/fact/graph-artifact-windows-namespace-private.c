@@ -292,8 +292,10 @@ wyl_fact_artifact_reader_wal_binding_free (WylFactArtifactReaderWalBinding *b)
 /* Only the neutral, pair-bound entry point is missing on Windows: the native
  * adoption path wyl_fact_artifact_win_namespace_open_provisioned_pair_internal
  * below is real and covered by tests/test-fact-artifact-namespace-windows.c.
- * This one cannot succeed while no WylFactGraphProvisionedPair can be
- * constructed here; see the fail-closed authority in
+ * This one still fails closed: forwarding a constructed pair to a namespace
+ * is the next commit's work.  A pair itself can now be built from in-process
+ * operation evidence; see
+ * wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence in
  * fact/graph-locator-windows-private.c. */
 G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal (
