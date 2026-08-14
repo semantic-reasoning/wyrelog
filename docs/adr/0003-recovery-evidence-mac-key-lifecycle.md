@@ -71,7 +71,10 @@ lease before any mutation. Missing, wrong, stale, or malformed keys/tags fail
 closed without touching the named artifact.
 
 The key identifier in the envelope is the exact provider lookup input and is
-included in the derivation domain. Offline recovery is supported only when the configured provider can resolve
+included in the derivation domain. Provider-backed key metadata is durable,
+owner-only protected policy state and is included in the provider's backup and
+restore contract; evidence files never contain a backup of the key. Offline
+recovery is supported only when the configured provider can resolve
 the required key identifier in the recovery environment. If it cannot, the
 operation is unavailable and must be reported as a non-mutating policy
 failure; an owner-only evidence file is not treated as a substitute for the
