@@ -332,37 +332,37 @@ remove_guard_eval_facts (WylEngineSession *session,
   if (facts->context_now_inserted) {
     wyrelog_error_t rc =
         wyl_engine_session_remove (session, "context_now", facts->context_now,
-        3);
+            3);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
   if (facts->guard_context_timestamp_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session,
-        "guard_context_timestamp", facts->guard_context_timestamp, 3);
+            "guard_context_timestamp", facts->guard_context_timestamp, 3);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
   if (facts->guard_context_loc_class_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session,
-        "guard_context_loc_class", facts->guard_context_loc_class, 3);
+            "guard_context_loc_class", facts->guard_context_loc_class, 3);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
   if (facts->guard_context_risk_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session,
-        "guard_context_risk", facts->guard_context_risk, 3);
+            "guard_context_risk", facts->guard_context_risk, 3);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
   if (facts->guard_context_in_window_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session,
-        "guard_context_in_window", facts->guard_context_in_window, 4);
+            "guard_context_in_window", facts->guard_context_in_window, 4);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
   if (facts->guard_context_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session, "guard_context",
-        facts->guard_context, 6);
+            facts->guard_context, 6);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
@@ -380,13 +380,13 @@ insert_guard_eval_facts (WylEngineSession *session, const gint64 row[3],
 
   gint64 loc_class_id = 0;
   wyrelog_error_t rc = wyl_engine_session_intern_symbol (session,
-      req->guard_loc_class, &loc_class_id);
+          req->guard_loc_class, &loc_class_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 context_id = 0;
   rc = wyl_engine_session_make_guard_context_compound (session,
-      req->guard_timestamp, loc_class_id, req->guard_risk, row[2], &context_id);
+          req->guard_timestamp, loc_class_id, req->guard_risk, row[2], &context_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -431,13 +431,13 @@ insert_guard_eval_facts (WylEngineSession *session, const gint64 row[3],
   facts->eval_guard[3] = context_id;
 
   rc = wyl_engine_session_insert (session, "guard_context",
-      facts->guard_context, 6);
+          facts->guard_context, 6);
   if (rc != WYRELOG_E_OK)
     return rc;
   facts->guard_context_inserted = TRUE;
 
   rc = wyl_engine_session_insert (session, "guard_context_timestamp",
-      facts->guard_context_timestamp, 3);
+          facts->guard_context_timestamp, 3);
   if (rc != WYRELOG_E_OK) {
     (void) remove_guard_eval_facts (session, facts);
     return rc;
@@ -445,7 +445,7 @@ insert_guard_eval_facts (WylEngineSession *session, const gint64 row[3],
   facts->guard_context_timestamp_inserted = TRUE;
 
   rc = wyl_engine_session_insert (session, "guard_context_loc_class",
-      facts->guard_context_loc_class, 3);
+          facts->guard_context_loc_class, 3);
   if (rc != WYRELOG_E_OK) {
     (void) remove_guard_eval_facts (session, facts);
     return rc;
@@ -453,7 +453,7 @@ insert_guard_eval_facts (WylEngineSession *session, const gint64 row[3],
   facts->guard_context_loc_class_inserted = TRUE;
 
   rc = wyl_engine_session_insert (session, "guard_context_risk",
-      facts->guard_context_risk, 3);
+          facts->guard_context_risk, 3);
   if (rc != WYRELOG_E_OK) {
     (void) remove_guard_eval_facts (session, facts);
     return rc;
@@ -462,7 +462,7 @@ insert_guard_eval_facts (WylEngineSession *session, const gint64 row[3],
 
   if (window != NULL) {
     rc = wyl_engine_session_insert (session, "guard_context_in_window",
-        facts->guard_context_in_window, 4);
+            facts->guard_context_in_window, 4);
     if (rc != WYRELOG_E_OK) {
       (void) remove_guard_eval_facts (session, facts);
       return rc;
@@ -471,7 +471,7 @@ insert_guard_eval_facts (WylEngineSession *session, const gint64 row[3],
   }
 
   rc = wyl_engine_session_insert (session, "context_now", facts->context_now,
-      3);
+          3);
   if (rc != WYRELOG_E_OK) {
     (void) remove_guard_eval_facts (session, facts);
     return rc;
@@ -525,7 +525,7 @@ find_deny_reason (WylEngineSession *session, const gint64 row[3],
 
     gboolean found = FALSE;
     wyrelog_error_t rc = wyl_engine_session_contains (session, "deny_reason",
-        reason_row, 5, &found);
+            reason_row, 5, &found);
     if (rc != WYRELOG_E_OK)
       return rc;
     if (found) {
@@ -553,7 +553,7 @@ fill_guard_miss_deny_reason (WylEngineSession *session, const gint64 row[3],
 
   gboolean base_allowed = FALSE;
   rc = wyl_engine_session_contains (session, "allow_guard_base", row, 3,
-      &base_allowed);
+          &base_allowed);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (base_allowed)
@@ -691,19 +691,19 @@ wyl_decide_with_service_authority (WylHandle *handle,
 
   gint64 context_row[3];
   rc = wyl_engine_session_intern_symbol (engine_session, authority->context_id,
-      &context_row[0]);
+          &context_row[0]);
   if (rc != WYRELOG_E_OK)
     goto release;
   rc = wyl_engine_session_intern_symbol (engine_session, authority->subject_id,
-      &context_row[1]);
+          &context_row[1]);
   if (rc != WYRELOG_E_OK)
     goto release;
   rc = wyl_engine_session_intern_symbol (engine_session, authority->tenant_id,
-      &context_row[2]);
+          &context_row[2]);
   if (rc != WYRELOG_E_OK)
     goto release;
   rc = wyl_engine_session_insert (engine_session, "service_request_auth", context_row,
-      G_N_ELEMENTS (context_row));
+          G_N_ELEMENTS (context_row));
   if (rc != WYRELOG_E_OK)
     goto release;
   inserted = TRUE;
@@ -716,12 +716,12 @@ wyl_decide_with_service_authority (WylHandle *handle,
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   rc = wyl_engine_session_contains (engine_session, "service_allow_bool",
-      decision_row, G_N_ELEMENTS (decision_row), &allowed);
+          decision_row, G_N_ELEMENTS (decision_row), &allowed);
 
 cleanup:
   if (inserted) {
     wyrelog_error_t cleanup_rc = wyl_engine_session_remove (engine_session,
-        "service_request_auth", context_row, G_N_ELEMENTS (context_row));
+            "service_request_auth", context_row, G_N_ELEMENTS (context_row));
     if (cleanup_rc != WYRELOG_E_OK) {
       wyl_handle_poison_engine_pair (handle);
       rc = cleanup_rc;
@@ -732,7 +732,7 @@ release:
   g_clear_pointer (&engine_session, wyl_engine_session_release);
   {
     wyrelog_error_t release_rc =
-      wyl_service_auth_read_lease_release_terminal (&authority->lease);
+        wyl_service_auth_read_lease_release_terminal (&authority->lease);
     if (release_rc != WYRELOG_E_OK)
       rc = release_rc;
   }
@@ -761,13 +761,13 @@ remove_break_glass_facts (WylEngineSession *session,
   wyrelog_error_t first_rc = WYRELOG_E_OK;
   if (facts->used_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session, "break_glass_used",
-        facts->used_row, 1);
+            facts->used_row, 1);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
   if (facts->now_inserted) {
     wyrelog_error_t rc = wyl_engine_session_remove (session, "now",
-        facts->now_row, 1);
+            facts->now_row, 1);
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
@@ -796,7 +796,7 @@ insert_break_glass_facts (WylEngineSession *session, WylHandle *handle,
 {
   facts->now_row[0] = g_get_real_time () / G_USEC_PER_SEC;
   wyrelog_error_t rc = wyl_engine_session_insert (session, "now",
-      facts->now_row, 1);
+          facts->now_row, 1);
   if (rc != WYRELOG_E_OK)
     return rc;
   facts->now_inserted = TRUE;
@@ -807,7 +807,7 @@ insert_break_glass_facts (WylEngineSession *session, WylHandle *handle,
         == WYRELOG_E_OK) {
       facts->used_row[0] = activated_at_us / G_USEC_PER_SEC;
       rc = wyl_engine_session_insert (session, "break_glass_used",
-          facts->used_row, 1);
+              facts->used_row, 1);
       if (rc != WYRELOG_E_OK) {
         (void) remove_break_glass_facts (session, facts);
         return rc;
@@ -845,15 +845,15 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
   if (wyl_handle_engine_pair_is_ready (handle)) {
     gint64 row[3];
     wyrelog_error_t rc = wyl_engine_session_intern_symbol (session,
-        wyl_decide_req_get_subject_id (req), &row[0]);
+            wyl_decide_req_get_subject_id (req), &row[0]);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_engine_session_intern_symbol (session, wyl_decide_req_get_action
-        (req), &row[1]);
+              (req), &row[1]);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_engine_session_intern_symbol (session,
-        wyl_decide_req_get_resource_id (req), &row[2]);
+            wyl_decide_req_get_resource_id (req), &row[2]);
     if (rc != WYRELOG_E_OK)
       return rc;
     gint64 reason_names[WYL_DENY_REASON_LAST_] = { 0 };
@@ -904,19 +904,19 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     if (wyl_decide_req_get_service_bearer_authenticated (req)) {
       gint64 authenticated_id = 0;
       rc = wyl_engine_session_intern_symbol (session, "authenticated",
-          &authenticated_id);
+              &authenticated_id);
       if (rc != WYRELOG_E_OK)
         return rc;
       pstate_row[0] = row[0];
       pstate_row[1] = authenticated_id;
       gboolean present = FALSE;
       rc = wyl_engine_session_contains (session, "principal_state", pstate_row,
-          2, &present);
+              2, &present);
       if (rc != WYRELOG_E_OK)
         return rc;
       if (!present) {
         rc = wyl_engine_session_insert (session, "principal_state", pstate_row,
-            2);
+                2);
         if (rc != WYRELOG_E_OK)
           return rc;
         pstate_injected = TRUE;
@@ -967,7 +967,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     if (wyl_decide_req_get_service_bearer_authenticated (req)) {
       gboolean has_perm = FALSE;
       rc = wyl_engine_session_contains (session, "has_permission", row, 3,
-          &has_perm);
+              &has_perm);
       if (rc != WYRELOG_E_OK) {
         cleanup_rc = rc;
         goto decide_cleanup;
@@ -977,7 +977,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       for (gsize i = 0;
           i < wyl_policy_store_approved_data_plane_permission_count (); i++) {
         if (g_strcmp0 (wyl_policy_store_approved_data_plane_permission_id (i),
-                action_id) == 0) {
+            action_id) == 0) {
           data_plane = TRUE;
           break;
         }
@@ -995,14 +995,14 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         perm_state_row[3] = armed_id;
         gboolean present = FALSE;
         rc = wyl_engine_session_contains (session, "perm_state", perm_state_row,
-            4, &present);
+                4, &present);
         if (rc != WYRELOG_E_OK) {
           cleanup_rc = rc;
           goto decide_cleanup;
         }
         if (!present) {
           rc = wyl_engine_session_insert (session, "perm_state", perm_state_row,
-              4);
+                  4);
           if (rc != WYRELOG_E_OK) {
             cleanup_rc = rc;
             goto decide_cleanup;
@@ -1018,7 +1018,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       if (!guard_is_satisfied (guard, req)) {
         wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
         rc = fill_guard_miss_deny_reason (session, row, reason_names,
-            reason_origins, &code);
+                reason_origins, &code);
         if (rc != WYRELOG_E_OK) {
           cleanup_rc = rc;
           goto decide_cleanup;
@@ -1071,7 +1071,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
      * be returned WITHOUT emitting an audit row; a clean fall-through
      * continues to the audit emit below.
      */
-  decide_cleanup:
+decide_cleanup:
     {
       wyrelog_error_t guard_remove_rc = WYRELOG_E_OK;
       wyrelog_error_t pstate_remove_rc = WYRELOG_E_OK;
@@ -1084,10 +1084,10 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       if (pstate_injected)
         pstate_remove_rc =
             wyl_engine_session_remove (session, "principal_state", pstate_row,
-            2);
+                2);
       if (perm_state_injected)
         perm_state_remove_rc = wyl_engine_session_remove (session, "perm_state",
-            perm_state_row, 4);
+                perm_state_row, 4);
       /*
        * All removes run BEFORE any failure-return so nothing leaks, then
        * the fail-closed checks fire in precedence order. The transient

@@ -374,7 +374,7 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
       && wyl_handle_engine_pair_is_ready (mutation->handle)) {
     wyrelog_error_t projection =
         wyl_handle_reload_engine_pair_with_service_auth_write
-        (mutation->handle, mutation->lease);
+          (mutation->handle, mutation->lease);
     if (projection != WYRELOG_E_OK && result == WYRELOG_E_OK)
       result = projection;
   }

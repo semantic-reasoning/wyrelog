@@ -49,6 +49,7 @@
 // the build.
 
 .decl principal_state(user: symbol, state: symbol)
+.decl service_principal_state(subject: symbol, state: symbol)
 .decl session_state(scope: symbol, state: symbol)
 .decl session_active(state: symbol)
 .decl frozen(scope: symbol)
@@ -70,6 +71,13 @@
 .decl audit_event_deny_origin(id: symbol, origin: symbol)
 .decl audit_event_request_id(id: symbol, request_id: symbol)
 .decl principal_state_observed(user: symbol, state: symbol)
+.decl service_principal_state_observed(subject: symbol, state: symbol)
+.decl service_request_auth(context: symbol, subject: symbol, tenant: symbol)
+.decl service_request_auth_observed(context: symbol, subject: symbol,
+    tenant: symbol)
+.decl service_armed(context: symbol, user: symbol, perm: symbol, scope: symbol)
+.decl service_allow_bool(context: symbol, user: symbol, perm: symbol,
+    scope: symbol)
 .decl login_skip_mfa_authz(user: symbol)
 .decl login_skip_mfa_authz_observed(user: symbol)
 
@@ -105,6 +113,26 @@ audit_event_request_id(ID, RequestID) :-
 
 principal_state_observed(U, State) :-
     principal_state(U, State).
+
+service_principal_state_observed(Subject, State) :-
+    service_principal_state(Subject, State).
+
+// A request-local service capability binds the resolver-verified subject and
+// tenant to the decision scope. Only active service principals and the
+// existing approved data-plane permission set may authorize through it.
+service_request_auth_observed(Context, Subject, Tenant) :-
+    service_request_auth(Context, Subject, Tenant).
+
+service_armed(Context, U, P, S) :-
+    service_request_auth(Context, U, S),
+    service_principal_state(U, "active"),
+    approved_data_plane_permission(P),
+    !disabled_role_for(U, P),
+    !policy_violation("sod", U, P, _).
+
+service_allow_bool(Context, U, P, S) :-
+    service_armed(Context, U, P, S),
+    has_permission(U, P, S).
 
 login_skip_mfa_authz_observed(U) :-
     login_skip_mfa_authz(U).

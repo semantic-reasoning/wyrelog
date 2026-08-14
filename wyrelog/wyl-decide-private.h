@@ -11,17 +11,17 @@ void wyl_decide_req_set_service_bearer_authenticated
   (wyl_decide_req_t *req, gboolean authenticated);
 gboolean wyl_decide_req_get_service_bearer_authenticated
   (const wyl_decide_req_t *req);
-    typedef struct _WylServiceDecisionAuthority WylServiceDecisionAuthority;
+typedef struct _WylServiceDecisionAuthority WylServiceDecisionAuthority;
 
 /* Creates a request-local service decision capability after the sole bearer
  * resolver has validated the complete credential tuple. Success consumes
  * |*inout_lease|; every failure leaves it owned by the caller. */
 wyrelog_error_t wyl_service_decision_authority_new_resolved
-    (WylHandle * handle, WylServiceAuthReadLease ** inout_lease,
+  (WylHandle * handle, WylServiceAuthReadLease ** inout_lease,
     const gchar * subject_id, const gchar * tenant_id,
     WylServiceDecisionAuthority ** out_authority);
 void wyl_service_decision_authority_free
-    (WylServiceDecisionAuthority * authority);
+  (WylServiceDecisionAuthority * authority);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceDecisionAuthority,
     wyl_service_decision_authority_free);
 

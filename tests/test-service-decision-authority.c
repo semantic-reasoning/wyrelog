@@ -93,7 +93,7 @@ contains_state (WylHandle *handle, const gchar *relation,
   g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, state, &row[1]),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_engine_contains (handle, relation, row, 2,
-          &contains), ==, WYRELOG_E_OK);
+      &contains), ==, WYRELOG_E_OK);
   return contains;
 }
 
@@ -105,10 +105,10 @@ new_service_authority (WylHandle *handle, const gchar *subject,
   WylServiceDecisionAuthority *authority = NULL;
 
   g_assert_cmpint (wyl_service_auth_authority_acquire_read
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_decision_authority_new_resolved (handle,
-          &lease, subject, tenant, &authority), ==, WYRELOG_E_OK);
+      &lease, subject, tenant, &authority), ==, WYRELOG_E_OK);
   g_assert_null (lease);
   g_assert_nonnull (authority);
   return authority;
@@ -127,7 +127,7 @@ service_decide (WylHandle *handle, const gchar *subject,
   wyl_decide_req_set_action (req, action);
   wyl_decide_req_set_resource_id (req, scope);
   g_assert_cmpint (wyl_decide_with_service_authority (handle, req, authority,
-          resp), ==, expected_rc);
+      resp), ==, expected_rc);
   return wyl_decide_resp_get_decision (resp);
 }
 
@@ -147,7 +147,7 @@ request_context_count (WylHandle *handle)
 {
   guint count = 0;
   g_assert_cmpint (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "service_request_auth_observed", count_rows, &count), ==,
+      "service_request_auth_observed", count_rows, &count), ==,
       WYRELOG_E_OK);
   return count;
 }
@@ -160,12 +160,12 @@ new_service_decision_handle (const gchar *templates, const gchar *subject,
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, subject, "worker",
-          "admin", "authority-create", &principal), ==, WYRELOG_E_OK);
+      "admin", "authority-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   if (grant_read)
     g_assert_cmpint (wyl_policy_store_grant_direct_permission
-        (wyl_handle_get_policy_store (handle), subject, "wr.stream.read",
-            WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+          (wyl_handle_get_policy_store (handle), subject, "wr.stream.read",
+        WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_open_engine_pair (handle, templates), ==,
       WYRELOG_E_OK);
   return handle;
@@ -186,23 +186,23 @@ test_service_lifecycle_projection (void)
 
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:projection",
-          "projection", "admin", "projection-create", &principal), ==,
+      "projection", "admin", "projection-create", &principal), ==,
       WYRELOG_E_OK);
   g_assert_true (contains_state (handle, "service_principal_state",
-          principal.subject_id, "active"));
+      principal.subject_id, "active"));
   g_assert_false (contains_state (handle, "principal_state",
-          principal.subject_id, "authenticated"));
+      principal.subject_id, "authenticated"));
   wyl_service_principal_clear (&principal);
 
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:projection",
-          "admin", "00000000000000000000000725A", &principal), ==,
+      "admin", "00000000000000000000000725A", &principal), ==,
       WYRELOG_E_OK);
   g_assert_false (contains_state (handle, "service_principal_state",
-          principal.subject_id, "active"));
+      principal.subject_id, "active"));
   g_assert_true (contains_state (handle, "service_principal_state",
-          principal.subject_id, "disabled"));
+      principal.subject_id, "disabled"));
   g_assert_false (contains_state (handle, "principal_state",
-          principal.subject_id, "authenticated"));
+      principal.subject_id, "authenticated"));
   wyl_service_principal_clear (&principal);
 
   g_clear_object (&handle);
@@ -228,10 +228,10 @@ test_service_lifecycle_restart_projection (void)
       WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:restart:725",
-          "restart", "admin", "restart-create", &principal), ==, WYRELOG_E_OK);
+      "restart", "admin", "restart-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:restart:725",
-          "admin", "00000000000000000000000725B", &principal), ==,
+      "admin", "00000000000000000000000725B", &principal), ==,
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   g_clear_object (&handle);
@@ -239,9 +239,9 @@ test_service_lifecycle_restart_projection (void)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   g_assert_true (contains_state (handle, "service_principal_state",
-          "svc:restart:725", "disabled"));
+      "svc:restart:725", "disabled"));
   g_assert_false (contains_state (handle, "principal_state",
-          "svc:restart:725", "authenticated"));
+      "svc:restart:725", "authenticated"));
   g_clear_object (&handle);
 
   remove_store_files (store);
@@ -266,17 +266,17 @@ test_service_lifecycle_projection_failure_latches (void)
       "service_principal_state", WYRELOG_E_IO);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle,
-          "svc:projection:fault", "fault", "admin", "projection-fault",
-          &principal), ==, WYRELOG_E_BUSY);
+      "svc:projection:fault", "fault", "admin", "projection-fault",
+      &principal), ==, WYRELOG_E_BUSY);
   g_assert_null (principal.subject_id);
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==,
       WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
   g_assert_false (contains_state (handle, "service_principal_state",
-          "svc:projection:fault", "active"));
+      "svc:projection:fault", "active"));
 
   g_clear_object (&handle);
   remove_tree (templates);
@@ -332,7 +332,7 @@ emit_successful_delta_witness (WylHandle *handle, const gchar *suffix)
   g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, scope, &row[2]),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_engine_insert (handle, "member_of", row,
-          G_N_ELEMENTS (row)), ==, WYRELOG_E_OK);
+      G_N_ELEMENTS (row)), ==, WYRELOG_E_OK);
 }
 
 static gpointer
@@ -342,11 +342,11 @@ service_projection_fault_worker (gpointer data)
   wyl_service_principal_t principal = { 0 };
   if (worker->operation == SERVICE_PROJECTION_CREATE)
     worker->rc = wyl_service_principal_create (worker->handle,
-        worker->subject, "projection-fault-worker", "admin",
-        "projection-fault-create", &principal);
+            worker->subject, "projection-fault-worker", "admin",
+            "projection-fault-create", &principal);
   else
     worker->rc = wyl_service_principal_disable (worker->handle,
-        worker->subject, "admin", "00000000000000000000000725C", &principal);
+            worker->subject, "admin", "00000000000000000000000725C", &principal);
   wyl_service_principal_clear (&principal);
   g_mutex_lock (&worker->mutex);
   worker->completed = TRUE;
@@ -378,14 +378,14 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   if (operation == SERVICE_PROJECTION_DISABLE) {
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle, subject,
-            "projection-fault-worker", "admin", "projection-disable-setup",
-            &principal), ==, WYRELOG_E_OK);
+        "projection-fault-worker", "admin", "projection-disable-setup",
+        &principal), ==, WYRELOG_E_OK);
     wyl_service_principal_clear (&principal);
   }
 
   ServiceProjectionDeltaWitness delta_witness = { 0 };
   g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
-          service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
+      service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
 
   if (step_fault)
     wyl_handle_set_engine_delta_step_fault_once (handle,
@@ -403,7 +403,7 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   g_mutex_init (&worker.mutex);
   g_cond_init (&worker.changed);
   GThread *thread = g_thread_new ("service-projection-fault",
-      service_projection_fault_worker, &worker);
+          service_projection_fault_worker, &worker);
   gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
   g_mutex_lock (&worker.mutex);
   while (!worker.completed
@@ -419,14 +419,14 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
 
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==,
       WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
   WylServiceAuthReadLease *read_lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_read
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-          &read_lease), ==, WYRELOG_E_BUSY);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &read_lease), ==, WYRELOG_E_BUSY);
   g_assert_null (read_lease);
   g_assert_cmpuint (delta_witness.total, ==, 0);
   g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
@@ -446,17 +446,17 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   g_assert_true (contains_state (handle, "service_principal_state", subject,
-          expected_state));
+      expected_state));
   g_assert_false (contains_state (handle, "service_principal_state", subject,
-          operation == SERVICE_PROJECTION_CREATE ? "disabled" : "active"));
+      operation == SERVICE_PROJECTION_CREATE ? "disabled" : "active"));
   reason = WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
   memset (&delta_witness, 0, sizeof delta_witness);
   g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
-          service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
+      service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
   emit_successful_delta_witness (handle, "reopened");
   g_assert_cmpuint (delta_witness.total, >, 0);
   g_assert_cmpuint (delta_witness.service_principal_state, ==, 0);
@@ -484,14 +484,14 @@ test_service_authority_allow_deny_and_binding (void)
   g_autofree gchar *templates = copy_unsigned_template_tree ();
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-      "svc:authority:allow", TRUE);
+          "svc:authority:allow", TRUE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
-          &tenant_created), ==, WYRELOG_E_OK);
+      &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
-          "svc:authority:allow", "wr.stream.read", "tenant-b"), ==,
+      "svc:authority:allow", "wr.stream.read", "tenant-b"), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
 
@@ -505,28 +505,28 @@ test_service_authority_allow_deny_and_binding (void)
       WYL_DECISION_DENY);
 
   g_assert_cmpint (service_decide (handle, "svc:authority:allow",
-          WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
-          WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
   g_assert_cmpint (request_context_count (handle), ==, 0);
   g_assert_cmpint (service_decide (handle, "svc:authority:allow",
-          WYL_TENANT_DEFAULT, "wr.stream.read", "tenant-b",
-          WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+      WYL_TENANT_DEFAULT, "wr.stream.read", "tenant-b",
+      WYRELOG_E_OK), ==, WYL_DECISION_DENY);
   g_assert_cmpint (service_decide (handle, "svc:authority:allow", "tenant-b",
-          "wr.stream.read", "tenant-b", WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+      "wr.stream.read", "tenant-b", WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
   g_assert_cmpint (service_decide (handle, "svc:authority:allow", "tenant-b",
-          "wr.stream.read", WYL_TENANT_DEFAULT, WYRELOG_E_OK), ==,
+      "wr.stream.read", WYL_TENANT_DEFAULT, WYRELOG_E_OK), ==,
       WYL_DECISION_DENY);
   g_assert_cmpint (service_decide (handle, "svc:authority:allow",
-          WYL_TENANT_DEFAULT, "wr.policy.write", WYL_TENANT_DEFAULT,
-          WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+      WYL_TENANT_DEFAULT, "wr.policy.write", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_DENY);
 
   g_autoptr (WylServiceDecisionAuthority) one_shot =
       new_service_authority (handle, "svc:authority:allow", WYL_TENANT_DEFAULT);
   g_autoptr (wyl_decide_resp_t) first = wyl_decide_resp_new ();
   g_assert_cmpint (wyl_decide_with_service_authority (handle, bare, one_shot,
-          first), ==, WYRELOG_E_OK);
+      first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_decide_with_service_authority (handle, bare, one_shot,
-          first), ==, WYRELOG_E_INVALID);
+      first), ==, WYRELOG_E_INVALID);
 
   g_clear_object (&handle);
   remove_tree (templates);
@@ -538,10 +538,10 @@ test_service_authority_zero_role_and_forged_subject_deny (void)
   g_autofree gchar *templates = copy_unsigned_template_tree ();
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-      "svc:authority:zero", FALSE);
+          "svc:authority:zero", FALSE);
   g_assert_cmpint (service_decide (handle, "svc:authority:zero",
-          WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
-          WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_DENY);
 
   g_autoptr (WylServiceDecisionAuthority) authority =
       new_service_authority (handle, "svc:authority:zero", WYL_TENANT_DEFAULT);
@@ -551,7 +551,7 @@ test_service_authority_zero_role_and_forged_subject_deny (void)
   wyl_decide_req_set_action (forged, "wr.stream.read");
   wyl_decide_req_set_resource_id (forged, WYL_TENANT_DEFAULT);
   g_assert_cmpint (wyl_decide_with_service_authority (handle, forged,
-          authority, response), ==, WYRELOG_E_INVALID);
+      authority, response), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_decide_resp_get_decision (response), ==,
       WYL_DECISION_DENY);
   g_assert_cmpint (request_context_count (handle), ==, 0);
@@ -568,59 +568,59 @@ test_service_authority_faults_fail_closed (void)
 
   {
     g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-        "svc:authority:insert-fault", TRUE);
+            "svc:authority:insert-fault", TRUE);
     wyl_handle_set_engine_insert_fault_once (handle, "service_request_auth",
         WYRELOG_E_IO);
     g_assert_cmpint (service_decide (handle, "svc:authority:insert-fault",
-            WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
-            WYRELOG_E_IO), ==, WYL_DECISION_DENY);
+        WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+        WYRELOG_E_IO), ==, WYL_DECISION_DENY);
     g_assert_cmpint (request_context_count (handle), ==, 0);
   }
   {
     g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-        "svc:authority:query-fault", TRUE);
+            "svc:authority:query-fault", TRUE);
     wyl_handle_set_engine_contains_fault_once (handle, "service_allow_bool",
         WYRELOG_E_IO);
     g_assert_cmpint (service_decide (handle, "svc:authority:query-fault",
-            WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
-            WYRELOG_E_IO), ==, WYL_DECISION_DENY);
+        WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+        WYRELOG_E_IO), ==, WYL_DECISION_DENY);
     g_assert_cmpint (request_context_count (handle), ==, 0);
   }
   {
     g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-        "svc:authority:cleanup-fault", TRUE);
+            "svc:authority:cleanup-fault", TRUE);
     wyl_handle_set_engine_remove_fault_once (handle, "service_request_auth",
         WYRELOG_E_IO);
     g_assert_cmpint (service_decide (handle, "svc:authority:cleanup-fault",
-            WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
-            WYRELOG_E_IO), ==, WYL_DECISION_DENY);
+        WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+        WYRELOG_E_IO), ==, WYL_DECISION_DENY);
     g_assert_null (wyl_handle_get_read_engine (handle));
     g_assert_null (wyl_handle_get_delta_engine (handle));
   }
   {
     g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-        "svc:authority:terminal-fault", TRUE);
+            "svc:authority:terminal-fault", TRUE);
     WylServiceAuthReadLease *lease = NULL;
     g_assert_cmpint (wyl_service_auth_authority_acquire_read
-        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-            &lease), ==, WYRELOG_E_OK);
+          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+        &lease), ==, WYRELOG_E_OK);
     wyl_service_auth_read_lease_test_fail_terminal_prevalidation (lease);
     g_autoptr (WylServiceDecisionAuthority) authority = NULL;
     g_assert_cmpint (wyl_service_decision_authority_new_resolved (handle,
-            &lease, "svc:authority:terminal-fault", WYL_TENANT_DEFAULT,
-            &authority), ==, WYRELOG_E_OK);
+        &lease, "svc:authority:terminal-fault", WYL_TENANT_DEFAULT,
+        &authority), ==, WYRELOG_E_OK);
     g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
     g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
     wyl_decide_req_set_subject_id (req, "svc:authority:terminal-fault");
     wyl_decide_req_set_action (req, "wr.stream.read");
     wyl_decide_req_set_resource_id (req, WYL_TENANT_DEFAULT);
     g_assert_cmpint (wyl_decide_with_service_authority (handle, req, authority,
-            resp), ==, WYRELOG_E_INTERNAL);
+        resp), ==, WYRELOG_E_INTERNAL);
     g_assert_cmpint (wyl_decide_resp_get_decision (resp), ==,
         WYL_DECISION_DENY);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (reason, ==,
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -652,7 +652,7 @@ concurrent_service_decide (gpointer data)
   ConcurrentDecision *decision = data;
   g_autoptr (WylServiceDecisionAuthority) authority =
       new_service_authority (decision->handle, "svc:authority:concurrent",
-      decision->authority_tenant);
+          decision->authority_tenant);
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   wyl_decide_req_set_subject_id (req, "svc:authority:concurrent");
@@ -667,7 +667,7 @@ concurrent_service_decide (gpointer data)
   g_mutex_unlock (&decision->barrier->mutex);
 
   decision->rc = wyl_decide_with_service_authority (decision->handle, req,
-      authority, resp);
+          authority, resp);
   decision->decision = wyl_decide_resp_get_decision (resp);
   return NULL;
 }
@@ -678,14 +678,14 @@ test_service_authority_concurrent_context_isolation (void)
   g_autofree gchar *templates = copy_unsigned_template_tree ();
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-      "svc:authority:concurrent", TRUE);
+          "svc:authority:concurrent", TRUE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
-          &tenant_created), ==, WYRELOG_E_OK);
+      &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
-          "svc:authority:concurrent", "wr.stream.read", "tenant-b"), ==,
+      "svc:authority:concurrent", "wr.stream.read", "tenant-b"), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
   DecisionBarrier barrier = {.target = 4 };
@@ -815,15 +815,15 @@ nested_write_reload (gpointer data)
   ReloadDecisionRace *race = data;
   WylServiceAuthWriteLease *lease = NULL;
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (race->handle), race->handle,
-      NULL, &lease);
+        (wyl_handle_get_service_auth_authority (race->handle), race->handle,
+          NULL, &lease);
   wyl_policy_store_t *store = NULL;
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_write_lease_get_policy_store (lease, race->handle,
-        &store);
+            &store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_grant_direct_permission (store, "reload-witness",
-        "wr.stream.read", "witness-scope");
+            "wr.stream.read", "witness-scope");
   race->mutation_rc = rc;
   race->reload_rc = rc == WYRELOG_E_OK
       ? wyl_handle_reload_engine_pair (race->handle) : rc;
@@ -854,24 +854,24 @@ test_nested_write_reload_serializes_with_human_decide (void)
   g_autofree gchar *templates = copy_unsigned_template_tree ();
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-      "svc:reload:test", FALSE);
+          "svc:reload:test", FALSE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
-          "reload-human", "wr.stream.write_reserved", "reload-scope"), ==,
+      "reload-human", "wr.stream.write_reserved", "reload-scope"), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_principal_state (store,
-          "reload-human", "authenticated"), ==, WYRELOG_E_OK);
+      "reload-human", "authenticated"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_session_state (store, "reload-scope",
-          "active"), ==, WYRELOG_E_OK);
+      "active"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_permission_state (store,
-          "reload-human", "wr.stream.write_reserved", "reload-scope",
-          "armed"), ==, WYRELOG_E_OK);
+      "reload-human", "wr.stream.write_reserved", "reload-scope",
+      "armed"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_principal_state (store,
-          "reload-witness", "authenticated"), ==, WYRELOG_E_OK);
+      "reload-witness", "authenticated"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_session_state (store,
-          "witness-scope", "active"), ==, WYRELOG_E_OK);
+      "witness-scope", "active"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_permission_state (store,
-          "reload-witness", "wr.stream.read", "witness-scope", "armed"),
+      "reload-witness", "wr.stream.read", "witness-scope", "armed"),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
 
@@ -885,13 +885,13 @@ test_nested_write_reload_serializes_with_human_decide (void)
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
   GThread *decision = g_thread_new ("blocking-human-decision",
-      blocking_human_decide, &race);
+          blocking_human_decide, &race);
   wait_for_race_flag (&race, &race.decision_active);
 
   wyl_handle_set_reload_decision_checkpoint_for_test (handle,
       nested_reload_checkpoint, &race);
   GThread *reload = g_thread_new ("nested-write-reload",
-      nested_write_reload, &race);
+          nested_write_reload, &race);
   wait_for_race_flag (&race, &race.reload_waiting);
   g_mutex_lock (&race.mutex);
   g_assert_false (race.reload_acquired);
@@ -984,11 +984,11 @@ run_engine_operation (gpointer data)
   EngineOperationReloadRace *race = data;
   if (race->kind == ENGINE_OPERATION_AUDIT)
     race->operation_rc = wyl_handle_insert_audit_fact (race->handle,
-        "engine-session-audit", 725, "audit-subject", "audit-action",
-        "audit-resource", NULL, NULL, "audit-request", WYL_DECISION_DENY);
+            "engine-session-audit", 725, "audit-subject", "audit-action",
+            "audit-resource", NULL, NULL, "audit-request", WYL_DECISION_DENY);
   else
     race->operation_rc = wyl_handle_engine_insert (race->handle, "member_of",
-        race->delta_row, G_N_ELEMENTS (race->delta_row));
+            race->delta_row, G_N_ELEMENTS (race->delta_row));
   return NULL;
 }
 
@@ -1017,8 +1017,8 @@ assert_engine_operation_serializes_reload (EngineOperationKind kind)
   g_autofree gchar *templates = copy_unsigned_template_tree ();
   g_assert_nonnull (templates);
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
-      kind == ENGINE_OPERATION_AUDIT ? "svc:engine:audit" :
-      "svc:engine:delta", FALSE);
+          kind == ENGINE_OPERATION_AUDIT ? "svc:engine:audit" :
+          "svc:engine:delta", FALSE);
   EngineOperationReloadRace race = {
     .handle = handle,
     .kind = kind,
@@ -1031,22 +1031,22 @@ assert_engine_operation_serializes_reload (EngineOperationKind kind)
   if (kind == ENGINE_OPERATION_DELTA) {
     relation = "member_of";
     g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
-            "engine-delta-subject", &race.delta_row[0]), ==, WYRELOG_E_OK);
+        "engine-delta-subject", &race.delta_row[0]), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
-            "engine-delta-role", &race.delta_row[1]), ==, WYRELOG_E_OK);
+        "engine-delta-role", &race.delta_row[1]), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
-            "engine-delta-scope", &race.delta_row[2]), ==, WYRELOG_E_OK);
+        "engine-delta-scope", &race.delta_row[2]), ==, WYRELOG_E_OK);
   }
   wyl_handle_set_engine_operation_checkpoint_for_test (handle, relation,
       blocking_engine_operation_checkpoint, &race);
   GThread *operation = g_thread_new ("engine-operation",
-      run_engine_operation, &race);
+          run_engine_operation, &race);
   wait_for_engine_operation_flag (&race, &race.operation_entered);
 
   wyl_handle_set_reload_decision_checkpoint_for_test (handle,
       engine_operation_reload_checkpoint, &race);
   GThread *reload = g_thread_new ("engine-operation-reload",
-      reload_after_engine_operation, &race);
+          reload_after_engine_operation, &race);
   wait_for_engine_operation_flag (&race, &race.reload_waiting);
   g_mutex_lock (&race.mutex);
   g_assert_false (race.reload_acquired);

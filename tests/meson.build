@@ -1742,7 +1742,7 @@ test_service_decision_authority = executable('test-service-decision-authority',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  dependencies : [wyrelog_handle_test_seams_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep],
 )
 
 test('service-decision-authority', test_service_decision_authority,
