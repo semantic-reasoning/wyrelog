@@ -100,12 +100,13 @@ typedef struct
  * verified by the #595 exact opener; callers cannot retarget it by changing
  * either retained name.
  *
- * POSIX binds a retained nlink==2 hard-link pair.  Windows has no
- * representation yet and no code path that produces one: its locator rejects
- * NumberOfLinks != 1 for every regular file it hands out, so that proof is
- * unrepresentable there, and its authority fails closed.  A
- * WylFactGraphWinOperationEvidence tuple is the intended substitute, pending a
- * durable place to record it. */
+ * There is no Windows analogue of the POSIX retained nlink==2 pair.  Windows
+ * publishes by rename, so after publish the stage name does not exist and the
+ * final is at NumberOfLinks == 1 by construction; its substitute is the
+ * WylFactGraphWinOperationEvidence tuple minted from the stage before the
+ * rename, whose artifact identity survives it.  That tuple must be supplied by
+ * the caller and cannot be read back from the filesystem, which is why a
+ * Windows pair cannot survive a restart until #816 gives it a durable home. */
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
 
 typedef struct
@@ -228,6 +229,52 @@ wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_with_evidence
 wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
   (WylFactGraphDirectory * directory, WylFactGraphStage * stage,
     const WylFactGraphWinOperationEvidence * expected_evidence);
+/* Adopt the published final as a provisioned pair after exact evidence
+ * equality.  The evidence must be the tuple minted before the publishing
+ * rename: wyl_fact_graph_stage_publish_with_evidence forgets it, so a caller
+ * that reads it afterwards gets WYRELOG_E_INVALID.  The pair clones the
+ * directory, so it outlives the caller's own WylFactGraphDirectory. */
+wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphWinOperationEvidence * expected_evidence,
+    WylFactGraphProvisionedPair ** out_pair);
+/* Hot-path re-proof.  This is NOT the full contract, and the difference is
+ * deliberate.  Only the locator and the artifact-namespace implementation may
+ * call it: every other caller wants wyl_fact_graph_provisioned_pair_revalidate.
+ * It is declared here rather than in fact/graph-provisioned-pair-internal.h so
+ * the locator's own tests can pin the difference between the two forms.
+ *
+ * Both forms re-prove the artifact identity, NumberOfLinks == 1, its binding
+ * to the fixed `facts.duckdb` name, its protected owner-only DACL under the
+ * SID pinned at construction and still held by the live process token, and the
+ * graph directory's identity and its name binding inside its tenant.
+ *
+ * The full form additionally re-walks the absolute path from the volume root
+ * to the fact root.  On POSIX that walk is fstat-cheap and runs on every
+ * lease; the Windows twin enumerates the volume root and every intermediate
+ * component with FILE_ID_EXTD_DIRECTORY_INFO, so it runs only at pair
+ * construction and at each open_identified_provisioned_pair_pinned boundary.
+ *
+ * Residual: a substitution of the fact root or the tenant directory ABOVE the
+ * graph directory is caught at those two boundaries, not between them within a
+ * live namespace.  The form reachable under a live pair needs no rename --
+ * unprotecting an ancestor's DACL is the one tests/test-fact-graph-locator-
+ * windows.c pins, in both directions.  Renaming an ancestor, or planting a
+ * second entry alias-equivalent to a path component (validate_parent_entry
+ * accepts exactly one exact-spelled entry whose FileId matches, and no other
+ * alias-equivalent), is beyond that suite: Win32 canonicalisation cannot
+ * produce a coexisting trailing-dot or case variant, though an attacker using
+ * the \\?\ prefix or a case-sensitive directory can.  The pair holds all three
+ * directory handles open and re-proves the graph handle, so such a
+ * substitution leaves the live namespace serving the original object while
+ * fresh resolvers reach the new one: it fails stale, not open.
+ *
+ * A live pair also happens to leave those directories un-renameable in
+ * practice, but that is an observation about one attack vector on one
+ * filesystem, not a contract: the locator requires only DRIVE_FIXED and
+ * non-remote.  No check may be removed on the strength of it. */
+wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate_bound
+  (WylFactGraphProvisionedPair * pair);
 #endif
 /* Open the intentionally retained `stage + facts.duckdb` provisioning pair.
  * The operation UUID is canonical UUIDv7 and derives both names internally.
@@ -236,8 +283,12 @@ wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphRegularFile * out_final);
-/* Windows has no name-only adoption path, so its implementation of the opener
- * fails closed; see fact/graph-locator-windows-private.c. */
+/* The name-only form.  Windows has no name-only adoption path and fails this
+ * closed: an operation UUID derives a name, and a name is not provenance
+ * there.  Its callable form is
+ * wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence below.
+ * Once the operation-evidence tuple has a durable home (#816) this becomes a
+ * thin wrapper that loads it and calls that form. */
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphProvisionedPair ** out_pair);

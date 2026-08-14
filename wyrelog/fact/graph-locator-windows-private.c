@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-locator-private.h"
+#include "fact/graph-provisioned-pair-internal.h"
 #include "fact/graph-windows-security-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "wyl-id-private.h"
@@ -1211,8 +1212,12 @@ wyl_fact_root_writer_lease_release (WylFactRootWriterLease *lease)
   g_free (lease);
 }
 
+/* The handle-and-entry half of revalidate_named_regular: the held file still
+ * carries |identity| and exactly one entry of that spelling in the graph
+ * directory still resolves to it.  Callers that already hold a proven graph
+ * directory use this directly and skip the absolute-path re-walk. */
 static wyrelog_error_t
-revalidate_named_regular (WylFactGraphDirectory *directory,
+named_regular_bound_check (WylFactGraphDirectory *directory,
     const gchar *basename, HANDLE held,
     const WylFactGraphWinIdentity *identity, gboolean strict_acl)
 {
@@ -1225,6 +1230,16 @@ revalidate_named_regular (WylFactGraphDirectory *directory,
   if (rc == WYRELOG_E_OK)
     rc = validate_parent_entry (directory->graph_handle, (WCHAR *) wide,
             (gsize) units, identity);
+  return rc;
+}
+
+static wyrelog_error_t
+revalidate_named_regular (WylFactGraphDirectory *directory,
+    const gchar *basename, HANDLE held,
+    const WylFactGraphWinIdentity *identity, gboolean strict_acl)
+{
+  wyrelog_error_t rc = named_regular_bound_check (directory, basename, held,
+          identity, strict_acl);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   return rc;
@@ -1452,26 +1467,11 @@ wyl_fact_graph_directory_open_provisioned_final_exact
   return WYRELOG_E_POLICY;
 }
 
-/* What is unrepresentable on Windows is the POSIX *proof*, not the pair: this
-* locator rejects NumberOfLinks != 1 for every regular file it hands out, so a
-* retained nlink==2 hard link cannot exist here.  The native substitute is a
-* WylFactGraphWinOperationEvidence tuple, and the openers that consume one
-* are already written and tested here:
-* wyl_fact_graph_directory_stage_open_exact_with_evidence,
-* wyl_fact_graph_directory_open_provisioned_final_with_evidence and
-* wyl_fact_graph_stage_publish_with_evidence.  The namespace end of the
-* chain is written too, in
-* fact/graph-artifact-windows-namespace-private.c, though it takes a locator
-* and entries rather than an evidence tuple.
-*
-* What is missing is narrower: this neutral signature carries no evidence, so
-* it cannot reach any of them, and nothing persists a tuple either --
-* fact_graph_provisioning has no evidence column, so an operation cannot be
-* reconstituted across a restart.  An in-process caller that still holds its
-* stage could build a pair today through an evidence-bearing variant; that
-* variant does not exist yet.  Until it does, adopting `facts.duckdb` by name
-* would give Windows a materially weaker contract than POSIX enforces, so
-* every entry point below that can produce or validate a pair fails closed. */
+/* The name-only form.  An operation UUID derives a name, and a name is not
+ * provenance on Windows, so this fails closed here.  The callable form is
+ * wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence below.
+ * Once the evidence tuple has a durable home (#816) this becomes a thin
+ * wrapper that loads it and calls that form. */
 wyrelog_error_t
 wyl_fact_graph_directory_open_provisioned_pair_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
@@ -1484,31 +1484,284 @@ wyl_fact_graph_directory_open_provisioned_pair_exact
   return WYRELOG_E_POLICY;
 }
 
-/* No pair can be constructed on this platform, so these only ever observe the
- * NULL that the failed opener leaves behind.  They stay total anyway: the
- * neutral contract says a pair is refcounted and revalidatable, and a caller
- * that ignores the open failure must not fall off a cliff here.  _ref answers
- * NULL rather than echoing its argument: it takes no reference, so handing one
- * back would be a count this file cannot honour once a real pair lands. */
-WylFactGraphProvisionedPair *
-wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair * pair)
+/* Clone the directory authority so the pair outlives the caller's own
+ * WylFactGraphDirectory.  Revalidation runs with only the pair in hand and
+ * dereferences all three handles and all three path strings, every one of
+ * which wyl_fact_graph_directory_clear frees, so borrowing would be a dangling
+ * read on a security-decision path rather than a fail-closed refusal.
+ *
+ * DuplicateHandle yields a new handle to the same file object, so handle
+ * identity is preserved trivially; what the clone's later revalidation
+ * re-proves is the name-to-object binding, by reopening root, tenant and graph
+ * by name and comparing.  That is exactly what an attacker can change.
+ *
+ * The checkpoint hooks are deliberately not carried over: they belong to the
+ * operation that minted the directory, not to this retained authority. */
+static wyrelog_error_t
+provisioned_pair_directory_clone (WylFactGraphDirectory *source,
+    WylFactGraphDirectory *destination)
 {
-  (void) pair;
-  return NULL;
+  *destination = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  wyrelog_error_t rc = directory_revalidate (source);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  HANDLE self = GetCurrentProcess ();
+  gboolean duplicated = DuplicateHandle (self, source->root_handle, self,
+          (HANDLE *) &destination->root_handle, 0, FALSE,
+          DUPLICATE_SAME_ACCESS)
+      && DuplicateHandle (self, source->tenant_handle, self,
+          (HANDLE *) &destination->tenant_handle, 0, FALSE,
+          DUPLICATE_SAME_ACCESS)
+      && DuplicateHandle (self, source->graph_handle, self,
+          (HANDLE *) &destination->graph_handle, 0, FALSE,
+          DUPLICATE_SAME_ACCESS);
+  if (!duplicated) {
+    wyl_fact_graph_directory_clear (destination);
+    return WYRELOG_E_IO;
+  }
+
+  destination->root_identity = source->root_identity;
+  destination->tenant_identity = source->tenant_identity;
+  destination->graph_identity = source->graph_identity;
+  destination->root_path = try_strdup (source->root_path);
+  destination->tenant_component = try_strdup (source->tenant_component);
+  destination->graph_component = try_strdup (source->graph_component);
+  if (destination->root_path == NULL || destination->tenant_component == NULL
+      || destination->graph_component == NULL) {
+    wyl_fact_graph_directory_clear (destination);
+    return WYRELOG_E_NOMEM;
+  }
+
+  rc = directory_revalidate (destination);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_graph_directory_clear (destination);
+  return rc;
 }
 
-void
-wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair)
+/* The POSIX pair compares the held file's owner against both the value pinned
+ * at construction and the live effective uid.  Do both here too.
+ *
+ * Within one process the live half cannot fire: a process token's user SID is
+ * immutable for the process lifetime, and named_regular_bound_check already
+ * validates the same DACL against that live SID.  The pinned half is what
+ * matters at the boundary #816 introduces, where a pair is rebuilt from a
+ * durable record and the identity that minted it is no longer implied by the
+ * caller.  Neither half catches an impersonating thread; that would need
+ * OpenThreadToken rather than OpenProcessToken. */
+static wyrelog_error_t
+provisioned_pair_owner_check (WylFactGraphProvisionedPair *pair, HANDLE held)
 {
-  (void) pair;
+  if (pair->owner_token.user == NULL || !IsValidSid (pair->owner_token.user))
+    return WYRELOG_E_POLICY;
+
+  WylFactGraphWinTokenIdentity live = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_win_token_identity_init (&live);
+  if (rc == WYRELOG_E_OK && !EqualSid (live.user, pair->owner_token.user))
+    rc = WYRELOG_E_POLICY;
+  wyl_fact_graph_win_token_identity_clear (&live);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_fact_graph_win_validate_protected_owner_acl_for_user (held,
+             pair->owner_token.user, 0);
+}
+
+static wyrelog_error_t
+provisioned_pair_handle_revalidate (WylFactGraphProvisionedPair *pair,
+    HANDLE held)
+{
+  WylFactGraphWinIdentity observed = { 0 };
+  DWORD flags = 0;
+  if (!handle_is_valid (held))
+    return WYRELOG_E_POLICY;
+  if (!GetHandleInformation (held, &flags)
+      || (flags & HANDLE_FLAG_INHERIT) != 0)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = query_regular_identity (held, &observed);
+  if (rc == WYRELOG_E_OK
+      && !identity_equal (&observed, &pair->evidence.artifact_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_owner_check (pair, held);
+  return rc;
+}
+
+/* The provenance half, shared by both revalidation forms: the pair still names
+ * the operation it was minted for, and its evidence still binds this graph. */
+static wyrelog_error_t
+provisioned_pair_provenance_check (WylFactGraphProvisionedPair *pair)
+{
+  if (pair == NULL || g_atomic_int_get (&pair->references) <= 0
+      || pair->operation_uuid == NULL || pair->stage_basename == NULL)
+    return WYRELOG_E_INVALID;
+  if (!operation_evidence_is_valid (&pair->evidence))
+    return WYRELOG_E_POLICY;
+
+  wyl_id_t operation_id;
+  g_autofree gchar *derived = NULL;
+  wyrelog_error_t rc = operation_uuid_parse_canonical (pair->operation_uuid,
+          &operation_id);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (pair->operation_uuid,
+            &derived);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_strcmp0 (derived, pair->stage_basename) != 0
+      || !operation_evidence_matches_id (&pair->evidence, &operation_id)
+      || !identity_equal (&pair->directory.graph_identity,
+      &pair->evidence.graph_identity))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_provisioned_pair_revalidate_bound
+  (WylFactGraphProvisionedPair * pair)
+{
+  wyrelog_error_t rc = provisioned_pair_provenance_check (pair);
+  /* The graph directory's own name binding inside its tenant.  Nothing else on
+   * the namespace hot path re-proves this, and it is what a substitution of
+   * that directory -- by rename or by an alias-equivalent entry -- changes.
+   * revalidate_named_child opens with the same validate_directory this would
+   * otherwise repeat, so it is not called separately here. */
+  if (rc == WYRELOG_E_OK)
+    rc = revalidate_named_child (pair->directory.tenant_handle,
+            pair->directory.graph_component, pair->directory.graph_handle,
+            &pair->directory.graph_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_handle_revalidate (pair, pair->held_final_handle);
+  if (rc == WYRELOG_E_OK)
+    rc = named_regular_bound_check (&pair->directory, "facts.duckdb",
+            pair->held_final_handle, &pair->evidence.artifact_identity, TRUE);
+  return rc;
 }
 
 wyrelog_error_t
 wyl_fact_graph_provisioned_pair_revalidate
   (WylFactGraphProvisionedPair * pair)
 {
-  (void) pair;
-  return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = provisioned_pair_provenance_check (pair);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (&pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_handle_revalidate (pair, pair->held_final_handle);
+  if (rc == WYRELOG_E_OK)
+    rc = named_regular_bound_check (&pair->directory, "facts.duckdb",
+            pair->held_final_handle, &pair->evidence.artifact_identity, TRUE);
+  /* Re-prove the directory between the two name-binding passes, so a
+   * substitution racing the first pass is caught rather than straddling the
+   * validation window.  This mirrors the POSIX pair's stat/revalidate/stat;
+   * calling the full revalidate_named_regular above would have re-walked the
+   * volume root twice in a row, which proves nothing the first walk did not. */
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (&pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = named_regular_bound_check (&pair->directory, "facts.duckdb",
+            pair->held_final_handle, &pair->evidence.artifact_identity, TRUE);
+  return rc;
+}
+
+WylFactGraphProvisionedPair *
+wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair * pair)
+{
+  if (pair != NULL)
+    g_atomic_int_inc (&pair->references);
+  return pair;
+}
+
+void
+wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair)
+{
+  if (pair == NULL || !g_atomic_int_dec_and_test (&pair->references))
+    return;
+  if (handle_is_valid (pair->held_final_handle))
+    CloseHandle (pair->held_final_handle);
+  wyl_fact_graph_directory_clear (&pair->directory);
+  wyl_fact_graph_win_token_identity_clear (&pair->owner_token);
+  g_free (pair->operation_uuid);
+  g_free (pair->stage_basename);
+  g_free (pair);
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphWinOperationEvidence * expected_evidence,
+    WylFactGraphProvisionedPair ** out_pair)
+{
+  if (out_pair != NULL)
+    *out_pair = NULL;
+  if (directory == NULL || out_pair == NULL
+      || !operation_evidence_is_valid (expected_evidence))
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphRegularFile held =
+      (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  wyrelog_error_t rc =
+      wyl_fact_graph_directory_open_provisioned_final_with_evidence (directory,
+          operation_uuid, expected_evidence, &held);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylFactGraphProvisionedPair *pair =
+      g_try_new0 (WylFactGraphProvisionedPair, 1);
+  if (pair == NULL) {
+    wyl_fact_graph_regular_file_clear (&held);
+    return WYRELOG_E_NOMEM;
+  }
+  pair->references = 1;
+  pair->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  pair->evidence = *expected_evidence;
+  pair->held_final_handle = held.handle;
+  held.handle = NULL;
+  pair->operation_uuid = try_strdup (operation_uuid);
+  if (pair->operation_uuid == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (operation_uuid,
+            &pair->stage_basename);
+  /* Pin the process token once, at construction.  Never re-query it as this
+   * authority's owner: impersonation or a token change must not silently
+   * widen an authority that was already issued. */
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_win_token_identity_init (&pair->owner_token);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioned_pair_directory_clone (directory, &pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+
+  /* Prove the published final is writable under its protected ACL without
+   * retaining the handle.  The Windows namespace reopens facts.duckdb for
+   * itself, so a held writable handle would be interrogated by nothing; POSIX
+   * keeps one only because it hands that descriptor to the namespace. */
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-pair-pre-writable-open",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK) {
+    HANDLE probe = INVALID_HANDLE_VALUE;
+    WylFactGraphWinIdentity probe_identity = { 0 };
+    rc = open_relative_regular (pair->directory.graph_handle, "facts.duckdb",
+            GENERIC_READ | GENERIC_WRITE, FALSE, TRUE, &probe,
+            &probe_identity);
+    if (rc == WYRELOG_E_OK && !identity_equal (&probe_identity,
+        &pair->evidence.artifact_identity))
+      rc = WYRELOG_E_POLICY;
+    if (handle_is_valid (probe))
+      CloseHandle (probe);
+  }
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-pair-post-writable-open",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_graph_provisioned_pair_free (pair);
+    return rc;
+  }
+  *out_pair = pair;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
