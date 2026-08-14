@@ -290,7 +290,7 @@ wyl_fact_artifact_reader_wal_binding_free (WylFactArtifactReaderWalBinding *b)
 }
 
 /* Only the neutral, pair-bound entry point is missing on Windows: the native
- * adoption path wyl_fact_artifact_win_namespace_open_provisioned_pair_internal
+ * adoption path wyl_fact_artifact_win_namespace_adopt_entries_for_test
  * below is real and covered by tests/test-fact-artifact-namespace-windows.c.
  * This one still fails closed: forwarding a constructed pair to a namespace
  * is the next commit's work.  A pair itself can now be built from in-process
@@ -2619,7 +2619,7 @@ wyl_fact_artifact_win_temp_orphan_evidence_bytes (const WylFactArtifactWinTempOr
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_namespace_open_provisioned_pair_internal (
+wyl_fact_artifact_win_namespace_adopt_entries_for_test (
   WylFactArtifactWinLocator *locator, WylFactArtifactWinEntry *main_entry,
   WylFactArtifactWinEntry *lock_entry,
   WylFactArtifactWinNamespace **out_namespace)

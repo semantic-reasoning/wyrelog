@@ -2587,7 +2587,7 @@ test_io_session_query_metadata_and_revalidate (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &main_entry), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb.lock", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &lock_entry), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_provisioned_pair_internal (locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_adopt_entries_for_test (locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns, &lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &binding), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session (binding, &session), ==, WYRELOG_E_OK);
@@ -2642,7 +2642,7 @@ test_temp_root_spill_child_capabilities (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &main_entry), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb.lock", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &lock_entry), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_provisioned_pair_internal (locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_adopt_entries_for_test (locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns, &lease), ==, WYRELOG_E_OK);
 
   /* Create temp root with orphan evidence */
@@ -2702,7 +2702,7 @@ test_io_session_read_only_access_intent (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &main_entry), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb.lock", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &lock_entry), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_provisioned_pair_internal (locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_adopt_entries_for_test (locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns, &lease), ==, WYRELOG_E_OK);
 
   /* Open write sidecar */
