@@ -989,6 +989,38 @@ wyl_fact_store_ensure_projection (wyl_fact_store_t *store,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_store_validate_projection (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    gboolean *out_exists)
+{
+  if (out_exists != NULL)
+    *out_exists = FALSE;
+  if (store == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
+  if (table == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&store->lock);
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, schema->tenant_id,
+            schema->graph_id, FALSE);
+  gboolean exists = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = table_exists_unlocked (store, table, &exists);
+  if (rc == WYRELOG_E_OK)
+    *out_exists = exists;
+  if (rc == WYRELOG_E_OK && exists)
+    rc = validate_projection_shape_unlocked (store, schema, table);
+  g_mutex_unlock (&store->lock);
+  return rc;
+}
+
 static wyrelog_error_t
 existing_batch_matches_unlocked (wyl_fact_store_t *store,
     const wyl_fact_store_batch_t *batch, const gchar *content_hash,
