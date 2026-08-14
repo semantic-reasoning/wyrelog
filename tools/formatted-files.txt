@@ -1,4 +1,5 @@
 tests/fact-test-support.h
+tests/test-access-decision.c
 tests/test-audit-emit.c
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
@@ -30,10 +31,12 @@ tests/test-revoke-req.c
 tests/test-secure-duckdb-bridge.c
 tests/test-service-credential-domain.c
 tests/test-service-credential-operation-root.h
+tests/test-service-decision-authority.c
 tests/test-service-exchange-private.c
 tests/test-session-id.c
 tests/test-session-logout.c
 tests/test-session-registry.c
+tests/test-template-tree.c
 tests/test-traits-compile.c
 tests/test-wyctl-basic.c
 wyrelog/access/break-glass-private.h
@@ -121,6 +124,8 @@ wyrelog/wyl-boot-private.h
 wyrelog/wyl-boot.c
 wyrelog/wyl-client-private.h
 wyrelog/wyl-common-private.h
+wyrelog/wyl-decide-private.h
+wyrelog/wyl-decide.c
 wyrelog/wyl-dl-static-private.h
 wyrelog/wyl-engine.c
 wyrelog/wyl-events-private.h

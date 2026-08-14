@@ -619,7 +619,7 @@ static inline GQuark
 wyl_handle_engine_contains_fault_once_quark (void)
 {
   return g_quark_from_static_string
-      ("wyrelog-handle-engine-contains-fault-once");
+           ("wyrelog-handle-engine-contains-fault-once");
 }
 
 static inline void

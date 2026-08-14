@@ -3052,7 +3052,7 @@ preintern_policy_store_symbols (WylHandle *self,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_service_principal (self->policy_store,
-      preintern_policy_store_service_principal_symbols, self);
+          preintern_policy_store_service_principal_symbols, self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_foreach_principal_event (self->policy_store,
@@ -4826,7 +4826,7 @@ insert_policy_store_service_principal_state (const
   wyrelog_error_t fault_rc = WYRELOG_E_OK;
 #ifdef WYL_TEST_HANDLE_SEAMS
   WylHandleEngineInsertFaultOnce *insert_fault = g_object_get_qdata
-      (G_OBJECT (self), wyl_handle_engine_insert_fault_once_quark ());
+        (G_OBJECT (self), wyl_handle_engine_insert_fault_once_quark ());
   if (insert_fault != NULL
       && g_strcmp0 (insert_fault->relation, "service_principal_state") == 0) {
     fault_rc = insert_fault->rc;
@@ -4841,11 +4841,11 @@ insert_policy_store_service_principal_state (const
     return fault_rc;
 #endif
   rc = wyl_engine_owned_insert (self->read_engine,
-      "service_principal_state", row, 2);
+          "service_principal_state", row, 2);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_engine_owned_insert (self->delta_engine,
-      "service_principal_state", row, 2);
+          "service_principal_state", row, 2);
   if (rc != WYRELOG_E_OK)
     return rc;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -4867,7 +4867,7 @@ wyl_handle_load_policy_store_service_principal_states (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_service_principal (self->policy_store,
-      insert_policy_store_service_principal_state, self);
+             insert_policy_store_service_principal_state, self);
 }
 
 static wyrelog_error_t
@@ -5232,7 +5232,7 @@ wyl_handle_engine_contains_locked (WylHandle *self, const gchar *relation,
 
   wyrelog_error_t fault_rc = WYRELOG_E_OK;
   if (take_engine_fault_once (self,
-          wyl_handle_engine_contains_fault_once_quark (), relation, &fault_rc))
+      wyl_handle_engine_contains_fault_once_quark (), relation, &fault_rc))
     return fault_rc;
 
   const gchar *snapshot_relation = relation;

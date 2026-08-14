@@ -236,6 +236,8 @@ typedef struct
    * uninitialised memory. Never set on the human or session-token path.
    */
   gboolean service_authenticated;
+  /* Held from bearer resolution through the service decision. */
+  WylServiceAuthReadLease *service_lease;
 } WylDaemonAuthContext;
 
 typedef struct _WylHumanRefreshResult
@@ -1523,6 +1525,8 @@ wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
   g_free (auth->session_id);
   g_free (auth->actor);
   g_free (auth->tenant);
+  if (auth->service_lease != NULL)
+    (void) wyl_service_auth_read_lease_release_terminal (&auth->service_lease);
   memset (auth, 0, sizeof *auth);
 }
 
@@ -5986,6 +5990,10 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
        * bearer tail below or the session-token path.
        */
       out_auth->service_authenticated = TRUE;
+      /* Keep the resolver's lease until the request-local authority has
+       * completed its policy query. Re-acquiring here would leave a revoke
+       * race between authentication and authorization. */
+      out_auth->service_lease = g_steal_pointer (&lease);
 #ifdef WYL_TEST_DAEMON_HTTP
       if (ctx->resolver_checkpoint != NULL)
         ctx->resolver_checkpoint (WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED,
@@ -7144,6 +7152,34 @@ wyl_daemon_http_profile_events_ingest_for_test (WylDaemonProfile profile,
 static gboolean
 tenant_scope_is_allowed (const gchar * tenant, const gchar * scope);
 
+/* Evaluate a request only after the bearer resolver has established its
+ * complete subject/tenant tuple. Service credentials receive a fresh,
+ * request-local authority whose READ lease spans context insertion, signed
+ * policy evaluation, and cleanup; human sessions retain the existing path. */
+static wyrelog_error_t
+decide_authenticated_request (WylHandle *handle, const wyl_decide_req_t *req,
+    gboolean service_authenticated, const gchar *subject, const gchar *tenant,
+    WylServiceAuthReadLease **inout_lease,
+    wyl_decide_resp_t *resp)
+{
+  if (!service_authenticated)
+    return wyl_decide (handle, req, resp);
+  if (subject == NULL || tenant == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (inout_lease == NULL || *inout_lease == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceDecisionAuthority *authority = NULL;
+  wyrelog_error_t rc = wyl_service_decision_authority_new_resolved (handle,
+          inout_lease, subject,
+          tenant, &authority);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_decide_with_service_authority (handle, req, authority, resp);
+  wyl_service_decision_authority_free (authority);
+  return rc;
+}
+
 static gboolean
 authorize_guarded_session_action_extended (SoupServer *server,
     SoupServerMessage *msg,
@@ -7236,7 +7272,9 @@ authorize_guarded_session_action_extended (SoupServer *server,
   wyl_decide_req_set_service_bearer_authenticated (req,
       auth.service_authenticated);
 
-  wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
+  wyrelog_error_t rc = decide_authenticated_request (ctx->handle, req,
+          auth.service_authenticated, auth.actor, auth.tenant,
+          &auth.service_lease, resp);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, invalid_code);
     return FALSE;
@@ -7697,7 +7735,9 @@ service_principal_management_authorize_session (SoupServer *server,
    * human/session-token bearers so nothing is asserted for them. */
   wyl_decide_req_set_service_bearer_authenticated (req,
       auth.service_authenticated);
-  decision_rc = wyl_decide (ctx->handle, req, resp);
+  decision_rc = decide_authenticated_request (ctx->handle, req,
+          auth.service_authenticated, auth.actor, auth.tenant,
+          &auth.service_lease, resp);
   if (decision_rc == WYRELOG_E_INVALID) {
     if (lease != NULL) {
       wyrelog_error_t release_rc =
@@ -15075,7 +15115,9 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   wyl_decide_req_set_service_bearer_authenticated (req,
       auth.service_authenticated);
 
-  wyrelog_error_t rc = wyl_decide (handle, req, resp);
+  wyrelog_error_t rc = decide_authenticated_request (handle, req,
+          auth.service_authenticated, auth.actor, auth.tenant,
+          &auth.service_lease, resp);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_decide_request");
     return;

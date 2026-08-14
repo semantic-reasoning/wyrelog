@@ -81,27 +81,27 @@ check_stratification (void)
   };
   wyl_dl_rule_t rules[] = {
     {.head = "allow_guard_base",.body = allow_guard_base_body,
-        .body_len = G_N_ELEMENTS (allow_guard_base_body)},
+     .body_len = G_N_ELEMENTS (allow_guard_base_body)},
     {.head = "guarded_perm",.body = guarded_perm_body,
-        .body_len = G_N_ELEMENTS (guarded_perm_body)},
+     .body_len = G_N_ELEMENTS (guarded_perm_body)},
     {.head = "allow",.body = allow_body,.body_len = G_N_ELEMENTS (allow_body)},
     {.head = "allow_bool",.body = allow_bool_body,
-        .body_len = G_N_ELEMENTS (allow_bool_body)},
+     .body_len = G_N_ELEMENTS (allow_bool_body)},
     {.head = "login_skip_mfa_authz_observed",
-          .body = login_skip_mfa_observed_body,
-        .body_len = G_N_ELEMENTS (login_skip_mfa_observed_body)},
+     .body = login_skip_mfa_observed_body,
+     .body_len = G_N_ELEMENTS (login_skip_mfa_observed_body)},
     {.head = "deny_reason",.body = dr_frozen_body,
-        .body_len = G_N_ELEMENTS (dr_frozen_body)},
+     .body_len = G_N_ELEMENTS (dr_frozen_body)},
     {.head = "deny_reason",.body = dr_disabled_role_body,
-        .body_len = G_N_ELEMENTS (dr_disabled_role_body)},
+     .body_len = G_N_ELEMENTS (dr_disabled_role_body)},
     {.head = "deny_reason",.body = dr_sod_body,
-        .body_len = G_N_ELEMENTS (dr_sod_body)},
+     .body_len = G_N_ELEMENTS (dr_sod_body)},
     {.head = "deny_reason",.body = dr_not_auth_body,
-        .body_len = G_N_ELEMENTS (dr_not_auth_body)},
+     .body_len = G_N_ELEMENTS (dr_not_auth_body)},
     {.head = "deny_reason",.body = dr_session_inactive_body,
-        .body_len = G_N_ELEMENTS (dr_session_inactive_body)},
+     .body_len = G_N_ELEMENTS (dr_session_inactive_body)},
     {.head = "deny_reason",.body = dr_not_armed_body,
-        .body_len = G_N_ELEMENTS (dr_not_armed_body)},
+     .body_len = G_N_ELEMENTS (dr_not_armed_body)},
   };
 
   if (wyl_dl_static_check (rules, G_N_ELEMENTS (rules)) != WYRELOG_E_OK)
@@ -187,7 +187,7 @@ check_origin_tags (void)
     {WYL_DENY_REASON_DISABLED_ROLE, "disabled_role", "disabled_role_for"},
     {WYL_DENY_REASON_SOD, "sod", "policy_violation"},
     {WYL_DENY_REASON_NOT_AUTHENTICATED, "not_authenticated",
-        "principal_state"},
+     "principal_state"},
     {WYL_DENY_REASON_SESSION_INACTIVE, "session_inactive", "session_state"},
     {WYL_DENY_REASON_NOT_ARMED, "not_armed", "perm_state"},
   };
@@ -266,7 +266,7 @@ check_head_mirror (void)
   gsize len = 0;
   g_autoptr (GError) err = NULL;
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &contents,
-          &len, &err)) {
+      &len, &err)) {
     g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
         err ? err->message : "?");
     return 100;
@@ -332,7 +332,7 @@ check_audit_fact_declarations (void)
   g_autoptr (GError) err = NULL;
 
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &contents,
-          &len, &err)) {
+      &len, &err)) {
     g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
         err ? err->message : "?");
     return 163;
@@ -371,64 +371,66 @@ check_decision_rule_bodies (void)
 {
   static const gchar *snippets[] = {
     "allow_guard_base(U, P, S) :-\n"
-        "    has_permission(U, P, S),\n"
-        "    principal_state(U, \"authenticated\"),\n"
-        "    session_state(S, ST),\n"
-        "    session_active(ST),\n"
-        "    !frozen(S),\n"
-        "    !disabled_role_for(U, P),\n"
-        "    !policy_violation(\"sod\", U, P, _).",
+    "    has_permission(U, P, S),\n"
+    "    principal_state(U, \"authenticated\"),\n"
+    "    session_state(S, ST),\n"
+    "    session_active(ST),\n"
+    "    !frozen(S),\n"
+    "    !disabled_role_for(U, P),\n"
+    "    !policy_violation(\"sod\", U, P, _).",
     "guarded_perm(P) :- perm_arm_rule(P, _).",
     "allow(U, P, S) :-\n"
-        "    allow_guard_base(U, P, S),\n" "    armed(U, P, S).",
+    "    allow_guard_base(U, P, S),\n" "    armed(U, P, S).",
     "allow_bool(U, P, S) :- allow(U, P, S).",
     ".decl service_principal_state(subject: symbol, state: symbol)",
     ".decl service_request_auth(context: symbol, subject: symbol, tenant: symbol)",
     ".decl service_principal_state_observed(subject: symbol, state: symbol)",
     ".decl service_request_auth_observed(context: symbol, subject: symbol,\n"
-        "    tenant: symbol)",
+    "    tenant: symbol)",
     ".decl service_armed(context: symbol, user: symbol, perm: symbol, scope: symbol)",
     ".decl service_allow_bool(context: symbol, user: symbol, perm: symbol,\n"
-        "    scope: symbol)",
+    "    scope: symbol)",
     "service_principal_state_observed(Subject, State) :-\n"
-        "    service_principal_state(Subject, State).",
+    "    service_principal_state(Subject, State).",
     "service_request_auth_observed(Context, Subject, Tenant) :-\n"
-        "    service_request_auth(Context, Subject, Tenant).",
+    "    service_request_auth(Context, Subject, Tenant).",
     "service_armed(Context, U, P, S) :-\n"
-        "    service_request_auth(Context, U, S),\n"
-        "    service_principal_state(U, \"active\"),\n"
-        "    approved_data_plane_permission(P).",
+    "    service_request_auth(Context, U, S),\n"
+    "    service_principal_state(U, \"active\"),\n"
+    "    approved_data_plane_permission(P),\n"
+    "    !disabled_role_for(U, P),\n"
+    "    !policy_violation(\"sod\", U, P, _).",
     "service_allow_bool(Context, U, P, S) :-\n"
-        "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
+    "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
     ".decl login_skip_mfa_authz(user: symbol)",
     ".decl login_skip_mfa_authz_observed(user: symbol)",
     "login_skip_mfa_authz_observed(U) :-\n" "    login_skip_mfa_authz(U).",
     "deny_reason(U, P, S, \"frozen\", \"frozen\") :-\n"
-        "    has_permission(U, P, S),\n" "    frozen(S).",
+    "    has_permission(U, P, S),\n" "    frozen(S).",
     "deny_reason(U, P, S, \"disabled_role\", \"disabled_role_for\") :-\n"
-        "    has_permission(U, P, S),\n" "    disabled_role_for(U, P).",
+    "    has_permission(U, P, S),\n" "    disabled_role_for(U, P).",
     "deny_reason(U, P, S, \"sod\", \"policy_violation\") :-\n"
-        "    has_permission(U, P, S),\n"
-        "    policy_violation(\"sod\", U, P, _).",
+    "    has_permission(U, P, S),\n"
+    "    policy_violation(\"sod\", U, P, _).",
     "deny_reason(U, P, S, \"not_authenticated\", \"principal_state\") :-\n"
-        "    has_permission(U, P, S),\n"
-        "    !principal_state(U, \"authenticated\").",
+    "    has_permission(U, P, S),\n"
+    "    !principal_state(U, \"authenticated\").",
     "deny_reason(U, P, S, \"session_inactive\", \"session_state\") :-\n"
-        "    has_permission(U, P, S),\n"
-        "    principal_state(U, \"authenticated\"),\n"
-        "    session_state(S, ST),\n" "    !session_active(ST).",
+    "    has_permission(U, P, S),\n"
+    "    principal_state(U, \"authenticated\"),\n"
+    "    session_state(S, ST),\n" "    !session_active(ST).",
     "deny_reason(U, P, S, \"not_armed\", \"perm_state\") :-\n"
-        "    has_permission(U, P, S),\n"
-        "    principal_state(U, \"authenticated\"),\n"
-        "    session_state(S, ST),\n"
-        "    session_active(ST),\n" "    !armed(U, P, S).",
+    "    has_permission(U, P, S),\n"
+    "    principal_state(U, \"authenticated\"),\n"
+    "    session_state(S, ST),\n"
+    "    session_active(ST),\n" "    !armed(U, P, S).",
   };
   g_autofree gchar *contents = NULL;
   gsize len = 0;
   g_autoptr (GError) err = NULL;
 
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &contents,
-          &len, &err)) {
+      &len, &err)) {
     g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
         err ? err->message : "?");
     return 180;
@@ -438,7 +440,7 @@ check_decision_rule_bodies (void)
 
   for (gsize i = 0; i < G_N_ELEMENTS (snippets); i++) {
     gint rc = check_snippet_present (normalized, len, snippets[i],
-        (gint) (181 + i));
+            (gint) (181 + i));
     if (rc != 0)
       return rc;
   }
@@ -508,7 +510,7 @@ check_legacy_declarations_match_canonical (void)
   g_autoptr (GError) err = NULL;
 
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &canonical,
-          &canonical_len, &err)) {
+      &canonical_len, &err)) {
     g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
         err ? err->message : "?");
     return 173;
@@ -516,7 +518,7 @@ check_legacy_declarations_match_canonical (void)
 
   g_clear_error (&err);
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, &legacy,
-          &legacy_len, &err)) {
+      &legacy_len, &err)) {
     g_printerr ("cannot read %s: %s\n",
         WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, err ? err->message : "?");
     return 174;
@@ -542,7 +544,7 @@ check_legacy_template_matches_canonical (void)
   g_autoptr (GError) err = NULL;
 
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &canonical,
-          &canonical_len, &err)) {
+      &canonical_len, &err)) {
     g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
         err ? err->message : "?");
     return 170;
@@ -550,7 +552,7 @@ check_legacy_template_matches_canonical (void)
 
   g_clear_error (&err);
   if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, &legacy,
-          &legacy_len, &err)) {
+      &legacy_len, &err)) {
     g_printerr ("cannot read %s: %s\n",
         WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, err ? err->message : "?");
     return 171;

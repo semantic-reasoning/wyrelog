@@ -163,9 +163,9 @@ check_bootstrap_seed_consistency (void)
     return rc;
 
   g_autoptr (GHashTable) roles = g_hash_table_new_full (g_str_hash,
-      g_str_equal, g_free, NULL);
+          g_str_equal, g_free, NULL);
   g_autoptr (GHashTable) permissions = g_hash_table_new_full (g_str_hash,
-      g_str_equal, g_free, NULL);
+          g_str_equal, g_free, NULL);
   g_autoptr (GHashTable) approved_data_permissions =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
@@ -176,22 +176,22 @@ check_bootstrap_seed_consistency (void)
   if (rc != 0)
     return 32;
   rc = collect_template_facts (contents, "approved_data_plane_permission(\"",
-      approved_data_permissions);
+          approved_data_permissions);
   if (rc != 0)
     return 34;
 
   rc = check_seed_list (roles, wyl_policy_store_builtin_role_count (),
-      wyl_policy_store_builtin_role_id);
+          wyl_policy_store_builtin_role_id);
   if (rc != 0)
     return 40 + rc;
   rc = check_seed_list (permissions,
-      wyl_policy_store_builtin_permission_count (),
-      wyl_policy_store_builtin_permission_id);
+          wyl_policy_store_builtin_permission_count (),
+          wyl_policy_store_builtin_permission_id);
   if (rc != 0)
     return 60 + rc;
   rc = check_seed_list (approved_data_permissions,
-      wyl_policy_store_approved_data_plane_permission_count (),
-      wyl_policy_store_approved_data_plane_permission_id);
+          wyl_policy_store_approved_data_plane_permission_count (),
+          wyl_policy_store_approved_data_plane_permission_id);
   if (rc != 0)
     return 120 + rc;
 
@@ -253,27 +253,27 @@ check_decision_template_relation_contract (void)
     ".decl service_request_auth(context: symbol, subject: symbol, tenant: symbol)",
     ".decl service_principal_state_observed(subject: symbol, state: symbol)",
     ".decl service_request_auth_observed(context: symbol, subject: symbol,\n"
-        "    tenant: symbol)",
+    "    tenant: symbol)",
     ".decl login_skip_mfa_authz_observed(user: symbol)",
     ".decl allow_bool(user: symbol, perm: symbol, scope: symbol)",
     ".decl service_armed(context: symbol, user: symbol, perm: symbol, scope: symbol)",
     ".decl service_allow_bool(context: symbol, user: symbol, perm: symbol,\n"
-        "    scope: symbol)",
+    "    scope: symbol)",
     ".decl deny_reason(user: symbol, perm: symbol, scope: symbol,\n"
-        "    code: symbol, origin: symbol)",
+    "    code: symbol, origin: symbol)",
     "audit_event_request_id(ID, RequestID) :-\n"
-        "    audit_event_request_id_input(ID, RequestID).",
+    "    audit_event_request_id_input(ID, RequestID).",
     "service_principal_state_observed(Subject, State) :-\n"
-        "    service_principal_state(Subject, State).",
+    "    service_principal_state(Subject, State).",
     "service_request_auth_observed(Context, Subject, Tenant) :-\n"
-        "    service_request_auth(Context, Subject, Tenant).",
+    "    service_request_auth(Context, Subject, Tenant).",
     "login_skip_mfa_authz_observed(U) :-\n" "    login_skip_mfa_authz(U).",
     "service_armed(Context, U, P, S) :-\n"
-        "    service_request_auth(Context, U, S),\n"
-        "    service_principal_state(U, \"active\"),\n"
-        "    approved_data_plane_permission(P).",
+    "    service_request_auth(Context, U, S),\n"
+    "    service_principal_state(U, \"active\"),\n"
+    "    approved_data_plane_permission(P).",
     "service_allow_bool(Context, U, P, S) :-\n"
-        "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
+    "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
   };
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -281,7 +281,7 @@ check_decision_template_relation_contract (void)
   if (rc != 0)
     return rc;
   return check_required_snippets (contents, len, snippets,
-      G_N_ELEMENTS (snippets), 100);
+             G_N_ELEMENTS (snippets), 100);
 }
 
 static gint
@@ -290,24 +290,24 @@ check_permission_scope_relation_contract (void)
   static const gchar *const snippets[] = {
     ".decl perm_state_transition(from: symbol, event: symbol, to: symbol)",
     ".decl perm_state_event(event_id: int64, user: symbol, perm: symbol,\n"
-        "    scope: symbol, event: symbol, from_state: symbol, to_state: symbol)",
+    "    scope: symbol, event: symbol, from_state: symbol, to_state: symbol)",
     ".decl perm_state_replayed(user: symbol, perm: symbol, scope: symbol,\n"
-        "    state: symbol)",
+    "    state: symbol)",
     ".decl perm_state_fired(event_id: int64, user: symbol, perm: symbol,\n"
-        "    scope: symbol, from_state: symbol, event: symbol, to_state: symbol)",
+    "    scope: symbol, from_state: symbol, event: symbol, to_state: symbol)",
     ".decl perm_state_observed(user: symbol, perm: symbol, scope: symbol,\n"
-        "    state: symbol)",
+    "    state: symbol)",
     ".decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)",
     ".decl perm_window_guard_observed(perm: symbol, window: symbol)",
     ".decl guard_context_timestamp(user: symbol, scope: symbol, timestamp: int64)",
     ".decl guard_context_loc_class(user: symbol, scope: symbol, loc_class: symbol)",
     ".decl guard_context_risk(user: symbol, scope: symbol, risk: int64)",
     ".decl guard_context_in_window(user: symbol, scope: symbol, timestamp: int64,\n"
-        "    window: symbol)",
+    "    window: symbol)",
     ".decl loc_class(loc_id: symbol, class: symbol)",
     ".decl in_window(timestamp: int64, window: symbol)",
     "perm_state_observed(U, P, S, State) :- "
-        "perm_state_replayed(U, P, S, State).",
+    "perm_state_replayed(U, P, S, State).",
     "perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).",
     "perm_window_guard_observed(P, W) :- perm_window_guard(P, W).",
   };
@@ -317,7 +317,7 @@ check_permission_scope_relation_contract (void)
   if (rc != 0)
     return rc;
   return check_required_snippets (contents, len, snippets,
-      G_N_ELEMENTS (snippets), 130);
+             G_N_ELEMENTS (snippets), 130);
 }
 
 static gint
@@ -335,19 +335,19 @@ check_audit_schema_contract (const gchar *relative_path, gint error_base)
     "request_id    ",
     "decision      ",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us\n"
-        "    ON audit_events (created_at_us);",
+    "    ON audit_events (created_at_us);",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id\n"
-        "    ON audit_events (subject_id);",
+    "    ON audit_events (subject_id);",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_action\n"
-        "    ON audit_events (action);",
+    "    ON audit_events (action);",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_decision\n"
-        "    ON audit_events (decision);",
+    "    ON audit_events (decision);",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason\n"
-        "    ON audit_events (deny_reason);",
+    "    ON audit_events (deny_reason);",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_origin\n"
-        "    ON audit_events (deny_origin);",
+    "    ON audit_events (deny_origin);",
     "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id\n"
-        "    ON audit_events (request_id);",
+    "    ON audit_events (request_id);",
   };
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -355,7 +355,7 @@ check_audit_schema_contract (const gchar *relative_path, gint error_base)
   if (rc != 0)
     return rc;
   return check_required_snippets (contents, len, snippets,
-      G_N_ELEMENTS (snippets), error_base);
+             G_N_ELEMENTS (snippets), error_base);
 }
 
 static gint
@@ -379,42 +379,42 @@ check_template_manifest_contract (void)
     return 210;
 
   gint64 version = g_key_file_get_int64 (key_file, "template", "version",
-      &error);
+          &error);
   if (error != NULL || version != 0)
     return 211;
 
   g_autofree gchar *semantics = g_key_file_get_string (key_file,
-      "template", "migration_semantics", &error);
+          "template", "migration_semantics", &error);
   if (error != NULL || g_strcmp0 (semantics, "append-only") != 0)
     return 212;
 
   g_autofree gchar *migration_path = g_key_file_get_string (key_file,
-      "template", "migration_path", &error);
+          "template", "migration_path", &error);
   if (error != NULL || g_strcmp0 (migration_path, "migrations") != 0)
     return 218;
 
   g_autofree gchar *hash = g_key_file_get_string (key_file, "template",
-      "sha256", &error);
+          "sha256", &error);
   if (error != NULL || strlen (hash) != 64)
     return 213;
 
   g_autofree gchar *algorithm = g_key_file_get_string (key_file,
-      "signature", "algorithm", &error);
+          "signature", "algorithm", &error);
   if (error != NULL || g_strcmp0 (algorithm, "ed25519") != 0)
     return 214;
 
   g_autofree gchar *context = g_key_file_get_string (key_file, "signature",
-      "context", &error);
+          "context", &error);
   if (error != NULL || g_strcmp0 (context, "wyrelog-template-v0-sha256") != 0)
     return 215;
 
   g_autofree gchar *public_key = g_key_file_get_string (key_file,
-      "signature", "public_key", &error);
+          "signature", "public_key", &error);
   if (error != NULL || strlen (public_key) != 64)
     return 216;
 
   g_autofree gchar *signature = g_key_file_get_string (key_file,
-      "signature", "ed25519", &error);
+          "signature", "ed25519", &error);
   if (error != NULL || strlen (signature) != 128)
     return 217;
 
@@ -425,7 +425,7 @@ static gint
 check_template_migration_contract (void)
 {
   g_autofree gchar *path = g_build_filename (WYL_TEST_TEMPLATE_DIR,
-      "migrations", "0000-baseline.ini", NULL);
+          "migrations", "0000-baseline.ini", NULL);
   g_autoptr (GKeyFile) key_file = g_key_file_new ();
   g_autoptr (GError) error = NULL;
 
@@ -433,58 +433,58 @@ check_template_migration_contract (void)
     return 230;
 
   g_autofree gchar *id = g_key_file_get_string (key_file, "migration", "id",
-      &error);
+          &error);
   if (error != NULL || g_strcmp0 (id, "0000-baseline") != 0)
     return 231;
 
   gint64 sequence = g_key_file_get_int64 (key_file, "migration", "sequence",
-      &error);
+          &error);
   if (error != NULL || sequence != 0)
     return 232;
 
   gint64 from_version = g_key_file_get_int64 (key_file, "migration",
-      "from_version", &error);
+          "from_version", &error);
   if (error != NULL || from_version != 0)
     return 233;
 
   gint64 to_version = g_key_file_get_int64 (key_file, "migration",
-      "to_version", &error);
+          "to_version", &error);
   if (error != NULL || to_version != 0)
     return 234;
 
   g_autofree gchar *semantics = g_key_file_get_string (key_file, "migration",
-      "semantics", &error);
+          "semantics", &error);
   if (error != NULL || g_strcmp0 (semantics, "append-only") != 0)
     return 235;
 
   g_autofree gchar *operation = g_key_file_get_string (key_file, "migration",
-      "operation", &error);
+          "operation", &error);
   if (error != NULL || g_strcmp0 (operation, "baseline") != 0)
     return 236;
 
   g_autofree gchar *reserved_namespace = g_key_file_get_string (key_file,
-      "migration", "reserved_namespace", &error);
+          "migration", "reserved_namespace", &error);
   if (error != NULL || g_strcmp0 (reserved_namespace, "wr.") != 0)
     return 237;
 
   g_autofree gchar *hash = g_key_file_get_string (key_file, "migration",
-      "sha256", &error);
+          "sha256", &error);
   if (error != NULL || strlen (hash) != 64)
     return 238;
 
   g_autofree gchar *context = g_key_file_get_string (key_file, "signature",
-      "context", &error);
+          "context", &error);
   if (error != NULL
       || g_strcmp0 (context, "wyrelog-template-migration-v0-sha256") != 0)
     return 239;
 
   g_autofree gchar *public_key = g_key_file_get_string (key_file,
-      "signature", "public_key", &error);
+          "signature", "public_key", &error);
   if (error != NULL || strlen (public_key) != 64)
     return 240;
 
   g_autofree gchar *signature = g_key_file_get_string (key_file,
-      "signature", "ed25519", &error);
+          "signature", "ed25519", &error);
   if (error != NULL || strlen (signature) != 128)
     return 241;
 
