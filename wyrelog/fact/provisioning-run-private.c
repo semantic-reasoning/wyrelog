@@ -293,4 +293,115 @@ wyl_fact_graph_provisioning_recover (wyl_policy_store_t *store,
   wyl_policy_graph_provisioning_record_free (record);
   return rc;
 }
+
+wyrelog_error_t
+wyl_fact_relation_activation_reconcile
+  (wyl_policy_store_t *policy_store, wyl_fact_store_t *fact_store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name, guint64 expected_activation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (policy_store == NULL || fact_store == NULL || out_result == NULL
+      || tenant_id == NULL || graph_id == NULL || namespace_id == NULL
+      || relation_name == NULL || expected_activation_generation >= G_MAXINT64)
+    return WYRELOG_E_INVALID;
+
+  WylPolicyRelationActivationRecord *record = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_relation_activation (policy_store,
+          tenant_id, graph_id, namespace_id, relation_name, &record);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (record->activation_generation != expected_activation_generation) {
+    wyl_policy_relation_activation_record_free (record);
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+    return WYRELOG_E_POLICY;
+  }
+  if (record->lifecycle_state == WYL_POLICY_RELATION_ACTIVATION_ACTIVE) {
+    wyl_policy_relation_activation_record_free (record);
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+    return WYRELOG_E_OK;
+  }
+  if (record->lifecycle_state != WYL_POLICY_RELATION_ACTIVATION_ACTIVATING
+      || !record->has_pending_schema_version) {
+    wyl_policy_relation_activation_record_free (record);
+    return WYRELOG_E_POLICY;
+  }
+
+  gboolean relation_visible = FALSE;
+  wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;
+  gsize n_loaded = 0;
+  if (record->pending_schema_version > G_MAXUINT32)
+    rc = WYRELOG_E_POLICY;
+  else
+    rc = wyl_policy_store_load_fact_relation_schema_columns (policy_store,
+            tenant_id, graph_id, namespace_id, relation_name,
+            (guint32) record->pending_schema_version, &relation_visible,
+            &loaded, &n_loaded);
+  const gchar *error_class = rc == WYRELOG_E_OK ? "projection" : "schema";
+  if (rc == WYRELOG_E_OK) {
+    wyl_policy_fact_relation_schema_column_t *columns =
+        g_new0 (wyl_policy_fact_relation_schema_column_t, n_loaded);
+    if (columns == NULL && n_loaded != 0)
+      rc = WYRELOG_E_NOMEM;
+    for (gsize i = 0; rc == WYRELOG_E_OK && i < n_loaded; i++)
+      columns[i] = (wyl_policy_fact_relation_schema_column_t) {
+        .column_name = loaded[i].column_name,
+        .column_type = loaded[i].column_type,
+        .nullable = loaded[i].nullable,
+        .visible = loaded[i].visible
+      };
+    wyl_policy_fact_relation_schema_options_t schema = {
+      .tenant_id = tenant_id,
+      .graph_id = graph_id,
+      .namespace_id = namespace_id,
+      .relation_name = relation_name,
+      .schema_version = (guint32) record->pending_schema_version,
+      .relation_visible = relation_visible,
+      .columns = columns,
+      .n_columns = n_loaded,
+      .queries = NULL,
+      .n_queries = 0
+    };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_store_ensure_projection (fact_store, &schema, NULL);
+    gboolean exists = FALSE;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_store_validate_projection (fact_store, &schema, &exists);
+    if (rc == WYRELOG_E_OK && !exists)
+      rc = WYRELOG_E_POLICY;
+    g_free (columns);
+  }
+  wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_transition_relation_activation (policy_store,
+            tenant_id, graph_id, namespace_id, relation_name,
+            WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+            expected_activation_generation,
+            WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+            TRUE, record->pending_schema_version, FALSE, 0, "none",
+            out_result);
+    wyl_policy_relation_activation_record_free (record);
+    return rc;
+  }
+
+  /* A failed projection must never publish the pending version.  DEGRADED is
+   * an explicit terminal state and may retain the prior active schema. */
+  WylPolicyAuthorityMutationResult degrade_result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  wyrelog_error_t degrade_rc =
+      wyl_policy_store_transition_relation_activation (policy_store,
+          tenant_id, graph_id, namespace_id, relation_name,
+          WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+          expected_activation_generation,
+          WYL_POLICY_RELATION_ACTIVATION_DEGRADED,
+          record->has_active_schema_version, record->active_schema_version,
+          FALSE, 0, error_class, &degrade_result);
+  wyl_policy_relation_activation_record_free (record);
+  if (degrade_rc != WYRELOG_E_OK)
+    return degrade_rc;
+  *out_result = degrade_result;
+  return rc;
+}
 #endif
