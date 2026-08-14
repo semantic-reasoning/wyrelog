@@ -746,6 +746,7 @@ test_handle_replay_is_idempotent_and_graph_local (void)
         (wyl_handle_get_policy_store (handle));
   g_assert_nonnull (policy_db);
   g_assert_cmpint (sqlite3_exec (policy_db,
+      "DELETE FROM fact_relation_activation;"
       "DELETE FROM fact_relation_query_allowlist;"
       "DELETE FROM fact_relation_schema_columns;"
       "DELETE FROM fact_relation_schemas;"
