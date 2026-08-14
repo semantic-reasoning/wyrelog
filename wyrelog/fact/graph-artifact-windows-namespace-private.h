@@ -231,7 +231,7 @@ void wyl_fact_artifact_win_temp_orphan_evidence_free
 GBytes *wyl_fact_artifact_win_temp_orphan_evidence_bytes
   (const WylFactArtifactWinTempOrphanEvidence *);
 
-wyrelog_error_t wyl_fact_artifact_win_namespace_open_provisioned_pair_internal
+wyrelog_error_t wyl_fact_artifact_win_namespace_adopt_entries_for_test
   (WylFactArtifactWinLocator *, WylFactArtifactWinEntry * main_entry,
     WylFactArtifactWinEntry * lock_entry,
     WylFactArtifactWinNamespace ** out_namespace);
