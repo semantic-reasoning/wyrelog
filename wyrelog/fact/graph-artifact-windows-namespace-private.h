@@ -128,6 +128,10 @@ void wyl_fact_artifact_win_main_binding_free (WylFactArtifactWinMainBinding *);
 wyrelog_error_t wyl_fact_artifact_win_main_binding_open_io_session
   (WylFactArtifactWinMainBinding *, WylFactArtifactWinIoSession **);
 
+/* Re-prove a sidecar binding without opening anything through it. */
+wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_revalidate
+  (WylFactArtifactWinSidecarBinding *);
+
 /* Sidecar I/O is an opaque session. */
 wyrelog_error_t wyl_fact_artifact_win_lease_open_sidecar
   (WylFactArtifactWinLease *, WylFactArtifactName sidecar,
