@@ -1035,7 +1035,11 @@ sidecar_revalidate_locked (WylFactArtifactWinSidecarBinding *binding,
     gboolean require_working, HANDLE supplied)
 {
   wyrelog_error_t rc;
-  if (binding == NULL || !binding->active || !binding->lease->exclusive)
+  /* This predicate is shared with the mutators, so it can no longer carry the
+   * exclusivity requirement on their behalf: a read-only binding must
+   * revalidate too.  Each mutator states the requirement itself instead --
+   * see retire and publish_no_replace below. */
+  if (binding == NULL || !binding->active)
     return WYRELOG_E_POLICY;
   rc = lease_revalidate (binding->lease);
   if (rc == WYRELOG_E_OK)
@@ -1063,8 +1067,12 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
   wyrelog_error_t rc;
   if (out_binding != NULL)
     *out_binding = NULL;
-  if (lease == NULL || out_binding == NULL || !lease->exclusive
-      || !sidecar_name (sidecar))
+  /* Exclusivity is required for what changes the namespace, not for looking at
+   * it.  Creating a name or opening one writably still demands it; a reader
+   * guard may open an existing sidecar read-only, which is how a read-only
+   * DuckDB replays an existing WAL. */
+  if (lease == NULL || out_binding == NULL || !sidecar_name (sidecar)
+      || ((create_new || writable) && !lease->exclusive))
     return WYRELOG_E_POLICY;
   if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
     return rc;
@@ -1131,7 +1139,12 @@ wyl_fact_artifact_win_sidecar_binding_publish_no_replace
   if (binding == NULL || out_effect == NULL || !sidecar_name (destination))
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
-  if (!binding->active || !binding->creator || binding->name == destination
+  /* As with retire: publishing is a namespace mutation and states its own
+   * exclusivity requirement, and as with retire the term is redundant today --
+   * |creator| is only ever set by an open that required exclusivity, so no
+   * reachable binding has creator without it.  Declared rather than inferred. */
+  if (!binding->active || !binding->creator || !binding->lease->exclusive
+      || binding->name == destination
       || wyl_fact_artifact_win_io_state_has_session (binding->io_state)
       || wyl_fact_artifact_win_io_state_is_aborted (binding->io_state)) {
     if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)
@@ -1183,7 +1196,16 @@ wyl_fact_artifact_win_sidecar_binding_retire
   if (binding == NULL || out_result == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
-  if (!binding->active
+  /* Retirement changes the namespace, so it states the exclusivity that
+   * sidecar_revalidate_locked no longer demands on every caller's behalf.
+   *
+   * Be honest about its reach: it is redundant today.  A reader-guard binding
+   * holds a read-only working handle, so wyl_fact_artifact_win_entry_delete_exact
+   * already answers WYRELOG_E_POLICY with NOT_APPLIED for want of DELETE
+   * access -- measured, not assumed.  What this adds is that the requirement
+   * is declared where it belongs rather than left to emerge from an access
+   * mask two layers down. */
+  if (!binding->active || !binding->lease->exclusive
       || wyl_fact_artifact_win_io_state_has_session (binding->io_state)
       || wyl_fact_artifact_win_io_state_is_aborted (binding->io_state)) {
     if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)
