@@ -112,8 +112,17 @@ wyrelog_error_t wyl_fact_artifact_win_lease_revalidate
 void wyl_fact_artifact_win_lease_free (WylFactArtifactWinLease *);
 
 /* Main is imported authority only; in-place I/O uses the opaque session
- * surface. */
+ * surface.
+ *
+ * Two openers, split the way POSIX splits mutation_lease_open_main_binding
+ * from reader_guard_open_main_binding.  The writable one demands an exclusive
+ * lease, because a writable main session must be serialised.  The reader one
+ * takes either kind and its sessions refuse write and truncate: the lock
+ * domain already refuses an exclusive lease while a reader guard is live, so
+ * read-only access needs no exclusion of its own. */
 wyrelog_error_t wyl_fact_artifact_win_lease_open_main
+  (WylFactArtifactWinLease *, WylFactArtifactWinMainBinding **);
+wyrelog_error_t wyl_fact_artifact_win_lease_open_main_reader
   (WylFactArtifactWinLease *, WylFactArtifactWinMainBinding **);
 void wyl_fact_artifact_win_main_binding_free (WylFactArtifactWinMainBinding *);
 wyrelog_error_t wyl_fact_artifact_win_main_binding_open_io_session
