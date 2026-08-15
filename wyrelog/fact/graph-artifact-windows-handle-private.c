@@ -266,8 +266,19 @@ wyl_fact_artifact_win_io_session_read (WylFactArtifactWinIoSession *session,
     return rc;
   ov.Offset = (DWORD) offset;
   ov.OffsetHigh = (DWORD) (offset >> 32);
-  if (!ReadFile (session->handle, buffer, (DWORD) length, &done, &ov))
-    return win_error (GetLastError ());
+  if (!ReadFile (session->handle, buffer, (DWORD) length, &done, &ov)) {
+    /* A positional read that begins at or past end-of-file reports
+     * ERROR_HANDLE_EOF rather than succeeding with nothing.  That is a short
+     * read, not a fault: the POSIX arm's pread answers zero bytes with
+     * WYRELOG_E_OK and every caller above this one is written to that
+     * contract.  Mapping it through win_error would make it WYRELOG_E_IO and
+     * fail an ordinary probe of an empty artifact.  reconcile-move-private.c
+     * reads the same code the same way. */
+    DWORD error = GetLastError ();
+    if (error != ERROR_HANDLE_EOF)
+      return win_error (error);
+    done = 0;
+  }
   *out_read = done;
   return WYRELOG_E_OK;
 }

@@ -344,6 +344,57 @@ test_private_io_session_lifetime_and_singleton (void)
   remove_scratch_file (path);
 }
 
+/* A read that starts at or past end-of-file is a short read, not an I/O
+ * failure.  POSIX pread answers 0 bytes with success and every caller is
+ * written to that contract -- DuckDB's magic-byte probe reads 16 bytes from a
+ * freshly published empty store before it will create anything in it, and
+ * relies on a zeroed buffer plus a zero count.  A positional ReadFile fails
+ * with ERROR_HANDLE_EOF instead, which win_error does not name, so it used to
+ * fall through to WYRELOG_E_IO and abort the open.  reconcile-move-private.c
+ * already treats that code as end-of-data for the same reason. */
+static void
+test_io_session_read_at_eof_is_a_short_read (void)
+{
+  gchar *path = NULL;
+  HANDLE source = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (source);
+  WylFactArtifactWinWorkingHandle *working = NULL;
+  WylFactArtifactWinIoState *state = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  gchar buffer[16] = { 0 };
+  gsize n = 1;
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (source,
+      &identity, &working), ==, WYRELOG_E_OK);
+  source = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_fact_artifact_win_io_state_new (working, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, TRUE,
+      &session), ==, WYRELOG_E_OK);
+
+  /* The scratch file is empty, so offset 0 is already end-of-file. */
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, buffer,
+      sizeof buffer, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 0);
+
+  /* Past the end answers the same way, and a partial read still reports only
+   * the bytes that existed. */
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "ab", 2,
+      &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 2);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 2, buffer,
+      sizeof buffer, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 1, buffer,
+      sizeof buffer, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 1);
+
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_state_free (state);
+  remove_scratch_file (path);
+}
+
 static void
 test_io_session_guardian_failure_is_policy (void)
 {
@@ -2916,6 +2967,8 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_private_io_session_lifetime_and_singleton},
   {"/fact/artifact-namespace/windows/io-session/guardian-policy",
    test_io_session_guardian_failure_is_policy},
+  {"/fact/artifact-namespace/windows/io-session/read-at-eof",
+   test_io_session_read_at_eof_is_a_short_read},
   {"/fact/artifact-namespace/windows/io-session/mutation-gate",
    test_session_blocks_mutation_until_finish},
   {"/fact/artifact-namespace/windows/io-session/retains-lease",
