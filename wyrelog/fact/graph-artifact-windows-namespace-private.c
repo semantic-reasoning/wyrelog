@@ -683,6 +683,12 @@ struct WylFactArtifactWinMainBinding
   WylFactArtifactWinWorkingHandle *working;
   WylFactArtifactWinIoState *io_state;
   gboolean active;
+  /* Decided once at open and never revisited: the sessions this binding hands
+   * out are writable only if the opener demanded and was granted write
+   * authority.  A reader guard's binding is FALSE, so its duplicate carries
+   * GENERIC_READ alone and the session rejects write and truncate outright,
+   * rather than relying on no caller trying. */
+  gboolean writable;
 };
 
 struct WylFactArtifactWinSidecarBinding
@@ -931,15 +937,21 @@ io_state_attach_entry_validator (WylFactArtifactWinIoState *state,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_fact_artifact_win_lease_open_main (WylFactArtifactWinLease *lease,
+/* The two main-binding authorities differ only in what they grant, so they
+ * share everything after the gate.  |writable| is both the admission rule and
+ * the grant: a writable main session is serialised by an exclusive lease, and
+ * that is the invariant this function exists to hold.  A read-only open needs
+ * no such serialisation -- the lock domain already refuses an exclusive lease
+ * while any reader guard is live -- so it accepts either kind of lease. */
+static wyrelog_error_t
+lease_open_main_binding (WylFactArtifactWinLease *lease, gboolean writable,
     WylFactArtifactWinMainBinding **out_binding)
 {
   WylFactArtifactWinMainBinding *binding;
   wyrelog_error_t rc;
   if (out_binding != NULL)
     *out_binding = NULL;
-  if (lease == NULL || out_binding == NULL || !lease->exclusive)
+  if (lease == NULL || out_binding == NULL || (writable && !lease->exclusive))
     return WYRELOG_E_POLICY;
   if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
     return rc;
@@ -960,8 +972,27 @@ wyl_fact_artifact_win_lease_open_main (WylFactArtifactWinLease *lease,
   wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
       lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   binding->active = TRUE;
+  binding->writable = writable;
   *out_binding = binding;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_lease_open_main (WylFactArtifactWinLease *lease,
+    WylFactArtifactWinMainBinding **out_binding)
+{
+  return lease_open_main_binding (lease, TRUE, out_binding);
+}
+
+/* The reader-guard half of the same authority.  It opens the one existing
+ * fixed name and grants no creation or mutation power, mirroring the POSIX
+ * split between mutation_lease_open_main_binding and
+ * reader_guard_open_main_binding rather than widening the writable opener. */
+wyrelog_error_t
+wyl_fact_artifact_win_lease_open_main_reader (WylFactArtifactWinLease *lease,
+    WylFactArtifactWinMainBinding **out_binding)
+{
+  return lease_open_main_binding (lease, FALSE, out_binding);
 }
 
 wyrelog_error_t
@@ -976,8 +1007,8 @@ wyl_fact_artifact_win_main_binding_open_io_session
     rc = wyl_fact_artifact_win_entry_revalidate (binding->lease->
             namespace_->locator, binding->lease->namespace_->main_entry);
   return rc ==
-         WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state, TRUE,
-             out_session) : rc;
+         WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
+             binding->writable, out_session) : rc;
 }
 
 void

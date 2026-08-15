@@ -66,7 +66,9 @@ wyl_fact_artifact_io_session_open_reader_main (
   if (lease == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  rc = wyl_fact_artifact_win_lease_open_main (lease, &binding);
+  /* The reader half: this is the only main open a reader guard can make, and
+   * the session it yields cannot write. */
+  rc = wyl_fact_artifact_win_lease_open_main_reader (lease, &binding);
   if (rc != WYRELOG_E_OK)
     return rc;
 

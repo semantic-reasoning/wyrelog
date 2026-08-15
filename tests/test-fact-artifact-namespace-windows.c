@@ -119,6 +119,7 @@ typedef struct
 
 static WylFactArtifactWinNamespace *open_namespace_at_path (const gchar * path,
     gboolean create_main, HANDLE * out_graph);
+static void remove_tree_for_test (const gchar * root);
 
 static gpointer
 release_namespace_thread (gpointer user_data)
@@ -342,6 +343,90 @@ test_private_io_session_lifetime_and_singleton (void)
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (first), ==,
       WYRELOG_E_OK);
   remove_scratch_file (path);
+}
+
+/* A reader guard must be able to read main, and must not be able to write it.
+ * The bounded DuckDB filesystem opens read-only whenever the caller asked to
+ * validate rather than initialize, and that path acquires a shared reader
+ * guard, so a main opener that demanded an exclusive lease made read-only
+ * validation impossible on Windows.
+ *
+ * Relaxing the exclusive check in place would have been wrong: the binding
+ * used to hand out sessions with writable hardcoded TRUE against a
+ * GENERIC_READ|GENERIC_WRITE guardian, so a shared reader would have received
+ * a genuinely writable handle to facts.duckdb.  The authority is split
+ * instead, and this pins both halves. */
+static void
+test_reader_guard_opens_main_read_only (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = wyl_test_make_secure_fact_root
+        ("wyl-win-reader-main-XXXXXX", &error);
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *reader = NULL;
+  WylFactArtifactWinLease *writer = NULL;
+  WylFactArtifactWinMainBinding *binding = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  gchar buffer[8] = { 0 };
+  gsize n = 1;
+
+  g_assert_no_error (error);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+
+  /* Seed a byte through the writable authority so the read below has
+   * something to prove it can see. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &writer), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_main (writer, &binding),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_main_binding_open_io_session (binding,
+      &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "x", 1,
+      &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 1);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_main_binding_free (binding);
+  binding = NULL;
+  session = NULL;
+  wyl_fact_artifact_win_lease_free (writer);
+  writer = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_reader (namespace_,
+      &reader), ==, WYRELOG_E_OK);
+
+  /* The writable opener still refuses a shared lease: the split did not widen
+   * it.  Delete the (writable && !lease->exclusive) term from
+   * lease_open_main_binding and this line goes green. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_main (reader, &binding),
+      ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_main_reader (reader,
+      &binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_main_binding_open_io_session (binding,
+      &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, buffer,
+      sizeof buffer, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 1);
+  g_assert_cmpint (buffer[0], ==, 'x');
+
+  /* The grant is physical, not advisory: the duplicate carries GENERIC_READ
+   * alone.  Restore the hardcoded TRUE in
+   * wyl_fact_artifact_win_main_binding_open_io_session and these two fail. */
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "y", 1,
+      &n), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_truncate (session, 0), ==,
+      WYRELOG_E_POLICY);
+
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_main_binding_free (binding);
+  wyl_fact_artifact_win_lease_free (reader);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
 }
 
 /* A read that starts at or past end-of-file is a short read, not an I/O
@@ -2969,6 +3054,8 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_io_session_guardian_failure_is_policy},
   {"/fact/artifact-namespace/windows/io-session/read-at-eof",
    test_io_session_read_at_eof_is_a_short_read},
+  {"/fact/artifact-namespace/windows/reader-guard/main-read-only",
+   test_reader_guard_opens_main_read_only},
   {"/fact/artifact-namespace/windows/io-session/mutation-gate",
    test_session_blocks_mutation_until_finish},
   {"/fact/artifact-namespace/windows/io-session/retains-lease",
