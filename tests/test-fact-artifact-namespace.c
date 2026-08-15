@@ -2677,16 +2677,22 @@ test_mutation_leases (void)
   gint fd = 42;
   WylFactArtifactSidecarRetireResult retirement =
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+  /* The missing-argument half of the neutral contract, which survives the
+   * Windows implementation and is asserted for both platforms.
+   *
+   * What used to sit here was a second call passing (WylFactArtifactSidecarBinding *) 0x1
+   * and expecting the same answer.  That held only while retirement was a stub
+   * that ignored its argument; it is not a contract any implementation can
+   * keep, because no function can tell an invalid pointer from a valid one.
+   * The real refusals a caller can provoke -- a reader-guard lease, a live
+   * session, an inactive binding -- are exercised against genuine bindings in
+   * tests/test-fact-artifact-namespace-windows.c. */
   g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (NULL,
       &retirement), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (retirement, ==,
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
-  retirement = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
-  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire
-        ((WylFactArtifactSidecarBinding *) 0x1, &retirement), ==,
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (NULL, NULL), ==,
       WYRELOG_E_POLICY);
-  g_assert_cmpint (retirement, ==,
-      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (NULL,
       &lease), ==, WYRELOG_E_POLICY);
   g_assert_null (lease);

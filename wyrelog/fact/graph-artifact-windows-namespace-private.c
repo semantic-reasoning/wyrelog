@@ -149,14 +149,31 @@ wyl_fact_artifact_reader_wal_binding_revalidate (
   return WYRELOG_E_POLICY;
 }
 
+/* These three are the neutral spelling of authorities the native side already
+ * implements.  They can forward rather than reimplement because the neutral
+ * and native binding types are the same struct on Windows -- see the typedef
+ * block in graph-artifact-namespace-private.h -- so there is no conversion,
+ * only a name.
+ *
+ * The bounded DuckDB filesystem reaches all three: it retires the WAL after a
+ * shutdown checkpoint, and it probes for sidecars it never opened when DuckDB
+ * creates a fresh database, which is a removal of a name that is simply not
+ * there.  The POSIX arm answers that probe WYRELOG_E_NOT_FOUND and the caller
+ * treats it as "nothing to remove"; the stub answered WYRELOG_E_POLICY, which
+ * poisoned the filesystem instead. */
 wyrelog_error_t
 wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding *b,
     WylFactArtifactSidecarRetireResult *r)
 {
-  (void) b;
+  /* The neutral contract answers a missing argument WYRELOG_E_POLICY, where
+   * the native entry point answers WYRELOG_E_INVALID.  Hold the neutral
+   * spelling to the neutral contract -- tests/test-fact-artifact-namespace.c
+   * pins it for both platforms -- and forward everything else. */
   if (r != NULL)
     *r = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
-  return WYRELOG_E_POLICY;
+  if (b == NULL || r == NULL)
+    return WYRELOG_E_POLICY;
+  return wyl_fact_artifact_win_sidecar_binding_retire (b, r);
 }
 
 wyrelog_error_t
@@ -164,14 +181,11 @@ wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (
   WylFactArtifactMutationLease *l, WylFactArtifactName a, gboolean w,
   WylFactArtifactSidecarBinding **b, gint *out_fd)
 {
-  (void) l;
-  (void) a;
-  (void) w;
-  if (b != NULL)
-    *b = NULL;
+  /* Windows issues sessions, never raw descriptors, so the fd this neutral
+   * signature carries for the POSIX arm is always absent here. */
   if (out_fd != NULL)
     *out_fd = -1;
-  return WYRELOG_E_POLICY;
+  return wyl_fact_artifact_win_lease_open_sidecar (l, a, FALSE, w, b);
 }
 
 wyrelog_error_t
@@ -187,9 +201,14 @@ wyrelog_error_t
 wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding *b,
     gint *fd)
 {
-  (void) b;
-  (void) fd;
-  return WYRELOG_E_POLICY;
+  /* The POSIX contract closes a descriptor it once issued and revalidates on
+   * the way out.  Windows issued none, so a caller presenting one is holding a
+   * descriptor this authority never granted, and that is a refusal rather than
+   * something to close.  What remains of the contract -- the revalidation --
+   * is still owed and still runs. */
+  if (fd != NULL && *fd != -1)
+    return WYRELOG_E_POLICY;
+  return wyl_fact_artifact_win_sidecar_binding_revalidate (b);
 }
 
 wyrelog_error_t
@@ -1124,6 +1143,23 @@ wyl_fact_artifact_win_sidecar_binding_open_io_session
   rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_io_session_open (binding->io_state, binding->writable, out_session);
+  g_mutex_unlock (&binding->mutex);
+  return rc;
+}
+
+/* Re-prove a binding without opening anything through it.  The neutral
+ * "checked close" needs a real validation checkpoint rather than a no-op, and
+ * this is the only thing it can honestly check on Windows: there is no
+ * descriptor to hand back, so what the caller is owed is that the binding it
+ * still holds continues to name what it named. */
+wyrelog_error_t
+wyl_fact_artifact_win_sidecar_binding_revalidate
+  (WylFactArtifactWinSidecarBinding * binding) {
+  wyrelog_error_t rc;
+  if (binding == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&binding->mutex);
+  rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
   g_mutex_unlock (&binding->mutex);
   return rc;
 }
