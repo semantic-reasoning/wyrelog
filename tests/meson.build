@@ -1203,11 +1203,17 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
   # To support both default_library=static and default_library=shared on
   # Windows without exporting private test-only symbols from libwyrelog.dll,
   # this binary links against wyrelog_handle_test_seams_dep (#654).
+  # fact-test-support.c is compiled in rather than linked: it defines only
+  # wyl_test_* helpers and calls no private wyrelog symbol, so it does not
+  # disturb the wyrelog_handle_test_seams_dep linkage above.  The pair cases
+  # need its wyl_test_make_secure_fact_root to get a resolver-acceptable root.
   test_fact_artifact_namespace_windows = executable(
     'test-fact-artifact-namespace-windows',
     'test-fact-artifact-namespace-windows.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_handle_test_seams_dep],
+    dependencies : [wyrelog_handle_test_seams_dep] + fact_test_support_deps,
   )
   test('fact-artifact-namespace-windows',
     test_fact_artifact_namespace_windows,
