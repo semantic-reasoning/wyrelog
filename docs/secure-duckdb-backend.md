@@ -91,9 +91,12 @@ An upgrade is a security-contract change, not a dependency-only update.
    runs `secure-duckdb-bridge`, `secure-duckdb-recording-filesystem`,
    `fact-artifact-namespace-windows` and `fact-provisioning-construct`: the
    bridge object is platform-neutral and succeeds there. Windows can now
-   construct a provisioned pair, open a namespace from it, and run DuckDB
-   against the published `facts.duckdb` through the bounded filesystem -- but
-   only from operation evidence held in the constructing process (#815). The
+   construct a provisioned pair and open a namespace from it, from operation
+   evidence held in the constructing process (#815). DuckDB reaches the
+   published `facts.duckdb` through the bounded filesystem but does not yet
+   complete against it: the reader guard and the sidecar retirement authority
+   are still fail-closed on Windows, so `wyl_fact_graph_provisioning_construct`
+   returns `WYRELOG_E_POLICY` there. The
    name-only `open_provisioned_pair_exact` and the fixed WAL replacement still
    return `WYRELOG_E_POLICY`, and a pair cannot survive a restart until the
    evidence tuple has a durable home (#816). What Windows still has no route to
