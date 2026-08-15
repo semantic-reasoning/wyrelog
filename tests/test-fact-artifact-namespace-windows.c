@@ -14,6 +14,8 @@
 #include "fact/graph-artifact-windows-namespace-private.h"
 #include "fact/graph-windows-security-private.h"
 
+#include "fact-test-support.h"
+
 static WylFactGraphWinIdentity
 identity_for (HANDLE handle)
 {
@@ -2763,29 +2765,24 @@ G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
   (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
 
-/* The resolver requires a protected owner-only fact root, so a bare
- * g_dir_make_tmp directory is refused.  Build one with the same production
- * helper the locator uses. */
+/* These are the only cases in this file that walk a path with the resolver
+ * rather than driving the namespace from a handle, so they are the only ones
+ * that need a fact root the resolver will accept.  Two properties matter and
+ * a bare g_dir_make_tmp directory has neither: a protected owner-only ACL, and
+ * an exactly-spelled path.  GetTempPath hands back an 8.3 short name on hosts
+ * whose user directory needs one -- C:\Users\RUNNER~1 on the CI runner -- and
+ * validate_parent_entry accepts only the exact spelling, so the walk refuses
+ * the alias with WYRELOG_E_POLICY.  wyl_test_make_secure_fact_root applies the
+ * ACL and canonicalises through GetFinalPathNameByHandleW and
+ * GetLongPathNameW, which is why this borrows it rather than building a root
+ * here. */
 static gchar *
 provisioned_root (void)
 {
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *parent = g_dir_make_tmp ("wyl-pair-ns-XXXXXX", &error);
+  gchar *root = wyl_test_make_secure_fact_root ("wyl-pair-ns-XXXXXX", &error);
   g_assert_no_error (error);
-  g_assert_nonnull (parent);
-
-  gchar *root = g_build_filename (parent, "root", NULL);
-  g_autofree gunichar2 *wide = g_utf8_to_utf16 (root, -1, NULL, NULL, NULL);
-  WylFactGraphWinOwnerOnlySecurity security = { 0 };
-  SECURITY_ATTRIBUTES attributes = { 0 };
-
-  g_assert_nonnull (wide);
-  g_assert_cmpint (wyl_fact_graph_win_owner_only_security_init (&security,
-      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE), ==, WYRELOG_E_OK);
-  attributes.nLength = sizeof attributes;
-  attributes.lpSecurityDescriptor = &security.descriptor;
-  g_assert_true (CreateDirectoryW ((LPCWSTR) wide, &attributes));
-  wyl_fact_graph_win_owner_only_security_clear (&security);
+  g_assert_nonnull (root);
   return root;
 }
 
