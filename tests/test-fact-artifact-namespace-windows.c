@@ -429,6 +429,102 @@ test_reader_guard_opens_main_read_only (void)
   remove_tree_for_test (path);
 }
 
+/* The sidecar half of the same split.  A read-only DuckDB replays an existing
+ * WAL, so a reader guard must be able to open one; it must not be able to
+ * create, write, or retire anything.  The exclusivity requirement moved out of
+ * sidecar_revalidate_locked, which readers now also run, and into each
+ * mutator, so this pins the mutators too. */
+static void
+test_reader_guard_sidecar_is_read_only (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = wyl_test_make_secure_fact_root
+        ("wyl-win-reader-wal-XXXXXX", &error);
+  g_autofree gchar *wal_path = NULL;
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  WylFactArtifactSidecarRetireResult retired =
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  gchar buffer[4] = { 0 };
+  gsize n = 0;
+
+  g_assert_no_error (error);
+  wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+
+  /* Create and seed the WAL through the exclusive authority. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "wal",
+      3, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_reader (namespace_,
+      &lease), ==, WYRELOG_E_OK);
+
+  /* Creating or writably opening still needs exclusivity. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar), ==, WYRELOG_E_POLICY);
+  g_assert_null (sidecar);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, &sidecar), ==, WYRELOG_E_POLICY);
+  g_assert_null (sidecar);
+
+  /* Read-only on an existing name is admitted, and revalidation runs for it:
+   * restore the !binding->lease->exclusive term in sidecar_revalidate_locked
+   * and opening this session returns POLICY. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, buffer,
+      3, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 3);
+  g_assert_cmpint (memcmp (buffer, "wal", 3), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "z", 1,
+      &n), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+
+  /* Retirement is a mutation and a reader guard must not achieve one.  This
+   * pins the outcome, not a particular mechanism: deleting the
+   * !binding->lease->exclusive term from
+   * wyl_fact_artifact_win_sidecar_binding_retire does NOT make this fail,
+   * because a read-only working handle has no DELETE access and
+   * wyl_fact_artifact_win_entry_delete_exact refuses one layer down (measured:
+   * rc=POLICY, effect=NOT_APPLIED).  The outcome is what the namespace owes;
+   * the explicit term only states the requirement where it is decided. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
+      &retired), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retired, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_true (g_file_test (wal_path, G_FILE_TEST_EXISTS));
+
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+}
+
 /* A read that starts at or past end-of-file is a short read, not an I/O
  * failure.  POSIX pread answers 0 bytes with success and every caller is
  * written to that contract -- DuckDB's magic-byte probe reads 16 bytes from a
@@ -3056,6 +3152,8 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_io_session_read_at_eof_is_a_short_read},
   {"/fact/artifact-namespace/windows/reader-guard/main-read-only",
    test_reader_guard_opens_main_read_only},
+  {"/fact/artifact-namespace/windows/reader-guard/sidecar-read-only",
+   test_reader_guard_sidecar_is_read_only},
   {"/fact/artifact-namespace/windows/io-session/mutation-gate",
    test_session_blocks_mutation_until_finish},
   {"/fact/artifact-namespace/windows/io-session/retains-lease",
