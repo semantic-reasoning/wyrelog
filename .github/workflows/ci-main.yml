@@ -430,7 +430,6 @@ jobs:
             daemon-http-decide \
             daemon-http-decide-refresh \
             daemon-http-decide-service \
-            daemon-http-service-decision \
             daemon-http-decide-audit \
             daemon-http-decide-private-symbols \
             --print-errorlogs
