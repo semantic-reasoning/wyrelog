@@ -68,12 +68,22 @@ if host_machine.system() == 'windows'
 elif host_machine.system() == 'darwin'
   handle_test_object_format = 'macho'
 endif
+# libwyrelog follows default_library, so the inspector must be told which kind
+# it is actually being handed.  Naming it 'shared' unconditionally selects the
+# dynamic-export command, and against a static archive that command reports
+# nothing -- which the tool correctly refuses as an unusable inspection rather
+# than reading as "no seams present".  Every Windows CI configuration is
+# static, so the hardcoded value made this gate fail wherever it mattered most.
+handle_test_artifact_kind = 'shared'
+if get_option('default_library') == 'static'
+  handle_test_artifact_kind = 'archive'
+endif
 test('handle-test-seams-not-shipped', python3,
   args : [
     files('../tools/check-handle-test-seam-exports.py'),
     'absent',
     handle_test_object_format,
-    'shared',
+    handle_test_artifact_kind,
     libwyrelog.full_path(),
   ],
   depends : libwyrelog,
