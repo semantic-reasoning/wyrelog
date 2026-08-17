@@ -86,6 +86,22 @@ def check(path: Path) -> list[str]:
             "wyl_service_auth_read_lease_get_policy_store": 1,
         },
     }
+    # The auth context destructor is the last-resort release for a lease that
+    # reached request teardown still owned by the context: the resolver hands
+    # one back only for POST /decide, and the decision authority is expected to
+    # consume it first. Registering it keeps it inside the reviewed set with a
+    # pinned count instead of leaving an unaccounted terminal release.
+    #
+    # Registered only when present, unlike the mandatory owners above, because
+    # the self-test drives this checker with synthetic sources that define no
+    # such destructor. It is also the one owner that cannot report a failed
+    # release -- G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC fixes the void signature --
+    # so it stays outside the discard-result prohibition further down, which
+    # covers the owners that can report.
+    if re.search(r"^wyl_daemon_auth_context_clear\s*\(", source, re.M):
+        management_counts["wyl_daemon_auth_context_clear"] = {
+            "wyl_service_auth_read_lease_release_terminal": 1,
+        }
     management_edges = {
         "service_principal_management_authorize_session": {
             "service_principal_management_authorize": 1,
