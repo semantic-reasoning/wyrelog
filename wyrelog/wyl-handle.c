@@ -2430,6 +2430,39 @@ wyl_handle_replay_fact_graphs (WylHandle *self,
   return rc;
 }
 
+wyrelog_error_t
+wyl_handle_refresh_fact_graph (WylHandle *self,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (out_status != NULL)
+    memset (out_status, 0, sizeof (*out_status));
+
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->fact_graph_runtime == NULL || graph_info == NULL)
+    return WYRELOG_E_INVALID;
+
+  /*
+   * Targeted single-graph counterpart of wyl_handle_replay_fact_graphs: an
+   * append/retract refreshes only the graph it committed to, under the same
+   * policy-store pin and coordinator lock, leaving every other graph's engine
+   * generation untouched.
+   */
+  wyl_policy_store_t *policy = NULL;
+  g_mutex_lock (&self->fact_replay_coordinator_lock);
+  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&self->fact_replay_coordinator_lock);
+    return rc;
+  }
+  rc = wyl_fact_replay_refresh_graph (policy, self->fact_root, graph_info,
+          self->fact_graph_runtime, out_status);
+  wyl_handle_policy_store_unpin (self, policy);
+  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  return rc;
+}
+
 typedef struct
 {
   WylEngine *engine;

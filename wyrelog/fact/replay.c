@@ -756,3 +756,39 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     *out_summary = summary;
   return rc;
 }
+
+wyrelog_error_t
+wyl_fact_replay_refresh_graph (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (out_status != NULL)
+    memset (out_status, 0, sizeof (*out_status));
+  if (policy == NULL || graph_info == NULL || graph_info->tenant_id == NULL
+      || graph_info->graph_id == NULL || runtime_manager == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (fact_root != NULL && fact_root[0] != '\0') {
+    wyrelog_error_t rc = wyl_policy_store_bind_fact_root (policy, fact_root);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
+  WylFactGraphKey key = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
+          graph_info->graph_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Refresh ONLY this one key.  This deliberately never calls
+   * retire_unseen or foreach-refresh: a targeted post-mutation refresh must
+   * leave every sibling graph's runtime entry and generation untouched
+   * (issue #546 isolation), and retiring on a one-element seen set would
+   * detach all other entries. */
+  GraphBuildCtx build = { policy, fact_root, graph_info };
+  rc = wyl_fact_graph_runtime_manager_refresh (runtime_manager, &key,
+          build_graph_engine, &build, out_status);
+  wyl_fact_graph_key_clear (&key);
+  return rc;
+}
