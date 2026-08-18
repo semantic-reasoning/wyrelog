@@ -487,6 +487,95 @@ test_service_lifecycle_projection_loader_faults (void)
   assert_service_projection_loader_fault (SERVICE_PROJECTION_DISABLE);
 }
 
+/*
+ * #834: service_armed carries !frozen(S).  This asserts that a service decide
+ * at a frozen scope is DENY while the same decide at an unfrozen scope is
+ * still ALLOW -- the freeze is scope-discriminating, not global -- and that
+ * the DENY carries no deny reason.
+ *
+ * Nothing in the library writes frozen/1; only tests populate it.  So what is
+ * covered here is the rule, not an operator freeze control.
+ *
+ * Deleting !frozen(S) from both .dl copies and from the rule-text pins in
+ * test-access-decision.c and test-template-tree.c leaves those two binaries
+ * green and fails this one.  Those pins compare the template against string
+ * literals in the test source, and check_stratification models the rule in C
+ * without reading the template, so its {"frozen", TRUE} entry would go stale
+ * in silence.
+ *
+ * Every decide below passes the same string as credential tenant and as
+ * scope, so nothing here bears on the two being distinct fields.  The rule
+ * unifies them -- ALLOW requires context_row[2] and decision_row[3] equal --
+ * so exchanging the two in wyl-decide.c is a semantic no-op.  What
+ * test_service_authority_allow_deny_and_binding asserts, by varying them
+ * independently, is that equality requirement itself: a service decide
+ * authorizes only at its own tenant.
+ *
+ * Kept in its own test so a failure names the freeze rather than a later
+ * assertion, and so the frozen row stays inside one handle.  It could be
+ * withdrawn with wyl_handle_engine_remove if a future test needs that.
+ */
+static void
+test_service_authority_freeze_denies (void)
+{
+  g_autofree gchar *templates = copy_unsigned_template_tree ();
+  g_assert_nonnull (templates);
+  g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
+          "svc:authority:freeze", TRUE);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean tenant_created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-thaw",
+      &tenant_created), ==, WYRELOG_E_OK);
+  g_assert_true (tenant_created);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+      "svc:authority:freeze", "wr.stream.read", "tenant-thaw"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+
+  /* Both scopes allow before the freeze, so the DENY below cannot be a
+   * pre-existing grant failure. */
+  g_assert_cmpint (service_decide (handle, "svc:authority:freeze",
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+  g_assert_cmpint (service_decide (handle, "svc:authority:freeze",
+      "tenant-thaw", "wr.stream.read", "tenant-thaw",
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+
+  gint64 frozen_row[1];
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, WYL_TENANT_DEFAULT,
+      &frozen_row[0]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_insert (handle, "frozen", frozen_row,
+      G_N_ELEMENTS (frozen_row)), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (service_decide (handle, "svc:authority:freeze",
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+  /* Control: the freeze is scoped, not a blanket deny. */
+  g_assert_cmpint (service_decide (handle, "svc:authority:freeze",
+      "tenant-thaw", "wr.stream.read", "tenant-thaw",
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+
+  /* The service path leaves the deny tags NULL whatever the cause, so a
+   * frozen DENY carries no reason.  This pins current behaviour, not settled
+   * policy: whether a service DENY should ever carry a reason is open, and
+   * changing it must be a deliberate edit here rather than a silent drift. */
+  g_autoptr (WylServiceDecisionAuthority) authority =
+      new_service_authority (handle, "svc:authority:freeze",
+          WYL_TENANT_DEFAULT);
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "svc:authority:freeze");
+  wyl_decide_req_set_action (req, "wr.stream.read");
+  wyl_decide_req_set_resource_id (req, WYL_TENANT_DEFAULT);
+  g_assert_cmpint (wyl_decide_with_service_authority (handle, req, authority,
+      resp), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_decide_resp_get_decision (resp), ==, WYL_DECISION_DENY);
+  g_assert_null (wyl_decide_resp_get_deny_reason (resp));
+
+  g_clear_object (&handle);
+  remove_tree (templates);
+}
+
 static void
 test_service_authority_allow_deny_and_binding (void)
 {
@@ -1098,6 +1187,8 @@ main (int argc, char **argv)
       test_service_lifecycle_projection_loader_faults);
   g_test_add_func ("/service-decision/authority/allow-deny-binding",
       test_service_authority_allow_deny_and_binding);
+  g_test_add_func ("/service-decision/authority/freeze-denies",
+      test_service_authority_freeze_denies);
   g_test_add_func ("/service-decision/authority/zero-role-forged-subject",
       test_service_authority_zero_role_and_forged_subject_deny);
   g_test_add_func ("/service-decision/authority/faults",
