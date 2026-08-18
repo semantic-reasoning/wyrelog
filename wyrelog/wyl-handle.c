@@ -4823,16 +4823,17 @@ insert_policy_store_service_principal_state (const
   rc = wyl_handle_intern_engine_symbol_locked (self, info->state, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  /* The sanctioned funnel, exactly as the human sibling above uses it.  A
-   * hand-rolled copy loses the operation checkpoint, the poisoned-pair gate,
-   * the delta step, and -- the one that matters -- the repair after a failed
-   * delta projection, which is what keeps the read engine from holding a row
-   * the delta engine lacks.
+  /* The sanctioned funnel, exactly as the human sibling above uses it.  What
+   * the hand-rolled copy lost at this call site is the operation checkpoint
+   * seam and the poisoned-pair gate.  The funnel also repairs a failed delta
+   * projection and steps the delta engine, but both live past the fan-out
+   * early return, so this relation never reaches them -- they are why the
+   * funnel is right in general, not what it fixes here.
    *
    * service_principal_state is deliberately absent from
    * relation_fans_out_to_delta: the service decision path resolves
-   * service_allow_bool out of the read engine alone, like principal_state and
-   * service_request_auth beside it, and the suite asserts this relation
+   * service_allow_bool through a read_engine snapshot, like principal_state
+   * and service_request_auth beside it, and this suite asserts the relation
    * produces no deltas. */
   return wyl_handle_engine_insert_locked (self, "service_principal_state",
              row, 2);
