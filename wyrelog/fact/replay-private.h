@@ -51,4 +51,15 @@ wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,
     const gchar * fact_root, WylFactGraphRuntimeManager * runtime_manager,
     wyl_fact_replay_summary_t * out_summary);
 
+/* Refresh exactly one graph's runtime engine (issue #546).  Unlike
+ * wyl_fact_replay_policy_graphs this touches only the given key and never
+ * retires sibling entries, so an append/retract converges its own graph
+ * without disturbing any other graph's generation.  |out_status| receives the
+ * post-refresh runtime status (READY on success; READY_STALE/DEGRADED with a
+ * replay class on a post-commit refresh failure). */
+wyrelog_error_t wyl_fact_replay_refresh_graph (wyl_policy_store_t * policy,
+    const gchar * fact_root, const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * runtime_manager,
+    WylFactGraphRuntimeStatus * out_status);
+
 G_END_DECLS;

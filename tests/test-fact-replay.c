@@ -921,6 +921,110 @@ test_replay_dup_version_relation_degrades (void)
   remove_tree (root);
 }
 
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  wyl_policy_fact_graph_info_t info;
+  gboolean found;
+} FullGraphInfoProbe;
+
+static wyrelog_error_t
+capture_full_graph_info_cb (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
+{
+  FullGraphInfoProbe *probe = user_data;
+  if (probe->found
+      || g_strcmp0 (probe->tenant_id, info->tenant_id) != 0
+      || g_strcmp0 (probe->graph_id, info->graph_id) != 0)
+    return WYRELOG_E_OK;
+  probe->info.tenant_id = g_strdup (info->tenant_id);
+  probe->info.graph_id = g_strdup (info->graph_id);
+  probe->info.storage_uri = g_strdup (info->storage_uri);
+  probe->info.storage_path = g_strdup (info->storage_path);
+  probe->info.owner_scope = g_strdup (info->owner_scope);
+  probe->info.schema_version = info->schema_version;
+  probe->info.sealed = info->sealed;
+  probe->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static void
+clear_full_graph_info (wyl_policy_fact_graph_info_t *info)
+{
+  g_free ((gchar *) info->tenant_id);
+  g_free ((gchar *) info->graph_id);
+  g_free ((gchar *) info->storage_uri);
+  g_free ((gchar *) info->storage_path);
+  g_free ((gchar *) info->owner_scope);
+  memset (info, 0, sizeof (*info));
+}
+
+/* Issue #546: a single-graph refresh converges only its own graph and never
+ * disturbs a sibling (in particular it must not retire_unseen the others). */
+static void
+test_handle_refresh_fact_graph_is_isolated (void)
+{
+  TEST ("single-graph refresh converges one graph without disturbing another");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-refresh-iso-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-b", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-b", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  /* Startup replay makes both graphs READY and queryable. */
+  FactStatusProbe before = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.total, ==, 2);
+  g_assert_cmpuint (before.ready, ==, 2);
+
+  /* Capture tenant-a/orders' full authority info, then refresh only it. */
+  FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+
+  WylFactGraphRuntimeStatus status;
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &target.info,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  clear_full_graph_info (&target.info);
+
+  /* The sibling graph was neither retired nor degraded: both remain READY.
+   * A wrong retire_unseen on the one-element seen set would have swept B. */
+  FactStatusProbe after = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.total, ==, 2);
+  g_assert_cmpuint (after.ready, ==, 2);
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -937,5 +1041,7 @@ main (int argc, char **argv)
       test_handle_replay_rejects_fact_root_replacement);
   g_test_add_func ("/fact-replay/dup-version-degrades",
       test_replay_dup_version_relation_degrades);
+  g_test_add_func ("/fact-replay/single-graph-refresh-isolated",
+      test_handle_refresh_fact_graph_is_isolated);
   return g_test_run ();
 }

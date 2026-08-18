@@ -11764,16 +11764,42 @@ emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
 
 static void
 set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
-    gboolean inserted)
+    gboolean inserted, const wyl_fact_mutation_outcome_t *outcome)
 {
   if (!wyl_daemon_policy_write_prepare_success_response (msg))
     return;
+  gboolean degraded =
+      outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+  const gchar *class_name =
+      wyl_fact_mutation_class_name (outcome->mutation_class);
   g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"inserted\":");
   g_string_append (body, inserted ? "true" : "false");
   g_string_append (body, ",\"batch_id\":");
   append_json_string (body, batch_id);
-  g_string_append_c (body, '}');
+  /* Issue #546: the fact is durably committed on this code path; report
+   * whether the graph's engine already reflects it (committed_ready) or a
+   * post-commit refresh failed (committed_degraded) so the client can tell the
+   * two apart even though both are HTTP 200. */
+  g_string_append (body, ",\"committed\":true,\"mutation_class\":");
+  append_json_string (body, class_name);
+  g_string_append (body, ",\"queryable\":");
+  g_string_append (body, outcome->engine_queryable ? "true" : "false");
+  g_string_append (body, ",\"reconcile\":");
+  g_string_append (body, degraded ? "true" : "false");
+  if (degraded) {
+    g_string_append (body, ",\"degraded_class\":");
+    append_json_string (body,
+        wyl_fact_graph_replay_class_name (outcome->degraded_class));
+  }
+  g_string_append_printf (body,
+      ",\"committed_row_delta\":%" G_GINT64_FORMAT
+      ",\"logical_byte_delta\":%" G_GINT64_FORMAT
+      ",\"engine_generation\":%" G_GUINT64_FORMAT "}",
+      outcome->delta.committed_row_delta, outcome->delta.logical_byte_delta,
+      outcome->engine_generation);
   attach_request_id_header (msg);
+  soup_message_headers_replace (soup_server_message_get_response_headers (msg),
+      "X-Wyrelog-Mutation", class_name);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body->str, body->len);
@@ -11913,7 +11939,11 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     }
     g_clear_pointer (&fact_store, wyl_fact_store_close);
     if (rc == WYRELOG_E_OK)
-      (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
+      /* Refresh only the forgotten graph (issue #546 isolation), not every
+       * graph.  Forget's committed-vs-degraded outcome contract is left to
+       * #547; this preserves the existing success reporting while no longer
+       * disturbing sibling graph generations. */
+      (void) wyl_handle_refresh_fact_graph (ctx->handle, &lookup.info, NULL);
 
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
@@ -12083,16 +12113,40 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     .rows = rows,
     .n_rows = n_rows,
   };
+  wyl_fact_commit_delta_t delta;
+  wyl_fact_commit_delta_init (&delta);
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
   if (rc == WYRELOG_E_OK) {
     if (op == FACT_HTTP_OP_RETRACT)
-      rc = wyl_fact_store_retract_batch (fact_store, &schema, &batch,
-              &inserted);
+      rc = wyl_fact_store_retract_batch_delta (fact_store, &schema, &batch,
+              &inserted, &delta);
     else
-      rc = wyl_fact_store_append_batch (fact_store, &schema, &batch, &inserted);
+      rc = wyl_fact_store_append_batch_delta (fact_store, &schema, &batch,
+              &inserted, &delta);
   }
   g_clear_pointer (&fact_store, wyl_fact_store_close);
-  if (rc == WYRELOG_E_OK)
-    (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
+  if (rc == WYRELOG_E_OK) {
+    /* The fact is durably committed.  Refresh ONLY this graph (issue #546);
+     * a post-commit refresh failure is committed-but-degraded, never a commit
+     * failure, so it must not turn into a non-2xx response and no sibling
+     * graph's generation is touched. */
+    WylFactGraphRuntimeStatus status;
+    wyrelog_error_t refresh_rc =
+        wyl_handle_refresh_fact_graph (ctx->handle, &lookup.info, &status);
+    outcome.delta = delta;
+    outcome.engine_queryable = status.queryable;
+    outcome.engine_generation = status.engine_generation;
+    if (refresh_rc == WYRELOG_E_OK) {
+      outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+    } else {
+      outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+      outcome.degraded_class = status.last_replay_class;
+      outcome.needs_runtime_reconcile = TRUE;
+      outcome.needs_durable_reconcile = TRUE;
+    }
+    wyl_fact_graph_runtime_status_clear (&status);
+  }
   if (rc == WYRELOG_E_OK)
     rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
             relation, batch_id, store_op, inserted, request_id);
@@ -12113,7 +12167,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 500, fail_code);
     return;
   }
-  set_fact_op_json (msg, batch_id, inserted);
+  set_fact_op_json (msg, batch_id, inserted, &outcome);
 }
 #else
 static void

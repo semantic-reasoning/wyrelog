@@ -256,6 +256,12 @@ wyrelog_error_t wyl_handle_flush_pending_deltas_for_test (WylHandle * self);
 #ifdef WYL_HAS_FACT_STORE
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
     wyl_fact_replay_summary_t * out_summary);
+/* Targeted single-graph refresh (issue #546): refresh only |graph_info|'s
+ * runtime engine, leaving all other graphs untouched.  |out_status| receives
+ * the post-refresh runtime status. */
+wyrelog_error_t wyl_handle_refresh_fact_graph (WylHandle * self,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeStatus * out_status);
 typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
     const gchar * relation, const gint64 * row, guint ncols,
     gpointer user_data);
