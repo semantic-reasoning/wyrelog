@@ -5,8 +5,8 @@
 #include "wyrelog/wyl-events-private.h"
 
 /* -----------------------------------------------------------------------
- * Legacy flat-struct tests (preserved exactly)
- * --------------------------------------------------------------------- */
+* Legacy flat-struct tests (preserved exactly)
+* --------------------------------------------------------------------- */
 
 /* --- Domain name round-trip ------------------------------------- */
 
@@ -29,11 +29,11 @@ check_domain_names (void)
 static gint
 check_total_kinds (void)
 {
-  /* 7 principal events + 6 session events = 13 carried variants. */
+  /* 8 principal events + 6 session events = 14 carried variants. */
   if (wyl_access_event_total_kinds () !=
       (gsize) WYL_PRINCIPAL_EVENT_LAST_ + (gsize) WYL_SESSION_EVENT_LAST_)
     return 10;
-  if (wyl_access_event_total_kinds () != 13)
+  if (wyl_access_event_total_kinds () != 14)
     return 11;
   return 0;
 }
@@ -131,8 +131,8 @@ check_zero_init (void)
 }
 
 /* -----------------------------------------------------------------------
- * Helpers for GObject-based tests
- * --------------------------------------------------------------------- */
+* Helpers for GObject-based tests
+* --------------------------------------------------------------------- */
 
 /* Mint a non-NIL id for testing by filling bytes with a fixed pattern. */
 static wyl_id_t
@@ -150,8 +150,8 @@ make_test_id (guint8 seed)
 }
 
 /* -----------------------------------------------------------------------
- * GObject ctor tests - PRINCIPAL domain
- * --------------------------------------------------------------------- */
+* GObject ctor tests - PRINCIPAL domain
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_ctor_principal_valid (void)
@@ -162,9 +162,9 @@ test_event_ctor_principal_valid (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK,
-      "password", "10.0.0.1", "TestAgent/1.0",
-      G_GINT64_CONSTANT (123456789), NULL, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK,
+          "password", "10.0.0.1", "TestAgent/1.0",
+          G_GINT64_CONSTANT (123456789), NULL, &e);
 
   if (rc != WYRELOG_E_OK)
     return 100;
@@ -173,8 +173,8 @@ test_event_ctor_principal_valid (void)
   if (wyl_access_event_get_domain (e) != WYL_ACCESS_EVENT_DOMAIN_PRINCIPAL)
     return 102;
   if (!wyl_id_equal (&eid, &(wyl_id_t) {
-            .bytes = { 0 }
-          }
+    .bytes = { 0 }
+  }
       )){
     wyl_id_t got = wyl_access_event_get_event_id (e);
     if (!wyl_id_equal (&got, &eid))
@@ -200,7 +200,7 @@ test_event_ctor_principal_valid (void)
   if (g_strcmp0 (wyl_access_event_get_principal_source_ip (e), "10.0.0.1") != 0)
     return 108;
   if (g_strcmp0 (wyl_access_event_get_principal_user_agent (e),
-          "TestAgent/1.0") != 0)
+      "TestAgent/1.0") != 0)
     return 109;
   if (wyl_access_event_get_context (e) != NULL)
     return 110;
@@ -217,7 +217,7 @@ test_event_ctor_principal_nil_event_id_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (WYL_ID_NIL, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, NULL, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 120;
@@ -234,7 +234,7 @@ test_event_ctor_principal_nil_principal_id_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (eid, WYL_ID_NIL,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, NULL, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 130;
@@ -252,7 +252,7 @@ test_event_ctor_principal_null_auth_method_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK, NULL, NULL, NULL, 0, NULL, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK, NULL, NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 140;
@@ -269,7 +269,7 @@ test_event_ctor_principal_null_out_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, NULL, NULL);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, NULL, NULL);
 
   if (rc != WYRELOG_E_INVALID)
     return 150;
@@ -285,7 +285,7 @@ test_event_ctor_principal_sentinel_fsm_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LAST_, "password", NULL, NULL, 0, NULL, &e);
+          WYL_PRINCIPAL_EVENT_LAST_, "password", NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 160;
@@ -295,8 +295,8 @@ test_event_ctor_principal_sentinel_fsm_rejects (void)
 }
 
 /* -----------------------------------------------------------------------
- * GObject ctor tests - SESSION domain
- * --------------------------------------------------------------------- */
+* GObject ctor tests - SESSION domain
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_ctor_session_valid (void)
@@ -307,8 +307,8 @@ test_event_ctor_session_valid (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_session (eid, sid,
-      WYL_SESSION_EVENT_REQUEST,
-      "192.168.1.1", "Browser/2.0", G_GINT64_CONSTANT (987654321), NULL, &e);
+          WYL_SESSION_EVENT_REQUEST,
+          "192.168.1.1", "Browser/2.0", G_GINT64_CONSTANT (987654321), NULL, &e);
 
   if (rc != WYRELOG_E_OK)
     return 200;
@@ -331,10 +331,10 @@ test_event_ctor_session_valid (void)
   if (wyl_access_event_get_session_fsm_event (e) != WYL_SESSION_EVENT_REQUEST)
     return 206;
   if (g_strcmp0 (wyl_access_event_get_session_source_ip (e),
-          "192.168.1.1") != 0)
+      "192.168.1.1") != 0)
     return 207;
   if (g_strcmp0 (wyl_access_event_get_session_user_agent (e),
-          "Browser/2.0") != 0)
+      "Browser/2.0") != 0)
     return 208;
 
   g_object_unref (e);
@@ -350,7 +350,7 @@ test_event_ctor_session_sentinel_fsm_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_session (eid, sid,
-      WYL_SESSION_EVENT_LAST_, NULL, NULL, 0, NULL, &e);
+          WYL_SESSION_EVENT_LAST_, NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 210;
@@ -368,7 +368,7 @@ test_event_ctor_session_nil_event_id_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_session (WYL_ID_NIL, sid,
-      WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, &e);
+          WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 270;
@@ -386,7 +386,7 @@ test_event_ctor_session_nil_session_id_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_session (eid, WYL_ID_NIL,
-      WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, &e);
+          WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, &e);
 
   if (rc != WYRELOG_E_INVALID)
     return 280;
@@ -403,7 +403,7 @@ test_event_ctor_session_null_out_rejects (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_session (eid, sid,
-      WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, NULL);
+          WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, NULL);
 
   if (rc != WYRELOG_E_INVALID)
     return 290;
@@ -422,13 +422,13 @@ test_event_cross_domain_accessor_isolation_full (void)
   wyrelog_error_t rc;
 
   rc = wyl_access_event_new_principal (p_eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK,
-      "password", "10.0.0.1", "UA/1", 0, NULL, &pe);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK,
+          "password", "10.0.0.1", "UA/1", 0, NULL, &pe);
   if (rc != WYRELOG_E_OK)
     return 300;
 
   rc = wyl_access_event_new_session (s_eid, sid,
-      WYL_SESSION_EVENT_REQUEST, "10.0.0.2", "UA/2", 0, NULL, &se);
+          WYL_SESSION_EVENT_REQUEST, "10.0.0.2", "UA/2", 0, NULL, &se);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (pe);
     return 301;
@@ -506,8 +506,8 @@ fail_310:
 }
 
 /* -----------------------------------------------------------------------
- * Autoptr cleanup (build-level: no crash = pass)
- * --------------------------------------------------------------------- */
+* Autoptr cleanup (build-level: no crash = pass)
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_autoptr_cleanup (void)
@@ -518,8 +518,8 @@ test_event_autoptr_cleanup (void)
   {
     g_autoptr (WylAccessEvent) e = NULL;
     wyrelog_error_t rc = wyl_access_event_new_principal (eid, pid,
-        WYL_PRINCIPAL_EVENT_MFA_OK,
-        "totp", NULL, NULL, 0, NULL, &e);
+            WYL_PRINCIPAL_EVENT_MFA_OK,
+            "totp", NULL, NULL, 0, NULL, &e);
     if (rc != WYRELOG_E_OK || e == NULL)
       return 220;
     /* e is released by g_autoptr at end of block */
@@ -528,8 +528,8 @@ test_event_autoptr_cleanup (void)
 }
 
 /* -----------------------------------------------------------------------
- * Cross-domain accessor isolation
- * --------------------------------------------------------------------- */
+* Cross-domain accessor isolation
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_cross_domain_accessor_isolation (void)
@@ -539,8 +539,8 @@ test_event_cross_domain_accessor_isolation (void)
   WylAccessEvent *e = NULL;
 
   wyrelog_error_t rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK,
-      "password", NULL, NULL, 0, NULL, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK,
+          "password", NULL, NULL, 0, NULL, &e);
   if (rc != WYRELOG_E_OK)
     return 230;
 
@@ -554,8 +554,8 @@ test_event_cross_domain_accessor_isolation (void)
 }
 
 /* -----------------------------------------------------------------------
- * Context attachment
- * --------------------------------------------------------------------- */
+* Context attachment
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_context_attachment (void)
@@ -567,12 +567,12 @@ test_event_context_attachment (void)
 
   wyrelog_error_t rc =
       wyl_access_context_new (G_GINT64_CONSTANT (111222333), "1.2.3.4", "UA/1",
-      "req-abc", &ctx);
+          "req-abc", &ctx);
   if (rc != WYRELOG_E_OK || ctx == NULL)
     return 240;
 
   rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, ctx, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK, "password", NULL, NULL, 0, ctx, &e);
   if (rc != WYRELOG_E_OK)
     return 241;
 
@@ -594,8 +594,8 @@ test_event_context_attachment (void)
 }
 
 /* -----------------------------------------------------------------------
- * Owned strings: caller mutation after ctor must not affect stored value
- * --------------------------------------------------------------------- */
+* Owned strings: caller mutation after ctor must not affect stored value
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_owned_strings (void)
@@ -607,8 +607,8 @@ test_event_owned_strings (void)
   gchar method_buf[] = "original";
 
   wyrelog_error_t rc = wyl_access_event_new_principal (eid, pid,
-      WYL_PRINCIPAL_EVENT_LOGIN_OK,
-      method_buf, NULL, NULL, 0, NULL, &e);
+          WYL_PRINCIPAL_EVENT_LOGIN_OK,
+          method_buf, NULL, NULL, 0, NULL, &e);
   if (rc != WYRELOG_E_OK)
     return 250;
 
@@ -624,20 +624,20 @@ test_event_owned_strings (void)
 }
 
 /* -----------------------------------------------------------------------
- * Total kinds preserved (existing contract)
- * --------------------------------------------------------------------- */
+* Total kinds preserved (existing contract)
+* --------------------------------------------------------------------- */
 
 static gint
 test_event_total_kinds_preserved (void)
 {
-  if (wyl_access_event_total_kinds () != 13)
+  if (wyl_access_event_total_kinds () != 14)
     return 260;
   return 0;
 }
 
 /* -----------------------------------------------------------------------
- * main
- * --------------------------------------------------------------------- */
+* main
+* --------------------------------------------------------------------- */
 
 int
 main (void)

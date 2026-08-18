@@ -49,8 +49,8 @@ G_BEGIN_DECLS;
  * automatically without a third source of truth to keep in sync.
  *
  * The total number of distinct events the envelope can carry is
- * therefore equal to the sum of the two FSM event counts -- seven
- * principal events plus six session events for thirteen variants
+ * therefore equal to the sum of the two FSM event counts -- eight
+ * principal events plus six session events for fourteen variants
  * in v0. The earlier ten-event sketch in the design notes
  * predates the FSM lock; it is superseded here so that no FSM
  * transition is orphaned at the ingress boundary.

@@ -27051,6 +27051,7 @@ wyl_policy_store_apply_principal_transition (wyl_policy_store_t *store,
     case WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA:
     case WYL_PRINCIPAL_EVENT_MFA_OK:
     case WYL_PRINCIPAL_EVENT_UNLOCK:
+    case WYL_PRINCIPAL_EVENT_LOGOUT:
       target_count = 0;
       target_locked_at = G_MININT64;
       break;
