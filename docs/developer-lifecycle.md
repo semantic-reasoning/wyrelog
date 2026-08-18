@@ -355,6 +355,44 @@ permission, and the credential tenant is the requested scope. Cleanup failure
 poisons the engine pair, and terminal-release uncertainty leaves the response
 DENY.
 
+Which walls apply to a service bearer. `decide_authenticated_request` routes a
+validated service bearer to `wyl_decide_with_service_authority`, which never
+enters the `wyl_decide` core. The transient `principal_state` injection
+(`#740` WALL 1) and the transient `perm_state` injection (`#762` WALL 3) are
+therefore unreachable on `POST /decide` for service bearers, and are not
+needed: signed policy substitutes `service_principal_state(U, "active")` for
+the first and `approved_data_plane_permission(P)` for the second. Both
+substitutions are stronger than what they replace, because both are evaluated
+inside the signed artifact rather than asserted from C. The other decide sites
+in the daemon still call `wyl_decide`, so both walls remain live there.
+
+`service_armed` carries `!frozen(S)` on the same relation as
+`allow_guard_base`, and first among the same three negated atoms, so a `frozen`
+row covering the scope denies a service decide. Two limits are worth stating
+plainly. Nothing in the library writes `frozen/1` yet -- the relation is
+populated only by tests -- so there is no operator freeze control today and
+this gate is inert until that wiring lands. And the scope key differs between
+the two paths: `resource_id` comes from `session_token`, which is the session
+id for a human decide and the credential tenant for a service decide, so
+freezing a tenant denies service traffic at that tenant and does not touch
+human traffic. This is parity of the rule, not parity of the operator action.
+
+`service_armed` does not yet carry `session_state`/`session_active`. `S` is the
+credential tenant, and no tenant except the default one is ever given a
+`session_state` row, so that gate would deny every non-default tenant. It is
+blocked on the absent tenant activation wiring tracked by issue #835.
+
+`armed/3` is deliberately excluded and must stay excluded. It is unreachable
+for a `svc:` subject, so requiring it would make `service_allow_bool`
+identically false rather than stricter. The template records this reasoning
+inline.
+
+A service DENY carries no deny reason. `wyl_decide_with_service_authority`
+leaves the deny tags NULL, so the response body reports `"deny_reason":null`
+whatever the cause. This is deliberate: a machine caller gets no map of the
+policy structure. Assertions that expect a named reason on this path are
+testing the human contract by mistake.
+
 On the HTTP wire, `session_token` remains the legacy `/decide` name for the
 policy scope; a service request must set it to the credential tenant. An
 invalid bearer returns 401. A valid service bearer with no matching role, a

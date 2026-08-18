@@ -120,10 +120,33 @@ service_principal_state_observed(Subject, State) :-
 service_request_auth_observed(Context, Subject, Tenant) :-
     service_request_auth(Context, Subject, Tenant).
 
+// S is the credential tenant: the third column of service_request_auth and
+// the scope column of this head are the same variable, so a service decide can
+// only authorize at its own tenant.
+//
+// SUBSTITUTIONS relative to allow_guard_base (#725, #762, #834)
+//   principal_state(U, "authenticated") -> service_principal_state(U, "active")
+//     Projected from the durable service_principals records only, never
+//     borrowed from the human principal_states table, so a disabled service
+//     principal stops authorizing at the next projection refresh.
+//   armed(U, P, S) -> approved_data_plane_permission(P)
+//     armed/3 is unreachable for a svc: subject.  Its rule 1 needs a durable
+//     perm_state row and the store rejects perm_state for svc: subjects; its
+//     rules 3 and 4 need perm_arm_rule(P, _) and no approved data-plane
+//     permission is in the guard catalogue.  Requiring armed/3 here would make
+//     service_allow_bool identically false, not stricter.  The closed approved
+//     data-plane set IS the arming condition for service subjects.  Do not
+//     "harden" this by re-adding armed/3; that deletes the feature.
+//
+// STILL MISSING relative to allow_guard_base: session_state/session_active.
+// S is the tenant, and no tenant but the default one is ever given a
+// session_state row, so that gate would deny every non-default tenant.  It is
+// blocked on the absent tenant activation wiring; see issue #835.
 service_armed(Context, U, P, S) :-
     service_request_auth(Context, U, S),
     service_principal_state(U, "active"),
     approved_data_plane_permission(P),
+    !frozen(S),
     !disabled_role_for(U, P),
     !policy_violation("sod", U, P, _).
 

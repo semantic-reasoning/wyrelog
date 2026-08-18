@@ -50,6 +50,23 @@ check_stratification (void)
   static const wyl_dl_body_atom_t login_skip_mfa_observed_body[] = {
     {.predicate = "login_skip_mfa_authz",.negated = FALSE},
   };
+  /*
+   * #834: service_armed carries its own negation edges (frozen,
+   * disabled_role_for, policy_violation).  Model it here so a new negated
+   * atom on the service path is stratification-checked like the human one.
+   */
+  static const wyl_dl_body_atom_t service_armed_body[] = {
+    {.predicate = "service_request_auth",.negated = FALSE},
+    {.predicate = "service_principal_state",.negated = FALSE},
+    {.predicate = "approved_data_plane_permission",.negated = FALSE},
+    {.predicate = "frozen",.negated = TRUE},
+    {.predicate = "disabled_role_for",.negated = TRUE},
+    {.predicate = "policy_violation",.negated = TRUE},
+  };
+  static const wyl_dl_body_atom_t service_allow_bool_body[] = {
+    {.predicate = "service_armed",.negated = FALSE},
+    {.predicate = "has_permission",.negated = FALSE},
+  };
   static const wyl_dl_body_atom_t dr_frozen_body[] = {
     {.predicate = "has_permission",.negated = FALSE},
     {.predicate = "frozen",.negated = FALSE},
@@ -90,6 +107,10 @@ check_stratification (void)
     {.head = "login_skip_mfa_authz_observed",
      .body = login_skip_mfa_observed_body,
      .body_len = G_N_ELEMENTS (login_skip_mfa_observed_body)},
+    {.head = "service_armed",.body = service_armed_body,
+     .body_len = G_N_ELEMENTS (service_armed_body)},
+    {.head = "service_allow_bool",.body = service_allow_bool_body,
+     .body_len = G_N_ELEMENTS (service_allow_bool_body)},
     {.head = "deny_reason",.body = dr_frozen_body,
      .body_len = G_N_ELEMENTS (dr_frozen_body)},
     {.head = "deny_reason",.body = dr_disabled_role_body,
@@ -398,6 +419,7 @@ check_decision_rule_bodies (void)
     "    service_request_auth(Context, U, S),\n"
     "    service_principal_state(U, \"active\"),\n"
     "    approved_data_plane_permission(P),\n"
+    "    !frozen(S),\n"
     "    !disabled_role_for(U, P),\n"
     "    !policy_violation(\"sod\", U, P, _).",
     "service_allow_bool(Context, U, P, S) :-\n"
