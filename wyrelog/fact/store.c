@@ -1209,13 +1209,60 @@ append_value (duckdb_appender appender, const wyl_fact_value_t *value)
   }
 }
 
+/* Stable, backend-independent logical size of a single fact value, used for
+ * quota accounting (issue #546).  Fixed-width scalars count their natural
+ * width; text counts its UTF-8 byte length; NULL counts nothing. */
+static gint64
+fact_value_logical_bytes (const wyl_fact_value_t *value)
+{
+  switch (value->type) {
+    case WYL_FACT_VALUE_SYMBOL:
+    case WYL_FACT_VALUE_STRING:
+      return value->as.text != NULL ? (gint64) strlen (value->as.text) : 0;
+    case WYL_FACT_VALUE_INT64:
+    case WYL_FACT_VALUE_COMPOUND_REF:
+      return 8;
+    case WYL_FACT_VALUE_BOOL:
+      return 1;
+    case WYL_FACT_VALUE_NULL:
+    default:
+      return 0;
+  }
+}
+
+/* Logical byte size of a batch's fact payload (schema columns only; the
+ * bookkeeping columns the appender adds are storage overhead, not logical
+ * fact bytes). */
+static gint64
+batch_logical_bytes (const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch)
+{
+  gint64 total = 0;
+  for (gsize i = 0; i < batch->n_rows; i++) {
+    for (gsize j = 0; j < schema->n_columns; j++)
+      total += fact_value_logical_bytes (&batch->rows[i].values[j]);
+  }
+  return total;
+}
+
 wyrelog_error_t
 wyl_fact_store_append_batch (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch, gboolean *out_inserted)
 {
+  return wyl_fact_store_append_batch_delta (store, schema, batch, out_inserted,
+             NULL);
+}
+
+wyrelog_error_t
+wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted,
+    wyl_fact_commit_delta_t *out_delta)
+{
   if (out_inserted != NULL)
     *out_inserted = FALSE;
+  wyl_fact_commit_delta_init (out_delta);
   if (store == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = validate_batch_shape (schema, batch);
@@ -1305,8 +1352,15 @@ wyl_fact_store_append_batch (wyl_fact_store_t *store,
   else
     (void) exec_sql (store->conn, "ROLLBACK;");
   g_mutex_unlock (&store->lock);
-  if (rc == WYRELOG_E_OK && out_inserted != NULL)
-    *out_inserted = TRUE;
+  if (rc == WYRELOG_E_OK) {
+    if (out_inserted != NULL)
+      *out_inserted = TRUE;
+    if (out_delta != NULL) {
+      out_delta->inserted = TRUE;
+      out_delta->committed_row_delta = (gint64) batch->n_rows;
+      out_delta->logical_byte_delta = batch_logical_bytes (schema, batch);
+    }
+  }
   return rc;
 }
 
@@ -1320,8 +1374,19 @@ wyl_fact_store_retract_batch (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch, gboolean *out_inserted)
 {
+  return wyl_fact_store_retract_batch_delta (store, schema, batch, out_inserted,
+             NULL);
+}
+
+wyrelog_error_t
+wyl_fact_store_retract_batch_delta (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted,
+    wyl_fact_commit_delta_t *out_delta)
+{
   if (out_inserted != NULL)
     *out_inserted = FALSE;
+  wyl_fact_commit_delta_init (out_delta);
   if (store == NULL)
     return WYRELOG_E_INVALID;
   if (batch == NULL)
@@ -1331,8 +1396,8 @@ wyl_fact_store_retract_batch (wyl_fact_store_t *store,
   if (batch_copy == NULL)
     return WYRELOG_E_NOMEM;
   batch_copy->op = WYL_FACT_STORE_OP_RETRACT;
-  wyrelog_error_t rc = wyl_fact_store_append_batch (store, schema, batch_copy,
-          out_inserted);
+  wyrelog_error_t rc = wyl_fact_store_append_batch_delta (store, schema,
+          batch_copy, out_inserted, out_delta);
   g_free (batch_copy);
   return rc;
 }
