@@ -321,23 +321,29 @@ never echoed.
 
 ### Service bearer decision authority
 
-The sole bearer resolver retains its service-authentication READ lease whenever
-the bearer resolves to a service credential. It takes no endpoint argument and
-so does not decide this per handler: after the signed token, live service
-session, access-token record, ACTIVE registry tuple, and tenant have matched
-exactly, it hands the lease to the caller on the auth context. Only the human
-bearer tail and the session-token path release inside the resolver, and human
-decisions keep using the public `wyl_decide()` path.
-
-What confines the retained lease is therefore the shape of its use rather than
-a per-endpoint decision, and that shape is gated by
-`tools/check-daemon-bearer-resolver-structure.py`: `service_lease` is assigned
-in exactly one place, the resolver; its address reaches exactly one consumer,
-`decide_authenticated_request`, which transfers it into a request-unique,
+The sole bearer resolver retains its service-authentication READ lease only for
+`POST /decide`. It cannot infer that from the request -- it takes no endpoint
+argument -- so the caller states it: `resolve_bearer_session` carries a retain
+flag, and only `decide_handler` passes TRUE. After the signed token, live
+service session, access-token record, ACTIVE registry tuple and tenant have
+matched exactly, the retained lease is transferred into a request-unique,
 one-shot decision authority that holds it through request-context insertion,
-policy query, context removal and terminal release; and it has exactly one
-last-resort terminal release, in the auth context destructor, for a request
-that ends without reaching that consumer.
+policy query, context removal and terminal release.
+
+Every other bearer caller releases inside the resolver as before, through the
+checked terminal release that reports a failed release and emits the
+RESOLVER_RELEASED checkpoint. Two of them -- the guarded-session action and the
+service management front door -- then acquire a READ lease of their own on the
+same thread, which the coordination authority refuses while one is already
+held, so retaining for them would turn every service-bearer management request
+into `WYRELOG_E_BUSY`. Human decisions keep using the public `wyl_decide()`
+path.
+
+`tools/check-daemon-bearer-resolver-structure.py` pins both halves: the retain
+mode at each of the six call sites, and the shape of the retained lease itself
+-- `service_lease` is assigned in exactly one place, its address reaches
+exactly one consumer, and it has exactly one terminal release, the last-resort
+one in the auth context destructor.
 
 Service lifecycle state is projected from the durable `service_principals`
 records into `service_principal_state`; it is never borrowed from the human

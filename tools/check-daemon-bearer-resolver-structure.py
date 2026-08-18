@@ -409,6 +409,45 @@ def check(path: Path) -> list[str]:
     # the field is written in exactly one place, its address reaches exactly
     # one consumer, and it is terminally released in exactly one place. Those
     # three facts are what keep a retained lease from escaping the request.
+    # Gated on the retain parameter actually being present, because the
+    # self-test drives this checker with synthetic sources that define none of
+    # these owners.  Its absence in a real http.c is caught by the closure
+    # count below rather than here.
+    if re.search(r"gboolean\s+retain_service_lease", source):
+      # Retention is a decision the caller makes, so pin who makes it.
+
+      # An earlier revision of this gate pinned the same map against an
+      # interface that did not exist, so it never ran; the interface exists now
+      # and the map is the contract. Only the decision path may keep the lease:
+      # two of the other owners acquire a READ lease of their own on the same
+      # thread, which the coordination authority refuses while one is held.
+      retain_owners = {
+          "wyl_daemon_http_resolve_bearer_for_test": "FALSE",
+          "authorize_guarded_session_action_extended": "FALSE",
+          "service_management_front_door": "FALSE",
+          "mfa_enroll_authorize": "FALSE",
+          "logout_handler": "FALSE",
+          "decide_handler": "TRUE",
+      }
+      retain_pattern = re.compile(
+          r"\bresolve_bearer_session\s*\([^;]*?\b(TRUE|FALSE)\s*\)", re.S)
+      total = len(retain_pattern.findall(source))
+      if total != len(retain_owners):
+          errors.append(
+              "bearer resolver retain-mode call-site closure mismatch: "
+              f"expected {len(retain_owners)}, found {total}")
+      for owner, expected_mode in retain_owners.items():
+          try:
+              owner_start, owner_end = function_span(source, owner)
+          except ValueError as exc:
+              errors.append(str(exc))
+              continue
+          modes = retain_pattern.findall(source[owner_start:owner_end])
+          if modes != [expected_mode]:
+              errors.append(
+                  f"{owner} must call resolve_bearer_session exactly once "
+                  f"with retain mode {expected_mode}; found {modes}")
+
     lease_field = "service_lease"
     if re.search(r"\bWylServiceAuthReadLease\s*\*\s*" + lease_field + r"\s*;",
                  source):
