@@ -5841,10 +5841,16 @@ lookup_bearer_token (SoupServerMessage *msg)
 }
 
 /* Sole bearer resolver for human and service credentials. */
+/* |retain_service_lease| is TRUE only for the decision path.  The resolver
+ * cannot infer it: it has no endpoint argument, and a service bearer reaches
+ * five other owners that must not keep the lease.  Two of them acquire a READ
+ * lease of their own on the same thread, which the coordination authority
+ * refuses while one is already held, so retaining unconditionally turns every
+ * service-bearer management request into WYRELOG_E_BUSY. */
 static wyrelog_error_t
 resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     const gchar *token, WylDaemonAuthContext *out_auth,
-    const gchar **out_auth_error_code)
+    const gchar **out_auth_error_code, gboolean retain_service_lease)
 {
   if (out_auth_error_code != NULL)
     *out_auth_error_code = NULL;
@@ -5993,7 +5999,11 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
       /* Keep the resolver's lease until the request-local authority has
        * completed its policy query. Re-acquiring here would leave a revoke
        * race between authentication and authorization. */
-      out_auth->service_lease = g_steal_pointer (&lease);
+      /* Only the decision path keeps it.  Everywhere else |lease| survives
+       * into the checked terminal release below, which is what reports a
+       * failed release and emits the RESOLVER_RELEASED checkpoint. */
+      if (retain_service_lease)
+        out_auth->service_lease = g_steal_pointer (&lease);
 #ifdef WYL_TEST_DAEMON_HTTP
       if (ctx->resolver_checkpoint != NULL)
         ctx->resolver_checkpoint (WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED,
@@ -6110,7 +6120,7 @@ wyl_daemon_http_resolve_bearer_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   WylDaemonAuthContext auth = { 0 };
   wyrelog_error_t rc = resolve_bearer_session (server, ctx, token, &auth,
-          NULL);
+          NULL, FALSE);
   if (rc == WYRELOG_E_OK) {
     *out_session_id = g_steal_pointer (&auth.session_id);
     *out_actor = g_steal_pointer (&auth.actor);
@@ -7244,7 +7254,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
     }
   } else {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-            bearer_token, &auth, &auth_tenant_error);
+            bearer_token, &auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401,
           auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
@@ -7272,9 +7282,9 @@ authorize_guarded_session_action_extended (SoupServer *server,
   wyl_decide_req_set_service_bearer_authenticated (req,
       auth.service_authenticated);
 
-  wyrelog_error_t rc = decide_authenticated_request (ctx->handle, req,
-          auth.service_authenticated, auth.actor, auth.tenant,
-          &auth.service_lease, resp);
+  /* No retained lease reaches this owner: only the decision path asks the
+   * resolver to keep one.  Back to the public entry, as on main. */
+  wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, invalid_code);
     return FALSE;
@@ -7601,7 +7611,7 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-          bearer_token, &auth, &auth_tenant_error);
+          bearer_token, &auth, &auth_tenant_error, FALSE);
   if (auth_rc != WYRELOG_E_OK) {
     set_json_error (msg, 401,
         auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
@@ -7735,9 +7745,10 @@ service_principal_management_authorize_session (SoupServer *server,
    * human/session-token bearers so nothing is asserted for them. */
   wyl_decide_req_set_service_bearer_authenticated (req,
       auth.service_authenticated);
-  decision_rc = decide_authenticated_request (ctx->handle, req,
-          auth.service_authenticated, auth.actor, auth.tenant,
-          &auth.service_lease, resp);
+  /* Same here, and this owner additionally acquires its own READ lease
+   * further down -- which the coordination authority refuses if the
+   * resolver still holds one on this thread. */
+  decision_rc = wyl_decide (ctx->handle, req, resp);
   if (decision_rc == WYRELOG_E_INVALID) {
     if (lease != NULL) {
       wyrelog_error_t release_rc =
@@ -12470,7 +12481,7 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   const gchar *tenant_error = NULL;
   if (resolve_bearer_session (server, ctx, bearer, out_auth,
-      &tenant_error) != WYRELOG_E_OK ||
+      &tenant_error, FALSE) != WYRELOG_E_OK ||
       g_strcmp0 (actor, out_auth->actor) != 0) {
     set_json_error (msg, 401, "mfa_enroll_auth_required");
     return FALSE;
@@ -14961,7 +14972,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   if (has_bearer_token) {
     const gchar *auth_tenant_error = NULL;
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-            bearer_token, &bearer_auth, &auth_tenant_error);
+            bearer_token, &bearer_auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401, auth_tenant_error != NULL
           ? auth_tenant_error : "logout_auth_required");
@@ -15078,7 +15089,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-          bearer_token, &auth, &auth_tenant_error);
+          bearer_token, &auth, &auth_tenant_error, TRUE);
   if (auth_rc != WYRELOG_E_OK) {
     set_json_error (msg, 401, auth_tenant_error != NULL
         ? auth_tenant_error : "decide_auth_required");
