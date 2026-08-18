@@ -1025,6 +1025,73 @@ test_handle_refresh_fact_graph_is_isolated (void)
   remove_tree (root);
 }
 
+/* Issue #546: when the post-commit engine rebuild fails, the single-graph
+ * refresh reports failure while the prior complete generation stays queryable
+ * (READY_STALE) -- the daemon maps this to a committed-but-degraded 200. */
+static void
+test_handle_refresh_fact_graph_reports_degraded (void)
+{
+  TEST ("single-graph refresh degrades to READY_STALE on a failed rebuild");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-refresh-deg-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autofree gchar *storage_path = NULL;
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    storage_path = lookup_graph_storage_path (policy, "tenant-a", "orders");
+    g_assert_nonnull (storage_path);
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  /* Startup replay makes the graph READY with a complete engine. */
+  FactStatusProbe before = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.ready, ==, 1);
+
+  /* Capture the graph's authority info, then corrupt its fact store so the
+   * next engine rebuild fails after the already-committed data. */
+  FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+
+  g_autofree gchar *fact_path = g_build_filename (storage_path, "facts.duckdb",
+          NULL);
+  g_assert_true (g_file_set_contents (fact_path, "not a database", -1, NULL));
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
+
+  WylFactGraphRuntimeStatus status;
+  wyrelog_error_t rc = wyl_handle_refresh_fact_graph (handle, &target.info,
+          &status);
+  g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY_STALE);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  clear_full_graph_info (&target.info);
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1043,5 +1110,7 @@ main (int argc, char **argv)
       test_replay_dup_version_relation_degrades);
   g_test_add_func ("/fact-replay/single-graph-refresh-isolated",
       test_handle_refresh_fact_graph_is_isolated);
+  g_test_add_func ("/fact-replay/single-graph-refresh-degrades",
+      test_handle_refresh_fact_graph_reports_degraded);
   return g_test_run ();
 }
