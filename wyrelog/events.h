@@ -106,6 +106,7 @@ typedef enum wyl_principal_event_t
   WYL_PRINCIPAL_EVENT_LOCK,
   WYL_PRINCIPAL_EVENT_UNLOCK,
   WYL_PRINCIPAL_EVENT_REVOKE,
+  WYL_PRINCIPAL_EVENT_LOGOUT,
   WYL_PRINCIPAL_EVENT_LAST_,
 } wyl_principal_event_t;
 
@@ -135,8 +136,8 @@ typedef enum wyl_session_event_t
 #endif /* WYL_SESSION_EVENT_T_DEFINED */
 
 /* -----------------------------------------------------------------------
- * WylAccessContext constructors and accessors
- * --------------------------------------------------------------------- */
+* WylAccessContext constructors and accessors
+* --------------------------------------------------------------------- */
 
 /*
  * Construct a new WylAccessContext carrying per-request metadata.
@@ -182,8 +183,8 @@ const gchar *wyl_access_context_get_user_agent (const WylAccessContext * ctx);
 const gchar *wyl_access_context_get_request_id (const WylAccessContext * ctx);
 
 /* -----------------------------------------------------------------------
- * WylAccessEvent constructors
- * --------------------------------------------------------------------- */
+* WylAccessEvent constructors
+* --------------------------------------------------------------------- */
 
 /*
  * Construct a new access event for the principal authentication domain.
@@ -241,8 +242,8 @@ wyrelog_error_t wyl_access_event_new_session (wyl_id_t event_id,
     gint64 timestamp_us, WylAccessContext * context, WylAccessEvent ** out);
 
 /* -----------------------------------------------------------------------
- * WylAccessEvent common accessors
- * --------------------------------------------------------------------- */
+* WylAccessEvent common accessors
+* --------------------------------------------------------------------- */
 
 /*
  * Returns the domain discriminator of the event.
@@ -271,12 +272,12 @@ gint64 wyl_access_event_get_timestamp_us (const WylAccessEvent * e);
 WylAccessContext *wyl_access_event_get_context (const WylAccessEvent * e);
 
 /* -----------------------------------------------------------------------
- * WylAccessEvent domain-gated accessors
- *
- * Accessors in the PRINCIPAL family return a sentinel (WYL_ID_NIL or
- * NULL) and log a recoverable error when called on a SESSION event,
- * and vice versa.
- * --------------------------------------------------------------------- */
+* WylAccessEvent domain-gated accessors
+*
+* Accessors in the PRINCIPAL family return a sentinel (WYL_ID_NIL or
+* NULL) and log a recoverable error when called on a SESSION event,
+* and vice versa.
+* --------------------------------------------------------------------- */
 
 /*
  * Returns the principal identifier carried by a PRINCIPAL-domain
