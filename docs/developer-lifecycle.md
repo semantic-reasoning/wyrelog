@@ -321,14 +321,23 @@ never echoed.
 
 ### Service bearer decision authority
 
-The sole bearer resolver may retain its service-authentication READ lease only
-for `POST /decide`. After the signed token, live service session, access-token
-record, ACTIVE registry tuple, and tenant have matched exactly, it transfers
-that lease into a request-unique, one-shot decision authority. The private
-service decision path holds the lease through request-context insertion,
-policy query, context removal, and terminal release. Every other bearer caller
-releases its READ lease inside the resolver as before, and human decisions keep
-using the public `wyl_decide()` path.
+The sole bearer resolver retains its service-authentication READ lease whenever
+the bearer resolves to a service credential. It takes no endpoint argument and
+so does not decide this per handler: after the signed token, live service
+session, access-token record, ACTIVE registry tuple, and tenant have matched
+exactly, it hands the lease to the caller on the auth context. Only the human
+bearer tail and the session-token path release inside the resolver, and human
+decisions keep using the public `wyl_decide()` path.
+
+What confines the retained lease is therefore the shape of its use rather than
+a per-endpoint decision, and that shape is gated by
+`tools/check-daemon-bearer-resolver-structure.py`: `service_lease` is assigned
+in exactly one place, the resolver; its address reaches exactly one consumer,
+`decide_authenticated_request`, which transfers it into a request-unique,
+one-shot decision authority that holds it through request-context insertion,
+policy query, context removal and terminal release; and it has exactly one
+last-resort terminal release, in the auth context destructor, for a request
+that ends without reaching that consumer.
 
 Service lifecycle state is projected from the durable `service_principals`
 records into `service_principal_state`; it is never borrowed from the human
