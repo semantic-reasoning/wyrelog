@@ -3085,7 +3085,7 @@ take_engine_replacement_fault (WylHandle *self, WylEngineReplacementFault fault)
 #endif
 
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
-wyrelog_error_t wyl_handle_load_policy_store_service_principal_states
+static wyrelog_error_t wyl_handle_load_policy_store_service_principal_states
   (WylHandle *self);
 
 static wyrelog_error_t
@@ -4823,47 +4823,33 @@ insert_policy_store_service_principal_state (const
   rc = wyl_handle_intern_engine_symbol_locked (self, info->state, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  wyrelog_error_t fault_rc = WYRELOG_E_OK;
-#ifdef WYL_TEST_HANDLE_SEAMS
-  WylHandleEngineInsertFaultOnce *insert_fault = g_object_get_qdata
-        (G_OBJECT (self), wyl_handle_engine_insert_fault_once_quark ());
-  if (insert_fault != NULL
-      && g_strcmp0 (insert_fault->relation, "service_principal_state") == 0) {
-    fault_rc = insert_fault->rc;
-    g_object_steal_qdata (G_OBJECT (self),
-        wyl_handle_engine_insert_fault_once_quark ());
-    wyl_handle_engine_fault_once_free (insert_fault);
-    return fault_rc;
-  }
-  if (take_engine_fault_once (self,
-      wyl_handle_engine_delta_insert_fault_once_quark (),
-      "service_principal_state", &fault_rc))
-    return fault_rc;
-#endif
-  rc = wyl_engine_owned_insert (self->read_engine,
-          "service_principal_state", row, 2);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_owned_insert (self->delta_engine,
-          "service_principal_state", row, 2);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-#ifdef WYL_TEST_HANDLE_SEAMS
-  if (take_engine_fault_once (self,
-      wyl_handle_engine_delta_step_fault_once_quark (),
-      "service_principal_state", &fault_rc))
-    return fault_rc;
-#endif
-  return WYRELOG_E_OK;
+  /* The sanctioned funnel, exactly as the human sibling above uses it.  A
+   * hand-rolled copy loses the operation checkpoint, the poisoned-pair gate,
+   * the delta step, and -- the one that matters -- the repair after a failed
+   * delta projection, which is what keeps the read engine from holding a row
+   * the delta engine lacks.
+   *
+   * service_principal_state is deliberately absent from
+   * relation_fans_out_to_delta: the service decision path resolves
+   * service_allow_bool out of the read engine alone, like principal_state and
+   * service_request_auth beside it, and the suite asserts this relation
+   * produces no deltas. */
+  return wyl_handle_engine_insert_locked (self, "service_principal_state",
+             row, 2);
 }
 
-wyrelog_error_t
+static wyrelog_error_t
 wyl_handle_load_policy_store_service_principal_states (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || self->read_engine == NULL
-      || self->delta_engine == NULL)
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (self);
+  if (engine_session == NULL)
+    return WYRELOG_E_INVALID;
+  /* engine_pair_unavailable rather than a pair of NULL tests: it also
+   * refuses a poisoned pair that is not mid-replacement. */
+  if (self->policy_store == NULL || engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   return wyl_policy_store_foreach_service_principal (self->policy_store,
