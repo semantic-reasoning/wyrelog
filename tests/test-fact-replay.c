@@ -1092,6 +1092,105 @@ test_handle_refresh_fact_graph_reports_degraded (void)
   remove_tree (root);
 }
 
+typedef struct
+{
+  WylHandle *handle;
+  const wyl_policy_fact_graph_info_t *info;
+  const gchar *observed;
+  guint iterations;
+  volatile gint failures;
+} RefreshRaceCtx;
+
+static gpointer
+refresh_race_writer (gpointer data)
+{
+  RefreshRaceCtx *ctx = data;
+  for (guint i = 0; i < ctx->iterations; i++) {
+    WylFactGraphRuntimeStatus status;
+    wyrelog_error_t rc = wyl_handle_refresh_fact_graph (ctx->handle, ctx->info,
+            &status);
+    if (rc != WYRELOG_E_OK)
+      g_atomic_int_inc (&ctx->failures);
+    wyl_fact_graph_runtime_status_clear (&status);
+  }
+  return NULL;
+}
+
+static gpointer
+refresh_race_reader (gpointer data)
+{
+  RefreshRaceCtx *ctx = data;
+  for (guint i = 0; i < ctx->iterations; i++) {
+    SnapshotProbe probe = { ctx->observed, 0, FALSE };
+    wyrelog_error_t rc = wyl_handle_snapshot_fact_graph_relation (ctx->handle,
+            "tenant-a", "orders", ctx->observed, handle_snapshot_cb, &probe);
+    /* A concurrent reader must always observe a COMPLETE generation: the row
+     * is already durable and every refresh rebuilds the same single row, so a
+     * failed snapshot or a torn read (count != 1) would be a race. */
+    if (rc != WYRELOG_E_OK || probe.count != 1)
+      g_atomic_int_inc (&ctx->failures);
+  }
+  return NULL;
+}
+
+/* Issue #546: concurrent single-graph refreshes and queries on the same graph
+ * stay race-free -- readers never see a partial generation.  Run under the
+ * sanitizer builds this also exercises the runtime manager's generation swap
+ * for data races. */
+static void
+test_handle_refresh_fact_graph_races_with_queries (void)
+{
+  TEST ("concurrent single-graph refresh and query stay race-free");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-refresh-race-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+
+  RefreshRaceCtx ctx = { handle, &target.info, observed, 150, 0 };
+  GThread *writer = g_thread_new ("refresh-writer", refresh_race_writer, &ctx);
+  GThread *reader_a = g_thread_new ("refresh-reader-a", refresh_race_reader,
+          &ctx);
+  GThread *reader_b = g_thread_new ("refresh-reader-b", refresh_race_reader,
+          &ctx);
+  g_thread_join (writer);
+  g_thread_join (reader_a);
+  g_thread_join (reader_b);
+  g_assert_cmpint (g_atomic_int_get (&ctx.failures), ==, 0);
+
+  clear_full_graph_info (&target.info);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1112,5 +1211,7 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_is_isolated);
   g_test_add_func ("/fact-replay/single-graph-refresh-degrades",
       test_handle_refresh_fact_graph_reports_degraded);
+  g_test_add_func ("/fact-replay/single-graph-refresh-race",
+      test_handle_refresh_fact_graph_races_with_queries);
   return g_test_run ();
 }
