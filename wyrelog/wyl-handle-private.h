@@ -124,19 +124,8 @@ void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
   (WylHandle * self);
-GRecMutexLocker *wyl_handle_lock_engine_session (WylHandle * self);
 wyrelog_error_t wyl_handle_reload_engine_pair_with_service_auth_write
   (WylHandle * self, WylServiceAuthWriteLease * write_lease);
-wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
-    const gchar * symbol, gint64 * out_id);
-wyrelog_error_t wyl_handle_engine_insert (WylHandle * self,
-    const gchar * relation, const gint64 * row, gsize ncols);
-wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
-    const gchar * relation, const gint64 * row, gsize ncols);
-wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
-    const gchar * relation, const gint64 * row, gsize ncols,
-    gboolean * out_contains);
-WylEngine *wyl_handle_get_read_engine (WylHandle * self);
 
 /* Private typed capability proving that the caller owns one recursive engine
  * session. Production consumers must use these operations instead of carrying
