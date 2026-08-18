@@ -356,8 +356,7 @@ service_projection_fault_worker (gpointer data)
 }
 
 static void
-assert_service_projection_loader_fault (ServiceProjectionOperation operation,
-    gboolean step_fault)
+assert_service_projection_loader_fault (ServiceProjectionOperation operation)
 {
   g_autofree gchar *templates = copy_unsigned_template_tree ();
   g_autofree gchar *dir =
@@ -387,17 +386,19 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
       service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
 
-  /* The insert seam, not a delta seam.  service_principal_state resolves
-   * out of the read engine alone -- it is deliberately absent from
-   * relation_fans_out_to_delta, which is why the assertions below require
-   * it to produce no deltas -- so wyl_handle_engine_insert_locked never
-   * reaches the delta insert or the delta step, and a fault armed there can
-   * never fire.  Arming an unreachable seam and asserting a failure it
-   * cannot cause is how this case passed against a hand-rolled projection
-   * that bypassed the funnel. */
+  /* The insert seam, not a delta seam.  service_principal_state resolves out
+   * of the read engine alone -- it is deliberately absent from
+   * relation_fans_out_to_delta, which is why the assertions below require it
+   * to produce no deltas -- so wyl_handle_engine_insert_locked returns at the
+   * fan-out check and never reaches the delta insert or the delta step.
+   *
+   * Those two seams did fire before the projection was routed through the
+   * funnel: the hand-rolled body consumed both quarks for this relation
+   * directly.  Routing it correctly is what made them unreachable, so the
+   * arming had to move with it. */
   wyl_handle_set_engine_insert_fault_once (handle,
       "service_principal_state",
-      step_fault ? WYRELOG_E_IO : WYRELOG_E_POLICY);
+      WYRELOG_E_IO);
 
   ServiceProjectionFaultWorker worker = {
     .handle = handle,
@@ -477,10 +478,13 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
 static void
 test_service_lifecycle_projection_loader_faults (void)
 {
-  assert_service_projection_loader_fault (SERVICE_PROJECTION_CREATE, FALSE);
-  assert_service_projection_loader_fault (SERVICE_PROJECTION_CREATE, TRUE);
-  assert_service_projection_loader_fault (SERVICE_PROJECTION_DISABLE, FALSE);
-  assert_service_projection_loader_fault (SERVICE_PROJECTION_DISABLE, TRUE);
+  /* One invocation per operation.  The second dimension used to select
+   * between the delta-step and delta-insert seams; both are unreachable for
+   * this relation now, so both branches armed the same seam and differed
+   * only in an error value the propagation path discards --
+   * service_mutation_latch_unavailable returns BUSY regardless. */
+  assert_service_projection_loader_fault (SERVICE_PROJECTION_CREATE);
+  assert_service_projection_loader_fault (SERVICE_PROJECTION_DISABLE);
 }
 
 static void
