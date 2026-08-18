@@ -387,6 +387,17 @@ for a `svc:` subject, so requiring it would make `service_allow_bool`
 identically false rather than stricter. The template records this reasoning
 inline.
 
+That rests on engine sessions being mutually exclusive across threads:
+`wyl_engine_session_acquire` holds `engine_session_mutex` for the session's
+lifetime, and both `wyl_decide` and `wyl_decide_with_service_authority` hold
+one across their whole insert-probe-remove window, so the transient
+`perm_state` row that `wyl_decide` injects cannot be observed by another
+decide. The lock is a `GRecMutex`, so it permits same-thread nesting -- no
+decide path re-enters a decide inside that window, and the depth guard enforces
+reverse-order release. If the engine ever gains concurrent sessions, `armed/3`
+becomes race-dependent rather than false, which makes the exclusion more
+necessary, not less.
+
 A service DENY carries no deny reason. `wyl_decide_with_service_authority`
 leaves the deny tags NULL, so the response body reports `"deny_reason":null`
 whatever the cause. This is deliberate: a machine caller gets no map of the
