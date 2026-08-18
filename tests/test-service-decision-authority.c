@@ -387,12 +387,17 @@ assert_service_projection_loader_fault (ServiceProjectionOperation operation,
   g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle,
       service_projection_delta_witness, &delta_witness), ==, WYRELOG_E_OK);
 
-  if (step_fault)
-    wyl_handle_set_engine_delta_step_fault_once (handle,
-        "service_principal_state", WYRELOG_E_IO);
-  else
-    wyl_handle_set_engine_delta_insert_fault_once (handle,
-        "service_principal_state", WYRELOG_E_IO);
+  /* The insert seam, not a delta seam.  service_principal_state resolves
+   * out of the read engine alone -- it is deliberately absent from
+   * relation_fans_out_to_delta, which is why the assertions below require
+   * it to produce no deltas -- so wyl_handle_engine_insert_locked never
+   * reaches the delta insert or the delta step, and a fault armed there can
+   * never fire.  Arming an unreachable seam and asserting a failure it
+   * cannot cause is how this case passed against a hand-rolled projection
+   * that bypassed the funnel. */
+  wyl_handle_set_engine_insert_fault_once (handle,
+      "service_principal_state",
+      step_fault ? WYRELOG_E_IO : WYRELOG_E_POLICY);
 
   ServiceProjectionFaultWorker worker = {
     .handle = handle,
