@@ -86,6 +86,7 @@ wyrelog/fact/graph-artifact-windows-namespace-private.h
 wyrelog/fact/graph-locator-private.h
 wyrelog/fact/graph-locator-windows-private.c
 wyrelog/fact/graph-provisioned-pair-internal.h
+wyrelog/fact/mutation-outcome-private.h
 wyrelog/fact/provisioning-construct-private.c
 wyrelog/fact/provisioning-construct-private.h
 wyrelog/fact/provisioning-private.c

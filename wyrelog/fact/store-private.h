@@ -8,6 +8,8 @@
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-identity-types-private.h"
 
+#include "mutation-outcome-private.h"
+
 G_BEGIN_DECLS;
 
 typedef struct wyl_fact_store_t wyl_fact_store_t;
@@ -86,6 +88,18 @@ wyrelog_error_t wyl_fact_store_append_batch (wyl_fact_store_t * store,
 wyrelog_error_t wyl_fact_store_retract_batch (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted);
+/* Delta-reporting variants (issue #546).  Identical to the plain append/retract
+ * but additionally fill |out_delta| with the committed resource deltas for
+ * quota accounting.  On an idempotent no-op the delta is the zero state.  The
+ * plain functions above delegate here with a NULL |out_delta|. */
+wyrelog_error_t wyl_fact_store_append_batch_delta (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
+    wyl_fact_commit_delta_t * out_delta);
+wyrelog_error_t wyl_fact_store_retract_batch_delta (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
+    wyl_fact_commit_delta_t * out_delta);
 wyrelog_error_t wyl_fact_store_retract_by_batch_id (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const gchar * trigger_batch_id, const gchar * new_batch_id,

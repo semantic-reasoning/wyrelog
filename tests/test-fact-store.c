@@ -2005,6 +2005,97 @@ check_fact_store_identity_validation_snapshot (void)
   return 0;
 }
 
+/* Issue #546: append/retract report committed resource deltas; an idempotent
+ * no-op reports the zero delta. */
+static gint
+check_fact_store_reports_commit_delta (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 900;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 901;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
+    return 902;
+
+  /* Two rows; each symbol "ab" is 2 logical bytes and each int64 is 8, so the
+   * batch payload is 2 * (2 + 8) = 20 logical bytes. */
+  wyl_fact_value_t values[4] = { 0 };
+  wyl_fact_row_t rows[2] = { 0 };
+  for (gsize i = 0; i < 2; i++) {
+    wyl_fact_value_t *row = &values[i * 2];
+    row[0].type = WYL_FACT_VALUE_SYMBOL;
+    row[0].as.text = "ab";
+    row[1].type = WYL_FACT_VALUE_INT64;
+    row[1].as.int64_value = (gint64) i;
+    rows[i].values = row;
+    rows[i].n_values = 2;
+  }
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "delta-batch-1",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .request_id = "req-delta-1",
+    .idempotency_key = "delta:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = 2,
+  };
+
+  /* Pre-poison the delta to prove the store overwrites every field. */
+  gboolean inserted = FALSE;
+  wyl_fact_commit_delta_t delta = {TRUE, -1, -1};
+  if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &inserted,
+      &delta) != WYRELOG_E_OK || !inserted)
+    return 903;
+  if (!delta.inserted || delta.committed_row_delta != 2
+      || delta.logical_byte_delta != 20)
+    return 904;
+
+  /* Idempotent replay of the same batch: no-op with the zero delta. */
+  wyl_fact_commit_delta_t replay_delta = {TRUE, 7, 7};
+  if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &inserted,
+      &replay_delta) != WYRELOG_E_OK || inserted)
+    return 905;
+  if (replay_delta.inserted || replay_delta.committed_row_delta != 0
+      || replay_delta.logical_byte_delta != 0)
+    return 906;
+
+  /* Retract reports its tombstone batch's committed delta. */
+  wyl_fact_store_batch_t retract = batch;
+  retract.batch_id = "delta-retract-1";
+  retract.idempotency_key = "delta:retract:1";
+  wyl_fact_commit_delta_t retract_delta;
+  wyl_fact_commit_delta_init (&retract_delta);
+  if (wyl_fact_store_retract_batch_delta (store, &schema, &retract, &inserted,
+      &retract_delta) != WYRELOG_E_OK || !inserted)
+    return 907;
+  if (!retract_delta.inserted || retract_delta.committed_row_delta != 2
+      || retract_delta.logical_byte_delta != 20)
+    return 908;
+
+  /* The plain wrappers still accept a NULL delta. */
+  wyl_fact_store_batch_t plain = batch;
+  plain.batch_id = "delta-plain-1";
+  plain.idempotency_key = "delta:plain:1";
+  if (wyl_fact_store_append_batch (store, &schema, &plain, NULL)
+      != WYRELOG_E_OK)
+    return 909;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -2039,6 +2130,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_retracts_idempotently ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_reports_commit_delta ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_schema_drift ();
