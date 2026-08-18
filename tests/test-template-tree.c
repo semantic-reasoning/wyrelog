@@ -271,7 +271,10 @@ check_decision_template_relation_contract (void)
     "service_armed(Context, U, P, S) :-\n"
     "    service_request_auth(Context, U, S),\n"
     "    service_principal_state(U, \"active\"),\n"
-    "    approved_data_plane_permission(P).",
+    "    approved_data_plane_permission(P),\n"
+    "    !frozen(S),\n"
+    "    !disabled_role_for(U, P),\n"
+    "    !policy_violation(\"sod\", U, P, _).",
     "service_allow_bool(Context, U, P, S) :-\n"
     "    service_armed(Context, U, P, S),\n" "    has_permission(U, P, S).",
   };
