@@ -395,35 +395,55 @@ def check(path: Path) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
 
-    if "retain_service_decision_authority" in source:
-        retain_owners = {
-            "wyl_daemon_http_resolve_bearer_for_test": "FALSE",
-            "authorize_guarded_session_action_extended": "FALSE",
-            "service_principal_management_authorize_session": "FALSE",
-            "mfa_enroll_authorize": "FALSE",
-            "logout_handler": "FALSE",
-            "decide_handler": "TRUE",
-        }
-        retain_pattern = re.compile(
-            r"\bresolve_bearer_session\s*\([^;]*?\b(TRUE|FALSE)\s*\)", re.S
-        )
-        total_retain_calls = len(retain_pattern.findall(source))
-        if total_retain_calls != len(retain_owners):
+    # The service READ lease the resolver keeps for the decision authority.
+    #
+    # An earlier revision guarded this on "retain_service_decision_authority"
+    # and pinned a TRUE/FALSE retain argument at six resolve_bearer_session
+    # call sites. Neither exists: the symbol appears nowhere in the source, so
+    # the block never ran, and resolve_bearer_session takes no endpoint or
+    # retain parameter at all -- it cannot decide per handler, and retains for
+    # every service bearer. A check keyed on an interface that was never built
+    # is worse than no check, because it reads as coverage.
+    #
+    # What the implementation actually guarantees, and what this pins instead:
+    # the field is written in exactly one place, its address reaches exactly
+    # one consumer, and it is terminally released in exactly one place. Those
+    # three facts are what keep a retained lease from escaping the request.
+    lease_field = "service_lease"
+    if re.search(r"\bWylServiceAuthReadLease\s*\*\s*" + lease_field + r"\s*;",
+                 source):
+        assignments = [
+            match.start()
+            for match in re.finditer(r"\b" + lease_field + r"\s*=", source)
+        ]
+        if len(assignments) != 1:
             errors.append(
-                "bearer resolver retain-mode call-site closure mismatch: "
-                f"expected {len(retain_owners)}, found {total_retain_calls}"
+                f"{lease_field} must be assigned exactly once; found "
+                f"{len(assignments)}"
             )
-        for owner, expected_mode in retain_owners.items():
-            try:
-                owner_start, owner_end = function_span(source, owner)
-            except ValueError as exc:
-                errors.append(str(exc))
+        elif not (start <= assignments[0] < end):
+            errors.append(
+                f"{lease_field} may only be assigned inside "
+                "resolve_bearer_session"
+            )
+        consumers = list(
+            re.finditer(r"&\s*\w+(?:\.|->)" + lease_field + r"\b", source)
+        )
+        release_owner = "wyl_daemon_auth_context_clear"
+        try:
+            release_start, release_end = function_span(source, release_owner)
+        except ValueError as exc:
+            errors.append(str(exc))
+            release_start = release_end = -1
+        for match in consumers:
+            if release_start <= match.start() < release_end:
                 continue
-            modes = retain_pattern.findall(source[owner_start:owner_end])
-            if modes != [expected_mode]:
+            preceding = source[max(0, match.start() - 400):match.start()]
+            if "decide_authenticated_request" not in preceding:
                 errors.append(
-                    f"{owner} must call resolve_bearer_session exactly once "
-                    f"with retain mode {expected_mode}; found {modes}"
+                    f"the address of {lease_field} may only reach "
+                    "decide_authenticated_request or the auth context "
+                    "destructor"
                 )
     return errors
 
