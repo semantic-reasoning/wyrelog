@@ -1416,6 +1416,194 @@ check_fact_forget_audit_table_exists (void)
   return 0;
 }
 
+/* Fault seam: abort the forget protocol at one named durable boundary so a
+ * subsequent reconcile has to prove convergence from that exact crash point. */
+static wyrelog_error_t
+forget_fault_checkpoint (const gchar *point, gpointer user_data)
+{
+  const gchar *fail_at = user_data;
+  if (fail_at != NULL && g_strcmp0 (point, fail_at) == 0)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static gint
+forget_append_sample (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *batch_id, const gchar *idem, const gchar *sym, gint64 amount)
+{
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = sym},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = amount},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 2},
+  };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .idempotency_key = idem,
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, schema, &batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return -1;
+  return 0;
+}
+
+/* A crash at each destructive seam converges, via reconcile, to exactly one
+ * fully-forgotten result (data rows gone, one audit row, intent COMPLETED)
+ * and a second reconcile is a no-op (no duplicate audit). */
+static gint
+check_fact_forget_crash_convergence (void)
+{
+  const gchar *seams[] = {
+    "after_intent", "before_delete_projection", "before_delete_events",
+    "before_delete_batch", "before_completion",
+  };
+  for (guint s = 0; s < G_N_ELEMENTS (seams); s++) {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+      return 2200;
+    if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 2201;
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+            G_N_ELEMENTS (columns));
+    g_autofree gchar *table = NULL;
+    if (wyl_fact_store_ensure_projection (store, &schema, &table)
+        != WYRELOG_E_OK)
+      return 2202;
+    if (forget_append_sample (store, &schema, "crash-me", "crash:1", "o-1", 42)
+        != 0)
+      return 2203;
+
+    wyl_fact_store_forget_options_t opts = {
+      .batch_id = "crash-me",
+      .operator_id = "admin",
+      .reason = "gdpr-erasure",
+      .checkpoint = forget_fault_checkpoint,
+      .checkpoint_data = (gpointer) seams[s],
+    };
+    if (wyl_fact_store_forget (store, &schema, &opts, NULL) == WYRELOG_E_OK)
+      return 2204;
+
+    duckdb_connection conn = wyl_fact_store_get_connection (store);
+    gint64 count = 0;
+    if (!count_i64 (conn,
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+        &count) || count != 1)
+      return 2205;
+
+    if (wyl_fact_store_forget_reconcile (store, NULL, NULL) != WYRELOG_E_OK)
+      return 2206;
+
+    g_autofree gchar *proj_sql = g_strdup_printf
+          ("SELECT COUNT(*) FROM %s;", table);
+    if (!count_i64 (conn, proj_sql, &count) || count != 0)
+      return 2207;
+    if (!count_i64 (conn,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'crash-me';",
+        &count) || count != 0)
+      return 2208;
+    if (!count_i64 (conn,
+        "SELECT COUNT(*) FROM fact_event_log WHERE batch_id = 'crash-me';",
+        &count) || count != 0)
+      return 2209;
+    if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+        || count != 1)
+      return 2210;
+    if (!count_i64 (conn,
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';",
+        &count) || count != 1)
+      return 2211;
+    if (!count_i64 (conn,
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+        &count) || count != 0)
+      return 2212;
+
+    if (wyl_fact_store_forget_reconcile (store, NULL, NULL) != WYRELOG_E_OK)
+      return 2213;
+    if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+        || count != 1)
+      return 2214;
+  }
+  return 0;
+}
+
+/* A stale intent whose identifier was reused by a NEW batch must converge by
+ * recording completion WITHOUT deleting the new batch (AC-2). */
+static gint
+check_fact_forget_rejects_identifier_reuse (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 2230;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2231;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK)
+    return 2232;
+
+  if (forget_append_sample (store, &schema, "dup-id", "orig:1", "o-1", 42)
+      != 0)
+    return 2233;
+  wyl_fact_store_forget_options_t opts = {
+    .batch_id = "dup-id",
+    .operator_id = "admin",
+    .reason = "gdpr-erasure",
+    .checkpoint = forget_fault_checkpoint,
+    .checkpoint_data = (gpointer) "before_completion",
+  };
+  if (wyl_fact_store_forget (store, &schema, &opts, NULL) == WYRELOG_E_OK)
+    return 2234;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'dup-id';", &count)
+      || count != 0)
+    return 2235;
+
+  if (forget_append_sample (store, &schema, "dup-id", "reuse:2", "o-2", 99)
+      != 0)
+    return 2236;
+
+  if (wyl_fact_store_forget_reconcile (store, NULL, NULL) != WYRELOG_E_OK)
+    return 2237;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'dup-id';", &count)
+      || count != 1)
+    return 2238;
+  g_autofree gchar *proj_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s WHERE __wyl_batch_id = 'dup-id';", table);
+  if (!count_i64 (conn, proj_sql, &count) || count != 1)
+    return 2239;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &count) || count != 0)
+    return 2240;
+  return 0;
+}
+
 static const WylFactStoreIdentity test_identity = {
   .tenant_id = "tenant-a",
   .graph_id = "orders",
@@ -2121,6 +2309,12 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_forget ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_crash_convergence ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_rejects_identifier_reuse ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_retract_by_batch_id ();

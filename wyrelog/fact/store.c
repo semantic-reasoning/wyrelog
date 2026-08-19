@@ -795,7 +795,35 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
             "  operator      VARCHAR NOT NULL,"
             "  reason        VARCHAR NOT NULL,"
             "  rows_purged   BIGINT NOT NULL,"
-            "  created_at_us BIGINT NOT NULL" ");");
+            "  created_at_us BIGINT NOT NULL" ");"
+            /*
+             * Durable forget intention: the crash-convergence anchor.  A row is
+             * committed PENDING before any destructive step and flipped
+             * COMPLETED in the same transaction as its audit record, so at most
+             * one PENDING intent per batch ever needs replay and replay is a
+             * single idempotent re-run.  op_uuid (not the reusable batch_id)
+             * is the operation identity; content_hash + idempotency_key pin the
+             * exact target batch so a reused identifier cannot be deleted.  It
+             * stores only identifiers and the fingerprint, never fact content.
+             */
+            "CREATE TABLE IF NOT EXISTS fact_forget_intent ("
+            "  op_uuid         VARCHAR PRIMARY KEY,"
+            "  batch_id        VARCHAR NOT NULL,"
+            "  tenant_id       VARCHAR NOT NULL,"
+            "  graph_id        VARCHAR NOT NULL,"
+            "  namespace_id    VARCHAR NOT NULL,"
+            "  relation_name   VARCHAR NOT NULL,"
+            "  schema_version  BIGINT NOT NULL,"
+            "  projection_table VARCHAR NOT NULL,"
+            "  content_hash    VARCHAR NOT NULL,"
+            "  idempotency_key VARCHAR NOT NULL,"
+            "  operator        VARCHAR NOT NULL,"
+            "  reason          VARCHAR NOT NULL,"
+            "  rows_purged     BIGINT NOT NULL,"
+            "  state           VARCHAR NOT NULL "
+            "    CHECK (state IN ('PENDING', 'COMPLETED')),"
+            "  created_at_us   BIGINT NOT NULL,"
+            "  completed_at_us BIGINT" ");");
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   g_mutex_unlock (&store->lock);
@@ -1809,14 +1837,401 @@ unlock_return:
   return rc;
 }
 
-/* Tier-3 hard-delete: physically removes all rows for batch_id from the
- * projection table, fact_event_log, and fact_batches (in FK-safe order),
- * then records the operation in fact_forget_audit.
- *
- * Each statement runs in autocommit mode (no explicit transaction) because
- * DuckDB does not propagate intra-transaction DELETE visibility to FK checks
- * within the same transaction.  The audit INSERT is the final step; if it
- * fails the data rows are already gone and the operator must retry. */
+/*
+ * Tier-3 hard delete, crash-convergent.  DuckDB cannot delete an FK parent and
+ * its children inside one transaction (the parent DELETE aborts on the
+ * still-visible child rows), so the three destructive DELETEs stay autocommit
+ * and forward-only.  Convergence rides a durable intention instead: a PENDING
+ * fact_forget_intent row is committed before any delete, and it is flipped
+ * COMPLETED in the same transaction as its fact_forget_audit record.  So a
+ * crash leaves at most one PENDING intent, and wyl_fact_store_forget_reconcile
+ * replays it to exactly one fully-forgotten (or already-reused, no-op) result.
+ */
+
+static wyrelog_error_t
+forget_run_checkpoint (wyrelog_error_t (*checkpoint) (const gchar *, gpointer),
+    gpointer user_data, const gchar *point)
+{
+  if (checkpoint == NULL)
+    return WYRELOG_E_OK;
+  return checkpoint (point, user_data);
+}
+
+typedef struct
+{
+  gchar *op_uuid;
+  gchar *batch_id;
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *namespace_id;
+  gchar *relation_name;
+  gint64 schema_version;
+  gchar *projection_table;
+  gchar *content_hash;
+  gchar *idempotency_key;
+  gchar *operator_id;
+  gchar *reason;
+  gint64 rows_purged;
+  gchar *state;
+} ForgetIntent;
+
+static void
+forget_intent_clear (ForgetIntent *intent)
+{
+  if (intent == NULL)
+    return;
+  g_free (intent->op_uuid);
+  g_free (intent->batch_id);
+  g_free (intent->tenant_id);
+  g_free (intent->graph_id);
+  g_free (intent->namespace_id);
+  g_free (intent->relation_name);
+  g_free (intent->projection_table);
+  g_free (intent->content_hash);
+  g_free (intent->idempotency_key);
+  g_free (intent->operator_id);
+  g_free (intent->reason);
+  g_free (intent->state);
+  memset (intent, 0, sizeof (*intent));
+}
+
+static void
+forget_intent_free (ForgetIntent *intent)
+{
+  if (intent == NULL)
+    return;
+  forget_intent_clear (intent);
+  g_free (intent);
+}
+
+/* Read the reuse-guard fingerprint (content_hash + idempotency_key) of the
+ * batch row.  found=FALSE when no such batch row exists. */
+static wyrelog_error_t
+load_batch_forget_fingerprint_unlocked (wyl_fact_store_t *store,
+    const gchar *batch_id, gboolean *out_found, gchar **out_content_hash,
+    gchar **out_idempotency_key)
+{
+  *out_found = FALSE;
+  if (out_content_hash != NULL)
+    *out_content_hash = NULL;
+  if (out_idempotency_key != NULL)
+    *out_idempotency_key = NULL;
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  static const gchar *sql =
+      "SELECT content_hash, idempotency_key FROM fact_batches "
+      "WHERE batch_id = ?;";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, batch_id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  if (duckdb_row_count (&result) == 0) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_OK;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+  gchar *hash = duckdb_value_varchar (&result, 0, 0);
+  gchar *idem = duckdb_value_varchar (&result, 1, 0);
+  if (out_content_hash != NULL)
+    *out_content_hash = g_strdup (hash);
+  if (out_idempotency_key != NULL)
+    *out_idempotency_key = g_strdup (idem);
+  duckdb_free (hash);
+  duckdb_free (idem);
+  duckdb_destroy_result (&result);
+  if ((out_content_hash != NULL && *out_content_hash == NULL)
+      || (out_idempotency_key != NULL && *out_idempotency_key == NULL)) {
+    g_clear_pointer (out_content_hash, g_free);
+    g_clear_pointer (out_idempotency_key, g_free);
+    return WYRELOG_E_NOMEM;
+  }
+  *out_found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+count_projection_rows_unlocked (wyl_fact_store_t *store, const gchar *table,
+    const gchar *batch_id, gint64 *out_rows)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  g_autoptr (GString) sql = g_string_new ("SELECT COUNT(*) FROM ");
+  append_duckdb_identifier (sql, table);
+  g_string_append (sql, " WHERE __wyl_batch_id = ?;");
+  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, batch_id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  *out_rows = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+insert_forget_intent_unlocked (wyl_fact_store_t *store,
+    const ForgetIntent *intent, gint64 created_at_us)
+{
+  duckdb_prepared_statement stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_forget_intent "
+      "(op_uuid, batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+      " schema_version, projection_table, content_hash, idempotency_key, "
+      " operator, reason, rows_purged, state, created_at_us, completed_at_us) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NULL);";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  duckdb_state ok = duckdb_bind_varchar (stmt, 1, intent->op_uuid)
+      | duckdb_bind_varchar (stmt, 2, intent->batch_id)
+      | duckdb_bind_varchar (stmt, 3, intent->tenant_id)
+      | duckdb_bind_varchar (stmt, 4, intent->graph_id)
+      | duckdb_bind_varchar (stmt, 5, intent->namespace_id)
+      | duckdb_bind_varchar (stmt, 6, intent->relation_name)
+      | duckdb_bind_int64 (stmt, 7, intent->schema_version)
+      | duckdb_bind_varchar (stmt, 8, intent->projection_table)
+      | duckdb_bind_varchar (stmt, 9, intent->content_hash)
+      | duckdb_bind_varchar (stmt, 10, intent->idempotency_key)
+      | duckdb_bind_varchar (stmt, 11, intent->operator_id)
+      | duckdb_bind_varchar (stmt, 12, intent->reason)
+      | duckdb_bind_int64 (stmt, 13, intent->rows_purged)
+      | duckdb_bind_int64 (stmt, 14, created_at_us);
+  if (ok != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_state rc = duckdb_execute_prepared (stmt, NULL);
+  duckdb_destroy_prepare (&stmt);
+  return rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+prepared_delete_batch_unlocked (wyl_fact_store_t *store, const gchar *sql,
+    const gchar *batch_id)
+{
+  duckdb_prepared_statement stmt = NULL;
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, batch_id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_state rc = duckdb_execute_prepared (stmt, NULL);
+  duckdb_destroy_prepare (&stmt);
+  return rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+/* Final step: record the audit row and flip the intent COMPLETED in one
+ * transaction (no FK-delete, so DuckDB commits it atomically). */
+static wyrelog_error_t
+complete_forget_intent_unlocked (wyl_fact_store_t *store,
+    const ForgetIntent *intent)
+{
+  wyrelog_error_t rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gint64 now_us = g_get_real_time ();
+  duckdb_prepared_statement stmt = NULL;
+  static const gchar *audit_sql =
+      "INSERT INTO fact_forget_audit "
+      "(id, batch_id, tenant_id, graph_id, operator, reason, rows_purged, "
+      " created_at_us) VALUES ("
+      "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit), "
+      "?, ?, ?, ?, ?, ?, ?);";
+  if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess) {
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  duckdb_state ok = duckdb_bind_varchar (stmt, 1, intent->batch_id)
+      | duckdb_bind_varchar (stmt, 2, intent->tenant_id)
+      | duckdb_bind_varchar (stmt, 3, intent->graph_id)
+      | duckdb_bind_varchar (stmt, 4, intent->operator_id)
+      | duckdb_bind_varchar (stmt, 5, intent->reason)
+      | duckdb_bind_int64 (stmt, 6, intent->rows_purged)
+      | duckdb_bind_int64 (stmt, 7, now_us);
+  if (ok != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  duckdb_state exec = duckdb_execute_prepared (stmt, NULL);
+  duckdb_destroy_prepare (&stmt);
+  if (exec != DuckDBSuccess) {
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  duckdb_prepared_statement ustmt = NULL;
+  static const gchar *update_sql =
+      "UPDATE fact_forget_intent SET state = 'COMPLETED', "
+      "completed_at_us = ? WHERE op_uuid = ?;";
+  if (duckdb_prepare (store->conn, update_sql, &ustmt) != DuckDBSuccess) {
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  duckdb_state uok = duckdb_bind_int64 (ustmt, 1, now_us)
+      | duckdb_bind_varchar (ustmt, 2, intent->op_uuid);
+  if (uok != DuckDBSuccess) {
+    duckdb_destroy_prepare (&ustmt);
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  duckdb_state uexec = duckdb_execute_prepared (ustmt, NULL);
+  duckdb_destroy_prepare (&ustmt);
+  if (uexec != DuckDBSuccess) {
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  return exec_sql (store->conn, "COMMIT;");
+}
+
+/* Drive one intent to its terminal COMPLETED record.  Idempotent: an already
+ * COMPLETED intent is a no-op; a batch whose fingerprint no longer matches was
+ * deleted then had its identifier reused, so completion is recorded WITHOUT
+ * touching the new batch (closing the identifier-reuse hole). */
+static wyrelog_error_t
+execute_forget_intent_unlocked (wyl_fact_store_t *store,
+    const ForgetIntent *intent,
+    wyrelog_error_t (*checkpoint) (const gchar *, gpointer),
+    gpointer checkpoint_data, gint64 *out_rows_purged)
+{
+  if (g_strcmp0 (intent->state, "COMPLETED") == 0) {
+    if (out_rows_purged != NULL)
+      *out_rows_purged = intent->rows_purged;
+    return WYRELOG_E_OK;
+  }
+
+  gboolean found = FALSE;
+  g_autofree gchar *live_hash = NULL;
+  g_autofree gchar *live_idem = NULL;
+  wyrelog_error_t rc = load_batch_forget_fingerprint_unlocked (store,
+          intent->batch_id, &found, &live_hash, &live_idem);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean run_deletes = found
+      && g_strcmp0 (live_hash, intent->content_hash) == 0
+      && g_strcmp0 (live_idem, intent->idempotency_key) == 0;
+
+  if (run_deletes) {
+    rc = forget_run_checkpoint (checkpoint, checkpoint_data,
+            "before_delete_projection");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    g_autoptr (GString) proj_sql = g_string_new ("DELETE FROM ");
+    append_duckdb_identifier (proj_sql, intent->projection_table);
+    g_string_append (proj_sql, " WHERE __wyl_batch_id = ?;");
+    rc = prepared_delete_batch_unlocked (store, proj_sql->str,
+            intent->batch_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+
+    rc = forget_run_checkpoint (checkpoint, checkpoint_data,
+            "before_delete_events");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = prepared_delete_batch_unlocked (store,
+            "DELETE FROM fact_event_log WHERE batch_id = ?;", intent->batch_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+
+    rc = forget_run_checkpoint (checkpoint, checkpoint_data,
+            "before_delete_batch");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = prepared_delete_batch_unlocked (store,
+            "DELETE FROM fact_batches WHERE batch_id = ?;", intent->batch_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
+  rc = forget_run_checkpoint (checkpoint, checkpoint_data, "before_completion");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = complete_forget_intent_unlocked (store, intent);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (out_rows_purged != NULL)
+    *out_rows_purged = intent->rows_purged;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+load_pending_forget_intents_unlocked (wyl_fact_store_t *store, GPtrArray *out)
+{
+  duckdb_result result = { 0 };
+  static const gchar *sql =
+      "SELECT op_uuid, batch_id, tenant_id, graph_id, namespace_id, "
+      "relation_name, schema_version, projection_table, content_hash, "
+      "idempotency_key, operator, reason, rows_purged, state "
+      "FROM fact_forget_intent WHERE state = 'PENDING' "
+      "ORDER BY created_at_us;";
+  if (duckdb_query (store->conn, sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  gint64 n_rows = (gint64) duckdb_row_count (&result);
+  for (gint64 r = 0; r < n_rows; r++) {
+    ForgetIntent *intent = g_new0 (ForgetIntent, 1);
+    gchar *op_uuid = duckdb_value_varchar (&result, 0, r);
+    gchar *batch_id = duckdb_value_varchar (&result, 1, r);
+    gchar *tenant_id = duckdb_value_varchar (&result, 2, r);
+    gchar *graph_id = duckdb_value_varchar (&result, 3, r);
+    gchar *namespace_id = duckdb_value_varchar (&result, 4, r);
+    gchar *relation_name = duckdb_value_varchar (&result, 5, r);
+    gchar *projection_table = duckdb_value_varchar (&result, 7, r);
+    gchar *content_hash = duckdb_value_varchar (&result, 8, r);
+    gchar *idempotency_key = duckdb_value_varchar (&result, 9, r);
+    gchar *operator_id = duckdb_value_varchar (&result, 10, r);
+    gchar *reason = duckdb_value_varchar (&result, 11, r);
+    gchar *state = duckdb_value_varchar (&result, 13, r);
+    intent->op_uuid = g_strdup (op_uuid);
+    intent->batch_id = g_strdup (batch_id);
+    intent->tenant_id = g_strdup (tenant_id);
+    intent->graph_id = g_strdup (graph_id);
+    intent->namespace_id = g_strdup (namespace_id);
+    intent->relation_name = g_strdup (relation_name);
+    intent->schema_version = duckdb_value_int64 (&result, 6, r);
+    intent->projection_table = g_strdup (projection_table);
+    intent->content_hash = g_strdup (content_hash);
+    intent->idempotency_key = g_strdup (idempotency_key);
+    intent->operator_id = g_strdup (operator_id);
+    intent->reason = g_strdup (reason);
+    intent->rows_purged = duckdb_value_int64 (&result, 12, r);
+    intent->state = g_strdup (state);
+    duckdb_free (op_uuid);
+    duckdb_free (batch_id);
+    duckdb_free (tenant_id);
+    duckdb_free (graph_id);
+    duckdb_free (namespace_id);
+    duckdb_free (relation_name);
+    duckdb_free (projection_table);
+    duckdb_free (content_hash);
+    duckdb_free (idempotency_key);
+    duckdb_free (operator_id);
+    duckdb_free (reason);
+    duckdb_free (state);
+    g_ptr_array_add (out, intent);
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_fact_store_forget (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -1839,131 +2254,94 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
   if (table == NULL)
     return WYRELOG_E_INVALID;
 
-  /* Build the single-quoted, escaped batch_id literal once. */
-  g_autoptr (GString) batch_id_lit = g_string_new ("'");
-  for (const gchar * p = opts->batch_id; *p != '\0'; p++) {
-    if (*p == '\'')
-      g_string_append_c (batch_id_lit, '\'');
-    g_string_append_c (batch_id_lit, *p);
+  g_autofree gchar *minted_uuid = NULL;
+  const gchar *op_uuid = opts->op_uuid;
+  if (op_uuid == NULL || op_uuid[0] == '\0') {
+    minted_uuid = g_uuid_string_random ();
+    op_uuid = minted_uuid;
   }
-  g_string_append_c (batch_id_lit, '\'');
 
   g_mutex_lock (&store->lock);
 
-  /* Verify the batch exists. */
-  TriggerBatchScope scope = { 0 };
+  ForgetIntent intent = { 0 };
   gboolean found = FALSE;
-  rc = lookup_batch_scope_unlocked (store, opts->batch_id, &scope, &found);
+  g_autofree gchar *content_hash = NULL;
+  g_autofree gchar *idempotency_key = NULL;
+  rc = load_batch_forget_fingerprint_unlocked (store, opts->batch_id, &found,
+          &content_hash, &idempotency_key);
   if (rc != WYRELOG_E_OK)
     goto forget_unlock;
   if (!found) {
     rc = WYRELOG_E_NOT_FOUND;
     goto forget_unlock;
   }
-  trigger_batch_scope_clear (&scope);
 
-  /* Count projection rows before deletion. */
-  gint64 rows_purged = 0;
-  {
-    g_autoptr (GString) count_sql = g_string_new ("SELECT COUNT(*) FROM ");
-    append_duckdb_identifier (count_sql, table);
-    g_string_append_printf (count_sql, " WHERE __wyl_batch_id = %s;",
-        batch_id_lit->str);
-    duckdb_result result = { 0 };
-    if (duckdb_query (store->conn, count_sql->str, &result) != DuckDBSuccess) {
-      duckdb_destroy_result (&result);
-      rc = WYRELOG_E_IO;
-      goto forget_unlock;
-    }
-    rows_purged = duckdb_value_int64 (&result, 0, 0);
-    duckdb_destroy_result (&result);
-  }
+  gint64 rows = 0;
+  rc = count_projection_rows_unlocked (store, table, opts->batch_id, &rows);
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
 
-  /* 1. DELETE projection rows. */
-  {
-    g_autoptr (GString) sql = g_string_new ("DELETE FROM ");
-    append_duckdb_identifier (sql, table);
-    g_string_append_printf (sql, " WHERE __wyl_batch_id = %s;",
-        batch_id_lit->str);
-    rc = exec_sql (store->conn, sql->str);
-    if (rc != WYRELOG_E_OK)
-      goto forget_unlock;
-  }
+  intent.op_uuid = g_strdup (op_uuid);
+  intent.batch_id = g_strdup (opts->batch_id);
+  intent.tenant_id = g_strdup (schema->tenant_id);
+  intent.graph_id = g_strdup (schema->graph_id);
+  intent.namespace_id = g_strdup (schema->namespace_id);
+  intent.relation_name = g_strdup (schema->relation_name);
+  intent.schema_version = (gint64) schema->schema_version;
+  intent.projection_table = g_strdup (table);
+  intent.content_hash = g_strdup (content_hash);
+  intent.idempotency_key = g_strdup (idempotency_key);
+  intent.operator_id = g_strdup (opts->operator_id);
+  intent.reason = g_strdup (opts->reason);
+  intent.rows_purged = rows;
+  intent.state = g_strdup ("PENDING");
 
-  /* 2. DELETE fact_event_log rows (must precede fact_batches due to FK). */
-  {
-    g_autofree gchar *sql = g_strdup_printf
-          ("DELETE FROM fact_event_log WHERE batch_id = %s;",
-            batch_id_lit->str);
-    rc = exec_sql (store->conn, sql);
-    if (rc != WYRELOG_E_OK)
-      goto forget_unlock;
-  }
+  rc = forget_run_checkpoint (opts->checkpoint, opts->checkpoint_data,
+          "before_intent");
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
 
-  /* 3. DELETE fact_batches row. */
-  {
-    g_autofree gchar *sql = g_strdup_printf
-          ("DELETE FROM fact_batches WHERE batch_id = %s;",
-            batch_id_lit->str);
-    rc = exec_sql (store->conn, sql);
-    if (rc != WYRELOG_E_OK)
-      goto forget_unlock;
-  }
+  rc = insert_forget_intent_unlocked (store, &intent, g_get_real_time ());
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
 
-  /* 4. INSERT audit record. */
-  {
-    g_autoptr (GString) tid_lit = g_string_new ("'");
-    for (const gchar * p = schema->tenant_id; *p != '\0'; p++) {
-      if (*p == '\'')
-        g_string_append_c (tid_lit, '\'');
-      g_string_append_c (tid_lit, *p);
-    }
-    g_string_append_c (tid_lit, '\'');
+  rc = forget_run_checkpoint (opts->checkpoint, opts->checkpoint_data,
+          "after_intent");
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
 
-    g_autoptr (GString) gid_lit = g_string_new ("'");
-    for (const gchar * p = schema->graph_id; *p != '\0'; p++) {
-      if (*p == '\'')
-        g_string_append_c (gid_lit, '\'');
-      g_string_append_c (gid_lit, *p);
-    }
-    g_string_append_c (gid_lit, '\'');
-
-    g_autoptr (GString) op_lit = g_string_new ("'");
-    for (const gchar * p = opts->operator_id; *p != '\0'; p++) {
-      if (*p == '\'')
-        g_string_append_c (op_lit, '\'');
-      g_string_append_c (op_lit, *p);
-    }
-    g_string_append_c (op_lit, '\'');
-
-    g_autoptr (GString) reason_lit = g_string_new ("'");
-    for (const gchar * p = opts->reason; *p != '\0'; p++) {
-      if (*p == '\'')
-        g_string_append_c (reason_lit, '\'');
-      g_string_append_c (reason_lit, *p);
-    }
-    g_string_append_c (reason_lit, '\'');
-
-    gint64 now_us = g_get_real_time ();
-    g_autofree gchar *audit_sql = g_strdup_printf
-          ("INSERT INTO fact_forget_audit "
-            "(id, batch_id, tenant_id, graph_id, operator, reason, "
-            " rows_purged, created_at_us) "
-            "VALUES ("
-            "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit),"
-            " %s, %s, %s, %s, %s," " %" G_GINT64_FORMAT ", %" G_GINT64_FORMAT ");",
-            batch_id_lit->str, tid_lit->str, gid_lit->str,
-            op_lit->str, reason_lit->str, rows_purged, now_us);
-    rc = exec_sql (store->conn, audit_sql);
-    if (rc != WYRELOG_E_OK)
-      goto forget_unlock;
-  }
-
-  if (out_rows_purged != NULL)
-    *out_rows_purged = (gsize) rows_purged;
+  gint64 purged = 0;
+  rc = execute_forget_intent_unlocked (store, &intent, opts->checkpoint,
+          opts->checkpoint_data, &purged);
+  if (rc == WYRELOG_E_OK && out_rows_purged != NULL)
+    *out_rows_purged = (gsize) purged;
 
 forget_unlock:
-  trigger_batch_scope_clear (&scope);
+  forget_intent_clear (&intent);
+  g_mutex_unlock (&store->lock);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
+    wyrelog_error_t (*checkpoint) (const gchar *, gpointer),
+    gpointer checkpoint_data)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&store->lock);
+  g_autoptr (GPtrArray) pending =
+      g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
+  wyrelog_error_t rc = load_pending_forget_intents_unlocked (store, pending);
+  if (rc == WYRELOG_E_OK) {
+    for (guint i = 0; i < pending->len; i++) {
+      ForgetIntent *intent = g_ptr_array_index (pending, i);
+      rc = execute_forget_intent_unlocked (store, intent, checkpoint,
+              checkpoint_data, NULL);
+      if (rc != WYRELOG_E_OK)
+        break;
+    }
+  }
   g_mutex_unlock (&store->lock);
   return rc;
 }
