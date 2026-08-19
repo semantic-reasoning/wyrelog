@@ -5383,8 +5383,7 @@ check_service_bearer_decide_admits_only_the_data_plane_set (SoupServer *server,
    * DENY on this request would carry a named reason while this assertion
    * requires null -- a change that sent service bearers back through
    * wyl_decide would fail here.  Which name it would carry is not
-   * predicted: this check no longer seeds the session_state and
-   * session_active facts the old one did.
+   * predicted, and this check does not pin it.
    */
   if (strstr (body, "\"deny_reason\":null") == NULL)
     return 2460;
