@@ -141,14 +141,20 @@ service_request_auth_observed(Context, Subject, Tenant) :-
 //     data-plane set IS the arming condition for service subjects.  Do not
 //     "harden" this by re-adding armed/3; that deletes the feature.
 //
-// STILL MISSING relative to allow_guard_base: session_state/session_active.
-// S is the tenant, and no tenant but the default one is ever given a
-// session_state row, so that gate would deny every non-default tenant.  It is
-// blocked on the absent tenant activation wiring; see issue #835.
+// Scope liveness is carried too, on the same relation as allow_guard_base.
+// S is the credential tenant, and every tenant has a session_state row:
+// wyl_handle_load_policy_store_session_states projects the effective scope
+// state, which synthesizes active/closed from the tenants table itself and
+// falls back to session_states only for scopes that are not tenants, so a
+// created tenant is live and a sealed one is closed without any seeding.
+// A sealed tenant therefore denies at this rule as well as at the upstream
+// tenant-active gate.
 service_armed(Context, U, P, S) :-
     service_request_auth(Context, U, S),
     service_principal_state(U, "active"),
     approved_data_plane_permission(P),
+    session_state(S, ST),
+    session_active(ST),
     !frozen(S),
     !disabled_role_for(U, P),
     !policy_violation("sod", U, P, _).

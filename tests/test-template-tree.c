@@ -272,6 +272,8 @@ check_decision_template_relation_contract (void)
     "    service_request_auth(Context, U, S),\n"
     "    service_principal_state(U, \"active\"),\n"
     "    approved_data_plane_permission(P),\n"
+    "    session_state(S, ST),\n"
+    "    session_active(ST),\n"
     "    !frozen(S),\n"
     "    !disabled_role_for(U, P),\n"
     "    !policy_violation(\"sod\", U, P, _).",
