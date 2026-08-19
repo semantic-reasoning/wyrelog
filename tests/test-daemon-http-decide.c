@@ -4933,7 +4933,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
  * enters the wyl_decide core, so neither the #740 transient principal_state
  * injection nor the #762 transient perm_state arming takes any part.
  *
- * Asserts, in order: the four clauses together give ALLOW; a scope other
+ * Asserts, in order: the clauses together give ALLOW; a scope other
  * than the credential tenant gives 200 with DENY; that DENY carries a null
  * deny reason; disabling the durable principal revokes the bearer at
  * resolve, so the same request returns 401 without reaching a decision; and
@@ -4955,13 +4955,16 @@ check_service_bearer_decide_requires_live_principal (SoupServer *server,
    * wyl_decide_with_service_authority, which asks service_allow_bool and
    * never enters that core, so the old expectations were unreachable.
    *
-   * service_allow_bool requires four things at once, and the old check met
-   * only one.  has_permission held at the requested scope, because
+   * service_allow_bool requires five things at once, and the old check met
+   * two.  has_permission held at the requested scope, because
    * effective_permission carries no permission(P) guard and the undeclared
-   * svc.decide.allow flowed through it.  The other three failed: the
-   * principal was disabled, svc.decide.allow is outside the approved
-   * data-plane set, and the credential tenant __wr_default was not the
-   * requested scope.
+   * svc.decide.allow flowed through it; and scope liveness held, because the
+   * check seeded session_state(fixture.sid, "active") and
+   * session_active("active") for that session-id scope.  The other three
+   * failed: the principal was disabled, svc.decide.allow is outside the
+   * approved data-plane set, and the credential tenant __wr_default was not
+   * the requested scope -- which would have rejected the session-id scope
+   * the liveness it satisfied was keyed to.
    *
    * The subject is fresh because WYL_TEST_SERVICE_RESOLVER_SUBJECT is
    * disabled earlier in this variant and cannot be re-enabled.
@@ -5001,7 +5004,7 @@ check_service_bearer_decide_requires_live_principal (SoupServer *server,
   guint status = 0;
   g_autofree gchar *body = NULL;
 
-  /* All four clauses hold -> ALLOW. */
+  /* Every clause holds -> ALLOW. */
   gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
           fixture.tenant, NULL, fixture.token, &status, &body);
   if (rc != 0)
@@ -5088,19 +5091,22 @@ check_service_bearer_decide_requires_live_principal (SoupServer *server,
 }
 
 /*
- * #834 corrects what this block claimed.  It said a tenant created through
- * the public POST /tenants/create path is seeded with session_state(active),
- * and that step 2 would deny 403 without that seed.  No seed fires:
- * wyl_policy_store_seed_created_tenant_authority has no production caller,
- * so no tenant but the default one ever receives a session_state row.  That
- * is issue #835, and it is why the service rule still carries no
- * session_state term.
+ * #834 corrects the mechanism this block named, not its outcome.  It said a
+ * tenant created through the public POST /tenants/create path is seeded with
+ * session_state(active).  No seed runs --
+ * wyl_policy_store_seed_created_tenant_authority has no production caller --
+ * but the scope is live all the same, by a different route: the engine
+ * relation session_state is projected from the effective scope state, which
+ * wyl_policy_store_foreach_effective_scope_state synthesizes from the
+ * tenants table itself, active while sealed is 0 and closed once sealed.
+ * So a created tenant is a valid decision scope with no seeding, and
+ * service_armed carries session_state/session_active like allow_guard_base.
  *
  * What this check actually asserts, on ONE real server and handle:
  *   1. an admin bearer creates a fresh tenant through the public path;
  *   2. the admin grants the service its workload role at <tenant> (200);
- *   3. a service bearer decides ALLOW at <tenant>, on the four clauses of
- *      service_allow_bool rather than on any seeded scope liveness;
+ *   3. a service bearer decides ALLOW at <tenant>, on the clauses of
+ *      service_allow_bool, scope liveness among them;
  *   4. cross-scope: the same bearer at __wr_default decides 0.  Neither
  *      the grant nor the credential tenant reaches __wr_default, so this
  *      step isolates neither clause;
@@ -5211,9 +5217,10 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
    * anchor: mutate_tenant_lifecycle_publication grants the creator
    * wr.system_admin at the new tenant, and verify_tenant_creator_anchor
    * verifies that membership as part of the publication.  The comment here
-   * used to claim the create also seeds session_state(active), and that
-   * without that seed this grant would deny 403.  It does not: only the
-   * membership is established.  See the block above and issue #835. */
+   * used to add that the create seeds session_state(active) and that this
+   * grant would 403 without it.  The outcome was right and only the
+   * mechanism was wrong: the scope is live because the effective scope
+   * state is derived from the tenants table, not because a seed ran. */
   g_autofree gchar *grant_query = g_strdup_printf ("subject=%s&role=%s&scope=%s"
           "&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", svc, role,
           fresh);
@@ -5235,12 +5242,13 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
    * this step used to claim.  The decide no longer reaches wyl_decide at
    * all, so the #762 transient perm_state arming plays no part: signed
    * policy admits the action through approved_data_plane_permission
-   * instead.  Nor does a seeded session_state make <tenant> a valid scope --
-   * service_armed carries no session_state term, and no tenant but the
-   * default one is ever given such a row anyway (issue #835).  What makes
-   * this ALLOW is the four clauses of service_allow_bool: a durably active
-   * principal, an approved data-plane permission, has_permission at the
-   * scope, and the credential tenant equal to the requested scope.
+   * instead.  <tenant> is a valid scope because the effective scope state
+   * derives session_state(<tenant>, "active") from the tenants table, and
+   * service_armed now carries that term like allow_guard_base.  What makes
+   * this ALLOW is the clauses of service_allow_bool: a durably active
+   * principal, an approved data-plane permission, scope liveness,
+   * has_permission at the scope, and the credential tenant equal to the
+   * requested scope.
    */
   g_autofree gchar *fresh_tenant_query = g_strdup_printf ("tenant=%s", fresh);
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,

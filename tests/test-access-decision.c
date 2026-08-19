@@ -59,6 +59,8 @@ check_stratification (void)
     {.predicate = "service_request_auth",.negated = FALSE},
     {.predicate = "service_principal_state",.negated = FALSE},
     {.predicate = "approved_data_plane_permission",.negated = FALSE},
+    {.predicate = "session_state",.negated = FALSE},
+    {.predicate = "session_active",.negated = FALSE},
     {.predicate = "frozen",.negated = TRUE},
     {.predicate = "disabled_role_for",.negated = TRUE},
     {.predicate = "policy_violation",.negated = TRUE},
@@ -419,6 +421,8 @@ check_decision_rule_bodies (void)
     "    service_request_auth(Context, U, S),\n"
     "    service_principal_state(U, \"active\"),\n"
     "    approved_data_plane_permission(P),\n"
+    "    session_state(S, ST),\n"
+    "    session_active(ST),\n"
     "    !frozen(S),\n"
     "    !disabled_role_for(U, P),\n"
     "    !policy_violation(\"sod\", U, P, _).",

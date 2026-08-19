@@ -377,10 +377,15 @@ id for a human decide and the credential tenant for a service decide, so
 freezing a tenant denies service traffic at that tenant and does not touch
 human traffic. This is parity of the rule, not parity of the operator action.
 
-`service_armed` does not yet carry `session_state`/`session_active`. `S` is the
-credential tenant, and no tenant except the default one is ever given a
-`session_state` row, so that gate would deny every non-default tenant. It is
-blocked on the absent tenant activation wiring tracked by issue #835.
+`service_armed` carries `session_state`/`session_active`, on the same relation
+as `allow_guard_base`. `S` is the credential tenant, and every tenant has a
+scope state without any seeding:
+`wyl_handle_load_policy_store_session_states` projects the effective scope
+state, and `wyl_policy_store_foreach_effective_scope_state` synthesizes that
+from the `tenants` table itself -- `active` while `sealed` is 0, `closed`
+once sealed -- falling back to `session_states` only for scopes that are not
+tenants. A sealed tenant therefore denies at this rule as well as at the
+upstream tenant-active gate.
 
 `armed/3` is deliberately excluded and must stay excluded. It is unreachable
 for a `svc:` subject, so requiring it would make `service_allow_bool`
