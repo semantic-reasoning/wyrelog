@@ -145,6 +145,15 @@ typedef struct
 
 #define POLICY_WRITE_TEST_WAIT_TIMEOUT_US (30 * G_TIME_SPAN_SECOND)
 
+/*
+ * The subject every ServiceResolverFixture caller used before #834 made the
+ * field settable.  Keep it as the default so those callers are unaffected;
+ * a check that needs a durably active principal must pass its own, because
+ * this one is disabled by check_compound_disable_real_resolver_and_activation
+ * and the domain exposes no re-enable.
+ */
+#define WYL_TEST_SERVICE_RESOLVER_SUBJECT "svc:resolver:test"
+
 typedef struct
 {
   GMutex mutex;
@@ -3132,6 +3141,7 @@ typedef struct
   gchar credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
   gchar other_credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
   gchar tenant[64];
+  gchar subject[128];
   gchar *key_id;
   gchar *token;
   gint64 now;
@@ -3150,9 +3160,11 @@ static gboolean
 service_resolver_fixture_init_tenant_credential (SoupServer *server,
     ServiceResolverFixture *fixture, gint registry_state,
     guint registry_mismatch, const gchar *tenant_id,
-    const gchar *credential_id, guint64 credential_generation)
+    const gchar *credential_id, guint64 credential_generation,
+    const gchar *subject_id)
 {
   memset (fixture, 0, sizeof *fixture);
+  g_strlcpy (fixture->subject, subject_id, sizeof fixture->subject);
   wyl_id_t sid = WYL_ID_NIL, jti = WYL_ID_NIL;
   wyl_id_t other_sid = WYL_ID_NIL, other_jti = WYL_ID_NIL;
   guint8 secret[32] = { 0 };
@@ -3186,7 +3198,7 @@ service_resolver_fixture_init_tenant_credential (SoupServer *server,
   }
   wyl_service_session_descriptor_t descriptor = {
     .session_id = sid,.jti = fixture->jti,
-    .subject_id = "svc:resolver:test",.tenant_id = fixture->tenant,
+    .subject_id = fixture->subject,.tenant_id = fixture->tenant,
     .credential_id = fixture->credential,
     .credential_generation = credential_generation,
     .issued_at_seconds = fixture->now,
@@ -3253,7 +3265,29 @@ service_resolver_fixture_init_tenant (SoupServer *server,
     guint registry_mismatch, const gchar *tenant_id)
 {
   return service_resolver_fixture_init_tenant_credential (server, fixture,
-             registry_state, registry_mismatch, tenant_id, NULL, 0);
+             registry_state, registry_mismatch, tenant_id, NULL, 0,
+             WYL_TEST_SERVICE_RESOLVER_SUBJECT);
+}
+
+static gboolean
+service_resolver_fixture_init_tenant_subject (SoupServer *server,
+    ServiceResolverFixture *fixture, gint registry_state,
+    guint registry_mismatch, const gchar *tenant_id,
+    const gchar *subject_id)
+{
+  return service_resolver_fixture_init_tenant_credential (server, fixture,
+             registry_state, registry_mismatch, tenant_id, NULL, 0,
+             subject_id);
+}
+
+static gboolean
+service_resolver_fixture_init_subject (SoupServer *server,
+    ServiceResolverFixture *fixture, gint registry_state,
+    guint registry_mismatch, const gchar *subject_id)
+{
+  return service_resolver_fixture_init_tenant_credential (server, fixture,
+             registry_state, registry_mismatch, "__wr_default", NULL, 0,
+             subject_id);
 }
 
 static gboolean
@@ -3278,7 +3312,7 @@ service_resolver_expect (SoupServer *server,
     return rc == WYRELOG_E_POLICY && sid == NULL && actor == NULL
            && tenant == NULL;
   return rc == WYRELOG_E_OK && g_strcmp0 (sid, fixture->sid) == 0
-         && g_strcmp0 (actor, "svc:resolver:test") == 0
+         && g_strcmp0 (actor, fixture->subject) == 0
          && g_strcmp0 (tenant, fixture->tenant) == 0;
 }
 
@@ -3288,7 +3322,7 @@ service_auth_invalidation_for_fixture (const ServiceResolverFixture *fixture,
 {
   return (WylDaemonServiceAuthInvalidation) {
            .kind = kind,.credential_id = fixture->credential,.credential_generation =
-               9,.principal = "svc:resolver:test",.tenant = fixture->tenant,
+               9,.principal = fixture->subject,.tenant = fixture->tenant,
   };
 }
 
@@ -4001,7 +4035,8 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
   ok = ok && service_resolver_fixture_init_tenant_credential (server,
           &pending, WYL_SERVICE_AUTH_PENDING, 0, "__wr_default",
           active.issued.credential.credential_id,
-          active.issued.credential.generation);
+          active.issued.credential.generation,
+          WYL_TEST_SERVICE_RESOLVER_SUBJECT);
   CompoundDisableRace race = {
     .server = server,
     .request_id = rotate ? "resolver-credential-rotate" :
@@ -4892,88 +4927,150 @@ check_service_bearer_resolver_contract (SoupServer *server)
 }
 
 /*
- * #740 WALL 1 end-to-end: a genuine, FULLY validated live service (svc:)
- * bearer authorises through the real HTTP /decide route only because the
- * daemon injects a transient principal_state fact for it. This mints a
- * real service bearer (live detached session + ACTIVE registry
- * reservation + stored access token + signed JWT, all asserted by
- * service_resolver_expect), seeds a role grant, an ACTIVE session scope,
- * and an armed permission for the service subject -- but NO
- * principal_state row (that fact is written only for human sessions).
- * Before the fix the decide returned decision 0 not_authenticated;
- * after the fix it returns decision 1. Validation is never faked: the
- * signal that gates the injection is set only by resolve_bearer_session's
- * fully validated service branch.
+ * #834: a validated service bearer authorizes at its own tenant through the
+ * real HTTP /decide route.  decide_authenticated_request hands it to
+ * wyl_decide_with_service_authority, which asks service_allow_bool and never
+ * enters the wyl_decide core, so neither the #740 transient principal_state
+ * injection nor the #762 transient perm_state arming takes any part.
  *
- * SCOPE: the session scope is seeded active directly, so Wall 2
- * (fresh-tenant session_state seeding, #382) is deliberately not in play;
- * this asserts ONLY that the principal_state blocker (Wall 1) is cleared.
+ * Asserts, in order: the four clauses together give ALLOW; a scope other
+ * than the credential tenant gives 200 with DENY; that DENY carries a null
+ * deny reason; disabling the durable principal revokes the bearer at
+ * resolve, so the same request returns 401 without reaching a decision; and
+ * a token minted in a REVOKED registry state is likewise rejected there.
  */
 static gint
-check_service_bearer_decide_injects_principal_state (SoupServer *server,
+check_service_bearer_decide_requires_live_principal (SoupServer *server,
     const gchar *base_url)
 {
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   if (handle == NULL)
     return 2400;
 
-  g_auto (ServiceResolverFixture) fixture = { 0 };
-  if (!service_resolver_fixture_init (server, &fixture, WYL_SERVICE_AUTH_ACTIVE,
-      0)
-      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+  /*
+   * #834: this replaces a check written for the pre-#725 contract, when a
+   * service bearer on POST /decide went through wyl_decide and the #740
+   * transient principal_state injection cleared the authentication gate.
+   * decide_authenticated_request now routes a validated service bearer to
+   * wyl_decide_with_service_authority, which asks service_allow_bool and
+   * never enters that core, so the old expectations were unreachable.
+   *
+   * service_allow_bool requires four things at once, and the old check met
+   * only one.  has_permission held at the requested scope, because
+   * effective_permission carries no permission(P) guard and the undeclared
+   * svc.decide.allow flowed through it.  The other three failed: the
+   * principal was disabled, svc.decide.allow is outside the approved
+   * data-plane set, and the credential tenant __wr_default was not the
+   * requested scope.
+   *
+   * The subject is fresh because WYL_TEST_SERVICE_RESOLVER_SUBJECT is
+   * disabled earlier in this variant and cannot be re-enabled.
+   */
+  const gchar *subject = "svc:decide:live";
+  const gchar *perm = "wr.svc.read_decision";
+  const gchar *role = "wr.svc-834-role";
+
+  /*
+   * Create the durable principal BEFORE seeding: the create refreshes the
+   * service principal projection through a full engine pair reload, which
+   * discards every transient row inserted before it.
+   */
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t principal_rc = wyl_service_principal_create (handle,
+          subject, "834 live decide principal", "admin",
+          "decide-live-principal", &principal);
+  wyl_service_principal_clear (&principal);
+  if (principal_rc != WYRELOG_E_OK)
     return 2401;
 
-  const gchar *subject = "svc:resolver:test";
-  const gchar *perm = "svc.decide.allow";
-  /* Everything allow_guard_base needs EXCEPT principal_state. */
-  if (insert_symbol_row2 (handle, "role_permission", "wr.svc-decide-role", perm)
-      != WYRELOG_E_OK)
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (!service_resolver_fixture_init_subject (server, &fixture,
+      WYL_SERVICE_AUTH_ACTIVE, 0, subject)
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
     return 2402;
-  if (insert_symbol_row3 (handle, "member_of", subject, "wr.svc-decide-role",
-      fixture.sid) != WYRELOG_E_OK)
+
+  /* has_permission at the credential tenant, which is also the scope. */
+  if (insert_symbol_row2 (handle, "role_permission", role, perm)
+      != WYRELOG_E_OK)
     return 2403;
-  if (insert_symbol_row2 (handle, "session_state", fixture.sid, "active")
+  if (insert_symbol_row3 (handle, "member_of", subject, role, fixture.tenant)
       != WYRELOG_E_OK)
     return 2404;
-  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
-    return 2405;
-  if (insert_symbol_row4 (handle, "perm_state", subject, perm, fixture.sid,
-      "armed") != WYRELOG_E_OK)
-    return 2406;
 
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
 
-  /* Established scope: after the fix, decision 1 (before the fix it was
-   * decision 0 not_authenticated). */
+  /* All four clauses hold -> ALLOW. */
   gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
-          fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.tenant, NULL, fixture.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 2405;
+  if (strstr (body, "\"decision\":1") == NULL)
+    return 2406;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * Scope not equal to the credential tenant -> DENY.  service_armed binds
+   * the tenant column of service_request_auth and the head scope to the same
+   * variable, so a service decide authorizes only at its own tenant.  The
+   * request tenant stays the credential tenant so the request-tenant gate
+   * still passes and this reaches the decision rather than a 403.
+   */
+  g_autofree gchar *tenant_query = g_strdup_printf ("tenant=%s",
+          fixture.tenant);
+  rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
+          "wr-834-other-scope", tenant_query, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
     return 2407;
-  if (strstr (body, "\"decision\":1") == NULL)
+  if (strstr (body, "\"decision\":0") == NULL)
     return 2408;
-
-  /* Freeze the scope -> still denied, on the freeze gate: the transient
-   * fact clears only the authentication blocker, it never forces ALLOW. */
-  if (insert_symbol_row1 (handle, "frozen", fixture.sid) != WYRELOG_E_OK)
+  /*
+   * The service path leaves the deny tags NULL whatever the cause, so the
+   * body reports a null deny_reason.  This pins current behaviour, not
+   * settled policy: whether a service DENY should ever carry a reason is
+   * open, and changing it must be a deliberate edit here.
+   */
+  if (strstr (body, "\"deny_reason\":null") == NULL)
     return 2409;
   g_clear_pointer (&body, g_free);
+
+  /*
+   * Revocation, measured rather than assumed.  Disabling the durable
+   * principal does not turn the ALLOW above into a DENY: the same bearer,
+   * token, scope and grant now fail at resolve with 401
+   * decide_auth_required and never reach a decision at all.  The disable
+   * initializes a principal-scoped invalidation selector, which
+   * revokes every registry reservation for the subject, so
+   * resolve_bearer_session fails and the 401 is the only reachable outcome
+   * rather than an artefact of fixture ordering.  Revocation is therefore
+   * enforced ahead of policy, so service_principal_state(U, "active") in
+   * service_armed is a second line that this route cannot exercise --
+   * isolating that term needs the authority layer, where the decide is
+   * called without a bearer resolve in front of it.
+   *
+   * The principal is fresh and owned by this check, so disabling it is
+   * terminal here and affects nothing that runs later.
+   */
+  if (wyl_daemon_http_disable_service_principal_for_test (server, subject,
+      "000000000000000000000000834", NULL, NULL) != WYRELOG_E_OK)
+    return 2410;
   rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
-          fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.tenant, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 200)
-    return 2410;
-  if (strstr (body, "\"decision\":0") == NULL)
+  if (status != 401)
     return 2411;
-  if (strstr (body, "\"deny_reason\":\"frozen\"") == NULL)
+  if (strstr (body, "\"decide_auth_required\"") == NULL)
     return 2412;
+  g_clear_pointer (&body, g_free);
 
   /* A revoked service token is rejected at resolve (401) and never reaches
-   * decide, so no principal_state is ever asserted for it. */
+   * decide at all, so the service authority is never built for it. */
   g_auto (ServiceResolverFixture) revoked = { 0 };
   if (!service_resolver_fixture_init (server, &revoked,
       WYL_SERVICE_AUTH_REVOKED, 0)
@@ -4981,7 +5078,7 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
     return 2413;
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, subject, perm,
-          fixture.sid, NULL, revoked.token, &status, &body);
+          fixture.tenant, NULL, revoked.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401)
@@ -4991,20 +5088,24 @@ check_service_bearer_decide_injects_principal_state (SoupServer *server,
 }
 
 /*
- * #744 Wall 2: a tenant created through the real public POST /tenants/create
- * path is now seeded with session_state(active) + wr.system_admin membership
- * for the creating admin at <tenant> scope, so the admin can grant a workload
- * role at <tenant> and a service bearer can then /decide ALLOW there -- the
- * deny->allow that #382 could not reach on the public path.  Asserts, on ONE
- * real server/handle:
- *   1. create fresh tenant (admin bearer) fires the seed;
- *   2. grant the service its workload role at <tenant> (200) -- exercises the
- *      seeded authority anchor (without the seed this decide DENIES 403);
- *   3. service bearer /decide at <tenant> -> decision:1 (deny->allow);
- *   4. cross-scope: same bearer, datalog scope __wr_default -> decision:0
- *      (the grant at <tenant> confers nothing at another scope);
- *   5. seal <tenant> -> same decide -> 400 tenant_sealed (the upstream
- *      tenant-active gate beats the seeded session_state).
+ * #834 corrects what this block claimed.  It said a tenant created through
+ * the public POST /tenants/create path is seeded with session_state(active),
+ * and that step 2 would deny 403 without that seed.  No seed fires:
+ * wyl_policy_store_seed_created_tenant_authority has no production caller,
+ * so no tenant but the default one ever receives a session_state row.  That
+ * is issue #835, and it is why the service rule still carries no
+ * session_state term.
+ *
+ * What this check actually asserts, on ONE real server and handle:
+ *   1. an admin bearer creates a fresh tenant through the public path;
+ *   2. the admin grants the service its workload role at <tenant> (200);
+ *   3. a service bearer decides ALLOW at <tenant>, on the four clauses of
+ *      service_allow_bool rather than on any seeded scope liveness;
+ *   4. cross-scope: the same bearer at __wr_default decides 0.  Neither
+ *      the grant nor the credential tenant reaches __wr_default, so this
+ *      step isolates neither clause;
+ *   5. sealing <tenant> turns the same decide into 400 tenant_sealed -- the
+ *      upstream tenant-active gate runs ahead of the decision.
  */
 static gboolean seed_management_human_access_token (SoupServer * server,
     const gchar * session_id, const gchar * subject, gchar ** out_access_token);
@@ -5026,7 +5127,12 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
 
   const gchar *fresh = "wl744-fresh";
   const gchar *admin = "fresh-tenant-admin";
-  const gchar *svc = "svc:resolver:test";
+  /*
+   * #834: a fresh subject.  WYL_TEST_SERVICE_RESOLVER_SUBJECT is disabled
+   * earlier in this variant and service_allow_bool needs the principal
+   * durably active, so this check cannot share it.
+   */
+  const gchar *svc = "svc:wl744:agent";
   /* A non-"wr." role id: the reserved catalog namespace rejects upserts. */
   const gchar *role = "wl744-agent";
   /* Service-eligible: its only permission is an approved data-plane read. */
@@ -5068,8 +5174,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
   guint status = 0;
   g_autofree gchar *body = NULL;
 
-  /* (1) Create the fresh tenant through the real public path so the seed
-   * fires. */
+  /* (1) Create the fresh tenant through the real public path. */
   g_autofree gchar *create_query = g_strdup_printf ("name=%s&guard_timestamp=1"
           "&guard_loc_class=trusted&guard_risk=0", fresh);
   gint rc = send_raw_service_principal_bearer (session, "POST", base_url,
@@ -5080,18 +5185,35 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
     return 4626;
   g_clear_pointer (&body, g_free);
 
-  /* The validated service bearer for <tenant> (injects principal_state). The
-   * tenant must already exist/be active for the resolver to bind it. */
+  /* The validated service bearer for <tenant>.  The tenant must already
+   * exist and be active for the resolver to bind it. */
+  /*
+   * Create the durable principal before the fixture: the create refreshes
+   * the projection through a full engine pair reload, which would discard
+   * transient rows seeded ahead of it.
+   */
+  wyl_service_principal_t svc_principal = { 0 };
+  wyrelog_error_t svc_principal_rc = wyl_service_principal_create (handle,
+          svc, "744 fresh tenant agent", "admin", "wl744-agent-principal",
+          &svc_principal);
+  wyl_service_principal_clear (&svc_principal);
+  if (svc_principal_rc != WYRELOG_E_OK)
+    return 4627;
+
   g_auto (ServiceResolverFixture) fixture = { 0 };
-  if (!service_resolver_fixture_init_tenant (server, &fixture,
-      WYL_SERVICE_AUTH_ACTIVE, 0, fresh)
+  if (!service_resolver_fixture_init_tenant_subject (server, &fixture,
+      WYL_SERVICE_AUTH_ACTIVE, 0, fresh, svc)
       || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
     return 4625;
 
   /* (2) Grant the service its workload role at <tenant> using the creating
-   * admin's session.  This authorizes ONLY because the create seeded
-   * wr.system_admin + session_state(active) for the admin at <tenant>; without
-   * the seed the wr.policy.grant_role decide at <tenant> DENIES (403). */
+   * admin's session.  Asserts 200.  What authorizes it is the creator
+   * anchor: mutate_tenant_lifecycle_publication grants the creator
+   * wr.system_admin at the new tenant, and verify_tenant_creator_anchor
+   * verifies that membership as part of the publication.  The comment here
+   * used to claim the create also seeds session_state(active), and that
+   * without that seed this grant would deny 403.  It does not: only the
+   * membership is established.  See the block above and issue #835. */
   g_autofree gchar *grant_query = g_strdup_printf ("subject=%s&role=%s&scope=%s"
           "&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", svc, role,
           fresh);
@@ -5108,16 +5230,18 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 4629;
 
-  /* #762: the service's workload perm arms with no manual perm_state row.
-   * A service subject cannot hold a durable perm_state (the store rejects
-   * svc:), and wr.svc.read_decision is an approved data-plane permission,
-   * so wyl_decide injects the armed fact TRANSIENTLY for this validated
-   * service bearer at decide -- the previous manual read-engine injection
-   * is no longer needed. */
-
-  /* (3) The service bearer now decides ALLOW at <tenant>: the seeded
-   * session_state(active) is what makes <tenant> a valid decision scope,
-   * and the #762 transient arming supplies the armed perm_state. */
+  /*
+   * (3) The service bearer decides ALLOW at <tenant>.  #834 corrects what
+   * this step used to claim.  The decide no longer reaches wyl_decide at
+   * all, so the #762 transient perm_state arming plays no part: signed
+   * policy admits the action through approved_data_plane_permission
+   * instead.  Nor does a seeded session_state make <tenant> a valid scope --
+   * service_armed carries no session_state term, and no tenant but the
+   * default one is ever given such a row anyway (issue #835).  What makes
+   * this ALLOW is the four clauses of service_allow_bool: a durably active
+   * principal, an approved data-plane permission, has_permission at the
+   * scope, and the credential tenant equal to the requested scope.
+   */
   g_autofree gchar *fresh_tenant_query = g_strdup_printf ("tenant=%s", fresh);
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm, fresh,
           fresh_tenant_query, fixture.token, &status, &body);
@@ -5128,7 +5252,8 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   /* (4) Cross-scope isolation: the SAME bearer at datalog scope __wr_default
-   * has no membership there, so the grant at <tenant> confers nothing.  Keep
+   * decides 0.  Neither the grant nor the credential tenant reaches
+   * __wr_default, so this step isolates neither clause.  Keep
    * the request tenant at <tenant> so the request-tenant gate still passes. */
   rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm,
           WYL_TENANT_DEFAULT, fresh_tenant_query, fixture.token, &status, &body);
@@ -5139,7 +5264,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   /* (5) Seal <tenant>: the upstream tenant-active gate returns 400 before any
-   * datalog runs, even though session_state(active) is still seeded. */
+   * datalog runs, so no session_state is consulted either way. */
   if (wyl_policy_store_set_tenant_sealed (store, fresh, TRUE) != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 4632;
@@ -5155,77 +5280,106 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
 }
 
 /*
- * #762 WALL 3 end-to-end: a genuine, FULLY validated live service (svc:)
- * bearer that holds an APPROVED data-plane grant authorises through the
- * real HTTP /decide route with NO durable or manually injected perm_state
- * -- the daemon-validated service branch arms the grant TRANSIENTLY at
- * decide because the action is on the approved data-plane C-list. The
- * same bearer holding a control-plane grant is NEVER armed (the C-list is
- * a closed data-plane set), so that decide denies not_armed. Nothing is
- * written to the store: the public perm_state transition path for svc:
- * still rejects, asserted separately.
+ * #834: the approved data-plane set is what admits a service action.  This
+ * was written for #762, when a validated service bearer went through
+ * wyl_decide and a transient perm_state armed the grant.  The
+ * service-authority path never reaches that injection; the
+ * approved_data_plane_permission term inside service_armed does the work
+ * instead, so this asserts the same closed-set boundary against the rule
+ * that now enforces it.
+ *
+ * The two requests differ in the action alone -- same subject, token,
+ * scope, and role, with both permissions granted through that role -- so
+ * the approved data-plane set is the only term that varies.
  */
 static gint
-check_service_bearer_decide_arms_data_plane_permission (SoupServer *server,
+check_service_bearer_decide_admits_only_the_data_plane_set (SoupServer *server,
     const gchar *base_url)
 {
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   if (handle == NULL)
     return 2450;
 
-  g_auto (ServiceResolverFixture) fixture = { 0 };
-  if (!service_resolver_fixture_init (server, &fixture, WYL_SERVICE_AUTH_ACTIVE,
-      0)
-      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+  /*
+   * #834: this was written for #762, when a validated service bearer went
+   * through wyl_decide and the transient perm_state injection armed an
+   * approved data-plane permission.  The service-authority path never
+   * reaches that injection.  What admits the action now is the
+   * approved_data_plane_permission term inside service_armed, so this check
+   * asserts the same closed-set boundary against the rule that enforces it.
+   */
+  const gchar *subject = "svc:decide:dataplane";
+  const gchar *dp_perm = "wr.svc.read_decision";        /* approved */
+  const gchar *cp_perm = "wr.policy.grant_role";        /* control-plane */
+  const gchar *role = "wr.svc-834-dp-role";
+
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t principal_rc = wyl_service_principal_create (handle,
+          subject, "834 data-plane principal", "admin",
+          "decide-dataplane-principal", &principal);
+  wyl_service_principal_clear (&principal);
+  if (principal_rc != WYRELOG_E_OK)
     return 2451;
 
-  const gchar *subject = "svc:resolver:test";
-  const gchar *dp_perm = "wr.svc.read_decision";        /* approved data-plane */
-  const gchar *cp_perm = "wr.policy.grant_role";        /* control-plane */
-  const gchar *role = "wr.svc-762-role";
-  /* Grant both perms at the fixture scope, active session, NO perm_state. */
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (!service_resolver_fixture_init_subject (server, &fixture,
+      WYL_SERVICE_AUTH_ACTIVE, 0, subject)
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+    return 2452;
+
+  /* Both permissions granted at the credential tenant, which is the scope. */
   if (insert_symbol_row2 (handle, "role_permission", role, dp_perm)
       != WYRELOG_E_OK)
-    return 2452;
+    return 2453;
   if (insert_symbol_row2 (handle, "role_permission", role, cp_perm)
       != WYRELOG_E_OK)
-    return 2453;
-  if (insert_symbol_row3 (handle, "member_of", subject, role, fixture.sid)
-      != WYRELOG_E_OK)
     return 2454;
-  if (insert_symbol_row2 (handle, "session_state", fixture.sid, "active")
+  if (insert_symbol_row3 (handle, "member_of", subject, role, fixture.tenant)
       != WYRELOG_E_OK)
     return 2455;
-  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
-    return 2456;
 
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
 
-  /* (1) data-plane action -> decision:1, armed transiently by #762. */
-  gint rc = send_raw_decide_bearer (session, "POST", base_url, subject, dp_perm,
-          fixture.sid, NULL, fixture.token, &status, &body);
+  /* (1) approved data-plane action -> ALLOW. */
+  gint rc = send_raw_decide_bearer (session, "POST", base_url, subject,
+          dp_perm, fixture.tenant, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
-    return 2457;
+    return 2456;
   if (strstr (body, "\"decision\":1") == NULL)
-    return 2458;
+    return 2457;
   g_clear_pointer (&body, g_free);
 
-  /* (2) control-plane action -> decision:0 not_armed: the C-list gate
-   * blocks arming even though has_permission holds. */
+  /*
+   * (2) control-plane action -> DENY, even though has_permission holds at
+   * the same scope for the same bearer.  The only term that differs is
+   * approved_data_plane_permission, so this isolates the closed set.
+   */
   rc = send_raw_decide_bearer (session, "POST", base_url, subject, cp_perm,
-          fixture.sid, NULL, fixture.token, &status, &body);
+          fixture.tenant, NULL, fixture.token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
-    return 2459;
+    return 2458;
   if (strstr (body, "\"decision\":0") == NULL)
+    return 2459;
+  /*
+   * No named reason: the service path leaves the deny tags NULL whatever
+   * the cause.  This pins current behaviour, not settled policy.
+   *
+   * It also separates the two decide paths.  Every deny_reason rule begins
+   * with has_permission, which holds here for both actions, so a wyl_decide
+   * DENY on this request would carry a named reason while this assertion
+   * requires null -- a change that sent service bearers back through
+   * wyl_decide would fail here.  Which name it would carry is not
+   * predicted: this check no longer seeds the session_state and
+   * session_active facts the old one did.
+   */
+  if (strstr (body, "\"deny_reason\":null") == NULL)
     return 2460;
-  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL)
-    return 2461;
   g_clear_pointer (&body, g_free);
 
   return 0;
@@ -20055,7 +20209,7 @@ main (void)
     goto cleanup;
   }
   gint service_decide_rc =
-      check_service_bearer_decide_injects_principal_state (http.server,
+      check_service_bearer_decide_requires_live_principal (http.server,
           base_url);
   if (service_decide_rc != 0) {
     result = service_decide_rc;
@@ -20068,7 +20222,7 @@ main (void)
     goto cleanup;
   }
   gint service_data_plane_rc =
-      check_service_bearer_decide_arms_data_plane_permission (http.server,
+      check_service_bearer_decide_admits_only_the_data_plane_set (http.server,
           base_url);
   if (service_data_plane_rc != 0) {
     result = service_data_plane_rc;
