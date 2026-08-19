@@ -111,13 +111,43 @@ wyrelog_error_t wyl_fact_store_retract_by_batch_id (wyl_fact_store_t * store,
 
 typedef struct
 {
+  /*
+   * Optional caller-supplied operation identity.  When NULL the store mints a
+   * fresh one; a caller that wants to correlate or retry an exact forget can
+   * pass a stable value.  It is NOT the batch_id: batch_id is a reusable
+   * primary key, so it cannot safely identify a destructive operation across a
+   * crash+reuse.
+   */
+  const gchar *op_uuid;
   const gchar *batch_id;
   const gchar *operator_id;
   const gchar *reason;
+  /*
+   * Test-only fault-injection seam; NULL in production.  Invoked at each named
+   * durable boundary of the forget protocol ("after_intent",
+   * "before_delete_projection", "before_delete_events", "before_delete_batch",
+   * "before_completion").  Returning non-OK aborts the call at that boundary,
+   * leaving the exact durable state a real crash would, so a subsequent
+   * wyl_fact_store_forget_reconcile can prove convergence.
+   */
+  wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
+  gpointer checkpoint_data;
 } wyl_fact_store_forget_options_t;
 
 wyrelog_error_t wyl_fact_store_forget (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_forget_options_t * opts, gsize * out_rows_purged);
+
+/*
+ * Drive every durable forget intention that did not reach its COMPLETED record
+ * to convergence: a batch that is fully forgotten (data rows gone, audit +
+ * intent COMPLETED written) or, when its identifier has since been reused, a
+ * no-op completion that never touches the new batch.  Idempotent; safe to run
+ * at startup or targeted reconciliation.  checkpoint is a test-only seam as
+ * above (NULL in production).
+ */
+wyrelog_error_t wyl_fact_store_forget_reconcile (wyl_fact_store_t * store,
+    wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data),
+    gpointer checkpoint_data);
 
 G_END_DECLS;
