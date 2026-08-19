@@ -488,6 +488,100 @@ test_service_lifecycle_projection_loader_faults (void)
 }
 
 /*
+ * #834: service_armed carries service_principal_state(U, "active").  This
+ * asserts that disabling the durable principal turns the same decide from
+ * ALLOW to DENY -- same subject, tenant, action and scope, same grant, with
+ * only the projected lifecycle state moved.
+ *
+ * It lives at the authority layer because POST /decide cannot reach the term.
+ * The disable initializes a principal-scoped invalidation selector that
+ * revokes the subject's registry reservations, so an HTTP bearer fails at
+ * resolve with 401 before any decision is taken.  service_decide here runs
+ * with no bearer resolve in front of it, so the rule is what answers.
+ *
+ * The grant is durable, so it survives the projection reload the disable
+ * performs; service_principal_state is the only fact that flips.
+ */
+static void
+test_service_authority_disabled_principal_denies (void)
+{
+  g_autofree gchar *templates = copy_unsigned_template_tree ();
+  g_assert_nonnull (templates);
+  g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
+          "svc:authority:revoke", TRUE);
+
+  g_assert_cmpint (service_decide (handle, "svc:authority:revoke",
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_disable (handle,
+      "svc:authority:revoke", "admin", "00000000000000000000000834A",
+      &principal), ==, WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+
+  g_assert_cmpint (service_decide (handle, "svc:authority:revoke",
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+
+  g_clear_object (&handle);
+  remove_tree (templates);
+}
+
+/*
+ * #834: service_armed carries session_state(S, ST) and session_active(ST).
+ * This asserts that sealing the credential tenant turns the same decide from
+ * ALLOW to DENY at the rule, not merely at the daemon's tenant-active gate.
+ *
+ * No seeding is involved either way.  The engine relation session_state is
+ * projected from the effective scope state, which synthesizes the value from
+ * the tenants table -- active while sealed is 0, closed once sealed.  The
+ * DENY follows because wyl_handle_seed_session_active_states seeds
+ * session_active for "active" and "elevated" only, so "closed" satisfies no
+ * session_active row.
+ *
+ * A created tenant is required: wyl_policy_store_set_tenant_sealed rejects
+ * sealing WYL_TENANT_DEFAULT.  The reload is required too, so the projection
+ * re-derives the scope state after the store write.
+ */
+static void
+test_service_authority_sealed_tenant_denies (void)
+{
+  g_autofree gchar *templates = copy_unsigned_template_tree ();
+  g_assert_nonnull (templates);
+  g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
+          "svc:authority:sealed", TRUE);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean tenant_created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-seal",
+      &tenant_created), ==, WYRELOG_E_OK);
+  g_assert_true (tenant_created);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+      "svc:authority:sealed", "wr.stream.read", "tenant-seal"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (service_decide (handle, "svc:authority:sealed",
+      "tenant-seal", "wr.stream.read", "tenant-seal",
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "tenant-seal",
+      TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (service_decide (handle, "svc:authority:sealed",
+      "tenant-seal", "wr.stream.read", "tenant-seal",
+      WYRELOG_E_OK), ==, WYL_DECISION_DENY);
+  /* Control: the default tenant is untouched, so the seal is scoped. */
+  g_assert_cmpint (service_decide (handle, "svc:authority:sealed",
+      WYL_TENANT_DEFAULT, "wr.stream.read", WYL_TENANT_DEFAULT,
+      WYRELOG_E_OK), ==, WYL_DECISION_ALLOW);
+
+  g_clear_object (&handle);
+  remove_tree (templates);
+}
+
+/*
  * #834: service_armed carries !frozen(S).  This asserts that a service decide
  * at a frozen scope is DENY while the same decide at an unfrozen scope is
  * still ALLOW -- the freeze is scope-discriminating, not global -- and that
@@ -1187,6 +1281,10 @@ main (int argc, char **argv)
       test_service_lifecycle_projection_loader_faults);
   g_test_add_func ("/service-decision/authority/allow-deny-binding",
       test_service_authority_allow_deny_and_binding);
+  g_test_add_func ("/service-decision/authority/disabled-principal-denies",
+      test_service_authority_disabled_principal_denies);
+  g_test_add_func ("/service-decision/authority/sealed-tenant-denies",
+      test_service_authority_sealed_tenant_denies);
   g_test_add_func ("/service-decision/authority/freeze-denies",
       test_service_authority_freeze_denies);
   g_test_add_func ("/service-decision/authority/zero-role-forged-subject",
