@@ -57,7 +57,7 @@ public static class WyrelogTokenPrivileges
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
 
-    public static void Enable(string privilegeName)
+    public static bool TryEnable(string privilegeName)
     {
         IntPtr token;
         if (!OpenProcessToken(GetCurrentProcess(),
@@ -84,11 +84,11 @@ public static class WyrelogTokenPrivileges
 
             int error = Marshal.GetLastWin32Error();
             if (error == ERROR_NOT_ALL_ASSIGNED)
-                throw new Win32Exception(error,
-                    "The runner token does not hold the requested privilege");
+                return false;
             if (error != 0)
                 throw new Win32Exception(error,
                     "AdjustTokenPrivileges did not enable the requested privilege");
+            return true;
         }
         finally
         {
@@ -98,8 +98,23 @@ public static class WyrelogTokenPrivileges
 }
 '@
 
-[WyrelogTokenPrivileges]::Enable('SeCreateSymbolicLinkPrivilege')
-Write-Host 'SeCreateSymbolicLinkPrivilege enabled for the Windows test process.'
+$privilege_enabled =
+    [WyrelogTokenPrivileges]::TryEnable('SeCreateSymbolicLinkPrivilege')
+if ($privilege_enabled) {
+  Write-Host 'SeCreateSymbolicLinkPrivilege enabled for the Windows test process.'
+} else {
+  # GitHub-hosted Windows images run as administrators but do not assign
+  # SeCreateSymbolicLinkPrivilege to that logon.  Developer Mode is the
+  # documented unprivileged CreateSymbolicLinkW path and is effective for the
+  # child test process without requiring a new logon token.
+  $developer_mode_key =
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+  New-Item -Path $developer_mode_key -Force | Out-Null
+  New-ItemProperty -Path $developer_mode_key `
+      -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 `
+      -Force | Out-Null
+  Write-Host 'Developer Mode enabled for unprivileged Windows symlink tests.'
+}
 
 & $env:ComSpec /D /E:ON /V:OFF /S /C $Command
 if ($LASTEXITCODE -ne 0) {
