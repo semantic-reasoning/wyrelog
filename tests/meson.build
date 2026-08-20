@@ -1481,7 +1481,7 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   test('fact-provisioning-construct', test_fact_provisioning_construct,
     timeout : 60,
   )
-  if host_machine.system() != 'windows'
+  if get_option('enable_secure_duckdb_bridge').enabled()
     test_secure_duckdb_filesystem = executable(
       'test-secure-duckdb-filesystem',
       'test-secure-duckdb-filesystem.cc',

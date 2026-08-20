@@ -18,9 +18,6 @@ header = (root / "wyrelog/fact/store-private.h").read_text(encoding="utf-8")
 types = (
     root / "wyrelog/fact/store-identity-types-private.h"
 ).read_text(encoding="utf-8")
-windows = (
-    root / "wyrelog/fact/secure-duckdb-bridge-windows-private.c"
-).read_text(encoding="utf-8")
 locator_types = (
     root / "wyrelog/fact/graph-locator-private.h"
 ).read_text(encoding="utf-8")
@@ -91,8 +88,8 @@ for forbidden in ("gchar", "gint", "WylFactGraphDirectory"):
         raise SystemExit(
             f"pair handoff exposes raw or mutable authority: {forbidden}"
         )
-if "WYL_FACT_STORE_IDENTITY_RESULT_OPEN" not in windows:
-    raise SystemExit("Windows fail-closed result classification is missing")
+if "WYL_FACT_STORE_IDENTITY_RESULT_OPEN" not in bridge:
+    raise SystemExit("pinned identity result classification is missing")
 
 if sys.platform != "win32":
     # pkg-config and the compiler emit output in the toolchain locale's

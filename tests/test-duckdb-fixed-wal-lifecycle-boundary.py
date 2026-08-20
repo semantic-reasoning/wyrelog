@@ -89,7 +89,7 @@ seam_end = meson.index("\n  endif\nendif", seam_start)
 seam = meson[seam_start:seam_end]
 for token in named_tests:
     if token not in seam:
-        raise SystemExit(f"{token} escaped the non-Windows seam target")
+        raise SystemExit(f"{token} escaped the native seam target")
 
 for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     workflow = (

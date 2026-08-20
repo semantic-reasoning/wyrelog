@@ -40,8 +40,8 @@ if ("duckdb_test_seam_optimization = "
 
 if package.count("'-DWYL_DUCKDB_TEST_AFTER_WAL_START=1'") != 1:
     raise SystemExit("the seam macro must be defined for exactly one dependency")
-if "if host_machine.system() != 'windows'" not in package:
-    raise SystemExit("the seam variant must not become Windows runtime work")
+if "if true" not in package:
+    raise SystemExit("the seam variant must be available on every native host")
 if "duckdb_test_seam_dep = duckdb_subproject.get_variable(" not in parent:
     raise SystemExit("the source-pinned parent must expose the test dependency")
 

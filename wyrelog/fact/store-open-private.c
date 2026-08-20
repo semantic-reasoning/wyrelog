@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/store-open-private.h"
 
-#ifndef G_OS_WIN32
 #include "fact/graph-locator-private.h"
 #include "fact/provisioning-run-private.h"
 #include "wyl-id-private.h"
@@ -122,4 +121,3 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
   wyl_policy_graph_authority_record_free (authority);
   return rc;
 }
-#endif
