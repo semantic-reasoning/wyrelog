@@ -929,17 +929,9 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
       &lease), ==, WYRELOG_E_OK);
   /* Minting the reparse spelling takes either Developer Mode, which the
    * unprivileged flag asks for, or SeCreateSymbolicLinkPrivilege, which the
-   * unflagged call uses.  Ask for each in turn before concluding that this
-   * machine offers neither: a refusal of the flagged form alone says only
-   * that Developer Mode is off, not that the privilege is absent.
-   *
-   * An account holding neither -- the service account the Windows runner
-   * executes as -- cannot mint the adversary at all, so the case reports a
-   * skip rather than failing on an environment it cannot create.  What that
-   * gives up is narrow: the hard-link phase above still drives the same
-   * identity predicate, and only FILE_OPEN_REPARSE_POINT in the sidecar open,
-   * which is what makes the attribute observable instead of followed, goes
-   * unproven where the skip fires.  Issue #808 tracks restoring it. */
+   * unflagged call uses.  The Windows CI launcher must enable the latter on
+   * the test token; if it is absent, this coverage must fail rather than
+   * silently lose the FILE_OPEN_REPARSE_POINT proof. */
   await_deleted_artifact_name ("reparse", wal_path, wal_wide);
   if (!CreateSymbolicLinkW (wal_wide, main_wide,
       SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)
@@ -949,21 +941,11 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
     DWORD probe_error = probe_attrs == INVALID_FILE_ATTRIBUTES
         ? GetLastError () : ERROR_SUCCESS;
 
-    if (create_error == ERROR_PRIVILEGE_NOT_HELD) {
-      g_autofree gchar *message = g_strdup_printf
-            ("reparse substitution unproven: operation=CreateSymbolicLinkW "
-              "stage=reparse create-error=%lu probe-attrs=0x%08lx "
-              "probe-error=%lu", (unsigned long) create_error,
-              (unsigned long) probe_attrs, (unsigned long) probe_error);
-
-      g_test_skip (message);
-    } else {
-      g_error ("artifact substitution failed: operation=CreateSymbolicLinkW "
-          "stage=reparse path=%s create-error=%lu "
-          "probe-attrs=0x%08lx probe-error=%lu",
-          wal_path, (unsigned long) create_error, (unsigned long) probe_attrs,
-          (unsigned long) probe_error);
-    }
+    g_error ("artifact substitution failed: operation=CreateSymbolicLinkW "
+        "stage=reparse path=%s create-error=%lu "
+        "probe-attrs=0x%08lx probe-error=%lu",
+        wal_path, (unsigned long) create_error,
+        (unsigned long) probe_attrs, (unsigned long) probe_error);
   } else {
     g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease, WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, &sidecar), ==, WYRELOG_E_POLICY);
     g_assert_null (sidecar);
