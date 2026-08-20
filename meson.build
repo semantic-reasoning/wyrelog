@@ -78,10 +78,8 @@ if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
       # subproject (currently v1.5.5), never a system lookalike.
       duckdb_subproject = subproject('duckdb-amalgamated', required : true)
       duckdb_dep = duckdb_subproject.get_variable('duckdb_dep')
-      if host_machine.system() != 'windows'
-        duckdb_test_seam_dep = duckdb_subproject.get_variable(
-          'duckdb_test_seam_dep')
-      endif
+      duckdb_test_seam_dep = duckdb_subproject.get_variable(
+        'duckdb_test_seam_dep')
       # Meson 1.1 lacks SubprojectHolder.project_version(); the declared
       # subproject dependency carries that same project version.
       if duckdb_dep.version() != '1.5.5'

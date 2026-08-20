@@ -46,7 +46,8 @@ owner_acl_clear (WylTestOwnerAcl *security)
   g_free (security->acl);
   g_free (security->user);
   *security = (WylTestOwnerAcl) {
-  0};
+    0
+  };
 }
 
 static gboolean
@@ -58,7 +59,8 @@ owner_acl_init (BYTE ace_flags, WylTestOwnerAcl *security, GError **error)
   gboolean ok = FALSE;
 
   *security = (WylTestOwnerAcl) {
-  0};
+    0
+  };
   if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
     goto out;
   GetTokenInformation (token, TokenUser, NULL, 0, &needed);
@@ -78,7 +80,7 @@ owner_acl_init (BYTE ace_flags, WylTestOwnerAcl *security, GError **error)
   security->acl = g_malloc0 (acl_length);
   if (!InitializeAcl (security->acl, acl_length, ACL_REVISION)
       || !AddAccessAllowedAceEx (security->acl, ACL_REVISION, ace_flags,
-          FILE_ALL_ACCESS, security->user))
+      FILE_ALL_ACCESS, security->user))
     goto out;
   ok = TRUE;
 
@@ -99,8 +101,43 @@ out:
 static gboolean
 apply_owner_acl (const gchar *path, BYTE ace_flags, GError **error)
 {
+  HANDLE token = NULL;
+  TOKEN_PRIVILEGES privileges = { 0 };
+  gboolean privilege_available = TRUE;
+  DWORD privilege_error = ERROR_SUCCESS;
   WylTestOwnerAcl security;
   g_autofree gunichar2 *wide = NULL;
+
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_ADJUST_PRIVILEGES,
+      &token)) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "Failed to open the test process token: Win32 error %lu",
+        (gulong) GetLastError ());
+    return FALSE;
+  }
+  if (!LookupPrivilegeValueW (NULL, SE_TAKE_OWNERSHIP_NAME,
+      &privileges.Privileges[0].Luid)) {
+    privilege_available = FALSE;
+  } else {
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!AdjustTokenPrivileges (token, FALSE, &privileges, 0, NULL, NULL)) {
+      DWORD saved_error = GetLastError ();
+      CloseHandle (token);
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+          "Failed to enable SeTakeOwnershipPrivilege: Win32 error %lu",
+          (gulong) saved_error);
+      return FALSE;
+    }
+    privilege_error = GetLastError ();
+  }
+  CloseHandle (token);
+  if (privilege_available && privilege_error != ERROR_SUCCESS) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "SeTakeOwnershipPrivilege is unavailable: Win32 error %lu",
+        (gulong) privilege_error);
+    return FALSE;
+  }
 
   if (!owner_acl_init (ace_flags, &security, error))
     return FALSE;
@@ -109,10 +146,16 @@ apply_owner_acl (const gchar *path, BYTE ace_flags, GError **error)
     owner_acl_clear (&security);
     return FALSE;
   }
+  /* Hosted Windows runners may not define SeTakeOwnershipPrivilege.  The
+   * secure fixture is created by the current user in that case, so preserve
+   * its existing owner and still install the protected owner-only DACL. */
+  DWORD security_information = DACL_SECURITY_INFORMATION
+      | PROTECTED_DACL_SECURITY_INFORMATION;
+  if (privilege_available)
+    security_information |= OWNER_SECURITY_INFORMATION;
   DWORD status = SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
-      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
-      | PROTECTED_DACL_SECURITY_INFORMATION, security.user, NULL,
-      security.acl, NULL);
+          security_information, privilege_available ? security.user : NULL,
+          NULL, security.acl, NULL);
   owner_acl_clear (&security);
   if (status == ERROR_SUCCESS)
     return TRUE;
@@ -129,8 +172,8 @@ canonical_windows_path (const gchar *path, GError **error)
   if (wide == NULL)
     return NULL;
   HANDLE handle = CreateFileW ((LPCWSTR) wide, FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
   if (handle == INVALID_HANDLE_VALUE) {
     g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
         "Failed to open test root '%s': Win32 error %lu", path,
@@ -138,7 +181,7 @@ canonical_windows_path (const gchar *path, GError **error)
     return NULL;
   }
   DWORD needed = GetFinalPathNameByHandleW (handle, NULL, 0,
-      FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+          FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   if (needed == 0) {
     DWORD saved_error = GetLastError ();
     CloseHandle (handle);
@@ -149,7 +192,7 @@ canonical_windows_path (const gchar *path, GError **error)
   }
   g_autofree WCHAR *resolved = g_new0 (WCHAR, needed + 1);
   DWORD length = GetFinalPathNameByHandleW (handle, resolved, needed + 1,
-      FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+          FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   DWORD saved_error = GetLastError ();
   CloseHandle (handle);
   if (length == 0 || length > needed) {
@@ -274,16 +317,16 @@ wyl_test_create_directory_alias (const gchar *alias, const gchar *target,
 {
 #ifdef G_OS_WIN32
   g_autofree gunichar2 *wide_alias = g_utf8_to_utf16 (alias, -1, NULL, NULL,
-      error);
+          error);
   g_autofree gunichar2 *wide_target = g_utf8_to_utf16 (target, -1, NULL, NULL,
-      error);
+          error);
   if (wide_alias == NULL || wide_target == NULL)
     return FALSE;
 
   gsize target_units = wcslen ((const WCHAR *) wide_target);
   g_autofree WCHAR *substitute = g_new (WCHAR, target_units + 5);
   if (swprintf (substitute, target_units + 5, L"\\??\\%ls",
-          (const WCHAR *) wide_target) < 0) {
+      (const WCHAR *) wide_target) < 0) {
     g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
         "Failed to construct a junction target for '%s'", target);
     return FALSE;
@@ -307,8 +350,8 @@ wyl_test_create_directory_alias (const gchar *alias, const gchar *target,
   }
 
   HANDLE handle = CreateFileW ((LPCWSTR) wide_alias, GENERIC_WRITE, 0, NULL,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-      NULL);
+          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+          NULL);
   if (handle == INVALID_HANDLE_VALUE) {
     DWORD saved_error = GetLastError ();
     (void) RemoveDirectoryW ((LPCWSTR) wide_alias);
@@ -329,7 +372,7 @@ wyl_test_create_directory_alias (const gchar *alias, const gchar *target,
       target_bytes);
   DWORD returned = 0;
   gboolean created = DeviceIoControl (handle, FSCTL_SET_REPARSE_POINT, data,
-      (DWORD) total, NULL, 0, &returned, NULL);
+          (DWORD) total, NULL, 0, &returned, NULL);
   DWORD saved_error = GetLastError ();
   CloseHandle (handle);
   if (created)
@@ -446,12 +489,27 @@ wyl_test_path_exists (const gchar *path, gboolean *out_exists, GError **error)
 gchar *
 wyl_test_make_secure_fact_root (const gchar *tmpl, GError **error)
 {
+#ifdef G_OS_WIN32
+  /* g_dir_make_tmp uses the system temp volume, whose inherited owner on
+   * hosted runners can differ from the test token.  Create the fixture below
+   * the current user's home so the strict production owner check remains
+   * meaningful even when ownership reassignment is unavailable. */
+  g_autofree gchar *home_template = g_get_home_dir () != NULL
+      ? g_build_filename (g_get_home_dir (), tmpl, NULL) : NULL;
+  g_autofree gchar *created = home_template != NULL
+      && g_mkdtemp (home_template) != NULL
+      ? g_steal_pointer (&home_template) : NULL;
+  if (created == NULL && error != NULL)
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "Failed to create secure Windows fixture root");
+#else
   g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+#endif
   if (created == NULL)
     return NULL;
 #ifdef G_OS_WIN32
   if (!apply_owner_acl (created,
-          OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, error)) {
+      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, error)) {
     (void) g_rmdir (created);
     return NULL;
   }

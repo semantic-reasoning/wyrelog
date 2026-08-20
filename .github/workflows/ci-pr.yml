@@ -610,6 +610,7 @@ jobs:
   build-windows:
     name: build-windows${{ matrix.job_suffix }}
     runs-on: windows-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -831,7 +832,7 @@ jobs:
           builddir\wyrelog\wyctl.exe --help >NUL
           builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
           if "${{ matrix.secure_bridge }}"=="enabled" (
-            meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem fact-artifact-namespace-windows fact-provisioning-construct --print-errorlogs
+            meson test -C builddir secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem fact-artifact-namespace-windows fact-provisioning-construct fact-provisioning-run fact-store-provisioned duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery --print-errorlogs
           ) else (
             meson test -C builddir --print-errorlogs --suite wyrelog
           )

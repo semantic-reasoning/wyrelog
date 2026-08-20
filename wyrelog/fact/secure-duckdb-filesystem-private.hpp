@@ -12,6 +12,21 @@
 #include "fact/secure-duckdb-file-handle-private.hpp"
 #include "fact/secure-duckdb-filesystem-test-faults-private.h"
 
+#ifdef G_OS_WIN32
+#ifdef CreateDirectory
+#undef CreateDirectory
+#endif
+#ifdef RemoveDirectory
+#undef RemoveDirectory
+#endif
+#ifdef GetFileType
+#undef GetFileType
+#endif
+#ifdef MoveFile
+#undef MoveFile
+#endif
+#endif
+
 class WylSecureDuckdbAuthorityException final: public
 duckdb::IOException
 {
