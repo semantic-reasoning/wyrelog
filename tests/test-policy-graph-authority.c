@@ -48,6 +48,29 @@ recovery_mac_fake_verify (gpointer state_p, const guint8 *label,
 }
 
 static void
+recovery_mac_test_append_u16 (GByteArray *bytes, guint16 value)
+{
+  guint8 encoded[] = { (guint8) (value >> 8), (guint8) value };
+  g_byte_array_append (bytes, encoded, sizeof encoded);
+}
+
+static void
+recovery_mac_test_append_u64 (GByteArray *bytes, guint64 value)
+{
+  guint8 encoded[8];
+  for (guint i = 0; i < G_N_ELEMENTS (encoded); i++)
+    encoded[i] = (guint8) (value >> (56u - i * 8u));
+  g_byte_array_append (bytes, encoded, sizeof encoded);
+}
+
+static void
+recovery_mac_test_append_field (GByteArray *bytes, const gchar *value)
+{
+  recovery_mac_test_append_u16 (bytes, (guint16) strlen (value));
+  g_byte_array_append (bytes, (const guint8 *) value, strlen (value));
+}
+
+static void
 recovery_mac_fake_wipe (gpointer state_p)
 {
   RecoveryMacFakeProvider *state = state_p;
@@ -199,6 +222,8 @@ test_recovery_mac_handle_contract (void)
   g_assert_true (wyl_fact_recovery_mac_handle_scope_matches (handle,
       "tenant-a", "graph-a", "operation-a", 7));
   g_assert_false (wyl_fact_recovery_mac_handle_scope_matches (handle,
+      "tenant-a", "graph-a", "operation-a", 6));
+  g_assert_false (wyl_fact_recovery_mac_handle_scope_matches (handle,
       "tenant-b", "graph-a", "operation-a", 7));
   GBytes *label = NULL;
   g_assert_cmpint (wyl_fact_recovery_mac_handle_dup_label (handle, &label), ==,
@@ -207,6 +232,16 @@ test_recovery_mac_handle_contract (void)
   const guint8 *label_data = g_bytes_get_data (label, &label_len);
   g_assert_nonnull (label_data);
   g_assert_cmpuint (label_len, >, strlen ("wyrelog.fact.recovery-evidence.mac.v1"));
+  g_autoptr (GByteArray) expected_label = g_byte_array_new ();
+  recovery_mac_test_append_field (expected_label,
+      "wyrelog.fact.recovery-evidence.mac.v1");
+  recovery_mac_test_append_field (expected_label, "key-7");
+  recovery_mac_test_append_u64 (expected_label, 7);
+  recovery_mac_test_append_field (expected_label, "tenant-a");
+  recovery_mac_test_append_field (expected_label, "graph-a");
+  recovery_mac_test_append_field (expected_label, "operation-a");
+  g_assert_cmpmem (label_data, label_len, expected_label->data,
+      expected_label->len);
   g_bytes_unref (label);
 
   const guint8 payload[] = { 1, 2, 3, 4 };
