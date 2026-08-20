@@ -9041,6 +9041,8 @@ static const gchar fact_graph_provisioning_table_sql[] =
     "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
     "updated_at BETWEEN 0 AND 9223372036854775807),"
     "windows_operation_evidence_version INTEGER,"
+    /* Volume serials use SQLite INTEGER as a lossless signed bit container;
+     * existing positive rows require no data rewrite during this migration. */
     "windows_graph_volume_serial INTEGER,"
     "windows_graph_file_id BLOB,"
     "windows_artifact_volume_serial INTEGER,"
@@ -9051,10 +9053,10 @@ static const gchar fact_graph_provisioning_table_sql[] =
     "(typeof(windows_operation_evidence_version)='integer' AND "
     "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
     "typeof(windows_graph_volume_serial)='integer' AND "
-    "windows_graph_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "windows_graph_volume_serial != 0 AND "
     "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
     "typeof(windows_artifact_volume_serial)='integer' AND "
-    "windows_artifact_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "windows_artifact_volume_serial != 0 AND "
     "typeof(windows_artifact_file_id)='blob' AND "
     "length(windows_artifact_file_id)=16)),"
     "CHECK(updated_at>=created_at),"
@@ -9755,10 +9757,10 @@ validate_graph_authority_rows (sqlite3 *db)
     "(typeof(windows_operation_evidence_version)='integer' AND "
     "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
     "typeof(windows_graph_volume_serial)='integer' AND "
-    "windows_graph_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "windows_graph_volume_serial != 0 AND "
     "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
     "typeof(windows_artifact_volume_serial)='integer' AND "
-    "windows_artifact_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "windows_artifact_volume_serial != 0 AND "
     "typeof(windows_artifact_file_id)='blob' AND length(windows_artifact_file_id)=16)) OR "
     "updated_at<created_at OR NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
     "JOIN tenants AS t ON t.tenant_id=g.tenant_id WHERE "
@@ -10327,6 +10329,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  source_identity_kind INTEGER,"
       "  source_posix_device INTEGER,"
       "  source_posix_inode INTEGER,"
+      /* source_windows_volume_serial uses the same lossless INTEGER bit
+       * encoding as fact_graph_provisioning volume serials. */
       "  source_windows_volume_serial INTEGER,"
       "  source_windows_file_id BLOB,"
       "  source_size_bytes INTEGER,"
@@ -13085,6 +13089,25 @@ fact_reconcile_journal_state_parse (const gchar *value,
   return FALSE;
 }
 
+/* SQLite INTEGER is a signed 64-bit bit container.  Preserve the complete
+ * Windows ULONGLONG volume serial by moving its representation through that
+ * container without changing any bits. */
+static sqlite3_int64
+windows_volume_serial_to_sql (guint64 value)
+{
+  sqlite3_int64 encoded;
+  memcpy (&encoded, &value, sizeof encoded);
+  return encoded;
+}
+
+static guint64
+windows_volume_serial_from_sql (sqlite3_int64 value)
+{
+  guint64 decoded;
+  memcpy (&decoded, &value, sizeof decoded);
+  return decoded;
+}
+
 gboolean
 wyl_policy_fact_reconcile_artifact_evidence_is_valid
   (const WylPolicyFactReconcileArtifactEvidence * e)
@@ -13093,7 +13116,7 @@ wyl_policy_fact_reconcile_artifact_evidence_is_valid
       || e->digest_algorithm !=
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256
       || e->posix_device > G_MAXINT64 || e->posix_inode > G_MAXINT64
-      || e->windows_volume_serial > G_MAXINT64 || e->size_bytes > G_MAXINT64)
+      || e->size_bytes > G_MAXINT64)
     return FALSE;
   gboolean nonzero_digest = FALSE;
   gboolean nonzero_windows_id = FALSE;
@@ -13173,7 +13196,7 @@ fact_reconcile_journal_record_from_row (sqlite3_stmt *stmt,
       || sqlite3_column_type (stmt, 21) != SQLITE_INTEGER
       || sqlite3_column_type (stmt, 22) != SQLITE_INTEGER)
     return WYRELOG_E_POLICY;
-  for (gint i = 12; i <= 14; i++)
+  for (gint i = 12; i <= 13; i++)
     if (sqlite3_column_int64 (stmt, i) < 0)
       return WYRELOG_E_POLICY;
   if (sqlite3_column_int64 (stmt, 10) !=
@@ -13236,7 +13259,7 @@ fact_reconcile_journal_record_from_row (sqlite3_stmt *stmt,
   record->source_evidence.posix_inode =
       (guint64) sqlite3_column_int64 (stmt, 13);
   record->source_evidence.windows_volume_serial =
-      (guint64) sqlite3_column_int64 (stmt, 14);
+      windows_volume_serial_from_sql (sqlite3_column_int64 (stmt, 14));
   memcpy (record->source_evidence.windows_file_id, sqlite3_column_blob (stmt,
       15), sizeof record->source_evidence.windows_file_id);
   record->source_evidence.size_bytes =
@@ -13463,8 +13486,9 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
       source_evidence->posix_device) != SQLITE_OK
       || sqlite3_bind_int64 (stmt, 14, (sqlite3_int64)
       source_evidence->posix_inode) != SQLITE_OK
-      || sqlite3_bind_int64 (stmt, 15, (sqlite3_int64)
-      source_evidence->windows_volume_serial) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 15,
+      windows_volume_serial_to_sql (source_evidence->windows_volume_serial))
+      != SQLITE_OK
       || sqlite3_bind_blob (stmt, 16, source_evidence->windows_file_id,
       sizeof source_evidence->windows_file_id,
       SQLITE_TRANSIENT) != SQLITE_OK
@@ -13747,12 +13771,14 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
     gint64 evidence_version = sqlite3_column_int64 (stmt, 11);
     gint64 graph_volume_serial = sqlite3_column_int64 (stmt, 12);
     gint64 artifact_volume_serial = sqlite3_column_int64 (stmt, 14);
-    if (evidence_version < 1 || graph_volume_serial < 1
-        || artifact_volume_serial < 1)
+    if (evidence_version < 1 || graph_volume_serial == 0
+        || artifact_volume_serial == 0)
       return WYRELOG_E_POLICY;
     windows_evidence_version = (guint64) evidence_version;
-    windows_graph_volume_serial = (guint64) graph_volume_serial;
-    windows_artifact_volume_serial = (guint64) artifact_volume_serial;
+    windows_graph_volume_serial = windows_volume_serial_from_sql
+          (graph_volume_serial);
+    windows_artifact_volume_serial = windows_volume_serial_from_sql
+          (artifact_volume_serial);
     windows_graph_file_id = sqlite3_column_blob (stmt, 13);
     windows_artifact_file_id = sqlite3_column_blob (stmt, 15);
     if (windows_evidence_version !=
@@ -13899,10 +13925,8 @@ wyl_policy_store_graph_provisioning_set_windows_evidence (wyl_policy_store_t *st
 {
   if (store == NULL || store->db == NULL || op_uuid == NULL || evidence == NULL
       || evidence->version != WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION
-      || evidence->graph_identity.volume_serial < 1
-      || evidence->graph_identity.volume_serial > G_MAXINT64
-      || evidence->artifact_identity.volume_serial < 1
-      || evidence->artifact_identity.volume_serial > G_MAXINT64)
+      || evidence->graph_identity.volume_serial == 0
+      || evidence->artifact_identity.volume_serial == 0)
     return WYRELOG_E_INVALID;
   wyl_id_t operation_id;
   if (wyl_id_parse (op_uuid, &operation_id) != WYRELOG_E_OK
@@ -13935,7 +13959,8 @@ wyl_policy_store_graph_provisioning_set_windows_evidence (wyl_policy_store_t *st
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK
       && sqlite3_bind_int64 (stmt, 2,
-      (sqlite3_int64) evidence->graph_identity.volume_serial) != SQLITE_OK)
+      windows_volume_serial_to_sql (evidence->graph_identity.volume_serial))
+      != SQLITE_OK)
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK
       && sqlite3_bind_blob (stmt, 3, evidence->graph_identity.file_id, 16,
@@ -13943,7 +13968,8 @@ wyl_policy_store_graph_provisioning_set_windows_evidence (wyl_policy_store_t *st
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK
       && sqlite3_bind_int64 (stmt, 4,
-      (sqlite3_int64) evidence->artifact_identity.volume_serial) != SQLITE_OK)
+      windows_volume_serial_to_sql (evidence->artifact_identity.volume_serial))
+      != SQLITE_OK)
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK
       && sqlite3_bind_blob (stmt, 5, evidence->artifact_identity.file_id, 16,
