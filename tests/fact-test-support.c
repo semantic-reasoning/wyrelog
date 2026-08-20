@@ -146,10 +146,16 @@ apply_owner_acl (const gchar *path, BYTE ace_flags, GError **error)
     owner_acl_clear (&security);
     return FALSE;
   }
+  /* Hosted Windows runners may not define SeTakeOwnershipPrivilege.  The
+   * secure fixture is created by the current user in that case, so preserve
+   * its existing owner and still install the protected owner-only DACL. */
+  DWORD security_information = DACL_SECURITY_INFORMATION
+      | PROTECTED_DACL_SECURITY_INFORMATION;
+  if (privilege_available)
+    security_information |= OWNER_SECURITY_INFORMATION;
   DWORD status = SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
-          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
-          | PROTECTED_DACL_SECURITY_INFORMATION, security.user, NULL,
-          security.acl, NULL);
+          security_information, privilege_available ? security.user : NULL,
+          NULL, security.acl, NULL);
   owner_acl_clear (&security);
   if (status == ERROR_SUCCESS)
     return TRUE;
@@ -483,7 +489,22 @@ wyl_test_path_exists (const gchar *path, gboolean *out_exists, GError **error)
 gchar *
 wyl_test_make_secure_fact_root (const gchar *tmpl, GError **error)
 {
+#ifdef G_OS_WIN32
+  /* g_dir_make_tmp uses the system temp volume, whose inherited owner on
+   * hosted runners can differ from the test token.  Create the fixture below
+   * the current user's home so the strict production owner check remains
+   * meaningful even when ownership reassignment is unavailable. */
+  g_autofree gchar *home_template = g_get_home_dir () != NULL
+      ? g_build_filename (g_get_home_dir (), tmpl, NULL) : NULL;
+  g_autofree gchar *created = home_template != NULL
+      && g_mkdtemp (home_template) != NULL
+      ? g_steal_pointer (&home_template) : NULL;
+  if (created == NULL && error != NULL)
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "Failed to create secure Windows fixture root");
+#else
   g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+#endif
   if (created == NULL)
     return NULL;
 #ifdef G_OS_WIN32
