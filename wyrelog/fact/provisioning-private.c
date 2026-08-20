@@ -40,6 +40,27 @@ record_matches_authority (const WylPolicyGraphProvisioningRecord *record,
          == record->expected_reconciliation_generation;
 }
 
+#ifdef G_OS_WIN32
+static gboolean
+windows_operation_evidence_equal
+  (const WylFactGraphWinOperationEvidence *left,
+    const WylFactGraphWinOperationEvidence *right)
+{
+  return left != NULL && right != NULL && left->version == right->version
+         && memcmp (left->operation_uuid, right->operation_uuid,
+             sizeof left->operation_uuid) == 0
+         && left->graph_identity.volume_serial
+         == right->graph_identity.volume_serial
+         && memcmp (left->graph_identity.file_id, right->graph_identity.file_id,
+             sizeof left->graph_identity.file_id) == 0
+         && left->artifact_identity.volume_serial
+         == right->artifact_identity.volume_serial
+         && memcmp (left->artifact_identity.file_id,
+             right->artifact_identity.file_id,
+             sizeof left->artifact_identity.file_id) == 0;
+}
+#endif
+
 void
 wyl_fact_graph_provisioning_stage_clear (WylFactGraphProvisioningStage *stage)
 {
@@ -81,9 +102,20 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_stage_create_exact (&out_stage->directory,
             record->op_uuid, &out_stage->stage);
-  if (rc == WYRELOG_E_BUSY)
+  if (rc == WYRELOG_E_BUSY) {
+#ifdef G_OS_WIN32
+    if (record->has_windows_evidence)
+      rc = wyl_fact_graph_directory_stage_open_exact_with_evidence
+            (&out_stage->directory, record->op_uuid,
+              &record->windows_evidence, &out_stage->stage);
+    else
+      rc = wyl_fact_graph_directory_stage_open_exact (&out_stage->directory,
+              record->op_uuid, &out_stage->stage);
+#else
     rc = wyl_fact_graph_directory_stage_open_exact (&out_stage->directory,
             record->op_uuid, &out_stage->stage);
+#endif
+  }
   wyl_fact_graph_locator_clear (&locator);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_graph_provisioning_stage_clear (out_stage);
@@ -111,6 +143,19 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
     wyl_fact_graph_provisioning_stage_clear (out_stage);
     return rc;
   }
+#ifdef G_OS_WIN32
+  if (record->has_windows_evidence) {
+    WylFactGraphWinOperationEvidence actual = { 0 };
+    rc = wyl_fact_graph_stage_get_windows_operation_evidence (&out_stage->stage,
+            &actual);
+    if (rc != WYRELOG_E_OK
+        || !windows_operation_evidence_equal (&actual,
+        &record->windows_evidence)) {
+      wyl_fact_graph_provisioning_stage_clear (out_stage);
+      return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+    }
+  }
+#endif
 
   out_stage->tenant_id = g_strdup (record->tenant_id);
   out_stage->graph_id = g_strdup (record->graph_id);
