@@ -18,8 +18,8 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <sodium.h>
 #endif
+#include <string.h>
 #include "fact/graph-artifact-namespace-private.h"
 
 #define TOKEN_SIDE_REPLACE "00000000-0000-4000-8000-000000000001"
@@ -66,11 +66,13 @@ recovery_mac_test_compute (gpointer state, const guint8 *label, gsize label_len,
     guint8 out_tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
 {
   RecoveryMacTestProvider *provider = state;
-  g_autofree guint8 *input = g_malloc (label_len + payload_len);
-  memcpy (input, label, label_len);
-  memcpy (input + label_len, payload, payload_len);
-  return crypto_generichash (out_tag, WYL_FACT_RECOVERY_MAC_TAG_BYTES, input,
-             label_len + payload_len, provider->key, sizeof provider->key) == 0
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  gsize digest_len = WYL_FACT_RECOVERY_MAC_TAG_BYTES;
+  g_checksum_update (checksum, provider->key, sizeof provider->key);
+  g_checksum_update (checksum, label, label_len);
+  g_checksum_update (checksum, payload, payload_len);
+  g_checksum_get_digest (checksum, out_tag, &digest_len);
+  return digest_len == WYL_FACT_RECOVERY_MAC_TAG_BYTES
       ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
 }
 
@@ -82,15 +84,15 @@ recovery_mac_test_verify (gpointer state, const guint8 *label, gsize label_len,
   guint8 expected[WYL_FACT_RECOVERY_MAC_TAG_BYTES];
   wyrelog_error_t r = recovery_mac_test_compute (state, label, label_len,
           payload, payload_len, expected);
-  gboolean equal = sodium_memcmp (expected, tag, sizeof expected) == 0;
-  sodium_memzero (expected, sizeof expected);
+  gboolean equal = memcmp (expected, tag, sizeof expected) == 0;
+  memset (expected, 0, sizeof expected);
   return r == WYRELOG_E_OK && equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static void
 recovery_mac_test_wipe (gpointer state)
 {
-  sodium_memzero (state, sizeof (RecoveryMacTestProvider));
+  memset (state, 0, sizeof (RecoveryMacTestProvider));
 }
 
 static void
