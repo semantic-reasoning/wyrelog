@@ -2812,6 +2812,16 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
         (mac_handle, v2_tampered, &temp_evidence_v2), ==, WYRELOG_E_POLICY);
   g_assert_null (temp_evidence_v2);
+  for (gsize byte_offset = 0; byte_offset < v2_size; byte_offset++)
+    for (guint bit = 0; bit < 8; bit++) {
+      guint8 *single_bit_data = g_memdup2 (v2_data, v2_size);
+      single_bit_data[byte_offset] ^= (guint8) (1u << bit);
+      GBytes *single_bit = g_bytes_new_take (single_bit_data, v2_size);
+      g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
+            (mac_handle, single_bit, &temp_evidence_v2), !=, WYRELOG_E_OK);
+      g_assert_null (temp_evidence_v2);
+      g_bytes_unref (single_bit);
+    }
   g_autoptr (GBytes) v2_legacy = g_bytes_new_static ("WTE1", 4);
   g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
         (mac_handle, v2_legacy, &temp_evidence_v2), ==, WYRELOG_E_INVALID);
