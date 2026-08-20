@@ -2098,8 +2098,7 @@ test_fixed_sidecar_replacement_success (void)
       WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
   g_assert_cmpint
     (wyl_fact_artifact_sidecar_binding_replace_existing_wal
-        ((WylFactArtifactSidecarBinding *) 0x1,
-      (WylFactArtifactSidecarBinding *) 0x2, &result), ==,
+        (NULL, NULL, &result), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (result, ==,
       WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED);
