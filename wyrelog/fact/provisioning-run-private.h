@@ -6,12 +6,11 @@
 
 G_BEGIN_DECLS;
 
-#ifndef G_OS_WIN32
 /* Crash-safe provisioning coordinator: drives one per-graph store from
  * reservation to ACTIVE around the filesystem construct, keeping the policy
  * FSM (fact_graph_provisioning phase + coupled graph authority lifecycle) and
  * the on-disk retained pair consistent across every crash seam.  Still DARK:
- * no live create/open call path is rewired here.  POSIX-only for now.
+ * no live create/open call path is rewired here.
  *
  * The coordinator drives ONLY wyl_policy_store_graph_provisioning_transition;
  * that primitive atomically couples the graph authority (PROVISIONING -> ACTIVE
@@ -53,6 +52,4 @@ wyrelog_error_t wyl_fact_relation_activation_reconcile
     const gchar * namespace_id, const gchar * relation_name,
     guint64 expected_activation_generation,
     WylPolicyAuthorityMutationResult * out_result);
-#endif
-
 G_END_DECLS;

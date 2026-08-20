@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "fact-test-support.h"
 #include "wyrelog/wyrelog.h"
@@ -5907,6 +5908,35 @@ check_store_provisions_fact_graph (void)
     return 9691;
   if (absent_evidence_count != 1)
     return 9692;
+
+#ifdef G_OS_WIN32
+  WylPolicyGraphProvisioningRecord *provisioning = NULL;
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  wyl_id_t operation_id;
+  if (wyl_id_parse (op_uuid, &operation_id) != WYRELOG_E_OK)
+    return 9693;
+  evidence.version = WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION;
+  memcpy (evidence.operation_uuid, operation_id.bytes,
+      sizeof evidence.operation_uuid);
+  evidence.graph_identity.volume_serial = 1;
+  evidence.graph_identity.file_id[0] = 1;
+  evidence.artifact_identity.volume_serial = 2;
+  evidence.artifact_identity.file_id[0] = 2;
+  if (wyl_policy_store_graph_provisioning_set_windows_evidence (store, op_uuid,
+      &evidence) != WYRELOG_E_OK)
+    return 9694;
+  if (wyl_policy_store_graph_provisioning_read (store, op_uuid, &provisioning)
+      != WYRELOG_E_OK || provisioning == NULL
+      || !provisioning->has_windows_evidence
+      || memcmp (&provisioning->windows_evidence, &evidence,
+      sizeof evidence) != 0)
+    return 9695;
+  wyl_policy_graph_provisioning_record_free (provisioning);
+  evidence.graph_identity.file_id[1] = 1;
+  if (wyl_policy_store_graph_provisioning_set_windows_evidence (store, op_uuid,
+      &evidence) != WYRELOG_E_POLICY)
+    return 9696;
+#endif
 
   /* Idempotent resume: the same operation UUID, no second reservation. */
   gchar op_uuid_again[WYL_ID_STRING_BUF] = { 0 };

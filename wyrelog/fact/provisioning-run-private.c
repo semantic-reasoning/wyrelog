@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/provisioning-run-private.h"
 
-#ifndef G_OS_WIN32
-
 /* Open the graph directory (without staging) and build the exact store identity
  * from a durable record and its authority.  Used to resume an already-published
  * pair, where stage_prepare would reject the two-link final.  Leaves the stage
@@ -46,6 +44,10 @@ provisioning_reopen_context (const gchar *fact_root,
   out_stage->identity.store_uuid = out_stage->store_uuid;
   out_stage->identity.format_version = authority->format_version;
   out_stage->identity.path_encoding_version = authority->path_encoding_version;
+#ifdef G_OS_WIN32
+  if (record->has_windows_evidence)
+    out_stage->stage.operation_evidence = record->windows_evidence;
+#endif
   return WYRELOG_E_OK;
 }
 
@@ -58,8 +60,14 @@ provisioning_verify_pair (WylFactGraphProvisioningStage *stage,
     const gchar *op_uuid, WylPolicyGraphErrorClass *out_class)
 {
   WylFactGraphProvisionedPair *pair = NULL;
+#ifdef G_OS_WIN32
+  wyrelog_error_t rc =
+      wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&stage->directory, op_uuid, &stage->stage.operation_evidence, &pair);
+#else
   wyrelog_error_t rc = wyl_fact_graph_directory_open_provisioned_pair_exact
         (&stage->directory, op_uuid, &pair);
+#endif
   if (rc != WYRELOG_E_OK) {
     *out_class = WYL_POLICY_GRAPH_ERROR_OPEN;
     return rc;
@@ -123,6 +131,21 @@ provisioning_read_out (wyl_policy_store_t *store, const gchar *op_uuid,
   return wyl_policy_store_graph_provisioning_read (store, op_uuid, out_record);
 }
 
+#ifdef G_OS_WIN32
+static wyrelog_error_t
+provisioning_persist_windows_evidence (wyl_policy_store_t *store,
+    const gchar *op_uuid, WylFactGraphProvisioningStage *stage)
+{
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage->stage, &evidence);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_provisioning_set_windows_evidence (store,
+            op_uuid, &evidence);
+  return rc;
+}
+#endif
+
 /* Drive record->phase forward to ACTIVE, resuming from whatever seam the durable
  * phase names.  Borrows record and authority. */
 static wyrelog_error_t
@@ -160,6 +183,16 @@ provisioning_drive (wyl_policy_store_t *store,
           WYL_POLICY_GRAPH_ERROR_PATH);
       return rc;
     }
+#ifdef G_OS_WIN32
+    if (staged_flow && !record->has_windows_evidence) {
+      rc = provisioning_persist_windows_evidence (store, op_uuid, &stage);
+      if (rc != WYRELOG_E_OK) {
+        provisioning_degrade (store, op_uuid, attempt, phase,
+            WYL_POLICY_GRAPH_ERROR_IDENTITY);
+        return rc;
+      }
+    }
+#endif
   }
 
   if (!staged_flow
@@ -186,9 +219,20 @@ provisioning_drive (wyl_policy_store_t *store,
         break;
       case WYL_POLICY_GRAPH_PROVISIONING_STAGED:
         if (staged_flow) {
+#ifdef G_OS_WIN32
+          WylFactGraphWinOperationEvidence evidence = { 0 };
+          rc = wyl_fact_graph_stage_get_windows_operation_evidence
+                (&stage.stage, &evidence);
+          if (rc == WYRELOG_E_OK)
+            rc = wyl_fact_graph_stage_sync (&stage.stage);
+          if (rc == WYRELOG_E_OK)
+            rc = wyl_fact_graph_stage_publish_with_evidence (&stage.directory,
+                    &stage.stage, &evidence);
+#else
           rc = wyl_fact_graph_stage_sync (&stage.stage);
           if (rc == WYRELOG_E_OK)
             rc = wyl_fact_graph_stage_publish (&stage.directory, &stage.stage);
+#endif
           if (rc != WYRELOG_E_OK) {
             provisioning_degrade (store, op_uuid, attempt, cur,
                 WYL_POLICY_GRAPH_ERROR_PATH);
@@ -214,7 +258,7 @@ provisioning_drive (wyl_policy_store_t *store,
         break;
       case WYL_POLICY_GRAPH_PROVISIONING_VERIFIED:
         /* Finalize is policy-only: the transition couples the authority to ACTIVE.
-         * The retained pair stays at nlink 2 -- the secure open requires it. */
+         * POSIX retains nlink 2; Windows retains its persisted evidence tuple. */
         rc = provisioning_advance (store, op_uuid, attempt, cur,
                 WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
         cur = WYL_POLICY_GRAPH_PROVISIONING_ACTIVE;
@@ -404,4 +448,3 @@ wyl_fact_relation_activation_reconcile
   *out_result = degrade_result;
   return rc;
 }
-#endif
