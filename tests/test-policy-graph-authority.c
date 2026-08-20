@@ -2,7 +2,65 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include <sodium.h>
+#include <string.h>
+
+#include "fact/recovery-mac-private.h"
 #include "wyrelog/policy/store-private.h"
+
+typedef struct
+{
+  guint8 key[crypto_generichash_KEYBYTES];
+  gboolean wiped;
+  gboolean freed;
+  guint compute_calls;
+  GBytes *last_label;
+} RecoveryMacFakeProvider;
+
+static wyrelog_error_t
+recovery_mac_fake_compute (gpointer state_p, const guint8 *label,
+    gsize label_len, const guint8 *payload, gsize payload_len,
+    guint8 out_tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  RecoveryMacFakeProvider *state = state_p;
+  state->compute_calls++;
+  g_clear_pointer (&state->last_label, g_bytes_unref);
+  state->last_label = g_bytes_new (label, label_len);
+  return crypto_generichash (out_tag, WYL_FACT_RECOVERY_MAC_TAG_BYTES,
+             payload, payload_len, state->key, sizeof state->key) == 0
+      ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+}
+
+static wyrelog_error_t
+recovery_mac_fake_verify (gpointer state_p, const guint8 *label,
+    gsize label_len, const guint8 *payload, gsize payload_len,
+    const guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  guint8 expected[WYL_FACT_RECOVERY_MAC_TAG_BYTES] = { 0 };
+  RecoveryMacFakeProvider *state = state_p;
+  wyrelog_error_t rc = recovery_mac_fake_compute (state, label, label_len,
+          payload, payload_len, expected);
+  if (rc == WYRELOG_E_OK
+      && sodium_memcmp (expected, tag, sizeof expected) != 0)
+    rc = WYRELOG_E_POLICY;
+  sodium_memzero (expected, sizeof expected);
+  return rc;
+}
+
+static void
+recovery_mac_fake_wipe (gpointer state_p)
+{
+  RecoveryMacFakeProvider *state = state_p;
+  sodium_memzero (state->key, sizeof state->key);
+  state->wiped = TRUE;
+}
+
+static void
+recovery_mac_fake_free (gpointer state_p)
+{
+  RecoveryMacFakeProvider *state = state_p;
+  state->freed = TRUE;
+}
 
 static void
 exec_ok (sqlite3 *db, const gchar *sql)
@@ -115,6 +173,63 @@ assert_reconcile_evidence_equal (const WylPolicyFactReconcileArtifactEvidence
   g_assert_cmpmem (a->windows_file_id, sizeof a->windows_file_id,
       b->windows_file_id, sizeof b->windows_file_id);
   g_assert_cmpmem (a->digest, sizeof a->digest, b->digest, sizeof b->digest);
+}
+
+static void
+test_recovery_mac_handle_contract (void)
+{
+  RecoveryMacFakeProvider fake = { 0 };
+  for (gsize i = 0; i < sizeof fake.key; i++)
+    fake.key[i] = (guint8) (i + 1);
+  WylFactRecoveryMacProvider provider = {
+    recovery_mac_fake_compute,
+    recovery_mac_fake_verify,
+    recovery_mac_fake_wipe,
+    recovery_mac_fake_free,
+    &fake,
+  };
+  g_autoptr (WylFactRecoveryMacHandle) handle =
+      wyl_fact_recovery_mac_handle_new (&provider, "key-7", 7,
+          "tenant-a", "graph-a", "operation-a");
+  g_assert_nonnull (handle);
+  g_assert_cmpuint (wyl_fact_recovery_mac_handle_get_generation (handle), ==,
+      7);
+  g_assert_cmpstr (wyl_fact_recovery_mac_handle_get_key_id (handle), ==,
+      "key-7");
+  g_assert_true (wyl_fact_recovery_mac_handle_scope_matches (handle,
+      "tenant-a", "graph-a", "operation-a", 7));
+  g_assert_false (wyl_fact_recovery_mac_handle_scope_matches (handle,
+      "tenant-b", "graph-a", "operation-a", 7));
+  GBytes *label = NULL;
+  g_assert_cmpint (wyl_fact_recovery_mac_handle_dup_label (handle, &label), ==,
+      WYRELOG_E_OK);
+  gsize label_len = 0;
+  const guint8 *label_data = g_bytes_get_data (label, &label_len);
+  g_assert_nonnull (label_data);
+  g_assert_cmpuint (label_len, >, strlen ("wyrelog.fact.recovery-evidence.mac.v1"));
+  g_bytes_unref (label);
+
+  const guint8 payload[] = { 1, 2, 3, 4 };
+  guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES] = { 0 };
+  g_assert_cmpint (wyl_fact_recovery_mac_compute (handle, payload,
+      sizeof payload, tag), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_recovery_mac_verify (handle, payload,
+      sizeof payload, tag), ==, WYRELOG_E_OK);
+  tag[0] ^= 1;
+  g_assert_cmpint (wyl_fact_recovery_mac_verify (handle, payload,
+      sizeof payload, tag), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (fake.compute_calls, ==, 3);
+  wyl_fact_recovery_mac_handle_close (handle);
+  g_assert_true (fake.wiped);
+  g_assert_true (fake.freed);
+  memset (tag, 0xaa, sizeof tag);
+  g_assert_cmpint (wyl_fact_recovery_mac_compute (handle, payload,
+      sizeof payload, tag), ==, WYRELOG_E_POLICY);
+  for (gsize i = 0; i < sizeof tag; i++)
+    g_assert_cmpuint (tag[i], ==, 0);
+  g_assert_cmpint (wyl_fact_recovery_mac_handle_dup_label (handle, &label), ==,
+      WYRELOG_E_POLICY);
+  g_clear_pointer (&fake.last_label, g_bytes_unref);
 }
 
 static void
@@ -2205,6 +2320,8 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/policy/graph-authority/recovery-mac-handle-contract",
+      test_recovery_mac_handle_contract);
   g_test_add_func ("/policy/graph-authority/fresh-schema",
       test_fresh_schema_is_legacy_unclassified);
   g_test_add_func ("/policy/graph-authority/provisioning-schema-fails-closed",

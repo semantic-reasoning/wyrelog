@@ -50,6 +50,7 @@ wyrelog_sources = files(
   'fact/reconcile-private.c',
   'fact/reconcile-move-private.c',
   'fact/root-writer-lease-private.c',
+  'fact/recovery-mac-private.c',
   'fact/schema.c',
   'policy/service-permission-maintenance-private.c',
   'policy/store.c',
