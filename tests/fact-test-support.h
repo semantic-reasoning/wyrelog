@@ -3,6 +3,8 @@
 
 #include <glib.h>
 
+G_BEGIN_DECLS
+
 gchar *wyl_test_make_secure_fact_root (const gchar * tmpl, GError ** error);
 gboolean wyl_test_create_secure_directory (const gchar * path, GError ** error);
 gboolean wyl_test_secure_regular_file (const gchar * path, GError ** error);
@@ -12,3 +14,5 @@ gboolean wyl_test_remove_directory_alias (const gchar * alias, GError ** error);
 gboolean wyl_test_remove_empty_directory (const gchar * path, GError ** error);
 gboolean wyl_test_path_exists (const gchar * path, gboolean * out_exists,
     GError ** error);
+
+G_END_DECLS
