@@ -3619,6 +3619,17 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (mac_handle, tampered_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
   g_assert_null (decoded_v2);
+  for (gsize byte_offset = 0; byte_offset < encoded_v2_size; byte_offset++)
+    for (guint bit = 0; bit < 8; bit++) {
+      guint8 *single_bit_data = g_memdup2 (encoded_v2_data, encoded_v2_size);
+      single_bit_data[byte_offset] ^= (guint8) (1u << bit);
+      GBytes *single_bit = g_bytes_new_take (single_bit_data,
+              encoded_v2_size);
+      g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+            (mac_handle, single_bit, &decoded_v2), !=, WYRELOG_E_OK);
+      g_assert_null (decoded_v2);
+      g_bytes_unref (single_bit);
+    }
   g_autoptr (GBytes) truncated_v2 =
       g_bytes_new (encoded_v2_data, encoded_v2_size - 1);
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
