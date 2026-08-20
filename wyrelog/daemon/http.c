@@ -11984,7 +11984,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
        * isolation); a post-commit refresh failure is committed-but-degraded,
        * never a commit failure, so it stays HTTP 200 and no sibling graph's
        * generation is touched (issue #547 outcome contract). */
-      WylFactGraphRuntimeStatus status;
+      WylFactGraphRuntimeStatus status = { 0 };
       wyrelog_error_t refresh_rc =
           wyl_handle_refresh_fact_graph (ctx->handle, &lookup.info, &status);
       outcome.engine_queryable = status.queryable;
@@ -12178,7 +12178,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
      * a post-commit refresh failure is committed-but-degraded, never a commit
      * failure, so it must not turn into a non-2xx response and no sibling
      * graph's generation is touched. */
-    WylFactGraphRuntimeStatus status;
+    WylFactGraphRuntimeStatus status = { 0 };
     wyrelog_error_t refresh_rc =
         wyl_handle_refresh_fact_graph (ctx->handle, &lookup.info, &status);
     outcome.delta = delta;
