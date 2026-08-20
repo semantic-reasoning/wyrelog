@@ -2814,6 +2814,25 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
         (mac_handle, v2_legacy, &temp_evidence_v2), ==, WYRELOG_E_INVALID);
   g_assert_null (temp_evidence_v2);
+  WylFactArtifactWinTempToken *v2_token = NULL;
+  WylFactArtifactWinTempRecoveryEvidence *v2_evidence = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
+      "token-v2", &v2_token), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_export_recovery_evidence
+        (v2_token, &v2_evidence), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) v2_recovery_bytes = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_encode_v2
+        (mac_handle, v2_evidence, &v2_recovery_bytes), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_token_free (v2_token);
+  v2_token = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token_v2 (lease,
+      mac_handle, v2_recovery_bytes, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token_v2 (lease,
+      mac_handle, v2_recovery_bytes, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  wyl_fact_artifact_win_temp_recovery_evidence_free (v2_evidence);
+  v2_evidence = NULL;
   /* Simulate process loss: only durable bytes and the artifact remain.
    * Reacquiring the native lease must prove directory + lock + FileId before
    * it can clean up the abandoned token. */
