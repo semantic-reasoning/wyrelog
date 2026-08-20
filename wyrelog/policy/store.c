@@ -9675,6 +9675,10 @@ migrate_tenant_authority_guard (sqlite3 *db, const gchar *name,
 static wyrelog_error_t
 validate_graph_authority_rows (sqlite3 *db)
 {
+  /* Keep the SQL row gate aligned with the durable tuple shape, but leave
+   * all-zero file IDs to the decoder's narrower per-operation failure.  A
+   * malformed foreign row should not prevent unrelated tenants from opening;
+   * the decoder still fails closed before any filesystem access. */
   static const gchar *const validation_queries[] = {
     "SELECT EXISTS(SELECT 1 FROM tenants WHERE "
     "typeof(lifecycle_generation)!='integer' OR "
