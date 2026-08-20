@@ -3685,10 +3685,6 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (rotated_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
   g_assert_null (decoded_v2);
-  wyl_fact_recovery_mac_handle_close (mac_handle);
-  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
-        (mac_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
-  g_assert_null (decoded_v2);
   g_autoptr (GBytes) wtr1_as_v2 = g_bytes_new_static ("WTR1", 4);
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (mac_handle, wtr1_as_v2, &decoded_v2), ==, WYRELOG_E_INVALID);
@@ -3713,6 +3709,10 @@ test_namespace (void)
       mac_handle, recovery_v2_encoded), ==, WYRELOG_E_OK);
   wyl_fact_artifact_temp_recovery_evidence_free (recovery_v2_evidence);
   recovery_v2_evidence = NULL;
+  wyl_fact_recovery_mac_handle_close (mac_handle);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
   gsize encoded_size = 0;
   const guint8 *encoded_data = g_bytes_get_data (encoded, &encoded_size);
   const gchar legacy_token[] = "legacy-token";
