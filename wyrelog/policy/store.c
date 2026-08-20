@@ -9080,11 +9080,16 @@ static const gchar fact_graph_provisioning_immutable_trigger_sql[] =
     "NEW.windows_artifact_volume_serial IS NOT OLD.windows_artifact_volume_serial OR "
     "NEW.windows_artifact_file_id IS NOT OLD.windows_artifact_file_id)) OR "
     "(OLD.windows_operation_evidence_version IS NULL AND NOT ("
-    "NEW.windows_operation_evidence_version IS NOT NULL AND "
+    "(NEW.windows_operation_evidence_version IS NULL AND "
+    "NEW.windows_graph_volume_serial IS NULL AND "
+    "NEW.windows_graph_file_id IS NULL AND "
+    "NEW.windows_artifact_volume_serial IS NULL AND "
+    "NEW.windows_artifact_file_id IS NULL) OR "
+    "(NEW.windows_operation_evidence_version IS NOT NULL AND "
     "NEW.windows_graph_volume_serial IS NOT NULL AND "
     "NEW.windows_graph_file_id IS NOT NULL AND "
     "NEW.windows_artifact_volume_serial IS NOT NULL AND "
-    "NEW.windows_artifact_file_id IS NOT NULL)) "
+    "NEW.windows_artifact_file_id IS NOT NULL))) "
     "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
 
 static const gchar fact_graph_provisioning_immutable_trigger_pre_evidence_sql[] =
