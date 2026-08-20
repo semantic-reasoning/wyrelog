@@ -321,6 +321,10 @@ typedef struct
   guint64 attempt;
   gint64 created_at;
   gint64 updated_at;
+#ifdef G_OS_WIN32
+  gboolean has_windows_evidence;
+  WylFactGraphWinOperationEvidence windows_evidence;
+#endif
 } WylPolicyGraphProvisioningRecord;
 
 void wyl_policy_graph_provisioning_record_free
@@ -334,6 +338,11 @@ wyrelog_error_t wyl_policy_store_graph_provisioning_prepare
 wyrelog_error_t wyl_policy_store_graph_provisioning_read
   (wyl_policy_store_t * store, const gchar * op_uuid,
     WylPolicyGraphProvisioningRecord ** out_record);
+#ifdef G_OS_WIN32
+wyrelog_error_t wyl_policy_store_graph_provisioning_set_windows_evidence
+  (wyl_policy_store_t * store, const gchar * op_uuid,
+    const WylFactGraphWinOperationEvidence * evidence);
+#endif
 wyrelog_error_t wyl_policy_store_graph_provisioning_list
   (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);

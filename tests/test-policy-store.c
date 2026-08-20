@@ -5896,6 +5896,18 @@ check_store_provisions_fact_graph (void)
   if (reserved_count != 1)
     return 969;
 
+  gint absent_evidence_count = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graph_provisioning WHERE "
+      "windows_operation_evidence_version IS NULL "
+      "AND windows_graph_volume_serial IS NULL "
+      "AND windows_graph_file_id IS NULL "
+      "AND windows_artifact_volume_serial IS NULL "
+      "AND windows_artifact_file_id IS NULL;", &absent_evidence_count) != 0)
+    return 9691;
+  if (absent_evidence_count != 1)
+    return 9692;
+
   /* Idempotent resume: the same operation UUID, no second reservation. */
   gchar op_uuid_again[WYL_ID_STRING_BUF] = { 0 };
   if (wyl_policy_store_create_fact_graph_provisioning (store, &opts, NULL,
