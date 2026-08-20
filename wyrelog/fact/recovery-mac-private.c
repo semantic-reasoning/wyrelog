@@ -169,6 +169,19 @@ wyl_fact_recovery_mac_handle_get_key_id (const WylFactRecoveryMacHandle *handle)
   return handle == NULL ? NULL : handle->key_id;
 }
 
+void
+wyl_fact_recovery_mac_handle_get_scope
+  (const WylFactRecoveryMacHandle *handle, const gchar **out_tenant_id,
+    const gchar **out_graph_id, const gchar **out_operation_id)
+{
+  if (out_tenant_id != NULL)
+    *out_tenant_id = handle == NULL ? NULL : handle->tenant_id;
+  if (out_graph_id != NULL)
+    *out_graph_id = handle == NULL ? NULL : handle->graph_id;
+  if (out_operation_id != NULL)
+    *out_operation_id = handle == NULL ? NULL : handle->operation_id;
+}
+
 gboolean
 wyl_fact_recovery_mac_handle_scope_matches
   (const WylFactRecoveryMacHandle *handle, const gchar *tenant_id,

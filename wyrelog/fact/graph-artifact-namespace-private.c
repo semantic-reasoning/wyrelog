@@ -450,11 +450,39 @@ wyl_fact_artifact_temp_recovery_evidence_decode (GBytes *b,
 }
 
 wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_encode_v2
+  (WylFactRecoveryMacHandle *h, const WylFactArtifactTempRecoveryEvidence *e,
+    GBytes **b)
+{
+  (void) h; (void) e;
+  if (b) *b = NULL;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_decode_v2
+  (WylFactRecoveryMacHandle *h, GBytes *b,
+    WylFactArtifactTempRecoveryEvidence **e)
+{
+  (void) h; (void) b;
+  if (e) *e = NULL;
+  return closed ();
+}
+
+wyrelog_error_t
 wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
     const WylFactArtifactTempRecoveryEvidence *e)
 {
   (void) l;
   (void) e;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_recover_temp_v2
+  (WylFactArtifactMutationLease *l, WylFactRecoveryMacHandle *h, GBytes *b)
+{
+  (void) l; (void) h; (void) b;
   return closed ();
 }
 
@@ -4023,6 +4051,191 @@ wyl_fact_artifact_temp_recovery_evidence_decode (GBytes *bytes,
   }
   *out_evidence = evidence;
   return WYRELOG_E_OK;
+}
+
+#define TEMP_EVIDENCE_V2_MAGIC "WTR2"
+#define TEMP_EVIDENCE_V2_FIXED_BYTES 70u
+
+static void
+temp_evidence_v2_append_u16 (GByteArray *a, guint16 value)
+{
+  guint16 be = GUINT16_TO_BE (value);
+  g_byte_array_append (a, (const guint8 *) &be, sizeof be);
+}
+
+static void
+temp_evidence_v2_append_u64 (GByteArray *a, guint64 value)
+{
+  guint64 be = GUINT64_TO_BE (value);
+  g_byte_array_append (a, (const guint8 *) &be, sizeof be);
+}
+
+static gboolean
+temp_evidence_v2_read_u16 (const guint8 *data, gsize size, gsize *offset,
+    guint16 *out)
+{
+  if (*offset > size || size - *offset < sizeof (guint16))
+    return FALSE;
+  guint16 be;
+  memcpy (&be, data + *offset, sizeof be);
+  *offset += sizeof be;
+  *out = GUINT16_FROM_BE (be);
+  return TRUE;
+}
+
+static gboolean
+temp_evidence_v2_read_u64 (const guint8 *data, gsize size, gsize *offset,
+    guint64 *out)
+{
+  if (*offset > size || size - *offset < sizeof (guint64))
+    return FALSE;
+  guint64 be;
+  memcpy (&be, data + *offset, sizeof be);
+  *offset += sizeof be;
+  *out = GUINT64_FROM_BE (be);
+  return TRUE;
+}
+
+static gboolean
+temp_evidence_v2_text_valid (const gchar *value, guint16 length,
+    gboolean required)
+{
+  return (required ? length != 0 : TRUE) && memchr (value, '\0', length) == NULL
+         && g_utf8_validate (value, length, NULL);
+}
+
+static gboolean
+temp_evidence_v2_field (const guint8 *data, gsize size, gsize *offset,
+    guint16 length, gchar **out, gboolean required)
+{
+  if (*offset > size || size - *offset < length)
+    return FALSE;
+  gchar *value = g_strndup ((const gchar *) data + *offset, length);
+  *offset += length;
+  if (!temp_evidence_v2_text_valid (value, length, required)) {
+    g_free (value);
+    return FALSE;
+  }
+  *out = value;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_encode_v2
+  (WylFactRecoveryMacHandle *handle,
+    const WylFactArtifactTempRecoveryEvidence *evidence, GBytes **out_bytes)
+{
+  if (out_bytes != NULL)
+    *out_bytes = NULL;
+  if (handle == NULL || evidence == NULL || out_bytes == NULL
+      || !temp_token_valid (evidence->token))
+    return WYRELOG_E_INVALID;
+  const gchar *tenant = NULL, *graph = NULL, *operation = NULL;
+  wyl_fact_recovery_mac_handle_get_scope (handle, &tenant, &graph, &operation);
+  const gchar *fields[] = { wyl_fact_recovery_mac_handle_get_key_id (handle),
+                            tenant, graph, operation, evidence->token };
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++) {
+    gsize length = strlen (fields[i]);
+    if (length == 0 || length > G_MAXUINT16 || !g_utf8_validate (fields[i], -1, NULL))
+      return WYRELOG_E_INVALID;
+  }
+  GByteArray *payload = g_byte_array_new ();
+  g_byte_array_append (payload, (const guint8 *) TEMP_EVIDENCE_V2_MAGIC, 4);
+  temp_evidence_v2_append_u64 (payload,
+      wyl_fact_recovery_mac_handle_get_generation (handle));
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    temp_evidence_v2_append_u16 (payload, (guint16) strlen (fields[i]));
+  const guint64 identities[] = { evidence->directory_device,
+                                 evidence->directory_inode, evidence->lock_device, evidence->lock_inode,
+                                 evidence->artifact_device, evidence->artifact_inode };
+  for (guint i = 0; i < G_N_ELEMENTS (identities); i++)
+    temp_evidence_v2_append_u64 (payload, identities[i]);
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    g_byte_array_append (payload, (const guint8 *) fields[i], strlen (fields[i]));
+  guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES];
+  wyrelog_error_t r = wyl_fact_recovery_mac_compute (handle, payload->data,
+          payload->len, tag);
+  if (r == WYRELOG_E_OK)
+    g_byte_array_append (payload, tag, sizeof tag);
+  sodium_memzero (tag, sizeof tag);
+  if (r != WYRELOG_E_OK) {
+    g_byte_array_free (payload, TRUE);
+    return r;
+  }
+  *out_bytes = g_byte_array_free_to_bytes (payload);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_decode_v2
+  (WylFactRecoveryMacHandle *handle, GBytes *bytes,
+    WylFactArtifactTempRecoveryEvidence **out_evidence)
+{
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (handle == NULL || bytes == NULL || out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  gsize size = 0;
+  const guint8 *data = g_bytes_get_data (bytes, &size);
+  if (size < TEMP_EVIDENCE_V2_FIXED_BYTES + WYL_FACT_RECOVERY_MAC_TAG_BYTES
+      || memcmp (data, TEMP_EVIDENCE_V2_MAGIC, 4) != 0)
+    return WYRELOG_E_INVALID;
+  gsize offset = 4;
+  guint64 generation;
+  guint16 lengths[5];
+  if (!temp_evidence_v2_read_u64 (data, size, &offset, &generation))
+    return WYRELOG_E_INVALID;
+  for (guint i = 0; i < G_N_ELEMENTS (lengths); i++)
+    if (!temp_evidence_v2_read_u16 (data, size, &offset, &lengths[i]))
+      return WYRELOG_E_INVALID;
+  WylFactArtifactTempRecoveryEvidence *evidence = g_new0
+        (WylFactArtifactTempRecoveryEvidence, 1);
+  guint64 *identities[] = { &evidence->directory_device,
+                            &evidence->directory_inode, &evidence->lock_device, &evidence->lock_inode,
+                            &evidence->artifact_device, &evidence->artifact_inode };
+  for (guint i = 0; i < G_N_ELEMENTS (identities); i++)
+    if (!temp_evidence_v2_read_u64 (data, size, &offset, identities[i]))
+      goto invalid;
+  gchar *key_id = NULL, *tenant = NULL, *graph = NULL, *operation = NULL;
+  if (!temp_evidence_v2_field (data, size, &offset, lengths[0], &key_id, TRUE)
+      || !temp_evidence_v2_field (data, size, &offset, lengths[1], &tenant, TRUE)
+      || !temp_evidence_v2_field (data, size, &offset, lengths[2], &graph, TRUE)
+      || !temp_evidence_v2_field (data, size, &offset, lengths[3], &operation, TRUE)
+      || !temp_evidence_v2_field (data, size, &offset, lengths[4], &evidence->token, TRUE))
+    goto invalid_fields;
+  if (offset + WYL_FACT_RECOVERY_MAC_TAG_BYTES != size
+      || generation != wyl_fact_recovery_mac_handle_get_generation (handle)
+      || g_strcmp0 (key_id, wyl_fact_recovery_mac_handle_get_key_id (handle)) != 0
+      || !wyl_fact_recovery_mac_handle_scope_matches (handle, tenant, graph, operation,
+      generation))
+    goto invalid_fields;
+  if (wyl_fact_recovery_mac_verify (handle, data,
+      size - WYL_FACT_RECOVERY_MAC_TAG_BYTES,
+      data + size - WYL_FACT_RECOVERY_MAC_TAG_BYTES) != WYRELOG_E_OK)
+    goto invalid_fields;
+  g_free (key_id); g_free (tenant); g_free (graph); g_free (operation);
+  *out_evidence = evidence;
+  return WYRELOG_E_OK;
+invalid_fields:
+  g_free (key_id); g_free (tenant); g_free (graph); g_free (operation);
+invalid:
+  wyl_fact_artifact_temp_recovery_evidence_free (evidence);
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_recover_temp_v2
+  (WylFactArtifactMutationLease *lease, WylFactRecoveryMacHandle *handle,
+    GBytes *bytes)
+{
+  WylFactArtifactTempRecoveryEvidence *evidence = NULL;
+  wyrelog_error_t r = wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (handle, bytes, &evidence);
+  if (r != WYRELOG_E_OK)
+    return r;
+  r = wyl_fact_artifact_mutation_lease_recover_temp (lease, evidence);
+  wyl_fact_artifact_temp_recovery_evidence_free (evidence);
+  return r;
 }
 
 wyrelog_error_t

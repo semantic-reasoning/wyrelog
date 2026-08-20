@@ -4,6 +4,7 @@
 #include <glib.h>
 #include "wyrelog/error.h"
 #include "fact/graph-locator-private.h"
+#include "fact/recovery-mac-private.h"
 
 G_BEGIN_DECLS
 /*
@@ -382,6 +383,17 @@ wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_encode
   (const WylFactArtifactTempRecoveryEvidence *, GBytes ** out_bytes);
 wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_decode
   (GBytes *, WylFactArtifactTempRecoveryEvidence **);
+/* WTR2 is the MAC-authenticated successor of WTR1.  The handle supplies the
+ * canonical tenant/graph/operation scope and provider-backed tag operation;
+ * neither raw key material nor an unauthenticated legacy record is accepted. */
+wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_encode_v2
+  (WylFactRecoveryMacHandle *, const WylFactArtifactTempRecoveryEvidence *,
+    GBytes **out_bytes);
+wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_decode_v2
+  (WylFactRecoveryMacHandle *, GBytes *,
+    WylFactArtifactTempRecoveryEvidence **out_evidence);
+wyrelog_error_t wyl_fact_artifact_mutation_lease_recover_temp_v2
+  (WylFactArtifactMutationLease *, WylFactRecoveryMacHandle *, GBytes *);
 /* Missing artifacts are idempotently recovered.  Existing artifacts must
  * match every evidence identity field before dirfd-relative unlink. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_recover_temp
