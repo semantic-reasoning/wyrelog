@@ -617,6 +617,7 @@ jobs:
   build-windows:
     name: build-windows${{ matrix.job_suffix }}
     runs-on: windows-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

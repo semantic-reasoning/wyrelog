@@ -54,6 +54,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     windows_build = workflow[workflow.index("  build-windows:\n"):]
     if build_posix.count("    timeout-minutes: 45\n") != 1:
         raise SystemExit(f"{workflow_name} POSIX build must stay time bounded")
+    if windows_build.count("    timeout-minutes: 45\n") != 1:
+        raise SystemExit(f"{workflow_name} Windows build must stay time bounded")
     provision_secure = named_step(build_posix, provision_secure_name)
     step = named_step(build_posix, step_name)
     remove_secure = named_step(build_posix, remove_secure_name)
