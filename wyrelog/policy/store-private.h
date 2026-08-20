@@ -2157,11 +2157,6 @@ wyrelog_error_t wyl_policy_store_ensure_default_tenant (wyl_policy_store_t *
     store);
 wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_created);
-/* Seed a freshly-created tenant's authorization anchor (session_state active +
- * wr.system_admin membership for actor) at <tenant> scope. Owns no
- * transaction; the caller wraps create+seed in one SAVEPOINT. */
-wyrelog_error_t wyl_policy_store_seed_created_tenant_authority
-  (wyl_policy_store_t * store, const gchar * tenant, const gchar * actor);
 /* Compatibility/test setup mutator. Production tenant sealing must use the
  * keyed authority core below; non-test callers use this only to unseal. */
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
