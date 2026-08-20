@@ -17,8 +17,12 @@
 #include <fcntl.h>
 #include <limits>
 #include <sys/stat.h>
+#ifndef G_OS_WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include <windows.h>
+#endif
 
 #include "fact/secure-duckdb-bridge-private.h"
 #include "fact/secure-duckdb-filesystem-private.hpp"
@@ -29,6 +33,42 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+
+static gint
+create_symlink (const gchar *target, const gchar *link_path)
+{
+#ifdef G_OS_WIN32
+  g_autofree gunichar2 *wide_target = g_utf8_to_utf16 (target, -1, nullptr,
+      nullptr, nullptr);
+  g_autofree gunichar2 *wide_link = g_utf8_to_utf16 (link_path, -1, nullptr,
+      nullptr, nullptr);
+  if (wide_target == nullptr || wide_link == nullptr)
+    return -1;
+  DWORD flags = g_file_test (target, G_FILE_TEST_IS_DIR)
+      ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0;
+  return CreateSymbolicLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_target,
+      flags) ? 0 : -1;
+#else
+  return symlink (target, link_path);
+#endif
+}
+
+static gint
+create_hard_link (const gchar *target, const gchar *link_path)
+{
+#ifdef G_OS_WIN32
+  g_autofree gunichar2 *wide_target = g_utf8_to_utf16 (target, -1, nullptr,
+      nullptr, nullptr);
+  g_autofree gunichar2 *wide_link = g_utf8_to_utf16 (link_path, -1, nullptr,
+      nullptr, nullptr);
+  if (wide_target == nullptr || wide_link == nullptr)
+    return -1;
+  return CreateHardLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_target,
+      nullptr) ? 0 : -1;
+#else
+  return link (target, link_path);
+#endif
+}
 
 extern "C"
 {
@@ -110,18 +150,15 @@ struct Fixture
       }
     }
     if (zero_byte)
-      g_assert_cmpint (truncate (main_path, 0), ==, 0);
+      g_assert_true (g_file_set_contents (main_path, nullptr, 0, nullptr));
     g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
     WylFactGraphRegularFile main = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
-    main.fd = openat (directory.graph_fd, "facts.duckdb",
-            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    g_assert_cmpint (main.fd >= 0, ==, TRUE);
-    struct stat
-        status;
-    g_assert_cmpint (fstat (main.fd, &status), ==, 0);
-    main.device = status.st_dev;
-    main.inode = status.st_ino;
-    main.size_bytes = status.st_size;
+    g_autofree gchar *relative_dir =
+        wyl_fact_graph_locator_relative_dir (&locator);
+    g_autofree gchar *relative_main =
+        g_strdup_printf ("%s/facts.duckdb", relative_dir);
+    g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+        relative_main, &main), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_artifact_namespace_open (&directory, &main,
         &namespace_), ==, WYRELOG_E_OK);
     wyl_fact_graph_regular_file_clear (&main);
@@ -167,14 +204,31 @@ struct ProvisionedPairFixture
     g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
         &locator, TRUE, &directory), ==, WYRELOG_E_OK);
     graph_path = wyl_fact_graph_directory_descriptive_path (&directory);
+    final_path = g_build_filename (graph_path, "facts.duckdb", nullptr);
+#ifdef G_OS_WIN32
+    WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&directory,
+        operation_uuid, &stage), ==, WYRELOG_E_OK);
+    stage_path = g_build_filename (graph_path, stage.stage_basename, nullptr);
+    g_assert_cmpint (wyl_fact_graph_stage_sync (&stage), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage, &evidence), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&directory,
+        &stage, &evidence), ==, WYRELOG_E_OK);
+    g_assert_cmpint (
+        wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&directory, operation_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+    wyl_fact_graph_stage_clear (&stage);
+#else
     stage_path = g_build_filename (graph_path,
         "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
-    final_path = g_build_filename (graph_path, "facts.duckdb", nullptr);
     g_assert_true (g_file_set_contents (stage_path, "", 0, nullptr));
     g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
-    g_assert_cmpint (link (stage_path, final_path), ==, 0);
+    g_assert_cmpint (create_hard_link (stage_path, final_path), ==, 0);
     g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
         (&directory, operation_uuid, &pair), ==, WYRELOG_E_OK);
+#endif
   }
 
   ~ProvisionedPairFixture ()
@@ -487,7 +541,7 @@ test_wal_replacement_source_substitution_fails_closed (void)
   g_assert_true (g_file_set_contents (outside_path, "outside-sentinel", -1,
       nullptr));
   g_assert_cmpint (g_rename (source_path, saved_path), ==, 0);
-  g_assert_cmpint (symlink (outside_path, source_path), ==, 0);
+  g_assert_cmpint (create_symlink (outside_path, source_path), ==, 0);
 
   try {
     filesystem.MoveFile ("facts.duckdb.wal.checkpoint",
@@ -528,7 +582,7 @@ test_wal_replacement_destination_substitution_fails_closed (void)
   g_assert_true (g_file_set_contents (outside_path, "outside-sentinel", -1,
       nullptr));
   g_assert_cmpint (g_rename (wal_path, saved_path), ==, 0);
-  g_assert_cmpint (symlink (outside_path, wal_path), ==, 0);
+  g_assert_cmpint (create_symlink (outside_path, wal_path), ==, 0);
 
   try {
     filesystem.MoveFile ("facts.duckdb.wal.checkpoint",
@@ -776,7 +830,7 @@ test_checked_finalize_reports_cleanup_failure (void)
       g_build_filename (fixture.root, "outside-temp", nullptr);
   g_assert_cmpint (g_mkdir (outside_path, 0700), ==, 0);
   g_assert_cmpint (g_rename (temp_path, saved_path), ==, 0);
-  g_assert_cmpint (symlink (outside_path, temp_path), ==, 0);
+  g_assert_cmpint (create_symlink (outside_path, temp_path), ==, 0);
 
   g_assert_cmpint (wyl_secure_duckdb_bridge_finalize (bridge), ==,
       WYRELOG_E_POLICY);
@@ -793,6 +847,10 @@ test_checked_finalize_reports_cleanup_failure (void)
 static void
 test_wal_crash_recovery_and_locking (void)
 {
+#ifdef G_OS_WIN32
+  g_test_skip ("crash subprocess portability is not yet implemented");
+  return;
+#else
   Fixture fixture;
   const
   pid_t
@@ -836,6 +894,7 @@ test_wal_crash_recovery_and_locking (void)
         WYRELOG_E_BUSY);
     g_assert_null (writer);
   }
+#endif
 }
 
 static void
@@ -1081,7 +1140,7 @@ test_main_symlink_substitution_fails_closed (void)
   g_assert_true (g_file_set_contents (outside_path, "outside-sentinel", -1,
       nullptr));
   g_assert_cmpint (g_rename (main_path, saved_path), ==, 0);
-  g_assert_cmpint (symlink (outside_path, main_path), ==, 0);
+  g_assert_cmpint (create_symlink (outside_path, main_path), ==, 0);
 
   try {
     WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
@@ -1386,7 +1445,8 @@ test_provisioned_pair_pinned_actual_rendezvous (void)
           expected_names.end ());
       g_assert_true (snapshot_directory_names (fixture.graph_path)
           == expected_names);
-      g_assert_cmpint (link (fixture.final_path, fixture.stage_path), ==, 0);
+      g_assert_cmpint (create_hard_link (fixture.final_path,
+              fixture.stage_path), ==, 0);
     } else if (attack == PairLifecycleAttack::FINAL_SUBSTITUTION) {
       assert_file_bytes (fixture.stage_path, database_bytes, database_size);
       assert_file_contents (fixture.final_path, "attacker");
@@ -2104,7 +2164,7 @@ pinned_swap_seam_hook (WylFactStorePinnedRendezvous rendezvous,
     g_assert_true (g_file_set_contents (decoy, "parent-decoy", -1, nullptr));
     g_assert_cmpint (g_chmod (decoy, 0600), ==, 0);
   } else {
-    g_assert_cmpint (symlink (seam->attacker, seam->source), ==, 0);
+    g_assert_cmpint (create_symlink (seam->attacker, seam->source), ==, 0);
   }
 }
 
