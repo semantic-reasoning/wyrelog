@@ -2286,6 +2286,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
   WylFactArtifactWinLease *lease = NULL;
   WylFactArtifactWinMainBinding *main_binding = NULL;
   WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar_source = NULL;
   WylFactArtifactWinTempBinding *replacement_source = NULL;
   WylFactArtifactWinTempRoot *temp_root = NULL;
   WylFactArtifactWinTempChild *temp_child = NULL;
@@ -2302,9 +2303,13 @@ test_native_namespace_main_sidecar_lifecycle (void)
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
   WylFactArtifactWinSidecarReplaceResult replace_result =
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
+  WylFactArtifactSidecarReplaceResult neutral_replace =
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
   WylFactDuckdbTempRetireResult temp_retire =
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
   gsize written = 0;
+  gchar sidecar_readback[8] = { 0 };
+  gsize sidecar_read = 0;
   g_autofree wchar_t *main_wide = NULL;
   g_autofree wchar_t *lock_wide = NULL;
   g_autofree wchar_t *checkpoint_wide = NULL;
@@ -2427,6 +2432,74 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
         (replacement_source, &session), ==, WYRELOG_E_POLICY);
   g_assert_null (session);
+
+  /* The adapter's MoveFile path supplies a bound sidecar source rather than
+   * an owner-only temp source.  It must receive the same durable result and
+   * consume the source binding after transferring its identity. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar_source), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar_source, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0,
+      "sidecar", 7, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  neutral_replace = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_replace_existing_wal
+        (sidecar_source, sidecar, &neutral_replace), ==, WYRELOG_E_OK);
+  g_assert_cmpint (neutral_replace, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  memset (sidecar_readback, 0, sizeof sidecar_readback);
+  sidecar_read = 0;
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0,
+      sidecar_readback, 7, &sidecar_read), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (sidecar_read, ==, 7);
+  g_assert_cmpstr (sidecar_readback, ==, "sidecar");
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar_source);
+  sidecar_source = NULL;
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  /* An uncertain post-rename result is terminal: the old binding cannot be
+   * reused, but a fresh binding must observe either the old or new complete
+   * artifact.  The hook forces the post-linearization durability proof to
+   * fail after the rename has taken effect. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar_source), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar_source, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0,
+      "faulted", 7, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_namespace_set_test_fault
+    (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN);
+  neutral_replace = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_replace_existing_wal
+        (sidecar_source, sidecar, &neutral_replace), ==, WYRELOG_E_IO);
+  g_assert_cmpint (neutral_replace, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar_source);
+  sidecar_source = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  memset (sidecar_readback, 0, sizeof sidecar_readback);
+  sidecar_read = 0;
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0,
+      sidecar_readback, 7, &sidecar_read), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (sidecar_read, ==, 7);
+  g_assert_cmpstr (sidecar_readback, ==, "faulted");
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+#endif
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
       &retire), ==, WYRELOG_E_OK);
   g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
