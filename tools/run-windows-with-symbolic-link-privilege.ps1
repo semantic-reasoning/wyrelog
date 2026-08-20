@@ -116,8 +116,7 @@ if ($privilege_enabled) {
         -Force -ErrorAction Stop | Out-Null
     Write-Host 'Developer Mode enabled for unprivileged Windows symlink tests.'
   } catch {
-    Write-Warning ('Developer Mode could not be enabled; continuing with the '
-      + 'current token capability: ' + $_.Exception.Message)
+    Write-Warning ("Developer Mode could not be enabled; continuing with the current token capability: " + $_.Exception.Message)
   }
 }
 
