@@ -39,6 +39,7 @@
 #define TOKEN_LINEAR_RACE "00000000-0000-4000-8000-00000000000f"
 #define TOKEN_LINEAR_MOVED "00000000-0000-4000-8000-000000000010"
 #define TOKEN_RECOVERY "00000000-0000-4000-8000-000000000011"
+#define TOKEN_RECOVERY_V2 "00000000-0000-4000-8000-00000000001e"
 #define TOKEN_RECOVERY_FAULT "00000000-0000-4000-8000-000000000012"
 #define TOKEN_RECOVERY_WRONG "00000000-0000-4000-8000-000000000013"
 #define TOKEN_SUBSTITUTE "00000000-0000-4000-8000-000000000014"
@@ -3653,6 +3654,26 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (mac_handle, wtr1_as_v2, &decoded_v2), ==, WYRELOG_E_INVALID);
   g_assert_null (decoded_v2);
+  WylFactArtifactTempBinding *recovery_v2_binding = NULL;
+  WylFactArtifactTempRecoveryEvidence *recovery_v2_evidence = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+      TOKEN_RECOVERY_V2, TRUE, TRUE, &recovery_v2_binding, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
+        (recovery_v2_binding, &recovery_v2_evidence), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) recovery_v2_encoded = NULL;
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_encode_v2
+        (mac_handle, recovery_v2_evidence, &recovery_v2_encoded), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (recovery_v2_binding);
+  recovery_v2_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp_v2 (lease,
+      mac_handle, recovery_v2_encoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp_v2 (lease,
+      mac_handle, recovery_v2_encoded), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_recovery_evidence_free (recovery_v2_evidence);
+  recovery_v2_evidence = NULL;
   gsize encoded_size = 0;
   const guint8 *encoded_data = g_bytes_get_data (encoded, &encoded_size);
   const gchar legacy_token[] = "legacy-token";
