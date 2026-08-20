@@ -3646,6 +3646,34 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (wrong_scope_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
   g_assert_null (decoded_v2);
+  RecoveryMacTestProvider *wrong_key_state = g_new0
+        (RecoveryMacTestProvider, 1);
+  memset (wrong_key_state->key, 0x5a, sizeof wrong_key_state->key);
+  WylFactRecoveryMacProvider wrong_key_provider = {
+    recovery_mac_test_compute, recovery_mac_test_verify,
+    recovery_mac_test_wipe, recovery_mac_test_free, wrong_key_state
+  };
+  g_autoptr (WylFactRecoveryMacHandle) wrong_key_handle =
+      wyl_fact_recovery_mac_handle_new (&wrong_key_provider, "unknown-key", 7,
+          "tenant-1", "graph-1", "operation-1");
+  g_assert_nonnull (wrong_key_handle);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (wrong_key_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
+  RecoveryMacTestProvider *rotated_state = g_new0
+        (RecoveryMacTestProvider, 1);
+  memset (rotated_state->key, 0x5a, sizeof rotated_state->key);
+  WylFactRecoveryMacProvider rotated_provider = {
+    recovery_mac_test_compute, recovery_mac_test_verify,
+    recovery_mac_test_wipe, recovery_mac_test_free, rotated_state
+  };
+  g_autoptr (WylFactRecoveryMacHandle) rotated_handle =
+      wyl_fact_recovery_mac_handle_new (&rotated_provider, "key-1", 8,
+          "tenant-1", "graph-1", "operation-1");
+  g_assert_nonnull (rotated_handle);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (rotated_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
   wyl_fact_recovery_mac_handle_close (mac_handle);
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (mac_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
