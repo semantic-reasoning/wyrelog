@@ -37,6 +37,17 @@
 
 namespace fs = std::filesystem;
 
+static gchar *
+path_to_utf8 (const fs::path &path)
+{
+#ifdef G_OS_WIN32
+  return (gchar *) g_utf16_to_utf8 ((const gunichar2 *) path.c_str (), -1,
+      nullptr, nullptr, nullptr);
+#else
+  return g_strdup (path.c_str ());
+#endif
+}
+
 static gint
 create_symlink (const gchar *target, const gchar *link_path)
 {
@@ -126,7 +137,7 @@ struct Fixture
      * Resolve the owned fixture root before the resolver's no-symlink walk. */
     auto
         canonical_root = fs::canonical (created_root);
-    root = g_strdup (canonical_root.c_str ());
+    root = path_to_utf8 (canonical_root);
     g_assert_nonnull (root);
     g_assert_cmpint (g_chmod (root, 0700), ==, 0);
     g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
@@ -198,7 +209,7 @@ struct ProvisionedPairFixture
         g_dir_make_tmp ("wyl-secure-pair-XXXXXX", &error);
     g_assert_no_error (error);
     auto canonical_root = fs::canonical (created_root);
-    root = g_strdup (canonical_root.c_str ());
+    root = path_to_utf8 (canonical_root);
     g_assert_cmpint (g_chmod (root, 0700), ==, 0);
     g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
         WYRELOG_E_OK);
@@ -354,10 +365,13 @@ run_crash_writer_child (const gchar *root)
     if (result->HasError ())
       return 93;
   }
+  catch (...) {
+    return 94;
+  }
   /* Exit without running C++ destructors: this is the crash-style WAL
    * recovery boundary exercised by the POSIX fork path below. */
   ExitProcess (0);
-  return 94;
+  return 95;
 }
 
 static HANDLE
@@ -1037,7 +1051,7 @@ test_denial_and_numeric_no_mutation (void)
       original_cursor = filesystem.SeekPosition (*main);
   unsigned char
       sentinel = 0x5a;
-  const auto ssize_max = static_cast < int64_t > (SSIZE_MAX);
+  const auto ssize_max = std::numeric_limits < int64_t >::max ();
   try {
     filesystem.Write (*main, nullptr, ssize_max, 0);
     g_assert_not_reached ();
@@ -1245,6 +1259,10 @@ static const WylFactStoreIdentity pinned_identity = {
 static void
 test_provisioned_pair_pinned_modes (void)
 {
+#ifdef G_OS_WIN32
+  g_test_skip ("Windows provider does not expose POSIX pair-access hooks");
+  return;
+#else
   ProvisionedPairFixture fixture;
   WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   struct stat before, initialized;
@@ -1286,6 +1304,7 @@ test_provisioned_pair_pinned_modes (void)
   g_autofree gchar *wal =
       g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
   g_assert_false (g_file_test (wal, G_FILE_TEST_EXISTS));
+#endif
 }
 
 struct PairPreflightAction
@@ -1951,7 +1970,7 @@ test_pinned_provider_open_seams_fail_closed (void)
             before_length);
       } else {
         g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
-        g_assert_true (S_ISREG (after.st_mode));
+        g_assert_true (g_file_test (main_path, G_FILE_TEST_IS_REGULAR));
         g_assert_cmpuint (after.st_mode & 07777, ==, 0600);
         g_assert_cmpuint (after.st_nlink, ==, 1);
         g_assert_true (after.st_dev != before.st_dev

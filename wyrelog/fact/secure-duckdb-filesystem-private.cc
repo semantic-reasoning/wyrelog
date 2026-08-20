@@ -706,7 +706,7 @@ WylSecureDuckdbFileSystem::Truncate (duckdb::FileHandle & handle, int64_t size)
 
 bool
 WylSecureDuckdbFileSystem::DirectoryExists (const duckdb::string & path,
-    duckdb::optional_ptr < duckdb::FileOpener > opener)
+    WylSecureDuckdbFileOpener opener)
 {
   (void) opener;
   std::lock_guard<std::mutex> lock (mutex_);
@@ -723,7 +723,7 @@ WylSecureDuckdbFileSystem::DirectoryExists (const duckdb::string & path,
 
 void
 WylSecureDuckdbFileSystem::CreateDirectory (const duckdb::string & path,
-    duckdb::optional_ptr < duckdb::FileOpener > opener)
+    WylSecureDuckdbFileOpener opener)
 {
   (void) opener;
   std::lock_guard<std::mutex> lock (mutex_);
@@ -739,14 +739,14 @@ WylSecureDuckdbFileSystem::CreateDirectory (const duckdb::string & path,
 void
 WylSecureDuckdbFileSystem::
 CreateDirectoriesRecursive (const duckdb::string & path,
-    duckdb::optional_ptr < duckdb::FileOpener > opener)
+    WylSecureDuckdbFileOpener opener)
 {
   CreateDirectory (path, opener);
 }
 
 void
 WylSecureDuckdbFileSystem::RemoveDirectory (const duckdb::string & path,
-    duckdb::optional_ptr < duckdb::FileOpener > opener)
+    WylSecureDuckdbFileOpener opener)
 {
   (void) opener;
   std::lock_guard < std::mutex > lock (mutex_);
