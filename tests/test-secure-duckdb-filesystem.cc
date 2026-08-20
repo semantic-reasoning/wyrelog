@@ -42,6 +42,7 @@
 #include "fact/secure-duckdb-bridge-private.h"
 #include "fact/secure-duckdb-filesystem-private.hpp"
 #include "fact/store-identity-private.h"
+#include "fact-test-support.h"
 
 #include <algorithm>
 #include <string>
@@ -141,15 +142,25 @@ struct Fixture
 
   explicit Fixture (bool populated = true, bool zero_byte = false) {
     g_autoptr (GError) error = nullptr;
+#ifdef G_OS_WIN32
+    g_autofree gchar *created_root =
+        wyl_test_make_secure_fact_root ("wyl-secure-filesystem-XXXXXX",
+            &error);
+#else
     g_autofree gchar *
         created_root = g_dir_make_tmp ("wyl-secure-filesystem-XXXXXX", &error);
+#endif
     g_assert_no_error (error);
     g_assert_nonnull (created_root);
+#ifdef G_OS_WIN32
+    root = g_strdup (created_root);
+#else
     /* macOS may spell TMPDIR through /var, which is a symlink to /private/var.
      * Resolve the owned fixture root before the resolver's no-symlink walk. */
     auto
         canonical_root = fs::canonical (created_root);
     root = path_to_utf8 (canonical_root);
+#endif
     g_assert_nonnull (root);
     g_assert_cmpint (g_chmod (root, 0700), ==, 0);
     g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
@@ -217,11 +228,20 @@ struct ProvisionedPairFixture
   ProvisionedPairFixture ()
   {
     g_autoptr (GError) error = nullptr;
+#ifdef G_OS_WIN32
+    g_autofree gchar *created_root =
+        wyl_test_make_secure_fact_root ("wyl-secure-pair-XXXXXX", &error);
+#else
     g_autofree gchar *created_root =
         g_dir_make_tmp ("wyl-secure-pair-XXXXXX", &error);
+#endif
     g_assert_no_error (error);
+#ifdef G_OS_WIN32
+    root = g_strdup (created_root);
+#else
     auto canonical_root = fs::canonical (created_root);
     root = path_to_utf8 (canonical_root);
+#endif
     g_assert_cmpint (g_chmod (root, 0700), ==, 0);
     g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
         WYRELOG_E_OK);

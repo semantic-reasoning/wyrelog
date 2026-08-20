@@ -1485,8 +1485,10 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     test_secure_duckdb_filesystem = executable(
       'test-secure-duckdb-filesystem',
       'test-secure-duckdb-filesystem.cc',
+      'fact-test-support.c',
+      c_args : fact_test_support_c_args,
       include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_dep, duckdb_dep],
+      dependencies : [wyrelog_dep, duckdb_dep] + fact_test_support_deps,
       override_options : ['cpp_std=c++17'],
     )
     test('secure-duckdb-filesystem', test_secure_duckdb_filesystem,
