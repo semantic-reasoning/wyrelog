@@ -10786,42 +10786,6 @@ wyl_policy_store_create_tenant (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
-/* Seed the authorization anchor for a freshly-created tenant so a workload
- * role granted at <tenant> can later be decided ALLOW there.  This mirrors the
- * CALL SEQUENCE of the bootstrap seal (session_state(active) + session event +
- * wr.system_admin membership + role event + validate) at <tenant> scope, but
- * owns NO transaction of its own: the caller (tenant_mutation_handler) wraps
- * create+seed in a single SAVEPOINT via wyl_policy_store_begin_mutation so a
- * seed failure rolls back the tenant row too.  Any non-OK rc is propagated so
- * the caller can roll back.  actor is the human session actor; grant of
- * wr.system_admin fail-closes for svc: subjects, rolling the whole savepoint
- * back. */
-wyrelog_error_t
-wyl_policy_store_seed_created_tenant_authority (wyl_policy_store_t *store,
-    const gchar *tenant, const gchar *actor)
-{
-  if (store == NULL || store->db == NULL || tenant == NULL || actor == NULL)
-    return WYRELOG_E_INVALID;
-
-  wyrelog_error_t rc = wyl_policy_store_set_session_state (store, tenant,
-          "active");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_append_session_event (store, tenant, "request", "idle",
-          "active", NULL);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_grant_role_membership (store, actor, "wr.system_admin",
-          tenant);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_append_role_membership_event (store, actor,
-          "wr.system_admin", tenant, "grant");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_policy_store_validate_snapshot (store);
-}
-
 wyrelog_error_t
 wyl_policy_store_set_tenant_sealed_full (wyl_policy_store_t *store,
     const gchar *tenant_id, gboolean sealed, gboolean *out_changed)

@@ -16,8 +16,8 @@
 #      bearer (#740 self-arm rejects skip-MFA bearers with 403);
 #   5. admin2 self-arms the service-credential management authority;
 #   6. arm wr.tenant.manage for admin2;
-#   7. create tenant-a (#744 seeds admin2 wr.system_admin@tenant-a plus a
-#      session_state(active) anchor in the create savepoint);
+#   7. create tenant-a (the creator receives wr.system_admin@tenant-a plus a
+#      active tenant scope state);
 #   8. create the service principal svc:svc-app (a __wr_default identity);
 #   9. issue credential A, escrowed to $PUBROOT/credA;
 #  10. exchange the escrow doc for a live service JWT;
@@ -46,8 +46,8 @@
 # NOTE ON SCOPES: the service principal svc:svc-app is a __wr_default identity
 # (service principals always live in __wr_default), yet the role grant and both
 # /decide calls are tenant-a-scoped. This is correct, not inconsistent: it
-# relies on #744 seeding a session_state(active) anchor for tenant-a at create
-# time so a tenant-a-scoped decision can be authorized.
+# relies on tenant-a's active scope state at create time so a tenant-a-scoped
+# decision can be authorized.
 
 set -eu
 
@@ -196,7 +196,7 @@ chmod 600 "$ADMIN2_SECRET"
   || fail "arming wr.tenant.manage failed" \
     "$TMPDIR/tenant-manage.out" "$LOG.err"
 
-# --- 7. create tenant-a (#744 seeds admin2 authority + active anchor). --------
+# --- 7. create tenant-a (the creator receives tenant-scoped authority). -------
 "$PY" "$SC_E2E_PY" http-post --base-url "$URL" \
   --path /tenants/create --token-file "$ADMIN2_TOKEN" \
   --query name=tenant-a --query tenant=__wr_default \
