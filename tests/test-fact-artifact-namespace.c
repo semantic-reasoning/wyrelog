@@ -3618,6 +3618,37 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (mac_handle, tampered_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
   g_assert_null (decoded_v2);
+  g_autoptr (GBytes) truncated_v2 =
+      g_bytes_new (encoded_v2_data, encoded_v2_size - 1);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, truncated_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
+  guint8 *extended_v2_data = g_malloc (encoded_v2_size + 1);
+  memcpy (extended_v2_data, encoded_v2_data, encoded_v2_size);
+  extended_v2_data[encoded_v2_size] = 0;
+  g_autoptr (GBytes) extended_v2 =
+      g_bytes_new_take (extended_v2_data, encoded_v2_size + 1);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, extended_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
+  RecoveryMacTestProvider *wrong_scope_state = g_new0
+        (RecoveryMacTestProvider, 1);
+  memset (wrong_scope_state->key, 0x5a, sizeof wrong_scope_state->key);
+  WylFactRecoveryMacProvider wrong_scope_provider = {
+    recovery_mac_test_compute, recovery_mac_test_verify,
+    recovery_mac_test_wipe, recovery_mac_test_free, wrong_scope_state
+  };
+  g_autoptr (WylFactRecoveryMacHandle) wrong_scope_handle =
+      wyl_fact_recovery_mac_handle_new (&wrong_scope_provider, "key-1", 7,
+          "tenant-2", "graph-1", "operation-1");
+  g_assert_nonnull (wrong_scope_handle);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (wrong_scope_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
+  wyl_fact_recovery_mac_handle_close (mac_handle);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
   g_autoptr (GBytes) wtr1_as_v2 = g_bytes_new_static ("WTR1", 4);
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
         (mac_handle, wtr1_as_v2, &decoded_v2), ==, WYRELOG_E_INVALID);
