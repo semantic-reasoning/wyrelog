@@ -98,6 +98,8 @@ wyrelog/fact/provisioning-run-private.c
 wyrelog/fact/provisioning-run-private.h
 wyrelog/fact/query-private.h
 wyrelog/fact/reconcile-private.h
+wyrelog/fact/recovery-mac-private.c
+wyrelog/fact/recovery-mac-private.h
 wyrelog/fact/replay-private.h
 wyrelog/fact/replay.c
 wyrelog/fact/schema-private.h
