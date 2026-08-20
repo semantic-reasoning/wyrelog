@@ -103,6 +103,8 @@ apply_owner_acl (const gchar *path, BYTE ace_flags, GError **error)
 {
   HANDLE token = NULL;
   TOKEN_PRIVILEGES privileges = { 0 };
+  gboolean privilege_available = TRUE;
+  DWORD privilege_error = ERROR_SUCCESS;
   WylTestOwnerAcl security;
   g_autofree gunichar2 *wide = NULL;
 
@@ -115,26 +117,22 @@ apply_owner_acl (const gchar *path, BYTE ace_flags, GError **error)
   }
   if (!LookupPrivilegeValueW (NULL, SE_TAKE_OWNERSHIP_NAME,
       &privileges.Privileges[0].Luid)) {
-    DWORD saved_error = GetLastError ();
-    CloseHandle (token);
-    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
-        "Failed to resolve SeTakeOwnershipPrivilege: Win32 error %lu",
-        (gulong) saved_error);
-    return FALSE;
+    privilege_available = FALSE;
+  } else {
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!AdjustTokenPrivileges (token, FALSE, &privileges, 0, NULL, NULL)) {
+      DWORD saved_error = GetLastError ();
+      CloseHandle (token);
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+          "Failed to enable SeTakeOwnershipPrivilege: Win32 error %lu",
+          (gulong) saved_error);
+      return FALSE;
+    }
+    privilege_error = GetLastError ();
   }
-  privileges.PrivilegeCount = 1;
-  privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-  if (!AdjustTokenPrivileges (token, FALSE, &privileges, 0, NULL, NULL)) {
-    DWORD saved_error = GetLastError ();
-    CloseHandle (token);
-    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
-        "Failed to enable SeTakeOwnershipPrivilege: Win32 error %lu",
-        (gulong) saved_error);
-    return FALSE;
-  }
-  DWORD privilege_error = GetLastError ();
   CloseHandle (token);
-  if (privilege_error != ERROR_SUCCESS) {
+  if (privilege_available && privilege_error != ERROR_SUCCESS) {
     g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
         "SeTakeOwnershipPrivilege is unavailable: Win32 error %lu",
         (gulong) privilege_error);
