@@ -119,7 +119,8 @@ if ($privilege_enabled) {
 $temporary_path = [System.IO.Path]::GetTempFileName()
 $batch_path = [System.IO.Path]::ChangeExtension($temporary_path, '.cmd')
 try {
-  Set-Content -Path $batch_path -Value $Command -Encoding ASCII
+  $batch_content = "@echo off`r`ncd /d `"$env:GITHUB_WORKSPACE`"`r`n$Command"
+  Set-Content -Path $batch_path -Value $batch_content -Encoding ASCII
   & $env:ComSpec /D /E:ON /V:OFF /C $batch_path
   $command_exit_code = $LASTEXITCODE
 } finally {
