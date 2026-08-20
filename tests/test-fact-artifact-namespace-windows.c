@@ -27,6 +27,8 @@ win_recovery_mac_test_compute (gpointer state_p, const guint8 *label,
     gsize label_len, const guint8 *payload, gsize payload_len,
     guint8 out_tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
 {
+  (void) label;
+  (void) label_len;
   WinRecoveryMacTestProvider *state = state_p;
   g_autofree guint8 *input = g_malloc (label_len + payload_len);
   memcpy (input, label, label_len);
