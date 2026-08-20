@@ -8973,6 +8973,27 @@ static const WylGraphAuthorityColumn fact_reconcile_evidence_columns[] = {
    "ALTER TABLE fact_reconcile_journal ADD COLUMN source_digest BLOB"},
 };
 
+static const WylGraphAuthorityColumn fact_graph_provisioning_evidence_columns[] = {
+  {"fact_graph_provisioning", "windows_operation_evidence_version", "INTEGER",
+   FALSE, NULL, NULL,
+   "ALTER TABLE fact_graph_provisioning ADD COLUMN "
+   "windows_operation_evidence_version INTEGER"},
+  {"fact_graph_provisioning", "windows_graph_volume_serial", "INTEGER",
+   FALSE, NULL, NULL,
+   "ALTER TABLE fact_graph_provisioning ADD COLUMN "
+   "windows_graph_volume_serial INTEGER"},
+  {"fact_graph_provisioning", "windows_graph_file_id", "BLOB", FALSE, NULL,
+   NULL,
+   "ALTER TABLE fact_graph_provisioning ADD COLUMN windows_graph_file_id BLOB"},
+  {"fact_graph_provisioning", "windows_artifact_volume_serial", "INTEGER",
+   FALSE, NULL, NULL,
+   "ALTER TABLE fact_graph_provisioning ADD COLUMN "
+   "windows_artifact_volume_serial INTEGER"},
+  {"fact_graph_provisioning", "windows_artifact_file_id", "BLOB", FALSE, NULL,
+   NULL,
+   "ALTER TABLE fact_graph_provisioning ADD COLUMN windows_artifact_file_id BLOB"},
+};
+
 static const gchar graph_authority_uuid_index_sql[] =
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid "
     "ON fact_graphs(store_uuid) WHERE store_uuid IS NOT NULL";
@@ -9019,12 +9040,52 @@ static const gchar fact_graph_provisioning_table_sql[] =
     "created_at BETWEEN 0 AND 9223372036854775807),"
     "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
     "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "windows_operation_evidence_version INTEGER,"
+    "windows_graph_volume_serial INTEGER,"
+    "windows_graph_file_id BLOB,"
+    "windows_artifact_volume_serial INTEGER,"
+    "windows_artifact_file_id BLOB,"
+    "CHECK ((windows_operation_evidence_version IS NULL AND "
+    "windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL AND "
+    "windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL) OR "
+    "(typeof(windows_operation_evidence_version)='integer' AND "
+    "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_volume_serial)='integer' AND "
+    "windows_graph_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
+    "typeof(windows_artifact_volume_serial)='integer' AND "
+    "windows_artifact_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_artifact_file_id)='blob' AND "
+    "length(windows_artifact_file_id)=16)),"
     "CHECK(updated_at>=created_at),"
     "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
     "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
     ")";
 
 static const gchar fact_graph_provisioning_immutable_trigger_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
+    "BEFORE UPDATE ON fact_graph_provisioning WHEN "
+    "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
+    "OR NEW.graph_id IS NOT OLD.graph_id OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.stage_basename IS NOT OLD.stage_basename OR "
+    "NEW.expected_lifecycle_generation IS NOT OLD.expected_lifecycle_generation "
+    "OR NEW.expected_reconciliation_generation IS NOT OLD.expected_reconciliation_generation "
+    "OR NEW.created_at IS NOT OLD.created_at OR "
+    "(OLD.windows_operation_evidence_version IS NOT NULL AND "
+    "(NEW.windows_operation_evidence_version IS NOT OLD.windows_operation_evidence_version OR "
+    "NEW.windows_graph_volume_serial IS NOT OLD.windows_graph_volume_serial OR "
+    "NEW.windows_graph_file_id IS NOT OLD.windows_graph_file_id OR "
+    "NEW.windows_artifact_volume_serial IS NOT OLD.windows_artifact_volume_serial OR "
+    "NEW.windows_artifact_file_id IS NOT OLD.windows_artifact_file_id)) OR "
+    "(OLD.windows_operation_evidence_version IS NULL AND NOT ("
+    "NEW.windows_operation_evidence_version IS NOT NULL AND "
+    "NEW.windows_graph_volume_serial IS NOT NULL AND "
+    "NEW.windows_graph_file_id IS NOT NULL AND "
+    "NEW.windows_artifact_volume_serial IS NOT NULL AND "
+    "NEW.windows_artifact_file_id IS NOT NULL)) "
+    "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
+
+static const gchar fact_graph_provisioning_immutable_trigger_pre_evidence_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
     "BEFORE UPDATE ON fact_graph_provisioning WHEN "
     "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
@@ -9684,6 +9745,17 @@ validate_graph_authority_rows (sqlite3 *db)
     "typeof(attempt)!='integer' OR attempt NOT BETWEEN 0 AND 9223372036854775807 OR "
     "typeof(created_at)!='integer' OR created_at NOT BETWEEN 0 AND 9223372036854775807 OR "
     "typeof(updated_at)!='integer' OR updated_at NOT BETWEEN 0 AND 9223372036854775807 OR "
+    "NOT ((windows_operation_evidence_version IS NULL AND "
+    "windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL AND "
+    "windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL) OR "
+    "(typeof(windows_operation_evidence_version)='integer' AND "
+    "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_volume_serial)='integer' AND "
+    "windows_graph_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
+    "typeof(windows_artifact_volume_serial)='integer' AND "
+    "windows_artifact_volume_serial BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_artifact_file_id)='blob' AND length(windows_artifact_file_id)=16)) OR "
     "updated_at<created_at OR NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
     "JOIN tenants AS t ON t.tenant_id=g.tenant_id WHERE "
     "g.tenant_id=fact_graph_provisioning.tenant_id AND "
@@ -9731,6 +9803,15 @@ validate_graph_authority_schema (sqlite3 *db)
     gboolean exists = FALSE, matches = FALSE;
     wyrelog_error_t rc = graph_authority_column_status (db,
             &fact_reconcile_evidence_columns[i], &exists, &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!exists || !matches)
+      return WYRELOG_E_POLICY;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (fact_graph_provisioning_evidence_columns); i++) {
+    gboolean exists = FALSE, matches = FALSE;
+    wyrelog_error_t rc = graph_authority_column_status (db,
+            &fact_graph_provisioning_evidence_columns[i], &exists, &matches);
     if (rc != WYRELOG_E_OK)
       return rc;
     if (!exists || !matches)
@@ -9811,7 +9892,10 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
   gboolean added_tenant_sealed_generation = FALSE;
   rc = exec_sql (db, fact_graph_provisioning_table_sql);
   if (rc == WYRELOG_E_OK)
-    rc = exec_sql (db, fact_graph_provisioning_immutable_trigger_sql);
+    rc = migrate_tenant_authority_guard (db, "fact_graph_provisioning_immutable",
+            fact_graph_provisioning_immutable_trigger_pre_evidence_sql,
+            fact_graph_provisioning_immutable_trigger_sql,
+            "DROP TRIGGER fact_graph_provisioning_immutable;");
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (db, fact_graph_provisioning_insert_guard_sql);
   if (rc == WYRELOG_E_OK)
@@ -9851,6 +9935,18 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
       return WYRELOG_E_POLICY;
     if (!exists && (rc = exec_sql (db,
         fact_reconcile_evidence_columns[i].alter_sql)) != WYRELOG_E_OK)
+      return rc;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (fact_graph_provisioning_evidence_columns); i++) {
+    gboolean exists = FALSE, matches = FALSE;
+    rc = graph_authority_column_status (db,
+            &fact_graph_provisioning_evidence_columns[i], &exists, &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (exists && !matches)
+      return WYRELOG_E_POLICY;
+    if (!exists && (rc = exec_sql (db,
+        fact_graph_provisioning_evidence_columns[i].alter_sql)) != WYRELOG_E_OK)
       return rc;
   }
   if ((rc = exec_sql (db, fact_reconcile_evidence_immutable_trigger_sql)) !=
@@ -13622,6 +13718,55 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
   const gchar *store_uuid = (const gchar *) sqlite3_column_text (stmt, 3);
   const gchar *stage_basename = (const gchar *) sqlite3_column_text (stmt, 4);
   const gchar *phase_name = (const gchar *) sqlite3_column_text (stmt, 7);
+  gboolean has_windows_evidence = sqlite3_column_type (stmt, 11) != SQLITE_NULL;
+  for (gint i = 11; i <= 15; i++)
+    if ((sqlite3_column_type (stmt, i) != SQLITE_NULL) != has_windows_evidence)
+      return WYRELOG_E_POLICY;
+#ifdef G_OS_WIN32
+  guint64 windows_evidence_version = 0;
+  guint64 windows_graph_volume_serial = 0;
+  guint64 windows_artifact_volume_serial = 0;
+  const guint8 *windows_graph_file_id = NULL;
+  const guint8 *windows_artifact_file_id = NULL;
+  wyl_id_t operation_id = { 0 };
+#endif
+  if (has_windows_evidence) {
+    if (sqlite3_column_type (stmt, 11) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 12) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 13) != SQLITE_BLOB
+        || sqlite3_column_bytes (stmt, 13) != 16
+        || sqlite3_column_type (stmt, 14) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 15) != SQLITE_BLOB
+        || sqlite3_column_bytes (stmt, 15) != 16)
+      return WYRELOG_E_POLICY;
+#ifdef G_OS_WIN32
+    gint64 evidence_version = sqlite3_column_int64 (stmt, 11);
+    gint64 graph_volume_serial = sqlite3_column_int64 (stmt, 12);
+    gint64 artifact_volume_serial = sqlite3_column_int64 (stmt, 14);
+    if (evidence_version < 1 || graph_volume_serial < 1
+        || artifact_volume_serial < 1)
+      return WYRELOG_E_POLICY;
+    windows_evidence_version = (guint64) evidence_version;
+    windows_graph_volume_serial = (guint64) graph_volume_serial;
+    windows_artifact_volume_serial = (guint64) artifact_volume_serial;
+    windows_graph_file_id = sqlite3_column_blob (stmt, 13);
+    windows_artifact_file_id = sqlite3_column_blob (stmt, 15);
+    if (windows_evidence_version !=
+        WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION)
+      return WYRELOG_E_POLICY;
+    gboolean graph_file_nonzero = FALSE;
+    gboolean artifact_file_nonzero = FALSE;
+    for (gint i = 0; i < 16; i++) {
+      graph_file_nonzero |= windows_graph_file_id[i] != 0;
+      artifact_file_nonzero |= windows_artifact_file_id[i] != 0;
+    }
+    if (!graph_file_nonzero || !artifact_file_nonzero
+        || wyl_id_parse (op_uuid, &operation_id) != WYRELOG_E_OK)
+      return WYRELOG_E_POLICY;
+#else
+    return WYRELOG_E_POLICY;
+#endif
+  }
   WylPolicyGraphProvisioningPhase phase;
   gint64 lifecycle = sqlite3_column_int64 (stmt, 5);
   gint64 reconciliation = sqlite3_column_int64 (stmt, 6);
@@ -13653,6 +13798,23 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
   r->attempt = (guint64) attempt;
   r->created_at = created_at;
   r->updated_at = updated_at;
+#ifdef G_OS_WIN32
+  r->has_windows_evidence = has_windows_evidence;
+  if (has_windows_evidence) {
+    r->windows_evidence.version = (guint) windows_evidence_version;
+    memcpy (r->windows_evidence.operation_uuid, operation_id.bytes,
+        sizeof operation_id.bytes);
+    r->windows_evidence.graph_identity.volume_serial =
+        windows_graph_volume_serial;
+    memcpy (r->windows_evidence.graph_identity.file_id, windows_graph_file_id,
+        sizeof r->windows_evidence.graph_identity.file_id);
+    r->windows_evidence.artifact_identity.volume_serial =
+        windows_artifact_volume_serial;
+    memcpy (r->windows_evidence.artifact_identity.file_id,
+        windows_artifact_file_id,
+        sizeof r->windows_evidence.artifact_identity.file_id);
+  }
+#endif
   *out_record = r;
   return WYRELOG_E_OK;
 }
@@ -13660,7 +13822,10 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
 #define GRAPH_PROVISIONING_SELECT_COLUMNS \
   "op_uuid,tenant_id,graph_id,store_uuid,stage_basename," \
   "expected_lifecycle_generation,expected_reconciliation_generation," \
-  "phase,attempt,created_at,updated_at"
+  "phase,attempt,created_at,updated_at," \
+  "windows_operation_evidence_version,windows_graph_volume_serial," \
+  "windows_graph_file_id,windows_artifact_volume_serial," \
+  "windows_artifact_file_id"
 
 static wyrelog_error_t
 graph_provisioning_read_locked (wyl_policy_store_t *store,
@@ -13722,6 +13887,80 @@ wyl_policy_store_graph_provisioning_read (wyl_policy_store_t *store,
   g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
 }
+
+#ifdef G_OS_WIN32
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_set_windows_evidence (wyl_policy_store_t *store,
+    const gchar *op_uuid, const WylFactGraphWinOperationEvidence *evidence)
+{
+  if (store == NULL || store->db == NULL || op_uuid == NULL || evidence == NULL
+      || evidence->version != WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION
+      || evidence->graph_identity.volume_serial < 1
+      || evidence->graph_identity.volume_serial > G_MAXINT64
+      || evidence->artifact_identity.volume_serial < 1
+      || evidence->artifact_identity.volume_serial > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  wyl_id_t operation_id;
+  if (wyl_id_parse (op_uuid, &operation_id) != WYRELOG_E_OK
+      || memcmp (operation_id.bytes, evidence->operation_uuid,
+      sizeof operation_id.bytes) != 0)
+    return WYRELOG_E_INVALID;
+  gboolean graph_nonzero = FALSE;
+  gboolean artifact_nonzero = FALSE;
+  for (gint i = 0; i < 16; i++) {
+    graph_nonzero |= evidence->graph_identity.file_id[i] != 0;
+    artifact_nonzero |= evidence->artifact_identity.file_id[i] != 0;
+  }
+  if (!graph_nonzero || !artifact_nonzero)
+    return WYRELOG_E_INVALID;
+
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "UPDATE fact_graph_provisioning SET "
+          "windows_operation_evidence_version=?,windows_graph_volume_serial=?,"
+          "windows_graph_file_id=?,windows_artifact_volume_serial=?,"
+          "windows_artifact_file_id=? WHERE op_uuid=? AND phase IN "
+          "('reserved','staged') AND windows_operation_evidence_version IS NULL "
+          "AND windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL "
+          "AND windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL;",
+          &stmt);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) evidence->version)
+      != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 2,
+      (sqlite3_int64) evidence->graph_identity.volume_serial) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_blob (stmt, 3, evidence->graph_identity.file_id, 16,
+      SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 4,
+      (sqlite3_int64) evidence->artifact_identity.volume_serial) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_blob (stmt, 5, evidence->artifact_identity.file_id, 16,
+      SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 6, op_uuid);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_DONE)
+      rc = (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+          ? WYRELOG_E_POLICY
+          : graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+    else if (sqlite3_changes (store->db) != 1)
+      rc = WYRELOG_E_POLICY;
+  }
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+#endif
 
 wyrelog_error_t
 wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
