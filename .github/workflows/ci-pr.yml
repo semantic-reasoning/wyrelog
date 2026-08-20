@@ -813,8 +813,9 @@ jobs:
           key: ${{ steps.meson-packagecache.outputs.cache-primary-key }}
 
       - name: Build and test (clang-cl)
-        shell: cmd
+        shell: powershell
         run: |
+          $command = @'
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
@@ -834,6 +835,9 @@ jobs:
           ) else (
             meson test -C builddir --print-errorlogs --suite wyrelog
           )
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Show sccache statistics
         if: always()
