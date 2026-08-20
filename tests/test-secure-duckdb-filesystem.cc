@@ -2012,8 +2012,8 @@ test_pinned_provider_open_seams_fail_closed (void)
       }
     }
   }
-}
 #endif
+}
 
 static void
 assert_pathname_pinned_validation_parity (Fixture &fixture,
