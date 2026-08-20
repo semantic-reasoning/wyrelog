@@ -4203,7 +4203,8 @@ wyl_fact_artifact_temp_recovery_evidence_decode_v2
       || !temp_evidence_v2_field (data, size, &offset, lengths[3], &operation, TRUE)
       || !temp_evidence_v2_field (data, size, &offset, lengths[4], &evidence->token, TRUE))
     goto invalid_fields;
-  if (offset + WYL_FACT_RECOVERY_MAC_TAG_BYTES != size
+  if (offset > size
+      || size - offset != WYL_FACT_RECOVERY_MAC_TAG_BYTES
       || generation != wyl_fact_recovery_mac_handle_get_generation (handle)
       || g_strcmp0 (key_id, wyl_fact_recovery_mac_handle_get_key_id (handle)) != 0
       || !wyl_fact_recovery_mac_handle_scope_matches (handle, tenant, graph, operation,

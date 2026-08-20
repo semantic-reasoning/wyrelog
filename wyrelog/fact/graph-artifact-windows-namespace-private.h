@@ -203,11 +203,23 @@ wyrelog_error_t wyl_fact_artifact_win_temp_recovery_evidence_encode
   (const WylFactArtifactWinTempRecoveryEvidence *, GBytes **);
 wyrelog_error_t wyl_fact_artifact_win_temp_recovery_evidence_decode
   (GBytes *, WylFactArtifactWinTempRecoveryEvidence **);
+/* WTE2 is the MAC-authenticated successor of WTE1.  The opaque handle binds
+ * provider-backed authentication to the canonical policy scope; raw keys
+ * and legacy unauthenticated evidence never cross this boundary. */
+wyrelog_error_t wyl_fact_artifact_win_temp_recovery_evidence_encode_v2
+  (WylFactRecoveryMacHandle *, const WylFactArtifactWinTempRecoveryEvidence *,
+    GBytes **);
+wyrelog_error_t wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
+  (WylFactRecoveryMacHandle *, GBytes *,
+    WylFactArtifactWinTempRecoveryEvidence **);
 /* Recovery has no token pathname authority of its own: it needs a matching
  * exclusive lease and the immutable entry FileId evidence.  A missing entry
  * is idempotently recovered; mismatch/replacement is POLICY and untouched. */
 wyrelog_error_t wyl_fact_artifact_win_lease_recover_temp_token
   (WylFactArtifactWinLease *, const WylFactArtifactWinTempRecoveryEvidence *,
+    WylFactArtifactWinMutationEffect *);
+wyrelog_error_t wyl_fact_artifact_win_lease_recover_temp_token_v2
+  (WylFactArtifactWinLease *, WylFactRecoveryMacHandle *, GBytes *,
     WylFactArtifactWinMutationEffect *);
 void wyl_fact_artifact_win_temp_token_free (WylFactArtifactWinTempToken *);
 wyrelog_error_t wyl_fact_artifact_win_temp_token_open_io_session

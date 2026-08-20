@@ -6,6 +6,7 @@
 
 #ifdef G_OS_WIN32
 #include <aclapi.h>
+#include <sodium.h>
 #include <windows.h>
 
 #include "fact/graph-artifact-windows-handle-private.h"
@@ -15,6 +16,50 @@
 #include "fact/graph-windows-security-private.h"
 
 #include "fact-test-support.h"
+
+typedef struct
+{
+  guint8 key[crypto_generichash_KEYBYTES];
+} WinRecoveryMacTestProvider;
+
+static wyrelog_error_t
+win_recovery_mac_test_compute (gpointer state_p, const guint8 *label,
+    gsize label_len, const guint8 *payload, gsize payload_len,
+    guint8 out_tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  WinRecoveryMacTestProvider *state = state_p;
+  g_autofree guint8 *input = g_malloc (label_len + payload_len);
+  memcpy (input, label, label_len);
+  memcpy (input + label_len, payload, payload_len);
+  return crypto_generichash (out_tag, WYL_FACT_RECOVERY_MAC_TAG_BYTES, input,
+             label_len + payload_len, state->key, sizeof state->key) == 0
+      ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+}
+
+static wyrelog_error_t
+win_recovery_mac_test_verify (gpointer state_p, const guint8 *label,
+    gsize label_len, const guint8 *payload, gsize payload_len,
+    const guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  guint8 expected[WYL_FACT_RECOVERY_MAC_TAG_BYTES];
+  wyrelog_error_t rc = win_recovery_mac_test_compute (state_p, label,
+          label_len, payload, payload_len, expected);
+  gboolean equal = sodium_memcmp (expected, tag, sizeof expected) == 0;
+  sodium_memzero (expected, sizeof expected);
+  return rc == WYRELOG_E_OK && equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static void
+win_recovery_mac_test_wipe (gpointer state_p)
+{
+  sodium_memzero (state_p, sizeof (WinRecoveryMacTestProvider));
+}
+
+static void
+win_recovery_mac_test_free (gpointer state_p)
+{
+  g_free (state_p);
+}
 
 static WylFactGraphWinIdentity
 identity_for (HANDLE handle)
@@ -2736,6 +2781,39 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_encode
         (temp_evidence, &temp_evidence_bytes), ==, WYRELOG_E_OK);
   g_assert_nonnull (temp_evidence_bytes);
+  WinRecoveryMacTestProvider *mac_state = g_new0
+        (WinRecoveryMacTestProvider, 1);
+  memset (mac_state->key, 0x5a, sizeof mac_state->key);
+  WylFactRecoveryMacProvider mac_provider = {
+    win_recovery_mac_test_compute, win_recovery_mac_test_verify,
+    win_recovery_mac_test_wipe, win_recovery_mac_test_free, mac_state
+  };
+  g_autoptr (WylFactRecoveryMacHandle) mac_handle =
+      wyl_fact_recovery_mac_handle_new (&mac_provider, "key-1", 7,
+          "tenant-1", "graph-1", "operation-1");
+  g_assert_nonnull (mac_handle);
+  g_autoptr (GBytes) temp_evidence_v2_bytes = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_encode_v2
+        (mac_handle, temp_evidence, &temp_evidence_v2_bytes), ==,
+      WYRELOG_E_OK);
+  WylFactArtifactWinTempRecoveryEvidence *temp_evidence_v2 = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
+        (mac_handle, temp_evidence_v2_bytes, &temp_evidence_v2), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence_v2);
+  gsize v2_size = 0;
+  const guint8 *v2_data = g_bytes_get_data (temp_evidence_v2_bytes, &v2_size);
+  guint8 *v2_tampered_data = g_memdup2 (v2_data, v2_size);
+  v2_tampered_data[10] ^= 1;
+  g_autoptr (GBytes) v2_tampered =
+      g_bytes_new_take (v2_tampered_data, v2_size);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
+        (mac_handle, v2_tampered, &temp_evidence_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (temp_evidence_v2);
+  g_autoptr (GBytes) v2_legacy = g_bytes_new_static ("WTE1", 4);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode_v2
+        (mac_handle, v2_legacy, &temp_evidence_v2), ==, WYRELOG_E_INVALID);
+  g_assert_null (temp_evidence_v2);
   /* Simulate process loss: only durable bytes and the artifact remain.
    * Reacquiring the native lease must prove directory + lock + FileId before
    * it can clean up the abandoned token. */
