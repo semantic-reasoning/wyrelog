@@ -1734,6 +1734,39 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
 }
 
 static void
+test_reconcile_journal_round_trips_high_bit_windows_serial (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  insert_graph (wyl_policy_store_get_db (store), "tenant-high-serial",
+      "graph-high-serial", FALSE);
+  WylPolicyFactReconcileArtifactEvidence evidence = {
+    .version = WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1,
+    .identity_kind = WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS,
+    .windows_volume_serial = G_GUINT64_CONSTANT (0x8000000000000001),
+    .size_bytes = 23,
+    .digest_algorithm = WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256,
+  };
+  memset (evidence.windows_file_id, 7, sizeof evidence.windows_file_id);
+  for (gsize i = 0; i < G_N_ELEMENTS (evidence.digest); i++)
+    evidence.digest[i] = (guint8) (i + 1);
+  WylPolicyFactReconcileJournalInput input = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073996", "tenant-high-serial",
+    "graph-high-serial", 0, 0, 1, 1, NULL, "legacy/a/facts.duckdb",
+    "v1/a/b/facts.duckdb", evidence
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+      &record, &result), ==, WYRELOG_E_OK);
+  g_assert_nonnull (record);
+  g_assert_cmpuint (record->source_evidence.windows_volume_serial, ==,
+      evidence.windows_volume_serial);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+}
+
+static void
 test_reconcile_journal_evidence_fails_closed (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -2234,6 +2267,9 @@ main (int argc, char **argv)
       test_malformed_preexisting_trigger_fails_closed);
   g_test_add_func ("/policy/graph-authority/reconcile-journal-cas",
       test_reconcile_journal_prepare_read_list_and_cas);
+  g_test_add_func
+    ("/policy/graph-authority/reconcile-journal-high-bit-windows-serial",
+      test_reconcile_journal_round_trips_high_bit_windows_serial);
   g_test_add_func
     ("/policy/graph-authority/reconcile-journal-evidence-fails-closed",
       test_reconcile_journal_evidence_fails_closed);

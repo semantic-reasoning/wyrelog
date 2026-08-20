@@ -5918,9 +5918,9 @@ check_store_provisions_fact_graph (void)
   evidence.version = WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION;
   memcpy (evidence.operation_uuid, operation_id.bytes,
       sizeof evidence.operation_uuid);
-  evidence.graph_identity.volume_serial = 1;
+  evidence.graph_identity.volume_serial = G_GUINT64_CONSTANT (0x8000000000000001);
   evidence.graph_identity.file_id[0] = 1;
-  evidence.artifact_identity.volume_serial = 2;
+  evidence.artifact_identity.volume_serial = G_GUINT64_CONSTANT (0xffffffffffffffff);
   evidence.artifact_identity.file_id[0] = 2;
   if (wyl_policy_store_graph_provisioning_set_windows_evidence (store, op_uuid,
       &evidence) != WYRELOG_E_OK)
