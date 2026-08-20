@@ -13,6 +13,7 @@ typedef struct
   guint8 key[crypto_generichash_KEYBYTES];
   gboolean wiped;
   gboolean freed;
+  gboolean fail_compute;
   guint compute_calls;
   GBytes *last_label;
 } RecoveryMacFakeProvider;
@@ -26,6 +27,8 @@ recovery_mac_fake_compute (gpointer state_p, const guint8 *label,
   state->compute_calls++;
   g_clear_pointer (&state->last_label, g_bytes_unref);
   state->last_label = g_bytes_new (label, label_len);
+  if (state->fail_compute)
+    return WYRELOG_E_CRYPTO;
   return crypto_generichash (out_tag, WYL_FACT_RECOVERY_MAC_TAG_BYTES,
              payload, payload_len, state->key, sizeof state->key) == 0
       ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
@@ -265,6 +268,30 @@ test_recovery_mac_handle_contract (void)
   g_assert_cmpint (wyl_fact_recovery_mac_handle_dup_label (handle, &label), ==,
       WYRELOG_E_POLICY);
   g_clear_pointer (&fake.last_label, g_bytes_unref);
+
+  RecoveryMacFakeProvider unavailable = { 0 };
+  unavailable.fail_compute = TRUE;
+  WylFactRecoveryMacProvider unavailable_provider = {
+    recovery_mac_fake_compute,
+    recovery_mac_fake_verify,
+    recovery_mac_fake_wipe,
+    recovery_mac_fake_free,
+    &unavailable,
+  };
+  g_autoptr (WylFactRecoveryMacHandle) unavailable_handle =
+      wyl_fact_recovery_mac_handle_new (&unavailable_provider, "key-8", 8,
+          "tenant-a", "graph-a", "operation-a");
+  g_assert_nonnull (unavailable_handle);
+  memset (tag, 0xaa, sizeof tag);
+  g_assert_cmpint (wyl_fact_recovery_mac_compute (unavailable_handle, payload,
+      sizeof payload, tag), ==, WYRELOG_E_CRYPTO);
+  for (gsize i = 0; i < sizeof tag; i++)
+    g_assert_cmpuint (tag[i], ==, 0);
+  g_assert_cmpint (wyl_fact_recovery_mac_verify (unavailable_handle, payload,
+      sizeof payload, tag), ==, WYRELOG_E_CRYPTO);
+  wyl_fact_recovery_mac_handle_close (unavailable_handle);
+  g_assert_true (unavailable.wiped);
+  g_assert_true (unavailable.freed);
 }
 
 static void
