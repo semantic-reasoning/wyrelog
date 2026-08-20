@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sodium.h>
 #endif
 #include "fact/graph-artifact-namespace-private.h"
 
@@ -53,6 +54,50 @@
 #include "fact/artifact-io-session-private.h"
 
 #ifndef G_OS_WIN32
+typedef struct
+{
+  guint8 key[32];
+} RecoveryMacTestProvider;
+
+static wyrelog_error_t
+recovery_mac_test_compute (gpointer state, const guint8 *label, gsize label_len,
+    const guint8 *payload, gsize payload_len,
+    guint8 out_tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  RecoveryMacTestProvider *provider = state;
+  g_autofree guint8 *input = g_malloc (label_len + payload_len);
+  memcpy (input, label, label_len);
+  memcpy (input + label_len, payload, payload_len);
+  return crypto_generichash (out_tag, WYL_FACT_RECOVERY_MAC_TAG_BYTES, input,
+             label_len + payload_len, provider->key, sizeof provider->key) == 0
+      ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+}
+
+static wyrelog_error_t
+recovery_mac_test_verify (gpointer state, const guint8 *label, gsize label_len,
+    const guint8 *payload, gsize payload_len,
+    const guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  guint8 expected[WYL_FACT_RECOVERY_MAC_TAG_BYTES];
+  wyrelog_error_t r = recovery_mac_test_compute (state, label, label_len,
+          payload, payload_len, expected);
+  gboolean equal = sodium_memcmp (expected, tag, sizeof expected) == 0;
+  sodium_memzero (expected, sizeof expected);
+  return r == WYRELOG_E_OK && equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static void
+recovery_mac_test_wipe (gpointer state)
+{
+  sodium_memzero (state, sizeof (RecoveryMacTestProvider));
+}
+
+static void
+recovery_mac_test_free (gpointer state)
+{
+  g_free (state);
+}
+
 static gchar *
 make_root (void)
 {
@@ -3547,6 +3592,36 @@ test_namespace (void)
   g_autoptr (GBytes) encoded = NULL;
   g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_encode (evidence,
       &encoded), ==, WYRELOG_E_OK);
+  RecoveryMacTestProvider *mac_state = g_new0 (RecoveryMacTestProvider, 1);
+  memset (mac_state->key, 0x5a, sizeof mac_state->key);
+  WylFactRecoveryMacProvider mac_provider = {
+    recovery_mac_test_compute, recovery_mac_test_verify,
+    recovery_mac_test_wipe, recovery_mac_test_free, mac_state
+  };
+  g_autoptr (WylFactRecoveryMacHandle) mac_handle =
+      wyl_fact_recovery_mac_handle_new (&mac_provider, "key-1", 7,
+          "tenant-1", "graph-1", "operation-1");
+  g_assert_nonnull (mac_handle);
+  g_autoptr (GBytes) encoded_v2 = NULL;
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_encode_v2
+        (mac_handle, evidence, &encoded_v2), ==, WYRELOG_E_OK);
+  WylFactArtifactTempRecoveryEvidence *decoded_v2 = NULL;
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, encoded_v2, &decoded_v2), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_recovery_evidence_free (decoded_v2);
+  gsize encoded_v2_size = 0;
+  const guint8 *encoded_v2_data = g_bytes_get_data (encoded_v2, &encoded_v2_size);
+  guint8 *tampered_v2_data = g_memdup2 (encoded_v2_data, encoded_v2_size);
+  tampered_v2_data[10] ^= 1;
+  g_autoptr (GBytes) tampered_v2 =
+      g_bytes_new_take (tampered_v2_data, encoded_v2_size);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, tampered_v2, &decoded_v2), ==, WYRELOG_E_POLICY);
+  g_assert_null (decoded_v2);
+  g_autoptr (GBytes) wtr1_as_v2 = g_bytes_new_static ("WTR1", 4);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode_v2
+        (mac_handle, wtr1_as_v2, &decoded_v2), ==, WYRELOG_E_INVALID);
+  g_assert_null (decoded_v2);
   gsize encoded_size = 0;
   const guint8 *encoded_data = g_bytes_get_data (encoded, &encoded_size);
   const gchar legacy_token[] = "legacy-token";

@@ -52,6 +52,9 @@ guint64 wyl_fact_recovery_mac_handle_get_generation
   (const WylFactRecoveryMacHandle *handle);
 const gchar *wyl_fact_recovery_mac_handle_get_key_id
   (const WylFactRecoveryMacHandle *handle);
+void wyl_fact_recovery_mac_handle_get_scope
+  (const WylFactRecoveryMacHandle *handle, const gchar **out_tenant_id,
+    const gchar **out_graph_id, const gchar **out_operation_id);
 gboolean wyl_fact_recovery_mac_handle_scope_matches
   (const WylFactRecoveryMacHandle *handle, const gchar *tenant_id,
     const gchar *graph_id, const gchar *operation_id,
