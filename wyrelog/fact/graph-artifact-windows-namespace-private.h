@@ -164,6 +164,11 @@ wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_binding
 wyrelog_error_t wyl_fact_artifact_win_temp_binding_replace_sidecar
   (WylFactArtifactWinTempBinding *, WylFactArtifactWinSidecarBinding *,
     WylFactArtifactWinSidecarReplaceResult *);
+/* Replace a WAL sidecar from another bound sidecar.  The implementation uses
+ * the same identity, lease, and durability protocol as temp replacement. */
+wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_replace_existing_wal
+  (WylFactArtifactWinSidecarBinding *, WylFactArtifactWinSidecarBinding *,
+    WylFactArtifactWinSidecarReplaceResult *);
 void wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *);
 wyrelog_error_t wyl_fact_artifact_win_temp_binding_open_io_session
   (WylFactArtifactWinTempBinding *, WylFactArtifactWinIoSession **);

@@ -315,11 +315,24 @@ wyl_fact_artifact_sidecar_binding_replace_existing_wal (
   WylFactArtifactSidecarBinding *s, WylFactArtifactSidecarBinding *d,
   WylFactArtifactSidecarReplaceResult *r)
 {
-  (void) s;
-  (void) d;
   if (r != NULL)
     *r = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
-  return WYRELOG_E_POLICY;
+  if (s == NULL || d == NULL || r == NULL)
+    return WYRELOG_E_POLICY;
+  WylFactArtifactWinSidecarReplaceResult native_result =
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
+  wyrelog_error_t rc =
+      wyl_fact_artifact_win_sidecar_binding_replace_existing_wal (s, d,
+          &native_result);
+  /* Native REPLACED is equivalent to the neutral durable result: the native
+   * protocol flushes the directory and revalidates the transferred binding
+   * before publishing success. */
+  if (native_result == WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED)
+    *r = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE;
+  else if (native_result ==
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED)
+    *r = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_RECONCILE_REQUIRED;
+  return rc;
 }
 
 struct WylFactArtifactWinNamespace
@@ -1578,6 +1591,48 @@ out:
   if (first_mutex != second_mutex)
     g_mutex_unlock (second_mutex);
   g_mutex_unlock (first_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_sidecar_binding_replace_existing_wal
+  (WylFactArtifactWinSidecarBinding *source,
+    WylFactArtifactWinSidecarBinding *destination,
+    WylFactArtifactWinSidecarReplaceResult *out_result)
+{
+  WylFactArtifactWinTempBinding adapter = { 0 };
+  wyrelog_error_t rc;
+  if (out_result != NULL)
+    *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
+  if (source == NULL || destination == NULL || out_result == NULL
+      || source == destination || source->lease != destination->lease)
+    return WYRELOG_E_POLICY;
+
+  /* The existing replacement protocol is intentionally reused verbatim.  The
+   * source sidecar is temporarily viewed through the owner-only replacement
+   * shape while its mutex is held; no handle or pathname is copied or exposed,
+   * and every mutated field is copied back before releasing that mutex. */
+  g_mutex_lock (&source->mutex);
+  if (!source->writable) {
+    g_mutex_unlock (&source->mutex);
+    return WYRELOG_E_POLICY;
+  }
+  adapter.lease = source->lease;
+  adapter.entry = source->entry;
+  adapter.working = source->working;
+  adapter.io_state = source->io_state;
+  adapter.active = source->active;
+  adapter.io_open = source->io_open;
+  g_mutex_init (&adapter.mutex);
+  rc = wyl_fact_artifact_win_temp_binding_replace_sidecar (&adapter,
+          destination, out_result);
+  source->entry = adapter.entry;
+  source->working = adapter.working;
+  source->io_state = adapter.io_state;
+  source->active = adapter.active;
+  source->io_open = adapter.io_open;
+  g_mutex_clear (&adapter.mutex);
+  g_mutex_unlock (&source->mutex);
   return rc;
 }
 
