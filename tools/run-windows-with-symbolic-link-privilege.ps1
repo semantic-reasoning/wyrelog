@@ -109,11 +109,16 @@ if ($privilege_enabled) {
   # child test process without requiring a new logon token.
   $developer_mode_key =
       'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
-  New-Item -Path $developer_mode_key -Force | Out-Null
-  New-ItemProperty -Path $developer_mode_key `
-      -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 `
-      -Force | Out-Null
-  Write-Host 'Developer Mode enabled for unprivileged Windows symlink tests.'
+  try {
+    New-Item -Path $developer_mode_key -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $developer_mode_key `
+        -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 `
+        -Force -ErrorAction Stop | Out-Null
+    Write-Host 'Developer Mode enabled for unprivileged Windows symlink tests.'
+  } catch {
+    Write-Warning ('Developer Mode could not be enabled; continuing with the '
+      + 'current token capability: ' + $_.Exception.Message)
+  }
 }
 
 $temporary_path = [System.IO.Path]::GetTempFileName()
