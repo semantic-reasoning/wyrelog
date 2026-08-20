@@ -116,7 +116,16 @@ if ($privilege_enabled) {
   Write-Host 'Developer Mode enabled for unprivileged Windows symlink tests.'
 }
 
-& $env:ComSpec /D /E:ON /V:OFF /S /C $Command
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
+$temporary_path = [System.IO.Path]::GetTempFileName()
+$batch_path = [System.IO.Path]::ChangeExtension($temporary_path, '.cmd')
+try {
+  Set-Content -Path $batch_path -Value $Command -Encoding ASCII
+  & $env:ComSpec /D /E:ON /V:OFF /C $batch_path
+  $command_exit_code = $LASTEXITCODE
+} finally {
+  Remove-Item -LiteralPath $batch_path -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $temporary_path -Force -ErrorAction SilentlyContinue
+}
+if ($command_exit_code -ne 0) {
+  exit $command_exit_code
 }
