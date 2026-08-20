@@ -317,6 +317,72 @@ struct SecureDatabase
   }
 };
 
+#ifdef G_OS_WIN32
+static int
+run_crash_writer_child (const gchar *root)
+{
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphRegularFile main = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  WylFactArtifactNamespace *namespace_ = nullptr;
+
+  if (wyl_fact_graph_resolver_open (root, &resolver) != WYRELOG_E_OK
+      || wyl_fact_graph_locator_init (&locator, "tenant", "graph")
+          != WYRELOG_E_OK
+      || wyl_fact_graph_resolver_open_directory (&resolver, &locator, TRUE,
+             &directory) != WYRELOG_E_OK)
+    return 91;
+  g_autofree gchar *relative_dir =
+      wyl_fact_graph_locator_relative_dir (&locator);
+  g_autofree gchar *relative_main =
+      g_strdup_printf ("%s/facts.duckdb", relative_dir);
+  if (wyl_fact_graph_resolver_open_relative_regular (&resolver, relative_main,
+          &main) != WYRELOG_E_OK
+      || wyl_fact_artifact_namespace_open (&directory, &main, &namespace_)
+          != WYRELOG_E_OK)
+    return 92;
+
+  try {
+    SecureDatabase secure (namespace_, false);
+    auto result =
+        secure.connection->Query ("CREATE TABLE recovery(value BIGINT);"
+            "INSERT INTO recovery VALUES (7)");
+    if (result->HasError ())
+      return 93;
+  }
+  /* Exit without running C++ destructors: this is the crash-style WAL
+   * recovery boundary exercised by the POSIX fork path below. */
+  ExitProcess (0);
+  return 94;
+}
+
+static HANDLE
+spawn_crash_writer_child (const gchar *root)
+{
+  wchar_t executable[MAX_PATH + 1] = { 0 };
+  DWORD length = GetModuleFileNameW (NULL, executable,
+      G_N_ELEMENTS (executable));
+  g_autofree gchar *exe_utf8 = g_utf16_to_utf8 (
+      (const gunichar2 *) executable, length, nullptr, nullptr, nullptr);
+  g_autofree gchar *command_utf8 = g_strdup_printf (
+      "\"%s\" --secure-duckdb-crash-writer \"%s\"", exe_utf8, root);
+  g_autofree gunichar2 *command = g_utf8_to_utf16 (command_utf8, -1,
+      nullptr, nullptr, nullptr);
+  STARTUPINFOW startup = { sizeof startup };
+  PROCESS_INFORMATION process = { 0 };
+
+  g_assert_cmpuint (length, >, 0);
+  g_assert_cmpuint (length, <, G_N_ELEMENTS (executable));
+  g_assert_nonnull (exe_utf8);
+  g_assert_nonnull (command);
+  g_assert_true (CreateProcessW (NULL, (LPWSTR) command, NULL, NULL, FALSE,
+      CREATE_NO_WINDOW, NULL, NULL, &startup, &process));
+  g_assert_true (CloseHandle (process.hThread));
+  return process.hProcess;
+}
+#endif
+
 static void
 assert_query_ok (duckdb::Connection & connection, const char *sql)
 {
@@ -847,11 +913,15 @@ test_checked_finalize_reports_cleanup_failure (void)
 static void
 test_wal_crash_recovery_and_locking (void)
 {
-#ifdef G_OS_WIN32
-  g_test_skip ("crash subprocess portability is not yet implemented");
-  return;
-#else
   Fixture fixture;
+#ifdef G_OS_WIN32
+  HANDLE child = spawn_crash_writer_child (fixture.root);
+  g_assert_cmpuint (WaitForSingleObject (child, 10000), ==, WAIT_OBJECT_0);
+  DWORD exit_code = STILL_ACTIVE;
+  g_assert_true (GetExitCodeProcess (child, &exit_code));
+  g_assert_cmpuint (exit_code, ==, 0);
+  g_assert_true (CloseHandle (child));
+#else
   const
   pid_t
       child = fork ();
@@ -2359,6 +2429,13 @@ test_pinned_identity_process_serialization (void)
 int
 main (int argc, char **argv)
 {
+#ifdef G_OS_WIN32
+  gchar **win_argv = g_win32_get_command_line ();
+  argc = (int) g_strv_length (win_argv);
+  argv = win_argv;
+  if (argc == 3 && g_strcmp0 (argv[1], "--secure-duckdb-crash-writer") == 0)
+    return run_crash_writer_child (argv[2]);
+#endif
   g_test_init (&argc, &argv, nullptr);
   g_test_add_func ("/secure-duckdb-filesystem/main-wal-lock-bridge",
       test_real_main_wal_lock_and_bridge);
