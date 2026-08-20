@@ -25,6 +25,18 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifdef CreateDirectory
+#undef CreateDirectory
+#endif
+#ifdef RemoveDirectory
+#undef RemoveDirectory
+#endif
+#ifdef GetFileType
+#undef GetFileType
+#endif
+#ifdef MoveFile
+#undef MoveFile
+#endif
 #endif
 
 #include "fact/secure-duckdb-bridge-private.h"

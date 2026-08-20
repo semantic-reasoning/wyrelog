@@ -13,9 +13,18 @@
 #include "fact/secure-duckdb-filesystem-test-faults-private.h"
 
 #ifdef G_OS_WIN32
-using WylSecureDuckdbFileOpener = duckdb::FileOpener *;
-#else
-using WylSecureDuckdbFileOpener = duckdb::optional_ptr < duckdb::FileOpener >;
+#ifdef CreateDirectory
+#undef CreateDirectory
+#endif
+#ifdef RemoveDirectory
+#undef RemoveDirectory
+#endif
+#ifdef GetFileType
+#undef GetFileType
+#endif
+#ifdef MoveFile
+#undef MoveFile
+#endif
 #endif
 
 class WylSecureDuckdbAuthorityException final: public
@@ -110,16 +119,16 @@ public:
 
   bool
   DirectoryExists (const duckdb::string &,
-      WylSecureDuckdbFileOpener = nullptr) override;
+      duckdb::optional_ptr < duckdb::FileOpener > = nullptr) override;
   void
   CreateDirectory (const duckdb::string &,
-      WylSecureDuckdbFileOpener = nullptr) override;
+      duckdb::optional_ptr < duckdb::FileOpener > = nullptr) override;
   void
   CreateDirectoriesRecursive (const duckdb::string &,
-      WylSecureDuckdbFileOpener = nullptr) override;
+      duckdb::optional_ptr < duckdb::FileOpener > = nullptr) override;
   void
   RemoveDirectory (const duckdb::string &,
-      WylSecureDuckdbFileOpener = nullptr) override;
+      duckdb::optional_ptr < duckdb::FileOpener > = nullptr) override;
   bool
   ListFiles (const duckdb::string &,
       const std::function < void (const duckdb::string &, bool) > &,
