@@ -73,6 +73,130 @@ recovery_mac_test_append_field (GByteArray *bytes, const gchar *value)
   g_byte_array_append (bytes, (const guint8 *) value, strlen (value));
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  gboolean entered;
+  gboolean release;
+  gboolean wiped;
+  gboolean freed;
+  guint8 key[crypto_generichash_KEYBYTES];
+} RecoveryMacBlockingProvider;
+
+static wyrelog_error_t
+recovery_mac_blocking_compute (gpointer state_p, const guint8 *label,
+    gsize label_len, const guint8 *payload, gsize payload_len,
+    guint8 out_tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  (void) label;
+  (void) label_len;
+  RecoveryMacBlockingProvider *state = state_p;
+  g_mutex_lock (&state->mutex);
+  state->entered = TRUE;
+  g_cond_broadcast (&state->condition);
+  while (!state->release)
+    g_cond_wait (&state->condition, &state->mutex);
+  g_mutex_unlock (&state->mutex);
+  return crypto_generichash (out_tag, WYL_FACT_RECOVERY_MAC_TAG_BYTES,
+             payload, payload_len, state->key, sizeof state->key) == 0
+      ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+}
+
+static wyrelog_error_t
+recovery_mac_blocking_verify (gpointer state_p, const guint8 *label,
+    gsize label_len, const guint8 *payload, gsize payload_len,
+    const guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES])
+{
+  guint8 expected[WYL_FACT_RECOVERY_MAC_TAG_BYTES];
+  wyrelog_error_t rc = recovery_mac_blocking_compute (state_p, label,
+          label_len, payload, payload_len, expected);
+  if (rc == WYRELOG_E_OK
+      && sodium_memcmp (expected, tag, sizeof expected) != 0)
+    rc = WYRELOG_E_POLICY;
+  sodium_memzero (expected, sizeof expected);
+  return rc;
+}
+
+static void
+recovery_mac_blocking_wipe (gpointer state_p)
+{
+  RecoveryMacBlockingProvider *state = state_p;
+  sodium_memzero (state->key, sizeof state->key);
+  state->wiped = TRUE;
+}
+
+static void
+recovery_mac_blocking_free (gpointer state_p)
+{
+  RecoveryMacBlockingProvider *state = state_p;
+  state->freed = TRUE;
+}
+
+typedef struct
+{
+  WylFactRecoveryMacHandle *handle;
+  wyrelog_error_t result;
+} RecoveryMacThreadCall;
+
+static gpointer
+recovery_mac_compute_thread (gpointer data)
+{
+  RecoveryMacThreadCall *call = data;
+  const guint8 payload[] = { 9, 8, 7 };
+  guint8 tag[WYL_FACT_RECOVERY_MAC_TAG_BYTES];
+  call->result = wyl_fact_recovery_mac_compute (call->handle, payload,
+          sizeof payload, tag);
+  return NULL;
+}
+
+static gpointer
+recovery_mac_close_thread (gpointer data)
+{
+  wyl_fact_recovery_mac_handle_close (data);
+  return NULL;
+}
+
+static void
+test_recovery_mac_handle_close_race (void)
+{
+  RecoveryMacBlockingProvider state = { 0 };
+  g_mutex_init (&state.mutex);
+  g_cond_init (&state.condition);
+  memset (state.key, 0x31, sizeof state.key);
+  WylFactRecoveryMacProvider provider = {
+    recovery_mac_blocking_compute,
+    recovery_mac_blocking_verify,
+    recovery_mac_blocking_wipe,
+    recovery_mac_blocking_free,
+    &state,
+  };
+  g_autoptr (WylFactRecoveryMacHandle) handle =
+      wyl_fact_recovery_mac_handle_new (&provider, "key-race", 11,
+          "tenant-race", "graph-race", "operation-race");
+  g_assert_nonnull (handle);
+  RecoveryMacThreadCall call = { handle, WYRELOG_E_INTERNAL };
+  GThread *compute_thread = g_thread_new ("recovery-mac-compute",
+          recovery_mac_compute_thread, &call);
+  g_mutex_lock (&state.mutex);
+  while (!state.entered)
+    g_cond_wait (&state.condition, &state.mutex);
+  g_mutex_unlock (&state.mutex);
+  GThread *close_thread = g_thread_new ("recovery-mac-close",
+          recovery_mac_close_thread, handle);
+  g_mutex_lock (&state.mutex);
+  state.release = TRUE;
+  g_cond_broadcast (&state.condition);
+  g_mutex_unlock (&state.mutex);
+  g_thread_join (compute_thread);
+  g_thread_join (close_thread);
+  g_assert_cmpint (call.result, ==, WYRELOG_E_OK);
+  g_assert_true (state.wiped);
+  g_assert_true (state.freed);
+  g_mutex_clear (&state.mutex);
+  g_cond_clear (&state.condition);
+}
+
 static void
 recovery_mac_fake_wipe (gpointer state_p)
 {
@@ -2384,6 +2508,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/policy/graph-authority/recovery-mac-handle-contract",
       test_recovery_mac_handle_contract);
+  g_test_add_func ("/policy/graph-authority/recovery-mac-close-race",
+      test_recovery_mac_handle_close_race);
   g_test_add_func ("/policy/graph-authority/fresh-schema",
       test_fresh_schema_is_legacy_unclassified);
   g_test_add_func ("/policy/graph-authority/provisioning-schema-fails-closed",
