@@ -1189,7 +1189,7 @@ test('policy-store', test_policy_store,
 test_policy_graph_authority = executable('test-policy-graph-authority',
   'test-policy-graph-authority.c',
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep, sqlite_dep],
+  dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
 )
 
 test('policy-graph-authority', test_policy_graph_authority,
