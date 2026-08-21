@@ -12,6 +12,22 @@
 #include "fact/secure-duckdb-file-handle-private.hpp"
 #include "fact/secure-duckdb-filesystem-test-faults-private.h"
 
+/* windows.h defines these as macros selecting the A/W entry point, which
+ * rewrites the FileSystem override names and breaks the vtable match.
+ * GetFileType is deliberately absent: it is a real function with no A/W
+ * pair, so windows.h never defines it. */
+#ifdef G_OS_WIN32
+#ifdef CreateDirectory
+#undef CreateDirectory
+#endif
+#ifdef RemoveDirectory
+#undef RemoveDirectory
+#endif
+#ifdef MoveFile
+#undef MoveFile
+#endif
+#endif
+
 class WylSecureDuckdbAuthorityException final: public
 duckdb::IOException
 {
