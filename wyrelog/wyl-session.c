@@ -1185,6 +1185,80 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   return WYRELOG_E_OK;
 }
 
+/*
+ * Issue #752: is this an MFA verification that the ratified precedence has
+ * already satisfied?  A login that observed an already-authenticated
+ * principal appends no transition (WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED
+ * is defined as idempotent success with zero events), so the MFA_OK CAS the
+ * caller would otherwise drive has nothing to move and fails closed forever.
+ * Report success instead, but only for the session that actually attached and
+ * only while the watermark it attached at is still the live one:
+ *
+ *   1. the session carries the attach marker this login set, and
+ *   2. the durable principal state still reads 'authenticated', and
+ *   3. the durable authentication epoch is still exactly the one the session
+ *      attached at - so a lock/unlock or a third session's re-authentication
+ *      in between takes the caller back to the failing CAS, as it should.
+ *
+ * The session does NOT become mfa_assured here.  That bit means "this exact
+ * session completed an MFA transition", and the attached session is
+ * explicitly non-authoritative; even the winning skip-MFA login does not set
+ * it.  Granting it from a proof-free entry point would leave the attached
+ * session more privileged than the session that actually won the epoch.
+ * wyl_session_totp_reauthenticate stays the only way for this session to
+ * become assured, which is why reauth_pending is left standing.
+ *
+ * The two durable reads are not one transaction with the decision, and they
+ * do not need to be, because this function GRANTS NOTHING - it only reports
+ * that the caller's work is already done.  Most races simply produce a
+ * mismatch and fall through to the CAS, which fails closed.  One does not: a
+ * LOCK landing between the state read and the epoch read leaves the watermark
+ * where it is, so a locked principal can still be reported idempotent.  That
+ * is survivable precisely because nothing is granted - the sole production
+ * caller (login_check_principal in daemon/checks.c) follows this E_OK with a
+ * wyl_decide that consults principal_state through the engine and fails
+ * closed there.  Reached only from wyl_session_mfa_verify, never from the
+ * proof-bearing boundaries.
+ *
+ * reauth_mutex covers only the read of the pair (reauth_pending,
+ * reauth_expected_epoch), so that it serialises with the TOTP reauth path,
+ * which mutates both.  It is released before the durable reads because
+ * nothing is published here; wyl_session_totp_reauthenticate holds it across
+ * its whole commit for the opposite reason - it does publish under it.
+ */
+static gboolean
+session_mfa_verify_is_idempotent (WylHandle *handle, WylSession *session)
+{
+  if (wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE)
+    return FALSE;
+
+  g_mutex_lock (&session->reauth_mutex);
+  gboolean attached = wyl_session_reauth_pending_private (session);
+  gint64 expected_epoch = wyl_session_reauth_expected_epoch_private (session);
+  g_mutex_unlock (&session->reauth_mutex);
+  if (!attached || expected_epoch <= 0)
+    return FALSE;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return FALSE;
+
+  g_autofree gchar *durable_state = NULL;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_state (store, session->username,
+      &durable_state, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (durable_state, wyl_principal_state_name
+        (WYL_PRINCIPAL_STATE_AUTHENTICATED)) != 0)
+    return FALSE;
+
+  gint64 durable_epoch = 0;
+  gboolean epoch_found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, session->username,
+      &durable_epoch, &epoch_found) != WYRELOG_E_OK || !epoch_found)
+    return FALSE;
+  return durable_epoch == expected_epoch;
+}
+
 static wyrelog_error_t
 mark_session_mfa_verified (WylHandle *handle, WylSession *session)
 {
@@ -1216,6 +1290,21 @@ mark_session_mfa_verified (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
 {
+  /* Issue #752: the idempotent report belongs to THIS boundary only.  It is
+   * the proof-free one, whose contract is "the caller vouches that MFA
+   * happened", and for an attachment the ratified precedence has already
+   * granted the transition, so there is nothing left to apply.  The
+   * proof-bearing boundaries must NOT take this path: they document that they
+   * apply the transition themselves, and an attachment cannot, so they keep
+   * failing closed with WYRELOG_E_POLICY - which also tells an embedder to
+   * route to wyl_session_totp_reauthenticate instead. */
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session)
+      || session->username == NULL)
+    return WYRELOG_E_INVALID;
+  if (session_mfa_verify_is_idempotent (handle, session))
+    return WYRELOG_E_OK;
   return mark_session_mfa_verified (handle, session);
 }
 

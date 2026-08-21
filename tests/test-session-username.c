@@ -1945,6 +1945,117 @@ check_poisoned_engine_rejects_session_mutations (void)
  * resulting -Wunused-function warnings.
  */
 #ifndef WYL_TEST_VARIANT_LIFECYCLE
+/*
+ * Issue #752: a login that observes an already-authenticated principal
+ * attaches to it - idempotent success, zero durable events, explicitly
+ * non-authoritative.  Two properties have to hold together for that session,
+ * and neither implies the other:
+ *
+ *   - it is BOUND to the epoch the login observed, so a token minted for it
+ *     is checkable by the supersession gate instead of being dead on
+ *     arrival with epoch 0;
+ *   - it is NOT mfa_assured, and the proof-free wyl_session_mfa_verify does
+ *     not make it so.  That entry point reports the idempotent success the
+ *     ratified precedence already granted; it cannot hand an attachment more
+ *     authority than the session that actually won the epoch, which does not
+ *     carry the bit either (see check_login_skip_mfa_authenticates_principal).
+ */
+/* Accepts any proof for any subject, so the assertion below is about the
+ * boundary's own behaviour and cannot pass merely because a validator
+ * rejected the proof. */
+static wyrelog_error_t
+attach_probe_accepting_validator (WylHandle *handle, WylSession *session,
+    const gchar *proof, gpointer user_data)
+{
+  (void) handle;
+  (void) session;
+  (void) proof;
+  (void) user_data;
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_attached_login_stays_unassured (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 202;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "attach-probe-user");
+
+  g_autoptr (WylSession) winner = NULL;
+  if (wyl_session_login (handle, login, &winner) != WYRELOG_E_OK)
+    return 203;
+  if (wyl_session_mfa_verify (handle, winner) != WYRELOG_E_OK)
+    return 204;
+  if (!wyl_session_is_mfa_assured_private (winner))
+    return 205;
+  gint64 won_epoch = wyl_session_authn_epoch_load_private (winner);
+  if (won_epoch <= 0)
+    return 206;
+
+  g_autoptr (WylSession) attached = NULL;
+  if (wyl_session_login (handle, login, &attached) != WYRELOG_E_OK)
+    return 207;
+  if (wyl_session_authn_epoch_load_private (attached) != won_epoch)
+    return 208;
+  if (wyl_session_is_mfa_assured_private (attached))
+    return 209;
+
+  /* Idempotent success, and still no assurance. */
+  if (wyl_session_mfa_verify (handle, attached) != WYRELOG_E_OK)
+    return 210;
+  if (wyl_session_is_mfa_assured_private (attached))
+    return 211;
+  if (wyl_session_authn_epoch_load_private (attached) != won_epoch)
+    return 212;
+
+  /* The idempotent report belongs to the proof-free boundary alone.  The
+   * proof-bearing one documents that it applies the transition itself, which
+   * an attachment cannot, so it must keep failing closed even with a proof
+   * its validator accepts. */
+  if (wyl_session_mfa_verify_with_proof (handle, attached, "000000",
+      attach_probe_accepting_validator, NULL) != WYRELOG_E_POLICY)
+    return 218;
+  if (wyl_session_is_mfa_assured_private (attached))
+    return 219;
+
+  /* The idempotent report is guarded on the durable pair, not merely on the
+   * attach marker.  Advance the watermark with a real authenticating
+   * transition (there is no authenticated -> authenticated edge, so it takes
+   * logout then a fresh skip-MFA login) and the attachment must go back to
+   * failing closed: its expected epoch is now stale, so the verify falls
+   * through to the MFA_OK CAS, which cannot move an already-authenticated
+   * principal.  Without this the guard could be reduced to "is it attached?"
+   * and nothing would notice. */
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gboolean moved = FALSE;
+  gint64 event_id = -1;
+  gint64 now_secs = g_get_real_time () / G_USEC_PER_SEC;
+  if (wyl_policy_store_apply_principal_transition (store, "attach-probe-user",
+      WYL_PRINCIPAL_EVENT_LOGOUT, 0, now_secs, NULL, &to, &moved,
+      &event_id) != WYRELOG_E_OK || !moved)
+    return 213;
+  if (wyl_policy_store_apply_principal_transition (store, "attach-probe-user",
+      WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 0, now_secs, NULL, &to, &moved,
+      &event_id) != WYRELOG_E_OK || !moved
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED)
+    return 214;
+  gint64 advanced_epoch = 0;
+  gboolean advanced_found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, "attach-probe-user",
+      &advanced_epoch, &advanced_found) != WYRELOG_E_OK || !advanced_found
+      || advanced_epoch <= won_epoch)
+    return 215;
+  if (wyl_session_mfa_verify (handle, attached) == WYRELOG_E_OK)
+    return 216;
+  if (wyl_session_is_mfa_assured_private (attached))
+    return 217;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -2011,6 +2122,8 @@ main (void)
   if ((rc = check_login_skip_mfa_does_not_bypass_guarded_permission ()) != 0)
     return rc;
   if ((rc = check_poisoned_engine_rejects_session_mutations ()) != 0)
+    return rc;
+  if ((rc = check_attached_login_stays_unassured ()) != 0)
     return rc;
 
   return 0;
