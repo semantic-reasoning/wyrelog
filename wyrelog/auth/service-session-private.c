@@ -118,19 +118,6 @@ wyl_session_authn_epoch_load_private (const WylSession *session)
 }
 
 gboolean
-wyl_session_reauth_pending_private (const WylSession *session)
-{
-  return WYL_IS_SESSION ((gpointer) session)
-         && g_atomic_int_get ((gint *) &session->reauth_pending) != 0;
-}
-
-gint64
-wyl_session_reauth_expected_epoch_private (const WylSession *session)
-{
-  return WYL_IS_SESSION ((gpointer) session) ? session->reauth_expected_epoch : 0;
-}
-
-gboolean
 wyl_session_liveness_check_private (const WylSession *session,
     const gchar *expect_session_id, const gchar *expect_actor,
     const gchar *expect_tenant, gboolean require_mfa)

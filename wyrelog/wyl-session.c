@@ -55,6 +55,19 @@ session_is_service (const WylSession *session)
          && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
 }
 
+gboolean
+wyl_session_reauth_pending_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+         && g_atomic_int_get ((gint *) &session->reauth_pending) != 0;
+}
+
+gint64
+wyl_session_reauth_expected_epoch_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session) ? session->reauth_expected_epoch : 0;
+}
+
 /* Issue #752: store the authentication epoch this session won.  GLib exposes
  * no 64-bit atomic primitive, so - like mfa_assured's direct store and the
  * other 64-bit session words (created_at_us, the service_* fields) - the
