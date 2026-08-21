@@ -51,6 +51,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     ).read_text(encoding="utf-8")
     build_posix = job(workflow, "build-posix", "duckdb-checkpoint-seam")
     checkpoint_seam = job(workflow, "duckdb-checkpoint-seam", "build-windows")
+    windows_build = workflow[workflow.index("  build-windows:\n"):]
     if build_posix.count("    timeout-minutes: 45\n") != 1:
         raise SystemExit(f"{workflow_name} POSIX build must stay time bounded")
     provision_secure = named_step(build_posix, provision_secure_name)
@@ -143,6 +144,26 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         raise SystemExit(
             f"{workflow_name} secure source failure propagation was weakened"
         )
+
+    windows_test_step = named_step(
+        windows_build, "      - name: Build and test (clang-cl)"
+    )
+    required_windows_tests = (
+        "secure-duckdb-bridge",
+        "secure-duckdb-recording-filesystem",
+        "fact-artifact-namespace-windows",
+        "fact-provisioning-construct",
+        "duckdb-after-walstart-no-wal",
+        "duckdb-after-walstart-rendezvous",
+        "duckdb-fixed-wal-successful-checkpoint",
+        "duckdb-fixed-wal-pre-move-abort-reopen",
+        "duckdb-fixed-wal-interrupted-recovery",
+    )
+    for token in required_windows_tests:
+        if token not in windows_test_step:
+            raise SystemExit(
+                f"{workflow_name} native Windows secure gate lost {token}"
+            )
     if (
         "if meson setup build-secure-duckdb-prebuilt" not in step
         or "-Dduckdb_source=prebuilt" not in step
