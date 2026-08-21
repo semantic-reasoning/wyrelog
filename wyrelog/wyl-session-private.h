@@ -56,9 +56,9 @@ G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
  * comment in wyl-session-layout-private.h. */
 G_GNUC_INTERNAL gint64 wyl_session_authn_epoch_load_private (const
     WylSession * session);
-/* Reauthentication ceremony state is core session state and is implemented
- * by wyl-session.c so production callers resolve without the companion
- * service-session archive. */
+/* Core callers use the hidden definition in wyl-session.c; daemon HTTP test
+ * targets use the mirrored companion definition when linking the companion
+ * archive alongside libwyrelog. */
 G_GNUC_INTERNAL gboolean wyl_session_reauth_pending_private (const
     WylSession * session);
 G_GNUC_INTERNAL gint64 wyl_session_reauth_expected_epoch_private (const

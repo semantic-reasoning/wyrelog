@@ -117,6 +117,30 @@ wyl_session_authn_epoch_load_private (const WylSession *session)
   return WYL_IS_SESSION ((gpointer) session) ? session->authn_epoch : 0;
 }
 
+/* The daemon HTTP test targets link the companion archive alongside the
+ * shared library. Its core session definitions are hidden, so retain the
+ * companion bridge for those external test callers. The weak attribute
+ * prevents a duplicate strong definition when a static production library
+ * and this companion archive share one link image. */
+#if defined(__GNUC__) || defined(__clang__)
+# define WYL_SESSION_COMPANION_WEAK __attribute__ ((weak))
+#else
+# define WYL_SESSION_COMPANION_WEAK
+#endif
+WYL_SESSION_COMPANION_WEAK gboolean
+wyl_session_reauth_pending_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+         && g_atomic_int_get ((gint *) &session->reauth_pending) != 0;
+}
+
+WYL_SESSION_COMPANION_WEAK gint64
+wyl_session_reauth_expected_epoch_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session) ? session->reauth_expected_epoch : 0;
+}
+#undef WYL_SESSION_COMPANION_WEAK
+
 gboolean
 wyl_session_liveness_check_private (const WylSession *session,
     const gchar *expect_session_id, const gchar *expect_actor,
