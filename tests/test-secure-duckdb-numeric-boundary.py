@@ -126,8 +126,8 @@ for token in (
     "/secure-duckdb-filesystem/denial-numeric",
     "O_NOFOLLOW",
     "fs::canonical (created_root)",
-    "root = g_strdup (canonical_root.c_str ());",
-    "static_cast < int64_t > (SSIZE_MAX)",
+    "root = path_to_utf8 (canonical_root);",
+    "const auto ssize_max = std::numeric_limits < int64_t >::max ();",
     "static_cast < duckdb::idx_t > (LLONG_MAX)",
 ):
     if token not in runtime_test:

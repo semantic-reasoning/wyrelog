@@ -47,7 +47,7 @@ if "duckdb_test_seam_dep = duckdb_subproject.get_variable(" not in parent:
 
 consumer_start = tests.index(
     "test_duckdb_after_walstart = executable(")
-consumer_end = tests.index("\n    )\n", consumer_start)
+consumer_end = tests.index("\n  )\n", consumer_start)
 consumer = tests[consumer_start:consumer_end]
 if "dependencies : [glib_dep, gio_dep, duckdb_test_seam_dep]" not in consumer:
     raise SystemExit("focused test must consume only the seam-enabled DuckDB")
