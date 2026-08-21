@@ -23,6 +23,7 @@
 #include "fact/secure-duckdb-bridge-private.h"
 #include "fact/secure-duckdb-filesystem-private.hpp"
 #include "fact/store-identity-private.h"
+#include "fact-test-support.h"
 
 #include <algorithm>
 #include <string>
