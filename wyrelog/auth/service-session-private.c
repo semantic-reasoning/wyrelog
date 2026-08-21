@@ -104,19 +104,65 @@ wyl_session_is_mfa_assured_private (const WylSession *session)
          && g_atomic_int_get ((gint *) &session->mfa_assured) != 0;
 }
 
-/* Issue #752: read the authentication epoch this session won (0 if it never
- * won an authenticating transition).  The value is a write-once volatile
- * gint64 (GLib has no 64-bit atomic); the winning commit stores it before
- * publishing mfa_assured, so any reader that runs after authentication
- * observes the settled, non-torn value.  Lives here in the companion archive
- * so the daemon can read the epoch through this stable boundary rather than
- * touching the raw layout. */
+/* Issue #752: read the authentication epoch this session is bound to - the
+ * transition it won, or the watermark an attaching login observed (0 only if
+ * it is bound to neither).  The value is a write-once volatile gint64 (GLib
+ * has no 64-bit atomic).  A session that wins a transition stores it before
+ * publishing mfa_assured; an attaching session never publishes that bit, and
+ * stores it before wyl_handle_register_session makes the session reachable at
+ * all.  Either way the store happens before any other thread can observe the
+ * session, so a reader sees the settled, non-torn value.  Lives here in the
+ * companion archive so the daemon can read the epoch through this stable
+ * boundary rather than touching the raw layout. */
 gint64
 wyl_session_authn_epoch_load_private (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session) ? session->authn_epoch : 0;
 }
 
+/* The daemon HTTP test targets link the companion archive alongside the
+ * shared library. Its core session definitions are hidden, so retain the
+ * companion bridge for those external test callers. The weak attribute
+ * prevents a duplicate strong definition when a static production library
+ * and this companion archive share one link image. */
+#if defined(__GNUC__) || defined(__clang__)
+# define WYL_SESSION_COMPANION_WEAK __attribute__ ((weak))
+#else
+# define WYL_SESSION_COMPANION_WEAK
+#endif
+WYL_SESSION_COMPANION_WEAK gboolean
+wyl_session_reauth_pending_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+         && g_atomic_int_get ((gint *) &session->reauth_pending) != 0;
+}
+
+WYL_SESSION_COMPANION_WEAK gint64
+wyl_session_reauth_expected_epoch_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session) ? session->reauth_expected_epoch : 0;
+}
+#undef WYL_SESSION_COMPANION_WEAK
+
+/* Issue #752 note on |require_mfa|: mfa_assured is the whole test.  An
+ * earlier revision of this branch also demanded a non-zero authn_epoch here,
+ * as a proxy for "this session is not a non-authoritative attachment".  That
+ * proxy is gone because it is now both redundant and wrong: every path that
+ * sets mfa_assured stamps the epoch first (mark_session_mfa_verified and
+ * wyl_session_totp_commit_mfa_ok in wyl-session.c, and
+ * wyl_session_totp_reauthenticate), so no production session can reach here
+ * assured and unbound; and an attached session is now bound to the epoch its
+ * login observed, so the epoch no longer distinguishes it - only mfa_assured
+ * does, and that stays 0 for an attachment.  Token-level supersession is
+ * enforced separately, on every bearer request, by the epoch comparison in
+ * resolve_bearer_session (daemon/http.c).  This predicate is therefore back to
+ * exactly what it is on main; the clause never shipped.  Note the invariant it
+ * proxied ("assured implies bound") is not enforced anywhere - several test
+ * fixtures set mfa_assured directly with no epoch, including the seam
+ * wyl_daemon_http_seed_mfa_human_session_for_test, which lives in the
+ * production translation unit daemon/http.c behind WYL_TEST_DAEMON_HTTP - so
+ * if it is ever to be relied on it belongs at the point of assignment, not in
+ * a consumer. */
 gboolean
 wyl_session_liveness_check_private (const WylSession *session,
     const gchar *expect_session_id, const gchar *expect_actor,

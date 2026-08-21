@@ -5340,11 +5340,13 @@ issue_access_token (WylDaemonHttpContext *ctx, WylSession *session,
     .tenant = tenant,
     .principal_state_at_issue = principal_state,
     .session_id = session_token,
-    /* Issue #752: bind the token to the live session's authentication epoch
-     * (the winning transition's rowid).  Read from the session, not a fresh
-     * durable query, so the token carries exactly the epoch this session
-     * won; authorization later rejects it if the durable watermark advances
-     * past this value. */
+    /* Issue #752: bind the token to the live session's authentication epoch -
+     * the rowid of the transition the session won, or, for a session that
+     * attached to an already-authenticated principal, the watermark that
+     * login observed inside its own commit.  Read from the session, not a
+     * fresh durable query, so the token carries exactly the epoch this
+     * session is bound to; authorization later rejects it if the durable
+     * watermark advances past this value. */
     .authn_epoch = wyl_session_authn_epoch_load_private (session),
     .issued_at = issued_at,
     .ttl_seconds = ttl,
@@ -14337,7 +14339,19 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 429, "mfa_locked");
     return;
   }
-  if (g_strcmp0 (principal_state, "mfa_required") != 0) {
+  gint64 local_reauth_epoch = 0;
+  gboolean local_reauth_epoch_found = FALSE;
+  if (g_strcmp0 (principal_state, "authenticated") == 0)
+    (void) wyl_policy_store_get_principal_authn_epoch
+      (wyl_handle_get_policy_store (ctx->handle), username,
+        &local_reauth_epoch, &local_reauth_epoch_found);
+  gboolean local_reauth = g_strcmp0 (principal_state, "authenticated") == 0
+      && wyl_session_reauth_pending_private (session)
+      && wyl_session_reauth_expected_epoch_private (session) > 0
+      && local_reauth_epoch_found
+      && local_reauth_epoch ==
+      wyl_session_reauth_expected_epoch_private (session);
+  if (g_strcmp0 (principal_state, "mfa_required") != 0 && !local_reauth) {
     set_json_error (msg, 401, "mfa_auth_required");
     return;
   }

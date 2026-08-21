@@ -46,15 +46,24 @@ G_GNUC_INTERNAL gboolean wyl_session_is_active_human_private (const
  * Skip-MFA login, service sessions, and token refresh never set this bit. */
 G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
     WylSession * session);
-/* Issue #752: the subject-global authentication epoch this session won - the
- * principal_events rowid of the authenticating transition it drove.  0 for a
- * session that never won one (an attached loser, or a login against an
- * already-authenticated subject).  Write-once: stored on the winning commit
- * by the layout owner, read here by the token mint and the supersession gate.
+/* Issue #752: the subject-global authentication epoch this session is bound
+ * to - the principal_events rowid of the authenticating transition it drove,
+ * or, for a login that observed an already-authenticated principal, the
+ * watermark that login observed inside its own commit.  0 only for a session
+ * bound to no epoch (an attached loser whose subject is not authenticated
+ * yet).  Write-once: stored by the layout owner on the commit that binds it,
+ * read here by the token mint and the supersession gate.
  * Implemented in the service-session companion archive so non-test daemon
  * code can read it without the uninstalled layout header.  See the field
  * comment in wyl-session-layout-private.h. */
 G_GNUC_INTERNAL gint64 wyl_session_authn_epoch_load_private (const
+    WylSession * session);
+/* Core callers use the hidden definition in wyl-session.c; daemon HTTP test
+ * targets use the mirrored companion definition when linking the companion
+ * archive alongside libwyrelog. */
+G_GNUC_INTERNAL gboolean wyl_session_reauth_pending_private (const
+    WylSession * session);
+G_GNUC_INTERNAL gint64 wyl_session_reauth_expected_epoch_private (const
     WylSession * session);
 /* Single coherent management liveness primitive.  Returns TRUE only when
  * |session| is an ACTIVE human session (decided by one atomic state load),
@@ -126,6 +135,10 @@ typedef enum wyl_mfa_totp_receipt_t
  * drive it directly, mirroring the policy/store-private.h helpers.
  */
 wyrelog_error_t wyl_session_totp_commit_mfa_ok (WylHandle * handle,
+    WylSession * session, gint64 matched_step, WylMfaTotpReceipt * out_receipt);
+/* Consume a TOTP proof for a new session while preserving an already
+ * authenticated subject-global principal.  No principal event is appended. */
+wyrelog_error_t wyl_session_totp_reauthenticate (WylHandle * handle,
     WylSession * session, gint64 matched_step, WylMfaTotpReceipt * out_receipt);
 
 /*

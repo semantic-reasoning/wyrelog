@@ -21,7 +21,7 @@ query_count (wyl_policy_store_t *store, const gchar *sql, const gchar *argument)
       SQLITE_OK);
   if (argument != NULL)
     g_assert_cmpint (sqlite3_bind_text (stmt, 1, argument, -1,
-            SQLITE_TRANSIENT), ==, SQLITE_OK);
+        SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -32,13 +32,13 @@ static gint64
 readiness_event_count (wyl_policy_store_t *store)
 {
   return query_count (store,
-      "SELECT COUNT(*) FROM audit_events "
-      "WHERE subject_id='wyrelogd' "
-      "AND action='policy_audit_reload_check' "
-      "AND resource_id='audit_event' "
-      "AND deny_reason='readiness' "
-      "AND deny_origin='policy_store' "
-      "AND request_id='wyrelogd-readiness-request' AND decision=1;", NULL);
+             "SELECT COUNT(*) FROM audit_events "
+             "WHERE subject_id='wyrelogd' "
+             "AND action='policy_audit_reload_check' "
+             "AND resource_id='audit_event' "
+             "AND deny_reason='readiness' "
+             "AND deny_origin='policy_store' "
+             "AND request_id='wyrelogd-readiness-request' AND decision=1;", NULL);
 }
 
 static gint64
@@ -101,9 +101,9 @@ assert_exact_durable_bundle (WylHandle *handle, const gchar *id,
   }
   if (!present) {
     g_assert_cmpint (query_count (store,
-            "SELECT COUNT(*) FROM audit_events WHERE id=?;", id), ==, 0);
+        "SELECT COUNT(*) FROM audit_events WHERE id=?;", id), ==, 0);
     g_assert_cmpint (query_count (store,
-            "SELECT COUNT(*) FROM audit_intentions WHERE audit_id=?;", id),
+        "SELECT COUNT(*) FROM audit_intentions WHERE audit_id=?;", id),
         ==, 0);
   }
 }
@@ -146,12 +146,12 @@ assert_exact_projection (WylHandle *handle, const gchar *id,
       ==, WYRELOG_E_OK);
   event[1] = created_at_us;
   g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, "allow",
-          &event[2]), ==, WYRELOG_E_OK);
+      &event[2]), ==, WYRELOG_E_OK);
   action[0] = request[0] = event[0];
   g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
-          "policy_audit_reload_check", &action[1]), ==, WYRELOG_E_OK);
+      "policy_audit_reload_check", &action[1]), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_intern_engine_symbol (handle,
-          "wyrelogd-readiness-request", &request[1]), ==, WYRELOG_E_OK);
+      "wyrelogd-readiness-request", &request[1]), ==, WYRELOG_E_OK);
 
   const gchar *relations[] = {
     "audit_event",
@@ -167,7 +167,7 @@ assert_exact_projection (WylHandle *handle, const gchar *id,
       .ncols = widths[i],
     };
     g_assert_cmpint (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-            relations[i], exact_projection_probe_cb, &probe), ==, WYRELOG_E_OK);
+        relations[i], exact_projection_probe_cb, &probe), ==, WYRELOG_E_OK);
     g_assert_cmpuint (probe.keyed_count, ==, 1);
     g_assert_cmpuint (probe.exact_count, ==, 1);
   }
@@ -183,7 +183,7 @@ assert_publication_resources_released (WylHandle *handle)
   g_assert_cmpuint (total_pins, ==, 0);
   g_assert_cmpuint (current_thread_pins, ==, 0);
   g_assert_true (wyl_policy_store_is_autocommit
-      (wyl_handle_get_policy_store (handle)));
+        (wyl_handle_get_policy_store (handle)));
   for (WylServiceAuthRank rank = WYL_SERVICE_AUTH_RANK_COORDINATION;
       rank <= WYL_SERVICE_AUTH_RANK_REGISTRY; rank++)
     g_assert_false (wyl_service_auth_rank_is_held (handle, rank));
@@ -208,7 +208,7 @@ test_success_repeats_and_public_emit_stays_disabled (void)
   WylCommittedPublicationStage stage =
       WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-          &first_id, &first_time, &stage, NULL), ==, WYRELOG_E_OK);
+      &first_id, &first_time, &stage, NULL), ==, WYRELOG_E_OK);
   g_assert_cmpint (stage, ==, WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED);
   g_assert_cmpint (readiness_event_count (store), ==, 1);
   g_assert_cmpint (readiness_intention_count (store, "committed"), ==, 1);
@@ -218,7 +218,7 @@ test_success_repeats_and_public_emit_stays_disabled (void)
   assert_exact_projection (handle, first_id, first_time);
 
   g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-          &second_id, &second_time, &stage, NULL), ==, WYRELOG_E_OK);
+      &second_id, &second_time, &stage, NULL), ==, WYRELOG_E_OK);
   g_assert_cmpstr (second_id, !=, first_id);
   g_assert_cmpint (readiness_event_count (store), ==, 2);
   g_assert_cmpint (readiness_intention_count (store, "committed"), ==, 2);
@@ -238,7 +238,7 @@ test_durable_root_reopen_appends_fresh_event (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *directory = g_dir_make_tmp ("wyrelog-readiness-XXXXXX",
-      &error);
+          &error);
   g_assert_no_error (error);
   g_autofree gchar *path = g_build_filename (directory, "policy.sqlite", NULL);
   WylHandleOpenOptions options = {
@@ -252,7 +252,7 @@ test_durable_root_reopen_appends_fresh_event (void)
   g_autofree gchar *first_id = NULL;
   gint64 first_time = -1;
   g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-          &first_id, &first_time, NULL, NULL), ==, WYRELOG_E_OK);
+      &first_id, &first_time, NULL, NULL), ==, WYRELOG_E_OK);
   g_clear_object (&handle);
 
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
@@ -262,12 +262,12 @@ test_durable_root_reopen_appends_fresh_event (void)
   g_autofree gchar *second_id = NULL;
   gint64 second_time = -1;
   g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-          &second_id, &second_time, NULL, NULL), ==, WYRELOG_E_OK);
+      &second_id, &second_time, NULL, NULL), ==, WYRELOG_E_OK);
   g_assert_cmpstr (second_id, !=, first_id);
   g_assert_cmpint (readiness_event_count (wyl_handle_get_policy_store (handle)),
       ==, 2);
   g_assert_cmpint (readiness_intention_count (wyl_handle_get_policy_store
-          (handle), "committed"), ==, 2);
+        (handle), "committed"), ==, 2);
   assert_exact_durable_bundle (handle, first_id, first_time, TRUE);
   assert_exact_durable_bundle (handle, second_id, second_time, TRUE);
   g_clear_object (&handle);
@@ -295,7 +295,7 @@ assert_precommit_fault (WylDaemonReadinessAuditFault mutation_fault,
   WylCommittedPublicationStage stage =
       WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED;
   g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-          &id, &created_at_us, &stage, NULL), ==, WYRELOG_E_IO);
+      &id, &created_at_us, &stage, NULL), ==, WYRELOG_E_IO);
   g_assert_cmpint (stage, ==, WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED);
   assert_exact_durable_bundle (handle, id, created_at_us, FALSE);
   g_assert_true (wyl_handle_engine_pair_is_ready (handle));
@@ -341,7 +341,7 @@ assert_postcommit_fault (WylCommittedPublicationFault publication_fault,
   WylCommittedPublicationStage stage =
       WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-          &id, &created_at_us, &stage, NULL), ==, WYRELOG_E_IO);
+      &id, &created_at_us, &stage, NULL), ==, WYRELOG_E_IO);
   g_assert_cmpint (stage, ==, expected_stage);
   assert_exact_durable_bundle (handle, id, created_at_us, TRUE);
   g_assert_true (wyl_handle_engine_pair_is_poisoned (handle));
@@ -391,7 +391,7 @@ test_exact_verifier_rejects_extra_and_wrong_rows (void)
         WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
     gboolean verify_exact = TRUE;
     g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-            &id, &created_at_us, &stage, &verify_exact), ==, WYRELOG_E_POLICY);
+        &id, &created_at_us, &stage, &verify_exact), ==, WYRELOG_E_POLICY);
     g_assert_false (verify_exact);
     g_assert_cmpint (stage, ==, WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED);
     assert_exact_durable_bundle (handle, id, created_at_us, TRUE);
@@ -401,6 +401,25 @@ test_exact_verifier_rejects_extra_and_wrong_rows (void)
     g_assert_null (wyl_handle_get_delta_engine (handle));
     assert_publication_resources_released (handle);
   }
+}
+
+/*
+ * Issue #752: the same idempotency contract as the audit build, asserted here
+ * too because the audit-disabled CI leg compiles only this binary and the
+ * wyrelogd-readiness-persistent shell probe - without this the regression is
+ * guarded end to end but never as a unit in the configuration that broke.
+ */
+static void
+test_snapshot_reload_ready_is_idempotent (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_daemon_check_policy_snapshot_reload_ready (handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_daemon_check_policy_snapshot_reload_ready (handle), ==,
+      WYRELOG_E_OK);
 }
 
 int
@@ -417,5 +436,7 @@ main (int argc, char **argv)
       test_postcommit_faults_preserve_durable_bundle_and_poison);
   g_test_add_func ("/daemon/checks/noaudit/exact-verifier-negative",
       test_exact_verifier_rejects_extra_and_wrong_rows);
+  g_test_add_func ("/daemon/checks/noaudit/snapshot-reload-idempotent",
+      test_snapshot_reload_ready_is_idempotent);
   return g_test_run ();
 }

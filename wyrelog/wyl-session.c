@@ -13,6 +13,10 @@
 
 G_DEFINE_FINAL_TYPE (WylSession, wyl_session, G_TYPE_OBJECT);
 
+/* The ratified principal model folds the existing fifteen-minute lockout
+ * recovery window into the next login CAS (issue #752). */
+#define WYL_MFA_AUTO_UNLOCK_SECONDS 900
+
 static void
 wyl_session_finalize (GObject *object)
 {
@@ -23,6 +27,7 @@ wyl_session_finalize (GObject *object)
   g_free (self->service_jti);
   g_free (self->service_subject_id);
   g_free (self->service_credential_id);
+  g_mutex_clear (&self->reauth_mutex);
 
   G_OBJECT_CLASS (wyl_session_parent_class)->finalize (object);
 }
@@ -40,6 +45,7 @@ wyl_session_init (WylSession *self)
 {
   wyl_session_state_store_private (self, WYL_SESSION_STATE_IDLE);
   self->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+  g_mutex_init (&self->reauth_mutex);
 }
 
 static gboolean
@@ -47,6 +53,19 @@ session_is_service (const WylSession *session)
 {
   return WYL_IS_SESSION ((gpointer) session)
          && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
+}
+
+gboolean
+wyl_session_reauth_pending_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+         && g_atomic_int_get ((gint *) &session->reauth_pending) != 0;
+}
+
+gint64
+wyl_session_reauth_expected_epoch_private (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session) ? session->reauth_expected_epoch : 0;
 }
 
 /* Issue #752: store the authentication epoch this session won.  GLib exposes
@@ -64,6 +83,23 @@ session_store_authn_epoch (WylSession *session, gint64 epoch)
   if (session == NULL || !WYL_IS_SESSION (session))
     return;
   session->authn_epoch = epoch;
+}
+
+static void
+session_store_reauth_pending (WylSession *session, gint64 expected_epoch)
+{
+  if (session == NULL || !WYL_IS_SESSION (session) || expected_epoch <= 0)
+    return;
+  session->reauth_expected_epoch = expected_epoch;
+  g_atomic_int_set ((gint *) &session->reauth_pending, 1);
+}
+
+static void
+session_clear_reauth_pending (WylSession *session)
+{
+  if (session == NULL || !WYL_IS_SESSION (session))
+    return;
+  g_atomic_int_set ((gint *) &session->reauth_pending, 0);
 }
 
 static wyrelog_error_t
@@ -571,6 +607,117 @@ wyl_session_totp_commit_mfa_ok (WylHandle *handle, WylSession *session,
   return (rc == WYRELOG_E_POLICY) ? WYRELOG_E_POLICY : WYRELOG_E_INTERNAL;
 }
 
+typedef struct
+{
+  const gchar *username;
+  gint64 expected_epoch;
+  gint64 matched_step;
+} WylTotpReauthPublication;
+
+static wyrelog_error_t
+mutate_totp_reauth (wyl_policy_store_t *store, gpointer data)
+{
+  WylTotpReauthPublication *ctx = data;
+  g_autofree gchar *state = NULL;
+  gint64 failed_count = 0;
+  gint64 locked_at = 0;
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
+          ctx->username, &state, &failed_count, &locked_at, &found);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!found || g_strcmp0 (state, "authenticated") != 0)
+    return WYRELOG_E_POLICY;
+
+  gint64 current_epoch = 0;
+  gboolean epoch_found = FALSE;
+  rc = wyl_policy_store_get_principal_authn_epoch (store, ctx->username,
+          &current_epoch, &epoch_found);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!epoch_found || current_epoch != ctx->expected_epoch)
+    return WYRELOG_E_POLICY;
+
+  gboolean advanced = FALSE;
+  rc = wyl_policy_store_totp_enrollment_advance_step (store, ctx->username,
+          ctx->matched_step, &advanced);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!advanced)
+    return WYRELOG_E_POLICY;
+  rc = wyl_policy_store_reset_principal_failure_counter (store,
+          ctx->username);
+  return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
+verify_totp_reauth (WylEngineVerification *verification, gpointer data)
+{
+  (void) verification;
+  (void) data;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_session_totp_reauthenticate (WylHandle *handle, WylSession *session,
+    gint64 matched_step, WylMfaTotpReceipt *out_receipt)
+{
+  if (out_receipt != NULL)
+    *out_receipt = WYL_MFA_TOTP_RECEIPT_REPLAY_SUPERSEDED;
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session)
+      || session->username == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&session->reauth_mutex);
+  if (wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE
+      || !wyl_session_reauth_pending_private (session)
+      || wyl_session_reauth_expected_epoch_private (session) <= 0) {
+    g_mutex_unlock (&session->reauth_mutex);
+    return WYRELOG_E_POLICY;
+  }
+
+  WylTotpReauthPublication publication = {
+    session->username,
+    wyl_session_reauth_expected_epoch_private (session),
+    matched_step,
+  };
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
+  if (engine_session == NULL) {
+    g_mutex_unlock (&session->reauth_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  WylCommittedPublicationStage stage =
+      WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication
+        (engine_session, mutate_totp_reauth, &publication,
+          verify_totp_reauth, &publication, NULL, NULL, &stage);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+
+  if (rc == WYRELOG_E_OK
+      && stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED) {
+    if (wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE
+        || !wyl_session_reauth_pending_private (session)) {
+      session_clear_reauth_pending (session);
+      g_mutex_unlock (&session->reauth_mutex);
+      return WYRELOG_E_POLICY;
+    }
+    session_store_authn_epoch (session, publication.expected_epoch);
+    g_atomic_int_set ((gint *) &session->mfa_assured, 1);
+    session_clear_reauth_pending (session);
+    g_mutex_unlock (&session->reauth_mutex);
+    if (out_receipt != NULL)
+      *out_receipt = WYL_MFA_TOTP_RECEIPT_WON_COMMITTED;
+    return WYRELOG_E_OK;
+  }
+  g_mutex_unlock (&session->reauth_mutex);
+  if (out_receipt != NULL && stage ==
+      WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS)
+    *out_receipt = WYL_MFA_TOTP_RECEIPT_COMMIT_UNCERTAIN;
+  return rc == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_INTERNAL;
+}
+
 #ifdef WYL_HAS_AUDIT
 static WylAuditEvent *
 new_session_state_audit (const gchar *session_id,
@@ -670,51 +817,103 @@ typedef struct
 {
   WylHandle *handle;
   const gchar *username;
-  wyl_principal_event_t principal_event;
-  wyl_principal_state_t principal_new_state;
+  gboolean skip_mfa;
+  const gchar *request_id;
+  wyl_principal_login_outcome_t principal_outcome;
+  wyl_principal_state_t principal_from;
+  wyl_principal_state_t principal_to;
+  wyl_principal_event_t principal_events[2];
+  wyl_principal_state_t principal_event_from[2];
+  wyl_principal_state_t principal_event_to[2];
+  gint64 principal_event_ids[2];
+  gint principal_event_count;
+  gint64 principal_authn_epoch;
   const gchar *session_id;
   wyl_session_state_t session_old_state;
   wyl_session_event_t session_event;
   wyl_session_state_t session_new_state;
-  const WylAuditEvent *principal_audit_event;
   const WylAuditEvent *session_audit_event;
-  gint64 principal_event_id;
   gint64 session_event_id;
+#ifdef WYL_HAS_AUDIT
+  WylAuditEvent *principal_audit_events[2];
+#endif
 } WylLoginPublication;
+
+#ifdef WYL_HAS_AUDIT
+static void
+clear_login_principal_audits (WylLoginPublication *ctx)
+{
+  for (guint i = 0; i < G_N_ELEMENTS (ctx->principal_audit_events); i++)
+    g_clear_object (&ctx->principal_audit_events[i]);
+}
+#endif
 
 static wyrelog_error_t
 mutate_login_publication (wyl_policy_store_t *store, gpointer data)
 {
   WylLoginPublication *ctx = data;
-  const gchar *principal_event = wyl_principal_event_name
-        (ctx->principal_event);
-  const gchar *principal_from = wyl_principal_state_name
-        (WYL_PRINCIPAL_STATE_UNVERIFIED);
-  const gchar *principal_to = wyl_principal_state_name
-        (ctx->principal_new_state);
   const gchar *session_event = wyl_session_event_name (ctx->session_event);
   const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
   const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
-  if (principal_event == NULL || principal_from == NULL
-      || principal_to == NULL || session_event == NULL
-      || session_from == NULL || session_to == NULL)
+  if (session_event == NULL || session_from == NULL || session_to == NULL)
     return WYRELOG_E_INTERNAL;
 
-  wyrelog_error_t rc = wyl_policy_store_set_principal_state (store,
-          ctx->username, principal_to);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_append_principal_event (store, ctx->username,
-            principal_event, principal_from, principal_to,
-            &ctx->principal_event_id);
-  if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL) {
-    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
-          (ctx->principal_audit_event);
-    if (audit_id == NULL)
-      rc = WYRELOG_E_INTERNAL;
-    else
-      rc = append_policy_audit_event (store, audit_id,
-              ctx->principal_audit_event);
+  wyrelog_error_t rc = wyl_policy_store_apply_principal_login (store,
+          ctx->username, ctx->skip_mfa, WYL_MFA_AUTO_UNLOCK_SECONDS,
+          g_get_real_time () / G_USEC_PER_SEC, &ctx->principal_outcome,
+          &ctx->principal_from, &ctx->principal_to,
+          ctx->principal_event_ids, &ctx->principal_event_count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (ctx->principal_event_count < 0
+      || ctx->principal_event_count > (gint) G_N_ELEMENTS (ctx->principal_events))
+    return WYRELOG_E_INTERNAL;
+  if (ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED) {
+    gboolean found = FALSE;
+    rc = wyl_policy_store_get_principal_authn_epoch (store, ctx->username,
+            &ctx->principal_authn_epoch, &found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!found || ctx->principal_authn_epoch <= 0)
+      return WYRELOG_E_POLICY;
   }
+
+  for (gint i = 0; i < ctx->principal_event_count; i++) {
+    gboolean is_unlock = ctx->principal_outcome ==
+        WYL_PRINCIPAL_LOGIN_UNLOCKED_STARTED && i == 0;
+    ctx->principal_events[i] = is_unlock ? WYL_PRINCIPAL_EVENT_UNLOCK
+        : (ctx->skip_mfa ? WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA
+                         : WYL_PRINCIPAL_EVENT_LOGIN_OK);
+    ctx->principal_event_from[i] = is_unlock
+        ? WYL_PRINCIPAL_STATE_LOCKED : WYL_PRINCIPAL_STATE_UNVERIFIED;
+    ctx->principal_event_to[i] = is_unlock
+        ? WYL_PRINCIPAL_STATE_UNVERIFIED : ctx->principal_to;
+#ifdef WYL_HAS_AUDIT
+    if (ctx->principal_events[i] == WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA)
+      ctx->principal_audit_events[i] = new_login_skip_mfa_allowed_audit
+            (ctx->username, ctx->request_id);
+    else
+      ctx->principal_audit_events[i] = new_principal_state_audit (ctx->username,
+              wyl_principal_state_name (ctx->principal_event_from[i]),
+              wyl_principal_state_name (ctx->principal_event_to[i]),
+              wyl_principal_event_name (ctx->principal_events[i]),
+              ctx->request_id);
+    if (ctx->principal_audit_events[i] == NULL)
+      return WYRELOG_E_INTERNAL;
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
+          (ctx->principal_audit_events[i]);
+    if (audit_id == NULL)
+      return WYRELOG_E_INTERNAL;
+    rc = append_policy_audit_event (store, audit_id,
+            ctx->principal_audit_events[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+#endif
+  }
+
+  if (ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_LOCKED
+      || ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_REVOKED)
+    return WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_set_session_state (store, ctx->session_id,
             session_to);
@@ -737,26 +936,22 @@ static wyrelog_error_t
 verify_login_publication (WylEngineVerification *verification, gpointer data)
 {
   WylLoginPublication *ctx = data;
-  const gchar *principal_event = wyl_principal_event_name
-        (ctx->principal_event);
-  const gchar *principal_from = wyl_principal_state_name
-        (WYL_PRINCIPAL_STATE_UNVERIFIED);
-  const gchar *principal_to = wyl_principal_state_name
-        (ctx->principal_new_state);
   const gchar *session_event = wyl_session_event_name (ctx->session_event);
   const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
   const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
-  if (principal_event == NULL || principal_from == NULL
-      || principal_to == NULL || session_event == NULL
-      || session_from == NULL || session_to == NULL)
+  if (session_event == NULL || session_from == NULL || session_to == NULL
+      || wyl_principal_state_name (ctx->principal_to) == NULL)
     return WYRELOG_E_INTERNAL;
-  const gchar *principal_state[] = { ctx->username, principal_to };
+  const gchar *principal_state[] = { ctx->username,
+                                     wyl_principal_state_name (ctx->principal_to) };
   wyrelog_error_t rc = verify_session_symbol_row (verification,
           "principal_state", principal_state, G_N_ELEMENTS (principal_state));
-  if (rc == WYRELOG_E_OK)
+  for (gint i = 0; rc == WYRELOG_E_OK && i < ctx->principal_event_count; i++)
     rc = verify_session_event_row (verification, "principal_fired",
-            ctx->principal_event_id, ctx->username, principal_event,
-            principal_from, principal_to);
+            ctx->principal_event_ids[i], ctx->username,
+            wyl_principal_event_name (ctx->principal_events[i]),
+            wyl_principal_state_name (ctx->principal_event_from[i]),
+            wyl_principal_state_name (ctx->principal_event_to[i]));
   if (rc == WYRELOG_E_OK)
     rc = verify_session_event_row (verification, "session_fired",
             ctx->session_event_id, ctx->session_id, session_event, session_from,
@@ -769,13 +964,16 @@ produce_login_publication_deltas (WylEngineVerification *verification,
     gpointer data)
 {
   WylLoginPublication *ctx = data;
-  wyrelog_error_t rc = enqueue_session_event_delta (verification,
-          "principal_fired", ctx->principal_event_id, ctx->username,
-          wyl_principal_event_name (ctx->principal_event),
-          wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-          wyl_principal_state_name (ctx->principal_new_state));
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (gint i = 0; i < ctx->principal_event_count; i++) {
+    rc = enqueue_session_event_delta (verification, "principal_fired",
+            ctx->principal_event_ids[i], ctx->username,
+            wyl_principal_event_name (ctx->principal_events[i]),
+            wyl_principal_state_name (ctx->principal_event_from[i]),
+            wyl_principal_state_name (ctx->principal_event_to[i]));
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   return enqueue_session_event_delta (verification, "session_fired",
              ctx->session_event_id, ctx->session_id,
              wyl_session_event_name (ctx->session_event),
@@ -796,8 +994,12 @@ publish_login_mutation (WylLoginPublication *ctx)
           NULL);
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
-  if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL)
-    (void) wyl_audit_mirror_event (ctx->handle, ctx->principal_audit_event);
+  if (rc == WYRELOG_E_OK) {
+    for (gint i = 0; i < ctx->principal_event_count; i++)
+      if (ctx->principal_audit_events[i] != NULL)
+        (void) wyl_audit_mirror_event (ctx->handle,
+            ctx->principal_audit_events[i]);
+  }
   if (rc == WYRELOG_E_OK && ctx->session_audit_event != NULL)
     (void) wyl_audit_mirror_event (ctx->handle, ctx->session_audit_event);
 #endif
@@ -882,42 +1084,34 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (username != NULL) {
-    wyl_principal_state_t state = WYL_PRINCIPAL_STATE_LAST_;
-    wyl_principal_event_t event = WYL_PRINCIPAL_EVENT_LOGIN_OK;
-    wyl_principal_state_t expected = WYL_PRINCIPAL_STATE_MFA_REQUIRED;
-    if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
-      event = WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA;
-      expected = WYL_PRINCIPAL_STATE_AUTHENTICATED;
-    }
-    wyrelog_error_t rc = wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_UNVERIFIED,
-            event, &state);
-    if (rc != WYRELOG_E_OK || state != expected) {
-      g_object_unref (session);
-      return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
-    }
+    gboolean skip_mfa = req != NULL && wyl_login_req_get_skip_mfa (req);
+    wyrelog_error_t rc;
 #ifdef WYL_HAS_AUDIT
-    g_autoptr (WylAuditEvent) principal_ev = NULL;
-    if (req != NULL && wyl_login_req_get_skip_mfa (req))
-      principal_ev = new_login_skip_mfa_allowed_audit (username,
-              wyl_login_req_get_request_id (req));
-    else
-      principal_ev = new_principal_state_audit (username,
-              wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-              wyl_principal_state_name (state), wyl_principal_event_name (event),
-              wyl_login_req_get_request_id (req));
     g_autoptr (WylAuditEvent) session_ev =
         new_session_state_audit (session_id,
             wyl_session_state_name (wyl_session_state_load_private (session)),
             "active", wyl_login_req_get_request_id (req));
 #else
-    WylAuditEvent *principal_ev = NULL;
     WylAuditEvent *session_ev = NULL;
 #endif
-    WylLoginPublication publication = { handle, username, event, state,
-                                        session_id, WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-                                        WYL_SESSION_STATE_ACTIVE, principal_ev, session_ev, -1, -1};
+    WylLoginPublication publication = {
+      .handle = handle,
+      .username = username,
+      .skip_mfa = skip_mfa,
+      .request_id = req != NULL ? wyl_login_req_get_request_id (req) : NULL,
+      .session_id = session_id,
+      .session_old_state = WYL_SESSION_STATE_IDLE,
+      .session_event = WYL_SESSION_EVENT_REQUEST,
+      .session_new_state = WYL_SESSION_STATE_ACTIVE,
+      .session_audit_event = session_ev,
+      .principal_event_ids = {-1, -1},
+      .session_event_id = -1,
+    };
     rc = publish_login_mutation (&publication);
     if (rc != WYRELOG_E_OK) {
+#ifdef WYL_HAS_AUDIT
+      clear_login_principal_audits (&publication);
+#endif
       g_object_unref (session);
       return rc;
     }
@@ -927,14 +1121,41 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
      * becomes reachable.  A normal login only reaches mfa_required and is not
      * yet authenticated, so it leaves authn_epoch at 0; the MFA_OK commit
      * stamps it later. */
-    if (event == WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA)
-      session_store_authn_epoch (session, publication.principal_event_id);
+    if (skip_mfa && publication.principal_event_count > 0)
+      session_store_authn_epoch (session,
+          publication.principal_event_ids[publication.principal_event_count - 1]);
+    /* Issue #752: a login that observed an already-authenticated principal
+     * appends no authenticating transition, so it wins no epoch of its own.
+     * Bind it to the watermark the login observed inside its own commit
+     * instead of leaving it at 0: the observation and the precedence decision
+     * share one publication transaction, so the value cannot be stale by the
+     * time it is stored, and the moment any later authenticating transition
+     * lands the watermark moves past it and every token minted from this
+     * session is rejected - which is exactly what the supersession gate is
+     * for.  Leaving it at 0 instead does not fail closed, it fails useless:
+     * the mint would emit an epoch-0 token that the gate rejects on the very
+     * first request.  mfa_assured stays 0 - no proof was presented - so
+     * reauth_pending below remains the only route to an assured session, and
+     * the epoch is published not by that bit's release but by
+     * wyl_handle_register_session below, which is what makes the session
+     * reachable by any other thread at all. */
+    if (publication.principal_outcome ==
+        WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED) {
+      session_store_authn_epoch (session, publication.principal_authn_epoch);
+      session_store_reauth_pending (session, publication.principal_authn_epoch);
+    }
     wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {
+#ifdef WYL_HAS_AUDIT
+      clear_login_principal_audits (&publication);
+#endif
       g_object_unref (session);
       return rc;
     }
+#ifdef WYL_HAS_AUDIT
+    clear_login_principal_audits (&publication);
+#endif
     *out_session = session;
     return WYRELOG_E_OK;
   }
@@ -962,6 +1183,80 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   }
   *out_session = session;
   return WYRELOG_E_OK;
+}
+
+/*
+ * Issue #752: is this an MFA verification that the ratified precedence has
+ * already satisfied?  A login that observed an already-authenticated
+ * principal appends no transition (WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED
+ * is defined as idempotent success with zero events), so the MFA_OK CAS the
+ * caller would otherwise drive has nothing to move and fails closed forever.
+ * Report success instead, but only for the session that actually attached and
+ * only while the watermark it attached at is still the live one:
+ *
+ *   1. the session carries the attach marker this login set, and
+ *   2. the durable principal state still reads 'authenticated', and
+ *   3. the durable authentication epoch is still exactly the one the session
+ *      attached at - so a lock/unlock or a third session's re-authentication
+ *      in between takes the caller back to the failing CAS, as it should.
+ *
+ * The session does NOT become mfa_assured here.  That bit means "this exact
+ * session completed an MFA transition", and the attached session is
+ * explicitly non-authoritative; even the winning skip-MFA login does not set
+ * it.  Granting it from a proof-free entry point would leave the attached
+ * session more privileged than the session that actually won the epoch.
+ * wyl_session_totp_reauthenticate stays the only way for this session to
+ * become assured, which is why reauth_pending is left standing.
+ *
+ * The two durable reads are not one transaction with the decision, and they
+ * do not need to be, because this function GRANTS NOTHING - it only reports
+ * that the caller's work is already done.  Most races simply produce a
+ * mismatch and fall through to the CAS, which fails closed.  One does not: a
+ * LOCK landing between the state read and the epoch read leaves the watermark
+ * where it is, so a locked principal can still be reported idempotent.  That
+ * is survivable precisely because nothing is granted - the sole production
+ * caller (login_check_principal in daemon/checks.c) follows this E_OK with a
+ * wyl_decide that consults principal_state through the engine and fails
+ * closed there.  Reached only from wyl_session_mfa_verify, never from the
+ * proof-bearing boundaries.
+ *
+ * reauth_mutex covers only the read of the pair (reauth_pending,
+ * reauth_expected_epoch), so that it serialises with the TOTP reauth path,
+ * which mutates both.  It is released before the durable reads because
+ * nothing is published here; wyl_session_totp_reauthenticate holds it across
+ * its whole commit for the opposite reason - it does publish under it.
+ */
+static gboolean
+session_mfa_verify_is_idempotent (WylHandle *handle, WylSession *session)
+{
+  if (wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE)
+    return FALSE;
+
+  g_mutex_lock (&session->reauth_mutex);
+  gboolean attached = wyl_session_reauth_pending_private (session);
+  gint64 expected_epoch = wyl_session_reauth_expected_epoch_private (session);
+  g_mutex_unlock (&session->reauth_mutex);
+  if (!attached || expected_epoch <= 0)
+    return FALSE;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return FALSE;
+
+  g_autofree gchar *durable_state = NULL;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_state (store, session->username,
+      &durable_state, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (durable_state, wyl_principal_state_name
+        (WYL_PRINCIPAL_STATE_AUTHENTICATED)) != 0)
+    return FALSE;
+
+  gint64 durable_epoch = 0;
+  gboolean epoch_found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, session->username,
+      &durable_epoch, &epoch_found) != WYRELOG_E_OK || !epoch_found)
+    return FALSE;
+  return durable_epoch == expected_epoch;
 }
 
 static wyrelog_error_t
@@ -995,6 +1290,21 @@ mark_session_mfa_verified (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
 {
+  /* Issue #752: the idempotent report belongs to THIS boundary only.  It is
+   * the proof-free one, whose contract is "the caller vouches that MFA
+   * happened", and for an attachment the ratified precedence has already
+   * granted the transition, so there is nothing left to apply.  The
+   * proof-bearing boundaries must NOT take this path: they document that they
+   * apply the transition themselves, and an attachment cannot, so they keep
+   * failing closed with WYRELOG_E_POLICY - which also tells an embedder to
+   * route to wyl_session_totp_reauthenticate instead. */
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session)
+      || session->username == NULL)
+    return WYRELOG_E_INVALID;
+  if (session_mfa_verify_is_idempotent (handle, session))
+    return WYRELOG_E_OK;
   return mark_session_mfa_verified (handle, session);
 }
 
@@ -1085,8 +1395,13 @@ wyl_session_close_with_request_id (WylHandle *handle, WylSession *session,
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_CLOSED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, current,
-             WYL_SESSION_EVENT_LOGOUT, state, request_id);
+  g_mutex_lock (&session->reauth_mutex);
+  rc = transition_session_state (handle, session, current,
+          WYL_SESSION_EVENT_LOGOUT, state, request_id);
+  if (rc == WYRELOG_E_OK)
+    session_clear_reauth_pending (session);
+  g_mutex_unlock (&session->reauth_mutex);
+  return rc;
 }
 
 wyrelog_error_t
