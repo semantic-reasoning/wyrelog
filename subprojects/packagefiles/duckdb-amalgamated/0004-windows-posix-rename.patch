@@ -1,0 +1,79 @@
+diff --git a/duckdb.cpp b/duckdb.cpp
+--- a/duckdb.cpp
++++ b/duckdb.cpp
+@@ -81452,9 +81452,75 @@
+ 	}
+ }
+ 
++namespace {
++// FileRenameInfoEx (FILE_INFO_BY_HANDLE_CLASS 22) and its flags are declared
++// only under newer _WIN32_WINNT baselines; spell them out so the amalgamation
++// keeps building against the pinned SDK level.
++constexpr int WylFileRenameInfoExClass = 22;
++constexpr DWORD WylFileRenameReplaceIfExists = 0x00000001;
++constexpr DWORD WylFileRenamePosixSemantics = 0x00000002;
++struct WylFileRenameInfoEx {
++	DWORD Flags;
++	HANDLE RootDirectory;
++	DWORD FileNameLength;
++	WCHAR FileName[1];
++};
++} // namespace
++
+ void LocalFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
+ 	auto source_unicode = NormalizePathAndConvertToUnicode(*this, source, opener);
+ 	auto target_unicode = NormalizePathAndConvertToUnicode(*this, target, opener);
++
++	// A classic replace is refused on the destination's open count alone, so a
++	// live reader of the target makes MoveFileExW fail with ERROR_ACCESS_DENIED
++	// where POSIX rename() would succeed. POSIX semantics unlink the replaced
++	// name in the same operation, which is what the WAL recovery path needs.
++	//
++	// FILE_FLAG_WRITE_THROUGH carries MOVEFILE_WRITE_THROUGH's durability onto
++	// the fast path. Whether that flag does anything for a same-volume rename is
++	// genuinely arguable from the documentation, which scopes the flush to a
++	// move performed as copy-and-delete yet also says the call does not return
++	// until the move is on disk. Rather than ship one reading as settled, match
++	// the fallback: with write-through set this path is at least as durable as
++	// the MoveFileExW it replaces under either reading, and the cost lands at
++	// checkpoint boundaries rather than in a hot loop.
++	//
++	// The fallback below is taken on ANY failure -- unsupported class,
++	// unsupported filesystem, cross-volume target (ERROR_NOT_SAME_DEVICE), or a
++	// relative target, which this class cannot resolve against
++	// RootDirectory = NULL. A caller that passes a relative pathname therefore
++	// keeps the old behaviour, open-destination failure included; every caller
++	// in the amalgamation resolves the pathname before calling. The worst case
++	// on every path is exactly the pre-patch behaviour.
++	//
++	// FILE_FLAG_OPEN_REPARSE_POINT keeps the handle on the reparse point itself.
++	// Without it a symlinked source would be opened on its target, and this path
++	// would rename that target while MoveFileExW renames the link -- a silent
++	// divergence in which file moves.
++	HANDLE handle = CreateFileW(source_unicode.c_str(), DELETE | SYNCHRONIZE,
++	                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
++	                            OPEN_EXISTING,
++	                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT |
++	                                FILE_FLAG_WRITE_THROUGH,
++	                            NULL);
++	if (handle != INVALID_HANDLE_VALUE) {
++		const size_t bytes = target_unicode.size() * sizeof(WCHAR);
++		const size_t size = offsetof(WylFileRenameInfoEx, FileName) + bytes + sizeof(WCHAR);
++		std::vector<char> buffer(size, 0);
++		auto *info = reinterpret_cast<WylFileRenameInfoEx *>(buffer.data());
++		info->Flags = WylFileRenameReplaceIfExists | WylFileRenamePosixSemantics;
++		info->RootDirectory = NULL;
++		info->FileNameLength = static_cast<DWORD>(bytes);
++		memcpy(info->FileName, target_unicode.c_str(), bytes);
++		const BOOL renamed = SetFileInformationByHandle(
++		    handle, static_cast<FILE_INFO_BY_HANDLE_CLASS>(WylFileRenameInfoExClass), info,
++		    static_cast<DWORD>(size));
++		CloseHandle(handle);
++		if (renamed) {
++			return;
++		}
++	}
++
+ 	DWORD flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+ 
+ 	if (!MoveFileExW(source_unicode.c_str(), target_unicode.c_str(), flags)) {
