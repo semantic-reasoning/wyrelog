@@ -56,6 +56,10 @@ G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
  * comment in wyl-session-layout-private.h. */
 G_GNUC_INTERNAL gint64 wyl_session_authn_epoch_load_private (const
     WylSession * session);
+G_GNUC_INTERNAL gboolean wyl_session_reauth_pending_private (const
+    WylSession * session);
+G_GNUC_INTERNAL gint64 wyl_session_reauth_expected_epoch_private (const
+    WylSession * session);
 /* Single coherent management liveness primitive.  Returns TRUE only when
  * |session| is an ACTIVE human session (decided by one atomic state load),
  * optionally MFA-assured, whose immutable identity (session id, actor,
@@ -126,6 +130,10 @@ typedef enum wyl_mfa_totp_receipt_t
  * drive it directly, mirroring the policy/store-private.h helpers.
  */
 wyrelog_error_t wyl_session_totp_commit_mfa_ok (WylHandle * handle,
+    WylSession * session, gint64 matched_step, WylMfaTotpReceipt * out_receipt);
+/* Consume a TOTP proof for a new session while preserving an already
+ * authenticated subject-global principal.  No principal event is appended. */
+wyrelog_error_t wyl_session_totp_reauthenticate (WylHandle * handle,
     WylSession * session, gint64 matched_step, WylMfaTotpReceipt * out_receipt);
 
 /*
