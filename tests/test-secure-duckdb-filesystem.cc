@@ -573,6 +573,10 @@ test_fixed_wal_replacement_grammars_and_live_detach (void)
 static void
 test_terminal_wal_replacement_poison_has_no_retry (void)
 {
+#ifdef G_OS_WIN32
+  g_test_skip ("Windows provider does not expose POSIX fault injection");
+  return;
+#else
   Fixture fixture;
   WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
   auto wal = filesystem.OpenFile ("facts.duckdb.wal",
@@ -613,6 +617,7 @@ test_terminal_wal_replacement_poison_has_no_retry (void)
     g_assert_cmpint (exception.error, ==, WYRELOG_E_IO);
   }
   wal->Close ();
+#endif
 }
 
 static void
@@ -1935,6 +1940,10 @@ test_pinned_lifecycle_precedence (void)
 static void
 test_pinned_provider_open_seams_fail_closed (void)
 {
+#ifdef G_OS_WIN32
+  g_test_skip ("Windows provider does not expose POSIX fault injection");
+  return;
+#else
   const WylFactArtifactNamespaceTestFault faults[] = {
     WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA,
     WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE,
@@ -2008,6 +2017,7 @@ test_pinned_provider_open_seams_fail_closed (void)
       }
     }
   }
+#endif
 }
 
 static void
