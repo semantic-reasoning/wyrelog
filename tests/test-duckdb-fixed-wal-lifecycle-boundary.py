@@ -85,7 +85,7 @@ for token in named_tests:
 seam_start = meson.index(
     "test_duckdb_after_walstart = executable("
 )
-seam_end = meson.index("\n  endif\nendif", seam_start)
+seam_end = meson.index("\nendif", seam_start)
 seam = meson[seam_start:seam_end]
 for token in named_tests:
     if token not in seam:

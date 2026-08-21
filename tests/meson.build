@@ -600,7 +600,7 @@ if build_client
       test_daemon_http_facts_deps += duckdb_dep
       test_daemon_http_facts_deps += service_exchange_private_dep
     endif
-    if get_option('enable_secure_duckdb_bridge').enabled() and host_machine.system() != 'windows'
+    if get_option('enable_secure_duckdb_bridge').enabled()
       test_daemon_http_facts_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
     endif
     test_daemon_http_facts_deps += daemon_http_private_dep
@@ -1481,90 +1481,110 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   test('fact-provisioning-construct', test_fact_provisioning_construct,
     timeout : 60,
   )
+  test_secure_duckdb_filesystem = executable(
+    'test-secure-duckdb-filesystem',
+    'test-secure-duckdb-filesystem.cc',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep] + fact_test_support_deps,
+    override_options : ['cpp_std=c++17'],
+  )
+  # The suite's fixture calls wyl_fact_artifact_namespace_open, which the
+  # Windows arm still answers WYRELOG_E_POLICY unconditionally, so every
+  # case would fail in the constructor. Keep building the target there --
+  # that is what proves the port compiles -- but only run it where the
+  # authority it exercises is implemented.
+  #
+  # That is not the only thing standing between this suite and Windows.
+  # ProvisionedPairFixture builds stage_path from the stage basename that
+  # wyl_fact_graph_stage_publish_with_evidence then renames away, so the
+  # cases that stat or unlink it are asserting against a name Windows does
+  # not keep. Whoever implements the namespace arm has that to fix too (#816).
   if host_machine.system() != 'windows'
-    test_secure_duckdb_filesystem = executable(
-      'test-secure-duckdb-filesystem',
-      'test-secure-duckdb-filesystem.cc',
-      'fact-test-support.c',
-      c_args : fact_test_support_c_args,
-      include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_dep, duckdb_dep] + fact_test_support_deps,
-      override_options : ['cpp_std=c++17'],
-    )
     test('secure-duckdb-filesystem', test_secure_duckdb_filesystem,
       timeout : 120,
     )
-    test_fact_provisioning_run = executable(
-      'test-fact-provisioning-run',
-      'test-fact-provisioning-run.c',
-      'fact-test-support.c',
-      c_args : fact_test_support_c_args,
-      include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
-        + fact_test_support_deps,
-    )
+  endif
+  test_fact_provisioning_run = executable(
+    'test-fact-provisioning-run',
+    'test-fact-provisioning-run.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+      + fact_test_support_deps,
+  )
+  # Asserts st_nlink == 2 on the published graph, which is the POSIX
+  # retained hard-link pair. Windows publishes by renaming the stage away
+  # and keeps no second retained name, so this cannot pass there until the
+  # Windows pair has a durable evidence home (#816).
+  if host_machine.system() != 'windows'
     test('fact-provisioning-run', test_fact_provisioning_run,
       timeout : 60,
     )
-    test_fact_store_provisioned = executable(
-      'test-fact-store-provisioned',
-      'test-fact-store-provisioned.c',
-      'fact-test-support.c',
-      c_args : fact_test_support_c_args + ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE'],
-      include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
-        + fact_test_support_deps,
-    )
+  endif
+  test_fact_store_provisioned = executable(
+    'test-fact-store-provisioned',
+    'test-fact-store-provisioned.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args + ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE'],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+      + fact_test_support_deps,
+  )
+  # Same POSIX retained-pair invariant as fact-provisioning-run (#816).
+  if host_machine.system() != 'windows'
     test('fact-store-provisioned', test_fact_store_provisioned,
       timeout : 60,
     )
-    test_duckdb_after_walstart = executable(
-      'test-duckdb-after-walstart',
-      'test-secure-duckdb-recording-filesystem.cc',
-      cpp_args : ['-DWYL_DUCKDB_SOURCE_BUILD=1'],
-      dependencies : [glib_dep, gio_dep, duckdb_test_seam_dep],
-      override_options : ['cpp_std=c++17'],
-      build_by_default : false,
-    )
-    test('duckdb-after-walstart-no-wal', test_duckdb_after_walstart,
-      args : [
-        '-p',
-        '/secure-duckdb-bridge/recording-filesystem/after-wal-start-no-wal',
-      ],
-      timeout : 30,
-    )
-    test('duckdb-after-walstart-rendezvous', test_duckdb_after_walstart,
-      args : [
-        '-p',
-        '/secure-duckdb-bridge/recording-filesystem/after-wal-start-rendezvous',
-      ],
-      timeout : 30,
-    )
-    test('duckdb-fixed-wal-successful-checkpoint',
-      test_duckdb_after_walstart,
-      args : [
-        '-p',
-        '/secure-duckdb-bridge/recording-filesystem/concurrent-checkpoint-move',
-      ],
-      timeout : 30,
-    )
-    test('duckdb-fixed-wal-pre-move-abort-reopen',
-      test_duckdb_after_walstart,
-      args : [
-        '-p',
-        '/secure-duckdb-bridge/recording-filesystem/completed-checkpoint-recovery-move',
-      ],
-      timeout : 30,
-    )
-    test('duckdb-fixed-wal-interrupted-recovery',
-      test_duckdb_after_walstart,
-      args : [
-        '-p',
-        '/secure-duckdb-bridge/recording-filesystem/incomplete-checkpoint-recovery-move',
-      ],
-      timeout : 30,
-    )
   endif
+  test_duckdb_after_walstart = executable(
+    'test-duckdb-after-walstart',
+    'test-secure-duckdb-recording-filesystem.cc',
+    cpp_args : ['-DWYL_DUCKDB_SOURCE_BUILD=1'],
+    dependencies : [glib_dep, gio_dep, duckdb_test_seam_dep],
+    override_options : ['cpp_std=c++17'],
+    build_by_default : false,
+  )
+  test('duckdb-after-walstart-no-wal', test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/after-wal-start-no-wal',
+    ],
+    timeout : 30,
+  )
+  test('duckdb-after-walstart-rendezvous', test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/after-wal-start-rendezvous',
+    ],
+    timeout : 30,
+  )
+  test('duckdb-fixed-wal-successful-checkpoint',
+    test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/concurrent-checkpoint-move',
+    ],
+    timeout : 30,
+  )
+  test('duckdb-fixed-wal-pre-move-abort-reopen',
+    test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/completed-checkpoint-recovery-move',
+    ],
+    timeout : 30,
+  )
+  test('duckdb-fixed-wal-interrupted-recovery',
+    test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/incomplete-checkpoint-recovery-move',
+    ],
+    timeout : 30,
+  )
 endif
 
 test_policy_store_toctou = executable('test-policy-store-toctou',
