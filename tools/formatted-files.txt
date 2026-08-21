@@ -111,7 +111,6 @@ wyrelog/fact/replay.c
 wyrelog/fact/schema-private.h
 wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
-wyrelog/fact/secure-duckdb-bridge-windows-private.c
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
 wyrelog/fact/secure-duckdb-filesystem-test-faults-private.h
 wyrelog/fact/store-identity-types-private.h

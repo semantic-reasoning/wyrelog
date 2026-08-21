@@ -81,7 +81,7 @@ duckdb_dep = declare_dependency(
 )
 
 duckdb_test_seam_dep = disabler()
-if host_machine.system() != 'windows'
+if true
   # Compile the pinned rendezvous as a separate, test-only DuckDB variant.
   # duckdb_lib above deliberately receives neither this macro nor this
   # dependency, so the installed/production library keeps its original ABI,
@@ -96,7 +96,7 @@ if host_machine.system() != 'windows'
       'optimization=' + duckdb_test_seam_optimization,
       'debug=false',
       'b_lto=false',
-      'cpp_std=gnu++17',
+      'cpp_std=' + (host_machine.system() == 'windows' ? 'c++17' : 'gnu++17'),
     ],
     dependencies : duckdb_deps,
     cpp_args : duckdb_test_seam_compile_args,
