@@ -439,6 +439,44 @@ check_wrong_state_session (SoupServer *server, WylHandle *handle,
 }
 
 static gint
+check_authenticated_principal_reauth (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  (void) server;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw (session, "POST", base_url,
+      "/auth/login?username=mfa.reauth&skip_mfa=true", &status, &body) != 0
+      || status != 200) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 610;
+  }
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_clear_pointer (&body, g_free);
+
+  if (seed_enrollment (handle, "mfa.reauth") != 0)
+    return 611;
+  g_autofree gchar *session_token = NULL;
+  if (do_login (session, base_url, "mfa.reauth", &session_token) != 0)
+    return 612;
+  gchar proof[8];
+  if (compute_current_code (proof) != 0)
+    return 613;
+  g_autofree gchar *path = g_strdup_printf
+        ("/auth/mfa/verify?session_token=%s&code=%s", session_token, proof);
+  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+    return 614;
+  if (status != 200 || strstr (body, "\"principal_state\":\"authenticated\"")
+      == NULL || strstr (body, "\"access_token\":\"") == NULL)
+    return 615;
+  /* Reauthentication preserves the subject-global state and does not append
+   * a synthetic MFA_OK edge. */
+  return count_mfa_ok_events (handle, "mfa.reauth") == 0 ? 0 : 616;
+}
+
+static gint
 check_missing_code (SoupServer *server, const gchar *base_url)
 {
   (void) server;
@@ -724,6 +762,9 @@ main (void)
   if ((rc = check_wrong_code_rejected (http.server, handle, base_url)) != 0)
     goto out;
   if ((rc = check_wrong_state_session (http.server, handle, base_url)) != 0)
+    goto out;
+  if ((rc = check_authenticated_principal_reauth (http.server, handle,
+      base_url)) != 0)
     goto out;
   if ((rc = check_happy_path (http.server, handle, base_url)) != 0)
     goto out;

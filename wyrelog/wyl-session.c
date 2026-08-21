@@ -27,6 +27,7 @@ wyl_session_finalize (GObject *object)
   g_free (self->service_jti);
   g_free (self->service_subject_id);
   g_free (self->service_credential_id);
+  g_mutex_clear (&self->reauth_mutex);
 
   G_OBJECT_CLASS (wyl_session_parent_class)->finalize (object);
 }
@@ -44,6 +45,7 @@ wyl_session_init (WylSession *self)
 {
   wyl_session_state_store_private (self, WYL_SESSION_STATE_IDLE);
   self->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+  g_mutex_init (&self->reauth_mutex);
 }
 
 static gboolean
@@ -68,6 +70,23 @@ session_store_authn_epoch (WylSession *session, gint64 epoch)
   if (session == NULL || !WYL_IS_SESSION (session))
     return;
   session->authn_epoch = epoch;
+}
+
+static void
+session_store_reauth_pending (WylSession *session, gint64 expected_epoch)
+{
+  if (session == NULL || !WYL_IS_SESSION (session) || expected_epoch <= 0)
+    return;
+  session->reauth_expected_epoch = expected_epoch;
+  g_atomic_int_set ((gint *) &session->reauth_pending, 1);
+}
+
+static void
+session_clear_reauth_pending (WylSession *session)
+{
+  if (session == NULL || !WYL_IS_SESSION (session))
+    return;
+  g_atomic_int_set ((gint *) &session->reauth_pending, 0);
 }
 
 static wyrelog_error_t
@@ -575,6 +594,117 @@ wyl_session_totp_commit_mfa_ok (WylHandle *handle, WylSession *session,
   return (rc == WYRELOG_E_POLICY) ? WYRELOG_E_POLICY : WYRELOG_E_INTERNAL;
 }
 
+typedef struct
+{
+  const gchar *username;
+  gint64 expected_epoch;
+  gint64 matched_step;
+} WylTotpReauthPublication;
+
+static wyrelog_error_t
+mutate_totp_reauth (wyl_policy_store_t *store, gpointer data)
+{
+  WylTotpReauthPublication *ctx = data;
+  g_autofree gchar *state = NULL;
+  gint64 failed_count = 0;
+  gint64 locked_at = 0;
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
+          ctx->username, &state, &failed_count, &locked_at, &found);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!found || g_strcmp0 (state, "authenticated") != 0)
+    return WYRELOG_E_POLICY;
+
+  gint64 current_epoch = 0;
+  gboolean epoch_found = FALSE;
+  rc = wyl_policy_store_get_principal_authn_epoch (store, ctx->username,
+          &current_epoch, &epoch_found);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!epoch_found || current_epoch != ctx->expected_epoch)
+    return WYRELOG_E_POLICY;
+
+  gboolean advanced = FALSE;
+  rc = wyl_policy_store_totp_enrollment_advance_step (store, ctx->username,
+          ctx->matched_step, &advanced);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  if (!advanced)
+    return WYRELOG_E_POLICY;
+  rc = wyl_policy_store_reset_principal_failure_counter (store,
+          ctx->username);
+  return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
+verify_totp_reauth (WylEngineVerification *verification, gpointer data)
+{
+  (void) verification;
+  (void) data;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_session_totp_reauthenticate (WylHandle *handle, WylSession *session,
+    gint64 matched_step, WylMfaTotpReceipt *out_receipt)
+{
+  if (out_receipt != NULL)
+    *out_receipt = WYL_MFA_TOTP_RECEIPT_REPLAY_SUPERSEDED;
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session)
+      || session->username == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&session->reauth_mutex);
+  if (wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE
+      || !wyl_session_reauth_pending_private (session)
+      || wyl_session_reauth_expected_epoch_private (session) <= 0) {
+    g_mutex_unlock (&session->reauth_mutex);
+    return WYRELOG_E_POLICY;
+  }
+
+  WylTotpReauthPublication publication = {
+    session->username,
+    wyl_session_reauth_expected_epoch_private (session),
+    matched_step,
+  };
+  g_autoptr (WylEngineSession) engine_session =
+      wyl_engine_session_acquire (handle);
+  if (engine_session == NULL) {
+    g_mutex_unlock (&session->reauth_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  WylCommittedPublicationStage stage =
+      WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+  wyrelog_error_t rc = wyl_engine_session_run_committed_publication
+        (engine_session, mutate_totp_reauth, &publication,
+          verify_totp_reauth, &publication, NULL, NULL, &stage);
+  g_clear_pointer (&engine_session, wyl_engine_session_release);
+
+  if (rc == WYRELOG_E_OK
+      && stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED) {
+    if (wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE
+        || !wyl_session_reauth_pending_private (session)) {
+      session_clear_reauth_pending (session);
+      g_mutex_unlock (&session->reauth_mutex);
+      return WYRELOG_E_POLICY;
+    }
+    session_store_authn_epoch (session, publication.expected_epoch);
+    g_atomic_int_set ((gint *) &session->mfa_assured, 1);
+    session_clear_reauth_pending (session);
+    g_mutex_unlock (&session->reauth_mutex);
+    if (out_receipt != NULL)
+      *out_receipt = WYL_MFA_TOTP_RECEIPT_WON_COMMITTED;
+    return WYRELOG_E_OK;
+  }
+  g_mutex_unlock (&session->reauth_mutex);
+  if (out_receipt != NULL && stage ==
+      WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS)
+    *out_receipt = WYL_MFA_TOTP_RECEIPT_COMMIT_UNCERTAIN;
+  return rc == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_INTERNAL;
+}
+
 #ifdef WYL_HAS_AUDIT
 static WylAuditEvent *
 new_session_state_audit (const gchar *session_id,
@@ -684,6 +814,7 @@ typedef struct
   wyl_principal_state_t principal_event_to[2];
   gint64 principal_event_ids[2];
   gint principal_event_count;
+  gint64 principal_authn_epoch;
   const gchar *session_id;
   wyl_session_state_t session_old_state;
   wyl_session_event_t session_event;
@@ -724,6 +855,15 @@ mutate_login_publication (wyl_policy_store_t *store, gpointer data)
   if (ctx->principal_event_count < 0
       || ctx->principal_event_count > (gint) G_N_ELEMENTS (ctx->principal_events))
     return WYRELOG_E_INTERNAL;
+  if (ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED) {
+    gboolean found = FALSE;
+    rc = wyl_policy_store_get_principal_authn_epoch (store, ctx->username,
+            &ctx->principal_authn_epoch, &found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!found || ctx->principal_authn_epoch <= 0)
+      return WYRELOG_E_POLICY;
+  }
 
   for (gint i = 0; i < ctx->principal_event_count; i++) {
     gboolean is_unlock = ctx->principal_outcome ==
@@ -971,6 +1111,9 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     if (skip_mfa && publication.principal_event_count > 0)
       session_store_authn_epoch (session,
           publication.principal_event_ids[publication.principal_event_count - 1]);
+    if (publication.principal_outcome ==
+        WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED)
+      session_store_reauth_pending (session, publication.principal_authn_epoch);
     wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {
@@ -1133,8 +1276,13 @@ wyl_session_close_with_request_id (WylHandle *handle, WylSession *session,
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_CLOSED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, current,
-             WYL_SESSION_EVENT_LOGOUT, state, request_id);
+  g_mutex_lock (&session->reauth_mutex);
+  rc = transition_session_state (handle, session, current,
+          WYL_SESSION_EVENT_LOGOUT, state, request_id);
+  if (rc == WYRELOG_E_OK)
+    session_clear_reauth_pending (session);
+  g_mutex_unlock (&session->reauth_mutex);
+  return rc;
 }
 
 wyrelog_error_t

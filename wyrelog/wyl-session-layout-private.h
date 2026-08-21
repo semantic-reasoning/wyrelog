@@ -33,6 +33,9 @@ struct _WylSession
    * so authorization can reject a token whose epoch the durable watermark
    * has since moved past. */
   volatile gint64 authn_epoch;
+  volatile gint reauth_pending;
+  volatile gint64 reauth_expected_epoch;
+  GMutex reauth_mutex;
   wyl_session_auth_method_t auth_method;
   gchar *service_jti;
   gchar *service_subject_id;

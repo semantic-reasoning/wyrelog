@@ -393,6 +393,9 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
           subject_id, &pstate, &pcount, &plocked_at, &pfound);
   if (rc != WYRELOG_E_OK)
     return rc;
+  gboolean reauth = g_strcmp0 (pstate, "authenticated") == 0
+      && wyl_session_reauth_pending_private (session)
+      && wyl_session_reauth_expected_epoch_private (session) > 0;
   if (pfound && g_strcmp0 (pstate, "locked") == 0) {
     switch (maybe_auto_unlock (handle, subject_id, pstate, plocked_at, now)) {
       case WYL_MFA_AUTO_UNLOCK_UNLOCKED:
@@ -504,6 +507,9 @@ wyl_mfa_validator_totp (WylHandle *handle, WylSession *session,
    * F2: no log/audit emission ever sees the seed or the code.
    */
   wyl_totp_enrollment_clear (&enr);
+  if (reauth)
+    return wyl_session_totp_reauthenticate (handle, session,
+               (gint64) matched_step, NULL);
   return wyl_session_totp_commit_mfa_ok (handle, session,
              (gint64) matched_step, NULL);
 }
