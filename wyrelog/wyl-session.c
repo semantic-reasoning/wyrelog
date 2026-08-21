@@ -13,6 +13,10 @@
 
 G_DEFINE_FINAL_TYPE (WylSession, wyl_session, G_TYPE_OBJECT);
 
+/* The ratified principal model folds the existing fifteen-minute lockout
+ * recovery window into the next login CAS (issue #752). */
+#define WYL_MFA_AUTO_UNLOCK_SECONDS 900
+
 static void
 wyl_session_finalize (GObject *object)
 {
@@ -670,51 +674,93 @@ typedef struct
 {
   WylHandle *handle;
   const gchar *username;
-  wyl_principal_event_t principal_event;
-  wyl_principal_state_t principal_new_state;
+  gboolean skip_mfa;
+  const gchar *request_id;
+  wyl_principal_login_outcome_t principal_outcome;
+  wyl_principal_state_t principal_from;
+  wyl_principal_state_t principal_to;
+  wyl_principal_event_t principal_events[2];
+  wyl_principal_state_t principal_event_from[2];
+  wyl_principal_state_t principal_event_to[2];
+  gint64 principal_event_ids[2];
+  gint principal_event_count;
   const gchar *session_id;
   wyl_session_state_t session_old_state;
   wyl_session_event_t session_event;
   wyl_session_state_t session_new_state;
-  const WylAuditEvent *principal_audit_event;
   const WylAuditEvent *session_audit_event;
-  gint64 principal_event_id;
   gint64 session_event_id;
+#ifdef WYL_HAS_AUDIT
+  WylAuditEvent *principal_audit_events[2];
+#endif
 } WylLoginPublication;
+
+#ifdef WYL_HAS_AUDIT
+static void
+clear_login_principal_audits (WylLoginPublication *ctx)
+{
+  for (guint i = 0; i < G_N_ELEMENTS (ctx->principal_audit_events); i++)
+    g_clear_object (&ctx->principal_audit_events[i]);
+}
+#endif
 
 static wyrelog_error_t
 mutate_login_publication (wyl_policy_store_t *store, gpointer data)
 {
   WylLoginPublication *ctx = data;
-  const gchar *principal_event = wyl_principal_event_name
-        (ctx->principal_event);
-  const gchar *principal_from = wyl_principal_state_name
-        (WYL_PRINCIPAL_STATE_UNVERIFIED);
-  const gchar *principal_to = wyl_principal_state_name
-        (ctx->principal_new_state);
   const gchar *session_event = wyl_session_event_name (ctx->session_event);
   const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
   const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
-  if (principal_event == NULL || principal_from == NULL
-      || principal_to == NULL || session_event == NULL
-      || session_from == NULL || session_to == NULL)
+  if (session_event == NULL || session_from == NULL || session_to == NULL)
     return WYRELOG_E_INTERNAL;
 
-  wyrelog_error_t rc = wyl_policy_store_set_principal_state (store,
-          ctx->username, principal_to);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_append_principal_event (store, ctx->username,
-            principal_event, principal_from, principal_to,
-            &ctx->principal_event_id);
-  if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL) {
-    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
-          (ctx->principal_audit_event);
-    if (audit_id == NULL)
-      rc = WYRELOG_E_INTERNAL;
+  wyrelog_error_t rc = wyl_policy_store_apply_principal_login (store,
+          ctx->username, ctx->skip_mfa, WYL_MFA_AUTO_UNLOCK_SECONDS,
+          g_get_real_time () / G_USEC_PER_SEC, &ctx->principal_outcome,
+          &ctx->principal_from, &ctx->principal_to,
+          ctx->principal_event_ids, &ctx->principal_event_count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (ctx->principal_event_count < 0
+      || ctx->principal_event_count > (gint) G_N_ELEMENTS (ctx->principal_events))
+    return WYRELOG_E_INTERNAL;
+
+  for (gint i = 0; i < ctx->principal_event_count; i++) {
+    gboolean is_unlock = ctx->principal_outcome ==
+        WYL_PRINCIPAL_LOGIN_UNLOCKED_STARTED && i == 0;
+    ctx->principal_events[i] = is_unlock ? WYL_PRINCIPAL_EVENT_UNLOCK
+        : (ctx->skip_mfa ? WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA
+                         : WYL_PRINCIPAL_EVENT_LOGIN_OK);
+    ctx->principal_event_from[i] = is_unlock
+        ? WYL_PRINCIPAL_STATE_LOCKED : WYL_PRINCIPAL_STATE_UNVERIFIED;
+    ctx->principal_event_to[i] = is_unlock
+        ? WYL_PRINCIPAL_STATE_UNVERIFIED : ctx->principal_to;
+#ifdef WYL_HAS_AUDIT
+    if (ctx->principal_events[i] == WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA)
+      ctx->principal_audit_events[i] = new_login_skip_mfa_allowed_audit
+            (ctx->username, ctx->request_id);
     else
-      rc = append_policy_audit_event (store, audit_id,
-              ctx->principal_audit_event);
+      ctx->principal_audit_events[i] = new_principal_state_audit (ctx->username,
+              wyl_principal_state_name (ctx->principal_event_from[i]),
+              wyl_principal_state_name (ctx->principal_event_to[i]),
+              wyl_principal_event_name (ctx->principal_events[i]),
+              ctx->request_id);
+    if (ctx->principal_audit_events[i] == NULL)
+      return WYRELOG_E_INTERNAL;
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
+          (ctx->principal_audit_events[i]);
+    if (audit_id == NULL)
+      return WYRELOG_E_INTERNAL;
+    rc = append_policy_audit_event (store, audit_id,
+            ctx->principal_audit_events[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+#endif
   }
+
+  if (ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_LOCKED
+      || ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_REVOKED)
+    return WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_set_session_state (store, ctx->session_id,
             session_to);
@@ -737,26 +783,22 @@ static wyrelog_error_t
 verify_login_publication (WylEngineVerification *verification, gpointer data)
 {
   WylLoginPublication *ctx = data;
-  const gchar *principal_event = wyl_principal_event_name
-        (ctx->principal_event);
-  const gchar *principal_from = wyl_principal_state_name
-        (WYL_PRINCIPAL_STATE_UNVERIFIED);
-  const gchar *principal_to = wyl_principal_state_name
-        (ctx->principal_new_state);
   const gchar *session_event = wyl_session_event_name (ctx->session_event);
   const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
   const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
-  if (principal_event == NULL || principal_from == NULL
-      || principal_to == NULL || session_event == NULL
-      || session_from == NULL || session_to == NULL)
+  if (session_event == NULL || session_from == NULL || session_to == NULL
+      || wyl_principal_state_name (ctx->principal_to) == NULL)
     return WYRELOG_E_INTERNAL;
-  const gchar *principal_state[] = { ctx->username, principal_to };
+  const gchar *principal_state[] = { ctx->username,
+                                     wyl_principal_state_name (ctx->principal_to) };
   wyrelog_error_t rc = verify_session_symbol_row (verification,
           "principal_state", principal_state, G_N_ELEMENTS (principal_state));
-  if (rc == WYRELOG_E_OK)
+  for (gint i = 0; rc == WYRELOG_E_OK && i < ctx->principal_event_count; i++)
     rc = verify_session_event_row (verification, "principal_fired",
-            ctx->principal_event_id, ctx->username, principal_event,
-            principal_from, principal_to);
+            ctx->principal_event_ids[i], ctx->username,
+            wyl_principal_event_name (ctx->principal_events[i]),
+            wyl_principal_state_name (ctx->principal_event_from[i]),
+            wyl_principal_state_name (ctx->principal_event_to[i]));
   if (rc == WYRELOG_E_OK)
     rc = verify_session_event_row (verification, "session_fired",
             ctx->session_event_id, ctx->session_id, session_event, session_from,
@@ -769,13 +811,16 @@ produce_login_publication_deltas (WylEngineVerification *verification,
     gpointer data)
 {
   WylLoginPublication *ctx = data;
-  wyrelog_error_t rc = enqueue_session_event_delta (verification,
-          "principal_fired", ctx->principal_event_id, ctx->username,
-          wyl_principal_event_name (ctx->principal_event),
-          wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-          wyl_principal_state_name (ctx->principal_new_state));
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (gint i = 0; i < ctx->principal_event_count; i++) {
+    rc = enqueue_session_event_delta (verification, "principal_fired",
+            ctx->principal_event_ids[i], ctx->username,
+            wyl_principal_event_name (ctx->principal_events[i]),
+            wyl_principal_state_name (ctx->principal_event_from[i]),
+            wyl_principal_state_name (ctx->principal_event_to[i]));
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   return enqueue_session_event_delta (verification, "session_fired",
              ctx->session_event_id, ctx->session_id,
              wyl_session_event_name (ctx->session_event),
@@ -796,8 +841,12 @@ publish_login_mutation (WylLoginPublication *ctx)
           NULL);
   g_clear_pointer (&engine_session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
-  if (rc == WYRELOG_E_OK && ctx->principal_audit_event != NULL)
-    (void) wyl_audit_mirror_event (ctx->handle, ctx->principal_audit_event);
+  if (rc == WYRELOG_E_OK) {
+    for (gint i = 0; i < ctx->principal_event_count; i++)
+      if (ctx->principal_audit_events[i] != NULL)
+        (void) wyl_audit_mirror_event (ctx->handle,
+            ctx->principal_audit_events[i]);
+  }
   if (rc == WYRELOG_E_OK && ctx->session_audit_event != NULL)
     (void) wyl_audit_mirror_event (ctx->handle, ctx->session_audit_event);
 #endif
@@ -882,42 +931,34 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (username != NULL) {
-    wyl_principal_state_t state = WYL_PRINCIPAL_STATE_LAST_;
-    wyl_principal_event_t event = WYL_PRINCIPAL_EVENT_LOGIN_OK;
-    wyl_principal_state_t expected = WYL_PRINCIPAL_STATE_MFA_REQUIRED;
-    if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
-      event = WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA;
-      expected = WYL_PRINCIPAL_STATE_AUTHENTICATED;
-    }
-    wyrelog_error_t rc = wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_UNVERIFIED,
-            event, &state);
-    if (rc != WYRELOG_E_OK || state != expected) {
-      g_object_unref (session);
-      return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
-    }
+    gboolean skip_mfa = req != NULL && wyl_login_req_get_skip_mfa (req);
+    wyrelog_error_t rc;
 #ifdef WYL_HAS_AUDIT
-    g_autoptr (WylAuditEvent) principal_ev = NULL;
-    if (req != NULL && wyl_login_req_get_skip_mfa (req))
-      principal_ev = new_login_skip_mfa_allowed_audit (username,
-              wyl_login_req_get_request_id (req));
-    else
-      principal_ev = new_principal_state_audit (username,
-              wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-              wyl_principal_state_name (state), wyl_principal_event_name (event),
-              wyl_login_req_get_request_id (req));
     g_autoptr (WylAuditEvent) session_ev =
         new_session_state_audit (session_id,
             wyl_session_state_name (wyl_session_state_load_private (session)),
             "active", wyl_login_req_get_request_id (req));
 #else
-    WylAuditEvent *principal_ev = NULL;
     WylAuditEvent *session_ev = NULL;
 #endif
-    WylLoginPublication publication = { handle, username, event, state,
-                                        session_id, WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-                                        WYL_SESSION_STATE_ACTIVE, principal_ev, session_ev, -1, -1};
+    WylLoginPublication publication = {
+      .handle = handle,
+      .username = username,
+      .skip_mfa = skip_mfa,
+      .request_id = req != NULL ? wyl_login_req_get_request_id (req) : NULL,
+      .session_id = session_id,
+      .session_old_state = WYL_SESSION_STATE_IDLE,
+      .session_event = WYL_SESSION_EVENT_REQUEST,
+      .session_new_state = WYL_SESSION_STATE_ACTIVE,
+      .session_audit_event = session_ev,
+      .principal_event_ids = {-1, -1},
+      .session_event_id = -1,
+    };
     rc = publish_login_mutation (&publication);
     if (rc != WYRELOG_E_OK) {
+#ifdef WYL_HAS_AUDIT
+      clear_login_principal_audits (&publication);
+#endif
       g_object_unref (session);
       return rc;
     }
@@ -927,14 +968,21 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
      * becomes reachable.  A normal login only reaches mfa_required and is not
      * yet authenticated, so it leaves authn_epoch at 0; the MFA_OK commit
      * stamps it later. */
-    if (event == WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA)
-      session_store_authn_epoch (session, publication.principal_event_id);
+    if (skip_mfa && publication.principal_event_count > 0)
+      session_store_authn_epoch (session,
+          publication.principal_event_ids[publication.principal_event_count - 1]);
     wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {
+#ifdef WYL_HAS_AUDIT
+      clear_login_principal_audits (&publication);
+#endif
       g_object_unref (session);
       return rc;
     }
+#ifdef WYL_HAS_AUDIT
+    clear_login_principal_audits (&publication);
+#endif
     *out_session = session;
     return WYRELOG_E_OK;
   }
