@@ -403,6 +403,25 @@ test_exact_verifier_rejects_extra_and_wrong_rows (void)
   }
 }
 
+/*
+ * Issue #752: the same idempotency contract as the audit build, asserted here
+ * too because the audit-disabled CI leg compiles only this binary and the
+ * wyrelogd-readiness-persistent shell probe - without this the regression is
+ * guarded end to end but never as a unit in the configuration that broke.
+ */
+static void
+test_snapshot_reload_ready_is_idempotent (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_daemon_check_policy_snapshot_reload_ready (handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_daemon_check_policy_snapshot_reload_ready (handle), ==,
+      WYRELOG_E_OK);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -417,5 +436,7 @@ main (int argc, char **argv)
       test_postcommit_faults_preserve_durable_bundle_and_poison);
   g_test_add_func ("/daemon/checks/noaudit/exact-verifier-negative",
       test_exact_verifier_rejects_extra_and_wrong_rows);
+  g_test_add_func ("/daemon/checks/noaudit/snapshot-reload-idempotent",
+      test_snapshot_reload_ready_is_idempotent);
   return g_test_run ();
 }

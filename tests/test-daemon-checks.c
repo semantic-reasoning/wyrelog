@@ -480,6 +480,30 @@ check_unsafe_service_closure_latches_service_auth_at_reload (void)
   return 0;
 }
 
+/*
+ * Issue #752: the readiness probe logs in and verifies MFA for the same
+ * subject on every run.  Under the ratified single-active precedence a login
+ * that observes an already-authenticated principal appends no transition, so
+ * a verify that insists on driving mfa_required -> authenticated can never
+ * succeed the second time.  The probe has to stay idempotent against one
+ * durable store: tests/check-wyrelogd-readiness-persistent.sh runs
+ * `wyrelogd --check` twice over the same policy database, and this is that
+ * scenario in process.
+ */
+static gint
+check_snapshot_reload_ready_is_idempotent (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 110;
+  if (wyl_daemon_check_policy_snapshot_reload_ready (handle) != WYRELOG_E_OK)
+    return 111;
+  if (wyl_daemon_check_policy_snapshot_reload_ready (handle) != WYRELOG_E_OK)
+    return 112;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -501,6 +525,8 @@ main (void)
   if ((rc = check_login_skip_mfa_ready_allows_policy_path ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_ready_allows_role_policy_path ()) != 0)
+    return rc;
+  if ((rc = check_snapshot_reload_ready_is_idempotent ()) != 0)
     return rc;
   return 0;
 }

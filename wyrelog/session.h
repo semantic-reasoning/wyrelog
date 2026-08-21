@@ -91,6 +91,22 @@ wyrelog_error_t wyl_session_login (WylHandle * handle,
  * Trusted host-side transition primitive. This function records that MFA was
  * already verified by external trusted code; it does not inspect OTP material
  * and must not be wired directly to user-supplied HTTP or client proof.
+ *
+ * Issue #752: WYRELOG_E_OK does not by itself mean this session became
+ * MFA-assured. When |session| came from a login that observed an already-
+ * authenticated principal, the ratified single-active precedence has already
+ * granted the transition and there is nothing to apply, so this reports the
+ * idempotent success and leaves the session non-authoritative. While the
+ * principal stays authenticated, such a session becomes assured only by
+ * re-authenticating with a proof; if the principal is later driven back to
+ * mfa_required, the ordinary transition applies to it again like any other.
+ *
+ * wyl_session_mfa_verify_with_proof, declared below, is unaffected: it still
+ * applies the transition itself, which an attached session cannot do, so it
+ * fails closed with WYRELOG_E_POLICY rather than reporting this idempotent
+ * success. (The internal publishing-validator boundary is different again -
+ * its validator both consumes the proof and publishes, and for an attached
+ * session it routes to reauthentication, which succeeds.)
  */
 wyrelog_error_t wyl_session_mfa_verify (WylHandle * handle,
     WylSession * session);
