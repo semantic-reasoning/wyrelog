@@ -15,7 +15,7 @@ static wyrelog_error_t
 store_active_scope (WylHandle *handle, const gchar *scope)
 {
   return wyl_policy_store_set_session_state (wyl_handle_get_policy_store
-      (handle), scope, "active");
+               (handle), scope, "active");
 }
 
 static wyrelog_error_t
@@ -48,7 +48,7 @@ grant_role_permission (WylHandle *handle, const gchar *subject_id,
     return rc;
   if (!exists) {
     rc = wyl_policy_store_upsert_permission (store, permission, permission,
-        "basic");
+            "basic");
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -263,7 +263,7 @@ count_principal_event_fact (WylHandle *handle, const gchar *relation,
   PrincipalEventFactExpect expect = { relation, row, 0 };
 
   wyrelog_error_t rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-      relation, principal_event_fact_expect_cb, &expect);
+          relation, principal_event_fact_expect_cb, &expect);
   if (rc != WYRELOG_E_OK)
     return rc;
   *out_matches = expect.matches;
@@ -282,14 +282,14 @@ expect_session_transition (WylHandle *handle, const gchar *session_id,
     .to_state = to_state,
   };
   if (wyl_policy_store_foreach_session_event (wyl_handle_get_policy_store
-          (handle), session_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+        (handle), session_event_expect_cb, &event_expect) != WYRELOG_E_OK)
     return base_code;
   if (event_expect.matches != 1)
     return base_code + 1;
 
   gint64 row[5];
   if (intern_session_fired_row (handle, event_expect.event_id, session_id,
-          from_state, event, to_state, row) != WYRELOG_E_OK)
+      from_state, event, to_state, row) != WYRELOG_E_OK)
     return base_code + 2;
   guint matches = 0;
   if (count_principal_event_fact (handle, "session_fired", row, &matches)
@@ -301,7 +301,7 @@ expect_session_transition (WylHandle *handle, const gchar *session_id,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return base_code + 5;
   if (intern_session_fired_row (handle, event_expect.event_id, session_id,
-          from_state, event, to_state, row) != WYRELOG_E_OK)
+      from_state, event, to_state, row) != WYRELOG_E_OK)
     return base_code + 6;
   matches = 0;
   if (count_principal_event_fact (handle, "session_fired", row, &matches)
@@ -524,7 +524,7 @@ check_login_requires_mfa_before_allow (void)
   if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 71;
   if (grant_direct (handle, "login-user", "site.login-permission",
-          "login-scope") != WYRELOG_E_OK)
+      "login-scope") != WYRELOG_E_OK)
     return 72;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
@@ -558,10 +558,10 @@ check_mfa_verify_authenticates_engine_principal (void)
   if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 81;
   if (grant_direct (handle, "login-user", "site.login-permission",
-          "login-scope") != WYRELOG_E_OK)
+      "login-scope") != WYRELOG_E_OK)
     return 82;
   if (wyl_handle_apply_permission_state_transition (handle, "login-user",
-          "site.login-permission", "login-scope", "grant", NULL, NULL)
+      "site.login-permission", "login-scope", "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 231;
 
@@ -607,7 +607,7 @@ check_mfa_delta_callback_survives_state_reload (void)
 
   gint64 row[5];
   if (intern_principal_fired_row (handle, 2, "mfa-delta-user",
-          "mfa_required", "mfa_ok", "authenticated", row) != WYRELOG_E_OK)
+      "mfa_required", "mfa_ok", "authenticated", row) != WYRELOG_E_OK)
     return 93;
   DeltaFactExpect expect = {
     .relation = "principal_fired",
@@ -616,7 +616,7 @@ check_mfa_delta_callback_survives_state_reload (void)
     .kind = WYL_DELTA_INSERT,
   };
   if (wyl_handle_engine_set_delta_callback (handle, delta_fact_expect_cb,
-          &expect) != WYRELOG_E_OK)
+      &expect) != WYRELOG_E_OK)
     return 94;
   if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
     return 95;
@@ -661,7 +661,7 @@ check_login_persists_mfa_required_state (void)
     .state = "mfa_required",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 112;
   if (expect.matches != 1)
     return 113;
@@ -688,7 +688,7 @@ check_mfa_verify_persists_authenticated_state (void)
     .state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 123;
   if (expect.matches != 1)
     return 124;
@@ -716,7 +716,7 @@ check_login_persists_active_session_state (void)
     .state = "active",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 133;
   if (expect.matches != 1)
     return 134;
@@ -740,7 +740,7 @@ check_login_inserts_wirelog_session_fired (void)
   if (session_id == NULL)
     return 138;
   return expect_session_transition (handle, session_id, "idle", "request",
-      "active", 139);
+             "active", 139);
 }
 
 static gint
@@ -752,7 +752,7 @@ check_login_delta_callback_survives_state_reload (void)
 
   gint64 row[5];
   if (intern_principal_fired_row (handle, 1, "login-delta-user",
-          "unverified", "login_ok", "mfa_required", row) != WYRELOG_E_OK)
+      "unverified", "login_ok", "mfa_required", row) != WYRELOG_E_OK)
     return 142;
   DeltaFactExpect principal_expect = {
     .relation = "principal_fired",
@@ -761,7 +761,7 @@ check_login_delta_callback_survives_state_reload (void)
     .kind = WYL_DELTA_INSERT,
   };
   if (wyl_handle_engine_set_delta_callback (handle, delta_fact_expect_cb,
-          &principal_expect) != WYRELOG_E_OK)
+      &principal_expect) != WYRELOG_E_OK)
     return 143;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
@@ -774,7 +774,7 @@ check_login_delta_callback_survives_state_reload (void)
 
   guint session_fired = 0;
   if (wyl_handle_engine_set_delta_callback (handle, delta_relation_count_cb,
-          &session_fired) != WYRELOG_E_OK)
+      &session_fired) != WYRELOG_E_OK)
     return 146;
   g_autoptr (wyl_login_req_t) second_login = wyl_login_req_new ();
   wyl_login_req_set_username (second_login, "login-delta-session-user");
@@ -803,10 +803,10 @@ check_login_session_id_is_active_decision_scope (void)
   if (session_id == NULL)
     return 144;
   if (grant_direct (handle, "session-id-user", "site.session-id-permission",
-          session_id) != WYRELOG_E_OK)
+      session_id) != WYRELOG_E_OK)
     return 145;
   if (wyl_handle_apply_permission_state_transition (handle, "session-id-user",
-          "site.session-id-permission", session_id, "grant", NULL, NULL)
+      "site.session-id-permission", session_id, "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 233;
 
@@ -863,10 +863,10 @@ check_mfa_verify_with_proof_requires_validator (void)
   if (store_active_scope (handle, "mfa-proof-scope") != WYRELOG_E_OK)
     return 101;
   if (grant_direct (handle, "mfa-proof-user", "site.mfa-proof-permission",
-          "mfa-proof-scope") != WYRELOG_E_OK)
+      "mfa-proof-scope") != WYRELOG_E_OK)
     return 102;
   if (wyl_handle_apply_permission_state_transition (handle, "mfa-proof-user",
-          "site.mfa-proof-permission", "mfa-proof-scope", "grant", NULL, NULL)
+      "site.mfa-proof-permission", "mfa-proof-scope", "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 234;
 
@@ -877,24 +877,24 @@ check_mfa_verify_with_proof_requires_validator (void)
     return 103;
 
   if (wyl_session_mfa_verify_with_proof (NULL, session, "123456",
-          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+      allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
     return 104;
   if (wyl_session_mfa_verify_with_proof (handle, NULL, "123456",
-          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+      allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
     return 105;
   if (wyl_session_mfa_verify_with_proof (handle, session, NULL,
-          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+      allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
     return 106;
   if (wyl_session_mfa_verify_with_proof (handle, session, "",
-          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+      allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
     return 107;
   if (wyl_session_mfa_verify_with_proof (handle, session, "123456",
-          NULL, "123456") != WYRELOG_E_INVALID)
+      NULL, "123456") != WYRELOG_E_INVALID)
     return 108;
 
   guint reject_calls = 0;
   if (wyl_session_mfa_verify_with_proof (handle, session, "123456",
-          reject_mfa_validator, &reject_calls) != WYRELOG_E_POLICY)
+      reject_mfa_validator, &reject_calls) != WYRELOG_E_POLICY)
     return 109;
   if (reject_calls != 1)
     return 110;
@@ -904,7 +904,7 @@ check_mfa_verify_with_proof_requires_validator (void)
     .state = "mfa_required",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &required) != WYRELOG_E_OK)
+        (handle), principal_state_expect_cb, &required) != WYRELOG_E_OK)
     return 111;
   if (required.matches != 1)
     return 112;
@@ -914,7 +914,7 @@ check_mfa_verify_with_proof_requires_validator (void)
     .state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &authenticated)
+        (handle), principal_state_expect_cb, &authenticated)
       != WYRELOG_E_OK)
     return 113;
   if (authenticated.matches != 0)
@@ -931,7 +931,7 @@ check_mfa_verify_with_proof_requires_validator (void)
     return 116;
 
   if (wyl_session_mfa_verify_with_proof (handle, session, "123456",
-          allow_mfa_validator, "123456") != WYRELOG_E_OK)
+      allow_mfa_validator, "123456") != WYRELOG_E_OK)
     return 117;
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
     return 118;
@@ -966,7 +966,7 @@ check_login_skip_mfa_rejected_by_default (void)
     .state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 153;
   return expect.matches == 0 ? 0 : 154;
 }
@@ -981,10 +981,10 @@ check_login_skip_mfa_authenticates_principal (void)
   if (store_active_scope (handle, "skip-mfa-scope") != WYRELOG_E_OK)
     return 151;
   if (grant_direct (handle, "skip-mfa-user", "site.skip-mfa-permission",
-          "skip-mfa-scope") != WYRELOG_E_OK)
+      "skip-mfa-scope") != WYRELOG_E_OK)
     return 152;
   if (wyl_handle_apply_permission_state_transition (handle, "skip-mfa-user",
-          "site.skip-mfa-permission", "skip-mfa-scope", "grant", NULL, NULL)
+      "site.skip-mfa-permission", "skip-mfa-scope", "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 232;
 
@@ -1003,7 +1003,7 @@ check_login_skip_mfa_authenticates_principal (void)
     .state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 156;
   if (expect.matches != 1)
     return 157;
@@ -1014,7 +1014,7 @@ check_login_skip_mfa_authenticates_principal (void)
     .to_state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
-          (handle), principal_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+        (handle), principal_event_expect_cb, &event_expect) != WYRELOG_E_OK)
     return 160;
   if (event_expect.matches != 1)
     return 161;
@@ -1050,20 +1050,20 @@ check_login_skip_mfa_uses_deployment_mode (void)
     return 160;
 
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
-          (handle), "development") != WYRELOG_E_OK)
+        (handle), "development") != WYRELOG_E_OK)
     return 161;
   if (!wyl_handle_get_login_skip_mfa_allowed (handle))
     return 162;
 
   g_autoptr (WylSession) development_session = NULL;
   if (login_skip_mfa_user (handle, "skip-mfa-development-user",
-          &development_session) != WYRELOG_E_OK)
+      &development_session) != WYRELOG_E_OK)
     return 163;
   if (development_session == NULL)
     return 164;
 
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
-          (handle), "demo") != WYRELOG_E_OK)
+        (handle), "demo") != WYRELOG_E_OK)
     return 165;
 
   g_autoptr (WylSession) demo_session = NULL;
@@ -1078,14 +1078,14 @@ check_login_skip_mfa_uses_deployment_mode (void)
     return 168;
 
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
-          (handle), "production") != WYRELOG_E_OK)
+        (handle), "production") != WYRELOG_E_OK)
     return 169;
   if (wyl_handle_get_login_skip_mfa_allowed (handle))
     return 170;
 
   g_autoptr (WylSession) production_session = NULL;
   if (login_skip_mfa_user (handle, "skip-mfa-production-user",
-          &production_session) != WYRELOG_E_POLICY)
+      &production_session) != WYRELOG_E_POLICY)
     return 171;
   if (production_session != NULL)
     return 172;
@@ -1100,11 +1100,11 @@ check_login_skip_mfa_uses_policy_permission (void)
     return 173;
 
   if (grant_direct (handle, "skip-mfa-policy-user", "wr.login.skip_mfa",
-          "login") != WYRELOG_E_OK)
+      "login") != WYRELOG_E_OK)
     return 174;
   if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
-          (handle), "skip-mfa-policy-user", "wr.login.skip_mfa", "login",
-          "armed") != WYRELOG_E_OK)
+        (handle), "skip-mfa-policy-user", "wr.login.skip_mfa", "login",
+      "armed") != WYRELOG_E_OK)
     return 200;
 
   g_autoptr (WylSession) policy_session = NULL;
@@ -1119,7 +1119,7 @@ check_login_skip_mfa_uses_policy_permission (void)
     .state = "authenticated",
   };
   if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
-          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 177;
   if (expect.matches != 1)
     return 178;
@@ -1132,21 +1132,21 @@ check_login_skip_mfa_uses_policy_permission (void)
     return 180;
 
   if (grant_direct (handle, "skip-mfa-wrong-scope-user", "wr.login.skip_mfa",
-          "not-login") != WYRELOG_E_OK)
+      "not-login") != WYRELOG_E_OK)
     return 181;
   g_autoptr (WylSession) wrong_scope_session = NULL;
   if (login_skip_mfa_user (handle, "skip-mfa-wrong-scope-user",
-          &wrong_scope_session) != WYRELOG_E_POLICY)
+      &wrong_scope_session) != WYRELOG_E_POLICY)
     return 182;
   if (wrong_scope_session != NULL)
     return 183;
 
   if (grant_role_permission (handle, "skip-mfa-role-user",
-          "site.skip-mfa-role", "wr.login.skip_mfa", "login") != WYRELOG_E_OK)
+      "site.skip-mfa-role", "wr.login.skip_mfa", "login") != WYRELOG_E_OK)
     return 184;
   if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
-          (handle), "skip-mfa-role-user", "wr.login.skip_mfa", "login",
-          "armed") != WYRELOG_E_OK)
+        (handle), "skip-mfa-role-user", "wr.login.skip_mfa", "login",
+      "armed") != WYRELOG_E_OK)
     return 201;
   g_autoptr (WylSession) role_session = NULL;
   if (login_skip_mfa_user (handle, "skip-mfa-role-user", &role_session)
@@ -1167,8 +1167,8 @@ check_login_skip_mfa_does_not_use_state_without_permission (void)
 
   gint64 event_id = -1;
   if (wyl_handle_apply_permission_state_transition (handle,
-          "skip-mfa-state-only-user", "wr.login.skip_mfa", "login", "grant",
-          NULL, &event_id) != WYRELOG_E_OK)
+      "skip-mfa-state-only-user", "wr.login.skip_mfa", "login", "grant",
+      NULL, &event_id) != WYRELOG_E_OK)
     return 188;
   if (event_id <= 0)
     return 189;
@@ -1188,20 +1188,20 @@ check_login_skip_mfa_policy_permission_observes_state_lifecycle (void)
     return 192;
 
   if (grant_direct (handle, "skip-mfa-dormant-user", "wr.login.skip_mfa",
-          "login") != WYRELOG_E_OK)
+      "login") != WYRELOG_E_OK)
     return 193;
 
   gint64 event_id = -1;
   if (wyl_handle_apply_permission_state_transition (handle,
-          "skip-mfa-dormant-user", "wr.login.skip_mfa", "login", "grant",
-          NULL, &event_id) != WYRELOG_E_OK)
+      "skip-mfa-dormant-user", "wr.login.skip_mfa", "login", "grant",
+      NULL, &event_id) != WYRELOG_E_OK)
     return 194;
   if (event_id <= 0)
     return 195;
   event_id = -1;
   if (wyl_handle_apply_permission_state_transition (handle,
-          "skip-mfa-dormant-user", "wr.login.skip_mfa", "login", "revoke",
-          NULL, &event_id) != WYRELOG_E_OK)
+      "skip-mfa-dormant-user", "wr.login.skip_mfa", "login", "revoke",
+      NULL, &event_id) != WYRELOG_E_OK)
     return 196;
   if (event_id <= 0)
     return 197;
@@ -1230,7 +1230,7 @@ check_login_skip_mfa_inserts_wirelog_principal_fired (void)
 
   gint64 row[5];
   if (intern_principal_fired_row (handle, 1, "skip-mfa-fired-user",
-          "unverified", "login_skip_mfa", "authenticated", row)
+      "unverified", "login_skip_mfa", "authenticated", row)
       != WYRELOG_E_OK)
     return 164;
   guint matches = 0;
@@ -1243,7 +1243,7 @@ check_login_skip_mfa_inserts_wirelog_principal_fired (void)
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 167;
   if (intern_principal_fired_row (handle, 1, "skip-mfa-fired-user",
-          "unverified", "login_skip_mfa", "authenticated", row)
+      "unverified", "login_skip_mfa", "authenticated", row)
       != WYRELOG_E_OK)
     return 168;
   matches = 0;
@@ -1263,8 +1263,8 @@ check_login_skip_mfa_does_not_bypass_guarded_permission (void)
   if (store_active_scope (handle, "skip-mfa-guarded-scope") != WYRELOG_E_OK)
     return 167;
   if (grant_role_permission (handle, "skip-mfa-guarded-user",
-          "site.skip-mfa-guarded-role", "wr.audit.read",
-          "skip-mfa-guarded-scope") != WYRELOG_E_OK)
+      "site.skip-mfa-guarded-role", "wr.audit.read",
+      "skip-mfa-guarded-scope") != WYRELOG_E_OK)
     return 168;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
@@ -1320,7 +1320,7 @@ check_session_close_persists_closed_state (void)
     .state = "closed",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 164;
   if (expect.matches != 1)
     return 165;
@@ -1345,7 +1345,7 @@ check_session_close_inserts_wirelog_session_fired (void)
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
     return 169;
   return expect_session_transition (handle, session_id, "active", "logout",
-      "closed", 175);
+             "closed", 175);
 }
 
 static gint
@@ -1367,10 +1367,10 @@ check_session_close_deactivates_decision_scope (void)
   if (session_id == NULL)
     return 173;
   if (grant_direct (handle, "close-user", "site.close-permission",
-          session_id) != WYRELOG_E_OK)
+      session_id) != WYRELOG_E_OK)
     return 174;
   if (wyl_handle_apply_permission_state_transition (handle, "close-user",
-          "site.close-permission", session_id, "grant", NULL, NULL)
+      "site.close-permission", session_id, "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 241;
 
@@ -1387,7 +1387,7 @@ check_session_close_deactivates_decision_scope (void)
   if (wyl_decide_resp_get_decision (after_resp) != WYL_DECISION_DENY)
     return 178;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (after_resp),
-          "session_inactive") != 0)
+      "session_inactive") != 0)
     return 179;
   return 0;
 }
@@ -1429,7 +1429,7 @@ check_session_elevate_persists_elevated_state (void)
     .state = "elevated",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 204;
   if (expect.matches != 1)
     return 205;
@@ -1455,19 +1455,19 @@ check_session_transitions_insert_wirelog_session_fired (void)
   if (wyl_session_elevate (handle, session) != WYRELOG_E_OK)
     return 209;
   gint rc = expect_session_transition (handle, session_id, "active",
-      "elevate_grant", "elevated", 210);
+          "elevate_grant", "elevated", 210);
   if (rc != 0)
     return rc;
   if (wyl_session_drop_elevation (handle, session) != WYRELOG_E_OK)
     return 219;
   rc = expect_session_transition (handle, session_id, "elevated",
-      "elevate_drop", "active", 220);
+          "elevate_drop", "active", 220);
   if (rc != 0)
     return rc;
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
     return 229;
   return expect_session_transition (handle, session_id, "active",
-      "idle_timeout", "idle", 230);
+             "idle_timeout", "idle", 230);
 }
 
 static gint
@@ -1495,7 +1495,7 @@ check_session_drop_elevation_persists_active_state (void)
     .state = "active",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 215;
   if (expect.matches != 1)
     return 216;
@@ -1523,10 +1523,10 @@ check_elevated_session_remains_active_decision_scope (void)
   if (session_id == NULL)
     return 224;
   if (grant_direct (handle, "elevate-user", "site.elevate-permission",
-          session_id) != WYRELOG_E_OK)
+      session_id) != WYRELOG_E_OK)
     return 225;
   if (wyl_handle_apply_permission_state_transition (handle, "elevate-user",
-          "site.elevate-permission", session_id, "grant", NULL, NULL)
+      "site.elevate-permission", session_id, "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 242;
 
@@ -1563,11 +1563,11 @@ check_elevated_session_close_deactivates_decision_scope (void)
   if (session_id == NULL)
     return 234;
   if (grant_direct (handle, "elevated-close-user",
-          "site.elevated-close-permission", session_id) != WYRELOG_E_OK)
+      "site.elevated-close-permission", session_id) != WYRELOG_E_OK)
     return 235;
   if (wyl_handle_apply_permission_state_transition (handle,
-          "elevated-close-user", "site.elevated-close-permission", session_id,
-          "grant", NULL, NULL) != WYRELOG_E_OK)
+      "elevated-close-user", "site.elevated-close-permission", session_id,
+      "grant", NULL, NULL) != WYRELOG_E_OK)
     return 242;
 
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
@@ -1583,7 +1583,7 @@ check_elevated_session_close_deactivates_decision_scope (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 239;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "session_inactive") != 0)
+      "session_inactive") != 0)
     return 240;
   return 0;
 }
@@ -1611,7 +1611,7 @@ check_session_idle_timeout_persists_idle_state (void)
     .state = "idle",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 264;
   if (expect.matches != 1)
     return 265;
@@ -1637,10 +1637,10 @@ check_idle_session_deactivates_decision_scope (void)
   if (session_id == NULL)
     return 273;
   if (grant_direct (handle, "idle-user", "site.idle-permission",
-          session_id) != WYRELOG_E_OK)
+      session_id) != WYRELOG_E_OK)
     return 274;
   if (wyl_handle_apply_permission_state_transition (handle, "idle-user",
-          "site.idle-permission", session_id, "grant", NULL, NULL)
+      "site.idle-permission", session_id, "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 286;
 
@@ -1657,7 +1657,7 @@ check_idle_session_deactivates_decision_scope (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 278;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "session_inactive") != 0)
+      "session_inactive") != 0)
     return 279;
   return 0;
 }
@@ -1683,11 +1683,11 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   if (session_id == NULL)
     return 284;
   if (grant_direct (handle, "elevated-idle-user",
-          "site.elevated-idle-permission", session_id) != WYRELOG_E_OK)
+      "site.elevated-idle-permission", session_id) != WYRELOG_E_OK)
     return 285;
   if (wyl_handle_apply_permission_state_transition (handle,
-          "elevated-idle-user", "site.elevated-idle-permission", session_id,
-          "grant", NULL, NULL) != WYRELOG_E_OK)
+      "elevated-idle-user", "site.elevated-idle-permission", session_id,
+      "grant", NULL, NULL) != WYRELOG_E_OK)
     return 286;
 
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
@@ -1703,7 +1703,7 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 289;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "session_inactive") != 0)
+      "session_inactive") != 0)
     return 290;
   return 0;
 }
@@ -1731,7 +1731,7 @@ check_session_expire_persists_expiring_state (void)
     .state = "expiring",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 304;
   if (expect.matches != 1)
     return 305;
@@ -1757,10 +1757,10 @@ check_expiring_session_deactivates_decision_scope (void)
   if (session_id == NULL)
     return 313;
   if (grant_direct (handle, "expiry-user", "site.expiry-permission",
-          session_id) != WYRELOG_E_OK)
+      session_id) != WYRELOG_E_OK)
     return 314;
   if (wyl_handle_apply_permission_state_transition (handle, "expiry-user",
-          "site.expiry-permission", session_id, "grant", NULL, NULL)
+      "site.expiry-permission", session_id, "grant", NULL, NULL)
       != WYRELOG_E_OK)
     return 320;
 
@@ -1777,7 +1777,7 @@ check_expiring_session_deactivates_decision_scope (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 318;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "session_inactive") != 0)
+      "session_inactive") != 0)
     return 319;
   return 0;
 }
@@ -1807,7 +1807,7 @@ check_expiring_session_expire_persists_closed_state (void)
     .state = "closed",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 325;
   if (expect.matches != 1)
     return 326;
@@ -1832,13 +1832,13 @@ check_session_expiry_inserts_wirelog_session_fired (void)
   if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
     return 337;
   gint rc = expect_session_transition (handle, session_id, "active",
-      "expiry", "expiring", 338);
+          "expiry", "expiring", 338);
   if (rc != 0)
     return rc;
   if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
     return 347;
   return expect_session_transition (handle, session_id, "expiring",
-      "expiry", "closed", 348);
+             "expiry", "closed", 348);
 }
 
 static gint
@@ -1866,7 +1866,7 @@ check_elevated_session_expire_persists_expiring_state (void)
     .state = "expiring",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
-          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+        (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 335;
   if (expect.matches != 1)
     return 336;

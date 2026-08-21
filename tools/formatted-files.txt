@@ -3,6 +3,8 @@ tests/test-access-decision.c
 tests/test-audit-emit.c
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
+tests/test-daemon-checks-noaudit.c
+tests/test-daemon-checks.c
 tests/test-daemon-http-decide.c
 tests/test-daemon-http-mfa.c
 tests/test-daemon-mfa-validator-race.c
@@ -38,6 +40,7 @@ tests/test-service-exchange-private.c
 tests/test-session-id.c
 tests/test-session-logout.c
 tests/test-session-registry.c
+tests/test-session-username.c
 tests/test-template-tree.c
 tests/test-traits-compile.c
 tests/test-wyctl-basic.c

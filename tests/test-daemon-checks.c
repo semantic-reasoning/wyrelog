@@ -123,11 +123,11 @@ check_login_skip_mfa_ready_rejects_production_path (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'login_skip_mfa' "
-          "AND subject_id = 'wyrelogd-skip-mfa-user' "
-          "AND deny_reason = 'skip_mfa_not_allowed' "
-          "AND decision = 0;", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'login_skip_mfa' "
+      "AND subject_id = 'wyrelogd-skip-mfa-user' "
+      "AND deny_reason = 'skip_mfa_not_allowed' "
+      "AND decision = 0;", &count))
     return 12;
   if (count != 1)
     return 13;
@@ -135,7 +135,7 @@ check_login_skip_mfa_ready_rejects_production_path (void)
   gint64 row[2];
   gboolean found = FALSE;
   if (wyl_handle_intern_engine_symbol (handle, "wyrelogd-skip-mfa-user",
-          &row[0]) != WYRELOG_E_OK)
+      &row[0]) != WYRELOG_E_OK)
     return 14;
   if (wyl_handle_intern_engine_symbol (handle, "authenticated", &row[1])
       != WYRELOG_E_OK)
@@ -157,7 +157,7 @@ check_login_skip_mfa_ready_allows_development_path (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 30;
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
-          (handle), "development") != WYRELOG_E_OK)
+        (handle), "development") != WYRELOG_E_OK)
     return 31;
   if (wyl_daemon_check_login_skip_mfa_ready (handle) != WYRELOG_E_OK)
     return 32;
@@ -165,18 +165,18 @@ check_login_skip_mfa_ready_allows_development_path (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'login_skip_mfa' "
-          "AND subject_id = 'wyrelogd-skip-mfa-override-user' "
-          "AND deny_reason IS NULL "
-          "AND resource_id = 'principal_state' " "AND decision = 1;", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'login_skip_mfa' "
+      "AND subject_id = 'wyrelogd-skip-mfa-override-user' "
+      "AND deny_reason IS NULL "
+      "AND resource_id = 'principal_state' " "AND decision = 1;", &count))
     return 33;
   if (count != 1)
     return 34;
   if (wyl_handle_get_login_skip_mfa_override_allowed (handle))
     return 35;
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
-          (handle), "production") != WYRELOG_E_OK)
+        (handle), "production") != WYRELOG_E_OK)
     return 36;
   if (wyl_handle_get_login_skip_mfa_allowed (handle))
     return 37;
@@ -192,12 +192,12 @@ check_login_skip_mfa_ready_allows_policy_path (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 40;
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
-          (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login")
+        (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 41;
   if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
-          (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login",
-          "armed") != WYRELOG_E_OK)
+        (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login",
+      "armed") != WYRELOG_E_OK)
     return 65;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 45;
@@ -207,11 +207,11 @@ check_login_skip_mfa_ready_allows_policy_path (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'login_skip_mfa' "
-          "AND subject_id = 'wyrelogd-skip-mfa-user' "
-          "AND deny_reason IS NULL "
-          "AND resource_id = 'principal_state' AND decision = 1;", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'login_skip_mfa' "
+      "AND subject_id = 'wyrelogd-skip-mfa-user' "
+      "AND deny_reason IS NULL "
+      "AND resource_id = 'principal_state' AND decision = 1;", &count))
     return 43;
   if (count != 1)
     return 44;
@@ -229,17 +229,17 @@ check_login_skip_mfa_ready_allows_role_policy_path (void)
     return 46;
   store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_role (store, "wyrelogd-skip-mfa-role",
-          "skip mfa role") != WYRELOG_E_OK)
+      "skip mfa role") != WYRELOG_E_OK)
     return 47;
   if (wyl_policy_store_grant_role_permission (store,
-          "wyrelogd-skip-mfa-role", "wr.login.skip_mfa") != WYRELOG_E_OK)
+      "wyrelogd-skip-mfa-role", "wr.login.skip_mfa") != WYRELOG_E_OK)
     return 48;
   if (wyl_policy_store_grant_role_membership (store,
-          "wyrelogd-skip-mfa-user", "wyrelogd-skip-mfa-role", "login")
+      "wyrelogd-skip-mfa-user", "wyrelogd-skip-mfa-role", "login")
       != WYRELOG_E_OK)
     return 49;
   if (wyl_policy_store_set_permission_state (store, "wyrelogd-skip-mfa-user",
-          "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK)
+      "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK)
     return 66;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 60;
@@ -256,11 +256,11 @@ check_login_skip_mfa_ready_allows_role_policy_path (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'login_skip_mfa' "
-          "AND subject_id = 'wyrelogd-skip-mfa-user' "
-          "AND deny_reason IS NULL "
-          "AND resource_id = 'principal_state' AND decision = 1;", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'login_skip_mfa' "
+      "AND subject_id = 'wyrelogd-skip-mfa-user' "
+      "AND deny_reason IS NULL "
+      "AND resource_id = 'principal_state' AND decision = 1;", &count))
     return 62;
   if (count != 1)
     return 63;
@@ -281,74 +281,74 @@ check_policy_audit_facts_ready_loads_read_engine (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'policy_audit_reload_check' "
-          "AND request_id = 'wyrelogd-readiness-request';", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'policy_audit_reload_check' "
+      "AND request_id = 'wyrelogd-readiness-request';", &count))
     return 52;
   if (count != 0)
     return 53;
 
   sqlite3 *policy_db = wyl_policy_store_get_db (wyl_handle_get_policy_store
-      (handle));
+            (handle));
   if (!count_sqlite_rows (policy_db,
-          "SELECT COUNT(*) FROM audit_intentions "
-          "WHERE action='policy_audit_reload_check' "
-          "AND request_id='wyrelogd-readiness-request' "
-          "AND state='committed';", &count) || count != 1)
+      "SELECT COUNT(*) FROM audit_intentions "
+      "WHERE action='policy_audit_reload_check' "
+      "AND request_id='wyrelogd-readiness-request' "
+      "AND state='committed';", &count) || count != 1)
     return 57;
   if (!count_sqlite_rows (policy_db,
-          "SELECT COUNT(*) FROM audit_intentions "
-          "WHERE action='policy_audit_reload_check' "
-          "AND state IN ('pending','failed');", &count) || count != 0)
+      "SELECT COUNT(*) FROM audit_intentions "
+      "WHERE action='policy_audit_reload_check' "
+      "AND state IN ('pending','failed');", &count) || count != 0)
     return 58;
 
   AuditActionProbe probe = { 0 };
   if (wyl_handle_intern_engine_symbol (handle, "policy_audit_reload_check",
-          &probe.action_id) != WYRELOG_E_OK)
+      &probe.action_id) != WYRELOG_E_OK)
     return 54;
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "audit_event_action", count_audit_action_cb, &probe) != WYRELOG_E_OK)
+      "audit_event_action", count_audit_action_cb, &probe) != WYRELOG_E_OK)
     return 55;
   if (probe.matches == 0)
     return 56;
   if (wyl_daemon_check_audit_sink_ready (handle) != WYRELOG_E_OK)
     return 59;
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'policy_audit_reload_check' "
-          "AND request_id = 'wyrelogd-readiness-request';", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'policy_audit_reload_check' "
+      "AND request_id = 'wyrelogd-readiness-request';", &count))
     return 67;
   if (count != 1)
     return 68;
   if (!count_sqlite_rows (policy_db,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE subject_id='wyrelogd' AND action='daemon_check' "
-          "AND resource_id='audit_events' AND decision=1;", &count)
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE subject_id='wyrelogd' AND action='daemon_check' "
+      "AND resource_id='audit_events' AND decision=1;", &count)
       || count != 1)
     return 69;
   if (!count_sqlite_rows (policy_db,
-          "SELECT COUNT(*) FROM audit_intentions AS i "
-          "JOIN audit_events AS e ON e.id=i.audit_id "
-          "WHERE i.subject_id='wyrelogd' AND i.action='daemon_check' "
-          "AND i.resource_id='audit_events' AND i.decision=1 "
-          "AND i.state='committed' AND i.attempt_count=0 "
-          "AND i.last_error IS NULL "
-          "AND e.subject_id=i.subject_id AND e.action=i.action "
-          "AND e.resource_id=i.resource_id AND e.decision=i.decision "
-          "AND e.created_at_us=i.created_at_us "
-          "AND e.request_id IS i.request_id "
-          "AND e.deny_reason IS i.deny_reason "
-          "AND e.deny_origin IS i.deny_origin;", &count) || count != 1)
+      "SELECT COUNT(*) FROM audit_intentions AS i "
+      "JOIN audit_events AS e ON e.id=i.audit_id "
+      "WHERE i.subject_id='wyrelogd' AND i.action='daemon_check' "
+      "AND i.resource_id='audit_events' AND i.decision=1 "
+      "AND i.state='committed' AND i.attempt_count=0 "
+      "AND i.last_error IS NULL "
+      "AND e.subject_id=i.subject_id AND e.action=i.action "
+      "AND e.resource_id=i.resource_id AND e.decision=i.decision "
+      "AND e.created_at_us=i.created_at_us "
+      "AND e.request_id IS i.request_id "
+      "AND e.deny_reason IS i.deny_reason "
+      "AND e.deny_origin IS i.deny_origin;", &count) || count != 1)
     return 100;
   if (!count_sqlite_rows (policy_db,
-          "SELECT COUNT(*) FROM audit_intentions "
-          "WHERE action='daemon_check' AND state IN ('pending','failed');",
-          &count) || count != 0)
+      "SELECT COUNT(*) FROM audit_intentions "
+      "WHERE action='daemon_check' AND state IN ('pending','failed');",
+      &count) || count != 0)
     return 101;
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE subject_id='wyrelogd' AND action='daemon_check' "
-          "AND resource_id='audit_events' AND decision=1;", &count)
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE subject_id='wyrelogd' AND action='daemon_check' "
+      "AND resource_id='audit_events' AND decision=1;", &count)
       || count != 1)
     return 102;
   return 0;
@@ -368,11 +368,11 @@ check_direct_permission_grant_ready_allows_decide (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'permission_grant' "
-          "AND subject_id = 'wyrelogd-direct-grant-user' "
-          "AND deny_origin = 'wyrelogd.direct_grant.read' "
-          "AND decision = 1;", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'permission_grant' "
+      "AND subject_id = 'wyrelogd-direct-grant-user' "
+      "AND deny_origin = 'wyrelogd.direct_grant.read' "
+      "AND decision = 1;", &count))
     return 72;
   if (count != 1)
     return 73;
@@ -394,14 +394,14 @@ check_permission_state_transition_ready_allows_decide (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   PermissionStateEventProbe probe = { 0 };
   if (wyl_policy_store_foreach_permission_state_event (store,
-          permission_state_event_probe_cb, &probe) != WYRELOG_E_OK)
+      permission_state_event_probe_cb, &probe) != WYRELOG_E_OK)
     return 76;
   if (probe.matches != 1)
     return 77;
 
   AuditEventProbe audit_probe = { 0 };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-          &audit_probe) != WYRELOG_E_OK)
+      &audit_probe) != WYRELOG_E_OK)
     return 78;
   if (audit_probe.matches != 1)
     return 79;
@@ -409,11 +409,11 @@ check_permission_state_transition_ready_allows_decide (void)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'permission_state.grant' "
-          "AND subject_id = 'wyrelogd' "
-          "AND resource_id = 'wyrelogd.perm_state.read' "
-          "AND deny_reason = 'daemon_check' " "AND decision = 1;", &count))
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'permission_state.grant' "
+      "AND subject_id = 'wyrelogd' "
+      "AND resource_id = 'wyrelogd.perm_state.read' "
+      "AND deny_reason = 'daemon_check' " "AND decision = 1;", &count))
     return 80;
   if (count != 1)
     return 81;
@@ -439,7 +439,7 @@ check_unsafe_service_closure_latches_service_auth_at_reload (void)
 
   /* A clean boot leaves service auth available. */
   if (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason)
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason)
       != WYRELOG_E_OK)
     return 91;
   if (reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
@@ -448,15 +448,15 @@ check_unsafe_service_closure_latches_service_auth_at_reload (void)
   /* Register a service principal (safe), then plant an unsafe control-plane
    * direct permission via raw SQL, bypassing the closure mutation guard. */
   if (wyl_policy_store_create_service_principal (store,
-          "svc:closure:reload-unsafe", "reload unsafe", "admin-user",
-          "req-closure-reload-unsafe", &principal) != WYRELOG_E_OK)
+      "svc:closure:reload-unsafe", "reload unsafe", "admin-user",
+      "req-closure-reload-unsafe", &principal) != WYRELOG_E_OK)
     return 93;
   wyl_policy_service_principal_info_clear (&principal);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
-          "INSERT INTO direct_permissions "
-          "(subject_id, perm_id, scope, granted_at) VALUES "
-          "('svc:closure:reload-unsafe', 'wr.service_credential.manage', "
-          "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
+      "INSERT INTO direct_permissions "
+      "(subject_id, perm_id, scope, granted_at) VALUES "
+      "('svc:closure:reload-unsafe', 'wr.service_credential.manage', "
+      "'svc-scope', 0);", NULL, NULL, NULL) != SQLITE_OK)
     return 94;
 
   /* (b) The reload itself succeeds: the daemon would still boot. */
@@ -466,7 +466,7 @@ check_unsafe_service_closure_latches_service_auth_at_reload (void)
   /* (a) Service auth is latched unavailable with the closure reason. */
   reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   if (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason)
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason)
       != WYRELOG_E_BUSY)
     return 96;
   if (reason != WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE)
@@ -488,7 +488,7 @@ main (void)
   if ((rc = check_policy_audit_facts_ready_loads_read_engine ()) != 0)
     return rc;
   if ((rc =
-          check_unsafe_service_closure_latches_service_auth_at_reload ()) != 0)
+      check_unsafe_service_closure_latches_service_auth_at_reload ()) != 0)
     return rc;
   if ((rc = check_direct_permission_grant_ready_allows_decide ()) != 0)
     return rc;
