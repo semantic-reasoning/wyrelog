@@ -416,6 +416,10 @@ spawn_crash_writer_child (const gchar *root)
   wchar_t executable[MAX_PATH + 1] = { 0 };
   DWORD length = GetModuleFileNameW (NULL, executable,
       G_N_ELEMENTS (executable));
+  /* On truncation the call returns the buffer size and leaves the text
+   * unterminated, so the range must be checked before it is converted. */
+  g_assert_cmpuint (length, >, 0);
+  g_assert_cmpuint (length, <, G_N_ELEMENTS (executable));
   g_autofree gchar *exe_utf8 = g_utf16_to_utf8 (
       (const gunichar2 *) executable, length, nullptr, nullptr, nullptr);
   g_autofree gchar *command_utf8 = g_strdup_printf (
@@ -425,8 +429,6 @@ spawn_crash_writer_child (const gchar *root)
   STARTUPINFOW startup = { sizeof startup };
   PROCESS_INFORMATION process = { 0 };
 
-  g_assert_cmpuint (length, >, 0);
-  g_assert_cmpuint (length, <, G_N_ELEMENTS (executable));
   g_assert_nonnull (exe_utf8);
   g_assert_nonnull (command);
   g_assert_true (CreateProcessW (NULL, (LPWSTR) command, NULL, NULL, FALSE,
@@ -974,11 +976,20 @@ test_wal_crash_recovery_and_locking (void)
   Fixture fixture;
 #ifdef G_OS_WIN32
   HANDLE child = spawn_crash_writer_child (fixture.root);
-  g_assert_cmpuint (WaitForSingleObject (child, 10000), ==, WAIT_OBJECT_0);
+  /* A timed-out wait must still reap the child: it holds the database, and
+   * leaving it alive wedges the directory teardown that follows. */
+  const DWORD waited = WaitForSingleObject (child, 10000);
+  if (waited != WAIT_OBJECT_0) {
+    (void) TerminateProcess (child, 1);
+    (void) WaitForSingleObject (child, 5000);
+    (void) CloseHandle (child);
+    g_error ("crash-writer child did not exit within 10000 ms");
+  }
   DWORD exit_code = STILL_ACTIVE;
-  g_assert_true (GetExitCodeProcess (child, &exit_code));
-  g_assert_cmpuint (exit_code, ==, 0);
+  const gboolean read_exit = GetExitCodeProcess (child, &exit_code);
   g_assert_true (CloseHandle (child));
+  g_assert_true (read_exit);
+  g_assert_cmpuint (exit_code, ==, 0);
 #else
   const
   pid_t
@@ -2498,6 +2509,12 @@ int
 main (int argc, char **argv)
 {
 #ifdef G_OS_WIN32
+  /* A deliberately aborting child must fail fast, not sit in a Windows Error
+   * Reporting dialog: the harness has no interactive desktop, so a stalled
+   * abort surfaces as a test timeout with no diagnostic instead of a legible
+   * failure. */
+  SetErrorMode (SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  _set_abort_behavior (0, _CALL_REPORTFAULT);
   gchar **win_argv = g_win32_get_command_line ();
   argc = (int) g_strv_length (win_argv);
   argv = win_argv;

@@ -42,11 +42,15 @@
 #include <io.h>
 #include <fcntl.h>
 
-/* Declare the single Win32 entry point we need for the current executable
- * path without pulling in <windows.h>, whose CreateDirectory/RemoveDirectory/
- * MoveFile macros would rewrite the RecordingFileSystem method names below. */
+/* Declare the few Win32 entry points we need without pulling in <windows.h>,
+ * whose CreateDirectory/RemoveDirectory/MoveFile macros would rewrite the
+ * RecordingFileSystem method names below. */
 extern "C" __declspec (dllimport) unsigned long __stdcall
 GetModuleFileNameW (void *module, wchar_t *filename, unsigned long size);
+extern "C" __declspec (dllimport) unsigned int __stdcall
+SetErrorMode (unsigned int mode);
+#define WYL_SEM_FAILCRITICALERRORS 0x0001u
+#define WYL_SEM_NOGPFAULTERRORBOX 0x0002u
 
 /* GLib child-process tests consume a text trace on stdout.  MSVC has neither
  * POSIX dprintf nor STDOUT_FILENO, so provide the same checked writer without
@@ -6258,6 +6262,12 @@ main (int argc, char **argv)
    * main() entry before the dispatch below; it is harmless for the parent's
    * own TAP output. */
   _setmode (_fileno (stdout), _O_BINARY);
+  /* A deliberately aborting child must fail fast, not sit in a Windows Error
+   * Reporting dialog: the harness has no interactive desktop, so a stalled
+   * abort surfaces as a test timeout with no diagnostic instead of a legible
+   * failure. */
+  SetErrorMode (WYL_SEM_FAILCRITICALERRORS | WYL_SEM_NOGPFAULTERRORBOX);
+  _set_abort_behavior (0, _CALL_REPORTFAULT);
   /* The CRT argv is decoded in the system ANSI codepage, which cannot
    * represent the non-ASCII sandbox paths this suite hands to its re-exec'd
    * children. Reparse the command line as UTF-8 so a child resolves the same
