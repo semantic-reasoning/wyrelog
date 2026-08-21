@@ -22,16 +22,24 @@ struct _WylSession
   /* Monotonic live-session proof provenance.  This is deliberately private:
    * neither public session ABI nor JWT claims may synthesize it. */
   volatile gint mfa_assured;
-  /* Issue #752: the subject-global authentication epoch this session won.
-   * It is the principal_events rowid of the authenticating transition
-   * (login_skip_mfa or the MFA_OK commit) that THIS session drove to
-   * 'authenticated'.  It is 0 for a session that never won an authenticating
-   * transition - a loser that attached to an in-flight ceremony, or a login
-   * against an already-authenticated subject (non-authoritative).  It is
-   * write-once: set on the winning commit, never rewritten; a superseded
-   * session is rejected, not re-stamped.  Mint stamps it into the human JWT
-   * so authorization can reject a token whose epoch the durable watermark
-   * has since moved past. */
+  /* Issue #752: the subject-global authentication epoch this session is
+   * BOUND to.  Normally that is the principal_events rowid of the
+   * authenticating transition (login_skip_mfa or the MFA_OK commit) that THIS
+   * session drove to 'authenticated'.  A login that observed an already-
+   * authenticated principal drives no transition, so it binds instead to the
+   * watermark it observed inside its own publication transaction; it is still
+   * non-authoritative (mfa_assured stays 0) but its tokens are checkable.
+   * It stays 0 only for a session that is bound to no epoch at all - a loser
+   * that attached to an in-flight MFA ceremony, whose subject is not
+   * authenticated yet.  It is write-once: set once on the commit that binds
+   * it and never rewritten to a different value (the TOTP reauth path
+   * re-stores the same observed epoch); a superseded session is rejected,
+   * not re-stamped.  Mint stamps it into the human JWT so authorization can
+   * reject a token whose epoch the durable watermark has since moved past.
+   * The gate this feeds compares epochs only: it does not re-read the live
+   * principal state, so it detects supersession by a LATER authenticating
+   * transition, not de-authentication that leaves the watermark where it is.
+   */
   volatile gint64 authn_epoch;
   volatile gint reauth_pending;
   volatile gint64 reauth_expected_epoch;

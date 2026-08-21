@@ -19708,6 +19708,165 @@ check_tenant_gate_codes_contract (void)
 }
 
 /*
+ * Issue #752 regression: a login that observes an already-authenticated
+ * principal is idempotent - it appends no principal event, so it never
+ * creates an authentication epoch of its own.  The attached session must
+ * still bind to the epoch the login observed inside its own commit, or the
+ * daemon mints an access token carrying epoch 0 while the durable watermark
+ * sits at the first login's rowid, and the supersession gate rejects every
+ * request the attached session makes.
+ *
+ * The check proves both halves: the attached session's token is accepted
+ * while the watermark has not moved (the regression), and it is rejected
+ * once a later authenticating transition advances the watermark past it
+ * (the gate is still doing its job).
+ */
+static wyrelog_error_t
+insert_epoch_fixture (WylHandle *handle, const gchar *subject,
+    const gchar *resource)
+{
+  const gchar *action = "http.allow";
+
+  wyrelog_error_t rc =
+      insert_symbol_row2 (handle, "role_permission", "wr.http-decide-role",
+          action);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", subject, "wr.http-decide-role",
+          resource);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", resource, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row1 (handle, "session_active", "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
+             "armed");
+}
+
+static gint
+check_relogin_binds_current_authn_epoch (WylHandle *handle,
+    const gchar *base_url)
+{
+  const gchar *subject = "http-epoch-user";
+  const gchar *resource = "http-epoch-scope";
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return 22701;
+
+  /* First login: this session drives unverified --login_skip_mfa-->
+   * authenticated, so it wins the epoch it is bound to. */
+  g_autoptr (WylClient) winner = NULL;
+  if (wyl_client_new (base_url, &winner) != WYRELOG_E_OK)
+    return 22702;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  wyrelog_error_t rc = wyl_client_login_skip_mfa (winner, subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != WYRELOG_E_OK)
+    return 22703;
+  if (insert_epoch_fixture (handle, subject, resource) != WYRELOG_E_OK)
+    return 22704;
+
+  gint64 won_epoch = 0;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, subject, &won_epoch,
+      &found) != WYRELOG_E_OK || !found || won_epoch <= 0)
+    return 22705;
+
+  gint decision = -1;
+  if (wyl_client_decide (winner, subject, "http.allow", resource,
+      &decision) != WYRELOG_E_OK)
+    return 22706;
+  if (decision != WYL_DECISION_ALLOW)
+    return 22707;
+
+  /* Second login on a separate client: the subject is already authenticated,
+   * so the ratified precedence attaches without a durable write. */
+  g_autoptr (WylClient) attached = NULL;
+  if (wyl_client_new (base_url, &attached) != WYRELOG_E_OK)
+    return 22708;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  rc = wyl_client_login_skip_mfa (attached, subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != WYRELOG_E_OK)
+    return 22709;
+
+  /* Precondition, so this can never silently degrade into a first-login
+   * test: the attaching login must have appended no authenticating event,
+   * i.e. the durable watermark is exactly where the winner left it. */
+  gint64 attached_epoch = 0;
+  found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, subject,
+      &attached_epoch, &found) != WYRELOG_E_OK || !found
+      || attached_epoch != won_epoch)
+    return 22710;
+
+  if (insert_epoch_fixture (handle, subject, resource) != WYRELOG_E_OK)
+    return 22711;
+  decision = -1;
+  if (wyl_client_decide (attached, subject, "http.allow", resource,
+      &decision) != WYRELOG_E_OK)
+    return 22712;
+  if (decision != WYL_DECISION_ALLOW)
+    return 22713;
+
+  /* Advance the watermark with a real authenticating transition.  There is
+   * no authenticated --> authenticated edge (wyl-fsm-principal.c), so the
+   * minimum sequence is logout then a fresh skip-MFA login. */
+  wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+  gboolean moved = FALSE;
+  gint64 event_id = -1;
+  gint64 now_secs = g_get_real_time () / G_USEC_PER_SEC;
+  if (wyl_policy_store_apply_principal_transition (store, subject,
+      WYL_PRINCIPAL_EVENT_LOGOUT, 0, now_secs, NULL, &to, &moved,
+      &event_id) != WYRELOG_E_OK || !moved)
+    return 22714;
+  if (wyl_policy_store_apply_principal_transition (store, subject,
+      WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 0, now_secs, NULL, &to, &moved,
+      &event_id) != WYRELOG_E_OK || !moved
+      || to != WYL_PRINCIPAL_STATE_AUTHENTICATED)
+    return 22715;
+
+  gint64 advanced_epoch = 0;
+  found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, subject,
+      &advanced_epoch, &found) != WYRELOG_E_OK || !found
+      || advanced_epoch <= won_epoch)
+    return 22716;
+
+  if (insert_epoch_fixture (handle, subject, resource) != WYRELOG_E_OK)
+    return 22717;
+  /* Both are bound to the retired epoch now - the attachment and the session
+   * that won it.  Go through raw HTTP rather than wyl_client_decide, which
+   * collapses every non-2xx into WYRELOG_E_IO: the assertion has to pin 401,
+   * or it keeps passing if the supersession gate is ever replaced by an
+   * unrelated 403 or 500. */
+  g_autoptr (SoupSession) raw = g_object_new (SOUP_TYPE_SESSION, NULL);
+  g_autofree gchar *attached_token = wyl_client_dup_access_token (attached);
+  g_autofree gchar *winner_token = wyl_client_dup_access_token (winner);
+  if (raw == NULL || attached_token == NULL || winner_token == NULL)
+    return 22719;
+
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_decide_bearer (raw, "POST", base_url, subject, "http.allow",
+      resource, NULL, attached_token, &status, &body) != 0 || status != 401)
+    return 22720;
+  g_clear_pointer (&body, g_free);
+  status = 0;
+  if (send_raw_decide_bearer (raw, "POST", base_url, subject, "http.allow",
+      resource, NULL, winner_token, &status, &body) != 0 || status != 401)
+    return 22721;
+
+  return 0;
+}
+
+/*
  * The daemon-http-decide test surface has been split across four binaries
  * compiled from this single translation unit:
  *
@@ -19976,6 +20135,12 @@ main (void)
     return 8;
   if (decision != WYL_DECISION_ALLOW)
     return 9;
+
+  gint relogin_epoch_rc = check_relogin_binds_current_authn_epoch (handle,
+          base_url);
+  if (relogin_epoch_rc != 0)
+    return relogin_epoch_rc;
+
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-guard-user") != WYRELOG_E_OK) {
     wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
