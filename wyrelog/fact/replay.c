@@ -6,7 +6,7 @@
 #include "compound-private.h"
 #include "graph-locator-private.h"
 #include "wyrelog/wyl-engine-private.h"
-#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
 #include "fact/store-open-private.h"
 #endif
 
@@ -591,7 +591,7 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
   wyrelog_error_t rc = WYRELOG_E_OK;
   g_autoptr (wyl_fact_store_t) store = NULL;
   gboolean provisioned = FALSE;
-#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
   /* A provisioning or active graph is read through the live secure handle on
    * its retained pair, not the raw path open. */
   {
