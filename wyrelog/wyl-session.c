@@ -1124,9 +1124,26 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     if (skip_mfa && publication.principal_event_count > 0)
       session_store_authn_epoch (session,
           publication.principal_event_ids[publication.principal_event_count - 1]);
+    /* Issue #752: a login that observed an already-authenticated principal
+     * appends no authenticating transition, so it wins no epoch of its own.
+     * Bind it to the watermark the login observed inside its own commit
+     * instead of leaving it at 0: the observation and the precedence decision
+     * share one publication transaction, so the value cannot be stale by the
+     * time it is stored, and the moment any later authenticating transition
+     * lands the watermark moves past it and every token minted from this
+     * session is rejected - which is exactly what the supersession gate is
+     * for.  Leaving it at 0 instead does not fail closed, it fails useless:
+     * the mint would emit an epoch-0 token that the gate rejects on the very
+     * first request.  mfa_assured stays 0 - no proof was presented - so
+     * reauth_pending below remains the only route to an assured session, and
+     * the epoch is published not by that bit's release but by
+     * wyl_handle_register_session below, which is what makes the session
+     * reachable by any other thread at all. */
     if (publication.principal_outcome ==
-        WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED)
+        WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED) {
+      session_store_authn_epoch (session, publication.principal_authn_epoch);
       session_store_reauth_pending (session, publication.principal_authn_epoch);
+    }
     wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);
     if (rc != WYRELOG_E_OK) {

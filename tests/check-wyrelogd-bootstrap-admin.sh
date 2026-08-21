@@ -384,19 +384,29 @@ PY
   --access-token-file "$TOKEN_FILE" --guard-timestamp 123 \
   --guard-loc-class public --guard-risk 0 >/dev/null
 
-# Two independently authenticated admin sessions may start challenges for the
-# same subject. Exactly one may commit; the lock-protected second confirm
+# Two independently authenticated bootstrap sessions may start challenges for
+# the same subject. Exactly one may commit; the lock-protected second confirm
 # observes the enrollment and returns 409 instead of overwriting its secret.
-# Also covers issue #752 supersession: a second login by the same admin retires
-# the first session's token.
-"$PYTHON" - "http://127.0.0.1:$PORT" "$TOKEN_FILE" "$ADMIN2_TOKEN" <<'PY'
+#
+# Issue #752: two sessions of ONE subject are constructible again. The ratified
+# single-active precedence makes a login against an already-authenticated
+# subject idempotent - it appends no authenticating transition, so it neither
+# advances the durable watermark nor retires the first session's token. The
+# second session attaches to the epoch the first won and is non-authoritative
+# (it is not mfa_assured), but it authenticates. That is what lets the
+# cross-session assertion below - a challenge is bound to the exact session and
+# not merely to the actor - be driven by two sessions of the same admin, as it
+# was before the supersession gate landed.
+#
+# The supersession gate is not asserted here any more, because under this model
+# a second login is not the transition that would trip it. It is asserted where
+# a real watermark advance can be driven: check_relogin_binds_current_authn_epoch
+# in tests/test-daemon-http-decide.c.
+"$PYTHON" - "http://127.0.0.1:$PORT" <<'PY'
 import base64, hashlib, hmac, json, struct, sys, time
 import urllib.error, urllib.request
 
 base = sys.argv[1]
-token_file = sys.argv[2]
-with open(sys.argv[3], encoding="utf-8") as handle:
-    admin2_token = handle.read().strip()
 def login():
     req = urllib.request.Request(
         base + "/auth/login?username=admin1&skip_mfa=true", method="POST")
@@ -415,50 +425,34 @@ def code(secret):
     offset = digest[-1] & 15
     return (struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000
 tokens = [login(), login()]
-# Issue #752: principal_state is subject-global and a login is an authenticating
-# transition, so the second login supersedes the first - the older token is bound
-# to a stale authentication epoch and authorization rejects it. This is the
-# supersession gate itself, end to end: assert it rather than assume it.
-try:
-    urllib.request.urlopen(request("/auth/mfa/enroll/start", tokens[0],
-        {"subject": "admin4"}), timeout=3)
-except urllib.error.HTTPError as exc:
-    if exc.code != 401:
-        raise SystemExit(
-            f"superseded token rejected with {exc.code}, expected 401")
-else:
-    raise SystemExit("superseded token was accepted")
-# Everything below therefore uses the one live session. The previous revision of
-# this block asserted that a challenge is bound to the exact authenticated
-# session and not merely to the actor, by confirming one session's challenge
-# with a second session of the SAME subject. Under single-active-authentication
-# that pairing is no longer constructible: a same-actor second session can only
-# exist by superseding the first, which the assertion above proves is rejected
-# before any challenge lookup runs. The daemon-side binding is unchanged.
-token = tokens[1]
-with urllib.request.urlopen(request("/auth/mfa/enroll/start", token,
+# A challenge is bound to the exact authenticated session, not merely actor.
+with urllib.request.urlopen(request("/auth/mfa/enroll/start", tokens[0],
         {"subject": "admin4"}), timeout=3) as response:
-    owned = json.load(response)
-owner_confirm = request("/auth/mfa/enroll/confirm", token,
-    {"challenge": owned["challenge"],
-     "code": f"{code(owned['secret_base32']):06d}"})
+    cross = json.load(response)
+cross_confirm = request("/auth/mfa/enroll/confirm", tokens[1],
+    {"challenge": cross["challenge"],
+     "code": f"{code(cross['secret_base32']):06d}"})
+try:
+    urllib.request.urlopen(cross_confirm, timeout=3)
+except urllib.error.HTTPError as exc:
+    if exc.code != 401 or json.loads(exc.read())["error"] != "invalid_mfa_enroll_challenge":
+        raise
+else:
+    raise SystemExit("cross-session challenge confirmation succeeded")
+# A foreign session must not consume the challenge. Its legitimate owner can
+# still confirm it successfully afterwards.
+owner_confirm = request("/auth/mfa/enroll/confirm", tokens[0],
+    {"challenge": cross["challenge"],
+     "code": f"{code(cross['secret_base32']):06d}"})
 with urllib.request.urlopen(owner_confirm, timeout=3):
     pass
-# Two concurrent enrollment attempts for one subject: exactly one may commit,
-# and the lock-protected second confirm observes the enrollment and returns 409
-# instead of overwriting its secret. The two attempts must come from two
-# DISTINCT sessions - a session holds one live enrollment challenge, so a second
-# start on the same session supersedes the first. Two sessions of the same admin
-# are no longer constructible under single-active-authentication, so the
-# competing attempt is driven by admin2's session instead.
-competing = [token, admin2_token]
 challenges = []
-for enroller in competing:
-    with urllib.request.urlopen(request("/auth/mfa/enroll/start", enroller,
+for token in tokens:
+    with urllib.request.urlopen(request("/auth/mfa/enroll/start", token,
             {"subject": "admin3"}), timeout=3) as response:
         challenges.append(json.load(response))
-for index, (enroller, challenge) in enumerate(zip(competing, challenges)):
-    confirm = request("/auth/mfa/enroll/confirm", enroller,
+for index, (token, challenge) in enumerate(zip(tokens, challenges)):
+    confirm = request("/auth/mfa/enroll/confirm", token,
         {"challenge": challenge["challenge"],
          "code": f"{code(challenge['secret_base32']):06d}"})
     if index == 0:
@@ -473,10 +467,6 @@ for index, (enroller, challenge) in enumerate(zip(competing, challenges)):
                 raise
         else:
             raise SystemExit("competing enrollment unexpectedly overwrote secret")
-# The logins above superseded whatever admin1 token the earlier steps stored, so
-# hand the live one back for the steps that follow.
-with open(token_file, "w", encoding="utf-8") as handle:
-    handle.write(token)
 PY
 
 # Enroll the bootstrap administrator itself and prove that the live engine
