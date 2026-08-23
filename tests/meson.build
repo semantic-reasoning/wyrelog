@@ -1204,6 +1204,15 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+if get_option('enable_fact_store').allowed()
+  test_fact_artifact_inventory = executable('test-fact-artifact-inventory',
+    'test-fact-artifact-inventory.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+  test('fact-artifact-inventory-contract', test_fact_artifact_inventory)
+endif
+
 test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   'test-fact-artifact-namespace.c',
   include_directories : include_directories('../wyrelog'),
