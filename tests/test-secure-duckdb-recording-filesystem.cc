@@ -5883,10 +5883,13 @@ run_fixed_wal_abort_child (const fs::path &root, const char *mode)
   const std::string root_utf8 = path_to_utf8 (root);
   const gchar *argv[] = { self_path, mode, root_utf8.c_str (), NULL };
   g_autoptr (GError) error = NULL;
+  g_printerr ("WYRELOG_FIXED_WAL phase=spawn-child mode=%s\n", mode);
   g_autoptr (GSubprocess) child = g_subprocess_newv (argv,
       G_SUBPROCESS_FLAGS_STDOUT_PIPE, &error);
   g_assert_no_error (error);
   g_autofree gchar *output = communicate_utf8_with_timeout (child, 15000);
+  g_printerr ("WYRELOG_FIXED_WAL phase=child-communicated mode=%s exit=%d\n",
+      mode, g_subprocess_get_exit_status (child));
   g_assert_nonnull (output);
   g_assert_cmpstr (output, ==, "");
   g_assert_cmpint (g_subprocess_get_exit_status (child), ==, 0);
@@ -5921,7 +5924,9 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
   const fs::path recovery =
       path_from_utf8 (path_with_suffix (database, ".wal.recovery"));
   create_fixed_wal_fixture (root, database);
+  g_printerr ("WYRELOG_FIXED_WAL phase=fixture-created mode=%s\n", child_mode);
   run_fixed_wal_abort_child (root, child_mode);
+  g_printerr ("WYRELOG_FIXED_WAL phase=child-assertions mode=%s\n", child_mode);
   g_assert_true (fs::exists (wal));
   g_assert_true (fs::exists (checkpoint));
   g_assert_false (fs::exists (recovery));
@@ -5936,10 +5941,12 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.checkpoint_on_shutdown = false;
+    g_printerr ("WYRELOG_FIXED_WAL phase=first-open mode=%s\n", child_mode);
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     assert_fixed_wal_rows (connection);
   }
+  g_printerr ("WYRELOG_FIXED_WAL phase=first-close mode=%s\n", child_mode);
   dump_handle_lifecycle_if_requested (recorder);
   const bool checkpoint_completed =
       g_strcmp0 (child_mode, "--fixed-wal-abort-before-wal-finish") == 0;
@@ -5947,6 +5954,8 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
       checkpoint_completed ? ".wal.checkpoint" : ".wal.recovery");
   assert_recovery_replacement_exact_grammar (
       recorder, database, checkpoint_completed);
+  g_printerr ("WYRELOG_FIXED_WAL phase=replacement-asserted mode=%s\n",
+      child_mode);
   g_assert_false (fs::exists (checkpoint));
   g_assert_false (fs::exists (recovery));
 
@@ -5957,10 +5966,12 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
         source_155_open_flags (129),
         source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
         source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    g_printerr ("WYRELOG_FIXED_WAL phase=second-open mode=%s\n", child_mode);
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     assert_fixed_wal_rows (connection);
   }
+  g_printerr ("WYRELOG_FIXED_WAL phase=second-close mode=%s\n", child_mode);
   dump_handle_lifecycle_if_requested (reopen_recorder);
   if (checkpoint_completed)
     assert_fixed_wal_reopen_exact_grammar (reopen_recorder, database);
@@ -5970,7 +5981,9 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
   const ArtifactSet reopened = snapshot_artifacts (root);
   g_assert_cmpuint (reopened.files.size (), ==, 1);
   g_assert_cmpstr (reopened.files[0].first.c_str (), ==, "facts.duckdb");
+  g_printerr ("WYRELOG_FIXED_WAL phase=artifact-asserted mode=%s\n", child_mode);
   remove_tree (sandbox);
+  g_printerr ("WYRELOG_FIXED_WAL phase=cleanup-complete mode=%s\n", child_mode);
 }
 
 static void
