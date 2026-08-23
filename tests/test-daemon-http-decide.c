@@ -9160,9 +9160,13 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
           iteration);
   g_autofree gchar *perm = g_strdup_printf ("site.concurrent.read.%u",
           iteration);
+  g_autofree gchar *perm_name = g_strdup_printf ("site concurrent read %u",
+          iteration);
 
-  if (wyl_policy_store_upsert_permission (store, perm,
-      "site concurrent read", "basic") != WYRELOG_E_OK)
+  /* permissions.perm_name is also UNIQUE; vary it with the iteration so the
+   * stress loop does not turn its own setup into a false return-204 failure. */
+  if (wyl_policy_store_upsert_permission (store, perm, perm_name, "basic")
+      != WYRELOG_E_OK)
     return 204;
 
   ConcurrentPolicyMutation mutations[n_threads];
