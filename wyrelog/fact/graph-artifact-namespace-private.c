@@ -5326,16 +5326,18 @@ inventory_observation_for_namespace (WylFactArtifactNamespace *namespace_,
   guint64 fingerprint = G_GUINT64_CONSTANT (1469598103934665603);
   if (fstat (namespace_->fd, &directory) != 0
       || fstat (namespace_->lock_pin_fd, &lock) != 0) {
-    observation->directory_identity = (WylFactArtifactInventoryIdentity) { 0, 0 };
-    observation->guard_identity = (WylFactArtifactInventoryIdentity) { 0, 0 };
+    observation->directory_identity = (WylFactArtifactInventoryIdentity) { 0 };
+    observation->guard_identity = (WylFactArtifactInventoryIdentity) { 0 };
     observation->entry_fingerprint = 0;
     return FALSE;
   }
   observation->directory_identity = (WylFactArtifactInventoryIdentity) {
-    (guint64) directory.st_dev, (guint64) directory.st_ino
+    .domain = (guint64) directory.st_dev,
+    .object = (guint64) directory.st_ino,
   };
   observation->guard_identity = (WylFactArtifactInventoryIdentity) {
-    (guint64) lock.st_dev, (guint64) lock.st_ino
+    .domain = (guint64) lock.st_dev,
+    .object = (guint64) lock.st_ino,
   };
   fingerprint = inventory_hash_mix (fingerprint, (guint64) directory.st_mtime);
   gint scan_fd = openat (namespace_->fd, ".",
@@ -5487,7 +5489,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
       && slot <= WYL_FACT_ARTIFACT_INVENTORY_LOCK; slot++) {
     const gchar *name = name_for ((WylFactArtifactName) slot);
     struct stat statbuf = { 0 };
-    WylFactArtifactInventoryIdentity identity = { 0, 0 };
+    WylFactArtifactInventoryIdentity identity = { 0 };
     guint64 logical = 0, allocated = 0;
     gboolean allocation_supported = FALSE;
     if (fstatat (namespace_->fd, name, &statbuf, AT_SYMLINK_NOFOLLOW) != 0) {

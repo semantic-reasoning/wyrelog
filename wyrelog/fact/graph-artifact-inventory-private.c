@@ -45,13 +45,43 @@ snapshot_zero_result (WylFactArtifactInventorySnapshot *snapshot)
 }
 
 static gboolean
+inventory_identity_valid (const WylFactArtifactInventoryIdentity *identity)
+{
+  if (identity == NULL || (identity->object_width != 0
+      && identity->object_width != 16))
+    return FALSE;
+  if (identity->object_width == 16)
+    return identity->object == 0;
+  return memcmp (identity->object_bytes, (guint8[16]) { 0 },
+             sizeof identity->object_bytes) == 0;
+}
+
+gboolean
+wyl_fact_artifact_inventory_identity_equal
+  (const WylFactArtifactInventoryIdentity *left,
+    const WylFactArtifactInventoryIdentity *right)
+{
+  if (!inventory_identity_valid (left) || !inventory_identity_valid (right)
+      || left->domain != right->domain
+      || left->object_width != right->object_width)
+    return FALSE;
+  if (left->object_width == 0)
+    return left->object == right->object
+           && memcmp (left->object_bytes, right->object_bytes,
+               sizeof left->object_bytes) == 0;
+  return left->object == 0 && right->object == 0
+         && memcmp (left->object_bytes, right->object_bytes,
+             sizeof left->object_bytes) == 0;
+}
+
+static gboolean
 observation_equal (const WylFactArtifactInventoryObservation *left,
     const WylFactArtifactInventoryObservation *right)
 {
-  return left->directory_identity.domain == right->directory_identity.domain
-         && left->directory_identity.object == right->directory_identity.object
-         && left->guard_identity.domain == right->guard_identity.domain
-         && left->guard_identity.object == right->guard_identity.object
+  return wyl_fact_artifact_inventory_identity_equal
+           (&left->directory_identity, &right->directory_identity)
+         && wyl_fact_artifact_inventory_identity_equal
+           (&left->guard_identity, &right->guard_identity)
          && left->entry_fingerprint == right->entry_fingerprint;
 }
 
@@ -108,7 +138,9 @@ wyl_fact_artifact_inventory_snapshot_begin
     const WylFactArtifactInventoryObservation *observation)
 {
   if (!snapshot_mutable (snapshot) || snapshot->began
-      || observation == NULL)
+      || observation == NULL
+      || !inventory_identity_valid (&observation->directory_identity)
+      || !inventory_identity_valid (&observation->guard_identity))
     return;
   snapshot->begin = *observation;
   snapshot->began = TRUE;
@@ -119,7 +151,9 @@ wyl_fact_artifact_inventory_snapshot_end
   (WylFactArtifactInventorySnapshot *snapshot,
     const WylFactArtifactInventoryObservation *observation)
 {
-  if (!snapshot_building (snapshot) || observation == NULL)
+  if (!snapshot_building (snapshot) || observation == NULL
+      || !inventory_identity_valid (&observation->directory_identity)
+      || !inventory_identity_valid (&observation->guard_identity))
     return;
   snapshot->end = *observation;
   snapshot->ended = TRUE;
@@ -148,6 +182,9 @@ wyl_fact_artifact_inventory_snapshot_set_slot
   if (!snapshot_building (snapshot)
       || slot >= WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT)
     return WYRELOG_E_INVALID;
+  if (identity != NULL && !inventory_identity_valid (identity))
+    return wyl_fact_artifact_inventory_snapshot_fail (snapshot,
+               WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY);
   if (!allocation_supported && allocated_bytes != 0)
     return wyl_fact_artifact_inventory_snapshot_fail (snapshot,
                WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSUPPORTED_ALLOCATION);
@@ -164,7 +201,7 @@ wyl_fact_artifact_inventory_snapshot_set_slot
                WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY);
   snapshot->slot_set[slot] = TRUE;
   state->identity = identity == NULL
-      ? (WylFactArtifactInventoryIdentity) { 0, 0 } : *identity;
+      ? (WylFactArtifactInventoryIdentity) { 0 } : *identity;
   state->present = present;
   state->logical_bytes = logical_bytes;
   state->allocation_supported = allocation_supported;
@@ -272,7 +309,7 @@ wyl_fact_artifact_inventory_snapshot_slot_identity
     *out_identity = snapshot != NULL
         && slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT
         ? snapshot->slots[slot].identity
-        : (WylFactArtifactInventoryIdentity) { 0, 0 };
+        : (WylFactArtifactInventoryIdentity) { 0 };
 }
 
 guint64

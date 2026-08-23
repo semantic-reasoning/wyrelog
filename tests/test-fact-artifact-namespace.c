@@ -4354,7 +4354,7 @@ test_inventory_provider (void)
       WYL_FACT_ARTIFACT_INVENTORY_MAIN));
   g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_TEMP));
-  WylFactArtifactInventoryIdentity main_identity = { 0, 0 };
+  WylFactArtifactInventoryIdentity main_identity = { 0 };
   wyl_fact_artifact_inventory_snapshot_slot_identity (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_MAIN, &main_identity);
   g_assert_cmpuint (main_identity.domain, !=, 0);
