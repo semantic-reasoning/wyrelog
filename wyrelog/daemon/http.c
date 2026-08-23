@@ -12107,6 +12107,15 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       set_json_error (msg, 404, "graph_not_found");
       return;
     }
+    /* A sealed graph refuses appends; it must refuse hard deletes too.  This
+     * mirrors the append branch's gate and sits before the schema load and
+     * before any destructive step, so a sealed graph is never opened for
+     * forget. */
+    if (lookup.info.sealed) {
+      graph_lookup_clear (&lookup);
+      set_json_error (msg, 409, "graph_sealed");
+      return;
+    }
 
     gboolean relation_visible = FALSE;
     wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;

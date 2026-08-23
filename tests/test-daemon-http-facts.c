@@ -1052,6 +1052,29 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       return 524 + (gint) i;
     g_clear_pointer (&body, g_free);
   }
+  /* Forget case 1: normal forget of batch-1 -> 200 rows_purged 1.  This runs
+   * BEFORE the seal: a sealed graph refuses forget and there is no graph
+   * unseal API to undo it.  Cases 3 and 2 follow the seal below. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *forget_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
+  rc = send_raw (session, "DELETE", base_url,
+          "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
+          "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
+          "\"reason\":\"gdpr-erasure\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL ||
+      strstr (body, "\"rows_purged\":1") == NULL)
+    return 500;
+  /* Pin the post-state: Forget case 3 asserts this exact count, so a silent
+   * change here would make that assertion meaningless. */
+  rc = check_fact_projection_row_count (fact_root, "orders", 2);
+  if (rc != 0)
+    return rc;
+
+  g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url, "/graphs/seal", seal_query,
           admin_token, NULL, &status, &body);
   if (rc != 0)
@@ -1084,20 +1107,38 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
     return 408;
 
-  /* Forget case 1: normal forget of batch-1 -> 200 rows_purged>=1. */
+  /* Forget case 3: sealed graph -> 409 graph_sealed.  Before the gate this
+   * returned 200 and destroyed rows, while the append and retract cases just
+   * above were already refused -- the three differed only in which verb
+   * reached the store.
+   *
+   * Absolute counts, not a delta: a delta is only evaluated once the status
+   * check has passed, so it could never fail in the case it exists to catch. */
   g_clear_pointer (&body, g_free);
-  g_autofree gchar *forget_query = g_strdup_printf
-        ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
-          FACT_GUARD);
-  rc = send_raw (session, "DELETE", base_url,
-          "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
-          "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
-          "\"reason\":\"gdpr-erasure\"}", &status, &body);
+  rc = check_fact_projection_row_count (fact_root, "orders", 2);
   if (rc != 0)
     return rc;
-  if (status != 200 || strstr (body, "\"ok\":true") == NULL ||
-      strstr (body, "\"rows_purged\":") == NULL)
-    return 500;
+  rc = send_raw (session, "DELETE", base_url,
+          "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
+          "{\"batch_id\":\"batch-7\",\"operator\":\"admin\","
+          "\"reason\":\"sealed-should-refuse\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL) {
+    g_printerr ("sealed forget not refused: status=%u body=%s\n", status,
+        body != NULL ? body : "(null)");
+    return 409;
+  }
+  /* The refusal destroyed nothing.  Only 304 means the count moved; the
+   * helper's other codes are fixture failures and must not be reported as a
+   * gate regression. */
+  rc = check_fact_projection_row_count (fact_root, "orders", 2);
+  if (rc == 304) {
+    g_printerr ("sealed forget mutated the orders projection\n");
+    return 410;
+  }
+  if (rc != 0)
+    return rc;
 
   /* Forget case 2: no permission -> 403 fact_denied. */
   g_clear_pointer (&body, g_free);
