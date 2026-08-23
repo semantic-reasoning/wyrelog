@@ -5989,6 +5989,7 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
 static void
 test_recording_filesystem_completed_checkpoint_recovery_move (void)
 {
+  g_printerr ("WYRELOG_FIXED_WAL phase=test-start mode=completed\n");
   exercise_interrupted_checkpoint_replacement (
       "--fixed-wal-abort-before-wal-finish", ".wal.checkpoint");
 }
@@ -5996,6 +5997,7 @@ test_recording_filesystem_completed_checkpoint_recovery_move (void)
 static void
 test_recording_filesystem_incomplete_checkpoint_recovery_move (void)
 {
+  g_printerr ("WYRELOG_FIXED_WAL phase=test-start mode=interrupted\n");
   exercise_interrupted_checkpoint_replacement (
       "--fixed-wal-abort-before-header", ".wal.recovery");
 }
