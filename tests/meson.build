@@ -1243,6 +1243,15 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
     include_directories : include_directories('../wyrelog'),
     dependencies : [wyrelog_handle_test_seams_dep] + fact_test_support_deps,
   )
+  windows_appverifier_probe_dll = shared_module(
+    'test-windows-appverifier-probe-dll',
+    'windows-appverifier-probe-dll.c',
+    name_prefix : '',
+  )
+  windows_appverifier_probe = executable(
+    'test-windows-appverifier-probe',
+    'windows-appverifier-probe.c',
+  )
   test('fact-artifact-namespace-windows',
     test_fact_artifact_namespace_windows,
     timeout : 120,
@@ -2949,6 +2958,10 @@ test('secure-duckdb-ci-wiring', python3,
 
 test('windows-ci-timeout-boundary', python3,
   args : [files('test-windows-ci-timeout-boundary.py'),
+    meson.project_source_root()])
+
+test('windows-appverifier-wiring', python3,
+  args : [files('test-windows-appverifier-wiring.py'),
     meson.project_source_root()])
 
 if host_machine.system() == 'linux'
