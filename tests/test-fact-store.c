@@ -3303,6 +3303,108 @@ check_fact_store_identity_validation_snapshot (void)
   return 0;
 }
 
+/* Issue #546: a mutation faulted at or before its DuckDB commit leaves nothing
+ * durable, and the aborted attempt does not poison the idempotency key. */
+static gint
+check_fact_store_batch_commit_fault (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 960;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 961;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
+    return 962;
+
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "kf";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 7;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "fault-batch-1",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .request_id = "req-fault-1",
+    .idempotency_key = "fault:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = 1,
+  };
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  if (table == NULL)
+    return 963;
+  g_autofree gchar *count_sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;",
+          table);
+
+  /* Both fault values must leave the same postcondition: nothing durable.
+   * That is all this asserts -- everything AT_COMMIT stages is inside the
+   * rolled-back transaction, so no durable observable distinguishes it from
+   * BEFORE_COMMIT.  The placement of the two injection points is enforced by
+   * reading store.c, not by this test. */
+  const WylFactStoreBatchFault faults[] = {
+    WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT,
+    WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    wyl_fact_store_set_batch_fault_once_for_test (store, faults[i]);
+    gboolean inserted = TRUE;
+    wyl_fact_commit_delta_t delta;
+    wyl_fact_commit_delta_init (&delta);
+    if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &inserted,
+        &delta) == WYRELOG_E_OK)
+      return 964;
+    if (inserted || delta.inserted || delta.committed_row_delta != 0)
+      return 965;
+
+    gint64 count = -1;
+    if (!count_i64 (conn, count_sql, &count) || count != 0)
+      return 966;
+    if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_batches;", &count)
+        || count != 0)
+      return 967;
+    if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_event_log;", &count)
+        || count != 0)
+      return 968;
+  }
+
+  /* The aborted attempts did not claim the idempotency key: the same batch
+   * now applies exactly once. */
+  gboolean inserted = FALSE;
+  wyl_fact_commit_delta_t delta;
+  wyl_fact_commit_delta_init (&delta);
+  if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &inserted,
+      &delta) != WYRELOG_E_OK)
+    return 969;
+  if (!inserted || !delta.inserted || delta.committed_row_delta != 1
+      || delta.logical_byte_delta <= 0)
+    return 970;
+  gint64 count = -1;
+  if (!count_i64 (conn, count_sql, &count) || count != 1)
+    return 971;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 1)
+    return 972;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 1)
+    return 973;
+  return 0;
+}
+
 /* Issue #546: append/retract report committed resource deltas; an idempotent
  * no-op reports the zero delta. */
 static gint
@@ -3485,6 +3587,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_reports_commit_delta ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_batch_commit_fault ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_schema_drift ();

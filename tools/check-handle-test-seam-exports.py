@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reject engine-session test seams from production binary symbols."""
+"""Reject guarded test seams from production binary symbols.
+
+Originally scoped to the engine-session seams; the set now covers guarded
+*_for_test seams from other subsystems too, so keep the name generic.
+"""
 
 from pathlib import Path
 import re
@@ -17,6 +21,7 @@ PROTECTED = {
     "wyl_handle_set_audit_replay_checkpoint_for_test",
     "wyl_handle_engine_session_locked_for_test",
     "wyl_handle_pending_delta_count_for_test",
+    "wyl_fact_store_set_batch_fault_once_for_test",
 }
 SENTINEL = "wyl_init"
 

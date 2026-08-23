@@ -30,6 +30,9 @@ struct wyl_fact_store_t
   duckdb_database db;
   duckdb_connection conn;
   GMutex lock;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  WylFactStoreBatchFault batch_fault;
+#endif
   gchar *identity_tenant_id;
   gchar *identity_graph_id;
   gchar *identity_store_uuid;
@@ -1371,6 +1374,28 @@ wyl_fact_store_append_batch (wyl_fact_store_t *store,
              NULL);
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+void
+wyl_fact_store_set_batch_fault_once_for_test (wyl_fact_store_t *store,
+    WylFactStoreBatchFault fault)
+{
+  if (store == NULL)
+    return;
+  g_mutex_lock (&store->lock);
+  store->batch_fault = fault;
+  g_mutex_unlock (&store->lock);
+}
+
+/* Consume the armed fault.  Called with store->lock held. */
+static WylFactStoreBatchFault
+take_batch_fault_unlocked (wyl_fact_store_t *store)
+{
+  WylFactStoreBatchFault fault = store->batch_fault;
+  store->batch_fault = WYL_FACT_STORE_BATCH_FAULT_NONE;
+  return fault;
+}
+#endif
+
 wyrelog_error_t
 wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -1416,6 +1441,12 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   }
 
   rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+#ifdef WYL_TEST_HANDLE_SEAMS
+  WylFactStoreBatchFault batch_fault = take_batch_fault_unlocked (store);
+  if (rc == WYRELOG_E_OK
+      && batch_fault == WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT)
+    rc = WYRELOG_E_IO;
+#endif
   gint64 first_seq = 0;
   gint64 created_at_us = g_get_real_time ();
   if (rc == WYRELOG_E_OK)
@@ -1464,6 +1495,11 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
       && duckdb_appender_destroy (&appender) != DuckDBSuccess
       && rc == WYRELOG_E_OK)
     rc = WYRELOG_E_IO;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK
+      && batch_fault == WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT)
+    rc = WYRELOG_E_IO;
+#endif
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (store->conn, "COMMIT;");
   else
