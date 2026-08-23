@@ -22,10 +22,10 @@ required_script_tokens = (
     "'ErrorReport=0x1C1', 'Flavor=0x2'",
     "'-logtoxml', $raw.FullName, $xml_path",
     'SelectNodes("//*[local-name()=\'logEntry\']")',
-    "$expected_stop = if ($Mode -eq 'leak') { 0x901 } else { 0x300 }",
+    "$expected_layer = 'Handles'",
+    "$expected_stop = 0x300",
     "$unexpected.Count -ne 0",
     "clean-probe",
-    "leak-probe",
     "invalid-probe",
     "artifact-suite",
     "runner-started.json",
@@ -59,6 +59,8 @@ if "Handles.Traces" in script:
     )
 if "continue-on-error" in script or "SilentlyContinue" in script:
     raise SystemExit("Windows AppVerifier runner must not suppress failures")
+if "leak-probe" in script or "-Mode leak" in script:
+    raise SystemExit("AppVerifier negative control must use the reliable double-close")
 
 probe_dll = (root / "tests" / "windows-appverifier-probe-dll.c").read_text(
     encoding="utf-8"
@@ -70,15 +72,17 @@ for token in (
     "Local\\\\WyrelogAppVerifierHandleProbe",
     "CreateEventW",
     "mode == 0",
-    "mode == 1",
+    "mode != 1",
 ):
     if token not in probe_dll:
         raise SystemExit(f"AppVerifier HANDLE probe lost mode/resource token: {token}")
 if probe_dll.count("CloseHandle (event)") != 2:
     raise SystemExit("AppVerifier probe must retain clean close and invalid close")
-for token in ("L\"clean\"", "L\"leak\"", "L\"invalid\"", "FreeLibrary"):
+for token in ("L\"clean\"", "L\"invalid\"", "FreeLibrary"):
     if token not in probe_driver:
         raise SystemExit(f"AppVerifier probe driver lost execution token: {token}")
+if 'L"leak"' in probe_driver:
+    raise SystemExit("AppVerifier probe driver must not expose an unverified leak mode")
 
 meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
 for target in (

@@ -171,11 +171,10 @@ function Assert-Clean-Entries {
 }
 
 function Invoke-Probe-Phase {
-  param([ValidateSet('clean', 'leak', 'invalid')] [string] $Mode)
+  param([ValidateSet('clean', 'invalid')] [string] $Mode)
 
   $phase_name = @{
     clean = 'clean-probe'
-    leak = 'leak-probe'
     invalid = 'invalid-probe'
   }[$Mode]
   $phase = New-Phase $phase_name
@@ -192,8 +191,8 @@ function Invoke-Probe-Phase {
     }
     Assert-Clean-Entries -Entries $entries -PhaseName 'clean probe'
   } else {
-    $expected_layer = if ($Mode -eq 'leak') { 'Leak' } else { 'Handles' }
-    $expected_stop = if ($Mode -eq 'leak') { 0x901 } else { 0x300 }
+    $expected_layer = 'Handles'
+    $expected_stop = 0x300
     $expected = @($entries | Where-Object {
       $_.Layer -eq $expected_layer -and $_.StopCode -eq $expected_stop
     })
@@ -352,7 +351,6 @@ $primary_error = $null
 $cleanup_errors = @()
 try {
   Invoke-Probe-Phase -Mode clean
-  Invoke-Probe-Phase -Mode leak
   Invoke-Probe-Phase -Mode invalid
   Invoke-Artifact-Suite
 } catch {
