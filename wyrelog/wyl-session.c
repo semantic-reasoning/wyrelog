@@ -743,6 +743,11 @@ typedef struct
   wyl_session_state_t new_state;
   const WylAuditEvent *audit_event;
   gint64 event_id;
+  const gchar *principal_username;
+  wyl_principal_state_t principal_old_state;
+  wyl_principal_state_t principal_new_state;
+  gint64 principal_event_id;
+  gboolean principal_transitioned;
 } WylSessionPublication;
 
 static wyrelog_error_t
@@ -754,6 +759,37 @@ mutate_session_publication (wyl_policy_store_t *store, gpointer data)
   const gchar *new_state = wyl_session_state_name (ctx->new_state);
   if (old_state == NULL || event == NULL || new_state == NULL)
     return WYRELOG_E_INTERNAL;
+
+  /* Logout owns both the subject-global authority transition and the live
+   * session close.  The nested policy savepoint is released into the
+   * committed-publication savepoint, so a later session/audit failure rolls
+   * both changes back together. */
+  if (ctx->principal_username != NULL) {
+    g_autofree gchar *principal_state = NULL;
+    gboolean found = FALSE;
+    wyrelog_error_t rc = wyl_policy_store_get_principal_state (store,
+            ctx->principal_username, &principal_state, &found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    wyl_principal_state_t observed = found
+        ? wyl_principal_state_from_name (principal_state)
+        : WYL_PRINCIPAL_STATE_UNVERIFIED;
+    if (observed == WYL_PRINCIPAL_STATE_LAST_)
+      return WYRELOG_E_INTERNAL;
+    ctx->principal_old_state = observed;
+    ctx->principal_new_state = observed;
+    ctx->principal_event_id = -1;
+    ctx->principal_transitioned = FALSE;
+    if (observed == WYL_PRINCIPAL_STATE_AUTHENTICATED
+        || observed == WYL_PRINCIPAL_STATE_MFA_REQUIRED) {
+      rc = wyl_policy_store_apply_principal_transition (store,
+              ctx->principal_username, WYL_PRINCIPAL_EVENT_LOGOUT, 0, 0,
+              &ctx->principal_old_state, &ctx->principal_new_state,
+              &ctx->principal_transitioned, &ctx->principal_event_id);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+  }
   wyrelog_error_t rc = wyl_policy_store_set_session_state (store,
           ctx->session_id, new_state);
   if (rc == WYRELOG_E_OK)
@@ -779,6 +815,15 @@ verify_session_publication (WylEngineVerification *verification, gpointer data)
   const gchar *new_state = wyl_session_state_name (ctx->new_state);
   if (old_state == NULL || event == NULL || new_state == NULL)
     return WYRELOG_E_INTERNAL;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (ctx->principal_transitioned)
+    rc = verify_session_event_row (verification, "principal_fired",
+            ctx->principal_event_id, ctx->principal_username,
+            wyl_principal_event_name (WYL_PRINCIPAL_EVENT_LOGOUT),
+            wyl_principal_state_name (ctx->principal_old_state),
+            wyl_principal_state_name (ctx->principal_new_state));
+  if (rc != WYRELOG_E_OK)
+    return rc;
   return verify_session_event_row (verification, "session_fired",
              ctx->event_id, ctx->session_id, event, old_state, new_state);
 }
@@ -788,6 +833,15 @@ produce_session_publication_delta (WylEngineVerification *verification,
     gpointer data)
 {
   WylSessionPublication *ctx = data;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (ctx->principal_transitioned)
+    rc = enqueue_session_event_delta (verification, "principal_fired",
+            ctx->principal_event_id, ctx->principal_username,
+            wyl_principal_event_name (WYL_PRINCIPAL_EVENT_LOGOUT),
+            wyl_principal_state_name (ctx->principal_old_state),
+            wyl_principal_state_name (ctx->principal_new_state));
+  if (rc != WYRELOG_E_OK)
+    return rc;
   return enqueue_session_event_delta (verification, "session_fired",
              ctx->event_id, ctx->session_id, wyl_session_event_name (ctx->event),
              wyl_session_state_name (ctx->old_state),
@@ -1009,7 +1063,8 @@ publish_login_mutation (WylLoginPublication *ctx)
 static wyrelog_error_t
 transition_session_state (WylHandle *handle, WylSession *session,
     wyl_session_state_t old_state, wyl_session_event_t event,
-    wyl_session_state_t new_state, const gchar *request_id)
+    wyl_session_state_t new_state, const gchar *request_id,
+    const gchar *principal_username)
 {
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   const gchar *old_state_name = wyl_session_state_name (old_state);
@@ -1024,8 +1079,16 @@ transition_session_state (WylHandle *handle, WylSession *session,
   WylAuditEvent *ev = NULL;
   (void) request_id;
 #endif
-  WylSessionPublication publication = { handle, session_id, old_state, event,
-                                        new_state, ev, -1};
+  WylSessionPublication publication = {
+    .handle = handle,
+    .session_id = session_id,
+    .old_state = old_state,
+    .event = event,
+    .new_state = new_state,
+    .audit_event = ev,
+    .event_id = -1,
+    .principal_username = principal_username,
+  };
   wyrelog_error_t rc = publish_session_mutation (&publication);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1166,9 +1229,15 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 #else
   WylAuditEvent *ev = NULL;
 #endif
-  WylSessionPublication publication = { handle, session_id,
-                                        WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-                                        WYL_SESSION_STATE_ACTIVE, ev, -1};
+  WylSessionPublication publication = {
+    .handle = handle,
+    .session_id = session_id,
+    .old_state = WYL_SESSION_STATE_IDLE,
+    .event = WYL_SESSION_EVENT_REQUEST,
+    .new_state = WYL_SESSION_STATE_ACTIVE,
+    .audit_event = ev,
+    .event_id = -1,
+  };
   wyrelog_error_t rc = publish_session_mutation (&publication);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (session);
@@ -1397,7 +1466,7 @@ wyl_session_close_with_request_id (WylHandle *handle, WylSession *session,
 
   g_mutex_lock (&session->reauth_mutex);
   rc = transition_session_state (handle, session, current,
-          WYL_SESSION_EVENT_LOGOUT, state, request_id);
+          WYL_SESSION_EVENT_LOGOUT, state, request_id, session->username);
   if (rc == WYRELOG_E_OK)
     session_clear_reauth_pending (session);
   g_mutex_unlock (&session->reauth_mutex);
@@ -1426,7 +1495,7 @@ wyl_session_elevate (WylHandle *handle, WylSession *session)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
   return transition_session_state (handle, session, current,
-             WYL_SESSION_EVENT_ELEVATE_GRANT, state, NULL);
+             WYL_SESSION_EVENT_ELEVATE_GRANT, state, NULL, NULL);
 }
 
 wyrelog_error_t
@@ -1445,7 +1514,7 @@ wyl_session_drop_elevation (WylHandle *handle, WylSession *session)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
   return transition_session_state (handle, session, current,
-             WYL_SESSION_EVENT_ELEVATE_DROP, state, NULL);
+             WYL_SESSION_EVENT_ELEVATE_DROP, state, NULL, NULL);
 }
 
 wyrelog_error_t
@@ -1464,7 +1533,7 @@ wyl_session_idle_timeout (WylHandle *handle, WylSession *session)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
   return transition_session_state (handle, session, current,
-             WYL_SESSION_EVENT_IDLE_TIMEOUT, state, NULL);
+             WYL_SESSION_EVENT_IDLE_TIMEOUT, state, NULL, NULL);
 }
 
 wyrelog_error_t
@@ -1483,7 +1552,7 @@ wyl_session_expire (WylHandle *handle, WylSession *session)
     return rc;
 
   return transition_session_state (handle, session, current,
-             WYL_SESSION_EVENT_EXPIRY, state, NULL);
+             WYL_SESSION_EVENT_EXPIRY, state, NULL, NULL);
 }
 
 wyrelog_error_t
