@@ -83,8 +83,9 @@ complete.
 ## Evidence and cleanup
 
 Each phase has a distinct directory below the requested output root. Binary
-`.dat` logs are copied to `raw/`, every log is converted to XML under `xml/`,
-and configuration, process output, and conversion output are retained. XML is
+`.dat` logs emitted under the phase's AppVerifier-created `AppVerifierLogs/`
+directory are copied to `raw/`, every log is converted to XML under `xml/`, and
+configuration, process output, and conversion output are retained. XML is
 checked structurally through `logEntry` attributes; the negative control
 requires `LayerName="Handles"` and numeric `StopCode="0x300"`.
 
