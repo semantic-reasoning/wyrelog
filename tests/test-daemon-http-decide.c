@@ -389,6 +389,15 @@ typedef struct
 typedef struct
 {
   const gchar *subject_id;
+  const gchar *action;
+  const gchar *resource_id;
+  const gchar *deny_origin;
+  guint matches;
+} AuditEventTupleProbe;
+
+typedef struct
+{
+  const gchar *subject_id;
   const gchar *perm_id;
   const gchar *scope;
   const gchar *state;
@@ -398,8 +407,35 @@ typedef struct
   guint matches;
 } PermissionStateProbe;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  guint matches;
+} PermissionStateEventAnyProbe;
+
+typedef struct
+{
+  gboolean direct;
+  gboolean state;
+  guint direct_events;
+  guint state_events;
+  wyrelog_error_t direct_events_rc;
+  guint audit_matches;
+  wyrelog_error_t direct_rc;
+  wyrelog_error_t state_rc;
+  wyrelog_error_t state_events_rc;
+  wyrelog_error_t audit_rc;
+} PermissionMutationSnapshot;
+
 #ifdef WYL_HAS_AUDIT
 static wyrelog_error_t audit_event_probe_cb (const gchar * id,
+    gint64 created_at_us, const gchar * subject_id, const gchar * action,
+    const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, const gchar * request_id,
+    wyl_decision_t decision, gpointer user_data);
+static wyrelog_error_t audit_event_tuple_probe_cb (const gchar * id,
     gint64 created_at_us, const gchar * subject_id, const gchar * action,
     const gchar * resource_id, const gchar * deny_reason,
     const gchar * deny_origin, const gchar * request_id,
@@ -6758,11 +6794,24 @@ send_raw_reconcile_bearer (SoupSession *session, const gchar *method,
 
 typedef struct
 {
+  GMutex mutex;
+  GCond changed;
+  guint ready;
+  guint participants;
+  gboolean go;
+  gboolean cancelled;
+} ConcurrentPolicyMutationBarrier;
+
+typedef struct
+{
   const gchar *base_url;
   gchar *query;
   gint rc;
   guint status;
   gchar *body;
+  ConcurrentPolicyMutationBarrier *barrier;
+  gint64 arrived_us;
+  gint64 released_us;
 } ConcurrentPolicyMutation;
 
 typedef struct
@@ -6890,6 +6939,31 @@ concurrent_permission_grant_thread (gpointer user_data)
 {
   ConcurrentPolicyMutation *mutation = user_data;
   g_autoptr (SoupSession) session = soup_session_new ();
+
+  mutation->arrived_us = g_get_monotonic_time ();
+  if (mutation->barrier != NULL) {
+    g_mutex_lock (&mutation->barrier->mutex);
+    mutation->barrier->ready++;
+    if (mutation->barrier->ready == mutation->barrier->participants) {
+      mutation->barrier->go = TRUE;
+      g_cond_broadcast (&mutation->barrier->changed);
+    }
+    while (!mutation->barrier->go && !mutation->barrier->cancelled) {
+      if (!g_cond_wait_until (&mutation->barrier->changed,
+          &mutation->barrier->mutex,
+          g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND)) {
+        mutation->barrier->cancelled = TRUE;
+        g_cond_broadcast (&mutation->barrier->changed);
+      }
+    }
+    gboolean cancelled = mutation->barrier->cancelled;
+    g_mutex_unlock (&mutation->barrier->mutex);
+    if (cancelled) {
+      mutation->rc = -1;
+      return NULL;
+    }
+    mutation->released_us = g_get_monotonic_time ();
+  }
 
   mutation->rc = send_raw_policy_mutation (session, "POST",
           mutation->base_url, "/policy/permissions/grant", mutation->query,
@@ -8217,6 +8291,26 @@ audit_event_probe_cb (const gchar *id, gint64 created_at_us,
 }
 
 static wyrelog_error_t
+audit_event_tuple_probe_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) deny_reason;
+  (void) request_id;
+  (void) decision;
+  AuditEventTupleProbe *probe = user_data;
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (action, probe->action) == 0
+      && g_strcmp0 (resource_id, probe->resource_id) == 0
+      && g_strcmp0 (deny_origin, probe->deny_origin) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 audit_event_count_cb (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
     const gchar *deny_reason, const gchar *deny_origin,
@@ -8698,6 +8792,24 @@ permission_state_event_probe_cb (gint64 event_id, const gchar *subject_id,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+permission_state_event_any_probe_cb (gint64 event_id,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  (void) event_id;
+  (void) event;
+  (void) from_state;
+  (void) to_state;
+  PermissionStateEventAnyProbe *probe = user_data;
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (perm_id, probe->perm_id) == 0
+      && g_strcmp0 (scope, probe->scope) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 role_membership_exists (WylHandle *handle, const gchar *subject,
     const gchar *role, const gchar *scope)
@@ -8930,6 +9042,114 @@ arm_tenant_creator_role_grant (SoupSession *session, WylHandle *handle,
              "wr.policy.grant_role", tenant) ? 0 : error_base;
 }
 
+static void
+print_concurrent_policy_response (const gchar *phase, guint iteration,
+    guint thread, const gchar *kind, const gchar *subject,
+    const gchar *perm, const gchar *scope, gint transport_rc, guint status,
+    const gchar *body)
+{
+  g_autofree gchar *bounded_body = body != NULL ? g_strndup (body, 512)
+                                                : g_strdup ("<null>");
+  for (gchar *cursor = bounded_body; *cursor != '\0'; cursor++) {
+    if ((guchar) *cursor < 0x20)
+      *cursor = ' ';
+  }
+  g_printerr ("concurrent permission trace phase=%s iteration=%u "
+      "thread=%u kind=%s subject=%s perm=%s scope=%s transport_rc=%d "
+      "status=%u body=%s\n", phase, iteration, thread, kind, subject,
+      perm, scope, transport_rc, status, bounded_body);
+  fflush (stderr);
+}
+
+static gboolean
+capture_permission_mutation_snapshot (wyl_policy_store_t *store,
+    const gchar *subject, const gchar *perm, const gchar *scope,
+    const gchar *audit_action, const gchar *audit_resource,
+    const gchar *audit_origin, PermissionMutationSnapshot *snapshot)
+{
+  memset (snapshot, 0, sizeof *snapshot);
+  snapshot->direct_rc = wyl_policy_store_direct_permission_exists (store,
+          subject, perm, scope, &snapshot->direct);
+  snapshot->state_rc = wyl_policy_store_permission_state_exists (store,
+          subject, perm, scope, &snapshot->state);
+  PermissionProvenanceDirectEventProbe direct_events = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = scope,
+  };
+  snapshot->direct_events_rc =
+      wyl_policy_store_foreach_direct_permission_event (store,
+          permission_provenance_direct_event_probe_cb, &direct_events);
+  snapshot->direct_events = direct_events.grants + direct_events.revokes
+      + direct_events.other;
+  PermissionStateEventAnyProbe events = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = scope,
+  };
+  snapshot->state_events_rc =
+      wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_any_probe_cb, &events);
+  snapshot->state_events = events.matches;
+#ifdef WYL_HAS_AUDIT
+  AuditEventTupleProbe audit = {
+    .subject_id = "http-policy-admin",
+    .action = audit_action,
+    .resource_id = audit_resource,
+    .deny_origin = audit_origin,
+  };
+  snapshot->audit_rc = wyl_policy_store_foreach_audit_event (store,
+          audit_event_tuple_probe_cb, &audit);
+  snapshot->audit_matches = audit.matches;
+#else
+  (void) audit_action;
+  (void) audit_resource;
+  (void) audit_origin;
+  snapshot->audit_rc = WYRELOG_E_OK;
+#endif
+  return snapshot->direct_rc == WYRELOG_E_OK
+         && snapshot->state_rc == WYRELOG_E_OK
+         && snapshot->direct_events_rc == WYRELOG_E_OK
+         && snapshot->state_events_rc == WYRELOG_E_OK
+         && snapshot->audit_rc == WYRELOG_E_OK;
+}
+
+static gboolean
+permission_mutation_snapshot_unchanged (const PermissionMutationSnapshot *before,
+    const PermissionMutationSnapshot *after)
+{
+  return !before->direct && !before->state
+         && !after->direct && !after->state
+         && before->direct_events == after->direct_events
+         && before->state_events == after->state_events
+         && before->audit_matches == after->audit_matches;
+}
+
+static void
+print_permission_mutation_snapshot_difference (const gchar *kind,
+    guint iteration, const PermissionMutationSnapshot *before,
+    const PermissionMutationSnapshot *after)
+{
+  g_printerr ("concurrent permission snapshot difference kind=%s "
+      "iteration=%u before_direct_rc=%d before_direct=%d "
+      "after_direct_rc=%d after_direct=%d before_state_rc=%d "
+      "before_state=%d after_state_rc=%d after_state=%d "
+      "before_direct_events_rc=%d before_direct_events=%u "
+      "after_direct_events_rc=%d after_direct_events=%u "
+      "before_state_events_rc=%d before_state_events=%u "
+      "after_state_events_rc=%d after_state_events=%u "
+      "before_audit_rc=%d before_audit=%u after_audit_rc=%d "
+      "after_audit=%u\n", kind, iteration, before->direct_rc,
+      before->direct, after->direct_rc, after->direct, before->state_rc,
+      before->state, after->state_rc, after->state,
+      before->direct_events_rc, before->direct_events,
+      after->direct_events_rc, after->direct_events,
+      before->state_events_rc, before->state_events,
+      after->state_events_rc, after->state_events, before->audit_rc,
+      before->audit_matches, after->audit_rc, after->audit_matches);
+  fflush (stderr);
+}
+
 static gint
 check_concurrent_permission_grants_serialize (WylHandle *handle,
     const gchar *base_url, const gchar *session_token, guint iteration)
@@ -8947,12 +9167,76 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
 
   ConcurrentPolicyMutation mutations[n_threads];
   GThread *threads[n_threads];
+  ConcurrentPolicyMutationBarrier barrier = { 0 };
+  gboolean barrier_initialized = FALSE;
   gint result = 0;
   memset (mutations, 0, sizeof mutations);
   memset (threads, 0, sizeof threads);
 
+  gboolean direct_before = FALSE;
+  gboolean state_before = FALSE;
+  wyrelog_error_t direct_before_rc =
+      wyl_policy_store_direct_permission_exists (store, subject, perm,
+          "tenant-a", &direct_before);
+  wyrelog_error_t state_before_rc =
+      wyl_policy_store_permission_state_exists (store, subject, perm,
+          "tenant-a", &state_before);
+  PermissionProvenanceDirectEventProbe direct_events_before = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = "tenant-a",
+  };
+  wyrelog_error_t direct_events_before_rc =
+      wyl_policy_store_foreach_direct_permission_event (store,
+          permission_provenance_direct_event_probe_cb, &direct_events_before);
+  PermissionStateEventAnyProbe state_events_before = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = "tenant-a",
+  };
+  wyrelog_error_t state_events_before_rc =
+      wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_any_probe_cb, &state_events_before);
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe grant_audit_before = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_grant",
+    .resource_id = "tenant-a",
+    .deny_origin = perm,
+  };
+  wyrelog_error_t audit_before_rc =
+      wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &grant_audit_before);
+#endif
+  if (direct_before_rc != WYRELOG_E_OK
+      || state_before_rc != WYRELOG_E_OK
+      || direct_events_before_rc != WYRELOG_E_OK
+      || state_events_before_rc != WYRELOG_E_OK
+#ifdef WYL_HAS_AUDIT
+      || audit_before_rc != WYRELOG_E_OK
+#endif
+      || direct_before || state_before
+      || state_events_before.matches != 0) {
+    g_printerr ("concurrent permission snapshot before failed "
+        "iteration=%u direct_rc=%d direct=%d state_rc=%d state=%d "
+        "direct_events_rc=%d direct_events=%u state_events_rc=%d "
+        "state_events=%u\n", iteration,
+        direct_before_rc, direct_before, state_before_rc, state_before,
+        direct_events_before_rc, direct_events_before.grants
+        + direct_events_before.revokes + direct_events_before.other,
+        state_events_before_rc, state_events_before.matches);
+    result = 210;
+    goto cleanup;
+  }
+
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  barrier.participants = n_threads;
+  barrier_initialized = TRUE;
+
   for (guint i = 0; i < n_threads; i++) {
     mutations[i].base_url = base_url;
+    mutations[i].barrier = &barrier;
     mutations[i].query =
         g_strdup_printf ("subject=%s&perm=%s&scope=tenant-a"
             "&session_token=%s&guard_timestamp=123"
@@ -8961,62 +9245,128 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
     g_autofree gchar *name = g_strdup_printf ("policy-grant-%u", i);
     threads[i] = g_thread_new (name, concurrent_permission_grant_thread,
             &mutations[i]);
+    if (threads[i] == NULL) {
+      g_mutex_lock (&barrier.mutex);
+      barrier.cancelled = TRUE;
+      g_cond_broadcast (&barrier.changed);
+      g_mutex_unlock (&barrier.mutex);
+      result = 211;
+      break;
+    }
   }
 
   for (guint i = 0; i < n_threads; i++)
-    g_thread_join (threads[i]);
+    if (threads[i] != NULL)
+      g_thread_join (threads[i]);
+
+  if (result != 0)
+    goto cleanup;
+
+  gint64 latest_arrival_us = 0;
+  gint64 earliest_release_us = G_MAXINT64;
+  for (guint i = 0; i < n_threads; i++) {
+    latest_arrival_us = MAX (latest_arrival_us, mutations[i].arrived_us);
+    earliest_release_us = MIN (earliest_release_us,
+            mutations[i].released_us);
+  }
+  gboolean all_threads_overlapped = latest_arrival_us <= earliest_release_us;
 
   for (guint i = 0; i < n_threads; i++) {
+    print_concurrent_policy_response ("grant", iteration, i, "grant",
+        subject, perm, "tenant-a", mutations[i].rc, mutations[i].status,
+        mutations[i].body);
     if (mutations[i].rc != 0) {
-      g_printerr ("concurrent permission diagnostic iteration=%u thread=%u "
-          "rc=%d status=%u body=%s subject=%s perm=%s\n", iteration, i,
-          mutations[i].rc, mutations[i].status,
-          mutations[i].body != NULL ? mutations[i].body : "<null>", subject,
-          perm);
-      result = 205;
-      goto cleanup;
+      if (result == 0)
+        result = 205;
+      continue;
     }
     if (mutations[i].status != 200 || mutations[i].body == NULL
         || strstr (mutations[i].body, "\"ok\":true") == NULL) {
-      g_printerr ("concurrent permission diagnostic iteration=%u thread=%u "
-          "rc=%d status=%u body=%s subject=%s perm=%s\n", iteration, i,
-          mutations[i].rc, mutations[i].status,
-          mutations[i].body != NULL ? mutations[i].body : "<null>", subject,
-          perm);
-      result = 206;
-      goto cleanup;
+      if (result == 0)
+        result = 206;
     }
   }
 
-  if (!direct_permission_exists (handle, subject, perm, "tenant-a")) {
-    g_printerr ("concurrent permission diagnostic iteration=%u "
-        "missing durable permission subject=%s perm=%s\n", iteration,
-        subject, perm);
-    result = 207;
-    goto cleanup;
-  }
+  gboolean direct_after = FALSE;
+  gboolean state_after = FALSE;
+  wyrelog_error_t direct_after_rc =
+      wyl_policy_store_direct_permission_exists (store, subject, perm,
+          "tenant-a", &direct_after);
+  wyrelog_error_t state_after_rc =
+      wyl_policy_store_permission_state_exists (store, subject, perm,
+          "tenant-a", &state_after);
+  PermissionProvenanceDirectEventProbe direct_events_after = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = "tenant-a",
+  };
+  wyrelog_error_t direct_events_after_rc =
+      wyl_policy_store_foreach_direct_permission_event (store,
+          permission_provenance_direct_event_probe_cb, &direct_events_after);
+  PermissionStateEventAnyProbe state_events_after = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = "tenant-a",
+  };
+  wyrelog_error_t state_events_after_rc =
+      wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_any_probe_cb, &state_events_after);
 #ifdef WYL_HAS_AUDIT
-  AuditEventProbe grant_audit = {
+  AuditEventProbe grant_audit_after = {
     .subject_id = "http-policy-admin",
     .action = "permission_grant",
     .resource_id = "tenant-a",
     .deny_origin = perm,
   };
-  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
-      &grant_audit) != WYRELOG_E_OK) {
-    result = 208;
-    goto cleanup;
-  }
-  if (grant_audit.matches != n_threads) {
-    g_printerr ("concurrent permission diagnostic iteration=%u "
-        "audit-matches=%u expected=%u subject=%s perm=%s\n", iteration,
-        grant_audit.matches, n_threads, subject, perm);
-    result = 209;
-    goto cleanup;
-  }
+  wyrelog_error_t audit_after_rc =
+      wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &grant_audit_after);
 #endif
+  gboolean audit_monotonic = TRUE;
+  guint audit_delta = 0;
+#ifdef WYL_HAS_AUDIT
+  audit_monotonic = grant_audit_after.matches >= grant_audit_before.matches;
+  if (audit_monotonic)
+    audit_delta = grant_audit_after.matches - grant_audit_before.matches;
+#endif
+  g_printerr ("concurrent permission snapshot after iteration=%u "
+      "direct_rc=%d direct=%d state_rc=%d state=%d state_events_rc=%d "
+      "direct_events_rc=%d direct_events=%u state_events=%u "
+      "audit_monotonic=%d audit_delta=%u overlap_us=%" G_GINT64_FORMAT
+      " all_threads_overlapped=%d\n", iteration, direct_after_rc,
+      direct_after, state_after_rc, state_after, state_events_after_rc,
+      direct_events_after_rc, direct_events_after.grants
+      + direct_events_after.revokes + direct_events_after.other,
+      state_events_after.matches, audit_monotonic, audit_delta,
+      earliest_release_us - latest_arrival_us, all_threads_overlapped);
+  if (direct_after_rc != WYRELOG_E_OK
+      || state_after_rc != WYRELOG_E_OK
+      || direct_events_after_rc != WYRELOG_E_OK
+      || state_events_after_rc != WYRELOG_E_OK
+#ifdef WYL_HAS_AUDIT
+      || audit_after_rc != WYRELOG_E_OK
+#endif
+      || !direct_after || state_after
+      || direct_events_after.grants + direct_events_after.revokes
+      + direct_events_after.other
+      != direct_events_before.grants + direct_events_before.revokes
+      + direct_events_before.other + n_threads
+      || state_events_after.matches != state_events_before.matches
+      || !all_threads_overlapped
+      || !audit_monotonic
+#ifdef WYL_HAS_AUDIT
+      || audit_delta != n_threads
+#endif
+      ) {
+    if (result == 0)
+      result = 207;
+  }
 
 cleanup:
+  if (barrier_initialized){
+    g_cond_clear (&barrier.changed);
+    g_mutex_clear (&barrier.mutex);
+  }
   for (guint i = 0; i < n_threads; i++) {
     g_free (mutations[i].query);
     g_free (mutations[i].body);
@@ -10219,43 +10569,93 @@ check_policy_permission_mutation_contract (SoupServer *server,
     if (concurrent_rc != 0)
       return concurrent_rc;
 
+    g_autofree gchar *iteration_grant_subject = g_strdup_printf
+          ("target-%u", iteration);
+    g_autofree gchar *iteration_state_subject = g_strdup_printf
+          ("state-target-%u", iteration);
     g_autofree gchar *iteration_missing_perm = g_strdup_printf (
       "site.missing.concurrent.%u", iteration);
     g_autofree gchar *iteration_missing_grant_query = g_strdup_printf (
       "subject=target-%u&perm=%s&scope=tenant-a&session_token=%s"
       "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
       iteration, iteration_missing_perm, session_token);
+    PermissionMutationSnapshot missing_grant_before;
+    PermissionMutationSnapshot missing_grant_after = { 0 };
+    if (!capture_permission_mutation_snapshot (store,
+        iteration_grant_subject, iteration_missing_perm, "tenant-a",
+        "permission_grant", "tenant-a", iteration_missing_perm,
+        &missing_grant_before)) {
+      print_permission_mutation_snapshot_difference ("missing-grant-before",
+          iteration, &missing_grant_before,
+          &(PermissionMutationSnapshot) { 0 });
+      return 2780;
+    }
     rc = send_raw_policy_mutation (session, "POST", base_url,
             "/policy/permissions/grant", iteration_missing_grant_query,
             &status, &body);
-    if (rc != 0)
-      return rc;
-    if (status != 400 || body == NULL
-        || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
-      g_printerr ("concurrent permission diagnostic iteration=%u missing "
-          "grant status=%u body=%s\n", iteration, status,
-          body != NULL ? body : "<null>");
-      return 155;
+    print_concurrent_policy_response ("stress", iteration, 0,
+        "missing-grant", iteration_grant_subject, iteration_missing_perm,
+        "tenant-a", rc, status, body);
+    gint missing_grant_result = rc;
+    if (missing_grant_result == 0
+        && (status != 400 || body == NULL
+        || strstr (body, "\"invalid_policy_mutation\"") == NULL))
+      missing_grant_result = 155;
+    if (!capture_permission_mutation_snapshot (store,
+        iteration_grant_subject, iteration_missing_perm, "tenant-a",
+        "permission_grant", "tenant-a", iteration_missing_perm,
+        &missing_grant_after)
+        || !permission_mutation_snapshot_unchanged (&missing_grant_before,
+        &missing_grant_after)) {
+      print_permission_mutation_snapshot_difference ("missing-grant",
+          iteration, &missing_grant_before, &missing_grant_after);
+      if (missing_grant_result == 0)
+        missing_grant_result = 2781;
     }
     g_clear_pointer (&body, g_free);
+    if (missing_grant_result != 0)
+      return missing_grant_result;
 
     g_autofree gchar *iteration_missing_transition_query = g_strdup_printf (
       "subject=state-target-%u&perm=%s&scope=tenant-a&event=grant"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=49", iteration, iteration_missing_perm, session_token);
+    PermissionMutationSnapshot missing_transition_before;
+    PermissionMutationSnapshot missing_transition_after = { 0 };
+    if (!capture_permission_mutation_snapshot (store,
+        iteration_state_subject, iteration_missing_perm, "tenant-a",
+        "permission_state.grant", iteration_missing_perm, "tenant-a",
+        &missing_transition_before)) {
+      print_permission_mutation_snapshot_difference
+        ("missing-transition-before", iteration, &missing_transition_before,
+          &(PermissionMutationSnapshot) { 0 });
+      return 2782;
+    }
     rc = send_raw_policy_mutation (session, "POST", base_url,
             "/policy/permissions/transition",
             iteration_missing_transition_query, &status, &body);
-    if (rc != 0)
-      return rc;
-    if (status != 400 || body == NULL
-        || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
-      g_printerr ("concurrent permission diagnostic iteration=%u missing "
-          "transition status=%u body=%s\n", iteration, status,
-          body != NULL ? body : "<null>");
-      return 172;
+    print_concurrent_policy_response ("stress", iteration, 1,
+        "missing-transition", iteration_state_subject, iteration_missing_perm,
+        "tenant-a", rc, status, body);
+    gint missing_transition_result = rc;
+    if (missing_transition_result == 0
+        && (status != 400 || body == NULL
+        || strstr (body, "\"invalid_policy_mutation\"") == NULL))
+      missing_transition_result = 172;
+    if (!capture_permission_mutation_snapshot (store,
+        iteration_state_subject, iteration_missing_perm, "tenant-a",
+        "permission_state.grant", iteration_missing_perm, "tenant-a",
+        &missing_transition_after)
+        || !permission_mutation_snapshot_unchanged
+          (&missing_transition_before, &missing_transition_after)) {
+      print_permission_mutation_snapshot_difference ("missing-transition",
+          iteration, &missing_transition_before, &missing_transition_after);
+      if (missing_transition_result == 0)
+        missing_transition_result = 2783;
     }
     g_clear_pointer (&body, g_free);
+    if (missing_transition_result != 0)
+      return missing_transition_result;
   }
   g_printerr ("concurrent permission diagnostic iterations=10 duration_ms=%"
       G_GINT64_FORMAT "\n", (g_get_monotonic_time ()
@@ -10273,18 +10673,38 @@ check_policy_permission_mutation_contract (SoupServer *server,
       g_strdup_printf ("subject=state-target&perm=site.missing"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49", session_token);
+  PermissionMutationSnapshot final_transition_before;
+  PermissionMutationSnapshot final_transition_after = { 0 };
+  if (!capture_permission_mutation_snapshot (store, "state-target",
+      "site.missing", "tenant-a", "permission_state.grant",
+      "site.missing", "tenant-a", &final_transition_before)) {
+    print_permission_mutation_snapshot_difference ("final-transition-before",
+        0, &final_transition_before, &(PermissionMutationSnapshot) { 0 });
+    return 2784;
+  }
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/transition", missing_perm_transition_query,
           &status, &body);
-  if (rc != 0)
-    return rc;
-  if (status != 400 || body == NULL
-      || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
-    g_printerr ("missing permission transition returned status=%u body=%s\n",
-        status, body != NULL ? body : "<null>");
-    return 172;
+  print_concurrent_policy_response ("final", 0, 0, "missing-transition",
+      "state-target", "site.missing", "tenant-a", rc, status, body);
+  gint final_transition_result = rc;
+  if (final_transition_result == 0
+      && (status != 400 || body == NULL
+      || strstr (body, "\"invalid_policy_mutation\"") == NULL))
+    final_transition_result = 172;
+  if (!capture_permission_mutation_snapshot (store, "state-target",
+      "site.missing", "tenant-a", "permission_state.grant",
+      "site.missing", "tenant-a", &final_transition_after)
+      || !permission_mutation_snapshot_unchanged (&final_transition_before,
+      &final_transition_after)) {
+    print_permission_mutation_snapshot_difference ("final-transition", 0,
+        &final_transition_before, &final_transition_after);
+    if (final_transition_result == 0)
+      final_transition_result = 2785;
   }
   g_clear_pointer (&body, g_free);
+  if (final_transition_result != 0)
+    return final_transition_result;
 
   g_autofree gchar *invalid_edge_transition_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
