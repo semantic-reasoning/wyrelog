@@ -1251,10 +1251,13 @@ test_native_namespace_temp_token_real_crash_recovery (void)
     gsize tampered_size = 0;
     const guint8 *source = g_bytes_get_data (bytes, &tampered_size);
     guint8 *tampered_data = g_memdup2 (source, tampered_size);
-    tampered_data[tampered_size - 1] ^= 1;
+    /* WTE1 has no authentication tag; corrupt the token grammar so this
+     * legacy evidence is rejected structurally rather than merely changing
+     * one valid token character. */
+    tampered_data[tampered_size - 1] = '!';
     GBytes *tampered = g_bytes_new_take (tampered_data, tampered_size);
     g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode
-          (tampered, &evidence), ==, WYRELOG_E_POLICY);
+          (tampered, &evidence), ==, WYRELOG_E_INVALID);
     g_assert_null (evidence);
     g_bytes_unref (tampered);
   }
