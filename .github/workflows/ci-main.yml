@@ -617,6 +617,10 @@ jobs:
   build-windows:
     name: build-windows${{ matrix.job_suffix }}
     runs-on: windows-latest
+    # The pinned source build and focused secure-bridge tests are deliberately
+    # retained in full, but a hung native child must not consume a runner
+    # indefinitely (#846).
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -800,6 +804,10 @@ jobs:
             if errorlevel 1 exit /b 1
           )
 
+      - name: Verify Windows CI timeout boundary
+        shell: bash
+        run: python3 tests/test-windows-ci-timeout-boundary.py "$GITHUB_WORKSPACE"
+
       - name: Build and test (clang-cl)
         shell: powershell
         run: |
@@ -820,6 +828,7 @@ jobs:
           builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
           if "${{ matrix.secure_bridge }}"=="enabled" (
             meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem fact-artifact-namespace-windows fact-provisioning-construct --print-errorlogs
+            meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"
           ) else (
             meson test -C builddir --print-errorlogs --suite wyrelog
           )
@@ -828,7 +837,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Show sccache statistics
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           sccache_path="$(cygpath -u "${SCCACHE_EXE:-}" 2>/dev/null || true)"
@@ -847,7 +856,7 @@ jobs:
           fi
 
       - name: Upload meson logs on failure
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: meson-logs-windows${{ matrix.job_suffix }}
