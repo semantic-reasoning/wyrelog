@@ -29,6 +29,7 @@ required_script_tokens = (
     "leak-probe",
     "invalid-probe",
     "artifact-suite",
+    "runner-started.json",
     "test-windows-appverifier-probe.exe",
     "test-fact-artifact-namespace-windows.exe",
     "finally {",
@@ -41,6 +42,16 @@ required_script_tokens = (
 for token in required_script_tokens:
     if token not in script:
         raise SystemExit(f"Windows AppVerifier runner lost fail-closed token: {token}")
+
+output_root = script.index("$script:output_root =")
+startup_evidence = script.index("runner-started.json")
+build_prerequisite = script.index("$script:build_root =")
+required_target_check = script.index("foreach ($required in")
+if not output_root < startup_evidence < build_prerequisite < required_target_check:
+    raise SystemExit(
+        "Windows AppVerifier runner must preserve startup evidence before "
+        "build and target prerequisite checks"
+    )
 
 if "continue-on-error" in script or "SilentlyContinue" in script:
     raise SystemExit("Windows AppVerifier runner must not suppress failures")
@@ -97,6 +108,12 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     upload_start = windows.index(upload_name)
     if not windows.index("      - name: Build and test (clang-cl)") < run_start < upload_start:
         raise SystemExit(f"{workflow_name} verifier gate ordering drifted")
+    probe_compile = (
+        "meson compile -C builddir test-windows-appverifier-probe "
+        "test-windows-appverifier-probe-dll"
+    )
+    if windows.count(probe_compile) != 1 or windows.index(probe_compile) > run_start:
+        raise SystemExit(f"{workflow_name} must build verifier probes before the gate")
     run_step = windows[run_start:upload_start]
     upload_step = windows[upload_start:]
     for token in (
