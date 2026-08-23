@@ -20885,7 +20885,7 @@ main (void)
           base_url);
   if (relogin_epoch_rc != 0)
     return relogin_epoch_rc;
-#ifdef WYL_HAS_AUDIT
+#if defined(WYL_HAS_AUDIT) && defined(WYL_TEST_VARIANT_AUDIT)
   gint skip_mfa_audit_paths_rc = check_skip_mfa_zero_event_audit_paths
         (handle, base_url);
   if (skip_mfa_audit_paths_rc != 0)
