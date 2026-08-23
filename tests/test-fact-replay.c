@@ -1936,9 +1936,10 @@ test_handle_refresh_fact_graph_is_isolated (void)
 /* Drive one mutation through the single internal entry point, exactly as the
  * daemon route does.  Returns the rc; |out_outcome| carries the class. */
 static wyrelog_error_t
-commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
+commit_one_mutation_op (WylHandle *handle, wyl_policy_store_t *policy,
     const gchar *tenant_id, const gchar *graph_id, const gchar *batch_id,
-    const gchar *idempotency_key, gboolean *out_inserted,
+    const gchar *idempotency_key, wyl_fact_store_op_t op,
+    const gchar *order_id, gboolean *out_inserted,
     wyl_fact_mutation_outcome_t *out_outcome)
 {
   g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
@@ -1958,7 +1959,7 @@ commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
   wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
           graph_id, columns, G_N_ELEMENTS (columns));
   wyl_fact_value_t values[] = {
-    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-z"},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = order_id},
     {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 99},
     {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
   };
@@ -1972,7 +1973,7 @@ commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
     .schema_version = 1,
     .source = "test",
     .idempotency_key = idempotency_key,
-    .op = WYL_FACT_STORE_OP_ASSERT,
+    .op = op,
     .rows = rows,
     .n_rows = G_N_ELEMENTS (rows),
   };
@@ -1989,6 +1990,17 @@ commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
   g_assert_null (store);
   clear_full_graph_info (&target.info);
   return rc;
+}
+
+static wyrelog_error_t
+commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *batch_id,
+    const gchar *idempotency_key, gboolean *out_inserted,
+    wyl_fact_mutation_outcome_t *out_outcome)
+{
+  return commit_one_mutation_op (handle, policy, tenant_id, graph_id, batch_id,
+             idempotency_key, WYL_FACT_STORE_OP_ASSERT, "order-z",
+             out_inserted, out_outcome);
 }
 
 /* Issue #546: the internal mutation entry point commits, then refreshes only
@@ -2082,6 +2094,210 @@ test_handle_commit_fact_mutation_refreshes_only_its_graph (void)
       &same_tenant_before);
   assert_generations_unchanged (handle, "tenant-b", "orders",
       &other_tenant_before);
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+/* Issue #546 concurrent isolation.
+ *
+ * What this proves and what it does NOT: the DuckDB commits genuinely run in
+ * parallel -- each thread opens its own store on a different graph's file with
+ * no shared lock -- and the status reads take no coordinator lock, holding the
+ * per-entry state lock only for the copy and never across the engine build, so
+ * a read completes while another graph is mid-refresh.  The REFRESHES,
+ * however, serialize on the handle-global fact_replay_coordinator_lock, so
+ * this is isolation under interleaving, not concurrent engine builds.  Do not
+ * cite it as evidence of per-key refresh concurrency; that is what #548/#549
+ * are meant to unlock.
+ *
+ * The invariant under test is an accounting property, and it holds under any
+ * serialization: each graph's engine_generation advances by exactly its own
+ * successful mutations and by no one else's. */
+/* Deliberately ASYMMETRIC: with equal counts, a symmetric cross-attribution
+ * (a's refresh bumping b's counter and vice versa) would produce exactly the
+ * same totals and go undetected. */
+#define MUTATION_ISOLATION_ROUNDS_A 8
+#define MUTATION_ISOLATION_ROUNDS_B 6
+/* Each assert is retracted by the following round, so an odd count would
+ * leave one row behind and break the surviving-row assertion below. */
+G_STATIC_ASSERT (MUTATION_ISOLATION_ROUNDS_A % 2 == 0);
+G_STATIC_ASSERT (MUTATION_ISOLATION_ROUNDS_B % 2 == 0);
+
+typedef struct
+{
+  WylHandle *handle;
+  wyl_policy_store_t *policy;
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  guint rounds;
+  guint successes;
+  guint failures;
+} MutationWorkerCtx;
+
+static gpointer
+mutation_isolation_worker (gpointer data)
+{
+  MutationWorkerCtx *ctx = data;
+  for (guint i = 0; i < ctx->rounds; i++) {
+    /* Alternate assert and retract so the retract arm of the entry point's
+     * dispatch is exercised concurrently too, not just the assert arm. */
+    gboolean retract = (i % 2) == 1;
+    g_autofree gchar *order_id = g_strdup_printf ("order-%s-%s-%u",
+            ctx->tenant_id, ctx->graph_id, retract ? i - 1 : i);
+    g_autofree gchar *batch_id = g_strdup_printf ("iso-%s-%s-%u",
+            ctx->tenant_id, ctx->graph_id, i);
+    g_autofree gchar *key = g_strdup_printf ("iso-key-%s-%s-%u",
+            ctx->tenant_id, ctx->graph_id, i);
+    gboolean inserted = FALSE;
+    wyl_fact_mutation_outcome_t outcome;
+    wyl_fact_mutation_outcome_init (&outcome);
+    wyrelog_error_t rc = commit_one_mutation_op (ctx->handle, ctx->policy,
+            ctx->tenant_id, ctx->graph_id, batch_id, key,
+            retract ? WYL_FACT_STORE_OP_RETRACT : WYL_FACT_STORE_OP_ASSERT,
+            order_id, &inserted, &outcome);
+    if (rc != WYRELOG_E_OK
+        || outcome.mutation_class != WYL_FACT_MUTATION_COMMITTED_READY) {
+      ctx->failures++;
+      continue;
+    }
+    ctx->successes++;
+  }
+  return NULL;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  GraphGenerations baseline;
+  /* stop is genuinely cross-thread; failures and observations are written
+  * only here and read only after the join, like the workers' counters. */
+  gint stop;
+  guint failures;
+  guint observations;
+} QuietObserverCtx;
+
+/* Watch an UNMUTATED graph for the whole window.  A before/after snapshot
+ * cannot tell a generation that never moved from one that moved and moved
+ * back; this can, because wyl_handle_get_fact_graph_runtime_status takes no
+ * coordinator lock and so can read while another graph refreshes. */
+static gpointer
+quiet_graph_observer (gpointer data)
+{
+  QuietObserverCtx *ctx = data;
+  while (!g_atomic_int_get (&ctx->stop)) {
+    WylFactGraphRuntimeStatus status = { 0 };
+    if (wyl_handle_get_fact_graph_runtime_status (ctx->handle, "tenant-a",
+        "inventory", &status) != WYRELOG_E_OK) {
+      ctx->failures++;
+      wyl_fact_graph_runtime_status_clear (&status);
+      break;
+    }
+    if (status.engine_generation != ctx->baseline.engine_generation
+        || status.operation_generation != ctx->baseline.operation_generation)
+      ctx->failures++;
+    wyl_fact_graph_runtime_status_clear (&status);
+    ctx->observations++;
+    g_usleep (200);
+  }
+  return NULL;
+}
+
+static void
+test_mutation_isolation_is_concurrent (void)
+{
+  TEST ("concurrent mutations on two graphs never move a third graph's "
+      "generations");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-iso-conc-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "inventory");
+    create_graph_with_schema (policy, root, "tenant-b", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "inventory");
+    append_order_batches (policy, root, "tenant-b", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+
+  const GraphGenerations a_before = capture_generations (handle, "tenant-a",
+          "orders");
+  const GraphGenerations b_before = capture_generations (handle, "tenant-b",
+          "orders");
+  const GraphGenerations quiet_before = capture_generations (handle,
+          "tenant-a", "inventory");
+
+  MutationWorkerCtx a = {
+    .handle = handle,.policy = policy,.tenant_id = "tenant-a",
+    .graph_id = "orders",.rounds = MUTATION_ISOLATION_ROUNDS_A,
+  };
+  MutationWorkerCtx b = {
+    .handle = handle,.policy = policy,.tenant_id = "tenant-b",
+    .graph_id = "orders",.rounds = MUTATION_ISOLATION_ROUNDS_B,
+  };
+  QuietObserverCtx observer = {
+    .handle = handle,.baseline = quiet_before,
+  };
+
+  GThread *watcher = g_thread_new ("iso-observer", quiet_graph_observer,
+          &observer);
+  GThread *worker_a = g_thread_new ("iso-a", mutation_isolation_worker, &a);
+  GThread *worker_b = g_thread_new ("iso-b", mutation_isolation_worker, &b);
+  g_thread_join (worker_a);
+  g_thread_join (worker_b);
+  g_atomic_int_set (&observer.stop, 1);
+  g_thread_join (watcher);
+
+  g_assert_cmpuint (a.failures, ==, 0);
+  g_assert_cmpuint (b.failures, ==, 0);
+  g_assert_cmpuint (a.successes, ==, MUTATION_ISOLATION_ROUNDS_A);
+  g_assert_cmpuint (b.successes, ==, MUTATION_ISOLATION_ROUNDS_B);
+
+  /* Failures first: if the very first poll failed, the observer breaks with
+   * zero observations, and asserting the count first would report a
+   * misleading "observer never ran". */
+  g_assert_cmpuint (observer.failures, ==, 0);
+  g_assert_cmpuint (observer.observations, >, 0);
+
+  /* Each mutated graph advanced by exactly its OWN successful mutations --
+   * neither graph's refreshes were attributed to the other. */
+  const GraphGenerations a_after = capture_generations (handle, "tenant-a",
+          "orders");
+  const GraphGenerations b_after = capture_generations (handle, "tenant-b",
+          "orders");
+  g_assert_cmpuint (a_after.engine_generation, ==,
+      a_before.engine_generation + a.successes);
+  g_assert_cmpuint (b_after.engine_generation, ==,
+      b_before.engine_generation + b.successes);
+
+  /* And the untouched graph is where it started, on both counters. */
+  assert_generations_unchanged (handle, "tenant-a", "inventory",
+      &quiet_before);
+
+  /* Prove the retracts actually matched the rows they name.  A retract is a
+   * tombstone append that succeeds even against a row that never existed, so
+   * the alternating assert/retract pairing above would be decorative without
+   * this: every asserted order-* row is retracted again, leaving only the
+   * fixture's order-b in the observed relation. */
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+  assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
 
   g_clear_object (&handle);
   remove_tree (root);
@@ -2349,6 +2565,8 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_is_isolated);
   g_test_add_func ("/fact-replay/mutation-commits-and-refreshes",
       test_handle_commit_fact_mutation_refreshes_only_its_graph);
+  g_test_add_func ("/fact-replay/mutation-isolation-concurrent",
+      test_mutation_isolation_is_concurrent);
   g_test_add_func ("/fact-replay/single-graph-refresh-degrades",
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
