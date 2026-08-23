@@ -2463,6 +2463,29 @@ wyl_handle_refresh_fact_graph (WylHandle *self,
   return rc;
 }
 
+wyrelog_error_t
+wyl_handle_get_fact_graph_runtime_status (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (out_status != NULL)
+    memset (out_status, 0, sizeof (*out_status));
+
+  if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
+      || graph_id == NULL || out_status == NULL
+      || self->fact_graph_runtime == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphKey key = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_fact_graph_runtime_manager_get_status (self->fact_graph_runtime,
+            &key, out_status);
+  }
+  wyl_fact_graph_key_clear (&key);
+  return rc;
+}
+
 typedef struct
 {
   WylEngine *engine;
@@ -2498,17 +2521,17 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
       || self->fact_graph_runtime == NULL)
     return WYRELOG_E_INVALID;
 
-  WylFactGraphKey key = { 0 };
-  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
   WylFactGraphRuntimeStatus status = { 0 };
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_get_status
-          (self->fact_graph_runtime, &key, &status);
+  wyrelog_error_t rc = wyl_handle_get_fact_graph_runtime_status (self,
+          tenant_id, graph_id, &status);
   if (rc == WYRELOG_E_OK && !status.queryable) {
     rc = status.state == WYL_FACT_GRAPH_RUNTIME_DEGRADED
         ? WYRELOG_E_POLICY : WYRELOG_E_NOT_FOUND;
   }
   wyl_fact_graph_runtime_status_clear (&status);
+  WylFactGraphKey key = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
   g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_runtime_manager_acquire_snapshot

@@ -262,6 +262,16 @@ wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
 wyrelog_error_t wyl_handle_refresh_fact_graph (WylHandle * self,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeStatus * out_status);
+/* Capture one graph's runtime status without refreshing it (issue #546).
+ * This is how a caller observes a graph's engine/operation generations, which
+ * wyl_fact_graph_status_t deliberately does not carry.  It takes no
+ * coordinator lock: the runtime manager locks the entry internally, so an
+ * unrelated graph's generations can be read while another graph refreshes.
+ * |out_status| is cleared on every path and must be released with
+ * wyl_fact_graph_runtime_status_clear on success. */
+wyrelog_error_t wyl_handle_get_fact_graph_runtime_status (WylHandle * self,
+    const gchar * tenant_id, const gchar * graph_id,
+    WylFactGraphRuntimeStatus * out_status);
 typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
     const gchar * relation, const gint64 * row, guint ncols,
     gpointer user_data);
