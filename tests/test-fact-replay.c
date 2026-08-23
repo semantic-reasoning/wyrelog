@@ -2190,12 +2190,55 @@ clear_full_graph_info (wyl_policy_fact_graph_info_t *info)
   memset (info, 0, sizeof (*info));
 }
 
+/* Capture one graph's (operation_generation, engine_generation) pair.  These
+ * two counters are what acceptance criterion 1 is actually about, and
+ * wyl_fact_graph_status_t does not carry them. */
+typedef struct
+{
+  guint64 operation_generation;
+  guint64 engine_generation;
+  WylFactGraphRuntimeState state;
+  gboolean queryable;
+} GraphGenerations;
+
+static GraphGenerations
+capture_generations (WylHandle *handle, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle, tenant_id,
+      graph_id, &status), ==, WYRELOG_E_OK);
+  GraphGenerations out = {
+    .operation_generation = status.operation_generation,
+    .engine_generation = status.engine_generation,
+    .state = status.state,
+    .queryable = status.queryable,
+  };
+  wyl_fact_graph_runtime_status_clear (&status);
+  return out;
+}
+
+static void
+assert_generations_unchanged (WylHandle *handle, const gchar *tenant_id,
+    const gchar *graph_id, const GraphGenerations *before)
+{
+  GraphGenerations now = capture_generations (handle, tenant_id, graph_id);
+  g_assert_cmpuint (now.operation_generation, ==, before->operation_generation);
+  g_assert_cmpuint (now.engine_generation, ==, before->engine_generation);
+  g_assert_cmpint (now.state, ==, before->state);
+  g_assert_true (now.queryable);
+}
+
 /* Issue #546: a single-graph refresh converges only its own graph and never
- * disturbs a sibling (in particular it must not retire_unseen the others). */
+ * disturbs a sibling -- neither a sibling in the SAME tenant nor one in a
+ * different tenant.  Asserting READY counts alone is too weak: a sibling whose
+ * engine was silently rebuilt would still report ready.  The acceptance
+ * criterion is about generations, so this asserts the generations. */
 static void
 test_handle_refresh_fact_graph_is_isolated (void)
 {
-  TEST ("single-graph refresh converges one graph without disturbing another");
+  TEST ("single-graph refresh leaves same-tenant and cross-tenant "
+      "sibling generations untouched");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
         ("wyl-fact-refresh-iso-XXXXXX", &error);
@@ -2209,8 +2252,10 @@ test_handle_refresh_fact_graph_is_isolated (void)
         WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
     create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "inventory");
     create_graph_with_schema (policy, root, "tenant-b", "orders");
     append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "inventory");
     append_order_batches (policy, root, "tenant-b", "orders");
   }
 
@@ -2222,12 +2267,19 @@ test_handle_refresh_fact_graph_is_isolated (void)
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);
 
-  /* Startup replay makes both graphs READY and queryable. */
+  /* Startup replay makes all three graphs READY and queryable. */
   FactStatusProbe before = { 0 };
   g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
       fact_status_cb, &before), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (before.total, ==, 2);
-  g_assert_cmpuint (before.ready, ==, 2);
+  g_assert_cmpuint (before.total, ==, 3);
+  g_assert_cmpuint (before.ready, ==, 3);
+
+  const GraphGenerations target_before = capture_generations (handle,
+          "tenant-a", "orders");
+  const GraphGenerations same_tenant_before = capture_generations (handle,
+          "tenant-a", "inventory");
+  const GraphGenerations other_tenant_before = capture_generations (handle,
+          "tenant-b", "orders");
 
   /* Capture tenant-a/orders' full authority info, then refresh only it. */
   FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
@@ -2243,13 +2295,30 @@ test_handle_refresh_fact_graph_is_isolated (void)
   wyl_fact_graph_runtime_status_clear (&status);
   clear_full_graph_info (&target.info);
 
-  /* The sibling graph was neither retired nor degraded: both remain READY.
-   * A wrong retire_unseen on the one-element seen set would have swept B. */
+  /* The refreshed graph advanced exactly one operation and one engine
+   * generation: the refresh was admitted once and published once. */
+  const GraphGenerations target_after = capture_generations (handle,
+          "tenant-a", "orders");
+  g_assert_cmpuint (target_after.operation_generation, ==,
+      target_before.operation_generation + 1);
+  g_assert_cmpuint (target_after.engine_generation, ==,
+      target_before.engine_generation + 1);
+  g_assert_true (target_after.queryable);
+
+  /* Neither sibling moved on either counter -- not the same-tenant one, and
+   * not the cross-tenant one. */
+  assert_generations_unchanged (handle, "tenant-a", "inventory",
+      &same_tenant_before);
+  assert_generations_unchanged (handle, "tenant-b", "orders",
+      &other_tenant_before);
+
+  /* A wrong retire_unseen on the one-element seen set would have swept the
+   * siblings out of the runtime entirely. */
   FactStatusProbe after = { 0 };
   g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
       fact_status_cb, &after), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (after.total, ==, 2);
-  g_assert_cmpuint (after.ready, ==, 2);
+  g_assert_cmpuint (after.total, ==, 3);
+  g_assert_cmpuint (after.ready, ==, 3);
 
   g_clear_object (&handle);
   remove_tree (root);
