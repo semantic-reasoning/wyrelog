@@ -10215,8 +10215,12 @@ check_policy_permission_mutation_contract (SoupServer *server,
           &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+  if (status != 400 || body == NULL
+      || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
+    g_printerr ("missing permission transition returned status=%u body=%s\n",
+        status, body != NULL ? body : "<null>");
     return 172;
+  }
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *invalid_edge_transition_query =
