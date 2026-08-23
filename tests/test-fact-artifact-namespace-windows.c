@@ -1083,6 +1083,349 @@ run_lease_child (const gchar *mode, const gchar *path)
   return result;
 }
 
+enum
+{
+  TEMP_TOKEN_CHILD_OK = 0,
+  TEMP_TOKEN_CHILD_ERROR = 51,
+};
+
+/* The evidence file and ready marker deliberately live beside, rather than
+ * inside, the graph directory.  They are test-process IPC, not recovery
+ * authority and must never be mistaken for an artifact owned by the graph. */
+static int
+run_temp_token_child (const gchar *path, const gchar *evidence_path,
+    const gchar *ready_path)
+{
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ = open_namespace_at_path (path,
+          FALSE, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempToken *token = NULL;
+  WylFactArtifactWinTempRecoveryEvidence *evidence = NULL;
+  GBytes *encoded = NULL;
+  gsize size = 0;
+  const gchar *data = NULL;
+  wyrelog_error_t rc;
+  GError *error = NULL;
+
+  rc = wyl_fact_artifact_win_namespace_acquire_mutation (namespace_, &lease);
+  if (rc != WYRELOG_E_OK)
+    return TEMP_TOKEN_CHILD_ERROR;
+  rc = wyl_fact_artifact_win_lease_create_temp_token (lease, "crash-token",
+          &token);
+  if (rc != WYRELOG_E_OK)
+    return TEMP_TOKEN_CHILD_ERROR;
+  rc = wyl_fact_artifact_win_temp_token_export_recovery_evidence (token,
+          &evidence);
+  if (rc != WYRELOG_E_OK
+      || wyl_fact_artifact_win_temp_recovery_evidence_encode (evidence,
+      &encoded) != WYRELOG_E_OK)
+    return TEMP_TOKEN_CHILD_ERROR;
+  data = g_bytes_get_data (encoded, &size);
+  if (!g_file_set_contents (evidence_path, data, (gssize) size, &error))
+    return TEMP_TOKEN_CHILD_ERROR;
+  g_clear_error (&error);
+  if (!g_file_set_contents (ready_path, "ready", 5, &error))
+    return TEMP_TOKEN_CHILD_ERROR;
+  g_clear_error (&error);
+
+  /* The parent terminates this process while it still owns the token and the
+   * mutation lease.  No normal free/close path is allowed to simulate the
+   * crash. */
+  Sleep (INFINITE);
+  return TEMP_TOKEN_CHILD_OK;
+}
+
+static HANDLE
+spawn_temp_token_child (const gchar *path, const gchar *evidence_path,
+    const gchar *ready_path, HANDLE *out_job)
+{
+  wchar_t executable[MAX_PATH + 1] = { 0 };
+  DWORD length = GetModuleFileNameW (NULL, executable,
+          G_N_ELEMENTS (executable));
+  g_autofree gchar *exe_utf8 = NULL;
+  g_autofree gchar *command_utf8 = NULL;
+  g_autofree wchar_t *command = NULL;
+  STARTUPINFOW startup = {.cb = sizeof startup };
+  PROCESS_INFORMATION process = { 0 };
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = { 0 };
+  HANDLE job;
+
+  g_assert_cmpuint (length, >, 0);
+  g_assert_cmpuint (length, <, G_N_ELEMENTS (executable));
+  exe_utf8 = g_utf16_to_utf8 ((gunichar2 *) executable, -1, NULL, NULL, NULL);
+  g_assert_nonnull (exe_utf8);
+  command_utf8 = g_strdup_printf ("\"%s\" --win-temp-token-child \"%s\" \"%s\" \"%s\"",
+          exe_utf8, path, evidence_path, ready_path);
+  command = g_utf8_to_utf16 (command_utf8, -1, NULL, NULL, NULL);
+  g_assert_nonnull (command);
+  job = CreateJobObjectW (NULL, NULL);
+  g_assert_nonnull (job);
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  g_assert_true (SetInformationJobObject (job,
+      JobObjectExtendedLimitInformation, &limits, sizeof limits));
+  g_assert_true (CreateProcessW (NULL, command, NULL, NULL, FALSE,
+      CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &startup, &process));
+  if (!AssignProcessToJobObject (job, process.hProcess)) {
+    DWORD error = GetLastError ();
+    TerminateProcess (process.hProcess, TEMP_TOKEN_CHILD_ERROR);
+    WaitForSingleObject (process.hProcess, 10000);
+    CloseHandle (process.hThread);
+    CloseHandle (process.hProcess);
+    CloseHandle (job);
+    g_error ("AssignProcessToJobObject failed: %lu", (gulong) error);
+  }
+  if (ResumeThread (process.hThread) == (DWORD) -1) {
+    DWORD error = GetLastError ();
+    TerminateProcess (process.hProcess, TEMP_TOKEN_CHILD_ERROR);
+    WaitForSingleObject (process.hProcess, 10000);
+    CloseHandle (process.hThread);
+    CloseHandle (process.hProcess);
+    CloseHandle (job);
+    g_error ("ResumeThread failed: %lu", (gulong) error);
+  }
+  g_assert_true (CloseHandle (process.hThread));
+  *out_job = job;
+  return process.hProcess;
+}
+
+static void
+wait_for_marker (const gchar *path)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  for (guint i = 0; i < 400; i++) {
+    if (GetFileAttributesW (wide) != INVALID_FILE_ATTRIBUTES)
+      return;
+    Sleep (25);
+  }
+  g_error ("timed out waiting for child marker %s", path);
+}
+
+static void
+test_native_namespace_temp_token_real_crash_recovery (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  HANDLE child;
+  HANDLE child_job = NULL;
+  HANDLE parent_graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempRecoveryEvidence *evidence = NULL;
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  g_autofree gchar *evidence_path = g_strdup_printf ("%s.evidence", path);
+  g_autofree gchar *ready_path = g_strdup_printf ("%s.ready", path);
+  g_autofree gchar *token_path = g_build_filename (path, "tmp-crash-token",
+          NULL);
+  g_autofree gchar *cleanup_evidence = g_strdup (evidence_path);
+  g_autofree gchar *cleanup_ready = g_strdup (ready_path);
+  gchar *encoded = NULL;
+  gsize encoded_size = 0;
+  GError *error = NULL;
+
+  g_assert_true (CloseHandle (graph));
+  graph = INVALID_HANDLE_VALUE;
+  namespace_ = open_namespace_at_path (path, TRUE, &parent_graph);
+  child = spawn_temp_token_child (path, evidence_path, ready_path, &child_job);
+  wait_for_marker (ready_path);
+  g_assert_true (g_file_get_contents (evidence_path, &encoded,
+      &encoded_size, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (encoded_size, >, 0);
+
+  g_assert_true (TerminateProcess (child, 0x660));
+  g_assert_cmpuint (WaitForSingleObject (child, 10000), ==, WAIT_OBJECT_0);
+  DWORD child_exit = STILL_ACTIVE;
+  g_assert_true (GetExitCodeProcess (child, &child_exit));
+  g_assert_cmpuint (child_exit, ==, 0x660);
+  g_assert_true (CloseHandle (child));
+  g_assert_true (CloseHandle (child_job));
+  child_job = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  GBytes *bytes = g_bytes_new_take (encoded, encoded_size);
+  encoded = NULL;
+  {
+    gsize tampered_size = 0;
+    const guint8 *source = g_bytes_get_data (bytes, &tampered_size);
+    guint8 *tampered_data = g_memdup2 (source, tampered_size);
+    tampered_data[tampered_size - 1] ^= 1;
+    GBytes *tampered = g_bytes_new_take (tampered_data, tampered_size);
+    g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode
+          (tampered, &evidence), ==, WYRELOG_E_POLICY);
+    g_assert_null (evidence);
+    g_bytes_unref (tampered);
+  }
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode (bytes,
+      &evidence), ==, WYRELOG_E_OK);
+  g_bytes_unref (bytes);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+      evidence, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+      evidence, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  g_autofree wchar_t *token_wide = g_utf8_to_utf16 (token_path, -1, NULL,
+          NULL, NULL);
+  g_assert_cmpint (GetFileAttributesW (token_wide), ==,
+      INVALID_FILE_ATTRIBUTES);
+  wyl_fact_artifact_win_temp_recovery_evidence_free (evidence);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (parent_graph));
+  g_assert_true (g_remove (cleanup_evidence) == 0);
+  g_assert_true (g_remove (cleanup_ready) == 0);
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
+static WylFactArtifactWinNamespace *
+open_isolated_namespace (gchar **out_path, HANDLE *out_graph)
+{
+  HANDLE graph = open_scratch_directory (out_path);
+  WylFactArtifactWinNamespace *namespace_;
+
+  g_assert_true (CloseHandle (graph));
+  namespace_ = open_namespace_at_path (*out_path, TRUE, out_graph);
+  return namespace_;
+}
+
+static void
+test_native_namespace_sidecar_replacement_isolated (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *destination = NULL;
+  WylFactArtifactWinTempBinding *source = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  WylFactArtifactWinSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
+  WylFactArtifactSidecarRetireResult retire =
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  gsize written = 0;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &destination), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (destination, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
+      "isolated-sidecar", &source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session (source,
+      &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "wal",
+      3, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (written, ==, 3);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar (source,
+      destination, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (destination,
+      &retire), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retire, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_temp_binding_free (source);
+  wyl_fact_artifact_win_sidecar_binding_free (destination);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
+static void
+test_native_namespace_temp_binding_replacement_isolated (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *destination = NULL;
+  WylFactArtifactWinTempBinding *source = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  WylFactArtifactWinSidecarReplaceResult result =
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
+  gsize written = 0;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &destination), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
+      "isolated-temp", &source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session (source,
+      &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "tmp",
+      3, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (written, ==, 3);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar (source,
+      destination, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED);
+  wyl_fact_artifact_win_temp_binding_free (source);
+  wyl_fact_artifact_win_sidecar_binding_free (destination);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
+static void
+test_native_namespace_lock_entry_replacement_isolated (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinMainBinding *main_binding = (gpointer) 0x1;
+  WylFactArtifactWinSidecarBinding *sidecar = (gpointer) 0x1;
+  g_autofree gchar *lock_path = g_build_filename (path, "facts.duckdb.lock",
+          NULL);
+  g_autofree gchar *old_lock_path = g_build_filename (path,
+          "facts.duckdb.lock.old", NULL);
+  g_autofree wchar_t *lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL,
+          NULL, NULL);
+  g_autofree wchar_t *old_lock_wide = g_utf8_to_utf16 (old_lock_path, -1,
+          NULL, NULL, NULL);
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_true (MoveFileExW (lock_wide, old_lock_wide,
+      MOVEFILE_WRITE_THROUGH));
+  HANDLE replacement = CreateFileW (lock_wide, GENERIC_READ | GENERIC_WRITE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW,
+          FILE_ATTRIBUTE_NORMAL, NULL);
+  g_assert_true (replacement != INVALID_HANDLE_VALUE);
+  g_assert_true (CloseHandle (replacement));
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_main (lease,
+      &main_binding), ==, WYRELOG_E_POLICY);
+  g_assert_null (main_binding);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar), ==, WYRELOG_E_POLICY);
+  g_assert_null (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
 static HANDLE
 spawn_lease_child (const gchar *mode, const gchar *path)
 {
@@ -3446,6 +3789,14 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_locator_flush_after_leaked_fault},
   {"/fact/artifact-namespace/windows/namespace/main-sidecar",
    test_native_namespace_main_sidecar_lifecycle},
+  {"/fact/artifact-namespace/windows/sidecar/replacement-isolated",
+   test_native_namespace_sidecar_replacement_isolated},
+  {"/fact/artifact-namespace/windows/temp-binding/replacement-isolated",
+   test_native_namespace_temp_binding_replacement_isolated},
+  {"/fact/artifact-namespace/windows/namespace/lock-entry-replacement-isolated",
+   test_native_namespace_lock_entry_replacement_isolated},
+  {"/fact/artifact-namespace/windows/namespace/temp-token-real-crash-recovery",
+   test_native_namespace_temp_token_real_crash_recovery},
   {"/fact/artifact-namespace/windows/namespace/substitution",
    test_native_namespace_reparse_and_hardlink_substitution},
   {"/fact/artifact-namespace/windows/io-session/query-metadata-and-revalidate",
@@ -3461,6 +3812,8 @@ main (int argc, char **argv)
 {
   if (argc == 4 && strcmp (argv[1], "--win-lease-child") == 0)
     return run_lease_child (argv[2], argv[3]);
+  if (argc == 5 && strcmp (argv[1], "--win-temp-token-child") == 0)
+    return run_temp_token_child (argv[2], argv[3], argv[4]);
   g_test_init (&argc, &argv, NULL);
   for (gsize i = 0; i < G_N_ELEMENTS (win_guarded_cases); i++)
     g_test_add (win_guarded_cases[i].path, WinFaultGuard,
