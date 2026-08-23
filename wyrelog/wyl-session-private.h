@@ -58,12 +58,11 @@ G_GNUC_INTERNAL gboolean wyl_session_is_mfa_assured_private (const
  * comment in wyl-session-layout-private.h. */
 G_GNUC_INTERNAL gint64 wyl_session_authn_epoch_load_private (const
     WylSession * session);
-/* Core callers use the hidden definition in wyl-session.c; daemon HTTP test
- * targets use the mirrored companion definition when linking the companion
- * archive alongside libwyrelog. */
-G_GNUC_INTERNAL gboolean wyl_session_reauth_pending_private (const
+/* Export these accessors because wyrelogd links libwyrelog as a separate
+ * executable and must resolve the core definitions in wyl-session.c. */
+gboolean wyl_session_reauth_pending_private (const
     WylSession * session);
-G_GNUC_INTERNAL gint64 wyl_session_reauth_expected_epoch_private (const
+gint64 wyl_session_reauth_expected_epoch_private (const
     WylSession * session);
 /* Single coherent management liveness primitive.  Returns TRUE only when
  * |session| is an ACTIVE human session (decided by one atomic state load),
