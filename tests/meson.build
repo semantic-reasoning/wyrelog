@@ -1238,6 +1238,25 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
     test_fact_artifact_namespace_windows,
     timeout : 120,
   )
+  # Keep the long lifecycle subjects independently observable.  Each filtered
+  # invocation is a separate process, so a fatal assertion in one subject
+  # cannot suppress the remaining coverage in the CI matrix.
+  foreach lifecycle_case : [
+    ['main-sidecar', '/fact/artifact-namespace/windows/namespace/main-sidecar'],
+    ['sidecar-replacement-isolated', '/fact/artifact-namespace/windows/sidecar/replacement-isolated'],
+    ['temp-binding-replacement-isolated', '/fact/artifact-namespace/windows/temp-binding/replacement-isolated'],
+    ['lock-entry-replacement-isolated', '/fact/artifact-namespace/windows/namespace/lock-entry-replacement-isolated'],
+    ['temp-token-real-crash-recovery', '/fact/artifact-namespace/windows/namespace/temp-token-real-crash-recovery'],
+    ['cross-process', '/fact/artifact-namespace/windows/lock-domain/cross-process'],
+    ['temp-root-spill-child-capabilities', '/fact/artifact-namespace/windows/temp-root/spill-child-capabilities'],
+  ]
+    test('fact-artifact-namespace-windows-' + lifecycle_case[0],
+      test_fact_artifact_namespace_windows,
+      args : ['-p', lifecycle_case[1]],
+      is_parallel : false,
+      timeout : 120,
+    )
+  endforeach
 endif
 
 subprocess_test_env = environment()
