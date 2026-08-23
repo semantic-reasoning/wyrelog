@@ -326,6 +326,36 @@ def step_body(job: str, name: str) -> str:
     )
 
 
+def step_bodies(job: str, name: str) -> list[str]:
+    matches = re.findall(
+        rf"^      - name: {re.escape(name)}\n"
+        r"(.*?)(?=^      - name: |\Z)",
+        job,
+        re.MULTILINE | re.DOTALL,
+    )
+    return [
+        "\n".join(
+            line.removeprefix("        ") for line in match.rstrip().splitlines()
+        )
+        for match in matches
+    ]
+
+
+def remove_compile_step_id(job: str) -> str:
+    return re.sub(
+        r"(^      - name: Compile daemon HTTP variants\n)"
+        r"(.*?)(?=^      - name: |\Z)",
+        lambda match: match.group(1) + re.sub(
+            r"^        id: compile_daemon_http$\n",
+            "",
+            match.group(2),
+            flags=re.MULTILINE,
+        ),
+        job,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+
 def run_step_body(command: str) -> str:
     return "run: |\n" + "\n".join(
         f"  {line}" for line in command.splitlines()
@@ -406,7 +436,6 @@ for workflow_path in map(Path, sys.argv[5:]):
     if workflow.count("\n  daemon-http-shared-fact:\n") != 1:
         fail(f"{workflow_path} must define one daemon HTTP shared fact job")
     job = job_body(workflow, "daemon-http-shared-fact")
-    ci_audit_enabled_jobs.append(job)
     for required in (
         "os: [ubuntu-latest, macos-latest]",
         "timeout-minutes: 30",
@@ -431,6 +460,10 @@ for workflow_path in map(Path, sys.argv[5:]):
             f"{workflow_path} must test exactly four daemon HTTP variants "
             "and their artifact symbols"
         )
+    gate_steps = "\n".join((
+        step_run(job, "Compile daemon HTTP variants"),
+        step_run(job, "Test daemon HTTP variants"),
+    ))
     for target in (
         "daemon-http-decide",
         "daemon-http-decide-refresh",
@@ -440,13 +473,84 @@ for workflow_path in map(Path, sys.argv[5:]):
         occurrences = re.findall(
             rf"(?<![A-Za-z0-9_-])(?:test-)?{re.escape(target)}"
             r"(?![A-Za-z0-9_-])",
-            job,
+            gate_steps,
         )
         if len(occurrences) != 2:
             fail(
                 f"{workflow_path} must name {target} exactly in the compile "
                 "and test steps"
             )
+    diagnostic_name = "Capture daemon HTTP audit provenance"
+    diagnostic_steps = step_bodies(job, diagnostic_name)
+    if workflow_path.name == "ci-pr.yml":
+        if len(diagnostic_steps) != 1:
+            fail(
+                f"{workflow_path} must contain exactly one diagnostic audit "
+                "provenance step"
+            )
+        expected_diagnostic = (
+            "if: ${{ always() && "
+            "steps.compile_daemon_http.outcome == 'success' }}\n"
+            "continue-on-error: true\n"
+            "timeout-minutes: 6\n"
+            "run: |\n"
+            "  meson test -C build-daemon-http-shared --no-rebuild \\\n"
+            "    daemon-http-decide-audit --verbose --print-errorlogs"
+        )
+        if diagnostic_steps[0] != expected_diagnostic:
+            fail(
+                f"{workflow_path} diagnostic audit provenance step changed"
+            )
+    elif diagnostic_steps:
+        fail(f"{workflow_path} must not add the diagnostic audit step")
+    compile_steps = step_bodies(job, "Compile daemon HTTP variants")
+    if len(compile_steps) != 1:
+        fail(f"{workflow_path} must contain exactly one daemon HTTP compile step")
+    compile_id_count = len(re.findall(
+        r"^id: compile_daemon_http$", compile_steps[0], re.MULTILINE
+    ))
+    workflow_compile_id_count = len(re.findall(
+        r"^        id: compile_daemon_http$", job, re.MULTILINE
+    ))
+    if workflow_path.name == "ci-pr.yml" and (
+        compile_id_count != 1 or workflow_compile_id_count != 1
+    ):
+        fail(
+            f"{workflow_path} must define compile_daemon_http exactly once "
+            "on the compile step"
+        )
+    if workflow_path.name != "ci-pr.yml" and (
+        compile_id_count != 0 or workflow_compile_id_count != 0
+    ):
+        fail(f"{workflow_path} must not define the PR compile step id")
+    allowed_steps = gate_steps + "\n" + "\n".join(diagnostic_steps)
+    for target in (
+        "daemon-http-decide",
+        "daemon-http-decide-refresh",
+        "daemon-http-decide-service",
+        "daemon-http-decide-audit",
+    ):
+        target_pattern = (
+            rf"(?<![A-Za-z0-9_-])(?:test-)?{re.escape(target)}"
+            r"(?![A-Za-z0-9_-])"
+        )
+        if len(re.findall(target_pattern, job)) != len(
+            re.findall(target_pattern, allowed_steps)
+        ):
+            fail(
+                f"{workflow_path} contains an unapproved {target} "
+                "workflow reference"
+            )
+    comparison_job = remove_compile_step_id(job)
+    if workflow_path.name == "ci-pr.yml":
+        comparison_job = re.sub(
+            r"^      - name: Capture daemon HTTP audit provenance\n"
+            r".*?(?=^      - name: |\Z)",
+            "",
+            comparison_job,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+    ci_audit_enabled_jobs.append(comparison_job)
 
     audit_disabled_job_name = "daemon-http-shared-fact-audit-disabled"
     if workflow.count(f"\n  {audit_disabled_job_name}:\n") != 1:
