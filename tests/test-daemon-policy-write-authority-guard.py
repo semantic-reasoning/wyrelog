@@ -278,6 +278,15 @@ def main():
             facts_publication_acquire,
             "wyl_daemon_policy_write_acquire_removed (ctx, msg, &write);"),
         "outside-mutator": source + "\nvoid bad(void){ wyl_perm_grant (NULL, NULL); }\n",
+        "outside-commit-fact-mutation": source +
+            "\nvoid bad(void){ wyl_handle_commit_fact_mutation "
+            "(NULL, NULL, NULL, NULL, NULL, NULL, NULL); }\n",
+        "outside-fact-append-batch-delta": source +
+            "\nvoid bad(void){ wyl_fact_store_append_batch_delta "
+            "(NULL, NULL, NULL, NULL, NULL); }\n",
+        "outside-fact-retract-batch-delta": source +
+            "\nvoid bad(void){ wyl_fact_store_retract_batch_delta "
+            "(NULL, NULL, NULL, NULL, NULL); }\n",
         "outside-create-tenant": source +
             "\nvoid bad(void){ wyl_policy_store_create_tenant "
             "(NULL, NULL, NULL); }\n",
@@ -309,10 +318,17 @@ def main():
             "  (void) wyl_policy_store_create_fact_graph "
             "(write.store, &opts, NULL);"),
         "nested-write-scope": nested_write_scope(source),
-        "missing-append": mutate_function(source, "facts_route_handler",
-            "wyl_fact_store_append_batch", "wyl_fact_store_append_removed"),
-        "missing-retract": mutate_function(source, "facts_route_handler",
-            "wyl_fact_store_retract_batch", "wyl_fact_store_retract_removed"),
+        # In-function fixtures pin facts_route_handler's frozen token tree:
+        # each is rejected with "token freeze mismatch", so they are freeze
+        # canaries rather than semantic assertions about the thing their name
+        # describes.  The three "outside-*" fact fixtures above are the ones
+        # that exercise the MUTATORS ownership rule.
+        "missing-commit-entry": mutate_function(source, "facts_route_handler",
+            "rc = wyl_handle_commit_fact_mutation (ctx->handle",
+            "rc = wyl_handle_commit_fact_removed (ctx->handle"),
+        "missing-retract-op": mutate_function(source, "facts_route_handler",
+            "WYL_FACT_STORE_OP_RETRACT : WYL_FACT_STORE_OP_ASSERT",
+            "WYL_FACT_STORE_OP_ASSERT : WYL_FACT_STORE_OP_ASSERT"),
         "raw-lookup-getter": mutate_function(source,
             "schema_register_handler", "lookup_fact_graph (write.store",
             "lookup_fact_graph (wyl_handle_get_policy_store (ctx->handle)"),
@@ -331,8 +347,9 @@ def main():
             "if (rc == WYRELOG_E_OK) {}\n  rc = wyl_policy_store_create_fact_graph"),
         "append-acquire-in-forget-sibling": move_append_acquire_to_forget(source),
         "unconditional-fact-selector": mutate_function(source,
-            "facts_route_handler", "if (op == FACT_HTTP_OP_RETRACT)",
-            "if (TRUE)"),
+            "facts_route_handler",
+            "wyl_fact_store_op_t store_op = (op == FACT_HTTP_OP_RETRACT) ?",
+            "wyl_fact_store_op_t store_op = (TRUE) ?"),
         "pre-acquire-raw-store-alias": mutate_function(source,
             "tenant_mutation_handler",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };",
@@ -652,10 +669,21 @@ def main():
             "test-tenant-seam-production-visible", "inactive-acquire-alias",
             "directive-acquire-alias", "true-redefine",
         }
+        source_tokens = guard_module.lex(source, preserve_pp=True)
         for name, text in fixtures.items():
             if text == source:
                 raise SystemExit(
                     f"negative fixture anchor missing: {name}")
+            # A fixture whose anchor lands inside a comment changes the text
+            # but not the token tree, so the guard cannot see it and would
+            # silently stop covering whatever the fixture claims to pin.
+            try:
+                mutated_tokens = guard_module.lex(text, preserve_pp=True)
+            except guard_module.GuardError:
+                mutated_tokens = None
+            if mutated_tokens == source_tokens:
+                raise SystemExit(
+                    f"negative fixture anchor is not in active code: {name}")
             target.write_text(text, encoding="utf-8")
             if invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
                       ns.define, raw_only=name not in preprocessed_fixtures).returncode == 0:
