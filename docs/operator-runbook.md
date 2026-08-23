@@ -1037,6 +1037,13 @@ mutate a relation before registering its schema fail with
 `fact_schema_not_found` on the schema-backed `/facts/<tenant>/<graph>/<relation>`
 routes.
 
+A sealed graph refuses all three: append, retract and forget each return `409`
+`graph_sealed`. Sealing a graph is irreversible -- there is no graph unseal
+operation, tenant unseal does not clear the graph flag, and `graph create`
+refuses an existing or sealed graph -- so an erasure request that arrives for
+an already-sealed graph has no in-product remedy. Seal only after any pending
+erasure work is complete.
+
 The following unary `fact(V)` flow shows the required contract for a registered
 `fact(value:int64)` relation:
 
