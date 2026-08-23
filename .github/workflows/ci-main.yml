@@ -836,6 +836,21 @@ jobs:
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Run Windows Application Verifier handle gate
+        if: matrix.secure_bridge == 'enabled'
+        shell: powershell
+        run: |
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-appverifier.ps1" -BuildDirectory builddir -OutputDirectory builddir\appverifier-artifacts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows Application Verifier evidence
+        if: always() && matrix.secure_bridge == 'enabled'
+        uses: actions/upload-artifact@v6
+        with:
+          name: appverifier-windows-secure-bridge
+          path: builddir/appverifier-artifacts/
+          if-no-files-found: error
+
       - name: Show sccache statistics
         if: ${{ !cancelled() }}
         shell: bash

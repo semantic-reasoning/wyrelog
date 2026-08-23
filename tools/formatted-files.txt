@@ -45,6 +45,8 @@ tests/test-session-username.c
 tests/test-template-tree.c
 tests/test-traits-compile.c
 tests/test-wyctl-basic.c
+tests/windows-appverifier-probe-dll.c
+tests/windows-appverifier-probe.c
 wyrelog/access/break-glass-private.h
 wyrelog/access/break-glass.c
 wyrelog/access/decision-private.h
