@@ -162,12 +162,12 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         raise SystemExit(f"{workflow_name} Windows runner selection drifted")
     runner_rows = (
         (
-            "          - runner: windows-latest\n"
+            "          - runner: windows-2025\n"
             "            fact_store: disabled\n"
             "            secure_bridge: disabled"
         ),
         (
-            "          - runner: windows-latest\n"
+            "          - runner: windows-2025\n"
             "            fact_store: enabled\n"
             "            secure_bridge: disabled"
         ),
@@ -182,6 +182,22 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     ):
         raise SystemExit(
             f"{workflow_name} must preserve all three Windows runner rows"
+        )
+    hosted_contract = (
+        "      - name: Verify hosted Windows runner contract\n"
+        "        shell: powershell\n"
+        "        run: |\n"
+        "          if ('${{ runner.environment }}' -ne 'github-hosted') {\n"
+        "            throw 'the Windows matrix requires a GitHub-hosted runner'\n"
+        "          }"
+    )
+    if windows.count(hosted_contract) != 1:
+        raise SystemExit(f"{workflow_name} lost the hosted Windows contract")
+    if windows.index(hosted_contract) > windows.index(
+        "      - name: Check out source"
+    ):
+        raise SystemExit(
+            f"{workflow_name} must verify hosted provenance before checkout"
         )
     run_name = "      - name: Run Windows Application Verifier handle gate"
     upload_name = "      - name: Upload Windows Application Verifier evidence"

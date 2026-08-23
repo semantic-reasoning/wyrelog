@@ -625,19 +625,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: windows-latest
+          - runner: windows-2025
             fact_store: disabled
             secure_bridge: disabled
             duckdb_source: prebuilt
             job_suffix: ''
-          - runner: windows-latest
+          - runner: windows-2025
             fact_store: enabled
             secure_bridge: disabled
             duckdb_source: prebuilt
             job_suffix: -fact
-          # AppVerifier requires an elevated process. Pin the hosted image
-          # label so a self-hosted runner carrying windows-latest cannot claim
-          # this instrumentation gate.
+          # AppVerifier requires an elevated process. Keep the explicit hosted
+          # image label on every row so a self-hosted runner carrying
+          # windows-latest cannot claim the Windows matrix.
           - runner: windows-2025
             fact_store: enabled
             secure_bridge: enabled
@@ -650,6 +650,13 @@ jobs:
       # are fixed on hosted runners, so the hit rate does not depend on it.
       SCCACHE_BASEDIRS: ${{ github.workspace }}
     steps:
+      - name: Verify hosted Windows runner contract
+        shell: powershell
+        run: |
+          if ('${{ runner.environment }}' -ne 'github-hosted') {
+            throw 'the Windows matrix requires a GitHub-hosted runner'
+          }
+
       - name: Check out source
         uses: actions/checkout@v5
 

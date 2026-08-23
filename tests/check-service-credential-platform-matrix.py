@@ -318,9 +318,10 @@ def check_ci_workflow(path: Path, ci_text: str) -> None:
             fail(f"{label}: macOS build-only gate '{gate}' is not present")
 
     # Build-only platform: Windows runner + its native gates present.
-    if "windows-latest" not in ci_text:
-        fail(f"{label}: no Windows (windows-latest) runner job for the "
-             "build-only platform the matrix claims")
+    if ("runs-on: ${{ matrix.runner }}" not in ci_text
+            or ci_text.count("- runner: windows-2025") != 3):
+        fail(f"{label}: the three Windows build-only matrix rows must use "
+             "the explicit windows-2025 runner")
     for gate in WINDOWS_NATIVE_GATES:
         if gate not in ci_text:
             fail(f"{label}: Windows build-only native gate '{gate}' is not "

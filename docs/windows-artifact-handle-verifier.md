@@ -7,12 +7,13 @@ for invalid HANDLE use and HANDLE leaks. It runs in the existing
 ## Prerequisites
 
 - 64-bit native Windows and a 64-bit Administrator PowerShell process.
-- CI pins the secure-bridge matrix entry to the GitHub-hosted
-  `windows-2025` label. GitHub-hosted Windows VMs run as administrators with
-  UAC disabled. The explicit label avoids the repository's observed
-  self-hosted `windows-latest` collision, and the runner also requires
-  `RUNNER_ENVIRONMENT=github-hosted` in GitHub Actions so a self-hosted runner
-  assigned the same explicit label fails closed.
+- CI pins every Windows matrix entry to the GitHub-hosted `windows-2025` label
+  and checks `runner.environment == github-hosted` before setup. GitHub-hosted
+  Windows VMs run as administrators with UAC disabled. The explicit label
+  avoids the repository's observed self-hosted `windows-latest` collision, and
+  the runtime check makes a self-hosted runner assigned the same explicit label
+  fail closed. The AppVerifier runner independently records and checks the same
+  provenance before instrumentation.
 - The Windows SDK Application Verifier feature (`OptionId.AvrfExternal`). The
   runner requires the Microsoft-signed 64-bit tool at
   `%SystemRoot%\System32\appverif.exe`. If it is absent, the runner installs
