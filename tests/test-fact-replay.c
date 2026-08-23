@@ -2331,6 +2331,7 @@ commit_one_mutation_op (WylHandle *handle, wyl_policy_store_t *policy,
     const gchar *tenant_id, const gchar *graph_id, const gchar *batch_id,
     const gchar *idempotency_key, wyl_fact_store_op_t op,
     const gchar *order_id, WylFactStoreBatchFault batch_fault,
+    const wyl_policy_fact_relation_schema_options_t *schema_override,
     gboolean *out_inserted, wyl_fact_mutation_outcome_t *out_outcome)
 {
   g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
@@ -2349,21 +2350,23 @@ commit_one_mutation_op (WylHandle *handle, wyl_policy_store_t *policy,
     {"amount", "int64", FALSE, TRUE},
     {"expedited", "bool", FALSE, TRUE},
   };
-  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
-          graph_id, columns, G_N_ELEMENTS (columns));
+  wyl_policy_fact_relation_schema_options_t schema = schema_override != NULL
+      ? *schema_override
+      : make_schema (tenant_id, graph_id, columns, G_N_ELEMENTS (columns));
   wyl_fact_value_t values[] = {
     {.type = WYL_FACT_VALUE_SYMBOL,.as.text = order_id},
     {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 99},
     {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
   };
-  wyl_fact_row_t rows[] = { {values, 3} };
+  g_assert_cmpuint (schema.n_columns, <=, G_N_ELEMENTS (values));
+  wyl_fact_row_t rows[] = { {values, schema.n_columns} };
   const wyl_fact_store_batch_t batch = {
     .batch_id = batch_id,
     .tenant_id = tenant_id,
     .graph_id = graph_id,
     .namespace_id = "shop.ns",
     .relation_name = "orders-rel",
-    .schema_version = 1,
+    .schema_version = schema.schema_version,
     .source = "test",
     .idempotency_key = idempotency_key,
     .op = op,
@@ -2393,7 +2396,8 @@ commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
 {
   return commit_one_mutation_op (handle, policy, tenant_id, graph_id, batch_id,
              idempotency_key, WYL_FACT_STORE_OP_ASSERT, "order-z",
-             WYL_FACT_STORE_BATCH_FAULT_NONE, out_inserted, out_outcome);
+             WYL_FACT_STORE_BATCH_FAULT_NONE, NULL, out_inserted,
+             out_outcome);
 }
 
 /* Issue #546: the internal mutation entry point commits, then refreshes only
@@ -2548,7 +2552,8 @@ mutation_isolation_worker (gpointer data)
     wyrelog_error_t rc = commit_one_mutation_op (ctx->handle, ctx->policy,
             ctx->tenant_id, ctx->graph_id, batch_id, key,
             retract ? WYL_FACT_STORE_OP_RETRACT : WYL_FACT_STORE_OP_ASSERT,
-            order_id, WYL_FACT_STORE_BATCH_FAULT_NONE, &inserted, &outcome);
+            order_id, WYL_FACT_STORE_BATCH_FAULT_NONE, NULL, &inserted,
+            &outcome);
     if (rc != WYRELOG_E_OK
         || outcome.mutation_class != WYL_FACT_MUTATION_COMMITTED_READY) {
       ctx->failures++;
@@ -2751,7 +2756,7 @@ test_commit_fact_mutation_precommit_failure_is_isolated (void)
   g_assert_cmpint (commit_one_mutation_op (handle,
       wyl_handle_get_policy_store (handle), "tenant-a", "orders",
       "precommit-1", "precommit-key-1", WYL_FACT_STORE_OP_ASSERT, "order-p",
-      WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT, &inserted, &outcome), !=,
+      WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT, NULL, &inserted, &outcome), !=,
       WYRELOG_E_OK);
 
   /* Every field of the documented PRECOMMIT_FAILED invariant. */
@@ -2774,6 +2779,321 @@ test_commit_fact_mutation_precommit_failure_is_isolated (void)
       &sibling_before);
 
   /* And the engine still shows only what was there before. */
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+/* Count rows in a graph's observed relation. */
+static guint
+observed_row_count (WylHandle *handle, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+  SnapshotProbe probe = { observed, 0, FALSE };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle, tenant_id,
+      graph_id, observed, handle_snapshot_cb, &probe), ==, WYRELOG_E_OK);
+  return probe.count;
+}
+
+/* Issue #546, contract item 4: a retried idempotency key is a committed no-op
+ * that STILL refreshes.  The engine_generation clause is the least intuitive
+ * part of the contract and the easiest for a "skip the refresh on a no-op"
+ * optimisation to break invisibly, so it is asserted explicitly. */
+static void
+test_commit_fact_mutation_idempotent_retry (void)
+{
+  TEST ("a retried idempotency key refreshes again without applying twice");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-retry-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+
+  const GraphGenerations before = capture_generations (handle, "tenant-a",
+          "orders");
+
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  g_assert_cmpint (commit_one_mutation (handle, policy, "tenant-a", "orders",
+      "retry-1", "retry-key-1", &inserted, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_assert_cmpint (outcome.delta.committed_row_delta, ==, 1);
+  const guint rows_after_first = observed_row_count (handle, "tenant-a",
+          "orders");
+  g_assert_cmpuint (rows_after_first, ==, 2);
+
+  const GraphGenerations after_first = capture_generations (handle, "tenant-a",
+          "orders");
+  g_assert_cmpuint (after_first.engine_generation, ==,
+      before.engine_generation + 1);
+
+  /* Same batch_id and idempotency_key: a committed no-op. */
+  gboolean retry_inserted = TRUE;
+  wyl_fact_mutation_outcome_t retry;
+  wyl_fact_mutation_outcome_init (&retry);
+  g_assert_cmpint (commit_one_mutation (handle, policy, "tenant-a", "orders",
+      "retry-1", "retry-key-1", &retry_inserted, &retry), ==, WYRELOG_E_OK);
+
+  g_assert_false (retry_inserted);
+  g_assert_false (retry.delta.inserted);
+  g_assert_cmpint (retry.delta.committed_row_delta, ==, 0);
+  g_assert_cmpint (retry.delta.logical_byte_delta, ==, 0);
+  g_assert_cmpint (retry.mutation_class, ==,
+      WYL_FACT_MUTATION_COMMITTED_READY);
+
+  /* Contract item 4: the refresh STILL ran. */
+  const GraphGenerations after_retry = capture_generations (handle, "tenant-a",
+          "orders");
+  g_assert_cmpuint (after_retry.engine_generation, ==,
+      after_first.engine_generation + 1);
+  g_assert_cmpuint (retry.engine_generation, ==,
+      after_retry.engine_generation);
+
+  /* The refreshed engine still serves exactly the pre-retry content.  This is
+   * NOT a no-double-apply check: the observed relation is derived and has set
+   * semantics, so re-applying an identical tuple would be invisible here.
+   * The no-double-apply evidence is the store-layer delta above (inserted
+   * FALSE, zero row delta), and the durable row-count version lives in
+   * tests/test-daemon-http-facts.c. */
+  g_assert_cmpuint (observed_row_count (handle, "tenant-a", "orders"), ==,
+      rows_after_first);
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+/* Issue #546: the COMMITTED_DEGRADED arm of the mutation entry point.
+ *
+ * Reaching it needs a commit that SUCCEEDS and a rebuild that FAILS, and
+ * nothing can run between those two steps.  Corrupting the store cannot do it
+ * -- the commit would fail first.  The lever is that the two steps consult
+ * different sources of truth: the append validates only against the schema it
+ * is handed, while the rebuild re-enumerates the relation from the store.
+ *
+ * This graph's relation is NOT in the activation registry -- neither
+ * create_graph_with_schema nor register_fact_relation_schema populates
+ * fact_relation_activation -- so list_replay_relations falls back to the
+ * DISTINCT enumeration over fact_batches, which has no intra-loop dedup.  The
+ * committed v2 batch makes that yield both v1 and v2 of orders-rel, and
+ * build_graph_program emits a duplicate .decl for the version-independent
+ * wirelog name.  See test_replay_dup_version_relation_degrades for the same
+ * collision and for the activation registry that removes it: if graph
+ * creation ever starts populating that registry, this arrangement stops
+ * degrading and this test will FAIL with COMMITTED_READY.  The fix is a new
+ * lever, not a relaxed assertion. */
+static void
+test_commit_fact_mutation_reports_committed_degraded (void)
+{
+  TEST ("a commit whose rebuild fails is committed-but-degraded");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-degraded-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  const wyl_policy_fact_relation_schema_column_t v2_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema_v2 = make_schema ("tenant-a",
+          "orders", v2_columns, G_N_ELEMENTS (v2_columns));
+  schema_v2.schema_version = 2;
+  schema_v2.relation_visible = FALSE;
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "inventory");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "inventory");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+
+  const GraphGenerations before = capture_generations (handle, "tenant-a",
+          "orders");
+  const GraphGenerations sibling_before = capture_generations (handle,
+          "tenant-a", "inventory");
+
+  /* Poison the rebuild without touching the store file. */
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &schema_v2), ==, WYRELOG_E_OK);
+
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  g_assert_cmpint (commit_one_mutation_op (handle, policy, "tenant-a",
+      "orders", "degraded-1", "degraded-key-1", WYL_FACT_STORE_OP_ASSERT,
+      "order-d", WYL_FACT_STORE_BATCH_FAULT_NONE, &schema_v2, &inserted,
+      &outcome), ==, WYRELOG_E_OK);
+
+  /* Durable, and reported as such -- never as a commit failure. */
+  g_assert_true (inserted);
+  g_assert_cmpint (outcome.mutation_class, ==,
+      WYL_FACT_MUTATION_COMMITTED_DEGRADED);
+  g_assert_true (outcome.delta.inserted);
+  g_assert_cmpint (outcome.delta.committed_row_delta, ==, 1);
+  g_assert_true (outcome.needs_runtime_reconcile);
+  g_assert_true (outcome.needs_durable_reconcile);
+  /* The EXACT class, not merely non-NONE.  Without the registered v2 schema
+   * the rebuild still fails, but for a different reason: the fallback still
+   * enumerates version 2 from fact_batches, finds no schema columns for it,
+   * and that WYRELOG_E_NOT_FOUND classifies as store_unavailable.  Asserting
+   * only non-NONE would pass on that accident and stop testing the lever.
+   * SCHEMA_MISMATCH is the mapping of WYRELOG_E_POLICY, so it narrows the
+   * failure to this class rather than uniquely pinning the duplicate .decl. */
+  g_assert_cmpint (outcome.degraded_class, ==,
+      WYL_FACT_GRAPH_REPLAY_SCHEMA_MISMATCH);
+
+  /* The prior complete generation stays queryable and is NOT superseded: a
+   * failed build consumes an operation but publishes no engine. */
+  const GraphGenerations after = capture_generations (handle, "tenant-a",
+          "orders");
+  g_assert_cmpuint (after.engine_generation, ==, before.engine_generation);
+  /* Exactly one operation: the entry point refreshes once.  A loose '>' here
+   * would pass a regression that refreshed twice. */
+  g_assert_cmpuint (after.operation_generation, ==,
+      before.operation_generation + 1);
+  g_assert_true (outcome.engine_queryable);
+
+  /* A degraded mutation still moves no other graph. */
+  assert_generations_unchanged (handle, "tenant-a", "inventory",
+      &sibling_before);
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+/* Issue #546 required test: committed-but-degraded RECOVERY.  The degraded
+ * case above stops at READY_STALE; this drives the whole transition, degraded
+ * back to READY, and pins which counter moves on each leg.  Recovery is a
+ * refresh-layer property, so it is driven at that layer; the degraded OUTCOME
+ * mapping is proven through the mutation entry point separately. */
+static void
+test_handle_refresh_fact_graph_recovers_from_degraded (void)
+{
+  TEST ("a degraded graph returns to READY once its store is sound again");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-recover-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autofree gchar *storage_path = NULL;
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    storage_path = lookup_graph_storage_path (policy, "tenant-a", "orders");
+    g_assert_nonnull (storage_path);
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  const GraphGenerations sound = capture_generations (handle, "tenant-a",
+          "orders");
+  g_assert_cmpint (sound.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+
+  FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+
+  /* Set the store aside, then break it. */
+  g_autofree gchar *fact_path = g_build_filename (storage_path, "facts.duckdb",
+          NULL);
+  g_autofree gchar *saved = NULL;
+  gsize saved_len = 0;
+  g_assert_true (g_file_get_contents (fact_path, &saved, &saved_len, NULL));
+  g_assert_true (g_file_set_contents (fact_path, "not a database", -1, NULL));
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
+
+  WylFactGraphRuntimeStatus degraded = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &target.info,
+      &degraded), !=, WYRELOG_E_OK);
+  g_assert_cmpint (degraded.state, ==, WYL_FACT_GRAPH_RUNTIME_READY_STALE);
+  g_assert_true (degraded.queryable);
+  wyl_fact_graph_runtime_status_clear (&degraded);
+
+  /* The failed build consumed an operation but published no engine, so the
+   * prior generation is still the one being served. */
+  const GraphGenerations stale = capture_generations (handle, "tenant-a",
+          "orders");
+  g_assert_cmpuint (stale.engine_generation, ==, sound.engine_generation);
+  g_assert_cmpuint (stale.operation_generation, ==,
+      sound.operation_generation + 1);
+  g_assert_true (stale.queryable);
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+
+  /* Put the store back and reconcile. */
+  g_assert_true (g_file_set_contents (fact_path, saved, (gssize) saved_len,
+      NULL));
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
+
+  WylFactGraphRuntimeStatus recovered = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &target.info,
+      &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovered.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_true (recovered.queryable);
+  g_assert_cmpint (recovered.last_replay_class, ==,
+      WYL_FACT_GRAPH_REPLAY_NONE);
+  wyl_fact_graph_runtime_status_clear (&recovered);
+  clear_full_graph_info (&target.info);
+
+  /* Only the successful build published: exactly one engine generation over
+   * the pre-corruption value, despite two refresh attempts. */
+  const GraphGenerations back = capture_generations (handle, "tenant-a",
+          "orders");
+  g_assert_cmpint (back.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpuint (back.engine_generation, ==, sound.engine_generation + 1);
   assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
 
   g_clear_object (&handle);
@@ -3049,6 +3369,12 @@ main (int argc, char **argv)
       test_mutation_isolation_is_concurrent);
   g_test_add_func ("/fact-replay/mutation-precommit-failed-is-isolated",
       test_commit_fact_mutation_precommit_failure_is_isolated);
+  g_test_add_func ("/fact-replay/mutation-idempotent-retry",
+      test_commit_fact_mutation_idempotent_retry);
+  g_test_add_func ("/fact-replay/mutation-committed-degraded",
+      test_commit_fact_mutation_reports_committed_degraded);
+  g_test_add_func ("/fact-replay/refresh-recovers-from-degraded",
+      test_handle_refresh_fact_graph_recovers_from_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-degrades",
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
