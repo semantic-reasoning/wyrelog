@@ -618,7 +618,7 @@ jobs:
 
   build-windows:
     name: build-windows${{ matrix.job_suffix }}
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
     # The pinned source build and focused secure-bridge tests are deliberately
     # retained in full, but a hung native child must not consume a runner
     # indefinitely (#846).
@@ -627,15 +627,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - fact_store: disabled
+          - runner: windows-latest
+            fact_store: disabled
             secure_bridge: disabled
             duckdb_source: prebuilt
             job_suffix: ''
-          - fact_store: enabled
+          - runner: windows-latest
+            fact_store: enabled
             secure_bridge: disabled
             duckdb_source: prebuilt
             job_suffix: -fact
-          - fact_store: enabled
+          # AppVerifier requires an elevated process. Pin the hosted image
+          # label so a self-hosted runner carrying windows-latest cannot claim
+          # this instrumentation gate.
+          - runner: windows-2025
+            fact_store: enabled
             secure_bridge: enabled
             duckdb_source: subproject
             job_suffix: -secure-bridge

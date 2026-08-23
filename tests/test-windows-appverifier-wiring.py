@@ -29,6 +29,9 @@ required_script_tokens = (
     "invalid-probe",
     "artifact-suite",
     "runner-started.json",
+    "$env:GITHUB_ACTIONS -eq 'true'",
+    "$env:RUNNER_ENVIRONMENT -ne 'github-hosted'",
+    "runner_environment = $env:RUNNER_ENVIRONMENT",
     "test-windows-appverifier-probe.exe",
     "test-fact-artifact-namespace-windows.exe",
     "finally {",
@@ -44,12 +47,25 @@ for token in required_script_tokens:
 
 output_root = script.index("$script:output_root =")
 startup_evidence = script.index("runner-started.json")
+hosted_failure = script.index(
+    "throw 'CI Application Verifier requires a GitHub-hosted runner'"
+)
+administrator_failure = script.index(
+    "throw 'Application Verifier requires an Administrator process'"
+)
 build_prerequisite = script.index("$script:build_root =")
 required_target_check = script.index("foreach ($required in")
-if not output_root < startup_evidence < build_prerequisite < required_target_check:
+if not (
+    output_root
+    < startup_evidence
+    < hosted_failure
+    < administrator_failure
+    < build_prerequisite
+    < required_target_check
+):
     raise SystemExit(
         "Windows AppVerifier runner must preserve startup evidence before "
-        "build and target prerequisite checks"
+        "hosted-runner, administrator, build, and target prerequisite checks"
     )
 
 if "Handles.Traces" in script:
@@ -108,6 +124,31 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         encoding="utf-8"
     )
     windows = job(workflow, "build-windows")
+    if "    runs-on: ${{ matrix.runner }}" not in windows:
+        raise SystemExit(f"{workflow_name} Windows runner selection drifted")
+    runner_rows = (
+        (
+            "          - runner: windows-latest\n"
+            "            fact_store: disabled\n"
+            "            secure_bridge: disabled"
+        ),
+        (
+            "          - runner: windows-latest\n"
+            "            fact_store: enabled\n"
+            "            secure_bridge: disabled"
+        ),
+        (
+            "          - runner: windows-2025\n"
+            "            fact_store: enabled\n"
+            "            secure_bridge: enabled"
+        ),
+    )
+    if windows.count("          - runner:") != 3 or any(
+        windows.count(row) != 1 for row in runner_rows
+    ):
+        raise SystemExit(
+            f"{workflow_name} must preserve all three Windows runner rows"
+        )
     run_name = "      - name: Run Windows Application Verifier handle gate"
     upload_name = "      - name: Upload Windows Application Verifier evidence"
     if windows.count(run_name) != 1 or windows.count(upload_name) != 1:
