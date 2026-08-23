@@ -8566,6 +8566,120 @@ permission_state_probe_cb (const gchar *subject_id, const gchar *perm_id,
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  guint grants;
+  guint revokes;
+  guint other;
+} PermissionProvenanceDirectEventProbe;
+
+static wyrelog_error_t permission_state_event_probe_cb (gint64 event_id,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data);
+
+static wyrelog_error_t
+permission_provenance_state_event_probe_cb (gint64 event_id,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  (void) event_id;
+  (void) event;
+  (void) from_state;
+  (void) to_state;
+  PermissionStateProbe *probe = user_data;
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (perm_id, probe->perm_id) == 0
+      && g_strcmp0 (scope, probe->scope) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+permission_provenance_direct_event_probe_cb (const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *operation,
+    gpointer user_data)
+{
+  PermissionProvenanceDirectEventProbe *probe = user_data;
+  if (g_strcmp0 (subject_id, probe->subject_id) != 0
+      || g_strcmp0 (perm_id, probe->perm_id) != 0
+      || g_strcmp0 (scope, probe->scope) != 0)
+    return WYRELOG_E_OK;
+  if (g_strcmp0 (operation, "grant") == 0)
+    probe->grants++;
+  else if (g_strcmp0 (operation, "revoke") == 0)
+    probe->revokes++;
+  else
+    probe->other++;
+  return WYRELOG_E_OK;
+}
+
+static void
+print_permission_provenance_snapshot (WylHandle *handle,
+    const gchar *boundary, const gchar *request_id)
+{
+  const gchar *subject = "target";
+  const gchar *perm = "site.policy.read";
+  const gchar *scope = "tenant-a";
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean direct = FALSE;
+  gboolean state = FALSE;
+  wyrelog_error_t direct_rc = wyl_policy_store_direct_permission_exists
+        (store, subject, perm, scope, &direct);
+  wyrelog_error_t state_rc = wyl_policy_store_permission_state_exists
+        (store, subject, perm, scope, &state);
+  PermissionProvenanceDirectEventProbe direct_events = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = scope,
+  };
+  wyrelog_error_t direct_events_rc =
+      wyl_policy_store_foreach_direct_permission_event (store,
+          permission_provenance_direct_event_probe_cb, &direct_events);
+  PermissionStateProbe state_events = {
+    .subject_id = subject,
+    .perm_id = perm,
+    .scope = scope,
+  };
+  wyrelog_error_t state_events_rc =
+      wyl_policy_store_foreach_permission_state_event (store,
+          permission_provenance_state_event_probe_cb, &state_events);
+  guint audit_grants = 0;
+  gboolean audit_supported = FALSE;
+  const gchar *audit_scope = "unavailable";
+  wyrelog_error_t audit_rc = WYRELOG_E_OK;
+#ifdef WYL_HAS_AUDIT
+  audit_supported = TRUE;
+  audit_scope = request_id != NULL ? "exact-request" : "aggregate";
+  AuditEventProbe audit = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_grant",
+    .resource_id = scope,
+    .deny_origin = perm,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+    .request_id = request_id,
+  };
+  audit_rc = wyl_policy_store_foreach_audit_event (store,
+          audit_event_probe_cb, &audit);
+  audit_grants = audit.matches;
+#endif
+  g_printerr ("#853 permission provenance boundary=%s direct_rc=%d direct=%d "
+      "state_rc=%d state=%d direct_events_rc=%d grants=%u revokes=%u "
+      "other=%u state_events_rc=%d state_events=%u event_scope=exact-tuple "
+      "audit_supported=%d audit_scope=%s audit_rc=%d audit_exact_request=%d "
+      "audit_grants=%u\n", boundary,
+      direct_rc, direct, state_rc, state,
+      direct_events_rc, direct_events.grants, direct_events.revokes,
+      direct_events.other, state_events_rc, state_events.matches,
+      audit_supported, audit_scope, audit_rc,
+      audit_supported && request_id != NULL, audit_grants);
+}
+
 static wyrelog_error_t
 permission_state_event_probe_cb (gint64 event_id, const gchar *subject_id,
     const gchar *perm_id, const gchar *scope, const gchar *event,
@@ -10297,6 +10411,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
           "/policy/permissions/grant", grant_query, 2683);
   if (rc != 0)
     return rc;
+  print_permission_provenance_snapshot (handle, "before-direct-grant", NULL);
   if (direct_permission_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 2685;
@@ -10311,6 +10426,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (!direct_permission_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 136;
+  print_permission_provenance_snapshot (handle, "after-direct-grant",
+      grant_request_id);
   if (permission_state_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 204;
@@ -19915,12 +20032,17 @@ main (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
+  print_permission_provenance_snapshot (handle, "after-init", NULL);
   if (insert_allow_fixture (handle) != WYRELOG_E_OK)
     return 2;
+  print_permission_provenance_snapshot (handle, "after-allow-fixture", NULL);
   if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
     return 10;
+  print_permission_provenance_snapshot (handle, "after-not-armed-fixture",
+      NULL);
   if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
     return 11;
+  print_permission_provenance_snapshot (handle, "after-guarded-fixture", NULL);
 
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
@@ -20605,12 +20727,19 @@ main (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
+  print_permission_provenance_snapshot (handle, "audit-after-init", NULL);
   if (insert_allow_fixture (handle) != WYRELOG_E_OK)
     return 2;
+  print_permission_provenance_snapshot (handle, "audit-after-allow-fixture",
+      NULL);
   if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
     return 10;
+  print_permission_provenance_snapshot (handle,
+      "audit-after-not-armed-fixture", NULL);
   if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
     return 11;
+  print_permission_provenance_snapshot (handle, "audit-after-guarded-fixture",
+      NULL);
 
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
@@ -20656,6 +20785,7 @@ main (void)
   gint raw_rc = check_raw_decide_contract (http.server, handle, base_url);
   if (raw_rc != 0)
     return raw_rc;
+  print_permission_provenance_snapshot (handle, "audit-after-raw-decide", NULL);
   gint decision = -1;
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-allow-user") != WYRELOG_E_OK) {
