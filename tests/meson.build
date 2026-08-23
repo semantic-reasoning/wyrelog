@@ -1788,7 +1788,10 @@ if get_option('enable_fact_store').allowed()
         + fact_test_support_deps,
   )
 
-  test('fact-replay', test_fact_replay, timeout : 60)
+  # Raised from 60 for issue #546: the new concurrent isolation case runs two
+  # mutation workers plus a status observer.  ~14s here, but this suite is
+  # also run under ASan/UBSan, where that multiplies past 60.
+  test('fact-replay', test_fact_replay, timeout : 120)
 
   test('fact-sealed-provisioned-forget-boundary', python3,
     args : [files('test-fact-sealed-provisioned-forget-boundary.py'),
