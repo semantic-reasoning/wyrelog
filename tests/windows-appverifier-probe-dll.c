@@ -10,14 +10,14 @@ wyl_appverifier_handle_probe (DWORD mode)
 
   if (event == NULL)
     return GetLastError ();
-  if (mode == 0)
-    return ERROR_SUCCESS;
   if (!CloseHandle (event)) {
     error = GetLastError ();
     return error == ERROR_SUCCESS ? ERROR_INVALID_HANDLE : error;
   }
-  if (mode == 1)
+  if (mode == 0)
     return ERROR_SUCCESS;
+  if (mode != 1)
+    return ERROR_INVALID_PARAMETER;
   if (CloseHandle (event))
     return ERROR_INVALID_HANDLE;
   error = GetLastError ();

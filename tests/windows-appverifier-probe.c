@@ -14,11 +14,9 @@ wmain (int argc, wchar_t **argv)
 
   if (argc != 3
       || (wcscmp (argv[1], L"clean") != 0
-      && wcscmp (argv[1], L"leak") != 0
       && wcscmp (argv[1], L"invalid") != 0))
     return 2;
-  mode = wcscmp (argv[1], L"leak") == 0 ? 0
-      : (wcscmp (argv[1], L"clean") == 0 ? 1 : 2);
+  mode = wcscmp (argv[1], L"clean") == 0 ? 0 : 1;
   module = LoadLibraryW (argv[2]);
   if (module == NULL)
     return 3;

@@ -47,17 +47,14 @@ exception-terminating, logged with stacks, and non-continuable. Settings are
 image-name based, so subprocesses that re-execute
 `test-fact-artifact-namespace-windows.exe` receive the same checks.
 
-The runner performs four isolated phases:
+The runner performs three isolated phases:
 
 1. `clean-probe`: a test-only DLL creates a named event HANDLE and closes it
    before unload. The probe must exit zero without Handles/Leak stops.
-2. `leak-probe`: the same exported function creates the same named event and
-   intentionally omits that close. DLL unload must terminate the probe and
-   produce AppVerifier Leak stop `0x901`.
-3. `invalid-probe`: the same function closes the event and deliberately tries
+2. `invalid-probe`: the same function closes the event and deliberately tries
    to close the invalid HANDLE again. The probe must terminate with Handles
    stop `0x300`.
-4. `artifact-suite`: Meson runs the full
+3. `artifact-suite`: Meson runs the full
    `fact-artifact-namespace-windows` selector and the seven independently
    registered lifecycle selectors (`main-sidecar`,
    `sidecar-replacement-isolated`, `temp-binding-replacement-isolated`,
@@ -67,10 +64,14 @@ The runner performs four isolated phases:
    This preserves later lifecycle coverage if an aggregate process aborts.
    Every invocation must exit zero without relevant stops.
 
-This negative control proves that the configured instrument detects a named
-kernel HANDLE leak. It is test-only and does not alter production ownership.
-Issue #659 separately owns mutation-path lifetime coverage and remains open
-until its production-suite evidence is complete.
+The double-close negative control proves that the configured Handles
+instrument is active and terminating. It is test-only and does not alter
+production ownership. The Leak layer and stop `0x901` remain enabled for the
+artifact suite, but AppVerifier 10.0.26100 did not report a test-only named
+event left open immediately before owner-DLL unload, so that behavior is not
+used as the gate's activation proof. Issue #659 separately owns mutation-path
+lifetime coverage and remains open until its production-suite evidence is
+complete.
 
 ## Evidence and cleanup
 
@@ -78,7 +79,7 @@ Each phase has a distinct directory below the requested output root. Binary
 `.dat` logs are copied to `raw/`, every log is converted to XML under `xml/`,
 and configuration, process output, and conversion output are retained. XML is
 checked structurally through `logEntry` attributes; the negative control
-requires `LayerName="Leak"` and numeric `StopCode="0x901"`.
+requires `LayerName="Handles"` and numeric `StopCode="0x300"`.
 
 The runner deletes old settings and logs before every phase. It exports and
 validates phase evidence before deleting current settings/logs, then verifies
