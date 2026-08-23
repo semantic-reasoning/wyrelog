@@ -6,6 +6,7 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-session-private.h"
+#include "wyrelog/wyl-session-layout-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -143,6 +144,25 @@ typedef struct
   WylDeltaKind kind;
   guint matches;
 } DeltaFactExpect;
+
+typedef struct
+{
+  const gchar *relations[4];
+  guint count;
+} LogoutDeltaOrder;
+
+static void
+logout_delta_order_cb (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  LogoutDeltaOrder *order = user_data;
+  (void) row;
+  (void) ncols;
+  if (kind == WYL_DELTA_INSERT && order->count < G_N_ELEMENTS (order->relations)
+      && (g_strcmp0 (relation, "principal_fired") == 0
+      || g_strcmp0 (relation, "session_fired") == 0))
+    order->relations[order->count++] = relation;
+}
 
 static wyrelog_error_t
 principal_state_expect_cb (const gchar *subject_id, const gchar *state,
@@ -1298,6 +1318,173 @@ check_login_skip_mfa_does_not_bypass_guarded_permission (void)
 }
 
 static gint
+check_session_logout_preserves_locked_and_revoked_principals (void)
+{
+  const gchar *subjects[] = { "logout-locked-user", "logout-revoked-user",
+                              "logout-unverified-user" };
+  const wyl_principal_event_t prepare_events[] = {
+    WYL_PRINCIPAL_EVENT_LOCK, WYL_PRINCIPAL_EVENT_REVOKE,
+  };
+  const gchar *states[] = { "locked", "revoked", "unverified" };
+
+  for (guint i = 0; i < G_N_ELEMENTS (subjects); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return 170 + (gint) i * 10;
+    g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+    wyl_login_req_set_username (login, subjects[i]);
+    g_autoptr (WylSession) session = NULL;
+    if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+      return 171 + (gint) i * 10;
+    if (i == 1 && wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
+      return 172 + (gint) i * 10;
+
+    if (i == 2) {
+      if (wyl_policy_store_set_principal_state
+            (wyl_handle_get_policy_store (handle), subjects[i], "unverified")
+          != WYRELOG_E_OK)
+        return 173 + (gint) i * 10;
+    } else {
+      wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+      gboolean transitioned = FALSE;
+      gint64 event_id = -1;
+      if (wyl_policy_store_apply_principal_transition
+            (wyl_handle_get_policy_store (handle), subjects[i],
+          prepare_events[i], 0, 0, NULL, &to, &transitioned, &event_id)
+          != WYRELOG_E_OK
+          || !transitioned)
+        return 173 + (gint) i * 10;
+    }
+
+    wyl_session_id_t sid = wyl_session_get_id (session);
+    if (sid == 0 || wyl_session_logout (handle, sid) != WYRELOG_E_OK)
+      return 174 + (gint) i * 10;
+    PrincipalStateExpect state = {
+      .subject_id = subjects[i],
+      .state = states[i],
+    };
+    if (wyl_policy_store_foreach_principal_state
+          (wyl_handle_get_policy_store (handle), principal_state_expect_cb,
+        &state) != WYRELOG_E_OK || state.matches != 1)
+      return 175 + (gint) i * 10;
+    PrincipalEventExpect logout = {
+      .subject_id = subjects[i],
+      .event = "logout",
+      .from_state = i == 2 ? "mfa_required" : "authenticated",
+      .to_state = "unverified",
+    };
+    if (wyl_policy_store_foreach_principal_event
+          (wyl_handle_get_policy_store (handle), principal_event_expect_cb,
+        &logout) != WYRELOG_E_OK || logout.matches != 0)
+      return 176 + (gint) i * 10;
+  }
+  return 0;
+}
+
+static gint
+check_session_logout_logs_out_principal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 150;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "logout-principal-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 151;
+  wyl_session_id_t sid = wyl_session_get_id (session);
+  if (sid == 0)
+    return 152;
+
+  /* A rejected publication must leave both authorities untouched so the
+   * caller can retry the same logout deterministically. */
+  wyl_handle_set_committed_publication_fault_once_for_test (handle,
+      WYL_COMMITTED_PUBLICATION_FAULT_VALIDATE);
+  if (wyl_session_logout (handle, sid) != WYRELOG_E_IO)
+    return 153;
+  PrincipalStateExpect pending = {
+    .subject_id = "logout-principal-user",
+    .state = "mfa_required",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+        (handle), principal_state_expect_cb, &pending) != WYRELOG_E_OK
+      || pending.matches != 1
+      || wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE)
+    return 154;
+  LogoutDeltaOrder delta_order = { 0 };
+  if (wyl_handle_engine_set_delta_callback (handle, logout_delta_order_cb,
+      &delta_order) != WYRELOG_E_OK)
+    return 155;
+  if (wyl_session_logout (handle, sid) != WYRELOG_E_OK)
+    return 156;
+  if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
+      != WYRELOG_E_OK
+      || delta_order.count < 2
+      || g_strcmp0 (delta_order.relations[0], "principal_fired") != 0
+      || g_strcmp0 (delta_order.relations[1], "session_fired") != 0)
+    return 157;
+
+  PrincipalStateExpect state = {
+    .subject_id = "logout-principal-user",
+    .state = "unverified",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+        (handle), principal_state_expect_cb, &state) != WYRELOG_E_OK
+      || state.matches != 1)
+    return 158;
+
+  PrincipalEventExpect event = {
+    .subject_id = "logout-principal-user",
+    .event = "logout",
+    .from_state = "mfa_required",
+    .to_state = "unverified",
+  };
+  if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
+        (handle), principal_event_expect_cb, &event) != WYRELOG_E_OK
+      || event.matches != 1)
+    return 159;
+
+  /* The registry tombstone makes the public logout retry idempotent and must
+   * not append a second principal transition. */
+  if (wyl_session_logout (handle, sid) != WYRELOG_E_OK)
+    return 160;
+  event.matches = 0;
+  if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
+        (handle), principal_event_expect_cb, &event) != WYRELOG_E_OK
+      || event.matches != 1)
+    return 161;
+
+  /* The authenticated edge must be published as well, not just the login
+   * session's initial mfa_required edge. */
+  g_autoptr (wyl_login_req_t) authenticated_login = wyl_login_req_new ();
+  wyl_login_req_set_username (authenticated_login, "logout-auth-user");
+  g_autoptr (WylSession) authenticated_session = NULL;
+  if (wyl_session_login (handle, authenticated_login,
+      &authenticated_session) != WYRELOG_E_OK
+      || wyl_session_mfa_verify (handle, authenticated_session)
+      != WYRELOG_E_OK)
+    return 162;
+  wyl_session_id_t authenticated_sid = wyl_session_get_id
+        (authenticated_session);
+  if (authenticated_sid == 0
+      || wyl_session_close (handle, authenticated_session) != WYRELOG_E_OK)
+    return 163;
+  PrincipalEventExpect authenticated_event = {
+    .subject_id = "logout-auth-user",
+    .event = "logout",
+    .from_state = "authenticated",
+    .to_state = "unverified",
+  };
+  if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
+        (handle), principal_event_expect_cb, &authenticated_event)
+      != WYRELOG_E_OK
+      || authenticated_event.matches != 1)
+    return 164;
+  return 0;
+}
+
+static gint
 check_session_close_persists_closed_state (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2135,6 +2322,10 @@ main (void)
   gint rc;
 
   if ((rc = check_session_close_persists_closed_state ()) != 0)
+    return rc;
+  if ((rc = check_session_logout_preserves_locked_and_revoked_principals ()) != 0)
+    return rc;
+  if ((rc = check_session_logout_logs_out_principal ()) != 0)
     return rc;
   if ((rc = check_session_close_inserts_wirelog_session_fired ()) != 0)
     return rc;
