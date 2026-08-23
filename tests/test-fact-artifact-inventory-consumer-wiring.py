@@ -1567,6 +1567,11 @@ def validate_workflow(path: str, workflow: str) -> None:
     sanitizer = section(
         workflow,
         "  policy-write-focused-sanitizer:",
+        "  fact-mutation-focused-sanitizer:",
+    )
+    fact_sanitizer = section(
+        workflow,
+        "  fact-mutation-focused-sanitizer:",
         "  daemon-http-shared-fact-audit-disabled:",
     )
     windows = section(workflow, "  build-windows:", None)
@@ -1577,6 +1582,11 @@ def validate_workflow(path: str, workflow: str) -> None:
     )
     validate_job_profile(
         sanitizer,
+        "E_INVENTORY_CI_SANITIZER",
+        ("name", "runs-on", "timeout-minutes", "env", "steps"),
+    )
+    validate_job_profile(
+        fact_sanitizer,
         "E_INVENTORY_CI_SANITIZER",
         ("name", "runs-on", "timeout-minutes", "env", "steps"),
     )

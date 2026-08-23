@@ -874,6 +874,136 @@ jobs:
           path: build-policy-write-sanitizer/meson-logs/
           if-no-files-found: ignore
 
+  fact-mutation-focused-sanitizer:
+    name: fact-mutation-focused-sanitizer-ubuntu
+    runs-on: ubuntu-latest
+    # Higher than the policy WRITE job's 30: this one builds the library
+    # twice under instrumentation, because the fact tests link the handle
+    # test-seams archive as well as the shared library (issue #546).
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      # Leak detection stays ON.  These suites are leak-clean locally under
+      # ASan, and disabling it up front would mask leaks in the fact tests
+      # rather than in DuckDB.  If prebuilt DuckDB ever reports its own, add
+      # a narrow suppression file instead of turning the check off.
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1
+      UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1:print_stacktrace=1
+    steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
+
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: subprojects/packagecache
+          key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            Linux-packagecache-
+
+      - name: Set up sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
+
+      - name: Select compiler cache
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache.outcome }}" = success ] \
+            && command -v sccache >/dev/null 2>&1 \
+            && sccache --version >/dev/null 2>&1; then
+            echo 'CC=sccache cc' >> "$GITHUB_ENV"
+            echo 'CXX=sccache c++' >> "$GITHUB_ENV"
+          else
+            echo 'CC=cc' >> "$GITHUB_ENV"
+            echo 'CXX=c++' >> "$GITHUB_ENV"
+            echo 'sccache unavailable; using native compiler'
+          fi
+
+      - name: Configure fact mutation sanitizer tests
+        run: |
+          meson setup build-fact-mutation-sanitizer \
+            -Ddefault_library=shared \
+            -Denable_tpm=disabled \
+            -Denable_client=enabled \
+            -Denable_fact_store=enabled \
+            -Denable_audit=enabled \
+            -Dduckdb_source=prebuilt \
+            -Db_sanitize=address,undefined
+
+      - name: Compile focused fact mutation tests
+        run: |
+          meson compile -C build-fact-mutation-sanitizer \
+            test-fact-replay \
+            test-fact-runtime \
+            test-fact-store \
+            test-daemon-http-facts
+
+      # --num-processes 2 rather than the default ncpu: these four suites are
+      # instrumented and fact-replay itself runs two mutation workers plus an
+      # observer, so on a 4-vCPU runner the default would have them contend
+      # for the very cores the timeout budget assumes.
+      - name: Test focused fact mutation paths
+        run: |
+          meson test -C build-fact-mutation-sanitizer --no-rebuild \
+            fact-replay \
+            fact-runtime \
+            fact-store \
+            daemon-http-facts \
+            --num-processes 2 \
+            --timeout-multiplier 3 \
+            --print-errorlogs
+
+      # fact-replay carries this issue's actual race cases
+      # (single-graph-refresh-race, mutation-isolation-concurrent);
+      # fact-runtime's stress case is a runtime-manager property.  Repeating
+      # only the latter would leave the race coverage running once.
+      #
+      # Deliberately no --num-processes cap here, unlike the step above: this
+      # step exists to surface races, and contention is how they surface.
+      # ~30s against a 360s multiplied budget leaves no timeout risk.
+      - name: Repeat fact query/mutation race paths
+        run: |
+          meson test -C build-fact-mutation-sanitizer --no-rebuild \
+            fact-replay \
+            fact-runtime \
+            --repeat 5 \
+            --timeout-multiplier 3 \
+            --print-errorlogs
+
+      - name: Show sccache statistics
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo 'sccache statistics unavailable'
+          else
+            echo 'sccache unavailable; no statistics to show'
+          fi
+
+      - name: Upload fact mutation sanitizer logs on failure
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: fact-mutation-focused-sanitizer-logs-ubuntu
+          path: build-fact-mutation-sanitizer/meson-logs/
+          if-no-files-found: ignore
+
   daemon-http-shared-fact-audit-disabled:
     name: daemon-http-shared-fact-audit-disabled-ubuntu-fact-${{ matrix.fact_store }}
     runs-on: ubuntu-latest
