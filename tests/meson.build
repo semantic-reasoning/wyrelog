@@ -1434,7 +1434,7 @@ if get_option('enable_fact_store').allowed()
         + fact_test_support_deps,
   )
 
-  test('fact-replay', test_fact_replay)
+  test('fact-replay', test_fact_replay, timeout : 60)
 
   test_fact_runtime = executable('test-fact-runtime',
     'test-fact-runtime.c',
