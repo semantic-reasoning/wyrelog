@@ -21,6 +21,9 @@ The CI runner records the AppVerifier path, SHA-256, file/product versions,
 Authenticode signer, Windows version, image names, layers, stops, and selector
 in `environment.json`. It accepts only the Microsoft Application Verifier
 binary from the declared Windows SDK 26100 or 28000 family.
+CI explicitly builds both test-only probe targets before entering the gate,
+and `runner-started.json` preserves startup context even if a later prerequisite
+check fails.
 
 ## Exact invocation
 

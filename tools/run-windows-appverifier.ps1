@@ -254,6 +254,14 @@ if (Test-Path -LiteralPath $OutputDirectory) {
 }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $script:output_root = (Resolve-Path -LiteralPath $OutputDirectory).Path
+[ordered]@{
+  started_at_utc = [DateTime]::UtcNow.ToString('o')
+  requested_build_directory = $BuildDirectory
+  output_directory = $script:output_root
+  process_64_bit = [Environment]::Is64BitProcess
+  administrator = $true
+} | ConvertTo-Json -Depth 2 | Set-Content -LiteralPath (
+  Join-Path $script:output_root 'runner-started.json') -Encoding UTF8
 
 $script:app_verifier = Join-Path $env:SystemRoot 'System32\appverif.exe'
 $provisioned = $false
