@@ -163,6 +163,13 @@ MUTATORS = {
     "wyl_policy_store_create_fact_graph", "wyl_policy_store_seal_fact_graph",
     "wyl_policy_store_register_fact_relation_schema", "wyl_fact_store_forget",
     "wyl_fact_store_append_batch", "wyl_fact_store_retract_batch",
+    # The daemon's fact append/retract path moved twice: first to the
+    # delta-returning store variants, then behind one internal entry point
+    # (issue #546).  All three spellings stay listed so that whichever one
+    # appears in daemon/http.c is confined to a WRITE-owning caller and can
+    # never be aliased.
+    "wyl_fact_store_append_batch_delta", "wyl_fact_store_retract_batch_delta",
+    "wyl_handle_commit_fact_mutation",
     "wyl_perm_grant", "wyl_perm_revoke", "wyl_role_grant", "wyl_role_revoke",
     "wyl_handle_apply_permission_state_transition", "wyl_mfa_enrollment_commit",
     "wyl_engine_session_run_committed_publication",
