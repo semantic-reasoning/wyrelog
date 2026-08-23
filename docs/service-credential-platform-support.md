@@ -137,7 +137,7 @@ tests are POSIX-only by construction (`sh`-driven, gated off Windows), so no
 packaged-runtime guarantee is asserted on Windows.
 
 What actually runs on Windows (build evidence, `.github/workflows/ci-*.yml`,
-`build-windows` job, `windows-latest`):
+`build-windows` job, explicit GitHub-hosted `windows-2025` matrix rows):
 
 - Builds `wyctl` and `wyrelogd` with clang-cl and vcpkg-provided dependencies,
   across `fact_store`/`secure_bridge` matrix legs.
