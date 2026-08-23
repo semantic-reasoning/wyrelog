@@ -39,8 +39,10 @@ meson compile -C builddir
   -OutputDirectory builddir\appverifier-artifacts
 ```
 
-For each exact process image, the runner enables `Handles` and `Leak`, enables
-HANDLE traces, and configures stops `0x300` and `0x901` as active,
+For each exact process image, the runner enables `Handles` and `Leak`. The
+Handles layer automatically enables handle tracing; the runner deliberately
+does not set the SDK-version-specific `Handles.Traces` property. It configures
+stops `0x300` and `0x901` as active,
 exception-terminating, logged with stacks, and non-continuable. Settings are
 image-name based, so subprocesses that re-execute
 `test-fact-artifact-namespace-windows.exe` receive the same checks.

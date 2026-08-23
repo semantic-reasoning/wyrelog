@@ -18,7 +18,6 @@ required_script_tokens = (
     "'/features OptionId.AvrfExternal /quiet /norestart'",
     "'-query', '*', '-for', $ImageName",
     "'-enable', 'Handles', 'Leak', '-for', $ImageName",
-    "'Handles.Traces=true'",
     "'-configure', '0x300', '0x901', '-for', $ImageName",
     "'ErrorReport=0x1C1', 'Flavor=0x2'",
     "'-logtoxml', $raw.FullName, $xml_path",
@@ -53,6 +52,11 @@ if not output_root < startup_evidence < build_prerequisite < required_target_che
         "build and target prerequisite checks"
     )
 
+if "Handles.Traces" in script:
+    raise SystemExit(
+        "Handles enables tracing automatically; a version-specific property "
+        "override must not be used"
+    )
 if "continue-on-error" in script or "SilentlyContinue" in script:
     raise SystemExit("Windows AppVerifier runner must not suppress failures")
 

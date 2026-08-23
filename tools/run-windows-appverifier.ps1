@@ -89,8 +89,7 @@ function Enable-Target {
   param([string] $ImageName, [string] $EvidenceDirectory)
 
   $enable = Invoke-Captured -FilePath $script:app_verifier -Arguments @(
-    '-enable', 'Handles', 'Leak', '-for', $ImageName,
-    '-with', 'Handles.Traces=true'
+    '-enable', 'Handles', 'Leak', '-for', $ImageName
   ) -LogPath (Join-Path $EvidenceDirectory 'enable.txt')
   Assert-Success $enable "enable AppVerifier for $ImageName"
   $configure = Invoke-Captured -FilePath $script:app_verifier -Arguments @(
