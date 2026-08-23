@@ -56,8 +56,16 @@ typedef enum
 typedef struct
 {
   guint64 domain;
+  /* POSIX uses object with width zero.  Windows uses all 16 bytes below with
+   * width 16 and leaves object zero; no provider may publish a partial width. */
   guint64 object;
+  guint8 object_bytes[16];
+  guint8 object_width;
 } WylFactArtifactInventoryIdentity;
+
+gboolean wyl_fact_artifact_inventory_identity_equal
+  (const WylFactArtifactInventoryIdentity *,
+    const WylFactArtifactInventoryIdentity *);
 
 /* These opaque observations are provider-owned identity/fingerprint values.
  * They are not filesystem handles or caller-selected names. */
