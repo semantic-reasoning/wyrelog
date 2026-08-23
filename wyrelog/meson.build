@@ -131,8 +131,8 @@ if get_option('enable_audit').allowed()
   wyrelog_deps += duckdb_dep
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
 endif
+wyrelog_sources += files('fact/graph-artifact-inventory-private.c')
 if get_option('enable_fact_store').allowed()
-  wyrelog_sources += files('fact/graph-artifact-inventory-private.c')
   wyrelog_sources += files('fact/compound.c', 'fact/query.c',
     'fact/provisioning-private.c', 'fact/replay.c', 'fact/runtime-private.c',
     'fact/store.c',
