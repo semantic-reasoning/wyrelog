@@ -103,6 +103,37 @@ for token in ("L\"clean\"", "L\"invalid\"", "FreeLibrary"):
 if 'L"leak"' in probe_driver:
     raise SystemExit("AppVerifier probe driver must not expose an unverified leak mode")
 
+artifact_suite = (
+    root / "tests" / "test-fact-artifact-namespace-windows.c"
+).read_text(encoding="utf-8")
+artifact_phase = script[
+    script.index("function Invoke-Artifact-Suite") : script.index("\nif ($env:OS")
+]
+for token in (
+    "$previous_gate_marker = [Environment]::GetEnvironmentVariable(",
+    "'WYRELOG_APPVERIFIER_HANDLE_GATE', '1', 'Process'",
+    "} finally {",
+    "'WYRELOG_APPVERIFIER_HANDLE_GATE', $previous_gate_marker, 'Process'",
+):
+    if token not in artifact_phase:
+        raise SystemExit(
+            f"the AppVerifier artifact phase lost marker isolation: {token}"
+        )
+reused_test = artifact_suite[
+    artifact_suite.index("test_working_handle_free_never_closes_reused_handle") :
+    artifact_suite.index("typedef enum", artifact_suite.index(
+        "test_working_handle_free_never_closes_reused_handle"
+    ))
+]
+for token in (
+    'g_getenv ("WYRELOG_APPVERIFIER_HANDLE_GATE") == NULL',
+    "g_assert_false (CloseHandle (issued))",
+):
+    if token not in reused_test:
+        raise SystemExit(
+            f"the instrumented suite lost its isolated negative-control token: {token}"
+        )
+
 meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
 for target in (
     "test-windows-appverifier-probe-dll",
