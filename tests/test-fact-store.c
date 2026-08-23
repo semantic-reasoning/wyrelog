@@ -33,7 +33,9 @@ static gboolean
 query_text (duckdb_connection conn, const gchar *sql, gchar **out_value)
 {
   duckdb_result result = { 0 };
-  *out_value = NULL;
+  /* Own the slot: callers reuse a single g_autofree local across queries, and
+   * an unconditional overwrite here would leak the previous value. */
+  g_clear_pointer (out_value, g_free);
   if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return FALSE;
