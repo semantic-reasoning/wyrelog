@@ -1701,7 +1701,8 @@ if get_option('enable_fact_store').allowed()
   test_fact_store = executable('test-fact-store',
     'test-fact-store.c',
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, duckdb_dep,
+      sqlite_dep],
   )
 
   test('fact-store', test_fact_store,
@@ -1779,7 +1780,7 @@ if get_option('enable_fact_store').allowed()
     # Keep this consumer audit-macro-unaware to cover cross-TU layout stability.
     c_args : ['-DWYL_HAS_FACT_STORE'] + fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep]
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep]
         + fact_test_support_deps,
   )
 

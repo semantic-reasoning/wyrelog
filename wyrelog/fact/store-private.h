@@ -117,6 +117,34 @@ wyrelog_error_t wyl_fact_store_retract_batch_delta (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
     wyl_fact_commit_delta_t * out_delta);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+/* Fault the batch transaction of the next append/retract (issue #546), so a
+ * test can prove that a mutation which fails at or just before its DuckDB
+ * commit leaves nothing durable and moves no graph's engine generation.
+ *
+ * BEFORE_COMMIT faults immediately after BEGIN TRANSACTION, before any row is
+ * appended; AT_COMMIT faults after the rows are staged but before COMMIT.  The
+ * two are distinct injection points, not two names for the same one.  Both
+ * take the existing rollback path.
+ *
+ * One-shot: the armed fault is consumed by the next append/retract that
+ * reaches BEGIN TRANSACTION.  A batch that fails validation, or is an
+ * idempotent no-op, returns before that point and leaves the fault armed for
+ * a later batch on the same store; the tier-2 retract-by-batch-id and
+ * forget-intent transactions never consume it at all.  This is deliberately
+ * NOT modelled on wyl_fact_store_identity_set_test_fault, which is unguarded
+ * and ships in libwyrelog. */
+typedef enum
+{
+  WYL_FACT_STORE_BATCH_FAULT_NONE = 0,
+  WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT,
+  WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT,
+} WylFactStoreBatchFault;
+void wyl_fact_store_set_batch_fault_once_for_test (wyl_fact_store_t * store,
+    WylFactStoreBatchFault fault);
+#endif
+
 wyrelog_error_t wyl_fact_store_retract_by_batch_id (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const gchar * trigger_batch_id, const gchar * new_batch_id,

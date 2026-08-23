@@ -1939,8 +1939,8 @@ static wyrelog_error_t
 commit_one_mutation_op (WylHandle *handle, wyl_policy_store_t *policy,
     const gchar *tenant_id, const gchar *graph_id, const gchar *batch_id,
     const gchar *idempotency_key, wyl_fact_store_op_t op,
-    const gchar *order_id, gboolean *out_inserted,
-    wyl_fact_mutation_outcome_t *out_outcome)
+    const gchar *order_id, WylFactStoreBatchFault batch_fault,
+    gboolean *out_inserted, wyl_fact_mutation_outcome_t *out_outcome)
 {
   g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
           tenant_id, graph_id);
@@ -1950,6 +1950,8 @@ commit_one_mutation_op (WylHandle *handle, wyl_policy_store_t *policy,
   g_autoptr (wyl_fact_store_t) store = NULL;
   g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  if (batch_fault != WYL_FACT_STORE_BATCH_FAULT_NONE)
+    wyl_fact_store_set_batch_fault_once_for_test (store, batch_fault);
 
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
@@ -2000,7 +2002,7 @@ commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
 {
   return commit_one_mutation_op (handle, policy, tenant_id, graph_id, batch_id,
              idempotency_key, WYL_FACT_STORE_OP_ASSERT, "order-z",
-             out_inserted, out_outcome);
+             WYL_FACT_STORE_BATCH_FAULT_NONE, out_inserted, out_outcome);
 }
 
 /* Issue #546: the internal mutation entry point commits, then refreshes only
@@ -2155,7 +2157,7 @@ mutation_isolation_worker (gpointer data)
     wyrelog_error_t rc = commit_one_mutation_op (ctx->handle, ctx->policy,
             ctx->tenant_id, ctx->graph_id, batch_id, key,
             retract ? WYL_FACT_STORE_OP_RETRACT : WYL_FACT_STORE_OP_ASSERT,
-            order_id, &inserted, &outcome);
+            order_id, WYL_FACT_STORE_BATCH_FAULT_NONE, &inserted, &outcome);
     if (rc != WYRELOG_E_OK
         || outcome.mutation_class != WYL_FACT_MUTATION_COMMITTED_READY) {
       ctx->failures++;
@@ -2170,8 +2172,8 @@ typedef struct
 {
   WylHandle *handle;
   GraphGenerations baseline;
-  /* stop is genuinely cross-thread; failures and observations are written
-  * only here and read only after the join, like the workers' counters. */
+  /* stop is cross-thread; failures and observations are written only here
+   * and read only after the join, like the workers' counters. */
   gint stop;
   guint failures;
   guint observations;
@@ -2298,6 +2300,90 @@ test_mutation_isolation_is_concurrent (void)
    * fixture's order-b in the observed relation. */
   assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
   assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+/* Issue #546: a mutation that fails at its DuckDB commit is PRECOMMIT_FAILED --
+ * nothing durable, and no graph's generations move, not even the target's.  A
+ * refresh must not run for a commit that did not happen. */
+static void
+test_commit_fact_mutation_precommit_failure_is_isolated (void)
+{
+  TEST ("a failed commit leaves every graph's generations untouched");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-precommit-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "inventory");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "inventory");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  const GraphGenerations target_before = capture_generations (handle,
+          "tenant-a", "orders");
+  const GraphGenerations sibling_before = capture_generations (handle,
+          "tenant-a", "inventory");
+
+  /* Poison BOTH out-params.  wyl_fact_mutation_outcome_init leaves exactly
+   * the PRECOMMIT_FAILED state, so asserting it straight after an init would
+   * pass even against a callee that never wrote the struct. */
+  gboolean inserted = TRUE;
+  wyl_fact_mutation_outcome_t outcome = {
+    .mutation_class = WYL_FACT_MUTATION_COMMITTED_READY,
+    .delta = {.inserted = TRUE,.committed_row_delta = 99,
+              .logical_byte_delta = 99},
+    .degraded_class = WYL_FACT_GRAPH_REPLAY_FAILED,
+    .engine_queryable = TRUE,
+    .needs_runtime_reconcile = TRUE,
+    .needs_durable_reconcile = TRUE,
+    .engine_generation = 4242,
+  };
+  g_assert_cmpint (commit_one_mutation_op (handle,
+      wyl_handle_get_policy_store (handle), "tenant-a", "orders",
+      "precommit-1", "precommit-key-1", WYL_FACT_STORE_OP_ASSERT, "order-p",
+      WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT, &inserted, &outcome), !=,
+      WYRELOG_E_OK);
+
+  /* Every field of the documented PRECOMMIT_FAILED invariant. */
+  g_assert_cmpint (outcome.mutation_class, ==,
+      WYL_FACT_MUTATION_PRECOMMIT_FAILED);
+  g_assert_false (inserted);
+  g_assert_false (outcome.delta.inserted);
+  g_assert_cmpint (outcome.delta.committed_row_delta, ==, 0);
+  g_assert_cmpint (outcome.delta.logical_byte_delta, ==, 0);
+  g_assert_cmpuint (outcome.engine_generation, ==, 0);
+  g_assert_false (outcome.engine_queryable);
+  g_assert_cmpint (outcome.degraded_class, ==, WYL_FACT_GRAPH_REPLAY_NONE);
+  g_assert_false (outcome.needs_runtime_reconcile);
+  g_assert_false (outcome.needs_durable_reconcile);
+
+  /* No refresh ran: even the graph the mutation targeted is untouched on BOTH
+   * counters, so a failed commit does not consume an operation. */
+  assert_generations_unchanged (handle, "tenant-a", "orders", &target_before);
+  assert_generations_unchanged (handle, "tenant-a", "inventory",
+      &sibling_before);
+
+  /* And the engine still shows only what was there before. */
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
 
   g_clear_object (&handle);
   remove_tree (root);
@@ -2567,6 +2653,8 @@ main (int argc, char **argv)
       test_handle_commit_fact_mutation_refreshes_only_its_graph);
   g_test_add_func ("/fact-replay/mutation-isolation-concurrent",
       test_mutation_isolation_is_concurrent);
+  g_test_add_func ("/fact-replay/mutation-precommit-failed-is-isolated",
+      test_commit_fact_mutation_precommit_failure_is_isolated);
   g_test_add_func ("/fact-replay/single-graph-refresh-degrades",
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
