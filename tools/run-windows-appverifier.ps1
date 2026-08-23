@@ -119,9 +119,13 @@ function Export-Phase-Logs {
 
   $phase_path = (Resolve-Path -LiteralPath $Phase).Path
   $entries = @()
-  $raw_logs = @(Get-ChildItem -LiteralPath $phase_path -Filter '*.dat' -File)
+  $appverifier_logs = Join-Path $phase_path 'AppVerifierLogs'
+  $raw_logs = @()
+  if (Test-Path -LiteralPath $appverifier_logs -PathType Container) {
+    $raw_logs = @(Get-ChildItem -LiteralPath $appverifier_logs -Filter '*.dat' -File)
+  }
   foreach ($raw in $raw_logs) {
-    if ($raw.Directory.FullName -ne $phase_path) {
+    if ($raw.Directory.FullName -ne $appverifier_logs) {
       throw "AppVerifier log escaped its phase directory: $($raw.FullName)"
     }
     $raw_copy = Join-Path (Join-Path $phase_path 'raw') $raw.Name
