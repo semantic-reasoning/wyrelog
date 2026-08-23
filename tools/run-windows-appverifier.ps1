@@ -243,9 +243,8 @@ if (![Environment]::Is64BitOperatingSystem -or
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw 'Application Verifier requires an Administrator process'
-}
+$administrator = $principal.IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (Test-Path -LiteralPath $OutputDirectory) {
   throw "refusing to mix AppVerifier evidence with existing path: $OutputDirectory"
@@ -257,9 +256,18 @@ $script:output_root = (Resolve-Path -LiteralPath $OutputDirectory).Path
   requested_build_directory = $BuildDirectory
   output_directory = $script:output_root
   process_64_bit = [Environment]::Is64BitProcess
-  administrator = $true
+  administrator = $administrator
+  runner_environment = $env:RUNNER_ENVIRONMENT
+  runner_name = $env:RUNNER_NAME
 } | ConvertTo-Json -Depth 2 | Set-Content -LiteralPath (
   Join-Path $script:output_root 'runner-started.json') -Encoding UTF8
+if ($env:GITHUB_ACTIONS -eq 'true' -and
+    $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+  throw 'CI Application Verifier requires a GitHub-hosted runner'
+}
+if (!$administrator) {
+  throw 'Application Verifier requires an Administrator process'
+}
 
 $script:app_verifier = Join-Path $env:SystemRoot 'System32\appverif.exe'
 $provisioned = $false
