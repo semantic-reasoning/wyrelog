@@ -8932,12 +8932,16 @@ arm_tenant_creator_role_grant (SoupSession *session, WylHandle *handle,
 
 static gint
 check_concurrent_permission_grants_serialize (WylHandle *handle,
-    const gchar *base_url, const gchar *session_token)
+    const gchar *base_url, const gchar *session_token, guint iteration)
 {
   static const guint n_threads = 4;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_autofree gchar *subject = g_strdup_printf ("concurrent-target-%u",
+          iteration);
+  g_autofree gchar *perm = g_strdup_printf ("site.concurrent.read.%u",
+          iteration);
 
-  if (wyl_policy_store_upsert_permission (store, "site.concurrent.read",
+  if (wyl_policy_store_upsert_permission (store, perm,
       "site concurrent read", "basic") != WYRELOG_E_OK)
     return 204;
 
@@ -8950,10 +8954,10 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
   for (guint i = 0; i < n_threads; i++) {
     mutations[i].base_url = base_url;
     mutations[i].query =
-        g_strdup_printf ("subject=concurrent-target"
-            "&perm=site.concurrent.read&scope=tenant-a"
+        g_strdup_printf ("subject=%s&perm=%s&scope=tenant-a"
             "&session_token=%s&guard_timestamp=123"
-            "&guard_loc_class=public&guard_risk=49", session_token);
+            "&guard_loc_class=public&guard_risk=49", subject, perm,
+            session_token);
     g_autofree gchar *name = g_strdup_printf ("policy-grant-%u", i);
     threads[i] = g_thread_new (name, concurrent_permission_grant_thread,
             &mutations[i]);
@@ -8964,18 +8968,30 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
 
   for (guint i = 0; i < n_threads; i++) {
     if (mutations[i].rc != 0) {
+      g_printerr ("concurrent permission diagnostic iteration=%u thread=%u "
+          "rc=%d status=%u body=%s subject=%s perm=%s\n", iteration, i,
+          mutations[i].rc, mutations[i].status,
+          mutations[i].body != NULL ? mutations[i].body : "<null>", subject,
+          perm);
       result = 205;
       goto cleanup;
     }
-    if (mutations[i].status != 200
+    if (mutations[i].status != 200 || mutations[i].body == NULL
         || strstr (mutations[i].body, "\"ok\":true") == NULL) {
+      g_printerr ("concurrent permission diagnostic iteration=%u thread=%u "
+          "rc=%d status=%u body=%s subject=%s perm=%s\n", iteration, i,
+          mutations[i].rc, mutations[i].status,
+          mutations[i].body != NULL ? mutations[i].body : "<null>", subject,
+          perm);
       result = 206;
       goto cleanup;
     }
   }
 
-  if (!direct_permission_exists (handle, "concurrent-target",
-      "site.concurrent.read", "tenant-a")) {
+  if (!direct_permission_exists (handle, subject, perm, "tenant-a")) {
+    g_printerr ("concurrent permission diagnostic iteration=%u "
+        "missing durable permission subject=%s perm=%s\n", iteration,
+        subject, perm);
     result = 207;
     goto cleanup;
   }
@@ -8984,7 +9000,7 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
     .subject_id = "http-policy-admin",
     .action = "permission_grant",
     .resource_id = "tenant-a",
-    .deny_origin = "site.concurrent.read",
+    .deny_origin = perm,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
       &grant_audit) != WYRELOG_E_OK) {
@@ -8992,6 +9008,9 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
     goto cleanup;
   }
   if (grant_audit.matches != n_threads) {
+    g_printerr ("concurrent permission diagnostic iteration=%u "
+        "audit-matches=%u expected=%u subject=%s perm=%s\n", iteration,
+        grant_audit.matches, n_threads, subject, perm);
     result = 209;
     goto cleanup;
   }
@@ -10193,10 +10212,54 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 154;
   g_clear_pointer (&body, g_free);
 
-  gint concurrent_rc = check_concurrent_permission_grants_serialize (handle,
-          base_url, session_token);
-  if (concurrent_rc != 0)
-    return concurrent_rc;
+  const gint64 concurrent_stress_started_us = g_get_monotonic_time ();
+  for (guint iteration = 0; iteration < 10; iteration++) {
+    gint concurrent_rc = check_concurrent_permission_grants_serialize (handle,
+            base_url, session_token, iteration);
+    if (concurrent_rc != 0)
+      return concurrent_rc;
+
+    g_autofree gchar *iteration_missing_perm = g_strdup_printf (
+      "site.missing.concurrent.%u", iteration);
+    g_autofree gchar *iteration_missing_grant_query = g_strdup_printf (
+      "subject=target-%u&perm=%s&scope=tenant-a&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      iteration, iteration_missing_perm, session_token);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/grant", iteration_missing_grant_query,
+            &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400 || body == NULL
+        || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
+      g_printerr ("concurrent permission diagnostic iteration=%u missing "
+          "grant status=%u body=%s\n", iteration, status,
+          body != NULL ? body : "<null>");
+      return 155;
+    }
+    g_clear_pointer (&body, g_free);
+
+    g_autofree gchar *iteration_missing_transition_query = g_strdup_printf (
+      "subject=state-target-%u&perm=%s&scope=tenant-a&event=grant"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=49", iteration, iteration_missing_perm, session_token);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/transition",
+            iteration_missing_transition_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400 || body == NULL
+        || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
+      g_printerr ("concurrent permission diagnostic iteration=%u missing "
+          "transition status=%u body=%s\n", iteration, status,
+          body != NULL ? body : "<null>");
+      return 172;
+    }
+    g_clear_pointer (&body, g_free);
+  }
+  g_printerr ("concurrent permission diagnostic iterations=10 duration_ms=%"
+      G_GINT64_FORMAT "\n", (g_get_monotonic_time ()
+      - concurrent_stress_started_us) / 1000);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
