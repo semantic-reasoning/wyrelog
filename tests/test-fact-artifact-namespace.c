@@ -170,7 +170,13 @@ test_remove_fixed_artifact (const gchar *graph_path, WylFactArtifactName name)
   g_assert_cmpint (name >= WYL_FACT_ARTIFACT_MAIN
       && name <= WYL_FACT_ARTIFACT_LOCK, ==, TRUE);
   g_autofree gchar *path = g_build_filename (graph_path, names[name], NULL);
-  g_assert_cmpint (unlink (path), ==, 0);
+  gboolean optional = name == WYL_FACT_ARTIFACT_WAL
+      || name == WYL_FACT_ARTIFACT_CHECKPOINT
+      || name == WYL_FACT_ARTIFACT_RECOVERY;
+  if (unlink (path) != 0) {
+    int error = errno;
+    g_assert_true (optional && error == ENOENT);
+  }
 }
 
 /* Tests model the caller's already-held canonical main artifact.  The
