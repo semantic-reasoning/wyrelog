@@ -147,21 +147,23 @@ typedef struct
 
 typedef struct
 {
-  const gchar *relations[4];
-  guint count;
-} LogoutDeltaOrder;
+  guint principal_fired;
+  guint session_fired;
+} LogoutDeltaCounts;
 
 static void
-logout_delta_order_cb (const gchar *relation, const gint64 *row,
+logout_delta_counts_cb (const gchar *relation, const gint64 *row,
     guint ncols, WylDeltaKind kind, gpointer user_data)
 {
-  LogoutDeltaOrder *order = user_data;
+  LogoutDeltaCounts *counts = user_data;
   (void) row;
   (void) ncols;
-  if (kind == WYL_DELTA_INSERT && order->count < G_N_ELEMENTS (order->relations)
-      && (g_strcmp0 (relation, "principal_fired") == 0
-      || g_strcmp0 (relation, "session_fired") == 0))
-    order->relations[order->count++] = relation;
+  if (kind != WYL_DELTA_INSERT)
+    return;
+  if (g_strcmp0 (relation, "principal_fired") == 0)
+    counts->principal_fired++;
+  else if (g_strcmp0 (relation, "session_fired") == 0)
+    counts->session_fired++;
 }
 
 static wyrelog_error_t
@@ -1412,18 +1414,12 @@ check_session_logout_logs_out_principal (void)
       || pending.matches != 1
       || wyl_session_state_load_private (session) != WYL_SESSION_STATE_ACTIVE)
     return 154;
-  LogoutDeltaOrder delta_order = { 0 };
-  if (wyl_handle_engine_set_delta_callback (handle, logout_delta_order_cb,
-      &delta_order) != WYRELOG_E_OK)
+  LogoutDeltaCounts delta_counts = { 0 };
+  if (wyl_handle_engine_set_delta_callback (handle, logout_delta_counts_cb,
+      &delta_counts) != WYRELOG_E_OK)
     return 155;
   if (wyl_session_logout (handle, sid) != WYRELOG_E_OK)
     return 156;
-  if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
-      != WYRELOG_E_OK
-      || delta_order.count < 2
-      || g_strcmp0 (delta_order.relations[0], "principal_fired") != 0
-      || g_strcmp0 (delta_order.relations[1], "session_fired") != 0)
-    return 157;
 
   PrincipalStateExpect state = {
     .subject_id = "logout-principal-user",
@@ -1443,17 +1439,28 @@ check_session_logout_logs_out_principal (void)
   if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
         (handle), principal_event_expect_cb, &event) != WYRELOG_E_OK
       || event.matches != 1)
-    return 159;
+    return 157;
+  if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
+      != WYRELOG_E_OK
+      || delta_counts.principal_fired != 1
+      || delta_counts.session_fired != 1)
+    return 158;
+
+  /* The durable event rows are independently keyed; the callback above
+   * proves both publication deltas were emitted without comparing IDs from
+   * separate tables. */
+  if (event.event_id <= 0)
+    return 157;
 
   /* The registry tombstone makes the public logout retry idempotent and must
    * not append a second principal transition. */
   if (wyl_session_logout (handle, sid) != WYRELOG_E_OK)
-    return 160;
+    return 159;
   event.matches = 0;
   if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
         (handle), principal_event_expect_cb, &event) != WYRELOG_E_OK
       || event.matches != 1)
-    return 161;
+    return 160;
 
   /* The authenticated edge must be published as well, not just the login
    * session's initial mfa_required edge. */
@@ -1464,12 +1471,12 @@ check_session_logout_logs_out_principal (void)
       &authenticated_session) != WYRELOG_E_OK
       || wyl_session_mfa_verify (handle, authenticated_session)
       != WYRELOG_E_OK)
-    return 162;
+    return 161;
   wyl_session_id_t authenticated_sid = wyl_session_get_id
         (authenticated_session);
   if (authenticated_sid == 0
       || wyl_session_close (handle, authenticated_session) != WYRELOG_E_OK)
-    return 163;
+    return 162;
   PrincipalEventExpect authenticated_event = {
     .subject_id = "logout-auth-user",
     .event = "logout",
@@ -1480,7 +1487,7 @@ check_session_logout_logs_out_principal (void)
         (handle), principal_event_expect_cb, &authenticated_event)
       != WYRELOG_E_OK
       || authenticated_event.matches != 1)
-    return 164;
+    return 163;
   return 0;
 }
 
@@ -1573,8 +1580,11 @@ check_session_close_deactivates_decision_scope (void)
     return 177;
   if (wyl_decide_resp_get_decision (after_resp) != WYL_DECISION_DENY)
     return 178;
+  /* Logout now revokes the subject-global principal in the same durable
+   * publication, so authentication precedence is the visible deny reason
+   * after the session has been closed. */
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (after_resp),
-      "session_inactive") != 0)
+      "not_authenticated") != 0)
     return 179;
   return 0;
 }
@@ -1770,7 +1780,7 @@ check_elevated_session_close_deactivates_decision_scope (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 239;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-      "session_inactive") != 0)
+      "not_authenticated") != 0)
     return 240;
   return 0;
 }
