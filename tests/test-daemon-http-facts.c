@@ -217,8 +217,8 @@ count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
 }
 
 static gint
-check_fact_projection_row_count (const gchar *fact_root,
-    const gchar *graph_id, gint64 expected_rows)
+read_fact_projection_row_count (const gchar *fact_root,
+    const gchar *graph_id, gint64 *out_count)
 {
   WylFactGraphLocator locator = { 0 };
   if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
@@ -255,6 +255,18 @@ check_fact_projection_row_count (const gchar *fact_root,
   g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;", table);
   if (!count_i64 (conn, sql, &count))
     return 303;
+  *out_count = count;
+  return 0;
+}
+
+static gint
+check_fact_projection_row_count (const gchar *fact_root,
+    const gchar *graph_id, gint64 expected_rows)
+{
+  gint64 count = 0;
+  gint rc = read_fact_projection_row_count (fact_root, graph_id, &count);
+  if (rc != 0)
+    return rc;
   return count == expected_rows ? 0 : 304;
 }
 
@@ -329,8 +341,8 @@ check_legacy_metadata_key_count (const gchar *fact_root,
 #endif
 
 static gint
-check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
-    const gchar *base_url)
+check_fact_http_contract (WylHandle *handle, SoupServer *server,
+    const gchar *fact_root, const gchar *base_url)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (WylClient) admin_client = NULL;
@@ -1033,6 +1045,86 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   if (status != 409 || strstr (body, "\"fact_batch_conflict\"") == NULL)
     return 4125;
 #endif
+  /* Issue #546: a post-commit audit failure must not be reported as a failed
+   * append.  The audit result used to overwrite the commit result and then
+   * drive the 409/400/500 mapping, so a durably committed batch could be
+   * answered with 409 fact_batch_conflict, 400 invalid_fact_payload, or 500
+   * fact_append_failed -- all three claiming the mutation did not happen.
+   *
+   * Asserted as a DELTA rather than an absolute count: this runs after the
+   * retract and forget cases above, so the running total is not a fixed
+   * number and an absolute assertion here would be coupled to them. */
+  g_clear_pointer (&body, g_free);
+  gint64 rows_before_audit = 0;
+  rc = read_fact_projection_row_count (fact_root, "orders",
+          &rows_before_audit);
+  if (rc != 0)
+    return rc;
+
+  const gchar *audit_fact_body = "order_id\tamount\no-audit\t77\n";
+  g_autofree gchar *audit_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-audit-1&"
+          "idempotency_key=key-audit-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  wyl_daemon_http_fail_next_fact_op_audit_for_test (server);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:append", audit_query, admin_token,
+          audit_fact_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  /* Still an error -- a product that cannot record what it did must not
+   * answer 200 -- but it must admit the batch is durable. */
+  if (status != 500 || strstr (body, "\"fact_audit_failed\"") == NULL) {
+    g_printerr ("audit-failure status/code mismatch: status=%u body=%s\n",
+        status, body != NULL ? body : "(null)");
+    return 290;
+  }
+  if (strstr (body, "\"committed\":true") == NULL) {
+    g_printerr ("audit failure denied the commit: body=%s\n",
+        body != NULL ? body : "(null)");
+    return 291;
+  }
+  /* A successful refresh whose audit failed leaves the engine READY, so the
+   * class must not be downgraded to committed_degraded. */
+  if (strstr (body, "\"mutation_class\":\"committed_ready\"") == NULL) {
+    g_printerr ("audit failure mislabelled the mutation class: body=%s\n",
+        body != NULL ? body : "(null)");
+    return 293;
+  }
+  /* It really did commit: the row landed despite the 500. */
+  gint64 rows_after_audit = 0;
+  rc = read_fact_projection_row_count (fact_root, "orders",
+          &rows_after_audit);
+  if (rc != 0)
+    return rc;
+  if (rows_after_audit != rows_before_audit + 1) {
+    g_printerr ("audit-failed append did not commit: before=%" G_GINT64_FORMAT
+        " after=%" G_GINT64_FORMAT "\n", rows_before_audit, rows_after_audit);
+    return 294;
+  }
+
+  /* Retrying the same idempotency key cannot double-apply, and with the fault
+   * disarmed the retry records the audit and reports success. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:append", audit_query, admin_token,
+          audit_fact_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":false") == NULL) {
+    g_printerr ("audit-failure retry mismatch: status=%u body=%s\n", status,
+        body != NULL ? body : "(null)");
+    return 292;
+  }
+  gint64 rows_after_retry = 0;
+  rc = read_fact_projection_row_count (fact_root, "orders",
+          &rows_after_retry);
+  if (rc != 0)
+    return rc;
+  if (rows_after_retry != rows_after_audit) {
+    g_printerr ("idempotent retry double-applied: %" G_GINT64_FORMAT " -> %"
+        G_GINT64_FORMAT "\n", rows_after_audit, rows_after_retry);
+    return 295;
+  }
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
@@ -1069,8 +1161,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       strstr (body, "\"rows_purged\":1") == NULL)
     return 500;
   /* Pin the post-state: Forget case 3 asserts this exact count, so a silent
-   * change here would make that assertion meaningless. */
-  rc = check_fact_projection_row_count (fact_root, "orders", 2);
+   * change here would make that assertion meaningless.  The count includes
+   * the row the audit-failure case above committed: that append really did
+   * commit, which is the whole point of answering it 500 fact_audit_failed
+   * with "committed":true rather than fact_append_failed. */
+  rc = check_fact_projection_row_count (fact_root, "orders", 3);
   if (rc != 0)
     return rc;
 
@@ -1115,7 +1210,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
    * Absolute counts, not a delta: a delta is only evaluated once the status
    * check has passed, so it could never fail in the case it exists to catch. */
   g_clear_pointer (&body, g_free);
-  rc = check_fact_projection_row_count (fact_root, "orders", 2);
+  rc = check_fact_projection_row_count (fact_root, "orders", 3);
   if (rc != 0)
     return rc;
   rc = send_raw (session, "DELETE", base_url,
@@ -1132,7 +1227,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* The refusal destroyed nothing.  Only 304 means the count moved; the
    * helper's other codes are fixture failures and must not be reported as a
    * gate regression. */
-  rc = check_fact_projection_row_count (fact_root, "orders", 2);
+  rc = check_fact_projection_row_count (fact_root, "orders", 3);
   if (rc == 304) {
     g_printerr ("sealed forget mutated the orders projection\n");
     return 410;
@@ -1198,7 +1293,8 @@ main (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
-  gint rc = check_fact_http_contract (handle, fact_root, base_url);
+  gint rc = check_fact_http_contract (handle, http.server, fact_root,
+          base_url);
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
