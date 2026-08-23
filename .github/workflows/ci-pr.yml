@@ -410,6 +410,7 @@ jobs:
             -Dduckdb_source=prebuilt
 
       - name: Compile daemon HTTP variants
+        id: compile_daemon_http
         run: |
           meson compile -C build-daemon-http-shared \
             test-daemon-http-decide \
@@ -426,6 +427,14 @@ jobs:
             daemon-http-decide-audit \
             daemon-http-decide-private-symbols \
             --print-errorlogs
+
+      - name: Capture daemon HTTP audit provenance
+        if: ${{ always() && steps.compile_daemon_http.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          meson test -C build-daemon-http-shared --no-rebuild \
+            daemon-http-decide-audit --verbose --print-errorlogs
 
       - name: Upload daemon HTTP meson logs on failure
         if: failure()
