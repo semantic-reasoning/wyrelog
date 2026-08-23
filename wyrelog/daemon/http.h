@@ -497,6 +497,9 @@ void wyl_daemon_http_fail_next_policy_write_finalize_for_test
   (SoupServer * server, WylDaemonPolicyWriteFinalizeFault fault);
 void wyl_daemon_http_fail_next_policy_write_acquire_for_test
   (SoupServer * server, WylDaemonPolicyWriteAcquireFault fault);
+/* Fail the next fact append/retract audit emission (issue #546), so a test can
+ * prove that a durably committed batch is not reported as uncommitted. */
+void wyl_daemon_http_fail_next_fact_op_audit_for_test (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_lifecycle_audit_insert_for_test
   (SoupServer * server);
 void wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test

@@ -297,11 +297,12 @@ wyrelog_error_t wyl_handle_get_fact_graph_runtime_status (WylHandle * self,
  *      |out_inserted| is FALSE, the delta is the zero state, and the mutation
  *      is NOT applied a second time.  A refresh still runs, so the
  *      engine_generation still advances.
- *   5. Audit emission is the caller's, and happens AFTER this returns.
- *      NOTE: the HTTP route currently overwrites this function's rc with the
- *      audit rc, so an audit failure is still reported as a commit failure,
- *      contradicting item 1.  Fixing that is tracked separately; it does not
- *      change what item 1 already made durable.
+ *   5. Audit emission is the caller's, and happens AFTER this returns, and its
+ *      result is kept SEPARATE from this function's.  An audit failure leaves
+ *      the batch durable, so the caller must still report it as committed:
+ *      the HTTP route answers 500 fact_audit_failed with "committed":true and
+ *      the real mutation class, never a class downgraded to degraded, because
+ *      a successful refresh whose audit failed leaves the engine READY.
  *
  * Serialization: the exact graph's runtime writer lease (entry->writer_lock in
  * fact/runtime-private.c) is held across the engine build and the generation
@@ -309,7 +310,8 @@ wyrelog_error_t wyl_handle_get_fact_graph_runtime_status (WylHandle * self,
  * fact_replay_coordinator_lock taken by wyl_handle_refresh_fact_graph, so
  * distinct (tenant_id, graph_id) keys do NOT yet build concurrently -- the
  * per-key lease is nested inside the global one and is never the limiting
- * lock here.  Per-key independence is what #548/#549 are meant to unlock.
+ * lock here.  Per-key independence is what #548/#549 are meant to unlock, and
+ * bounded, tenant-fair replay scheduling is #554's.
  * This function is also the designated acquisition point for the graph-level
  * admission lease (#548) and the tenant admission read lease (#549); neither
  * exists yet.

@@ -523,6 +523,7 @@ typedef struct _WylDaemonHttpContext
   WylPolicyWriteAcquireTestLatch policy_write_acquire_latch;
   gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
+  gboolean fail_next_fact_op_audit;
   gboolean fail_next_tenant_lifecycle_audit_insert;
   gboolean fail_next_tenant_lifecycle_audit_append;
   gboolean fail_next_tenant_creator_grant;
@@ -3630,6 +3631,16 @@ wyl_daemon_http_fail_next_policy_write_acquire_for_test (SoupServer *server,
     return;
   g_mutex_lock (&ctx->lock);
   ctx->policy_write_acquire_fault = fault;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void wyl_daemon_http_fail_next_fact_op_audit_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_fact_op_audit = TRUE;
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -11907,6 +11918,14 @@ emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
     const gchar *relation, const gchar *batch_id, wyl_fact_store_op_t op,
     gboolean inserted, const gchar *request_id)
 {
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  gboolean fail_once = ctx->fail_next_fact_op_audit;
+  ctx->fail_next_fact_op_audit = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  if (fail_once)
+    return WYRELOG_E_INTERNAL;
+#endif
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   g_autofree gchar *resource = g_strdup_printf ("%s/%s/%s/%s", tenant, graph,
@@ -11934,6 +11953,76 @@ emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
   (void) request_id;
   return WYRELOG_E_OK;
 #endif
+}
+
+/* Issue #546: the batch is durably committed but its audit record could not be
+ * emitted.  The response must not claim the mutation failed -- acceptance
+ * criterion "a committed fact is never reported as uncommitted" -- so it
+ * carries "committed":true and the real mutation class alongside the error.
+ *
+ * It is still a 5xx: an authorization product that cannot record what it did
+ * must not answer 200.  The client should retry, and the retry is an
+ * idempotent store no-op that normally emits an audit record -- but that
+ * record describes a duplicate, not the original insert, because the audit
+ * event is per-request and the retry genuinely inserted nothing, and the
+ * emission can fail again.  Closing that gap needs a durable audit outbox,
+ * which is deliberately not in scope here.  The committed batch stays
+ * reconstructible from its durable batch_id and idempotency_key; note the
+ * HTTP request id is NOT persisted (the store's request_id column is bound
+ * to the idempotency key), so it cannot correlate the 500 the client saw
+ * with the durable row.
+ */
+static void
+set_fact_audit_failed_json (SoupServerMessage *msg, const gchar *batch_id,
+    gboolean inserted, const wyl_fact_mutation_outcome_t *outcome)
+{
+  const gchar *class_name =
+      wyl_fact_mutation_class_name (outcome->mutation_class);
+  wyrelog_error_t cleanup_rc = wyl_daemon_policy_write_finalize_for_response
+        (msg, 500, "fact_audit_failed");
+  if (cleanup_rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  attach_request_id_header (msg);
+  g_autoptr (GString) body = g_string_new ("{\"error\":\"fact_audit_failed\"");
+  g_string_append (body, ",\"committed\":true,\"inserted\":");
+  g_string_append (body, inserted ? "true" : "false");
+  g_string_append (body, ",\"batch_id\":");
+  append_json_string (body, batch_id);
+  g_string_append (body, ",\"mutation_class\":");
+  append_json_string (body, class_name);
+  /* A degraded mutation whose audit ALSO failed must not lose the reconcile
+   * signal: mirror the fields set_fact_op_json emits so a compound failure
+   * tells the client no less than either failure alone would. */
+  gboolean degraded =
+      outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+  g_string_append (body, ",\"queryable\":");
+  g_string_append (body, outcome->engine_queryable ? "true" : "false");
+  g_string_append (body, ",\"reconcile\":");
+  g_string_append (body, degraded ? "true" : "false");
+  if (degraded) {
+    g_string_append (body, ",\"degraded_class\":");
+    append_json_string (body,
+        wyl_fact_graph_replay_class_name (outcome->degraded_class));
+  }
+  /* The deltas too: the retry reports the zero delta by contract, so a batch
+   * that really did consume rows and bytes would otherwise have its
+   * accounting reported nowhere at all. */
+  g_string_append_printf (body,
+      ",\"committed_row_delta\":%" G_GINT64_FORMAT
+      ",\"logical_byte_delta\":%" G_GINT64_FORMAT
+      ",\"engine_generation\":%" G_GUINT64_FORMAT "}",
+      outcome->delta.committed_row_delta, outcome->delta.logical_byte_delta,
+      outcome->engine_generation);
+  /* The real class, never a hardcoded degraded: a successful refresh whose
+   * audit failed leaves the engine READY, and telling the client to reconcile
+   * a healthy engine would invert the stale-never-healthy guarantee. */
+  soup_message_headers_replace (soup_server_message_get_response_headers (msg),
+      "X-Wyrelog-Mutation", class_name);
+  soup_server_message_set_status (msg, 500, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
 }
 
 static void
@@ -12351,8 +12440,14 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     rc = wyl_handle_commit_fact_mutation (ctx->handle, &fact_store, &schema,
             &batch, &lookup.info, &inserted, &outcome);
   g_clear_pointer (&fact_store, wyl_fact_store_close);
+  /* Issue #546: the audit result is kept SEPARATE from the commit result.
+   * Folding it into |rc| let a durably committed batch be reported as a 409
+   * conflict, a 400 invalid payload, or a 500 append failure, depending on
+   * what wyl_audit_emit returned -- all three of which claim the mutation did
+   * not happen. */
+  wyrelog_error_t audit_rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK)
-    rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
+    audit_rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
             relation, batch_id, store_op, inserted, request_id);
 
   graph_lookup_clear (&lookup);
@@ -12369,6 +12464,10 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, fail_code);
+    return;
+  }
+  if (audit_rc != WYRELOG_E_OK) {
+    set_fact_audit_failed_json (msg, batch_id, inserted, &outcome);
     return;
   }
   set_fact_op_json (msg, batch_id, inserted, &outcome);

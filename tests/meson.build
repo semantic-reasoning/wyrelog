@@ -727,6 +727,7 @@ if build_client
   if get_option('enable_fact_store').allowed()
     test_daemon_http_facts_c_args = [
       '-DWYL_HAS_DAEMON_HTTP',
+      '-DWYL_TEST_DAEMON_HTTP',
       '-DWYL_HAS_FACT_STORE',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ]
