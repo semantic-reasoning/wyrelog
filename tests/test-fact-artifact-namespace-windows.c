@@ -2349,8 +2349,12 @@ test_working_handle_free_never_closes_reused_handle (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
       &identity, &binding), ==, WYRELOG_E_OK);
-  /* Adoption consumed |issued| and retained only a private duplicate. */
-  g_assert_false (CloseHandle (issued));
+  /* Preserve the direct consumption assertion in ordinary test runs.  The
+   * instrumented gate proves invalid-handle detection with its dedicated
+   * probe, so do not terminate this aggregate process on a second deliberate
+   * invalid close. */
+  if (g_getenv ("WYRELOG_APPVERIFIER_HANDLE_GATE") == NULL)
+    g_assert_false (CloseHandle (issued));
   /* Numeric reuse of the consumed slot is this test's precondition, not the
    * property it proves; nothing obliges the kernel to hand the value straight
    * back.  Retry a bounded number of times and make a precondition that never

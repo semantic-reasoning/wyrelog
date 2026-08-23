@@ -218,18 +218,27 @@ function Invoke-Artifact-Suite {
   $env:VERIFIER_LOG_PATH = $phase
   Clear-Target -ImageName $script:suite_image -EvidenceDirectory $phase
   Enable-Target -ImageName $script:suite_image -EvidenceDirectory $phase
-  $result = Invoke-Captured -FilePath $script:meson_path -Arguments @(
-    'test', '-C', $script:build_root, '--no-rebuild',
-    'fact-artifact-namespace-windows',
-    'fact-artifact-namespace-windows-main-sidecar',
-    'fact-artifact-namespace-windows-sidecar-replacement-isolated',
-    'fact-artifact-namespace-windows-temp-binding-replacement-isolated',
-    'fact-artifact-namespace-windows-lock-entry-replacement-isolated',
-    'fact-artifact-namespace-windows-temp-token-real-crash-recovery',
-    'fact-artifact-namespace-windows-cross-process',
-    'fact-artifact-namespace-windows-temp-root-spill-child-capabilities',
-    '--print-errorlogs'
-  ) -LogPath (Join-Path $phase 'meson-test.txt')
+  $previous_gate_marker = [Environment]::GetEnvironmentVariable(
+      'WYRELOG_APPVERIFIER_HANDLE_GATE', 'Process')
+  try {
+    [Environment]::SetEnvironmentVariable(
+        'WYRELOG_APPVERIFIER_HANDLE_GATE', '1', 'Process')
+    $result = Invoke-Captured -FilePath $script:meson_path -Arguments @(
+      'test', '-C', $script:build_root, '--no-rebuild',
+      'fact-artifact-namespace-windows',
+      'fact-artifact-namespace-windows-main-sidecar',
+      'fact-artifact-namespace-windows-sidecar-replacement-isolated',
+      'fact-artifact-namespace-windows-temp-binding-replacement-isolated',
+      'fact-artifact-namespace-windows-lock-entry-replacement-isolated',
+      'fact-artifact-namespace-windows-temp-token-real-crash-recovery',
+      'fact-artifact-namespace-windows-cross-process',
+      'fact-artifact-namespace-windows-temp-root-spill-child-capabilities',
+      '--print-errorlogs'
+    ) -LogPath (Join-Path $phase 'meson-test.txt')
+  } finally {
+    [Environment]::SetEnvironmentVariable(
+        'WYRELOG_APPVERIFIER_HANDLE_GATE', $previous_gate_marker, 'Process')
+  }
   $entries = @(Export-Phase-Logs -Phase $phase)
   if ($result.ExitCode -ne 0) {
     throw "instrumented Windows artifact suite exited $($result.ExitCode)"

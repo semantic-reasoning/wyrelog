@@ -71,6 +71,15 @@ The runner performs three isolated phases:
    This preserves later lifecycle coverage if an aggregate process aborts.
    Every invocation must exit zero without relevant stops.
 
+The activation fault is isolated to the test-only probe. The reused-slot
+ownership test retains its deliberate invalid `CloseHandle` consumption
+assertion in ordinary test runs. For the instrumented artifact phase only, the
+runner sets `WYRELOG_APPVERIFIER_HANDLE_GATE=1` around the Meson child process
+and restores the caller's prior process-environment value in `finally`, so that
+assertion does not terminate the aggregate process a second time and the marker
+cannot leak into later ordinary tests. The reused-slot ownership body and every
+other case still run under Handles/Leak checking.
+
 The double-close negative control proves that the configured Handles
 instrument is active and terminating. It is test-only and does not alter
 production ownership. The Leak layer and stop `0x901` remain enabled for the
