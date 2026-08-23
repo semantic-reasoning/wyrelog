@@ -2464,6 +2464,60 @@ wyl_handle_refresh_fact_graph (WylHandle *self,
 }
 
 wyrelog_error_t
+wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch,
+    const wyl_policy_fact_graph_info_t *graph_info, gboolean *out_inserted,
+    wyl_fact_mutation_outcome_t *out_outcome)
+{
+  if (out_inserted != NULL)
+    *out_inserted = FALSE;
+  if (out_outcome != NULL)
+    wyl_fact_mutation_outcome_init (out_outcome);
+
+  if (self == NULL || !WYL_IS_HANDLE (self) || store == NULL || *store == NULL
+      || schema == NULL || batch == NULL || graph_info == NULL
+      || out_inserted == NULL || out_outcome == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* Step 1: the store commit is the linearization point. */
+  wyl_fact_commit_delta_t delta;
+  wyl_fact_commit_delta_init (&delta);
+  wyrelog_error_t rc = batch->op == WYL_FACT_STORE_OP_RETRACT
+      ? wyl_fact_store_retract_batch_delta (*store, schema, batch,
+          out_inserted, &delta)
+      : wyl_fact_store_append_batch_delta (*store, schema, batch, out_inserted,
+          &delta);
+
+  /* Step 2: the mutation's store handle is consumed here.  Building the
+   * replacement engine reopens the same graph's store, so it must be closed
+   * before the refresh rather than at the caller's scope exit. */
+  g_clear_pointer (store, wyl_fact_store_close);
+
+  if (rc != WYRELOG_E_OK)
+    return rc;                  /* PRECOMMIT_FAILED: nothing durable. */
+
+  /* Step 3: post-commit targeted refresh of this graph only.  A failure here
+   * is committed-but-degraded, never a commit failure. */
+  WylFactGraphRuntimeStatus status = { 0 };
+  wyrelog_error_t refresh_rc = wyl_handle_refresh_fact_graph (self, graph_info,
+          &status);
+  out_outcome->delta = delta;
+  out_outcome->engine_queryable = status.queryable;
+  out_outcome->engine_generation = status.engine_generation;
+  if (refresh_rc == WYRELOG_E_OK) {
+    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+  } else {
+    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+    out_outcome->degraded_class = status.last_replay_class;
+    out_outcome->needs_runtime_reconcile = TRUE;
+    out_outcome->needs_durable_reconcile = TRUE;
+  }
+  wyl_fact_graph_runtime_status_clear (&status);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_handle_get_fact_graph_runtime_status (WylHandle *self,
     const gchar *tenant_id, const gchar *graph_id,
     WylFactGraphRuntimeStatus *out_status)

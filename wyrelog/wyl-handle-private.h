@@ -272,6 +272,54 @@ wyrelog_error_t wyl_handle_refresh_fact_graph (WylHandle * self,
 wyrelog_error_t wyl_handle_get_fact_graph_runtime_status (WylHandle * self,
     const gchar * tenant_id, const gchar * graph_id,
     WylFactGraphRuntimeStatus * out_status);
+/*
+ * Commit one fact mutation (append or retract) and refresh only the graph it
+ * committed to (issue #546).  This is the single internal entry point for a
+ * fact mutation; the daemon's HTTP route delegates to it rather than
+ * re-implementing the sequence.
+ *
+ * Ordering and idempotency contract:
+ *
+ *   1. The store commit is the LINEARIZATION POINT.  Until it returns
+ *      WYRELOG_E_OK nothing is durable, the outcome is PRECOMMIT_FAILED with a
+ *      zero delta, and no graph's engine or operation generation moves.
+ *   2. |store| is CONSUMED: it is closed and set to NULL before the refresh,
+ *      because building the replacement engine reopens the same graph's store.
+ *      The caller must not use it afterwards.  The sole exception is the
+ *      WYRELOG_E_INVALID programming-error return, which leaves |*store|
+ *      untouched -- the arguments may be garbage -- so the caller keeps
+ *      responsibility for releasing it on that path.
+ *   3. The refresh is POST-COMMIT and targeted at |graph_info| alone.  Its
+ *      failure is COMMITTED_DEGRADED -- the batch stays durable and must never
+ *      be reported as uncommitted -- and it leaves every other graph's
+ *      generations untouched.
+ *   4. A retried idempotency key is a committed no-op: rc is WYRELOG_E_OK,
+ *      |out_inserted| is FALSE, the delta is the zero state, and the mutation
+ *      is NOT applied a second time.  A refresh still runs, so the
+ *      engine_generation still advances.
+ *   5. Audit emission is the caller's, and happens AFTER this returns.
+ *      NOTE: the HTTP route currently overwrites this function's rc with the
+ *      audit rc, so an audit failure is still reported as a commit failure,
+ *      contradicting item 1.  Fixing that is tracked separately; it does not
+ *      change what item 1 already made durable.
+ *
+ * Serialization: the exact graph's runtime writer lease (entry->writer_lock in
+ * fact/runtime-private.c) is held across the engine build and the generation
+ * swap.  Note that the refresh ADDITIONALLY serializes on the handle-global
+ * fact_replay_coordinator_lock taken by wyl_handle_refresh_fact_graph, so
+ * distinct (tenant_id, graph_id) keys do NOT yet build concurrently -- the
+ * per-key lease is nested inside the global one and is never the limiting
+ * lock here.  Per-key independence is what #548/#549 are meant to unlock.
+ * This function is also the designated acquisition point for the graph-level
+ * admission lease (#548) and the tenant admission read lease (#549); neither
+ * exists yet.
+ */
+wyrelog_error_t wyl_handle_commit_fact_mutation (WylHandle * self,
+    wyl_fact_store_t * *store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const wyl_fact_store_batch_t * batch,
+    const wyl_policy_fact_graph_info_t * graph_info, gboolean * out_inserted,
+    wyl_fact_mutation_outcome_t * out_outcome);
 typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
     const gchar * relation, const gint64 * row, guint ncols,
     gpointer user_data);

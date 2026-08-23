@@ -12343,40 +12343,14 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     .rows = rows,
     .n_rows = n_rows,
   };
-  wyl_fact_commit_delta_t delta;
-  wyl_fact_commit_delta_init (&delta);
   wyl_fact_mutation_outcome_t outcome;
   wyl_fact_mutation_outcome_init (&outcome);
-  if (rc == WYRELOG_E_OK) {
-    if (op == FACT_HTTP_OP_RETRACT)
-      rc = wyl_fact_store_retract_batch_delta (fact_store, &schema, &batch,
-              &inserted, &delta);
-    else
-      rc = wyl_fact_store_append_batch_delta (fact_store, &schema, &batch,
-              &inserted, &delta);
-  }
+  /* One internal entry point owns commit-then-refresh ordering and consumes
+   * fact_store (issue #546); see wyl_handle_commit_fact_mutation. */
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_commit_fact_mutation (ctx->handle, &fact_store, &schema,
+            &batch, &lookup.info, &inserted, &outcome);
   g_clear_pointer (&fact_store, wyl_fact_store_close);
-  if (rc == WYRELOG_E_OK) {
-    /* The fact is durably committed.  Refresh ONLY this graph (issue #546);
-     * a post-commit refresh failure is committed-but-degraded, never a commit
-     * failure, so it must not turn into a non-2xx response and no sibling
-     * graph's generation is touched. */
-    WylFactGraphRuntimeStatus status = { 0 };
-    wyrelog_error_t refresh_rc =
-        wyl_handle_refresh_fact_graph (ctx->handle, &lookup.info, &status);
-    outcome.delta = delta;
-    outcome.engine_queryable = status.queryable;
-    outcome.engine_generation = status.engine_generation;
-    if (refresh_rc == WYRELOG_E_OK) {
-      outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
-    } else {
-      outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
-      outcome.degraded_class = status.last_replay_class;
-      outcome.needs_runtime_reconcile = TRUE;
-      outcome.needs_durable_reconcile = TRUE;
-    }
-    wyl_fact_graph_runtime_status_clear (&status);
-  }
   if (rc == WYRELOG_E_OK)
     rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
             relation, batch_id, store_op, inserted, request_id);

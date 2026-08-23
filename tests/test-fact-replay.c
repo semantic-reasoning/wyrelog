@@ -1933,6 +1933,160 @@ test_handle_refresh_fact_graph_is_isolated (void)
   remove_tree (root);
 }
 
+/* Drive one mutation through the single internal entry point, exactly as the
+ * daemon route does.  Returns the rc; |out_outcome| carries the class. */
+static wyrelog_error_t
+commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *batch_id,
+    const gchar *idempotency_key, gboolean *out_inserted,
+    wyl_fact_mutation_outcome_t *out_outcome)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          tenant_id, graph_id);
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-z"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 99},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+  };
+  wyl_fact_row_t rows[] = { {values, 3} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = 1,
+    .source = "test",
+    .idempotency_key = idempotency_key,
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+
+  FullGraphInfoProbe target = { tenant_id, graph_id, { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, tenant_id,
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+
+  wyrelog_error_t rc = wyl_handle_commit_fact_mutation (handle, &store,
+          &schema, &batch, &target.info, out_inserted, out_outcome);
+  /* The entry point consumes the store: it must be NULL now, and the
+   * g_autoptr below must therefore be a no-op rather than a double close. */
+  g_assert_null (store);
+  clear_full_graph_info (&target.info);
+  return rc;
+}
+
+/* Issue #546: the internal mutation entry point commits, then refreshes only
+ * the graph it committed to.  This is the append/retract path the acceptance
+ * criteria are actually written about -- the direct-refresh test above cannot
+ * reach it. */
+static void
+test_handle_commit_fact_mutation_refreshes_only_its_graph (void)
+{
+  TEST ("committed mutation refreshes its own graph and no sibling");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-commit-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "inventory");
+    create_graph_with_schema (policy, root, "tenant-b", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "inventory");
+    append_order_batches (policy, root, "tenant-b", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  const GraphGenerations target_before = capture_generations (handle,
+          "tenant-a", "orders");
+  const GraphGenerations same_tenant_before = capture_generations (handle,
+          "tenant-a", "inventory");
+  const GraphGenerations other_tenant_before = capture_generations (handle,
+          "tenant-b", "orders");
+
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  g_assert_cmpint (commit_one_mutation (handle,
+      wyl_handle_get_policy_store (handle), "tenant-a", "orders", "commit-1",
+      "commit-key-1", &inserted, &outcome), ==, WYRELOG_E_OK);
+
+  /* Committed AND refreshed. */
+  g_assert_true (inserted);
+  g_assert_cmpint (outcome.mutation_class, ==,
+      WYL_FACT_MUTATION_COMMITTED_READY);
+  g_assert_true (outcome.delta.inserted);
+  g_assert_cmpint (outcome.delta.committed_row_delta, ==, 1);
+  g_assert_true (outcome.engine_queryable);
+  g_assert_false (outcome.needs_runtime_reconcile);
+
+  const GraphGenerations target_after = capture_generations (handle,
+          "tenant-a", "orders");
+  g_assert_cmpuint (target_after.engine_generation, ==,
+      target_before.engine_generation + 1);
+  g_assert_cmpuint (target_after.operation_generation, ==,
+      target_before.operation_generation + 1);
+  /* The outcome reports the generation the refresh actually published. */
+  g_assert_cmpuint (outcome.engine_generation, ==,
+      target_after.engine_generation);
+
+  /* Prove the ORDER, not merely that both steps happened: the published
+   * engine must already contain the row this call committed.  Every
+   * generation and outcome assertion above also passes against a
+   * refresh-then-commit implementation; this one does not.  The fixture
+   * leaves the observed relation with exactly order-b, so a correct
+   * commit-then-refresh yields two rows and the wrong order yields one. */
+  {
+    g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+          ("shop.ns", "orders-rel");
+    g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+    SnapshotProbe probe = { observed, 0, FALSE };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+        "tenant-a", "orders", observed, handle_snapshot_cb, &probe), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (probe.count, ==, 2);
+  }
+
+  /* An append to one graph moves no other graph, in either tenant. */
+  assert_generations_unchanged (handle, "tenant-a", "inventory",
+      &same_tenant_before);
+  assert_generations_unchanged (handle, "tenant-b", "orders",
+      &other_tenant_before);
+
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 /* Issue #546: when the post-commit engine rebuild fails, the single-graph
  * refresh reports failure while the prior complete generation stays queryable
  * (READY_STALE) -- the daemon maps this to a committed-but-degraded 200. */
@@ -2193,6 +2347,8 @@ main (int argc, char **argv)
       test_replay_dup_version_relation_degrades);
   g_test_add_func ("/fact-replay/single-graph-refresh-isolated",
       test_handle_refresh_fact_graph_is_isolated);
+  g_test_add_func ("/fact-replay/mutation-commits-and-refreshes",
+      test_handle_commit_fact_mutation_refreshes_only_its_graph);
   g_test_add_func ("/fact-replay/single-graph-refresh-degrades",
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
