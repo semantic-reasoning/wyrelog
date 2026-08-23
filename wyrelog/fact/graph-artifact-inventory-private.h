@@ -37,6 +37,8 @@ typedef enum
   WYL_FACT_ARTIFACT_INVENTORY_CHECKPOINT,
   WYL_FACT_ARTIFACT_INVENTORY_RECOVERY,
   WYL_FACT_ARTIFACT_INVENTORY_LOCK,
+  /* Aggregate of bounded DuckDB private temporary roots and children. */
+  WYL_FACT_ARTIFACT_INVENTORY_TEMP,
   WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT,
 } WylFactArtifactInventorySlot;
 
@@ -51,12 +53,18 @@ typedef enum
   WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT,
 } WylFactArtifactInventoryAnomaly;
 
+typedef struct
+{
+  guint64 domain;
+  guint64 object;
+} WylFactArtifactInventoryIdentity;
+
 /* These opaque observations are provider-owned identity/fingerprint values.
  * They are not filesystem handles or caller-selected names. */
 typedef struct
 {
-  guint64 directory_identity;
-  guint64 guard_identity;
+  WylFactArtifactInventoryIdentity directory_identity;
+  WylFactArtifactInventoryIdentity guard_identity;
   guint64 entry_fingerprint;
 } WylFactArtifactInventoryObservation;
 
@@ -82,7 +90,8 @@ void wyl_fact_artifact_inventory_snapshot_end
 
 wyrelog_error_t wyl_fact_artifact_inventory_snapshot_set_slot
   (WylFactArtifactInventorySnapshot *snapshot,
-    WylFactArtifactInventorySlot slot, gboolean present,
+    WylFactArtifactInventorySlot slot,
+    const WylFactArtifactInventoryIdentity *identity, gboolean present,
     guint64 logical_bytes, gboolean allocation_supported,
     guint64 allocated_bytes);
 wyrelog_error_t wyl_fact_artifact_inventory_snapshot_add_anomaly
@@ -102,6 +111,10 @@ wyl_fact_artifact_inventory_snapshot_status
 gboolean wyl_fact_artifact_inventory_snapshot_slot_present
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventorySlot slot);
+void wyl_fact_artifact_inventory_snapshot_slot_identity
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventorySlot slot,
+    WylFactArtifactInventoryIdentity *out_identity);
 guint64 wyl_fact_artifact_inventory_snapshot_logical_bytes
   (const WylFactArtifactInventorySnapshot *snapshot);
 guint64 wyl_fact_artifact_inventory_snapshot_allocated_bytes

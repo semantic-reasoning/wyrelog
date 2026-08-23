@@ -4299,6 +4299,141 @@ test_duckdb_temp_root (void)
 #endif
 }
 
+#ifndef G_OS_WIN32
+static void
+test_inventory_provider (void)
+{
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  WylFactArtifactMutationLease *lease = NULL;
+  WylFactDuckdbTempRoot *root = NULL;
+  WylFactDuckdbTempChild *child = NULL;
+  WylFactDuckdbTempOrphanEvidence *evidence = NULL;
+  g_autofree gchar *base = make_root ();
+  g_assert_cmpint (wyl_fact_graph_resolver_open (base, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+      TRUE, &directory), ==, WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+        (lease, &root, &evidence), ==, WYRELOG_E_OK);
+  g_assert_null (evidence);
+  gint child_fd = -1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
+        (root, "duckdb_temp_storage_DEFAULT-1.tmp", &child, &child_fd,
+      &evidence), ==, WYRELOG_E_OK);
+  g_assert_null (evidence);
+  g_assert_cmpint (child_fd, >=, 0);
+  g_assert_cmpint (write (child_fd, "payload", 7), ==, 7);
+  close (child_fd);
+  wyl_fact_duckdb_temp_child_free (child);
+  child = NULL;
+  wyl_fact_duckdb_temp_root_free (root);
+  root = NULL;
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
+
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE);
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN));
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_TEMP));
+  WylFactArtifactInventoryIdentity main_identity = { 0, 0 };
+  wyl_fact_artifact_inventory_snapshot_slot_identity (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN, &main_identity);
+  g_assert_cmpuint (main_identity.domain, !=, 0);
+  g_assert_cmpuint (main_identity.object, !=, 0);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_logical_bytes
+        (snapshot), >=, 7);
+  g_clear_pointer (&snapshot,
+      wyl_fact_artifact_inventory_snapshot_free);
+
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&directory);
+  g_autoptr (GDir) temp_roots = g_dir_open (graph_path, 0, NULL);
+  const gchar *temp_root_name = NULL;
+  while ((temp_root_name = g_dir_read_name (temp_roots)) != NULL
+      && !g_str_has_prefix (temp_root_name, ".duckdb-private-temp-"))
+    ;
+  g_assert_nonnull (temp_root_name);
+  g_autofree gchar *temp_root_path = g_build_filename (graph_path,
+          temp_root_name, NULL);
+  g_autofree gchar *malformed_path = g_build_filename (temp_root_path,
+          "not-a-duckdb-child", NULL);
+  g_assert_cmpint (symlink ("payload", malformed_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY), ==, 1);
+  g_assert_cmpint (unlink (malformed_path), ==, 0);
+
+  g_autofree gchar *foreign_path = g_build_filename (graph_path, "foreign",
+          NULL);
+  gint foreign_fd = open (foreign_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+  g_assert_cmpint (foreign_fd, >=, 0);
+  close (foreign_fd);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, 1);
+  g_assert_cmpint (unlink (foreign_path), ==, 0);
+
+  wyl_fact_artifact_namespace_set_test_fault
+    (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  g_clear_pointer (&snapshot,
+      wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSTABLE);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_logical_bytes
+        (snapshot), ==, 0);
+  g_assert_true (wyl_fact_artifact_namespace_test_fault_was_consumed
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE));
+
+  g_autoptr (GDir) cleanup = g_dir_open (graph_path, 0, NULL);
+  const gchar *entry_name;
+  while ((entry_name = g_dir_read_name (cleanup)) != NULL) {
+    if (!g_str_has_prefix (entry_name, ".duckdb-private-temp-"))
+      continue;
+    g_autofree gchar *root_path = g_build_filename (graph_path, entry_name,
+            NULL);
+    g_autoptr (GDir) child_dir = g_dir_open (root_path, 0, NULL);
+    const gchar *child_name;
+    while ((child_name = g_dir_read_name (child_dir)) != NULL) {
+      g_autofree gchar *child_path = g_build_filename (root_path, child_name,
+              NULL);
+      g_assert_cmpint (unlink (child_path), ==, 0);
+    }
+    g_assert_cmpint (g_rmdir (root_path), ==, 0);
+  }
+  wyl_fact_artifact_namespace_free (namespace_);
+  for (WylFactArtifactName name = WYL_FACT_ARTIFACT_MAIN;
+      name <= WYL_FACT_ARTIFACT_LOCK; name++)
+    test_remove_fixed_artifact (graph_path, name);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_autofree gchar *tenant_path = g_path_get_dirname (graph_path);
+  g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -4314,6 +4449,10 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-artifact-namespace/fixed-sidecar-replacement/ambiguous-rename-error",
       test_fixed_sidecar_replacement_ambiguous_rename_error);
+#endif
+#ifndef G_OS_WIN32
+  g_test_add_func ("/fact-artifact-namespace/inventory-provider",
+      test_inventory_provider);
 #endif
   g_test_add_func
     ("/fact-artifact-namespace/fixed-sidecar-replacement/rejections",

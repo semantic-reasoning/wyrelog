@@ -3,6 +3,7 @@
 
 #include <glib.h>
 #include "wyrelog/error.h"
+#include "fact/graph-artifact-inventory-private.h"
 #include "fact/graph-locator-private.h"
 #include "fact/recovery-mac-private.h"
 
@@ -131,6 +132,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_LINEARIZATION,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_POST_VALIDATION,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE,
 } WylFactArtifactNamespaceTestFault;
 
 #ifndef G_OS_WIN32
@@ -497,5 +499,11 @@ wyrelog_error_t wyl_fact_duckdb_temp_child_retire
 void wyl_fact_duckdb_temp_child_free (WylFactDuckdbTempChild *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_retire
   (WylFactDuckdbTempRoot *, WylFactDuckdbTempRetireResult *);
+
+/* Produce one complete read-only inventory while holding the existing shared
+ * reader guard.  The returned snapshot contains values and bounded anomaly
+ * counts only; it is never a path or reopen capability. */
+wyrelog_error_t wyl_fact_artifact_namespace_inventory_snapshot
+  (WylFactArtifactNamespace *, WylFactArtifactInventorySnapshot **out_snapshot);
 
 G_END_DECLS

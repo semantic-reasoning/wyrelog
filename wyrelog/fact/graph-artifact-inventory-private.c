@@ -9,6 +9,7 @@
 
 typedef struct
 {
+  WylFactArtifactInventoryIdentity identity;
   gboolean present;
   guint64 logical_bytes;
   guint64 allocated_bytes;
@@ -47,8 +48,10 @@ static gboolean
 observation_equal (const WylFactArtifactInventoryObservation *left,
     const WylFactArtifactInventoryObservation *right)
 {
-  return left->directory_identity == right->directory_identity
-         && left->guard_identity == right->guard_identity
+  return left->directory_identity.domain == right->directory_identity.domain
+         && left->directory_identity.object == right->directory_identity.object
+         && left->guard_identity.domain == right->guard_identity.domain
+         && left->guard_identity.object == right->guard_identity.object
          && left->entry_fingerprint == right->entry_fingerprint;
 }
 
@@ -134,7 +137,8 @@ add_u64_checked (guint64 left, guint64 right, guint64 *out)
 wyrelog_error_t
 wyl_fact_artifact_inventory_snapshot_set_slot
   (WylFactArtifactInventorySnapshot *snapshot,
-    WylFactArtifactInventorySlot slot, gboolean present,
+    WylFactArtifactInventorySlot slot,
+    const WylFactArtifactInventoryIdentity *identity, gboolean present,
     guint64 logical_bytes, gboolean allocation_supported,
     guint64 allocated_bytes)
 {
@@ -159,6 +163,8 @@ wyl_fact_artifact_inventory_snapshot_set_slot
     return wyl_fact_artifact_inventory_snapshot_fail (snapshot,
                WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY);
   snapshot->slot_set[slot] = TRUE;
+  state->identity = identity == NULL
+      ? (WylFactArtifactInventoryIdentity) { 0, 0 } : *identity;
   state->present = present;
   state->logical_bytes = logical_bytes;
   state->allocation_supported = allocation_supported;
@@ -254,6 +260,19 @@ wyl_fact_artifact_inventory_snapshot_slot_present
 {
   return snapshot != NULL && slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT
          && snapshot->slots[slot].present;
+}
+
+void
+wyl_fact_artifact_inventory_snapshot_slot_identity
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventorySlot slot,
+    WylFactArtifactInventoryIdentity *out_identity)
+{
+  if (out_identity != NULL)
+    *out_identity = snapshot != NULL
+        && slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT
+        ? snapshot->slots[slot].identity
+        : (WylFactArtifactInventoryIdentity) { 0, 0 };
 }
 
 guint64

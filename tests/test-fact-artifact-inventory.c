@@ -7,7 +7,8 @@
 static WylFactArtifactInventoryObservation
 observation (guint64 fingerprint)
 {
-  WylFactArtifactInventoryObservation result = { 11, 17, fingerprint };
+  WylFactArtifactInventoryObservation result = { { 1, 11 }, { 2, 17 },
+                                                 fingerprint };
   return result;
 }
 
@@ -20,12 +21,14 @@ test_stable_typed_snapshot (void)
   WylFactArtifactInventoryObservation point_after = observation (24);
   g_assert_nonnull (snapshot);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
-      WYL_FACT_ARTIFACT_INVENTORY_MAIN, TRUE, 10, TRUE, 4096), !=,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN,
+      &(WylFactArtifactInventoryIdentity) { 3, 1 }, TRUE, 10, TRUE, 4096), !=,
       WYRELOG_E_OK);
   wyl_fact_artifact_inventory_snapshot_end (snapshot, &point);
   wyl_fact_artifact_inventory_snapshot_begin (snapshot, &point);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
-      WYL_FACT_ARTIFACT_INVENTORY_MAIN, TRUE, 10, TRUE, 4096), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN,
+      &(WylFactArtifactInventoryIdentity) { 3, 1 }, TRUE, 10, TRUE, 4096), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, WYRELOG_E_OK);
@@ -37,6 +40,11 @@ test_stable_typed_snapshot (void)
       ==, WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
   g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_MAIN));
+  WylFactArtifactInventoryIdentity identity = { 0, 0 };
+  wyl_fact_artifact_inventory_snapshot_slot_identity (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN, &identity);
+  g_assert_cmpuint (identity.domain, ==, 3);
+  g_assert_cmpuint (identity.object, ==, 1);
   g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_logical_bytes
         (snapshot), ==, 10);
   g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_allocated_bytes
@@ -45,7 +53,8 @@ test_stable_typed_snapshot (void)
         (snapshot, WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, 1);
   wyl_fact_artifact_inventory_snapshot_begin (snapshot, &point);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
-      WYL_FACT_ARTIFACT_INVENTORY_WAL, TRUE, 1, TRUE, 512), !=,
+      WYL_FACT_ARTIFACT_INVENTORY_WAL,
+      &(WylFactArtifactInventoryIdentity) { 3, 2 }, TRUE, 1, TRUE, 512), !=,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot),
       ==, WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
@@ -60,7 +69,8 @@ test_mismatch_discards_complete_result (void)
   WylFactArtifactInventoryObservation after = observation (2);
   wyl_fact_artifact_inventory_snapshot_begin (snapshot, &before);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
-      WYL_FACT_ARTIFACT_INVENTORY_WAL, TRUE, 9, TRUE, 512), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_WAL,
+      &(WylFactArtifactInventoryIdentity) { 3, 2 }, TRUE, 9, TRUE, 512), ==,
       WYRELOG_E_OK);
   wyl_fact_artifact_inventory_snapshot_end (snapshot, &after);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
@@ -93,7 +103,8 @@ test_bounded_failure_statuses_clear_result (void)
   wyl_fact_artifact_inventory_snapshot_clear (snapshot);
   wyl_fact_artifact_inventory_snapshot_begin (snapshot, &point);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
-      WYL_FACT_ARTIFACT_INVENTORY_MAIN, TRUE, 1, FALSE, 0), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN,
+      &(WylFactArtifactInventoryIdentity) { 3, 1 }, TRUE, 1, FALSE, 0), ==,
       WYRELOG_E_OK);
   wyl_fact_artifact_inventory_snapshot_end (snapshot, &point);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
