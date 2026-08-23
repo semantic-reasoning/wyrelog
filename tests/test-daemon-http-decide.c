@@ -8266,6 +8266,29 @@ policy_lifecycle_audit_count (WylHandle *handle, const gchar *subject,
   return TRUE;
 }
 
+#ifdef WYL_HAS_AUDIT
+static gboolean
+login_skip_mfa_allow_audit_count (WylHandle *handle, const gchar *subject,
+    guint *out_count)
+{
+  if (out_count == NULL)
+    return FALSE;
+  AuditEventProbe probe = {
+    .subject_id = subject,
+    .action = "login_skip_mfa",
+    .resource_id = "principal_state",
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &probe)
+      != WYRELOG_E_OK)
+    return FALSE;
+  *out_count = probe.matches;
+  return TRUE;
+}
+#endif
+
 typedef struct
 {
   const gchar *subject;
@@ -19886,6 +19909,12 @@ check_relogin_binds_current_authn_epoch (WylHandle *handle,
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (rc != WYRELOG_E_OK)
     return 22703;
+#ifdef WYL_HAS_AUDIT
+  guint skip_mfa_audit_count = 0;
+  if (!login_skip_mfa_allow_audit_count (handle, subject,
+      &skip_mfa_audit_count) || skip_mfa_audit_count != 1)
+    return 22722;
+#endif
   if (insert_epoch_fixture (handle, subject, resource) != WYRELOG_E_OK)
     return 22704;
 
@@ -19912,16 +19941,33 @@ check_relogin_binds_current_authn_epoch (WylHandle *handle,
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
   if (rc != WYRELOG_E_OK)
     return 22709;
+#ifdef WYL_HAS_AUDIT
+  if (!login_skip_mfa_allow_audit_count (handle, subject,
+      &skip_mfa_audit_count) || skip_mfa_audit_count != 2)
+    return 22723;
+#endif
 
   /* Precondition, so this can never silently degrade into a first-login
    * test: the attaching login must have appended no authenticating event,
    * i.e. the durable watermark is exactly where the winner left it. */
+  gint64 principal_events_before = 0;
+  gint64 principal_events_after = 0;
+  g_autofree gchar *principal_events_sql = g_strdup_printf
+        ("SELECT count(*) FROM principal_events WHERE subject_id='%s';",
+          subject);
+  if (!policy_count_rows (handle, principal_events_sql,
+      &principal_events_before))
+    return 22724;
   gint64 attached_epoch = 0;
   found = FALSE;
   if (wyl_policy_store_get_principal_authn_epoch (store, subject,
       &attached_epoch, &found) != WYRELOG_E_OK || !found
       || attached_epoch != won_epoch)
     return 22710;
+  if (!policy_count_rows (handle, principal_events_sql,
+      &principal_events_after)
+      || principal_events_after != principal_events_before)
+    return 22725;
 
   if (insert_epoch_fixture (handle, subject, resource) != WYRELOG_E_OK)
     return 22711;
@@ -19982,6 +20028,92 @@ check_relogin_binds_current_authn_epoch (WylHandle *handle,
 
   return 0;
 }
+
+#ifdef WYL_HAS_AUDIT
+static gint
+check_skip_mfa_zero_event_audit_paths (WylHandle *handle,
+    const gchar *base_url)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return 22800;
+
+  /* A normal login leaves mfa_required; a later skip-MFA login attaches to
+   * that ceremony without a principal event and still records its decision. */
+  const gchar *pending_subject = "http-mfa-pending-audit-user";
+  g_autoptr (WylClient) pending_first = NULL;
+  g_autoptr (WylClient) pending_attached = NULL;
+  if (wyl_client_new (base_url, &pending_first) != WYRELOG_E_OK
+      || wyl_client_new (base_url, &pending_attached) != WYRELOG_E_OK
+      || wyl_client_login (pending_first, pending_subject, NULL)
+      != WYRELOG_E_OK)
+    return 22801;
+  guint audit_count = 0;
+  if (!login_skip_mfa_allow_audit_count (handle, pending_subject,
+      &audit_count) || audit_count != 0)
+    return 22802;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  wyrelog_error_t rc = wyl_client_login_skip_mfa (pending_attached,
+          pending_subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != WYRELOG_E_OK
+      || !login_skip_mfa_allow_audit_count (handle, pending_subject,
+      &audit_count) || audit_count != 1)
+    return 22803;
+
+  /* An elapsed lock folds unlock + skip-MFA login into UNLOCKED_STARTED;
+   * the existing event-loop audit must still produce exactly one decision. */
+  const gchar *unlocked_subject = "http-unlocked-audit-user";
+  g_autoptr (WylClient) locked_session = NULL;
+  g_autoptr (WylClient) unlocked_login = NULL;
+  if (wyl_client_new (base_url, &locked_session) != WYRELOG_E_OK
+      || wyl_client_new (base_url, &unlocked_login) != WYRELOG_E_OK
+      || wyl_client_login (locked_session, unlocked_subject, NULL)
+      != WYRELOG_E_OK)
+    return 22804;
+  gboolean moved = FALSE;
+  gint64 now_secs = g_get_real_time () / G_USEC_PER_SEC;
+  if (wyl_policy_store_apply_principal_transition (store, unlocked_subject,
+      WYL_PRINCIPAL_EVENT_LOCK, 5, now_secs - 1000, NULL, NULL, &moved,
+      NULL) != WYRELOG_E_OK || !moved
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 22805;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  rc = wyl_client_login_skip_mfa (unlocked_login, unlocked_subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != WYRELOG_E_OK
+      || !login_skip_mfa_allow_audit_count (handle, unlocked_subject,
+      &audit_count) || audit_count != 1)
+    return 22806;
+
+  /* A non-elapsed locked rejection is not an authorization success and must
+   * not acquire an allowed skip-MFA audit record. */
+  const gchar *rejected_subject = "http-locked-audit-user";
+  g_autoptr (WylClient) rejected_session = NULL;
+  g_autoptr (WylClient) rejected_login = NULL;
+  if (wyl_client_new (base_url, &rejected_session) != WYRELOG_E_OK
+      || wyl_client_new (base_url, &rejected_login) != WYRELOG_E_OK
+      || wyl_client_login (rejected_session, rejected_subject, NULL)
+      != WYRELOG_E_OK)
+    return 22807;
+  now_secs = g_get_real_time () / G_USEC_PER_SEC;
+  moved = FALSE;
+  if (wyl_policy_store_apply_principal_transition (store, rejected_subject,
+      WYL_PRINCIPAL_EVENT_LOCK, 5, now_secs, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 22808;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  rc = wyl_client_login_skip_mfa (rejected_login, rejected_subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc == WYRELOG_E_OK
+      || !login_skip_mfa_allow_audit_count (handle, rejected_subject,
+      &audit_count) || audit_count != 0)
+    return 22809;
+
+  return 0;
+}
+#endif
 
 /*
  * The daemon-http-decide test surface has been split across four binaries
@@ -20262,6 +20394,12 @@ main (void)
           base_url);
   if (relogin_epoch_rc != 0)
     return relogin_epoch_rc;
+#ifdef WYL_HAS_AUDIT
+  gint skip_mfa_audit_paths_rc = check_skip_mfa_zero_event_audit_paths
+        (handle, base_url);
+  if (skip_mfa_audit_paths_rc != 0)
+    return skip_mfa_audit_paths_rc;
+#endif
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-guard-user") != WYRELOG_E_OK) {

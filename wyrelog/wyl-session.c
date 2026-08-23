@@ -890,6 +890,7 @@ typedef struct
   gint64 session_event_id;
 #ifdef WYL_HAS_AUDIT
   WylAuditEvent *principal_audit_events[2];
+  WylAuditEvent *skip_mfa_audit_event;
 #endif
 } WylLoginPublication;
 
@@ -899,6 +900,7 @@ clear_login_principal_audits (WylLoginPublication *ctx)
 {
   for (guint i = 0; i < G_N_ELEMENTS (ctx->principal_audit_events); i++)
     g_clear_object (&ctx->principal_audit_events[i]);
+  g_clear_object (&ctx->skip_mfa_audit_event);
 }
 #endif
 
@@ -931,6 +933,29 @@ mutate_login_publication (wyl_policy_store_t *store, gpointer data)
     if (!found || ctx->principal_authn_epoch <= 0)
       return WYRELOG_E_POLICY;
   }
+
+#ifdef WYL_HAS_AUDIT
+  /* This is an authorization decision, not a principal transition.  An
+   * attaching login publishes no principal event, so record the decision on
+   * that path; transition paths create the same record in the loop below. */
+  gboolean attaching_login =
+      ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_ATTACHED_MFA_PENDING
+      || ctx->principal_outcome == WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED;
+  if (ctx->skip_mfa && attaching_login && ctx->principal_event_count == 0) {
+    ctx->skip_mfa_audit_event = new_login_skip_mfa_allowed_audit
+          (ctx->username, ctx->request_id);
+    if (ctx->skip_mfa_audit_event == NULL)
+      return WYRELOG_E_INTERNAL;
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string
+          (ctx->skip_mfa_audit_event);
+    if (audit_id == NULL)
+      return WYRELOG_E_INTERNAL;
+    rc = append_policy_audit_event (store, audit_id,
+            ctx->skip_mfa_audit_event);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+#endif
 
   for (gint i = 0; i < ctx->principal_event_count; i++) {
     gboolean is_unlock = ctx->principal_outcome ==
@@ -1053,6 +1078,9 @@ publish_login_mutation (WylLoginPublication *ctx)
       if (ctx->principal_audit_events[i] != NULL)
         (void) wyl_audit_mirror_event (ctx->handle,
             ctx->principal_audit_events[i]);
+    if (ctx->skip_mfa_audit_event != NULL)
+      (void) wyl_audit_mirror_event (ctx->handle,
+          ctx->skip_mfa_audit_event);
   }
   if (rc == WYRELOG_E_OK && ctx->session_audit_event != NULL)
     (void) wyl_audit_mirror_event (ctx->handle, ctx->session_audit_event);
