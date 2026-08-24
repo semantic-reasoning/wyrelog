@@ -80,8 +80,9 @@ static gboolean
 canonical_graph_id_is_valid (const gchar *graph_id)
 {
   return canonical_component_is_valid (graph_id)
-      && g_strcmp0 (graph_id, "wr") != 0 && !g_str_has_prefix (graph_id, "wr.")
-      && !g_str_has_prefix (graph_id, "__wyrelog.");
+         && g_strcmp0 (graph_id, "wr") != 0
+         && !g_str_has_prefix (graph_id, "wr.")
+         && !g_str_has_prefix (graph_id, "__wyrelog.");
 }
 
 wyrelog_error_t
@@ -111,7 +112,7 @@ wyl_fact_graph_key_copy (const WylFactGraphKey *source,
   if (source == NULL)
     return WYRELOG_E_INVALID;
   return wyl_fact_graph_key_init (destination, source->tenant_id,
-      source->graph_id);
+             source->graph_id);
 }
 
 void
@@ -130,7 +131,7 @@ wyl_fact_graph_key_hash (gconstpointer data)
   guint tenant_hash = g_str_hash (key->tenant_id);
   guint graph_hash = g_str_hash (key->graph_id);
   return tenant_hash ^ (graph_hash + 0x9e3779b9u + (tenant_hash << 6)
-      + (tenant_hash >> 2));
+         + (tenant_hash >> 2));
 }
 
 gboolean
@@ -139,7 +140,7 @@ wyl_fact_graph_key_equal (gconstpointer left_data, gconstpointer right_data)
   const WylFactGraphKey *left = left_data;
   const WylFactGraphKey *right = right_data;
   return g_str_equal (left->tenant_id, right->tenant_id)
-      && g_str_equal (left->graph_id, right->graph_id);
+         && g_str_equal (left->graph_id, right->graph_id);
 }
 
 const gchar *
@@ -311,7 +312,7 @@ status_copy_locked (WylFactGraphRuntimeEntry *entry,
 {
   memset (out_status, 0, sizeof *out_status);
   wyrelog_error_t rc = wyl_fact_graph_key_copy (&entry->key,
-      &out_status->key);
+          &out_status->key);
   if (rc != WYRELOG_E_OK)
     return rc;
   status_fill_locked (entry, out_status);
@@ -341,7 +342,7 @@ wyl_fact_graph_runtime_manager_new (WylFactGraphRuntimeManager **out_manager)
   g_atomic_ref_count_init (&manager->ref_count);
   g_mutex_init (&manager->map_lock);
   manager->entries = g_hash_table_new_full (wyl_fact_graph_key_hash,
-      wyl_fact_graph_key_equal, NULL, (GDestroyNotify) runtime_entry_unref);
+          wyl_fact_graph_key_equal, NULL, (GDestroyNotify) runtime_entry_unref);
   *out_manager = manager;
   return WYRELOG_E_OK;
 }
@@ -375,7 +376,7 @@ wyl_fact_graph_runtime_manager_shutdown (WylFactGraphRuntimeManager *manager)
     g_ptr_array_add (entries, runtime_entry_ref (value));
   GHashTable *old_entries = manager->entries;
   manager->entries = g_hash_table_new_full (wyl_fact_graph_key_hash,
-      wyl_fact_graph_key_equal, NULL, (GDestroyNotify) runtime_entry_unref);
+          wyl_fact_graph_key_equal, NULL, (GDestroyNotify) runtime_entry_unref);
   g_mutex_unlock (&manager->map_lock);
 
   for (guint i = 0; i < entries->len; i++) {
@@ -424,7 +425,7 @@ manager_lookup_entry (WylFactGraphRuntimeManager *manager,
     return WYRELOG_E_BUSY;
   }
   WylFactGraphRuntimeEntry *entry = g_hash_table_lookup (manager->entries,
-      key);
+          key);
   if (entry == NULL && candidate != NULL) {
     entry = candidate;
     candidate = NULL;
@@ -556,8 +557,8 @@ runtime_status_free (gpointer data)
 }
 
 wyrelog_error_t
-    wyl_fact_graph_runtime_manager_foreach_status
-    (WylFactGraphRuntimeManager * manager,
+wyl_fact_graph_runtime_manager_foreach_status
+  (WylFactGraphRuntimeManager * manager,
     WylFactGraphRuntimeStatusFunc callback, gpointer user_data) {
   if (manager == NULL || callback == NULL)
     return WYRELOG_E_INVALID;
@@ -597,8 +598,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_graph_runtime_manager_try_evict
-    (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+wyl_fact_graph_runtime_manager_try_evict
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     gboolean * out_evicted)
 {
   if (out_evicted == NULL)
@@ -645,8 +646,8 @@ key_is_seen (const WylFactGraphKey *key,
 }
 
 wyrelog_error_t
-    wyl_fact_graph_runtime_manager_retire_unseen
-    (WylFactGraphRuntimeManager * manager,
+wyl_fact_graph_runtime_manager_retire_unseen
+  (WylFactGraphRuntimeManager * manager,
     const WylFactGraphKey * const *seen_keys, gsize n_seen_keys)
 {
   if (manager == NULL || (seen_keys == NULL && n_seen_keys > 0))
@@ -692,8 +693,8 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_fact_graph_runtime_manager_acquire_snapshot
-    (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+wyl_fact_graph_runtime_manager_acquire_snapshot
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphSnapshot ** out_snapshot)
 {
   if (out_snapshot == NULL)
@@ -755,8 +756,8 @@ wyl_fact_graph_snapshot_unref (WylFactGraphSnapshot *snapshot)
 }
 
 guint64
-    wyl_fact_graph_snapshot_engine_generation
-    (const WylFactGraphSnapshot * snapshot)
+wyl_fact_graph_snapshot_engine_generation
+  (const WylFactGraphSnapshot * snapshot)
 {
   return snapshot == NULL ? 0 : snapshot->generation->generation;
 }

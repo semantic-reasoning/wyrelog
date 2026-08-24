@@ -49,7 +49,7 @@ gate_wait_entered (Gate *gate)
   g_mutex_lock (&gate->mutex);
   while (!gate->entered) {
     gboolean signaled = g_cond_wait_until (&gate->changed, &gate->mutex,
-        deadline);
+            deadline);
     g_assert_true (signaled || gate->entered);
   }
   g_mutex_unlock (&gate->mutex);
@@ -96,7 +96,7 @@ completion_wait (Completion *completion)
   g_mutex_lock (&completion->mutex);
   while (!completion->completed) {
     gboolean signaled = g_cond_wait_until (&completion->changed,
-        &completion->mutex, deadline);
+            &completion->mutex, deadline);
     g_assert_true (signaled || completion->completed);
   }
   g_mutex_unlock (&completion->mutex);
@@ -116,7 +116,7 @@ build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
     g_cond_broadcast (&spec->gate->changed);
     while (!spec->gate->released) {
       gboolean signaled = g_cond_wait_until (&spec->gate->changed,
-          &spec->gate->mutex, deadline);
+              &spec->gate->mutex, deadline);
       g_assert_true (signaled || spec->gate->released);
     }
     g_mutex_unlock (&spec->gate->mutex);
@@ -125,9 +125,9 @@ build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
     return spec->failure;
 
   wyrelog_error_t rc = wyl_engine_open_source
-      (".decl marker(value: int64)\n"
-      ".decl marker_observed(value: int64)\n"
-      "marker_observed(V) :- marker(V).\n", 1, out_engine);
+        (".decl marker(value: int64)\n"
+          ".decl marker_observed(value: int64)\n"
+          "marker_observed(V) :- marker(V).\n", 1, out_engine);
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_insert (*out_engine, "marker", &spec->marker, 1);
   if (rc != WYRELOG_E_OK)
@@ -156,7 +156,7 @@ static wyrelog_error_t
 read_marker (WylEngine *engine, gpointer user_data)
 {
   return wyl_engine_snapshot (engine, "marker_observed", marker_tuple,
-      user_data);
+             user_data);
 }
 
 static gint64
@@ -208,7 +208,7 @@ status_reentrant_cb (const WylFactGraphRuntimeStatus *status,
   WylFactGraphRuntimeStatus copy = { 0 };
   probe->count++;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (probe->manager,
-          &status->key, &copy), ==, WYRELOG_E_OK);
+      &status->key, &copy), ==, WYRELOG_E_OK);
   g_assert_cmpuint (copy.operation_generation, ==,
       status->operation_generation);
   wyl_fact_graph_runtime_status_clear (&copy);
@@ -227,26 +227,26 @@ test_refresh_snapshot_status_and_evict (void)
       ==, WYRELOG_E_OK);
   g_assert_false (wyl_fact_graph_key_equal (&a, &b));
   g_assert_cmpint (wyl_fact_graph_key_init (&invalid, "tenant-a",
-          "wr.internal"), ==, WYRELOG_E_INVALID);
+      "wr.internal"), ==, WYRELOG_E_INVALID);
 
   g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
   BuildSpec a1 = {.marker = 11 }, b1 = {.marker = 21 };
   WylFactGraphRuntimeStatus status = { 0 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
-          build_marker_engine, &a1, &status), ==, WYRELOG_E_OK);
+      build_marker_engine, &a1, &status), ==, WYRELOG_E_OK);
   g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
   g_assert_cmpuint (status.operation_generation, ==, 1);
   g_assert_cmpuint (status.engine_generation, ==, 1);
   wyl_fact_graph_runtime_status_clear (&status);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &b,
-          build_marker_engine, &b1, NULL), ==, WYRELOG_E_OK);
+      build_marker_engine, &b1, NULL), ==, WYRELOG_E_OK);
 
   g_autoptr (WylFactGraphSnapshot) old = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &a, &old), ==, WYRELOG_E_OK);
+      &a, &old), ==, WYRELOG_E_OK);
   BuildSpec a2 = {.marker = 12 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
-          build_marker_engine, &a2, &status), ==, WYRELOG_E_OK);
+      build_marker_engine, &a2, &status), ==, WYRELOG_E_OK);
   g_assert_cmpuint (status.operation_generation, ==, 2);
   g_assert_cmpuint (status.engine_generation, ==, 2);
   wyl_fact_graph_runtime_status_clear (&status);
@@ -255,23 +255,23 @@ test_refresh_snapshot_status_and_evict (void)
   g_autoptr (WylFactGraphSnapshot) current = NULL;
   g_autoptr (WylFactGraphSnapshot) other = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &a, &current), ==, WYRELOG_E_OK);
+      &a, &current), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &b, &other), ==, WYRELOG_E_OK);
+      &b, &other), ==, WYRELOG_E_OK);
   g_assert_cmpint (snapshot_marker (current), ==, 12);
   g_assert_cmpint (snapshot_marker (other), ==, 21);
   const WylFactGraphKey *seen[] = { &a };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen (manager,
-          seen, G_N_ELEMENTS (seen)), ==, WYRELOG_E_OK);
+      seen, G_N_ELEMENTS (seen)), ==, WYRELOG_E_OK);
   g_assert_cmpint (snapshot_marker (other), ==, 21);
   WylFactGraphSnapshot *retired = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &b, &retired), ==, WYRELOG_E_NOT_FOUND);
+      &b, &retired), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (retired);
 
   BuildSpec failed = {.failure = WYRELOG_E_IO };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
-          build_marker_engine, &failed, &status), ==, WYRELOG_E_IO);
+      build_marker_engine, &failed, &status), ==, WYRELOG_E_IO);
   g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY_STALE);
   g_assert_cmpint (status.last_replay_class, ==,
       WYL_FACT_GRAPH_REPLAY_STORE_UNAVAILABLE);
@@ -282,32 +282,32 @@ test_refresh_snapshot_status_and_evict (void)
   g_assert_cmpint (snapshot_marker (current), ==, 12);
 
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &missing,
-          build_marker_engine, &failed, &status), ==, WYRELOG_E_IO);
+      build_marker_engine, &failed, &status), ==, WYRELOG_E_IO);
   g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_DEGRADED);
   g_assert_false (status.queryable);
   wyl_fact_graph_runtime_status_clear (&status);
   StatusProbe statuses = { manager, 0 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_foreach_status (manager,
-          status_reentrant_cb, &statuses), ==, WYRELOG_E_OK);
+      status_reentrant_cb, &statuses), ==, WYRELOG_E_OK);
   g_assert_cmpuint (statuses.count, ==, 3);
 
   gboolean evicted = FALSE;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &a,
-          &evicted), ==, WYRELOG_E_BUSY);
+      &evicted), ==, WYRELOG_E_BUSY);
   g_clear_pointer (&old, wyl_fact_graph_snapshot_unref);
   g_clear_pointer (&current, wyl_fact_graph_snapshot_unref);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &a,
-          &evicted), ==, WYRELOG_E_OK);
+      &evicted), ==, WYRELOG_E_OK);
   g_assert_true (evicted);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
-          &status), ==, WYRELOG_E_OK);
+      &status), ==, WYRELOG_E_OK);
   g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
   g_assert_cmpuint (status.operation_generation, ==, 3);
   g_assert_cmpuint (status.engine_generation, ==, 2);
   wyl_fact_graph_runtime_status_clear (&status);
   BuildSpec a3 = {.marker = 13 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
-          build_marker_engine, &a3, &status), ==, WYRELOG_E_OK);
+      build_marker_engine, &a3, &status), ==, WYRELOG_E_OK);
   g_assert_cmpuint (status.operation_generation, ==, 4);
   g_assert_cmpuint (status.engine_generation, ==, 3);
   wyl_fact_graph_runtime_status_clear (&status);
@@ -330,7 +330,7 @@ refresh_thread (gpointer user_data)
 {
   RefreshThread *thread = user_data;
   thread->result = wyl_fact_graph_runtime_manager_refresh (thread->manager,
-      thread->key, build_marker_engine, thread->spec, NULL);
+          thread->key, build_marker_engine, thread->spec, NULL);
   completion_signal (thread->completion);
   return NULL;
 }
@@ -357,14 +357,14 @@ test_slow_build_is_graph_local (void)
   gate_wait_entered (&gate);
   gboolean evicted = FALSE;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &slow,
-          &evicted), ==, WYRELOG_E_BUSY);
+      &evicted), ==, WYRELOG_E_BUSY);
   g_assert_false (evicted);
   BuildSpec fast_spec = {.marker = 41 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &fast,
-          build_marker_engine, &fast_spec, NULL), ==, WYRELOG_E_OK);
+      build_marker_engine, &fast_spec, NULL), ==, WYRELOG_E_OK);
   g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &fast, &snapshot), ==, WYRELOG_E_OK);
+      &fast, &snapshot), ==, WYRELOG_E_OK);
   g_assert_cmpint (snapshot_marker (snapshot), ==, 41);
   gate_release (&gate);
   g_thread_join (worker);
@@ -409,7 +409,7 @@ gated_read_marker (WylEngine *engine, gpointer user_data)
   g_cond_broadcast (&thread->gate->changed);
   while (!thread->gate->released) {
     gboolean signaled = g_cond_wait_until (&thread->gate->changed,
-        &thread->gate->mutex, deadline);
+            &thread->gate->mutex, deadline);
     g_assert_true (signaled || thread->gate->released);
   }
   g_mutex_unlock (&thread->gate->mutex);
@@ -421,7 +421,7 @@ query_thread (gpointer user_data)
 {
   QueryThread *thread = user_data;
   thread->result = wyl_fact_graph_snapshot_use (thread->snapshot,
-      gated_read_marker, thread);
+          gated_read_marker, thread);
   completion_signal (thread->completion);
   return NULL;
 }
@@ -433,7 +433,7 @@ use_gate_wait_entered (UseGate *gate)
   g_mutex_lock (&gate->mutex);
   while (!gate->entered) {
     gboolean signaled = g_cond_wait_until (&gate->changed, &gate->mutex,
-        deadline);
+            deadline);
     g_assert_true (signaled || gate->entered);
   }
   g_mutex_unlock (&gate->mutex);
@@ -471,7 +471,7 @@ use_thread (gpointer user_data)
   g_cond_broadcast (&thread->gate->changed);
   g_mutex_unlock (&thread->gate->mutex);
   thread->result = wyl_fact_graph_snapshot_use (thread->snapshot,
-      blocking_use, thread->gate);
+          blocking_use, thread->gate);
   return NULL;
 }
 
@@ -488,7 +488,7 @@ recursive_use (WylEngine *engine, gpointer user_data)
   MarkerProbe ignored = { 0 };
   (void) engine;
   use->nested = wyl_fact_graph_snapshot_use (use->snapshot, read_marker,
-      &ignored);
+          &ignored);
   return WYRELOG_E_OK;
 }
 
@@ -501,15 +501,15 @@ test_engine_calls_serialize_and_reject_recursion (void)
   g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
   BuildSpec first = {.marker = 51 }, second = {.marker = 52 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
-          build_marker_engine, &first, NULL), ==, WYRELOG_E_OK);
+      build_marker_engine, &first, NULL), ==, WYRELOG_E_OK);
   g_autoptr (WylFactGraphSnapshot) old = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &key, &old), ==, WYRELOG_E_OK);
+      &key, &old), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
-          build_marker_engine, &second, NULL), ==, WYRELOG_E_OK);
+      build_marker_engine, &second, NULL), ==, WYRELOG_E_OK);
   g_autoptr (WylFactGraphSnapshot) current = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &key, &current), ==, WYRELOG_E_OK);
+      &key, &current), ==, WYRELOG_E_OK);
 
   UseGate old_gate = { 0 }, new_gate = { 0 };
   g_mutex_init (&old_gate.mutex);
@@ -532,7 +532,7 @@ test_engine_calls_serialize_and_reject_recursion (void)
   do {
     wyl_fact_graph_runtime_status_clear (&call_status);
     g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
-            &call_status), ==, WYRELOG_E_OK);
+        &call_status), ==, WYRELOG_E_OK);
     if (call_status.waiting_engine_calls == 0)
       g_thread_yield ();
   } while (call_status.waiting_engine_calls == 0);
@@ -555,7 +555,7 @@ test_engine_calls_serialize_and_reject_recursion (void)
   g_assert_cmpint (new_use.result, ==, WYRELOG_E_OK);
   RecursiveUse recursive = { current, WYRELOG_E_OK };
   g_assert_cmpint (wyl_fact_graph_snapshot_use (current, recursive_use,
-          &recursive), ==, WYRELOG_E_OK);
+      &recursive), ==, WYRELOG_E_OK);
   g_assert_cmpint (recursive.nested, ==, WYRELOG_E_INVALID);
   g_cond_clear (&new_gate.changed);
   g_mutex_clear (&new_gate.mutex);
@@ -573,10 +573,10 @@ test_shutdown_keeps_pinned_snapshot_alive (void)
   WylFactGraphRuntimeManager *manager = new_manager ();
   BuildSpec spec = {.marker = 61 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
-          build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
   WylFactGraphSnapshot *dropped = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &key, &dropped), ==, WYRELOG_E_OK);
+      &key, &dropped), ==, WYRELOG_E_OK);
   Gate gate = { 0 };
   gate_init (&gate);
   BuildSpec replacement = {.marker = 62,.gate = &gate };
@@ -596,14 +596,14 @@ test_shutdown_keeps_pinned_snapshot_alive (void)
   gate_clear (&gate);
   WylFactGraphSnapshot *after_shutdown = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          &key, &after_shutdown), ==, WYRELOG_E_BUSY);
+      &key, &after_shutdown), ==, WYRELOG_E_BUSY);
   g_assert_null (after_shutdown);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
-          build_marker_engine, &spec, NULL), ==, WYRELOG_E_BUSY);
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_BUSY);
   wyl_fact_graph_runtime_manager_unref (manager);
   DropOwnerProbe drop = {.owner = &dropped };
   g_assert_cmpint (wyl_fact_graph_snapshot_use (dropped,
-          drop_owner_while_in_use, &drop), ==, WYRELOG_E_OK);
+      drop_owner_while_in_use, &drop), ==, WYRELOG_E_OK);
   g_assert_true (drop.called);
   g_assert_null (dropped);
   wyl_fact_graph_key_clear (&key);
@@ -619,7 +619,7 @@ test_bounded_query_swap_evict_stress (void)
   BuildSpec initial = {.marker = 1000 };
   WylFactGraphRuntimeStatus status = { 0 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
-          build_marker_engine, &initial, &status), ==, WYRELOG_E_OK);
+      build_marker_engine, &initial, &status), ==, WYRELOG_E_OK);
   guint64 operation_generation = 1;
   guint64 engine_generation = 1;
   gint64 published_marker = initial.marker;
@@ -628,7 +628,7 @@ test_bounded_query_swap_evict_stress (void)
   for (guint iteration = 0; iteration < 16; iteration++) {
     g_autoptr (WylFactGraphSnapshot) old = NULL;
     g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-            &key, &old), ==, WYRELOG_E_OK);
+        &key, &old), ==, WYRELOG_E_OK);
     g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (old), ==,
         engine_generation);
     g_assert_cmpint (snapshot_marker (old), ==, published_marker);
@@ -642,7 +642,7 @@ test_bounded_query_swap_evict_stress (void)
       old, &query_gate, {0}, WYRELOG_E_INTERNAL, &query_completion
     };
     GThread *query_worker = g_thread_new ("stress-query", query_thread,
-        &query);
+            &query);
     use_gate_wait_entered (&query_gate);
 
     Gate build_gate = { 0 };
@@ -654,20 +654,19 @@ test_bounded_query_swap_evict_stress (void)
       .gate = &build_gate,
     };
     RefreshThread swap_thread = { manager, &key, &swap, WYRELOG_E_INTERNAL,
-      &build_completion
-    };
+                                  &build_completion};
     GThread *builder = g_thread_new ("stress-swap", refresh_thread,
-        &swap_thread);
+            &swap_thread);
     gate_wait_entered (&build_gate);
 
     g_autoptr (WylFactGraphSnapshot) during_build = NULL;
     g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-            &key, &during_build), ==, WYRELOG_E_OK);
+        &key, &during_build), ==, WYRELOG_E_OK);
     g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (during_build),
         ==, engine_generation);
     gboolean evicted = FALSE;
     g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &key,
-            &evicted), ==, WYRELOG_E_BUSY);
+        &evicted), ==, WYRELOG_E_BUSY);
     g_assert_false (evicted);
 
     gate_release (&build_gate);
@@ -681,11 +680,11 @@ test_bounded_query_swap_evict_stress (void)
 
     g_autoptr (WylFactGraphSnapshot) current = NULL;
     g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-            &key, &current), ==, WYRELOG_E_OK);
+        &key, &current), ==, WYRELOG_E_OK);
     g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (current), ==,
         engine_generation);
     g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &key,
-            &evicted), ==, WYRELOG_E_BUSY);
+        &evicted), ==, WYRELOG_E_BUSY);
     g_assert_false (evicted);
 
     use_gate_release (&query_gate);
@@ -705,10 +704,10 @@ test_bounded_query_swap_evict_stress (void)
     g_clear_pointer (&during_build, wyl_fact_graph_snapshot_unref);
     g_clear_pointer (&old, wyl_fact_graph_snapshot_unref);
     g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &key,
-            &evicted), ==, WYRELOG_E_OK);
+        &evicted), ==, WYRELOG_E_OK);
     g_assert_true (evicted);
     g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
-            &status), ==, WYRELOG_E_OK);
+        &status), ==, WYRELOG_E_OK);
     g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
     g_assert_cmpuint (status.operation_generation, ==, operation_generation);
     g_assert_cmpuint (status.engine_generation, ==, engine_generation);
@@ -718,7 +717,7 @@ test_bounded_query_swap_evict_stress (void)
       .marker = swap.marker + 1,
     };
     g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
-            build_marker_engine, &republish, &status), ==, WYRELOG_E_OK);
+        build_marker_engine, &republish, &status), ==, WYRELOG_E_OK);
     operation_generation++;
     engine_generation++;
     g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
@@ -727,7 +726,7 @@ test_bounded_query_swap_evict_stress (void)
     wyl_fact_graph_runtime_status_clear (&status);
     g_autoptr (WylFactGraphSnapshot) republished = NULL;
     g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-            &key, &republished), ==, WYRELOG_E_OK);
+        &key, &republished), ==, WYRELOG_E_OK);
     g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (republished),
         ==, engine_generation);
     g_assert_cmpint (snapshot_marker (republished), ==, republish.marker);
@@ -743,13 +742,13 @@ assert_generation_and_marker (WylFactGraphRuntimeManager *manager,
 {
   WylFactGraphRuntimeStatus status = { 0 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, key,
-          &status), ==, WYRELOG_E_OK);
+      &status), ==, WYRELOG_E_OK);
   g_assert_cmpuint (status.operation_generation, ==, operation_generation);
   g_assert_cmpuint (status.engine_generation, ==, engine_generation);
   wyl_fact_graph_runtime_status_clear (&status);
   g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
-          key, &snapshot), ==, WYRELOG_E_OK);
+      key, &snapshot), ==, WYRELOG_E_OK);
   g_assert_cmpint (snapshot_marker (snapshot), ==, marker);
 }
 
@@ -775,7 +774,7 @@ test_two_tenant_two_graph_generation_isolation (void)
   gint64 markers[4] = { 101, 102, 201, 202 };
   for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
     g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &keys[i],
-            build_marker_engine, &initial[i], NULL), ==, WYRELOG_E_OK);
+        build_marker_engine, &initial[i], NULL), ==, WYRELOG_E_OK);
   }
 
   for (guint target = 0; target < G_N_ELEMENTS (keys); target++) {
@@ -783,7 +782,7 @@ test_two_tenant_two_graph_generation_isolation (void)
       .marker = initial[target].marker + 1000,
     };
     g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager,
-            &keys[target], build_marker_engine, &replacement, NULL), ==,
+        &keys[target], build_marker_engine, &replacement, NULL), ==,
         WYRELOG_E_OK);
     operation_generations[target]++;
     engine_generations[target]++;

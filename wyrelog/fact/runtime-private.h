@@ -88,7 +88,7 @@ gboolean wyl_fact_graph_key_equal (gconstpointer left, gconstpointer right);
 
 const gchar *wyl_fact_graph_runtime_state_name (WylFactGraphRuntimeState state);
 const gchar *wyl_fact_graph_replay_class_name
-    (WylFactGraphReplayClass replay_class);
+  (WylFactGraphReplayClass replay_class);
 void wyl_fact_graph_runtime_status_clear (WylFactGraphRuntimeStatus * status);
 
 /*
@@ -123,23 +123,23 @@ void wyl_fact_graph_runtime_status_clear (WylFactGraphRuntimeStatus * status);
  * entry locks held, so callbacks may re-enter manager status APIs.
  */
 wyrelog_error_t wyl_fact_graph_runtime_manager_new
-    (WylFactGraphRuntimeManager ** out_manager);
+  (WylFactGraphRuntimeManager ** out_manager);
 WylFactGraphRuntimeManager *wyl_fact_graph_runtime_manager_ref
-    (WylFactGraphRuntimeManager * manager);
+  (WylFactGraphRuntimeManager * manager);
 void wyl_fact_graph_runtime_manager_unref
-    (WylFactGraphRuntimeManager * manager);
+  (WylFactGraphRuntimeManager * manager);
 void wyl_fact_graph_runtime_manager_shutdown
-    (WylFactGraphRuntimeManager * manager);
+  (WylFactGraphRuntimeManager * manager);
 
 wyrelog_error_t wyl_fact_graph_runtime_manager_refresh
-    (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphBuildFunc build, gpointer user_data,
     WylFactGraphRuntimeStatus * out_status);
 wyrelog_error_t wyl_fact_graph_runtime_manager_get_status
-    (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphRuntimeStatus * out_status);
 wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
-    (WylFactGraphRuntimeManager * manager,
+  (WylFactGraphRuntimeManager * manager,
     WylFactGraphRuntimeStatusFunc callback, gpointer user_data);
 
 /*
@@ -162,10 +162,10 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
  * not use a partial enumeration as seen_keys.
  */
 wyrelog_error_t wyl_fact_graph_runtime_manager_try_evict
-    (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     gboolean * out_evicted);
 wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
-    (WylFactGraphRuntimeManager * manager,
+  (WylFactGraphRuntimeManager * manager,
     const WylFactGraphKey * const *seen_keys, gsize n_seen_keys);
 
 /*
@@ -196,18 +196,18 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
  * last snapshot/use reference is released.
  */
 wyrelog_error_t wyl_fact_graph_runtime_manager_acquire_snapshot
-    (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphSnapshot ** out_snapshot);
 WylFactGraphSnapshot *wyl_fact_graph_snapshot_ref
-    (WylFactGraphSnapshot * snapshot);
+  (WylFactGraphSnapshot * snapshot);
 void wyl_fact_graph_snapshot_unref (WylFactGraphSnapshot * snapshot);
 guint64 wyl_fact_graph_snapshot_engine_generation
-    (const WylFactGraphSnapshot * snapshot);
+  (const WylFactGraphSnapshot * snapshot);
 wyrelog_error_t wyl_fact_graph_snapshot_use (WylFactGraphSnapshot * snapshot,
     WylFactGraphSnapshotFunc callback, gpointer user_data);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphRuntimeManager,
     wyl_fact_graph_runtime_manager_unref)
-    G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphSnapshot,
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphSnapshot,
     wyl_fact_graph_snapshot_unref)
-    G_END_DECLS;
+G_END_DECLS;
