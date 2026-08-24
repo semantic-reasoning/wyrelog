@@ -7,6 +7,7 @@
 #include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
+#include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -2029,6 +2030,66 @@ test_handle_refresh_fact_graph_races_with_queries (void)
   remove_tree (root);
 }
 
+/* A daemon configured without a fact root never probes for pending forgets at
+ * all, which is not the same as a probe that was refused.  This pins that such
+ * a boot reports no probe/build disagreement.
+ *
+ * Read what this does and does not establish.  It passes with the
+ * forget_attempted guard removed, and it also passes with the ENTIRE tripwire
+ * block deleted -- the counter is then permanently zero and both assertions
+ * below hold in either configuration.  So this pins no part of the tripwire:
+ * it cannot tell "present and correctly silent" from "absent".  With no fact
+ * root the engine build fails for the same missing root, so graph_rc is never
+ * OK and the tripwire cannot fire either way (measured: seen=1 loaded=0
+ * degraded=1).  This is a characterization of the observable outcome, nothing
+ * more.
+ *
+ * The tripwire itself cannot be driven from a test in either configuration:
+ * off-bridge the two opens are the same call and would have to fail and then
+ * succeed within one loop iteration, and under the bridge disagreeing also
+ * means losing a LOCK_SH|LOCK_NB race on demand.  Note that off-bridge is
+ * hard to drive, not impossible in production -- a transient EMFILE between
+ * the two opens produces it.
+ *
+ * That is why it is counted rather than only logged -- the
+ * belief that it never happens is then falsifiable in the field, which is the
+ * evidence #550 would need to add a third forget state. */
+static void
+test_no_fact_root_is_not_a_probe_disagreement (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-nofactroot-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+
+  g_autoptr (WylFactGraphRuntimeManager) manager = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&manager), ==,
+      WYRELOG_E_OK);
+
+  /* The control: the graph really is seen, so a zero below is the guard
+   * holding and not an empty run. */
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (policy, "", manager, &summary);
+  g_assert_cmpuint (summary.graphs_seen, >, 0);
+  g_assert_cmpuint (summary.graphs_forget_probe_disagreed, ==, 0);
+
+  /* NULL is the other spelling of "no fact root" and must behave the same. */
+  wyl_fact_replay_summary_t null_summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (policy, NULL, manager, &null_summary);
+  g_assert_cmpuint (null_summary.graphs_seen, >, 0);
+  g_assert_cmpuint (null_summary.graphs_forget_probe_disagreed, ==, 0);
+
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2047,6 +2108,8 @@ main (int argc, char **argv)
       test_status_is_not_ready_while_an_erasure_is_outstanding);
   g_test_add_func ("/fact-replay/boot-converges-forget-on-sealed-graph",
       test_boot_converges_forget_on_sealed_graph);
+  g_test_add_func ("/fact-replay/no-fact-root-is-not-a-probe-disagreement",
+      test_no_fact_root_is_not_a_probe_disagreement);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
   g_test_add_func ("/fact-replay/compound-shared",

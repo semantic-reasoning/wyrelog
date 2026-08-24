@@ -174,4 +174,27 @@ wyrelog_error_t wyl_fact_store_forget_reconcile (wyl_fact_store_t * store,
     wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data),
     gpointer checkpoint_data);
 
+/*
+ * Report how many forget intentions are pending, without executing any of
+ * them and without writing anything at all.  This is the read-only prefix of
+ * wyl_fact_store_forget_reconcile and shares its predicate, so a caller can
+ * decide whether convergence work exists before paying for a write lease.
+ *
+ * expected_tenant_id/expected_graph_id carry the same meaning and the same
+ * requirement as in the reconciler, and a store reached through a mis-pointed
+ * path is refused here with WYRELOG_E_POLICY once anything is pending -- so
+ * it is never escalated to a writable open that would refuse it in turn.  The
+ * guard runs only when the count is non-zero, deliberately: see the ordering
+ * note on the survey in store.c.  A mis-pointed store with nothing pending
+ * therefore reports OK/0 rather than POLICY, which is the same answer the
+ * reconciler gives it.
+ *
+ * *out_pending is meaningful only on WYRELOG_E_OK; it is set to 0 on every
+ * other outcome so a caller that ignores the return value cannot read a stale
+ * count as convergence work.
+ */
+wyrelog_error_t wyl_fact_store_forget_pending_count (wyl_fact_store_t * store,
+    const gchar * expected_tenant_id, const gchar * expected_graph_id,
+    gsize * out_pending);
+
 G_END_DECLS;

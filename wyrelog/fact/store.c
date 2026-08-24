@@ -2448,6 +2448,80 @@ forget_unlock:
   return rc;
 }
 
+/* The read-only prefix of the reconciler: everything above its first write.
+ * The boot probe stops here and the reconciler continues past it, so the
+ * predicate that decides whether to take a write lease and the predicate that
+ * decides what to execute are one predicate and cannot disagree.  Two copies
+ * could, and their failure modes are asymmetric: a spurious escalation wastes
+ * a lease, a missed escalation strands an erasure.
+ *
+ * The caller holds store->lock.  Order matters and is not a convenience:
+ *
+ *  - the ledger check comes first because a store whose schema has never been
+ *    materialized has no ledger and so has nothing to converge.  Boot
+ *    deliberately does not create one, so that state is success rather than a
+ *    missing-table error.
+ *  - the scope guard comes AFTER the pending count because a store whose
+ *    schema was materialized but never appended to has a ledger and no bound
+ *    identity: create_schema creates fact_forget_intent, while tenant/graph
+ *    metadata is written lazily by ensure_projection.  Refusing that store
+ *    would report a failed erasure for a graph that has never held a fact, on
+ *    every boot, in the branch with the strongest wording.  Within the
+ *    pending > 0 branch a pending intent implies bound identity, so the guard
+ *    performs a real comparison and can never spuriously refuse.
+ *
+ * Line lengths here are constrained by #872; re-run ./tools/format-c after
+ * editing this comment. */
+static wyrelog_error_t
+forget_survey_unlocked (wyl_fact_store_t *store,
+    const gchar *expected_tenant_id, const gchar *expected_graph_id,
+    GPtrArray *pending)
+{
+  gboolean has_ledger = FALSE;
+  wyrelog_error_t rc = table_exists_unlocked (store, "fact_forget_intent",
+          &has_ledger);
+  if (rc != WYRELOG_E_OK || !has_ledger)
+    return rc;
+  rc = load_pending_forget_intents_unlocked (store, pending);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (pending->len == 0)
+    return WYRELOG_E_OK;
+  /* Refuse a store that is not the one the caller meant to open.  A
+   * mis-pointed path opens a store whose own identity and whose intents agree
+   * with each other, so only an expectation held outside this file can tell
+   * them apart. */
+  if (validate_store_scope_unlocked (store, expected_tenant_id,
+      expected_graph_id, FALSE) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_store_forget_pending_count (wyl_fact_store_t *store,
+    const gchar *expected_tenant_id, const gchar *expected_graph_id,
+    gsize *out_pending)
+{
+  if (out_pending == NULL)
+    return WYRELOG_E_INVALID;
+  /* Zero before the remaining argument checks, not after: the header promises
+   * the count is zeroed on every non-OK outcome, and returning INVALID with
+   * the caller's value untouched would break that promise on the one path a
+   * caller is most likely to reach by mistake. */
+  *out_pending = 0;
+  if (store == NULL || expected_tenant_id == NULL || expected_graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&store->lock);
+  g_autoptr (GPtrArray) pending =
+      g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
+  wyrelog_error_t rc = forget_survey_unlocked (store, expected_tenant_id,
+          expected_graph_id, pending);
+  if (rc == WYRELOG_E_OK)
+    *out_pending = pending->len;
+  g_mutex_unlock (&store->lock);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
     const gchar *expected_tenant_id, const gchar *expected_graph_id,
@@ -2457,44 +2531,13 @@ wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
   if (store == NULL || expected_tenant_id == NULL || expected_graph_id == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&store->lock);
-  /* A store whose schema has never been materialized has no forget ledger and
-   * so has nothing to converge.  Boot deliberately does not create one, so
-   * report that state as success rather than as a missing-table error. */
-  gboolean has_ledger = FALSE;
-  wyrelog_error_t rc = table_exists_unlocked (store, "fact_forget_intent",
-          &has_ledger);
-  if (rc != WYRELOG_E_OK || !has_ledger) {
-    g_mutex_unlock (&store->lock);
-    return rc;
-  }
   g_autoptr (GPtrArray) pending =
       g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
-  rc = load_pending_forget_intents_unlocked (store, pending);
-  if (rc != WYRELOG_E_OK) {
+  wyrelog_error_t rc = forget_survey_unlocked (store, expected_tenant_id,
+          expected_graph_id, pending);
+  if (rc != WYRELOG_E_OK || pending->len == 0) {
     g_mutex_unlock (&store->lock);
     return rc;
-  }
-  /* Nothing pending means nothing to converge and nothing to delete through,
-   * so there is no scope to police.  This is checked before the identity
-   * guard because a store whose schema was materialized but never appended to
-   * has a ledger and no bound identity: create_schema creates
-   * fact_forget_intent, while tenant/graph metadata is written lazily by
-   * ensure_projection.  Refusing that store would report a failed erasure for
-   * a graph that has never held a fact, on every boot, in the branch with the
-   * strongest wording. */
-  if (pending->len == 0) {
-    g_mutex_unlock (&store->lock);
-    return WYRELOG_E_OK;
-  }
-  /* Refuse a store that is not the one the caller meant to open.  A
-   * mis-pointed path opens a store whose own identity and whose intents agree
-   * with each other, so only an expectation held outside this file can tell
-   * them apart.  Line lengths here are constrained by #872; re-run
-   * ./tools/format-c after editing this comment. */
-  if (validate_store_scope_unlocked (store, expected_tenant_id,
-      expected_graph_id, FALSE) != WYRELOG_E_OK) {
-    g_mutex_unlock (&store->lock);
-    return WYRELOG_E_POLICY;
   }
   gboolean out_of_scope = FALSE;
   for (guint i = 0; i < pending->len; i++) {
