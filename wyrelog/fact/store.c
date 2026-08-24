@@ -2450,24 +2450,71 @@ forget_unlock:
 
 wyrelog_error_t
 wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
+    const gchar *expected_tenant_id, const gchar *expected_graph_id,
     wyrelog_error_t (*checkpoint) (const gchar *, gpointer),
     gpointer checkpoint_data)
 {
-  if (store == NULL)
+  if (store == NULL || expected_tenant_id == NULL || expected_graph_id == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&store->lock);
+  /* A store whose schema has never been materialized has no forget ledger and
+   * so has nothing to converge.  Boot deliberately does not create one, so
+   * report that state as success rather than as a missing-table error. */
+  gboolean has_ledger = FALSE;
+  wyrelog_error_t rc = table_exists_unlocked (store, "fact_forget_intent",
+          &has_ledger);
+  if (rc != WYRELOG_E_OK || !has_ledger) {
+    g_mutex_unlock (&store->lock);
+    return rc;
+  }
   g_autoptr (GPtrArray) pending =
       g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
-  wyrelog_error_t rc = load_pending_forget_intents_unlocked (store, pending);
-  if (rc == WYRELOG_E_OK) {
-    for (guint i = 0; i < pending->len; i++) {
-      ForgetIntent *intent = g_ptr_array_index (pending, i);
-      rc = execute_forget_intent_unlocked (store, intent, checkpoint,
-              checkpoint_data, NULL);
-      if (rc != WYRELOG_E_OK)
-        break;
-    }
+  rc = load_pending_forget_intents_unlocked (store, pending);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&store->lock);
+    return rc;
   }
+  /* Nothing pending means nothing to converge and nothing to delete through,
+   * so there is no scope to police.  This is checked before the identity
+   * guard because a store whose schema was materialized but never appended to
+   * has a ledger and no bound identity: create_schema creates
+   * fact_forget_intent, while tenant/graph metadata is written lazily by
+   * ensure_projection.  Refusing that store would report a failed erasure for
+   * a graph that has never held a fact, on every boot, in the branch with the
+   * strongest wording. */
+  if (pending->len == 0) {
+    g_mutex_unlock (&store->lock);
+    return WYRELOG_E_OK;
+  }
+  /* Refuse a store that is not the one the caller meant to open.  A
+   * mis-pointed path opens a store whose own identity and whose intents agree
+   * with each other, so only an expectation held outside this file can tell
+   * them apart.  Line lengths here are constrained by #872; re-run
+   * ./tools/format-c after editing this comment. */
+  if (validate_store_scope_unlocked (store, expected_tenant_id,
+      expected_graph_id, FALSE) != WYRELOG_E_OK) {
+    g_mutex_unlock (&store->lock);
+    return WYRELOG_E_POLICY;
+  }
+  gboolean out_of_scope = FALSE;
+  for (guint i = 0; i < pending->len; i++) {
+    ForgetIntent *intent = g_ptr_array_index (pending, i);
+    /* The pending query is not scoped, and the executor trusts the intent's
+     * own projection table.  One store serves one graph, so an intent naming
+     * another scope means this file is not what its identity claims: skip it
+     * rather than delete through it, and report so the caller degrades. */
+    if (validate_store_scope_unlocked (store, intent->tenant_id,
+        intent->graph_id, FALSE) != WYRELOG_E_OK) {
+      out_of_scope = TRUE;
+      continue;
+    }
+    rc = execute_forget_intent_unlocked (store, intent, checkpoint,
+            checkpoint_data, NULL);
+    if (rc != WYRELOG_E_OK)
+      break;
+  }
+  if (rc == WYRELOG_E_OK && out_of_scope)
+    rc = WYRELOG_E_POLICY;
   g_mutex_unlock (&store->lock);
   return rc;
 }

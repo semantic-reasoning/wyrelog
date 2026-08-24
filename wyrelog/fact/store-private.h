@@ -162,8 +162,15 @@ wyrelog_error_t wyl_fact_store_forget (wyl_fact_store_t * store,
  * no-op completion that never touches the new batch.  Idempotent; safe to run
  * at startup or targeted reconciliation.  checkpoint is a test-only seam as
  * above (NULL in production).
+ *
+ * expected_tenant_id/expected_graph_id are the scope the caller believes this
+ * store serves; both are required.  The store's own identity is checked
+ * against them, and every intent is then checked against the store's identity,
+ * so a store reached through a mis-pointed path is refused rather than deleted
+ * through.
  */
 wyrelog_error_t wyl_fact_store_forget_reconcile (wyl_fact_store_t * store,
+    const gchar * expected_tenant_id, const gchar * expected_graph_id,
     wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data),
     gpointer checkpoint_data);
 

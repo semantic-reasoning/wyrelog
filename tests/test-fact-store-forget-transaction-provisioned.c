@@ -260,8 +260,8 @@ test_provisioned_commit_failure_rolls_back (void)
       "SELECT COUNT(*) FROM fact_forget_audit;"), ==, 0);
 
   wyl_fact_store_set_forget_transaction_test_hook (store, NULL, NULL);
-  g_assert_cmpint (wyl_fact_store_forget_reconcile (store, NULL, NULL), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_forget_reconcile (store, tenant_id, graph_id,
+      NULL, NULL), ==, WYRELOG_E_OK);
   wyl_fact_store_close (store);
 
   g_assert_cmpint (open_live (policy_store, fixture->root, &store), ==,

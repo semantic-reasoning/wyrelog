@@ -541,6 +541,369 @@ snapshot_single_compound_handle (WylEngine *engine, const gchar *relation_name)
   return probe.handle;
 }
 
+/* Abort a forget at a named durable boundary, the way a crash would. */
+static wyrelog_error_t
+forget_crash_at (const gchar *point, gpointer user_data)
+{
+  return g_strcmp0 (point, (const gchar *) user_data) == 0
+         ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static gint64
+count_in_graph_store (wyl_policy_store_t *policy, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *sql)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          tenant_id, graph_id);
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
+  gint64 value = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return value;
+}
+
+/* Issue #547: boot reconciliation must converge each graph's own pending work,
+ * and a graph it cannot open must not stop the daemon from starting.
+ *
+ * The single-graph case cannot show either property: a driver that reconciled
+ * one hard-coded graph would pass it, and a driver that propagated failure
+ * would never be exercised. */
+static void
+test_boot_forget_is_per_graph_and_never_aborts (void)
+{
+  TEST ("boot converges each graph's own forget and survives one it cannot "
+      "open");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-forget-multi-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autofree gchar *broken_path = NULL;
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-b", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "broken");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-b", "orders");
+    append_order_batches (policy, root, "tenant-a", "broken");
+
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+      {"expedited", "bool", FALSE, TRUE},
+    };
+    /* Crash a forget on BOTH healthy graphs, of different batches, so a
+     * driver that reconciles one graph for another cannot pass. */
+    const gchar *tenants[] = { "tenant-a", "tenant-b" };
+    const gchar *batches[] = { "batch-1", "batch-2" };
+    for (gsize i = 0; i < G_N_ELEMENTS (tenants); i++) {
+      g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+              tenants[i], "orders");
+      g_assert_nonnull (storage_path);
+      g_autofree gchar *fact_path = g_build_filename (storage_path,
+              "facts.duckdb", NULL);
+      g_autoptr (wyl_fact_store_t) store = NULL;
+      g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
+          WYRELOG_E_OK);
+      wyl_policy_fact_relation_schema_options_t schema = make_schema
+            (tenants[i], "orders", columns, G_N_ELEMENTS (columns));
+      wyl_fact_store_forget_options_t opts = {
+        .batch_id = batches[i],
+        .operator_id = "admin",
+        .reason = "gdpr-erasure",
+        .checkpoint = forget_crash_at,
+        .checkpoint_data = (gpointer) "before_completion",
+      };
+      g_assert_cmpint (wyl_fact_store_forget (store, &schema, &opts, NULL),
+          !=, WYRELOG_E_OK);
+    }
+
+    /* And corrupt a third graph's store so its reconcile cannot succeed. */
+    g_autofree gchar *broken_storage = lookup_graph_storage_path (policy,
+            "tenant-a", "broken");
+    g_assert_nonnull (broken_storage);
+    broken_path = g_build_filename (broken_storage, "facts.duckdb", NULL);
+    g_assert_true (g_file_set_contents (broken_path, "not a database", -1,
+        NULL));
+    g_assert_true (wyl_test_secure_regular_file (broken_path, &error));
+    g_assert_no_error (error);
+  }
+
+  /* The daemon must still start. */
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    const WylHandleOpenOptions opts = {
+      .policy_store_path = policy_path,
+      .fact_root = root,
+    };
+    g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+        WYRELOG_E_OK);
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    /* Each healthy graph converged its OWN batch. */
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-b", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-1';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-b", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-2';"),
+        ==, 0);
+    /* Each converged only its own: the other graph's batch is untouched. */
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-2';"),
+        ==, 1);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-b", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-1';"),
+        ==, 1);
+  }
+
+  remove_tree (root);
+}
+
+/* Issue #547: a forget interrupted by a crash leaves a durable PENDING intent
+ * that nothing in the request path resumes.  Starting the daemon must converge
+ * it.  The proof is a fresh handle open and the durable state afterwards --
+ * this test never calls the reconciler itself, because doing so would prove
+ * only that the reconciler works, not that anything drives it. */
+static void
+test_boot_converges_interrupted_forget (void)
+{
+  TEST ("opening a handle converges a forget a crash left pending");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-forget-boot-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+
+    /* Crash a forget of batch-1 just before it records completion. */
+    g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+            "tenant-a", "orders");
+    g_assert_nonnull (storage_path);
+    g_autofree gchar *fact_path = g_build_filename (storage_path,
+            "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
+        WYRELOG_E_OK);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+      {"expedited", "bool", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema ("tenant-a",
+            "orders", columns, G_N_ELEMENTS (columns));
+    wyl_fact_store_forget_options_t opts = {
+      .batch_id = "batch-1",
+      .operator_id = "admin",
+      .reason = "gdpr-erasure",
+      .checkpoint = forget_crash_at,
+      .checkpoint_data = (gpointer) "before_completion",
+    };
+    g_assert_cmpint (wyl_fact_store_forget (store, &schema, &opts, NULL), !=,
+        WYRELOG_E_OK);
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    /* Durable evidence that the crash left work behind. */
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 1);
+  }
+
+  /* The restart.  Nothing else in this test touches the reconciler. */
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    const WylHandleOpenOptions opts = {
+      .policy_store_path = policy_path,
+      .fact_root = root,
+    };
+    g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+        WYRELOG_E_OK);
+    /* This graph is not sealed, so the very same snapshot call succeeds -- and
+     * returns nothing, because batch-1 asserted both orders while batch-2 only
+     * retracted one, so erasing batch-1 leaves no net fact.  The sealed twin
+     * of this test asserts this call fails outright; the pairing is what makes
+     * that failure attributable to the seal rather than to a mistyped relation
+     * name. */
+    g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+          ("shop.ns", "orders-rel");
+    g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+    SnapshotProbe probe = { observed, 0, FALSE };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+        "tenant-a", "orders", observed, handle_snapshot_cb, &probe), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (probe.count, ==, 0);
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    /* Converged: no pending intent, and the batch really is gone. */
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-1';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_audit WHERE batch_id = 'batch-1';"),
+        ==, 1);
+  }
+
+  remove_tree (root);
+}
+
+/* Issue #547: sealing blocks admission of new data, not erasure of data
+ * already stored.  A sealed graph refuses forget at the request boundary, so
+ * a forget a crash left pending on one has no in-product remedy at all except
+ * this one.  That makes the sealed case the reason boot reconciliation exists,
+ * not an edge of it.
+ *
+ * This is also the property #548 has to preserve when it turns sealing into a
+ * runtime barrier: startup may publish no engine for a sealed graph, and this
+ * test asserts it does not, but it must still open that graph's store to
+ * finish an erasure already recorded against it. */
+static void
+test_boot_converges_forget_on_sealed_graph (void)
+{
+  TEST ("opening a handle converges a pending forget on a sealed graph");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-forget-sealed-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+
+    g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+            "tenant-a", "orders");
+    g_assert_nonnull (storage_path);
+    g_autofree gchar *fact_path = g_build_filename (storage_path,
+            "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
+        WYRELOG_E_OK);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+      {"expedited", "bool", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema ("tenant-a",
+            "orders", columns, G_N_ELEMENTS (columns));
+    wyl_fact_store_forget_options_t opts = {
+      .batch_id = "batch-1",
+      .operator_id = "admin",
+      .reason = "gdpr-erasure",
+      .checkpoint = forget_crash_at,
+      .checkpoint_data = (gpointer) "before_completion",
+    };
+    g_assert_cmpint (wyl_fact_store_forget (store, &schema, &opts, NULL), !=,
+        WYRELOG_E_OK);
+    g_clear_pointer (&store, wyl_fact_store_close);
+
+    /* Seal only after the crash, exactly as an operator sealing a graph with
+     * unfinished erasure work would. */
+    g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
+        "orders"), ==, WYRELOG_E_OK);
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    /* The seal really took: without this the test would prove nothing about
+     * sealed graphs, because an unsealed one converges either way. */
+    gboolean active = TRUE;
+    g_assert_cmpint (wyl_policy_store_fact_graph_is_active (policy, "tenant-a",
+        "orders", &active), ==, WYRELOG_E_OK);
+    g_assert_false (active);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 1);
+  }
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    const WylHandleOpenOptions opts = {
+      .policy_store_path = policy_path,
+      .fact_root = root,
+    };
+    g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+        WYRELOG_E_OK);
+    /* A sealed graph gets no engine.  Convergence below is therefore not a
+     * side effect of the graph having been replayed like any other. */
+    g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+          ("shop.ns", "orders-rel");
+    g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+    SnapshotProbe probe = { observed, 0, FALSE };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+        "tenant-a", "orders", observed, handle_snapshot_cb, &probe), !=,
+        WYRELOG_E_OK);
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-1';"),
+        ==, 0);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_audit WHERE batch_id = 'batch-1';"),
+        ==, 1);
+    /* The graph is still sealed: erasure converged without unsealing it. */
+    gboolean active = TRUE;
+    g_assert_cmpint (wyl_policy_store_fact_graph_is_active (policy, "tenant-a",
+        "orders", &active), ==, WYRELOG_E_OK);
+    g_assert_false (active);
+  }
+
+  remove_tree (root);
+}
+
 static void
 test_direct_replay_retracts_and_mangles (void)
 {
@@ -739,6 +1102,13 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   g_assert_cmpuint (summary.graphs_seen, ==, 3);
   g_assert_cmpuint (summary.graphs_loaded, ==, 0);
   g_assert_cmpuint (summary.graphs_degraded, ==, 3);
+  /* #547: every graph here either fails key validation or fails to open, so
+   * none of them reached a forget ledger and none can have failed to converge.
+   * Asserting both halves is what makes the open-versus-reconcile split
+   * falsifiable: inverting the branch moves the count to the wrong field, and
+   * merging the two counters back breaks the first line. */
+  g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 0);
+  g_assert_cmpuint (summary.graphs_forget_probe_unavailable, ==, 2);
   assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
   assert_handle_stale_fact_status (handle);
 
@@ -916,6 +1286,9 @@ test_replay_dup_version_relation_degrades (void)
   g_assert_cmpuint (summary.graphs_seen, ==, 1);
   g_assert_cmpuint (summary.graphs_degraded, ==, 0);
   g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+  /* A graph that opens and converges touches neither forget counter. */
+  g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 0);
+  g_assert_cmpuint (summary.graphs_forget_probe_unavailable, ==, 0);
 
   g_clear_object (&handle);
   remove_tree (root);
@@ -1195,6 +1568,12 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-replay/boot-converges-interrupted-forget",
+      test_boot_converges_interrupted_forget);
+  g_test_add_func ("/fact-replay/boot-forget-per-graph-never-aborts",
+      test_boot_forget_is_per_graph_and_never_aborts);
+  g_test_add_func ("/fact-replay/boot-converges-forget-on-sealed-graph",
+      test_boot_converges_forget_on_sealed_graph);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
   g_test_add_func ("/fact-replay/compound-shared",
