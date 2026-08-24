@@ -38,6 +38,32 @@ win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
 }
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static gint win_temp_child_test_seam;
+
+void
+wyl_fact_artifact_win_temp_child_set_test_seam (
+  WylFactArtifactWinTempChildTestSeam seam)
+{
+  g_atomic_int_set (&win_temp_child_test_seam, seam);
+}
+
+WylFactArtifactWinTempChildTestSeam
+wyl_fact_artifact_win_temp_child_take_test_seam (void)
+{
+  return (WylFactArtifactWinTempChildTestSeam)
+         g_atomic_int_and (&win_temp_child_test_seam, 0);
+}
+
+gboolean
+wyl_fact_artifact_win_temp_child_take_specific_test_seam (
+  WylFactArtifactWinTempChildTestSeam seam)
+{
+  return g_atomic_int_compare_and_exchange (&win_temp_child_test_seam, seam,
+             WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE);
+}
+#endif /* WYL_TEST_HANDLE_SEAMS */
+
 wyrelog_error_t
 wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
     WylFactArtifactName a, gboolean c, gboolean w, gint *out_fd)
@@ -2513,24 +2539,25 @@ wyl_fact_artifact_win_temp_root_create_child (WylFactArtifactWinTempRoot *root,
     g_mutex_unlock (&root->mutex);
     return WYRELOG_E_NOMEM;
   }
+  /* No recoverable allocation may first occur after the child name enters
+   * the filesystem: callers cannot publish a child authority on failure. */
+  child->bindings = g_ptr_array_new ();
+  if (child->bindings == NULL) {
+    g_free (child);
+    g_mutex_unlock (&root->mutex);
+    return WYRELOG_E_NOMEM;
+  }
   rc = wyl_fact_artifact_win_directory_open_file
         (root->lease->namespace_->locator, root->directory, name,
           GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child->entry);
   if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (child->bindings);
     g_free (child);
     g_mutex_unlock (&root->mutex);
     return rc;
   }
   child->root = temp_root_ref (root);
   child->active = TRUE;
-  child->bindings = g_ptr_array_new ();
-  if (child->bindings == NULL) {
-    wyl_fact_artifact_win_entry_free (child->entry);
-    temp_root_unref (child->root);
-    g_free (child);
-    g_mutex_unlock (&root->mutex);
-    return WYRELOG_E_NOMEM;
-  }
   g_atomic_int_set (&child->references, 1);
   g_mutex_init (&child->mutex);
   *out_child = child;
@@ -2841,34 +2868,70 @@ wyl_fact_artifact_win_temp_root_snapshot_children (
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_artifact_win_temp_root_create_child_binding (
-  WylFactArtifactWinTempRoot *root, const gchar *name, gboolean writable,
-  WylFactArtifactWinTempChildBinding **out_binding)
-{
-  WylFactArtifactWinTempChild *child = NULL;
-  wyrelog_error_t rc;
-
-  if (out_binding != NULL)
-    *out_binding = NULL;
-
-  if (root == NULL || name == NULL || out_binding == NULL)
-    return WYRELOG_E_INVALID;
-
-  rc = wyl_fact_artifact_win_temp_root_create_child (root, name, &child);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_fact_artifact_win_temp_child_open (child, writable, out_binding);
-  wyl_fact_artifact_win_temp_child_free (child);
-  return rc;
-}
-
 struct WylFactArtifactWinTempOrphanEvidence
 {
   gchar *logical_name;
   WylFactGraphWinIdentity identity;
 };
+
+WylFactArtifactWinTempOrphanEvidence *
+wyl_fact_artifact_win_temp_orphan_evidence_new_for_name (const gchar *name)
+{
+  WylFactArtifactWinTempOrphanEvidence *evidence;
+  gsize length;
+
+  if (name == NULL)
+    return NULL;
+  evidence = g_try_new0 (WylFactArtifactWinTempOrphanEvidence, 1);
+  if (evidence == NULL)
+    return NULL;
+  length = strlen (name) + 1;
+  evidence->logical_name = g_try_malloc (length);
+  if (evidence->logical_name == NULL) {
+    g_free (evidence);
+    return NULL;
+  }
+  memcpy (evidence->logical_name, name, length);
+  return evidence;
+}
+
+void
+wyl_fact_artifact_win_temp_child_discard_unpublished (
+  WylFactArtifactWinTempChild *child,
+  WylFactArtifactWinTempOrphanEvidence *evidence,
+  WylFactArtifactWinTempOrphanEvidence **out_evidence)
+{
+  WylFactDuckdbTempRetireResult retired =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (child != NULL) {
+    if (evidence != NULL && child->entry != NULL)
+      evidence->identity = *wyl_fact_artifact_win_entry_identity (child->entry);
+    rc = wyl_fact_artifact_win_temp_child_retire (child, &retired);
+    wyl_fact_artifact_win_temp_child_free (child);
+  }
+  if (rc == WYRELOG_E_OK
+      && retired == WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED)
+    wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);
+  else if (out_evidence != NULL)
+    *out_evidence = evidence;
+  else
+    wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_create_child_binding (
+  WylFactArtifactWinTempRoot *root, const gchar *name, gboolean writable,
+  WylFactArtifactWinTempChild **out_child,
+  WylFactArtifactWinTempChildBinding **out_binding,
+  WylFactArtifactWinTempOrphanEvidence **out_evidence)
+{
+  return wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (
+    root, name, writable, out_child, out_binding, out_evidence);
+}
 
 wyrelog_error_t
 wyl_fact_artifact_win_temp_root_create_with_orphan_evidence (
@@ -2911,40 +2974,71 @@ wyl_fact_artifact_win_temp_root_create_with_orphan_evidence (
 wyrelog_error_t
 wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (
   WylFactArtifactWinTempRoot *root, const gchar *name, gboolean writable,
+  WylFactArtifactWinTempChild **out_child,
   WylFactArtifactWinTempChildBinding **out_binding,
   WylFactArtifactWinTempOrphanEvidence **out_evidence)
 {
+  WylFactArtifactWinTempChild *child = NULL;
   WylFactArtifactWinTempChildBinding *binding = NULL;
-  WylFactArtifactWinTempOrphanEvidence *ev = NULL;
+  WylFactArtifactWinTempOrphanEvidence *evidence = NULL;
   wyrelog_error_t rc;
 
+  if (out_child != NULL)
+    *out_child = NULL;
   if (out_binding != NULL)
     *out_binding = NULL;
   if (out_evidence != NULL)
     *out_evidence = NULL;
 
-  if (root == NULL || name == NULL || out_binding == NULL)
+  if (root == NULL || name == NULL || !temp_child_name (name)
+      || out_child == NULL || out_binding == NULL || out_evidence == NULL)
     return WYRELOG_E_INVALID;
 
-  rc = wyl_fact_artifact_win_temp_root_create_child_binding (root, name, writable, &binding);
+  /* Rollback evidence must not itself require an allocation after the name
+   * has entered the filesystem. */
+  evidence = wyl_fact_artifact_win_temp_orphan_evidence_new_for_name (name);
+  if (evidence == NULL)
+    return WYRELOG_E_NOMEM;
+
+  rc = wyl_fact_artifact_win_temp_root_create_child (root, name, &child);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    goto early_failure;
 
-  if (out_evidence != NULL) {
-    ev = g_try_new0 (WylFactArtifactWinTempOrphanEvidence, 1);
-    if (ev == NULL) {
-      wyl_fact_artifact_win_temp_child_binding_free (binding);
-      return WYRELOG_E_NOMEM;
-    }
-    ev->logical_name = g_strdup (name);
-    WylFactArtifactWinEntry *child_entry = binding->child->entry;
-    if (child_entry != NULL)
-      ev->identity = *wyl_fact_artifact_win_entry_identity (child_entry);
-    *out_evidence = ev;
+  evidence->identity = *wyl_fact_artifact_win_entry_identity (child->entry);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (wyl_fact_artifact_win_temp_child_take_specific_test_seam (
+        WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_CHILD_CREATE)) {
+    rc = WYRELOG_E_NOMEM;
+    goto rollback_child;
   }
+#endif
 
+  rc = wyl_fact_artifact_win_temp_child_open (child, writable, &binding);
+  if (rc != WYRELOG_E_OK)
+    goto rollback_child;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (wyl_fact_artifact_win_temp_child_take_specific_test_seam (
+        WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_BINDING_ACQUIRE)) {
+    rc = WYRELOG_E_NOMEM;
+    goto rollback_binding;
+  }
+#endif
+
+  wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);
+  *out_child = child;
   *out_binding = binding;
   return WYRELOG_E_OK;
+
+rollback_binding:
+  wyl_fact_artifact_win_temp_child_binding_free (binding);
+rollback_child:
+  wyl_fact_artifact_win_temp_child_discard_unpublished (child, evidence,
+      out_evidence);
+  return rc;
+
+early_failure:
+  wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);
+  return rc;
 }
 
 void

@@ -16,7 +16,54 @@ struct WylFactArtifactIoSession
   WylFactArtifactIoSessionKind kind;
   WylFactArtifactWinIoSession *win_session;
   WylFactArtifactWinSidecarBinding *sidecar_binding;
+  WylFactArtifactWinTempChildBinding *temp_child_binding;
 };
+
+static void
+temp_child_binding_free (WylFactArtifactIoSession *session)
+{
+  if (session->temp_child_binding != NULL) {
+    wyl_fact_artifact_win_temp_child_binding_free (
+      session->temp_child_binding);
+    session->temp_child_binding = NULL;
+  }
+}
+
+/* Consume the private I/O duplicate first.  A terminal caller then releases
+ * the binding even when checked finish reports an error; close deliberately
+ * retains the now-idle binding in the wrapper husk. */
+static wyrelog_error_t
+temp_child_session_release (WylFactArtifactIoSession *session,
+    gboolean release_binding)
+{
+  WylFactArtifactWinIoSession *win_session = session->win_session;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+
+  session->win_session = NULL;
+  if (win_session != NULL) {
+    rc = wyl_fact_artifact_win_io_session_finish (win_session);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (wyl_fact_artifact_win_temp_child_take_specific_test_seam (
+          WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_REPORT_FINISH_ERROR)
+        && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+#endif
+  }
+  if (release_binding)
+    temp_child_binding_free (session);
+  return rc;
+}
+
+static void
+temp_child_session_abort_and_release (WylFactArtifactIoSession *session)
+{
+  WylFactArtifactWinIoSession *win_session = session->win_session;
+
+  session->win_session = NULL;
+  if (win_session != NULL)
+    wyl_fact_artifact_win_io_session_abort (win_session);
+  temp_child_binding_free (session);
+}
 
 wyrelog_error_t
 wyl_fact_artifact_io_session_open_writer_main (
@@ -181,8 +228,11 @@ wyl_fact_artifact_io_session_create_temp_child (
   WylFactArtifactIoSession **out_session,
   WylFactArtifactWinTempOrphanEvidence **out_evidence)
 {
+  WylFactArtifactWinTempChild *child = NULL;
   WylFactArtifactWinTempChildBinding *binding = NULL;
   WylFactArtifactWinIoSession *win_session = NULL;
+  WylFactArtifactWinTempOrphanEvidence *rollback_evidence = NULL;
+  WylFactArtifactIoSession *session = NULL;
   wyrelog_error_t rc;
 
   if (out_child != NULL)
@@ -192,29 +242,73 @@ wyl_fact_artifact_io_session_create_temp_child (
   if (out_evidence != NULL)
     *out_evidence = NULL;
 
-  if (root == NULL || name == NULL || out_session == NULL)
+  if (root == NULL || name == NULL || out_child == NULL
+      || out_session == NULL || out_evidence == NULL)
     return WYRELOG_E_INVALID;
 
-  rc = wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (root, name, writable, &binding, out_evidence);
-  if (rc != WYRELOG_E_OK)
+  /* The wrapper needs its own rollback reserve because failures after the
+   * lower helper succeeds must not allocate evidence after filesystem
+   * mutation. */
+  rollback_evidence =
+      wyl_fact_artifact_win_temp_orphan_evidence_new_for_name (name);
+  if (rollback_evidence == NULL)
+    return WYRELOG_E_NOMEM;
+
+  rc = wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (
+    root, name, writable, &child, &binding, out_evidence);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_temp_orphan_evidence_free (rollback_evidence);
     return rc;
+  }
 
   rc = wyl_fact_artifact_win_temp_child_binding_open_io_session (binding, &win_session);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_artifact_win_temp_child_binding_free (binding);
+    wyl_fact_artifact_win_temp_child_discard_unpublished (child,
+        rollback_evidence, out_evidence);
     return rc;
   }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (wyl_fact_artifact_win_temp_child_take_specific_test_seam (
+        WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_IO_SESSION_ACQUIRE)) {
+    rc = WYRELOG_E_NOMEM;
+    goto rollback_session;
+  }
+#endif
 
-  WylFactArtifactIoSession *session = g_try_new0 (WylFactArtifactIoSession, 1);
+  session = g_try_new0 (WylFactArtifactIoSession, 1);
   if (session == NULL) {
-    wyl_fact_artifact_win_io_session_abort (win_session);
-    wyl_fact_artifact_win_temp_child_binding_free (binding);
-    return WYRELOG_E_NOMEM;
+    rc = WYRELOG_E_NOMEM;
+    goto rollback_session;
   }
   session->kind = WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD;
   session->win_session = win_session;
+  session->temp_child_binding = binding;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (wyl_fact_artifact_win_temp_child_take_specific_test_seam (
+        WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_WRAPPER_POPULATE)) {
+    rc = WYRELOG_E_NOMEM;
+    goto rollback_wrapper;
+  }
+#endif
+
+  wyl_fact_artifact_win_temp_orphan_evidence_free (rollback_evidence);
+  *out_child = child;
   *out_session = session;
   return WYRELOG_E_OK;
+
+rollback_wrapper:
+  temp_child_session_abort_and_release (session);
+  g_free (session);
+  goto rollback_child;
+
+rollback_session:
+  wyl_fact_artifact_win_io_session_abort (win_session);
+  wyl_fact_artifact_win_temp_child_binding_free (binding);
+rollback_child:
+  wyl_fact_artifact_win_temp_child_discard_unpublished (child,
+      rollback_evidence, out_evidence);
+  return rc;
 }
 
 wyrelog_error_t
@@ -237,17 +331,20 @@ wyl_fact_artifact_io_session_open_existing_temp_child (
     return rc;
 
   rc = wyl_fact_artifact_win_temp_child_binding_open_io_session (binding, &win_session);
-  wyl_fact_artifact_win_temp_child_binding_free (binding);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_temp_child_binding_free (binding);
     return rc;
+  }
 
   WylFactArtifactIoSession *session = g_try_new0 (WylFactArtifactIoSession, 1);
   if (session == NULL) {
     wyl_fact_artifact_win_io_session_abort (win_session);
+    wyl_fact_artifact_win_temp_child_binding_free (binding);
     return WYRELOG_E_NOMEM;
   }
   session->kind = WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD;
   session->win_session = win_session;
+  session->temp_child_binding = binding;
   *out_session = session;
   return WYRELOG_E_OK;
 }
@@ -331,6 +428,8 @@ wyl_fact_artifact_io_session_close (WylFactArtifactIoSession *session)
 {
   if (session == NULL)
     return WYRELOG_E_INVALID;
+  if (session->kind == WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD)
+    return temp_child_session_release (session, FALSE);
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (session->win_session != NULL) {
     rc = wyl_fact_artifact_win_io_session_finish (session->win_session);
@@ -357,7 +456,9 @@ wyl_fact_artifact_io_session_finish (WylFactArtifactIoSession *session)
   if (session == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = WYRELOG_E_OK;
-  if (session->win_session != NULL) {
+  if (session->kind == WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD) {
+    rc = temp_child_session_release (session, TRUE);
+  } else if (session->win_session != NULL) {
     rc = wyl_fact_artifact_win_io_session_finish (session->win_session);
     session->win_session = NULL;
   }
@@ -374,7 +475,9 @@ wyl_fact_artifact_io_session_free (WylFactArtifactIoSession *session)
 {
   if (session == NULL)
     return;
-  if (session->win_session != NULL) {
+  if (session->kind == WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD) {
+    temp_child_session_abort_and_release (session);
+  } else if (session->win_session != NULL) {
     wyl_fact_artifact_win_io_session_abort (session->win_session);
     session->win_session = NULL;
   }
