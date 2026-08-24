@@ -436,6 +436,7 @@ typedef struct
   guint total;
   guint ready;
   guint unavailable;
+  wyl_fact_graph_state_t last_state;
   gboolean saw_tenant_a_ready;
   gboolean saw_tenant_a_stale;
   gboolean saw_tenant_b_unavailable;
@@ -446,6 +447,7 @@ fact_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
 {
   FactStatusProbe *probe = user_data;
   probe->total++;
+  probe->last_state = status->state;
   if (status->state == WYL_FACT_GRAPH_STATE_READY)
     probe->ready++;
   if (status->state == WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE)
@@ -904,6 +906,449 @@ test_boot_converges_forget_on_sealed_graph (void)
   remove_tree (root);
 }
 
+/* Leave a durable, unconverged erasure on a graph that is otherwise healthy.
+ *
+ * after_intent is the seam that matters: the intent is committed and no delete
+ * has run, so the rows the intent names are still present and a reconcile that
+ * executed would be visible as their absence.  Rewriting the intent's tenant
+ * then makes the reconciler's per-intent scope check skip it -- POLICY, with
+ * the store open, which is the ledger-was-read class rather than the
+ * could-not-open class. */
+static void
+seed_unconverged_erasure (wyl_policy_store_t *policy, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          tenant_id, graph_id);
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  wyl_fact_store_forget_options_t opts = {
+    .batch_id = "batch-1",
+    .operator_id = "admin",
+    .reason = "gdpr-erasure",
+    .checkpoint = forget_crash_at,
+    .checkpoint_data = (gpointer) "after_intent",
+  };
+  g_assert_cmpint (wyl_fact_store_forget (store, &schema, &opts, NULL), !=,
+      WYRELOG_E_OK);
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (conn,
+      "UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
+      "WHERE state = 'PENDING';", &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+}
+
+/* No graph reports the forget axis.  Used where every graph is degraded for a
+ * replay reason: the axis must not surface at all, rather than surfacing as
+ * converged. */
+static wyrelog_error_t
+no_forget_state_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
+{
+  (void) user_data;
+  g_assert_cmpint (status->state, !=, WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
+  return WYRELOG_E_OK;
+}
+
+static void
+assert_no_graph_reports_forget_state (WylHandle *handle)
+{
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      no_forget_state_cb, NULL), ==, WYRELOG_E_OK);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  g_assert_null (strstr (json, "forget_incomplete"));
+}
+
+/* The state of the one graph a fixture holds, read through the same path the
+ * daemon status surface uses. */
+static wyl_fact_graph_state_t
+assert_single_graph_state (WylHandle *handle)
+{
+  FactStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 1);
+  return probe.last_state;
+}
+
+/* Issue #870: the verdict clears when the erasure converges, and a targeted
+ * refresh must not clear it.
+ *
+ * These are the two halves of "the setter is total".  Boot writes CONVERGED on
+ * success, so a graph that converges on a later replay heals itself -- without
+ * that, the zero value is a lie and the graph stays incomplete for the life of
+ * the process.  A targeted post-mutation refresh does not read the forget
+ * ledger, so it learns nothing about any erasure and must leave the verdict
+ * alone; clearing there would silently drop the signal on the next append. */
+static void
+test_forget_state_clears_on_convergence_but_not_on_refresh (void)
+{
+  TEST ("convergence clears the verdict; a targeted refresh does not");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-status-clear-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    seed_unconverged_erasure (policy, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (assert_single_graph_state (handle), ==,
+      WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
+
+  /* A targeted refresh leaves it alone: it never read the ledger. */
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+  wyl_policy_fact_graph_info_t info = { 0 };
+  info.tenant_id = "tenant-a";
+  info.graph_id = "orders";
+  info.schema_version = 1;
+  WylFactGraphRuntimeStatus rt = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &info, &rt), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_runtime_status_clear (&rt);
+  g_assert_cmpint (assert_single_graph_state (handle), ==,
+      WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
+
+  /* Repair the intent's scope so the next full replay converges it. */
+  {
+    g_autofree gchar *sp = lookup_graph_storage_path (policy, "tenant-a",
+            "orders");
+    g_assert_nonnull (sp);
+    g_autofree gchar *fp = g_build_filename (sp, "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) st = NULL;
+    g_assert_cmpint (wyl_fact_store_open (fp, &st), ==, WYRELOG_E_OK);
+    duckdb_result res = { 0 };
+    g_assert_cmpint (duckdb_query (wyl_fact_store_get_connection (st),
+        "UPDATE fact_forget_intent SET tenant_id = 'tenant-a' "
+        "WHERE state = 'PENDING';", &res), ==, DuckDBSuccess);
+    duckdb_destroy_result (&res);
+  }
+
+  wyl_fact_replay_summary_t summary = { 0 };
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 0);
+  /* Converged, and the verdict cleared itself. */
+  g_assert_cmpint (assert_single_graph_state (handle), ==,
+      WYL_FACT_GRAPH_STATE_READY);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"status\":\"ready\""));
+  g_assert_null (strstr (json, "forget_incomplete"));
+
+  remove_tree (root);
+}
+
+/* Issue #870 precedence, in the only state where it bites: a graph that is
+ * BOTH incomplete and degraded for a replay reason.
+ *
+ * The rule is that the forget axis is consulted only where replay health would
+ * report ready.  Every other test leaves the axis converged on a degraded
+ * graph, so removing the rule changes nothing in them -- verified by mutation:
+ * consulting the axis unconditionally survives the rest of the suite.  This
+ * fixture is what makes the rule falsifiable, by composing an unconverged
+ * erasure with the duplicate-schema-version collision that fails the engine
+ * build.
+ *
+ * Masking is the intended behaviour, not a compromise: the engine class is the
+ * more actionable of the two, an operator cannot act on the erasure until the
+ * graph replays at all, and the aggregate is degraded either way.  What must
+ * not happen is the reverse -- a replay failure reported as a compliance
+ * state. */
+static void
+test_replay_failure_outranks_an_outstanding_erasure (void)
+{
+  TEST ("a graph both degraded and incomplete reports the replay reason");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-status-mask-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    seed_unconverged_erasure (policy, "tenant-a", "orders");
+
+    /* A second schema version of the same relation collides on the
+     * version-independent wirelog name, so the engine build fails.  Same
+     * shape as /fact-replay/dup-version-degrades, which exists to pin that. */
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema_v2 = make_schema
+          ("tenant-a", "orders", columns, G_N_ELEMENTS (columns));
+    schema_v2.schema_version = 2;
+    schema_v2.relation_visible = FALSE;
+    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+        &schema_v2), ==, WYRELOG_E_OK);
+
+    g_autofree gchar *sp = lookup_graph_storage_path (policy, "tenant-a",
+            "orders");
+    g_assert_nonnull (sp);
+    g_autofree gchar *fp = g_build_filename (sp, "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) st = NULL;
+    g_assert_cmpint (wyl_fact_store_open (fp, &st), ==, WYRELOG_E_OK);
+    wyl_fact_value_t v2[] = {
+      {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-c"},
+      {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 33},
+    };
+    wyl_fact_row_t r2[] = { {v2, 2} };
+    const wyl_fact_store_batch_t b2 = {
+      .batch_id = "batch-v2",
+      .tenant_id = "tenant-a",
+      .graph_id = "orders",
+      .namespace_id = "shop.ns",
+      .relation_name = "orders-rel",
+      .schema_version = 2,
+      .source = "test",
+      .idempotency_key = "key-v2",
+      .op = WYL_FACT_STORE_OP_ASSERT,
+      .rows = r2,
+      .n_rows = G_N_ELEMENTS (r2),
+    };
+    gboolean ins = FALSE;
+    g_assert_cmpint (wyl_fact_store_append_batch (st, &schema_v2, &b2, &ins),
+        ==, WYRELOG_E_OK);
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  wyl_fact_replay_summary_t summary = { 0 };
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
+      WYRELOG_E_OK);
+  /* Both conditions really are present: the erasure did not converge AND the
+   * engine did not build.  Without these the test could pass by producing
+   * neither. */
+  g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 1);
+  g_assert_cmpuint (summary.graphs_degraded, ==, 1);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 0);
+
+  /* The replay reason wins, and the compliance state does not surface. */
+  g_assert_cmpint (assert_single_graph_state (handle), !=,
+      WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  g_assert_null (strstr (json, "forget_incomplete"));
+  g_assert_nonnull (strstr (json, "\"status\":\"degraded\""));
+
+  remove_tree (root);
+}
+
+/* Issue #870: the setter must be called AFTER the graph's refresh, and this
+ * is the test that fails if it moves.
+ *
+ * A plan sentence is not a guarantee.  Writing the verdict next to the
+ * reconcile that produces it is the natural placement and is wrong: the setter
+ * never creates an entry and refuses a tombstone, so an early write is dropped
+ * and the refresh then publishes CONVERGED over it -- this issue's own defect,
+ * reintroduced by call placement alone.
+ *
+ * The tombstone is reached without any fixture work, because retire_unseen
+ * runs at the tail of every replay: a graph deleted from policy is retired,
+ * and re-creating it under the same identity reuses the same on-disk store
+ * with its pending intent intact, since deleting the policy row never touches
+ * the DuckDB file. */
+static void
+test_forget_state_survives_retire_and_recreate (void)
+{
+  TEST ("an erasure outstanding across retire and recreate is still reported");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-status-recreate-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    seed_unconverged_erasure (policy, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (assert_single_graph_state (handle), ==,
+      WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
+
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (policy);
+  g_assert_nonnull (db);
+
+  /* Retire the graph: absent from policy, so the replay's tail sweep
+   * tombstones its runtime entry. */
+  g_assert_cmpint (sqlite3_exec (db,
+      "DELETE FROM fact_relation_activation;"
+      "DELETE FROM fact_relation_query_allowlist;"
+      "DELETE FROM fact_relation_schema_columns;"
+      "DELETE FROM fact_relation_schemas;"
+      "DELETE FROM fact_namespaces;"
+      "DELETE FROM fact_graph_query_allowlist;"
+      "DELETE FROM fact_graph_relation_columns;"
+      "DELETE FROM fact_graph_relations;"
+      "DELETE FROM fact_graphs;", NULL, NULL, NULL), ==, SQLITE_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (summary.graphs_seen, ==, 0);
+
+  /* Re-create under the same identity.  The store, and its pending intent,
+   * were never touched. */
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  memset (&summary, 0, sizeof summary);
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (summary.graphs_seen, ==, 1);
+  g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 1);
+
+  /* The verdict reached the surface across the tombstone.  Written before the
+   * refresh it would have been refused, and the republish would report ready
+   * on a graph still holding data it accepted an instruction to delete. */
+  g_assert_cmpint (assert_single_graph_state (handle), ==,
+      WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
+
+  remove_tree (root);
+}
+
+/* Issue #870: a graph whose boot forget reconciliation did not converge must
+ * not be reported ready.
+ *
+ * The fixture is a real unconverged erasure on an otherwise healthy ACTIVE
+ * graph, not a synthesised runtime state: crash a forget at after_intent so
+ * the intent is durable and no delete has run, then rewrite its tenant so the
+ * reconciler's per-intent scope check skips it and returns POLICY with the
+ * store open.  That is the ERROR class -- ledger read, intent not converged --
+ * and it leaves the engine buildable, which is the combination the status
+ * surface previously reported as ready.
+ *
+ * Every assertion about durable state comes first: if the seeding were wrong
+ * and the reconcile actually converged, the still-PENDING and row-present
+ * checks fail before any status assertion runs, so this cannot pass while
+ * testing nothing. */
+static void
+test_status_is_not_ready_while_an_erasure_is_outstanding (void)
+{
+  TEST ("a graph with an unconverged erasure is not reported ready");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-status-erasure-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    seed_unconverged_erasure (policy, "tenant-a", "orders");
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    /* Durable evidence the erasure really is outstanding, asserted before any
+     * status claim depends on it. */
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
+        ==, 1);
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'batch-1';"),
+        ==, 1);
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  FactStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 1);
+  g_assert_cmpuint (probe.ready, ==, 0);
+
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  /* The literal state name, not merely the tally: without its own case in
+   * wyl_fact_graph_state_name an appended enum value renders as some other
+   * string while every count assertion still passes. */
+  g_assert_nonnull (strstr (json, "\"state\":\"forget_incomplete\""));
+  g_assert_nonnull (strstr (json, "\"status\":\"degraded\""));
+  g_assert_nonnull (strstr (json, "\"graphs_ready\":0"));
+  g_assert_nonnull (strstr (json, "\"graphs_degraded\":1"));
+  /* The graph still serves queries -- this is a health axis, not a barrier. */
+  g_assert_nonnull (strstr (json, "\"queryable\":true"));
+  /* Redaction is unchanged.  The last two are the ones a compliance state
+   * would be tempted to carry -- the operator who requested the erasure and
+   * the reason they gave -- and the fixture really does set both, so they can
+   * fail.  `tenant-z` is the rewritten intent scope; it has no path to this
+   * JSON today, so treat it as a cheap tripwire rather than as coverage. */
+  g_assert_null (strstr (json, "facts.duckdb"));
+  g_assert_null (strstr (json, "storage_path"));
+  g_assert_null (strstr (json, root));
+  g_assert_null (strstr (json, "admin"));
+  g_assert_null (strstr (json, "gdpr-erasure"));
+  g_assert_null (strstr (json, "batch-1"));
+  g_assert_null (strstr (json, "tenant-z"));
+
+  remove_tree (root);
+}
+
 static void
 test_direct_replay_retracts_and_mangles (void)
 {
@@ -1109,6 +1554,26 @@ test_handle_replay_is_idempotent_and_graph_local (void)
    * merging the two counters back breaks the first line. */
   g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 0);
   g_assert_cmpuint (summary.graphs_forget_probe_unavailable, ==, 2);
+  /* #870: no graph here reports a forget state, and this is a weak guard by
+   * construction -- say so rather than let it read as coverage.  Nothing is
+   * written for an unprobed graph, so the axis stays at its CONVERGED zero
+   * and no forget state can surface whatever the mapping does.  It therefore
+   * does NOT pin the precedence rule -- removing that rule leaves this
+   * passing, and /fact-replay/replay-failure-outranks-erasure is what
+   * falsifies it -- and it does not pin the decision to write nothing for an
+   * unprobed graph either, which flipping to INCOMPLETE leaves passing too.
+   * No mutation found so far reaches it at all: every graph here is degraded,
+   * so the only change that would surface a forget state is writing a verdict
+   * for an unprobed graph AND removing the precedence rule together -- and
+   * that combination aborts this test earlier, in assert_handle_fact_status,
+   * because a graph that should read store_unavailable reads
+   * forget_incomplete instead.
+   *
+   * So this is a tripwire, not coverage.  It is kept because it is the one
+   * place in the suite that records which properties here are unpinned, and
+   * because the claim above has been wrong three times: state what a check
+   * catches only after trying to make it fail. */
+  assert_no_graph_reports_forget_state (handle);
   assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
   assert_handle_stale_fact_status (handle);
 
@@ -1572,6 +2037,14 @@ main (int argc, char **argv)
       test_boot_converges_interrupted_forget);
   g_test_add_func ("/fact-replay/boot-forget-per-graph-never-aborts",
       test_boot_forget_is_per_graph_and_never_aborts);
+  g_test_add_func ("/fact-replay/forget-state-clears-on-convergence",
+      test_forget_state_clears_on_convergence_but_not_on_refresh);
+  g_test_add_func ("/fact-replay/replay-failure-outranks-erasure",
+      test_replay_failure_outranks_an_outstanding_erasure);
+  g_test_add_func ("/fact-replay/forget-state-survives-retire-recreate",
+      test_forget_state_survives_retire_and_recreate);
+  g_test_add_func ("/fact-replay/status-not-ready-while-erasure-outstanding",
+      test_status_is_not_ready_while_an_erasure_is_outstanding);
   g_test_add_func ("/fact-replay/boot-converges-forget-on-sealed-graph",
       test_boot_converges_forget_on_sealed_graph);
   g_test_add_func ("/fact-replay/direct",

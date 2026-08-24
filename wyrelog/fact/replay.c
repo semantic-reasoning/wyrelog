@@ -55,9 +55,15 @@ wyl_fact_graph_state_name (wyl_fact_graph_state_t state)
       return "replay_failed";
     case WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE:
       return "store_unavailable";
-    default:
-      return "degraded";
+    case WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE:
+      return "forget_incomplete";
   }
+  /* No default arm: -Wswitch then names a state added without a string.  It
+   * is a warning rather than an error here (werror is off), so it does not
+   * stop a build -- the test asserting the literal name is what does.  This
+   * return covers a value outside the enum, and says so rather than
+   * rendering it as a plausible state. */
+  return "unknown";
 }
 
 void
@@ -808,10 +814,15 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
       summary.graphs_degraded++;
       continue;
     }
+    /* CONVERGED, INCOMPLETE, or no verdict at all -- see the write below. */
+    gboolean forget_probed = FALSE;
+    gboolean forget_incomplete = FALSE;
     if (fact_root != NULL && fact_root[0] != '\0') {
       gboolean opened = FALSE;
       wyrelog_error_t forget_rc = reconcile_graph_forgets (policy, fact_root,
               &spec->info, &opened);
+      forget_probed = forget_rc == WYRELOG_E_OK || opened;
+      forget_incomplete = forget_rc != WYRELOG_E_OK && opened;
       if (forget_rc != WYRELOG_E_OK) {
         if (opened)
           summary.graphs_forget_reconcile_failed++;
@@ -846,6 +857,43 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
       summary.graphs_loaded++;
     else
       summary.graphs_degraded++;
+    /* After the refresh, never before it.  The setter does not create an
+     * entry and refuses a tombstone, so a verdict written earlier is dropped
+     * -- NOT_FOUND on a graph the runtime has not built yet, which is every
+     * graph of a fresh daemon, or BUSY on one retired by an earlier replay --
+     * and the refresh then publishes CONVERGED over it.  Either return from
+     * this call means it has been moved to the wrong place.
+     *
+     * Written on both outcomes, because the CONVERGED zero is only honest if
+     * success asserts it: a graph that converges on a later replay must clear
+     * itself.  Not written when the store never opened, which is neither
+     * outcome -- nothing was learned, and claiming convergence there would be
+     * the over-report that #547 removed from the boot log.  Worse, it would
+     * erase a standing verdict: a graph already INCOMPLETE whose store then
+     * fails to open would be reported converged, which is this issue's own
+     * defect arriving through the failure path.
+     *
+     * Argued, not proved, and the whole choice is unpinned rather than just
+     * its reasoning: flipping this to write INCOMPLETE for an unprobed graph
+     * passes the entire suite unchanged.  Off-bridge and for legacy graphs
+     * under it, the reconcile open and the engine open are the same call --
+     * open_graph_store discards writable -- so a graph that could not be
+     * probed also failed to build and is never mapped through the forget
+     * axis, which is why no fixture can tell the two policies apart.  Under
+     * the bridge a provisioned graph can be refused a write lease while still
+     * serving reads; that is the only state where the choice is observable,
+     * and it needs an access-mode-conditional open fault no seam provides.
+     * Do not read the green suite as agreement with this decision.
+     *
+     * The residual it leaves is recorded on #870 and in the runbook: on a
+     * bridge build a graph refused a write lease keeps the CONVERGED zero and
+     * reports ready with a ledger that was never reconciled.  Closing that
+     * needs a third state meaning "not examined", which is #869's vocabulary
+     * work rather than this unit's. */
+    if (forget_probed)
+      (void) wyl_fact_graph_runtime_manager_set_forget_state (runtime_manager,
+          &spec->key, forget_incomplete ? WYL_FACT_GRAPH_FORGET_INCOMPLETE
+          : WYL_FACT_GRAPH_FORGET_CONVERGED);
     g_ptr_array_add (seen_keys, &spec->key);
   }
   rc = wyl_fact_graph_runtime_manager_retire_unseen (runtime_manager,
