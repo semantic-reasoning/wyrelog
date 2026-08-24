@@ -3,8 +3,18 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include "wyrelog/fact/legacy-store-identity-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/policy/store-private.h"
+
+static gboolean
+exec_ok (duckdb_connection conn, const gchar *sql)
+{
+  duckdb_result result = { 0 };
+  gboolean ok = duckdb_query (conn, sql, &result) == DuckDBSuccess;
+  duckdb_destroy_result (&result);
+  return ok;
+}
 
 static gboolean
 count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
@@ -74,6 +84,151 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
     .n_columns = n_columns,
   };
   return schema;
+}
+
+static gint
+check_legacy_identity_binding_is_atomic_and_recoverable (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+
+  /* An execute-time conflict in the second VALUES row rolls back the first
+   * row too.  Close/reopen then proves a normal retry binds both rows. */
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-legacy-bind-XXXXXX", &error);
+  if (dir == NULL)
+    return 3000;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3001;
+    wyl_fact_legacy_identity_set_test_fault
+      (WYL_FACT_LEGACY_IDENTITY_TEST_FAULT_STORE_SECOND_ROW);
+    if (wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_IO)
+      return 3002;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata "
+        "WHERE key IN ('tenant_id','graph_id');", &count) || count != 0)
+      return 3003;
+  }
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_OK)
+      return 3004;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata "
+        "WHERE (key='tenant_id' AND value='tenant-a') "
+        "OR (key='graph_id' AND value='orders');", &count) || count != 2)
+      return 3005;
+  }
+  (void) g_remove (path);
+  (void) g_rmdir (dir);
+
+  /* A matching tenant-only wedge repairs only graph_id.  Successful repair
+   * also proves the existing tenant primary key was not reinserted. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || !exec_ok (wyl_fact_store_get_connection (store),
+        "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');")
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_OK)
+      return 3006;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata "
+        "WHERE (key='tenant_id' AND value='tenant-a') "
+        "OR (key='graph_id' AND value='orders');", &count) || count != 2)
+      return 3007;
+  }
+
+  /* Reader-only access never repairs a partial identity. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    gboolean exists = TRUE;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || !exec_ok (wyl_fact_store_get_connection (store),
+        "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');")
+        || wyl_fact_store_validate_projection (store, &schema, &exists)
+        != WYRELOG_E_INTERNAL || exists)
+      return 3008;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata WHERE key='graph_id';",
+        &count) || count != 0)
+      return 3009;
+  }
+
+  /* A tenant mismatch is a malformed partial record, not a normal complete
+   * identity conflict, and is left untouched. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || !exec_ok (wyl_fact_store_get_connection (store),
+        "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-b');")
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_INTERNAL)
+      return 3010;
+  }
+
+  /* Durable fact rows make a tenant-only identity unsafe to repair.  The
+   * NOT EXISTS guard and graph_id insert execute as one statement. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || !exec_ok (wyl_fact_store_get_connection (store),
+        "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');"
+        "INSERT INTO fact_batches VALUES ('existing','tenant-a','orders',"
+        "'shop','order',1,NULL,NULL,'existing:1','assert',0,'hash',1);")
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_INTERNAL)
+      return 3011;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata WHERE key='graph_id';",
+        &count) || count != 0)
+      return 3012;
+  }
+
+  /* The unreachable reverse XOR is never repaired. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || !exec_ok (wyl_fact_store_get_connection (store),
+        "INSERT INTO fact_store_metadata VALUES ('graph_id','orders');")
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_INTERNAL)
+      return 3013;
+  }
+
+  /* A complete foreign tuple remains the ordinary policy mismatch. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || !exec_ok (wyl_fact_store_get_connection (store),
+        "INSERT INTO fact_store_metadata VALUES "
+        "('tenant_id','tenant-a'),('graph_id','other');")
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_POLICY)
+      return 3014;
+  }
+  return 0;
 }
 
 static gint
@@ -2288,6 +2443,9 @@ int
 main (void)
 {
   gint rc = check_fact_store_thread_budget ();
+  if (rc != 0)
+    return rc;
+  rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_identity_basic ();

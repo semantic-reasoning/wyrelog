@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "compound-private.h"
+#include "legacy-store-identity-private.h"
 #include "store-identity-private.h"
 
 /* Opaque even in non-secure builds so the store handle can carry the live
@@ -335,65 +336,6 @@ reject_audit_database_unlocked (wyl_fact_store_t *store)
 }
 
 static wyrelog_error_t
-metadata_value_unlocked (wyl_fact_store_t *store, const gchar *key,
-    gchar **out_value)
-{
-  duckdb_prepared_statement stmt = NULL;
-  duckdb_result result = { 0 };
-
-  *out_value = NULL;
-  if (duckdb_prepare (store->conn,
-      "SELECT value FROM fact_store_metadata WHERE key = ?;", &stmt)
-      != DuckDBSuccess)
-    return WYRELOG_E_IO;
-  if (duckdb_bind_varchar (stmt, 1, key) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-  duckdb_destroy_prepare (&stmt);
-  if (duckdb_row_count (&result) > 1) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_POLICY;
-  }
-  if (duckdb_row_count (&result) == 1) {
-    gchar *value = duckdb_value_varchar (&result, 0, 0);
-    *out_value = g_strdup (value);
-    duckdb_free (value);
-    if (*out_value == NULL) {
-      duckdb_destroy_result (&result);
-      return WYRELOG_E_NOMEM;
-    }
-  }
-  duckdb_destroy_result (&result);
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-insert_metadata_value_unlocked (wyl_fact_store_t *store, const gchar *key,
-    const gchar *value)
-{
-  duckdb_prepared_statement stmt = NULL;
-  if (duckdb_prepare (store->conn,
-      "INSERT INTO fact_store_metadata (key, value) VALUES (?, ?);",
-      &stmt) != DuckDBSuccess)
-    return WYRELOG_E_IO;
-  duckdb_state ok = duckdb_bind_varchar (stmt, 1, key)
-      | duckdb_bind_varchar (stmt, 2, value);
-  if (ok != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  duckdb_state rc = duckdb_execute_prepared (stmt, NULL);
-  duckdb_destroy_prepare (&stmt);
-  return rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
-}
-
-static wyrelog_error_t
 validate_store_scope_unlocked (wyl_fact_store_t *store, const gchar *tenant_id,
     const gchar *graph_id, gboolean bind_if_empty)
 {
@@ -409,30 +351,8 @@ validate_store_scope_unlocked (wyl_fact_store_t *store, const gchar *tenant_id,
     return rc;
   if (!has_fact_metadata)
     return WYRELOG_E_POLICY;
-
-  g_autofree gchar *stored_tenant = NULL;
-  g_autofree gchar *stored_graph = NULL;
-  rc = metadata_value_unlocked (store, "tenant_id", &stored_tenant);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = metadata_value_unlocked (store, "graph_id", &stored_graph);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  if ((stored_tenant == NULL) != (stored_graph == NULL))
-    return WYRELOG_E_POLICY;
-  if (stored_tenant == NULL) {
-    if (!bind_if_empty)
-      return WYRELOG_E_POLICY;
-    rc = insert_metadata_value_unlocked (store, "tenant_id", tenant_id);
-    if (rc == WYRELOG_E_OK)
-      rc = insert_metadata_value_unlocked (store, "graph_id", graph_id);
-    return rc;
-  }
-
-  return g_strcmp0 (stored_tenant, tenant_id) == 0
-         && g_strcmp0 (stored_graph, graph_id) == 0 ? WYRELOG_E_OK :
-         WYRELOG_E_POLICY;
+  return wyl_fact_legacy_identity_validate_unlocked (store->conn, tenant_id,
+             graph_id, bind_if_empty, WYL_FACT_LEGACY_IDENTITY_BIND_STORE);
 }
 
 

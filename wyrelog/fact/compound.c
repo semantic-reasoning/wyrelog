@@ -4,6 +4,7 @@
 #include <duckdb.h>
 #include <string.h>
 
+#include "legacy-store-identity-private.h"
 #include "store-private.h"
 #include "wyrelog/wyl-engine-private.h"
 
@@ -59,7 +60,7 @@ value_shape_valid (const wyl_fact_compound_value_t *value)
     if (arg_type_name (arg->type) == NULL)
       return FALSE;
     if ((arg->type == WYL_FACT_COMPOUND_ARG_SYMBOL
-            || arg->type == WYL_FACT_COMPOUND_ARG_STRING)
+        || arg->type == WYL_FACT_COMPOUND_ARG_STRING)
         && (arg->as.text == NULL || arg->as.text[0] == '\0'))
       return FALSE;
     if (arg->type == WYL_FACT_COMPOUND_ARG_COMPOUND_REF
@@ -166,97 +167,11 @@ exec_sql (duckdb_connection conn, const gchar *sql)
 }
 
 static wyrelog_error_t
-metadata_value_unlocked (duckdb_connection conn, const gchar *key,
-    gchar **out_value)
-{
-  duckdb_prepared_statement stmt = NULL;
-  duckdb_result result = { 0 };
-
-  *out_value = NULL;
-  if (duckdb_prepare (conn,
-          "SELECT value FROM fact_store_metadata WHERE key = ?;", &stmt)
-      != DuckDBSuccess)
-    return WYRELOG_E_IO;
-  if (duckdb_bind_varchar (stmt, 1, key) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-  duckdb_destroy_prepare (&stmt);
-  if (duckdb_row_count (&result) > 1) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_POLICY;
-  }
-  if (duckdb_row_count (&result) == 1) {
-    gchar *value = duckdb_value_varchar (&result, 0, 0);
-    *out_value = g_strdup (value);
-    duckdb_free (value);
-    if (*out_value == NULL) {
-      duckdb_destroy_result (&result);
-      return WYRELOG_E_NOMEM;
-    }
-  }
-  duckdb_destroy_result (&result);
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-insert_metadata_unlocked (duckdb_connection conn, const gchar *key,
-    const gchar *value)
-{
-  duckdb_prepared_statement stmt = NULL;
-  if (duckdb_prepare (conn,
-          "INSERT INTO fact_store_metadata (key, value) VALUES (?, ?);",
-          &stmt) != DuckDBSuccess)
-    return WYRELOG_E_IO;
-  duckdb_state ok = duckdb_bind_varchar (stmt, 1, key)
-      | duckdb_bind_varchar (stmt, 2, value);
-  if (ok != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  duckdb_state rc = duckdb_execute_prepared (stmt, NULL);
-  duckdb_destroy_prepare (&stmt);
-  return rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
-}
-
-static wyrelog_error_t
 validate_scope_unlocked (duckdb_connection conn, const gchar *tenant_id,
     const gchar *graph_id, gboolean bind_if_empty)
 {
-  g_autofree gchar *store_kind = NULL;
-  wyrelog_error_t rc = metadata_value_unlocked (conn, "store_kind",
-      &store_kind);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (g_strcmp0 (store_kind, "wyrelog.fact") != 0)
-    return WYRELOG_E_POLICY;
-
-  g_autofree gchar *stored_tenant = NULL;
-  g_autofree gchar *stored_graph = NULL;
-  rc = metadata_value_unlocked (conn, "tenant_id", &stored_tenant);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = metadata_value_unlocked (conn, "graph_id", &stored_graph);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if ((stored_tenant == NULL) != (stored_graph == NULL))
-    return WYRELOG_E_POLICY;
-  if (stored_tenant == NULL) {
-    if (!bind_if_empty)
-      return WYRELOG_E_POLICY;
-    rc = insert_metadata_unlocked (conn, "tenant_id", tenant_id);
-    if (rc == WYRELOG_E_OK)
-      rc = insert_metadata_unlocked (conn, "graph_id", graph_id);
-    return rc;
-  }
-  return g_strcmp0 (stored_tenant, tenant_id) == 0
-      && g_strcmp0 (stored_graph, graph_id) == 0 ? WYRELOG_E_OK :
-      WYRELOG_E_POLICY;
+  return wyl_fact_legacy_identity_validate_unlocked (conn, tenant_id,
+             graph_id, bind_if_empty, WYL_FACT_LEGACY_IDENTITY_BIND_COMPOUND);
 }
 
 wyrelog_error_t
@@ -271,29 +186,29 @@ wyl_fact_compound_create_schema (wyl_fact_store_t *store)
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   wyl_fact_store_lock (store);
   rc = exec_sql (conn,
-      "CREATE TABLE IF NOT EXISTS compound_terms ("
-      "  compound_ref BIGINT PRIMARY KEY,"
-      "  tenant_id VARCHAR NOT NULL,"
-      "  graph_id VARCHAR NOT NULL,"
-      "  namespace_id VARCHAR NOT NULL,"
-      "  functor VARCHAR NOT NULL,"
-      "  arity BIGINT NOT NULL,"
-      "  content_hash VARCHAR NOT NULL UNIQUE,"
-      "  created_at_us BIGINT NOT NULL"
-      ");"
-      "CREATE TABLE IF NOT EXISTS compound_args ("
-      "  compound_ref BIGINT NOT NULL,"
-      "  arg_index BIGINT NOT NULL,"
-      "  arg_type VARCHAR NOT NULL CHECK (arg_type IN "
-      "('symbol', 'string', 'int64', 'bool', 'compound_ref')),"
-      "  symbol_value VARCHAR,"
-      "  string_value VARCHAR,"
-      "  int64_value BIGINT,"
-      "  bool_value BOOLEAN,"
-      "  child_compound_ref BIGINT,"
-      "  PRIMARY KEY (compound_ref, arg_index),"
-      "  FOREIGN KEY (compound_ref) REFERENCES compound_terms (compound_ref)"
-      ");");
+          "CREATE TABLE IF NOT EXISTS compound_terms ("
+          "  compound_ref BIGINT PRIMARY KEY,"
+          "  tenant_id VARCHAR NOT NULL,"
+          "  graph_id VARCHAR NOT NULL,"
+          "  namespace_id VARCHAR NOT NULL,"
+          "  functor VARCHAR NOT NULL,"
+          "  arity BIGINT NOT NULL,"
+          "  content_hash VARCHAR NOT NULL UNIQUE,"
+          "  created_at_us BIGINT NOT NULL"
+          ");"
+          "CREATE TABLE IF NOT EXISTS compound_args ("
+          "  compound_ref BIGINT NOT NULL,"
+          "  arg_index BIGINT NOT NULL,"
+          "  arg_type VARCHAR NOT NULL CHECK (arg_type IN "
+          "('symbol', 'string', 'int64', 'bool', 'compound_ref')),"
+          "  symbol_value VARCHAR,"
+          "  string_value VARCHAR,"
+          "  int64_value BIGINT,"
+          "  bool_value BOOLEAN,"
+          "  child_compound_ref BIGINT,"
+          "  PRIMARY KEY (compound_ref, arg_index),"
+          "  FOREIGN KEY (compound_ref) REFERENCES compound_terms (compound_ref)"
+          ");");
   wyl_fact_store_unlock (store);
   return rc;
 }
@@ -307,9 +222,9 @@ compound_exists_unlocked (duckdb_connection conn, const gchar *tenant_id,
   duckdb_result result = { 0 };
   *out_exists = FALSE;
   if (duckdb_prepare (conn,
-          "SELECT COUNT(*) FROM compound_terms WHERE tenant_id = ? "
-          "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-          &stmt) != DuckDBSuccess)
+      "SELECT COUNT(*) FROM compound_terms WHERE tenant_id = ? "
+      "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
+      &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
       | duckdb_bind_varchar (stmt, 2, graph_id)
@@ -339,9 +254,9 @@ compound_hash_matches_unlocked (duckdb_connection conn, const gchar *tenant_id,
   duckdb_result result = { 0 };
   *out_matches = FALSE;
   if (duckdb_prepare (conn,
-          "SELECT content_hash FROM compound_terms WHERE tenant_id = ? "
-          "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-          &stmt) != DuckDBSuccess)
+      "SELECT content_hash FROM compound_terms WHERE tenant_id = ? "
+      "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
+      &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
       | duckdb_bind_varchar (stmt, 2, graph_id)
@@ -386,7 +301,7 @@ wyl_fact_compound_ref_exists (wyl_fact_store_t *store, const gchar *tenant_id,
   rc = validate_scope_unlocked (conn, tenant_id, graph_id, FALSE);
   if (rc == WYRELOG_E_OK)
     rc = compound_exists_unlocked (conn, tenant_id, graph_id, namespace_id,
-        compound_ref, out_exists);
+            compound_ref, out_exists);
   wyl_fact_store_unlock (store);
   return rc;
 }
@@ -398,10 +313,10 @@ insert_term_unlocked (duckdb_connection conn,
 {
   duckdb_prepared_statement stmt = NULL;
   if (duckdb_prepare (conn,
-          "INSERT INTO compound_terms "
-          "(compound_ref, tenant_id, graph_id, namespace_id, functor, arity, "
-          " content_hash, created_at_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
-          &stmt) != DuckDBSuccess)
+      "INSERT INTO compound_terms "
+      "(compound_ref, tenant_id, graph_id, namespace_id, functor, arity, "
+      " content_hash, created_at_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+      &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   duckdb_state ok = duckdb_bind_int64 (stmt, 1, compound_ref)
       | duckdb_bind_varchar (stmt, 2, value->tenant_id)
@@ -426,10 +341,10 @@ insert_arg_unlocked (duckdb_connection conn, gint64 compound_ref, gsize index,
 {
   duckdb_prepared_statement stmt = NULL;
   if (duckdb_prepare (conn,
-          "INSERT INTO compound_args "
-          "(compound_ref, arg_index, arg_type, symbol_value, string_value, "
-          " int64_value, bool_value, child_compound_ref) "
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?);", &stmt) != DuckDBSuccess)
+      "INSERT INTO compound_args "
+      "(compound_ref, arg_index, arg_type, symbol_value, string_value, "
+      " int64_value, bool_value, child_compound_ref) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);", &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   const gchar *type_name = arg_type_name (arg->type);
   duckdb_state ok = duckdb_bind_int64 (stmt, 1, compound_ref)
@@ -487,12 +402,12 @@ wyl_fact_compound_put (wyl_fact_store_t *store,
   gboolean exists = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = compound_exists_unlocked (conn, value->tenant_id, value->graph_id,
-        value->namespace_id, compound_ref, &exists);
+            value->namespace_id, compound_ref, &exists);
   if (rc == WYRELOG_E_OK && exists) {
     gboolean hash_matches = FALSE;
     rc = compound_hash_matches_unlocked (conn, value->tenant_id,
-        value->graph_id, value->namespace_id, compound_ref, hash,
-        &hash_matches);
+            value->graph_id, value->namespace_id, compound_ref, hash,
+            &hash_matches);
     if (rc != WYRELOG_E_OK || !hash_matches) {
       wyl_fact_store_unlock (store);
       return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
@@ -506,7 +421,7 @@ wyl_fact_compound_put (wyl_fact_store_t *store,
       continue;
     gboolean child_exists = FALSE;
     rc = compound_exists_unlocked (conn, value->tenant_id, value->graph_id,
-        value->namespace_id, value->args[i].as.compound_ref, &child_exists);
+            value->namespace_id, value->args[i].as.compound_ref, &child_exists);
     if (rc == WYRELOG_E_OK && !child_exists)
       rc = WYRELOG_E_POLICY;
   }
@@ -555,10 +470,10 @@ load_term_unlocked (duckdb_connection conn, const gchar *tenant_id,
   duckdb_result result = { 0 };
   memset (out_term, 0, sizeof (*out_term));
   if (duckdb_prepare (conn,
-          "SELECT functor, arity, content_hash FROM compound_terms "
-          "WHERE tenant_id = ? "
-          "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-          &stmt) != DuckDBSuccess)
+      "SELECT functor, arity, content_hash FROM compound_terms "
+      "WHERE tenant_id = ? "
+      "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
+      &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
       | duckdb_bind_varchar (stmt, 2, graph_id)
@@ -697,7 +612,7 @@ materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
     {
       gint64 symbol_id = 0;
       wyrelog_error_t rc = wyl_engine_owned_intern_symbol (engine,
-          logical_arg->as.text, &symbol_id);
+              logical_arg->as.text, &symbol_id);
       if (rc != WYRELOG_E_OK)
         return rc;
       out_arg->type = WIRELOG_TYPE_STRING;
@@ -716,8 +631,8 @@ materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
     {
       gint64 child_handle = 0;
       wyrelog_error_t rc = replay_unlocked (conn, engine, tenant_id, graph_id,
-          namespace_id, logical_arg->as.compound_ref, depth + 1, seen,
-          handles, &child_handle);
+              namespace_id, logical_arg->as.compound_ref, depth + 1, seen,
+              handles, &child_handle);
       if (rc != WYRELOG_E_OK)
         return rc;
       out_arg->type = WIRELOG_TYPE_INT64;
@@ -739,7 +654,7 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
     return WYRELOG_E_POLICY;
   if (handles != NULL) {
     g_autofree gchar *key = compound_replay_cache_key (namespace_id,
-        compound_ref);
+            compound_ref);
     gint64 *cached = g_hash_table_lookup (handles, key);
     if (cached != NULL) {
       *out_handle = *cached;
@@ -754,7 +669,7 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
 
   loaded_term_t term = { 0 };
   wyrelog_error_t rc = load_term_unlocked (conn, tenant_id, graph_id,
-      namespace_id, compound_ref, &term);
+          namespace_id, compound_ref, &term);
   if (rc != WYRELOG_E_OK) {
     g_hash_table_remove (seen, &compound_ref);
     return rc;
@@ -763,9 +678,9 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
   if (duckdb_prepare (conn,
-          "SELECT arg_index, arg_type, symbol_value, string_value, "
-          "int64_value, bool_value, child_compound_ref FROM compound_args "
-          "WHERE compound_ref = ? ORDER BY arg_index;", &stmt)
+      "SELECT arg_index, arg_type, symbol_value, string_value, "
+      "int64_value, bool_value, child_compound_ref FROM compound_args "
+      "WHERE compound_ref = ? ORDER BY arg_index;", &stmt)
       != DuckDBSuccess) {
     loaded_term_clear (&term);
     g_hash_table_remove (seen, &compound_ref);
@@ -813,16 +728,16 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
       rc = WYRELOG_E_POLICY;
   }
   g_autofree wirelog_compound_arg_t *args = g_new0 (wirelog_compound_arg_t,
-      (gsize) term.arity);
+          (gsize) term.arity);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < (gsize) term.arity; i++)
     rc = materialize_arg_unlocked (conn, engine, tenant_id, graph_id,
-        namespace_id, depth, seen, &logical_args[i], handles, &args[i]);
+            namespace_id, depth, seen, &logical_args[i], handles, &args[i]);
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_owned_make_compound (engine, term.functor, args,
-        (gsize) term.arity, out_handle);
+            (gsize) term.arity, out_handle);
   if (rc == WYRELOG_E_OK && handles != NULL) {
     g_autofree gchar *key = compound_replay_cache_key (namespace_id,
-        compound_ref);
+            compound_ref);
     gint64 *cached = g_new (gint64, 1);
     *cached = *out_handle;
     g_hash_table_insert (handles, g_steal_pointer (&key), cached);
@@ -845,13 +760,13 @@ wyl_fact_compound_replay (wyl_fact_store_t *store, WylEngine *engine,
     return WYRELOG_E_INVALID;
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
-      g_int64_equal, g_free, NULL);
+          g_int64_equal, g_free, NULL);
   wyl_fact_store_lock (store);
   wyrelog_error_t rc = validate_scope_unlocked (conn, tenant_id, graph_id,
-      FALSE);
+          FALSE);
   if (rc == WYRELOG_E_OK)
     rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
-        compound_ref, 0, seen, NULL, out_handle);
+            compound_ref, 0, seen, NULL, out_handle);
   wyl_fact_store_unlock (store);
   return rc;
 }
@@ -869,13 +784,13 @@ wyl_fact_compound_replay_cached (wyl_fact_store_t *store, WylEngine *engine,
     return WYRELOG_E_INVALID;
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
-      g_int64_equal, g_free, NULL);
+          g_int64_equal, g_free, NULL);
   wyl_fact_store_lock (store);
   wyrelog_error_t rc = validate_scope_unlocked (conn, tenant_id, graph_id,
-      FALSE);
+          FALSE);
   if (rc == WYRELOG_E_OK)
     rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
-        compound_ref, 0, seen, handles, out_handle);
+            compound_ref, 0, seen, handles, out_handle);
   wyl_fact_store_unlock (store);
   return rc;
 }

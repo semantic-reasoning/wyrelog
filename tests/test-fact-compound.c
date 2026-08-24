@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "wyrelog/fact/compound-private.h"
+#include "wyrelog/fact/legacy-store-identity-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/engine.h"
@@ -83,14 +84,14 @@ write_shipment_templates (const gchar *dir)
   if (g_mkdir (fsm_dir, 0755) != 0 || g_mkdir (lobac_dir, 0755) != 0)
     return FALSE;
   return write_file_in_dir (dir, "bootstrap.dl",
-      ".decl shipment(order_id: symbol, route: path/2 side, carrier: symbol)\n"
-      ".decl seen(order_id: symbol)\n"
-      "seen(Order) :- shipment(Order, path(_, _), _).\n")
-      && write_file_in_dir (dir, "fsm/principal.dl", "// principal stub\n")
-      && write_file_in_dir (dir, "fsm/session.dl", "// session stub\n")
-      && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      "// permission scope stub\n")
-      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
+             ".decl shipment(order_id: symbol, route: path/2 side, carrier: symbol)\n"
+             ".decl seen(order_id: symbol)\n"
+             "seen(Order) :- shipment(Order, path(_, _), _).\n")
+         && write_file_in_dir (dir, "fsm/principal.dl", "// principal stub\n")
+         && write_file_in_dir (dir, "fsm/session.dl", "// session stub\n")
+         && write_file_in_dir (dir, "fsm/permission_scope.dl",
+             "// permission scope stub\n")
+         && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
 static wyrelog_error_t
@@ -135,7 +136,7 @@ replay_and_query (wyl_fact_store_t *store, gint64 durable_ref,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-      "logistics", durable_ref, out_handle);
+          "logistics", durable_ref, out_handle);
   if (rc != WYRELOG_E_OK) {
     rmdir_recursive (engine_dir);
     return rc;
@@ -162,6 +163,88 @@ replay_and_query (wyl_fact_store_t *store, gint64 durable_ref,
   if (rc != WYRELOG_E_OK)
     return rc;
   return seen.matches == 1 ? WYRELOG_E_OK : WYRELOG_E_EXEC;
+}
+
+static gint
+check_compound_identity_binding_is_atomic (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  if (dir == NULL)
+    return 200;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  const wyl_fact_compound_arg_t args[] = {
+    {.type = WYL_FACT_COMPOUND_ARG_SYMBOL,.as.text = "ICN"},
+    {.type = WYL_FACT_COMPOUND_ARG_SYMBOL,.as.text = "LAX"},
+  };
+  const wyl_fact_compound_value_t value = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipments",
+    .namespace_id = "logistics",
+    .functor = "path",
+    .args = args,
+    .n_args = G_N_ELEMENTS (args),
+  };
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_compound_create_schema (store) != WYRELOG_E_OK)
+      return 201;
+    wyl_fact_legacy_identity_set_test_fault
+      (WYL_FACT_LEGACY_IDENTITY_TEST_FAULT_COMPOUND_SECOND_ROW);
+    gint64 ref = 0;
+    if (wyl_fact_compound_put (store, &value, &ref) != WYRELOG_E_IO)
+      return 202;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata "
+        "WHERE key IN ('tenant_id','graph_id');", &count) || count != 0)
+      return 203;
+  }
+
+  /* Retrying through the compound entry point binds the complete tuple and
+   * persists both rows across another close/reopen. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    gint64 ref = 0;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_compound_put (store, &value, &ref) != WYRELOG_E_OK
+        || ref <= 0)
+      return 204;
+  }
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 205;
+    gint64 count = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (store),
+        "SELECT COUNT(*) FROM fact_store_metadata "
+        "WHERE (key='tenant_id' AND value='tenant-a') "
+        "OR (key='graph_id' AND value='shipments');", &count) || count != 2)
+      return 206;
+  }
+  (void) g_remove (path);
+  rmdir_recursive (dir);
+
+  /* The stricter store_kind precondition survives deduplication. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_fact_compound_create_schema (store) != WYRELOG_E_OK)
+      return 207;
+    duckdb_result result = { 0 };
+    if (duckdb_query (wyl_fact_store_get_connection (store),
+        "UPDATE fact_store_metadata SET value='wyrelog.audit' "
+        "WHERE key='store_kind';", &result) != DuckDBSuccess) {
+      duckdb_destroy_result (&result);
+      return 208;
+    }
+    duckdb_destroy_result (&result);
+    gint64 ref = 0;
+    if (wyl_fact_compound_put (store, &value, &ref) != WYRELOG_E_POLICY)
+      return 209;
+  }
+  return 0;
 }
 
 static gint
@@ -202,16 +285,16 @@ check_compound_persists_and_replays (void)
     duckdb_connection conn = wyl_fact_store_get_connection (store);
     gint64 count = 0;
     if (!count_i64 (conn,
-            "SELECT COUNT(*) FROM compound_terms WHERE functor = 'path' "
-            "AND arity = 2;", &count) || count != 1)
+        "SELECT COUNT(*) FROM compound_terms WHERE functor = 'path' "
+        "AND arity = 2;", &count) || count != 1)
       return 14;
     if (!count_i64 (conn,
-            "SELECT COUNT(*) FROM compound_args WHERE arg_type = 'symbol' "
-            "AND symbol_value IN ('ICN', 'LAX');", &count) || count != 2)
+        "SELECT COUNT(*) FROM compound_args WHERE arg_type = 'symbol' "
+        "AND symbol_value IN ('ICN', 'LAX');", &count) || count != 2)
       return 15;
     if (!count_i64 (conn,
-            "SELECT COUNT(*) FROM compound_args WHERE int64_value IS NOT NULL "
-            "OR child_compound_ref IS NOT NULL;", &count) || count != 0)
+        "SELECT COUNT(*) FROM compound_args WHERE int64_value IS NOT NULL "
+        "OR child_compound_ref IS NOT NULL;", &count) || count != 0)
       return 16;
     if (replay_and_query (store, durable_ref, &first_handle) != WYRELOG_E_OK)
       return 17;
@@ -266,10 +349,10 @@ check_compound_tenant_scope_and_append_validation (void)
     return 33;
   gboolean exists = TRUE;
   if (wyl_fact_compound_ref_exists (store, "tenant-b", "shipments",
-          "logistics", ref, &exists) != WYRELOG_E_POLICY)
+      "logistics", ref, &exists) != WYRELOG_E_POLICY)
     return 34;
   if (wyl_fact_compound_ref_exists (store, "tenant-a", "shipments",
-          "other", ref, &exists) != WYRELOG_E_OK || exists)
+      "other", ref, &exists) != WYRELOG_E_OK || exists)
     return 341;
 
   const wyl_policy_fact_relation_schema_column_t columns[] = {
@@ -334,7 +417,7 @@ check_compound_tenant_scope_and_append_validation (void)
   };
   row_values[1].as.compound_ref = ref;
   if (wyl_fact_store_append_batch (store, &other_namespace_schema,
-          &other_namespace_batch, NULL) != WYRELOG_E_POLICY)
+      &other_namespace_batch, NULL) != WYRELOG_E_POLICY)
     return 361;
   row_values[1].as.compound_ref = ref;
   if (wyl_fact_store_append_batch (store, &schema, &batch, NULL)
@@ -376,8 +459,8 @@ check_compound_corruption_is_local (void)
     return 531;
   duckdb_result result = { 0 };
   g_autofree gchar *sql = g_strdup_printf
-      ("DELETE FROM compound_args WHERE compound_ref = %" G_GINT64_FORMAT
-      " AND arg_index = 1;", bad_ref);
+        ("DELETE FROM compound_args WHERE compound_ref = %" G_GINT64_FORMAT
+          " AND arg_index = 1;", bad_ref);
   if (duckdb_query (wyl_fact_store_get_connection (store), sql, &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -385,9 +468,9 @@ check_compound_corruption_is_local (void)
   }
   duckdb_destroy_result (&result);
   g_autofree gchar *drift_sql = g_strdup_printf
-      ("UPDATE compound_args SET symbol_value = 'SFO' "
-      "WHERE compound_ref = %" G_GINT64_FORMAT " AND arg_index = 0;",
-      drift_ref);
+        ("UPDATE compound_args SET symbol_value = 'SFO' "
+          "WHERE compound_ref = %" G_GINT64_FORMAT " AND arg_index = 0;",
+          drift_ref);
   if (duckdb_query (wyl_fact_store_get_connection (store), drift_sql, &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -401,17 +484,17 @@ check_compound_corruption_is_local (void)
     return 55;
   gint64 ignored = 0;
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", bad_ref, &ignored) != WYRELOG_E_POLICY) {
+      "logistics", bad_ref, &ignored) != WYRELOG_E_POLICY) {
     rmdir_recursive (engine_dir);
     return 56;
   }
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", drift_ref, &ignored) != WYRELOG_E_POLICY) {
+      "logistics", drift_ref, &ignored) != WYRELOG_E_POLICY) {
     rmdir_recursive (engine_dir);
     return 561;
   }
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", good_ref, &ignored) != WYRELOG_E_OK) {
+      "logistics", good_ref, &ignored) != WYRELOG_E_OK) {
     rmdir_recursive (engine_dir);
     return 57;
   }
@@ -446,7 +529,7 @@ check_nested_compound_replay (void)
     return 72;
   const wyl_fact_compound_arg_t scope_args[] = {
     {.type = WYL_FACT_COMPOUND_ARG_COMPOUND_REF,.as.compound_ref =
-          metadata_ref},
+         metadata_ref},
     {.type = WYL_FACT_COMPOUND_ARG_INT64,.as.int64_value = 7},
   };
   const wyl_fact_compound_value_t scope_value = {
@@ -467,13 +550,13 @@ check_nested_compound_replay (void)
     return 74;
   gint64 handle = 0;
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", scope_ref, &handle) != WYRELOG_E_OK || handle <= 0)
+      "logistics", scope_ref, &handle) != WYRELOG_E_OK || handle <= 0)
     return 75;
   duckdb_result result = { 0 };
   g_autofree gchar *cycle_sql = g_strdup_printf
-      ("UPDATE compound_args SET child_compound_ref = %" G_GINT64_FORMAT
-      " WHERE compound_ref = %" G_GINT64_FORMAT " AND arg_index = 0;",
-      scope_ref, scope_ref);
+        ("UPDATE compound_args SET child_compound_ref = %" G_GINT64_FORMAT
+          " WHERE compound_ref = %" G_GINT64_FORMAT " AND arg_index = 0;",
+          scope_ref, scope_ref);
   if (duckdb_query (wyl_fact_store_get_connection (store), cycle_sql, &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -481,10 +564,10 @@ check_nested_compound_replay (void)
   }
   duckdb_destroy_result (&result);
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", scope_ref, &handle) != WYRELOG_E_POLICY)
+      "logistics", scope_ref, &handle) != WYRELOG_E_POLICY)
     return 77;
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", metadata_ref, &handle) != WYRELOG_E_OK)
+      "logistics", metadata_ref, &handle) != WYRELOG_E_OK)
     return 78;
   gint64 chain_ref = metadata_ref;
   for (guint i = 0; i < 34; i++) {
@@ -505,7 +588,7 @@ check_nested_compound_replay (void)
       return 79;
   }
   if (wyl_fact_compound_replay (store, engine, "tenant-a", "shipments",
-          "logistics", chain_ref, &handle) != WYRELOG_E_POLICY)
+      "logistics", chain_ref, &handle) != WYRELOG_E_POLICY)
     return 80;
   return 0;
 }
@@ -513,7 +596,10 @@ check_nested_compound_replay (void)
 int
 main (void)
 {
-  gint rc = check_compound_persists_and_replays ();
+  gint rc = check_compound_identity_binding_is_atomic ();
+  if (rc != 0)
+    return rc;
+  rc = check_compound_persists_and_replays ();
   if (rc != 0)
     return rc;
   rc = check_compound_tenant_scope_and_append_validation ();
