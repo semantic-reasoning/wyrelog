@@ -1941,6 +1941,152 @@ check_fact_forget_reconcile_skips_out_of_scope_intent (void)
   return 0;
 }
 
+/* The boot probe asks whether anything is pending WITHOUT taking a write
+ * lease, so it must answer the question and change nothing.  A probe that
+ * answered by calling the reconciler would pass a bare count assertion and
+ * fail these: the intent would be gone and an audit row would exist. */
+static gint
+check_fact_forget_pending_count_reports_without_executing (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_pending_intent (&store, &schema, &table) != 0)
+    return 2300;
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+
+  gsize pending = 0;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
+      &pending) != WYRELOG_E_OK)
+    return 2301;
+  if (pending != 1)
+    return 2302;
+
+  gint64 count = 0;
+  /* Still pending: the survey did not converge it. */
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &count) || count != 1)
+    return 2303;
+  /* And nothing was deleted through. */
+  g_autofree gchar *proj_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (conn, proj_sql, &count) || count != 1)
+    return 2304;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+      || count != 0)
+    return 2305;
+
+  /* Asking twice is the boot-over-boot case and must be stable. */
+  pending = 0;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
+      &pending) != WYRELOG_E_OK || pending != 1)
+    return 2306;
+  return 0;
+}
+
+/* The counterpart of check_fact_forget_reconcile_ignores_schema_only_store:
+ * a store whose schema was materialized but never appended to has a ledger and
+ * no bound identity.  The survey must report zero rather than refuse, or boot
+ * would escalate to a write lease and then report a failed erasure for a graph
+ * that has never held a fact. */
+static gint
+check_fact_forget_pending_count_ignores_schema_only_store (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 2310;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2311;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  /* The ledger exists and is empty, so the case is reached past the ledger
+   * check rather than short-circuited by it. */
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_intent;", &count)
+      || count != 0)
+    return 2312;
+  /* And the identity really is unbound, which is what a scope check placed
+   * before the count would refuse. */
+  g_autofree gchar *bound = NULL;
+  if (query_text (conn,
+      "SELECT value FROM fact_store_metadata WHERE key = 'tenant_id';",
+      &bound) || bound != NULL)
+    return 2313;
+
+  gsize pending = 1;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
+      &pending) != WYRELOG_E_OK)
+    return 2314;
+  if (pending != 0)
+    return 2315;
+  return 0;
+}
+
+/* A store that is not the one the caller meant to open must be refused by the
+ * survey, so boot never escalates to a write lease it would then refuse.
+ * Before #869 U1 such a store took that lease on every boot and does
+ * nothing with it. */
+static gint
+check_fact_forget_pending_count_refuses_wrong_scope (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_pending_intent (&store, &schema, &table) != 0)
+    return 2320;
+
+  gsize pending = 99;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-z", "orders",
+      &pending) != WYRELOG_E_POLICY)
+    return 2321;
+  /* The header promises the count is zeroed on every non-OK outcome, so a
+   * caller that ignores the return value cannot read a stale 99 as
+   * convergence work.  The seed above is that stale value. */
+  if (pending != 0)
+    return 2329;
+  pending = 99;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-a", "shipments",
+      &pending) != WYRELOG_E_POLICY)
+    return 2322;
+  if (pending != 0)
+    return 2330;
+
+  /* Refusing is not converging: nothing may have been written. */
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &count) || count != 1)
+    return 2323;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+      || count != 0)
+    return 2324;
+
+  /* The header's zeroing promise covers the INVALID paths too, and a caller
+   * that passes a bad argument is the likeliest to ignore the return value.
+   * Seed a stale count before each so a missing zero is visible. */
+  pending = 99;
+  if (wyl_fact_store_forget_pending_count (NULL, "tenant-a", "orders",
+      &pending) != WYRELOG_E_INVALID)
+    return 2325;
+  if (pending != 0)
+    return 2331;
+  pending = 99;
+  if (wyl_fact_store_forget_pending_count (store, NULL, "orders", &pending)
+      != WYRELOG_E_INVALID)
+    return 2326;
+  if (pending != 0)
+    return 2332;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-a", NULL, &pending)
+      != WYRELOG_E_INVALID)
+    return 2327;
+  if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders", NULL)
+      != WYRELOG_E_INVALID)
+    return 2328;
+  return 0;
+}
+
 static const WylFactStoreIdentity test_identity = {
   .tenant_id = "tenant-a",
   .graph_id = "orders",
@@ -2664,6 +2810,15 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_ignores_schema_only_store ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_pending_count_reports_without_executing ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_pending_count_ignores_schema_only_store ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_pending_count_refuses_wrong_scope ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_retract_by_batch_id ();

@@ -10,6 +10,8 @@
 #include "fact-test-support.h"
 #include "fact/provisioning-construct-private.h"
 #include "fact/provisioning-run-private.h"
+#include "fact/replay-private.h"
+#include "fact/runtime-private.h"
 #include "fact/store-identity-private.h"
 #include "fact/store-open-private.h"
 #include "fact/store-private.h"
@@ -1351,10 +1353,237 @@ test_open_for_graph_serves_active_graph (void)
 }
 #endif
 
+/* Locate the directory holding a graph's artifacts by finding the one that
+ * contains the lock file, rather than reconstructing the layout here. */
+static gchar *
+find_artifact_dir (const gchar *root)
+{
+  g_autoptr (GDir) directory = g_dir_open (root, 0, NULL);
+  if (directory == NULL)
+    return NULL;
+  const gchar *name;
+  while ((name = g_dir_read_name (directory)) != NULL) {
+    g_autofree gchar *child = g_build_filename (root, name, NULL);
+    if (!g_file_test (child, G_FILE_TEST_IS_DIR)
+        || g_file_test (child, G_FILE_TEST_IS_SYMLINK))
+      continue;
+    g_autofree gchar *lock = g_build_filename (child, "facts.duckdb.lock",
+            NULL);
+    if (g_file_test (lock, G_FILE_TEST_EXISTS))
+      return g_steal_pointer (&child);
+    gchar *nested = find_artifact_dir (child);
+    if (nested != NULL)
+      return nested;
+  }
+  return NULL;
+}
+
+/* #869 rules that a read-only fact root needs no disposition of its own -- no
+ * third probe outcome, no new status state, no "expected permanent
+ * degradation" paragraph.  That ruling holds BY CONSTRUCTION, and the
+ * construction is a signature: every lock-file open in the artifact namespace
+ * is unconditionally O_RDWR (graph-artifact-namespace-private.c:1200, :1205,
+ * :1247), and open_checked_lock (:1189) takes no access-mode parameter at
+ * all.  acquire_lease (:1518) uses |exclusive| only to choose LOCK_EX vs
+ * LOCK_SH at :1529 and to record it on the lease at :1544; neither reaches an
+ * open.  So there is no path by which a reader guard could request read-only
+ * lock access, and open(2) returns EROFS when write access is requested on a
+ * read-only mount.  That is where the confidence comes from -- not from this
+ * test.  Note that the fourth mutation below had to ADD a parameter to
+ * express the regression at all: the mutation's shape is itself evidence for
+ * the claim.
+ *
+ * READ THIS BEFORE TRUSTING THIS TEST.  It asserts a true and relevant
+ * property -- that the read-only open is never more permissive than the
+ * writable one -- and NO PERMISSION-BIT FIXTURE CAN FALSIFY IT.  That is a
+ * closed result, not an open hunt.  The lock path has two serial gates and
+ * this test has one lever:
+ *
+ *   gate A  O_RDWR access mode on the open itself
+ *   gate B  the (st_mode & 07777) == 0600 equality check in lock_stat_matches
+ *           (:1158-1176), called unconditionally from open_checked_lock at
+ *           :1217, :1234, :1243 and :1250 -- before acquire_lease branches on
+ *           mode at :1529
+ *   lever   chmod on the lock file, which trips both
+ *
+ * So the mode space partitions into {0600 -> both opens succeed} and {every
+ * other mode -> both fail identically, before any flock, whatever the open
+ * flags say}.  Measured: at 0400 the open returns EACCES (gate A); at 0644 the
+ * open SUCCEEDS and zero flock calls follow (gate B).  There is no permission
+ * bit at which the read-only open is admitted and the writable one refused,
+ * so the two assertions can only hold jointly or be jointly unreachable.
+ *
+ * Falsifying the property needs read to pass where write fails, which means
+ * mutating BOTH gates -- O_RDONLY for readers and relaxing the 0600 check for
+ * readers.  A two-point mutation is not evidence that a test is live.  Four
+ * single-point mutations were tried and all survived, each masked by the other
+ * gate:
+ *
+ *   - :1205 (pin EEXIST fallback) O_RDWR -> O_RDONLY
+ *   - :1247 (reader guard lock open) O_RDWR -> O_RDONLY
+ *   - both of the above together
+ *   - threading |exclusive| into open_checked_lock so the reader path opens
+ *     O_RDONLY while the writer path keeps O_RDWR -- the realistic regression
+ *
+ * Two earlier attributions were also wrong: chmod 0555 on the directory is
+ * refused at :1451 by the 0700 mode check before any open, and the 0400
+ * lock-file variant here does reach an O_RDWR open (the pin fallback, per
+ * strace: EEXIST then EACCES then WYRELOG_E_IO, before any flock) yet still
+ * survives every mutation above.
+ *
+ * So do not cite this test as evidence for the ruling, and do not assume it
+ * guards the property it names.  It is kept as a cheap tripwire on the
+ * read-only-is-not-more-permissive direction; the property itself is pinned
+ * by the construction cited above, and making that enforceable rather than
+ * greppable is #883 -- which requires its check be demonstrated FAILING
+ * against a deliberately conditional lock open, the one bar that would have
+ * caught all four mutations listed above. */
+static void
+test_read_only_open_is_not_more_permissive_than_writable (void)
+{
+  if (geteuid () == 0) {
+    g_test_skip ("running as root; directory permissions do not bind");
+    return;
+  }
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-provisioning-ro-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  seed_graph (wyl_policy_store_get_db (store), "tenant-ro", "graph-ro");
+  WylPolicyGraphProvisioningInput input = make_input ("tenant-ro", "graph-ro");
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (store, &input, root, NULL),
+      ==, WYRELOG_E_OK);
+
+  g_autofree gchar *artifacts = find_artifact_dir (root);
+  g_assert_nonnull (artifacts);
+  g_autofree gchar *lock = g_build_filename (artifacts,
+          "facts.duckdb.lock", NULL);
+
+  /* The control, and it covers both modes deliberately: without the
+  * writable half, the "writable is refused" assertion below could pass
+  * because that open was already broken for an unrelated reason. */
+  wyl_fact_store_t *fact_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
+      "tenant-ro", "graph-ro", FALSE, &fact_store), ==, WYRELOG_E_OK);
+  wyl_fact_store_close (fact_store);
+  fact_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
+      "tenant-ro", "graph-ro", TRUE, &fact_store), ==, WYRELOG_E_OK);
+  wyl_fact_store_close (fact_store);
+
+  /* The directory and the main file keep the modes the pair check
+  * requires, so the refusal below cannot come from that check. */
+  g_assert_cmpint (g_chmod (lock, 0400), ==, 0);
+
+  fact_store = NULL;
+  wyrelog_error_t read_only = wyl_fact_store_open_provisioned_graph (store,
+          root, "tenant-ro", "graph-ro", FALSE, &fact_store);
+  if (read_only == WYRELOG_E_OK)
+    wyl_fact_store_close (fact_store);
+  fact_store = NULL;
+  wyrelog_error_t writable = wyl_fact_store_open_provisioned_graph (store,
+          root, "tenant-ro", "graph-ro", TRUE, &fact_store);
+  if (writable == WYRELOG_E_OK)
+    wyl_fact_store_close (fact_store);
+
+  g_assert_cmpint (g_chmod (lock, 0600), ==, 0);
+
+  /* The writable open failing is the uninteresting half. */
+  g_assert_cmpint (writable, !=, WYRELOG_E_OK);
+  /* This is the half the ruling rests on: the probe cannot read a graph the
+   * engine builder cannot open, so no graph is newly reported as carrying an
+   * unconverged erasure on account of being read-only. */
+  g_assert_cmpint (read_only, !=, WYRELOG_E_OK);
+
+  remove_root (root);
+}
+
+/* #869 U1's behavioural claim, and the only test that falsifies it.
+ *
+ * Boot used to open every graph's fact store WRITABLE just to ask whether a
+ * forget intent was pending.  U1 asks read-only first and escalates only when
+ * something is pending.  Neither configuration can tell those apart on a quiet
+ * boot -- off-bridge open_graph_store discards |writable| entirely
+ * (replay.c:604), and under the bridge an uncontended LOCK_EX succeeds just as
+ * a LOCK_SH does -- so proving the split needs contention that only the bridge
+ * can express.
+ *
+ * A held reader guard is that contention.  The engine builder already opens
+ * read-only (replay.c:635), so it is unaffected; only the forget path cared
+ * about the difference.  That makes the pre-U1 asymmetry systematic rather
+ * than racy: a graph whose store another reader holds would build its engine
+ * fine and report its forget ledger unreadable, on every boot.
+ *
+ * Revert reconcile_graph_forgets to the unconditional writable open and the
+ * last assertion here fails with graphs_forget_probe_unavailable == 1. */
+static void
+test_boot_forget_probe_survives_a_held_reader_guard (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-provisioning-lease-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  seed_graph (wyl_policy_store_get_db (store), "tenant-lease", "graph-lease");
+  WylPolicyGraphProvisioningInput input = make_input ("tenant-lease",
+          "graph-lease");
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (store, &input, root, NULL),
+      ==, WYRELOG_E_OK);
+
+  /* Hold a reader guard for the rest of the test. */
+  wyl_fact_store_t *reader = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
+      "tenant-lease", "graph-lease", FALSE, &reader), ==, WYRELOG_E_OK);
+  g_assert_nonnull (reader);
+
+  /* The contention is real: a writable open is refused while it is held.
+   * Without this, a passing test below could just mean nothing contended. */
+  wyl_fact_store_t *writer = NULL;
+  wyrelog_error_t writable = wyl_fact_store_open_provisioned_graph (store,
+          root, "tenant-lease", "graph-lease", TRUE, &writer);
+  if (writable == WYRELOG_E_OK)
+    wyl_fact_store_close (writer);
+  g_assert_cmpint (writable, ==, WYRELOG_E_BUSY);
+
+  /* And a second reader is admitted, so the guard is shared and not
+   * exclusive -- which is why the read-only probe can succeed here. */
+  wyl_fact_store_t *second = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
+      "tenant-lease", "graph-lease", FALSE, &second), ==, WYRELOG_E_OK);
+  wyl_fact_store_close (second);
+
+  g_autoptr (WylFactGraphRuntimeManager) manager = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (store, root, manager, &summary);
+
+  /* The control: the graph was actually visited. */
+  g_assert_cmpuint (summary.graphs_seen, ==, 1);
+  /* The claim.  Pre-U1 this is 1: the writable open loses to the held reader
+   * guard, so boot reports it could not look for a pending forget on a graph
+   * it is simultaneously serving. */
+  g_assert_cmpuint (summary.graphs_forget_probe_unavailable, ==, 0);
+  /* Nothing was pending, so nothing failed to converge either. */
+  g_assert_cmpuint (summary.graphs_forget_reconcile_failed, ==, 0);
+
+  wyl_fact_store_close (reader);
+  remove_root (root);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact/provisioning-run/probe-survives-held-reader-guard",
+      test_boot_forget_probe_survives_a_held_reader_guard);
+  g_test_add_func ("/fact/provisioning-run/read-open-not-more-permissive",
+      test_read_only_open_is_not_more_permissive_than_writable);
   g_test_add_func ("/fact/provisioning-run/drives-fresh-graph-to-active",
       test_run_drives_fresh_graph_to_active);
   g_test_add_func ("/fact/provisioning-run/rejects-reprovision-of-active",

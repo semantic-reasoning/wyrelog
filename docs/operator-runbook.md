@@ -1055,22 +1055,26 @@ So a forget that was already in flight when the graph was sealed will finish on
 the next start; only an erasure request that arrives after the seal is stranded.
 
 Boot convergence is best-effort by design: a graph whose forget cannot be
-converged is logged and skipped, never allowed to stop the daemon starting. Two
-distinct lines appear in the `BOOT` section:
+converged is logged and skipped, never allowed to stop the daemon starting.
+
+Since #869 the daemon asks this question read-only first. It opens each graph's
+fact store without requesting write access, counts pending intents, and takes a
+write lease only when something is actually pending. A boot with nothing to
+converge -- the overwhelmingly common case -- now takes no write lease on any
+graph, and a store reached through a mis-pointed path -- once it has anything
+pending -- is refused at the probe rather than after a lease it would then
+decline.
+
+Three distinct lines appear in the `BOOT` section:
 
 - `could not open the fact store of tenant <t> graph <g> to look for a pending
-  forget` (warning) -- the store would not open for writing, so its forget
-  ledger was never read and nothing is known about any erasure for that graph.
-  Usually the graph is also reported degraded, because the read-only open the
-  engine build needs fails for the same reason, and the warning then adds
-  nothing to the degraded report. If the graph is reported ready *at startup*
-  instead, the store refused a *write* handle while still serving reads -- that
-  graph is answering queries and may hold an erasure that never converged.
-  Investigate that combination; do not dismiss the warning on a graph that
-  reports ready. A graph that was degraded at startup and reports ready later
-  in the run is a different case with the same appearance, and reaches it
-  without any lease refusal -- see "A graph reporting `forget_incomplete`"
-  below.
+  forget` (warning) -- the store would not open at all, so its forget ledger
+  was never read and nothing is known about any erasure for that graph. The
+  graph is normally reported degraded too, because the engine build makes the
+  same read-only open and fails for the same reason. Since the probe and the
+  engine build now request identical access, a graph that reports *ready* while
+  emitting this warning is not the write-lease case it used to be -- that
+  combination is the anomaly the third line below reports.
 - `a pending fact forget recorded for tenant <t> graph <g> could not be
   converged` (error) -- an intent was found and did not complete. Personal data
   that was accepted for deletion is still present in that graph. Investigate
@@ -1078,18 +1082,40 @@ distinct lines appear in the `BOOT` section:
   `forget_incomplete` on `/facts/status`, so this case is visible without
   reading logs; the warning above is not.
 
-Note that at `wyrelog_log_max_level=error`, which the option's own description
-recommends for production builds, the warning is compiled out entirely. The
-error survives.
+  This line now also covers the case the previous revision of this runbook told
+  you to watch for separately. A write lease is requested only after the
+  read-only probe has counted a pending intent, so a graph refused that lease
+  is a graph we know has an outstanding erasure: it lands here, as an error,
+  with `forget_incomplete` on `/facts/status`. It no longer reports `ready`
+  over an unreconciled ledger.
+- `the fact store of tenant <t> graph <g> refused the forget probe with rc=<n>
+  but served the engine build moments later` (error) -- the probe and the
+  engine build make the same call with the same arguments, and they disagreed.
+  Nothing is known about that graph's erasure state; no `/facts/status` verdict
+  is written for it, because "we could not establish it" is not the same as
+  "an erasure is outstanding".
 
-That matters most for the combination the warning bullet above singles out. In
-most configurations a store that could not be opened for the forget probe also
-failed to build an engine, so the graph reports a replay state and the warning
-adds nothing. Under the secure bridge a provisioned graph can be refused a
-*write* handle while still serving reads: there the graph reports `ready`, and
-on a production build set to `error` the warning that would have told you is
-gone. That is the case to watch, and the reason to collect `BOOT` output at
-`warn` at least once after a configuration change.
+  Read the `rc` before concluding anything. Under the secure bridge this can be
+  a lost race for the shared reader guard, which is transient and clears on its
+  own. But any transient resource failure that clears between the two opens
+  produces the same line -- an exhausted descriptor table is the obvious one,
+  and is not bridge-specific. A recurring instance of this line on the same
+  graph is worth investigating; a single one with an `rc` that indicates
+  resource exhaustion is a capacity problem, not a lease problem.
+
+Note that at `wyrelog_log_max_level=error`, which the option's own description
+recommends for production builds, the warning is compiled out entirely. Both
+errors survive.
+
+That gap is narrower than it was. The case this runbook previously singled out
+-- a bridge graph refused a *write* handle while still serving reads, reporting
+`ready` with only a compiled-out warning to tell you -- cannot occur now: no
+write lease is taken unless a pending intent has already been counted, and a
+refusal at that point is an error, not a warning. What remains behind the
+`error` threshold is the first bullet: a store that would not open at all,
+which in nearly every case also shows up as a degraded graph. Collecting `BOOT`
+output at `warn` at least once after a configuration change is still worthwhile
+for that reason.
 
 The following unary `fact(V)` flow shows the required contract for a registered
 `fact(value:int64)` relation:

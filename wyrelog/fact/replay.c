@@ -726,6 +726,51 @@ build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
              ctx->info, out_engine);
 }
 
+/* Ask whether a graph has any pending forget intention without asking for
+ * write access.  "Only a read lease" is the bridge case: off-bridge, and for
+ * a LEGACY_UNCLASSIFIED graph under the bridge, open_graph_store discards
+ * |writable| and this takes the same read-write DuckDB handle the engine
+ * builder takes.
+ *
+ * The store handle lives and dies inside this function and the count
+ * is returned by value, so no probe handle is in scope where the caller
+ * escalates to a writable open.  That makes "the probe contends with the
+ * escalation it decided on" unrepresentable rather than something a test has
+ * to police -- which matters because off-bridge the two opens are the same
+ * call and no off-bridge test could catch it.
+ *
+ * *out_opened reports whether the store was examined at all: TRUE means the
+ * open succeeded, FALSE that it did not.  Do not read more into a failure
+ * than that.  TRUE with a non-OK rc means only that we opened the store --
+ * the survey can still fail with E_IO out of table_exists_unlocked or
+ * load_pending_forget_intents_unlocked, which is a store examined and nothing
+ * learned.  Today the caller cannot tell that from a genuinely unconverged
+ * erasure and reports both as incomplete; separating them is what U2's
+ * loaded/executed/refused/failed counts are for. */
+static wyrelog_error_t
+probe_graph_forgets (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info, gboolean *out_opened,
+    gsize *out_pending)
+{
+  g_assert (out_opened != NULL);
+  g_assert (out_pending != NULL);
+  *out_opened = FALSE;
+  *out_pending = 0;
+
+  g_autoptr (wyl_fact_store_t) probe = NULL;
+  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
+          &probe);
+  /* A graph whose store has never been written has nothing to converge.  The
+   * resolver reports that as NOT_FOUND. */
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_opened = TRUE;
+  return wyl_fact_store_forget_pending_count (probe, graph_info->tenant_id,
+             graph_info->graph_id, out_pending);
+}
+
 /* Converge any forget interrupted by a crash, before the engine for this graph
  * is built.  A forget is durable in two steps -- a PENDING intent, then the
  * deletion and its completion -- and nothing in the request path resumes the
@@ -765,16 +810,27 @@ reconcile_graph_forgets (wyl_policy_store_t *policy, const gchar *fact_root,
       || graph_info == NULL)
     return WYRELOG_E_INVALID;
 
+  gsize pending = 0;
+  wyrelog_error_t rc = probe_graph_forgets (policy, fact_root, graph_info,
+          out_opened, &pending);
+  /* Nothing pending, or we could not find out.  Either way no write lease is
+   * taken: the overwhelmingly common boot has no outstanding erasure, and
+   * taking an exclusive lease on every graph to discover that is what this
+   * probe exists to avoid. */
+  if (rc != WYRELOG_E_OK || pending == 0)
+    return rc;
+
+  /* Something is pending, so escalate.  The probe's store handle is already
+   * closed -- it never leaves probe_graph_forgets -- so this open cannot
+   * contend with it. */
   g_autoptr (wyl_fact_store_t) store = NULL;
-  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, TRUE,
-          &store);
-  /* A graph whose store has never been written has nothing to converge.  The
-   * resolver reports that as NOT_FOUND. */
-  if (rc == WYRELOG_E_NOT_FOUND)
-    return WYRELOG_E_OK;
+  rc = open_graph_store (policy, fact_root, graph_info, TRUE, &store);
+  /* NOT_FOUND is not benign here.  The probe just read this store, so a
+   * resolver that now reports it missing is an anomaly, not a graph that was
+   * never written, and reporting it as convergence would claim an erasure
+   * completed that did not. */
   if (rc != WYRELOG_E_OK)
     return rc;
-  *out_opened = TRUE;
   /* No schema creation here: this runs for every graph at every boot.  A
    * store with no forget ledger has nothing pending, and the reconciler
    * reports that as success rather than as a missing-table error. */
@@ -817,9 +873,15 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     /* CONVERGED, INCOMPLETE, or no verdict at all -- see the write below. */
     gboolean forget_probed = FALSE;
     gboolean forget_incomplete = FALSE;
+    gboolean forget_attempted = FALSE;
+    /* Hoisted so the tripwire below can report it: the rc is what separates a
+     * lost lease race from a transient resource failure at probe time, and
+     * those two produce an identical signal. */
+    wyrelog_error_t forget_rc = WYRELOG_E_OK;
     if (fact_root != NULL && fact_root[0] != '\0') {
+      forget_attempted = TRUE;
       gboolean opened = FALSE;
-      wyrelog_error_t forget_rc = reconcile_graph_forgets (policy, fact_root,
+      forget_rc = reconcile_graph_forgets (policy, fact_root,
               &spec->info, &opened);
       forget_probed = forget_rc == WYRELOG_E_OK || opened;
       forget_incomplete = forget_rc != WYRELOG_E_OK && opened;
@@ -857,6 +919,48 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
       summary.graphs_loaded++;
     else
       summary.graphs_degraded++;
+    /* The forget probe and the engine builder open the same store with
+     * byte-identical arguments, so a probe that could not open it while the
+     * engine built fine is two identical opens disagreeing.  The bridge makes
+     * that possible -- the reader guard takes LOCK_SH|LOCK_NB and can lose to
+     * transient contention, the residual shape #870 left behind -- but a lost
+     * lease is NOT the only cause.  Any transient resource failure that clears
+     * between the two opens produces the identical signal, and EMFILE at probe
+     * time is neither bridge-specific nor rare.  That is why the rc is
+     * reported: a reader of this counter must be able to tell an exhausted
+     * descriptor table from a lost race, because only one of the two is
+     * evidence that the population #550 asks about exists.  Report it here,
+     * where both outcomes are in hand.
+     *
+     * Not an assertion: boot must never abort on a graph.  And no status
+     * verdict, because we do not know whether an erasure is outstanding --
+     * the two opens disagreeing is itself the anomaly worth naming.
+     *
+     * This line is also the instrument that settles whether the racy window
+     * is a population worth its own WylFactGraphForgetState value in #550.
+     * If it is ever observed in the field, that population exists; until
+     * then, nothing shows it does.
+     *
+     * forget_attempted is half of the condition, not padding around it.  The
+     * state being reported is "the probe ran and was refused, while the engine
+     * built", and forget_probed cannot express that on its own: it is FALSE
+     * both when a probe was refused and when no probe was ever attempted,
+     * which is the same conflation this issue removes one layer up.  Without
+     * this term the line would read "the forget block established no verdict",
+     * a weaker and different claim than the one above.  (It happens to be
+     * inert today -- with no fact root the engine build fails for the same
+     * missing root, so graph_rc is not OK either: seen=1 loaded=0 degraded=1.
+     * That is why no test discriminates it, not a reason to drop it.) */
+    if (forget_attempted && !forget_probed && graph_rc == WYRELOG_E_OK) {
+      summary.graphs_forget_probe_disagreed++;
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "the fact store of tenant %s graph %s refused the forget probe "
+          "with rc=%d but served the engine build moments later; the "
+          "pending-erasure state of that graph was not established",
+          spec->info.tenant_id != NULL ? spec->info.tenant_id : "(unset)",
+          spec->info.graph_id != NULL ? spec->info.graph_id : "(unset)",
+          (int) forget_rc);
+    }
     /* After the refresh, never before it.  The setter does not create an
      * entry and refuses a tombstone, so a verdict written earlier is dropped
      * -- NOT_FOUND on a graph the runtime has not built yet, which is every
@@ -875,21 +979,26 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
      *
      * Argued, not proved, and the whole choice is unpinned rather than just
      * its reasoning: flipping this to write INCOMPLETE for an unprobed graph
-     * passes the entire suite unchanged.  Off-bridge and for legacy graphs
-     * under it, the reconcile open and the engine open are the same call --
-     * open_graph_store discards writable -- so a graph that could not be
-     * probed also failed to build and is never mapped through the forget
-     * axis, which is why no fixture can tell the two policies apart.  Under
-     * the bridge a provisioned graph can be refused a write lease while still
-     * serving reads; that is the only state where the choice is observable,
-     * and it needs an access-mode-conditional open fault no seam provides.
-     * Do not read the green suite as agreement with this decision.
+     * passes the entire suite unchanged.  The reason is now stronger than it
+     * was when this was written.  Since #869 U1 the forget probe and the
+     * engine builder BOTH open read-only (probe_graph_forgets and
+     * wyl_fact_replay_open_graph_engine), so they are the same call in every
+     * configuration, not only off-bridge: a graph that could not be probed
+     * also failed to build and is never mapped through the forget axis.  The
+     * write-lease refusal that used to be the one observable state no longer
+     * reaches this decision at all, because no write lease is taken unless
+     * something is pending.  What remains is the LOCK_SH race the tripwire
+     * above counts.  Do not read the green suite as agreement with this
+     * decision.
      *
-     * The residual it leaves is recorded on #870 and in the runbook: on a
-     * bridge build a graph refused a write lease keeps the CONVERGED zero and
-     * reports ready with a ledger that was never reconciled.  Closing that
-     * needs a third state meaning "not examined", which is #869's vocabulary
-     * work rather than this unit's. */
+     * The residual this used to leave -- a bridge graph refused a write lease
+     * keeping the CONVERGED zero and reporting ready over an unreconciled
+     * ledger -- is closed by #869 U1 and no longer applies.  A write lease is
+     * requested only after the read-only probe has counted a pending intent,
+     * so a refusal now lands with the store opened: graphs_forget_reconcile_
+     * failed, an ERROR that survives wyrelog_log_max_level=error, and
+     * FORGET_INCOMPLETE.  Do not re-open #870 or #550 on the strength of the
+     * older wording. */
     if (forget_probed)
       (void) wyl_fact_graph_runtime_manager_set_forget_state (runtime_manager,
           &spec->key, forget_incomplete ? WYL_FACT_GRAPH_FORGET_INCOMPLETE

@@ -25,6 +25,18 @@ typedef struct
    * merging them would make this counter a near-duplicate of graphs_degraded
    * while diluting the one signal no other counter carries. */
   guint graphs_forget_probe_unavailable;
+  /* Graphs whose store refused the forget probe and then served the engine
+   * build moments later.  Two opens with byte-identical arguments disagreed,
+   * so the pending-erasure state of the graph was never established -- which
+   * is neither of the two above: nothing was learned, but not because the
+   * store was unopenable.  A lost lease is NOT the only cause and this is not
+   * unreachable off-bridge: any transient resource failure that clears between
+   * the two opens produces the identical signal, and EMFILE at probe time is
+   * neither bridge-specific nor rare.  Under the bridge the reader guard also
+   * takes LOCK_SH|LOCK_NB and can lose to contention.  Read the rc on the BOOT
+   * line before concluding which occurred -- only the lease case is evidence
+   * for the population #550 asks about. */
+  guint graphs_forget_probe_disagreed;
 } wyl_fact_replay_summary_t;
 
 typedef enum
