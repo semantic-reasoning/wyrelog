@@ -4064,6 +4064,14 @@ test_mutation_handle_lifetime_temp_tree (void)
 }
 
 static const WinGuardedCase win_guarded_cases[] = {
+#if defined (test_working_handle_free_closes_unlinked_object)                 \
+  || defined (test_locator_replace_open_destination)                          \
+  || defined (test_native_namespace_sidecar_replacement_isolated)             \
+  || defined (test_native_namespace_main_sidecar_lifecycle)                    \
+  || defined (test_mutation_handle_lifetime_temp_tokens)                       \
+  || defined (test_mutation_handle_lifetime_temp_tree)
+#error "mutation HANDLE-lifetime callbacks must not be macros"
+#endif
   {"/fact/artifact-namespace/windows/mutation-handle-lifetime/working-guardian",
    test_working_handle_free_closes_unlinked_object},
   {"/fact/artifact-namespace/windows/mutation-handle-lifetime/raw-replace",

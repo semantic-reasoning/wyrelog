@@ -63,12 +63,12 @@ The runner performs three isolated phases:
    to close the invalid HANDLE again. The probe must terminate with Handles
    stop `0x300`.
 3. `artifact-suite`: Meson runs the full
-   `fact-artifact-namespace-windows` selector and the seven independently
+   `fact-artifact-namespace-windows` selector and the eight independently
    registered lifecycle selectors (`main-sidecar`,
    `sidecar-replacement-isolated`, `temp-binding-replacement-isolated`,
    `lock-entry-replacement-isolated`, `temp-token-real-crash-recovery`,
-   `cross-process`, and `temp-root-spill-child-capabilities`) under the same
-   Handles/Leak configuration.
+   `cross-process`, `temp-root-spill-child-capabilities`, and
+   `mutation-handle-lifetime`) under the same Handles/Leak configuration.
    This preserves later lifecycle coverage if an aggregate process aborts.
    Every invocation must exit zero without relevant stops.
 
@@ -89,6 +89,50 @@ event left open immediately before owner-DLL unload, so that behavior is not
 used as the gate's activation proof. Issue #659 separately owns mutation-path
 lifetime coverage and remains open until its production-suite evidence is
 complete.
+
+## Mutation lifetime coverage and limits
+
+The `mutation-handle-lifetime` selector groups the object-specific lifetime
+checks added for #659. They capture a `FILE_ID_128` before a name is removed or
+made delete-pending, retain an exact witness across the mutation, and then
+prove that the production owner disappears at the protocol-specific cleanup
+point. The covered protocols include working-handle release, raw and
+higher-level replacement, sidecar retirement, temporary-token unlink and
+recovery, and temporary-child/root retirement. Replacement tests distinguish
+the caller-owned displaced target from production-owned replacement state;
+recovery tests account for owners acquired and released entirely inside the
+recovery call.
+
+The File-ID oracle is deliberately bounded. Before treating a failed
+`OpenFileById` query as an unavailable filesystem capability, each test proves
+that its known-open witness still has the expected identity. A local run may
+then report a capability skip. Under `WYRELOG_APPVERIFIER_HANDLE_GATE=1`, the
+same condition is fatal, so hosted evidence cannot silently omit a lifetime
+observation. The three close-reversion negative controls recorded by #737
+remain the mutation-sensitivity evidence for this primitive.
+
+The reachability oracle cannot detect a leaked HANDLE while the object still
+has a name. Graph directories, lock guardians, ordinary sidecar bindings, and
+I/O-session duplicates therefore rely on the Handles/Leak instrumentation in
+this runner. The aggregate process and the independent
+`mutation-handle-lifetime` process must both be clean before hosted evidence is
+accepted.
+
+`test-windows-artifact-handle-lifetime-boundary.py` is a structural inventory,
+not a runtime ownership proof. It requires one row for every native or external
+Windows wrapper that transitively reaches a bounded mutation transport,
+validates exact test-to-entry and entry-to-linearizer reachability, pins known
+fault arms/probes, and rejects direct native-transport bypasses. It records
+which rows have an object-reachability oracle and which remain
+AppVerifier-only.
+
+Two temporary-child wrapper rows remain explicit residuals. The create wrapper
+does not return its created child or release its successful binding ownership;
+the open-existing wrapper immediately releases a live binding and requires a
+transfer audit. [Issue #882](https://github.com/semantic-reasoning/wyrelog/issues/882)
+owns that production repair and blocks the final exactly-once claim in #659.
+Neither the inventory nor a clean run of the currently reachable selectors is
+evidence that those residual paths are fixed.
 
 ## Evidence and cleanup
 
