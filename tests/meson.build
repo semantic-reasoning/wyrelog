@@ -1,5 +1,6 @@
 fs = import('fs')
 python3 = find_program('python3')
+meson_exe = find_program('meson')
 # Boundary checkers read repository sources.  Make an encoding-less read a
 # hard error so a checker can never silently fall back to the machine
 # locale's codec.  This asserts strictness; it does not change the default.
@@ -19,6 +20,16 @@ python3 = find_program('python3')
 python_strict_encoding_env = environment()
 python_strict_encoding_env.set('PYTHONWARNDEFAULTENCODING', '1')
 python_strict_encoding_env.set('PYTHONWARNINGS', 'error::EncodingWarning')
+
+test('wirelog-dependency-boundary', python3,
+  args : [
+    meson.current_source_dir() / 'test-wirelog-dependency-boundary.py',
+    meson.project_source_root(),
+    meson_exe.full_path(),
+  ],
+  env : python_strict_encoding_env,
+  timeout : 600,
+)
 
 explicit_encoding_checker = files(
   '../tools/check-explicit-encoding.py',
