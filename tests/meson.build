@@ -1531,6 +1531,25 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   test('fact-provisioning-construct', test_fact_provisioning_construct,
     timeout : 60,
   )
+  if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
+    # Exact provisioned-pair -> native namespace -> production secure
+    # filesystem route. Link only the full-source test-seam archive so this
+    # executable has one private implementation and no shipped-library twin.
+    test_secure_duckdb_temp_child_windows = executable(
+      'test-secure-duckdb-temp-child-windows',
+      'test-secure-duckdb-temp-child-windows.cc',
+      'fact-test-support.c',
+      c_args : fact_test_support_c_args,
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep]
+        + fact_test_support_deps,
+      override_options : ['cpp_std=c++17'],
+    )
+    test('secure-duckdb-temp-child-windows',
+      test_secure_duckdb_temp_child_windows,
+      timeout : 120,
+    )
+  endif
   test_secure_duckdb_filesystem = executable(
     'test-secure-duckdb-filesystem',
     'test-secure-duckdb-filesystem.cc',

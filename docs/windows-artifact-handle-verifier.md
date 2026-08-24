@@ -29,6 +29,9 @@ Authenticode signer, Windows version, image names, layers, stops, and selector
 in `environment.json`. It accepts only the Microsoft Application Verifier
 binary from the declared Windows SDK 26100 or 28000 family.
 CI explicitly builds both test-only probe targets before entering the gate.
+The secure-bridge leg also builds
+`test-secure-duckdb-temp-child-windows.exe`, a separate native image linked to
+the test-seam archive and DuckDB rather than the shipped library.
 `runner-started.json` records the runner environment/name and preserves startup
 context even if the Administrator, tool, build, or target prerequisite check
 fails.
@@ -55,7 +58,7 @@ exception-terminating, logged with stacks, and non-continuable. Settings are
 image-name based, so subprocesses that re-execute
 `test-fact-artifact-namespace-windows.exe` receive the same checks.
 
-The runner performs three isolated phases:
+The runner performs four isolated phases:
 
 1. `clean-probe`: a test-only DLL creates a named event HANDLE and closes it
    before unload. The probe must exit zero without Handles/Leak stops.
@@ -63,14 +66,24 @@ The runner performs three isolated phases:
    to close the invalid HANDLE again. The probe must terminate with Handles
    stop `0x300`.
 3. `artifact-suite`: Meson runs the full
-   `fact-artifact-namespace-windows` selector and the eight independently
+   `fact-artifact-namespace-windows` selector and the nine independently
    registered lifecycle selectors (`main-sidecar`,
    `sidecar-replacement-isolated`, `temp-binding-replacement-isolated`,
    `lock-entry-replacement-isolated`, `temp-token-real-crash-recovery`,
-   `cross-process`, `temp-root-spill-child-capabilities`, and
-   `mutation-handle-lifetime`) under the same Handles/Leak configuration.
+   `cross-process`, `temp-root-spill-child-capabilities`,
+   `temp-root-wrapper-ownership`, and `mutation-handle-lifetime`) under the
+   same Handles/Leak configuration.
    This preserves later lifecycle coverage if an aggregate process aborts.
    Every invocation must exit zero without relevant stops.
+4. `secure-temp-child`: the separately instrumented
+   `test-secure-duckdb-temp-child-windows.exe` constructs an exact Windows
+   provisioned pair, opens it through
+   `wyl_fact_artifact_namespace_open_provisioned_pair_internal`, and drives a
+   real `WylSecureDuckdbFileSystem` temporary child through create, write,
+   flush, close, retirement, and destruction. This phase must exit zero with
+   no Handles or Leak stop. Keeping it in its own image and evidence directory
+   prevents a clean artifact-suite process from standing in for the production
+   secure-filesystem path.
 
 The activation fault is isolated to the test-only probe. The reused-slot
 ownership test retains its deliberate invalid `CloseHandle` consumption
@@ -145,7 +158,8 @@ requires `LayerName="Handles"` and numeric `StopCode="0x300"`.
 
 The runner deletes old settings and logs before every phase. It exports and
 validates phase evidence before deleting current settings/logs, then verifies
-that neither target image remains enabled. A final cleanup repeats and checks
-both images after every success or failure. CI uploads
+that no target image remains enabled. A final cleanup repeats and checks the
+probe, artifact-suite, and secure-temp-child images after every success or
+failure. CI uploads
 `builddir/appverifier-artifacts/` with `always()`; missing evidence is itself a
 gate failure.

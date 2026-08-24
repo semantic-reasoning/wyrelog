@@ -9,7 +9,8 @@ $ErrorActionPreference = 'Stop'
 function Invoke-Captured {
   param(
     [Parameter(Mandatory = $true)] [string] $FilePath,
-    [Parameter(Mandatory = $true)] [string[]] $Arguments,
+    [Parameter(Mandatory = $true)] [AllowEmptyCollection()]
+      [string[]] $Arguments,
     [Parameter(Mandatory = $true)] [string] $LogPath
   )
 
@@ -233,6 +234,7 @@ function Invoke-Artifact-Suite {
       'fact-artifact-namespace-windows-temp-token-real-crash-recovery',
       'fact-artifact-namespace-windows-cross-process',
       'fact-artifact-namespace-windows-temp-root-spill-child-capabilities',
+      'fact-artifact-namespace-windows-temp-root-wrapper-ownership',
       'fact-artifact-namespace-windows-mutation-handle-lifetime',
       '--print-errorlogs'
     ) -LogPath (Join-Path $phase 'meson-test.txt')
@@ -246,6 +248,21 @@ function Invoke-Artifact-Suite {
   }
   Assert-Clean-Entries -Entries $entries -PhaseName 'artifact suite'
   Clear-Target -ImageName $script:suite_image -EvidenceDirectory $phase
+}
+
+function Invoke-Secure-Temp-Child {
+  $phase = New-Phase 'secure-temp-child'
+  $env:VERIFIER_LOG_PATH = $phase
+  Clear-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
+  Enable-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
+  $result = Invoke-Captured -FilePath $script:secure_temp_child_path -Arguments @(
+  ) -LogPath (Join-Path $phase 'process.txt')
+  $entries = @(Export-Phase-Logs -Phase $phase)
+  if ($result.ExitCode -ne 0) {
+    throw "instrumented secure temp-child fixture exited $($result.ExitCode)"
+  }
+  Assert-Clean-Entries -Entries $entries -PhaseName 'secure temp-child'
+  Clear-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
 }
 
 if ($env:OS -ne 'Windows_NT') {
@@ -330,13 +347,18 @@ $tests_root = Join-Path $script:build_root 'tests'
 $script:probe_path = Join-Path $tests_root 'test-windows-appverifier-probe.exe'
 $script:probe_dll_path = Join-Path $tests_root 'test-windows-appverifier-probe-dll.dll'
 $suite_path = Join-Path $tests_root 'test-fact-artifact-namespace-windows.exe'
-foreach ($required in @($script:probe_path, $script:probe_dll_path, $suite_path)) {
+$script:secure_temp_child_path = Join-Path $tests_root (
+  'test-secure-duckdb-temp-child-windows.exe')
+foreach ($required in @($script:probe_path, $script:probe_dll_path, $suite_path,
+    $script:secure_temp_child_path)) {
   if (!(Test-Path -LiteralPath $required -PathType Leaf)) {
     throw "required Windows verifier target is missing: $required"
   }
 }
 $script:probe_image = [System.IO.Path]::GetFileName($script:probe_path)
 $script:suite_image = [System.IO.Path]::GetFileName($suite_path)
+$script:secure_temp_child_image = [System.IO.Path]::GetFileName(
+  $script:secure_temp_child_path)
 $metadata = [ordered]@{
   appverifier_path = $script:app_verifier
   appverifier_sha256 = $app_verifier_hash
@@ -351,6 +373,7 @@ $metadata = [ordered]@{
   process_64_bit = [Environment]::Is64BitProcess
   probe_image = $script:probe_image
   suite_image = $script:suite_image
+  secure_temp_child_image = $script:secure_temp_child_image
   layers = @('Handles', 'Leak')
   stops = @('0x300', '0x901')
   error_report = '0x1C1'
@@ -363,7 +386,8 @@ $metadata = [ordered]@{
     'fact-artifact-namespace-windows-lock-entry-replacement-isolated',
     'fact-artifact-namespace-windows-temp-token-real-crash-recovery',
     'fact-artifact-namespace-windows-cross-process',
-    'fact-artifact-namespace-windows-temp-root-spill-child-capabilities'
+    'fact-artifact-namespace-windows-temp-root-spill-child-capabilities',
+    'fact-artifact-namespace-windows-temp-root-wrapper-ownership',
     'fact-artifact-namespace-windows-mutation-handle-lifetime'
   )
 }
@@ -376,13 +400,15 @@ try {
   Invoke-Probe-Phase -Mode clean
   Invoke-Probe-Phase -Mode invalid
   Invoke-Artifact-Suite
+  Invoke-Secure-Temp-Child
 } catch {
   $primary_error = $_
 } finally {
   $cleanup_root = Join-Path $script:output_root 'final-cleanup'
   New-Item -ItemType Directory -Path $cleanup_root -Force | Out-Null
   $env:VERIFIER_LOG_PATH = $cleanup_root
-  foreach ($image in @($script:probe_image, $script:suite_image)) {
+  foreach ($image in @($script:probe_image, $script:suite_image,
+      $script:secure_temp_child_image)) {
     $image_root = Join-Path $cleanup_root $image
     New-Item -ItemType Directory -Path $image_root -Force | Out-Null
     try {

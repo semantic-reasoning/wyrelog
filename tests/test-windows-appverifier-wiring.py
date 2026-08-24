@@ -2,8 +2,321 @@
 """Guard the native Windows Application Verifier CI contract."""
 
 from pathlib import Path
+import hashlib
 import re
 import sys
+
+
+class FixtureContractError(ValueError):
+    pass
+
+
+def active_cpp_source(source: str) -> str:
+    """Remove #if 0 regions and comments while preserving active strings."""
+    active = True
+    stack: list[tuple[bool, bool]] = []
+    selected: list[str] = []
+    for line in source.splitlines(keepends=True):
+        directive = re.match(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)", line)
+        if directive:
+            kind, expression = directive.groups()
+            if kind in {"if", "ifdef", "ifndef"}:
+                condition = expression.strip() not in {"0", "FALSE", "false"}
+                stack.append((active, condition))
+                active = active and condition
+            elif kind == "elif":
+                if not stack:
+                    raise FixtureContractError("unbalanced #elif in fixture")
+                parent, _ = stack[-1]
+                condition = expression.strip() not in {"0", "FALSE", "false"}
+                stack[-1] = (parent, condition)
+                active = parent and condition
+            elif kind == "else":
+                if not stack:
+                    raise FixtureContractError("unbalanced #else in fixture")
+                parent, condition = stack[-1]
+                stack[-1] = (parent, not condition)
+                active = parent and not condition
+            else:
+                if not stack:
+                    raise FixtureContractError("unbalanced #endif in fixture")
+                parent, _ = stack.pop()
+                active = parent
+            selected.append("\n" if line.endswith("\n") else "")
+        elif active:
+            selected.append(line)
+        else:
+            selected.append("\n" if line.endswith("\n") else "")
+    if stack:
+        raise FixtureContractError("unterminated preprocessor region in fixture")
+
+    text = "".join(selected)
+    output: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if quote is not None:
+            output.append(char)
+            if char == "\\" and index + 1 < len(text):
+                index += 1
+                output.append(text[index])
+            elif char == quote:
+                quote = None
+        elif char in {'"', "'"}:
+            quote = char
+            output.append(char)
+        elif char == "/" and next_char == "/":
+            output.extend((" ", " "))
+            index += 2
+            while index < len(text) and text[index] != "\n":
+                output.append(" ")
+                index += 1
+            if index < len(text):
+                output.append("\n")
+        elif char == "/" and next_char == "*":
+            output.extend((" ", " "))
+            index += 2
+            while index < len(text):
+                if index + 1 < len(text) and text[index : index + 2] == "*/":
+                    output.extend((" ", " "))
+                    index += 1
+                    break
+                output.append("\n" if text[index] == "\n" else " ")
+                index += 1
+        else:
+            output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def function_braces(source: str, signature: str) -> tuple[int, int]:
+    start = source.find(signature)
+    if start < 0:
+        raise FixtureContractError(f"missing active function: {signature}")
+    opening = source.find("{", start + len(signature))
+    if opening < 0:
+        raise FixtureContractError(f"missing body for active function: {signature}")
+    depth = 0
+    quote: str | None = None
+    index = opening
+    while index < len(source):
+        char = source[index]
+        if quote is not None:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return opening, index
+        index += 1
+    raise FixtureContractError(f"unterminated active function: {signature}")
+
+
+def function_body(source: str, signature: str) -> str:
+    opening, closing = function_braces(source, signature)
+    return source[opening + 1 : closing]
+
+
+def cpp_code_only(source: str) -> str:
+    """Blank string and character literals without changing source offsets."""
+    output = list(source)
+    quote: str | None = None
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if quote is None and char in {'"', "'"}:
+            quote = char
+            output[index] = " "
+        elif quote is not None:
+            output[index] = "\n" if char == "\n" else " "
+            if char == "\\" and index + 1 < len(source):
+                index += 1
+                output[index] = "\n" if source[index] == "\n" else " "
+            elif char == quote:
+                quote = None
+        index += 1
+    if quote is not None:
+        raise FixtureContractError("unterminated literal in fixture")
+    return "".join(output)
+
+
+def require_ordered_patterns(
+    source: str, patterns: tuple[str, ...], contract: str
+) -> None:
+    offset = 0
+    for pattern in patterns:
+        match = re.search(pattern, source[offset:])
+        if match is None:
+            raise FixtureContractError(f"{contract} lost active call: {pattern}")
+        absolute = offset + match.start()
+        depth = source[:absolute].count("{") - source[:absolute].count("}")
+        if depth != 0:
+            raise FixtureContractError(f"{contract} call is not top-level: {pattern}")
+        offset += match.end()
+
+
+def require_straight_line(source: str, contract: str) -> None:
+    forbidden = (
+        r"\bif\b",
+        r"\belse\b",
+        r"\bfor\b",
+        r"\bwhile\b",
+        r"\bdo\b",
+        r"\bswitch\b",
+        r"\bcase\b",
+        r"\btry\b",
+        r"\bcatch\b",
+        r"\bgoto\b",
+        r"\bthrow\b",
+        r"\bco_return\b",
+        r"\bdecltype\b",
+        r"\bnoexcept\s*\(",
+        r"\brequires\b",
+        r"\bg_test_skip\s*\(",
+        r"\bg_test_incomplete\s*\(",
+        r"\bg_assert_not_reached\s*\(",
+        r"\b(?:exit|_Exit|abort|longjmp)\s*\(",
+        r"\b__builtin_unreachable\s*\(",
+        r"\[[^\]\n]*\]\s*(?:\([^)]*\)\s*)?(?:mutable\s*)?\{",
+        r"\?",
+        r"&&",
+        r"\|\|",
+    )
+    for pattern in forbidden:
+        if re.search(pattern, source):
+            raise FixtureContractError(
+                f"{contract} contains conditional or dead control: {pattern}"
+            )
+
+
+def validate_secure_temp_fixture(source: str) -> None:
+    source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    if source_digest != "c213bbcf99b68c8901a55e59c43249d8efe4ce8be9eb186a543dd9fa0cfe259a":
+        raise FixtureContractError(
+            "secure fixture changed outside its reviewed full-source allowlist"
+        )
+    for digraph in ("%:", "<%", "%>", "<:", ":>", "??="):
+        if digraph in source:
+            raise FixtureContractError(
+                f"secure fixture contains rejected preprocessing token: {digraph}"
+            )
+    conditional_directives = [
+        re.sub(r"\s+", " ", match.group(0).strip())
+        for match in re.finditer(
+            r"(?m)^\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b[^\n]*",
+            source,
+        )
+    ]
+    if conditional_directives != ["#ifndef G_OS_WIN32", "#endif"]:
+        raise FixtureContractError(
+            "secure fixture contains an unreviewed conditional compilation path"
+        )
+    active = active_cpp_source(source)
+    expected_bodies = {
+        "ProvisionedPairFixture ()":
+            "e7bd8defef11bd4bfd29f64250d8a1587ed34dd3275049203800aadb84fb182e",
+        "test_secure_temp_child_lifecycle (void)":
+            "b3e7a35f64937ee241ff79f7785e315c887c1ccc6983c557309c2a94721ab90b",
+        "main (int argc, char **argv)":
+            "5d4ef1f5bc55a843efa25188c5f9ed5f63c3656a56f72c4a4eb9fcee4145774e",
+    }
+    for signature, expected_digest in expected_bodies.items():
+        canonical = " ".join(function_body(active, signature).split())
+        observed_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if observed_digest != expected_digest:
+            raise FixtureContractError(
+                f"secure fixture changed outside its reviewed skeleton: {signature}"
+            )
+    constructor = cpp_code_only(
+        function_body(active, "ProvisionedPairFixture ()")
+    )
+    require_straight_line(constructor, "secure fixture constructor")
+    if re.search(r"\breturn\b", constructor):
+        raise FixtureContractError("secure fixture constructor returns early")
+    require_ordered_patterns(
+        constructor,
+        (
+            r"\bwyl_test_make_secure_fact_root\s*\(",
+            r"\bwyl_fact_graph_directory_stage_create_exact\s*\(",
+            r"\bwyl_fact_graph_stage_get_windows_operation_evidence\s*\(",
+            r"\bwyl_fact_graph_stage_publish_with_evidence\s*\(",
+            r"\bwyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence\s*\(",
+            r"\bwyl_fact_artifact_namespace_open_provisioned_pair_internal\s*\(",
+        ),
+        "secure fixture constructor",
+    )
+    lifecycle = cpp_code_only(
+        function_body(active, "test_secure_temp_child_lifecycle (void)")
+    )
+    require_straight_line(lifecycle, "secure temp-child lifecycle")
+    if re.search(r"\breturn\b", lifecycle):
+        raise FixtureContractError("secure temp-child lifecycle returns early")
+    require_ordered_patterns(
+        lifecycle,
+        (
+            r"\bProvisionedPairFixture\s+fixture\s*;",
+            r"\bWylSecureDuckdbFileSystem\s+filesystem\s*\(",
+            r"\bfilesystem\s*\.\s*TemporaryDirectory\s*\(",
+            r"\bfilesystem\s*\.\s*OpenFile\s*\(",
+            r"\bfilesystem\s*\.\s*Write\s*\(",
+            r"\bfilesystem\s*\.\s*FileSync\s*\(",
+            r"\bfilesystem\s*\.\s*Read\s*\(",
+            r"\btemporary\s*->\s*Close\s*\(",
+            r"\bfilesystem\s*\.\s*TryRemoveFile\s*\(",
+            r"\btemporary\s*\.\s*reset\s*\(",
+        ),
+        "secure temp-child lifecycle",
+    )
+    main = function_body(active, "main (int argc, char **argv)")
+    main_code = cpp_code_only(main)
+    require_straight_line(main_code, "secure fixture main")
+    registration = re.search(r"\bg_test_add_func\s*\(", main_code)
+    if registration is None:
+        raise FixtureContractError("main does not execute the secure lifecycle test")
+    registration_end = main_code.find(")", registration.end())
+    if registration_end < 0:
+        raise FixtureContractError("main has an unterminated test registration")
+    registration_code = main_code[registration.start() : registration_end + 1]
+    registration_source = main[registration.start() : registration_end + 1]
+    if (
+        '"/secure-duckdb/windows/temp-child/ownership"'
+        not in registration_source
+        or re.search(
+            r",\s*test_secure_temp_child_lifecycle\s*\)", registration_code
+        )
+        is None
+        or re.search(r"\bg_test_run\s*\(\s*\)", main_code) is None
+    ):
+        raise FixtureContractError("main does not execute the secure lifecycle test")
+    if (
+        len(re.findall(r"\breturn\b", main_code)) != 1
+        or len(re.findall(r"\bg_test_run\s*\(", main_code)) != 1
+        or re.search(r"\breturn\s+g_test_run\s*\(\s*\)\s*;", main_code)
+        is None
+    ):
+        raise FixtureContractError("main must terminate only through g_test_run")
+    require_ordered_patterns(
+        main_code,
+        (
+            r"\bg_test_init\s*\(",
+            r"\bg_test_add_func\s*\(",
+            r"\breturn\s+g_test_run\s*\(",
+        ),
+        "secure fixture main",
+    )
+
+
+def replace_function_body(source: str, signature: str, replacement: str) -> str:
+    opening, closing = function_braces(source, signature)
+    return source[:opening] + replacement + source[closing + 1 :]
 
 
 root = Path(sys.argv[1])
@@ -32,6 +345,7 @@ required_script_tokens = (
     "$expected_layer = 'Handles'",
     "$expected_stop = 0x300",
     "$unexpected.Count -ne 0",
+    "[AllowEmptyCollection()]",
     "clean-probe",
     "invalid-probe",
     "artifact-suite",
@@ -51,6 +365,12 @@ required_script_tokens = (
 for token in required_script_tokens:
     if token not in script:
         raise SystemExit(f"Windows AppVerifier runner lost fail-closed token: {token}")
+if re.search(
+    r"\[Parameter\(Mandatory = \$true\)\]\s*"
+    r"\[AllowEmptyCollection\(\)\]\s*\[string\[\]\] \$Arguments",
+    script,
+) is None:
+    raise SystemExit("argument-free AppVerifier images require an empty array contract")
 
 output_root = script.index("$script:output_root =")
 startup_evidence = script.index("runner-started.json")
@@ -138,10 +458,149 @@ for token in (
             f"the instrumented suite lost its isolated negative-control token: {token}"
         )
 
+secure_temp_fixture_path = (
+    root / "tests" / "test-secure-duckdb-temp-child-windows.cc"
+)
+if not secure_temp_fixture_path.is_file():
+    raise SystemExit("missing native Windows secure-DuckDB temp-child fixture")
+secure_temp_fixture = secure_temp_fixture_path.read_text(encoding="utf-8")
+for token in (
+    "wyl_test_make_secure_fact_root",
+    "wyl_fact_graph_directory_stage_create_exact",
+    "wyl_fact_graph_stage_get_windows_operation_evidence",
+    "wyl_fact_graph_stage_publish_with_evidence",
+    "wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence",
+    "wyl_fact_artifact_namespace_open_provisioned_pair_internal",
+    "WylSecureDuckdbFileSystem",
+    "TemporaryDirectory",
+    "duckdb_temp_storage_S32K-0.tmp",
+    "TempChildrenCreatedForTest",
+    "TryRemoveFile",
+):
+    if token not in secure_temp_fixture:
+        raise SystemExit(f"secure temp-child fixture lost runtime token: {token}")
+try:
+    validate_secure_temp_fixture(secure_temp_fixture)
+except FixtureContractError as error:
+    raise SystemExit(str(error)) from error
+
+lifecycle_opening, lifecycle_closing = function_braces(
+    secure_temp_fixture, "test_secure_temp_child_lifecycle (void)"
+)
+lifecycle_source_body = secure_temp_fixture[
+    lifecycle_opening + 1 : lifecycle_closing
+]
+
+mutations = {
+    "inactive-copy": (
+        "#if 0\n" + secure_temp_fixture + "\n#endif\n"
+        "int main (int argc, char **argv) { return argc == 0 && argv == nullptr; }\n"
+    ),
+    "comment-only-constructor": replace_function_body(
+        secure_temp_fixture,
+        "ProvisionedPairFixture ()",
+        "{ /* wyl_test_make_secure_fact_root "
+        "wyl_fact_graph_directory_stage_create_exact "
+        "wyl_fact_graph_stage_get_windows_operation_evidence "
+        "wyl_fact_graph_stage_publish_with_evidence "
+        "wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence "
+        "wyl_fact_artifact_namespace_open_provisioned_pair_internal */ }",
+    ),
+    "trivial-main": replace_function_body(
+        secure_temp_fixture,
+        "main (int argc, char **argv)",
+        "{ (void) argc; (void) argv; return 0; }",
+    ),
+    "string-only-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{ \"ProvisionedPairFixture fixture; "
+        "WylSecureDuckdbFileSystem filesystem( filesystem.TemporaryDirectory( "
+        "filesystem.OpenFile( filesystem.Write( filesystem.FileSync( "
+        "filesystem.Read( temporary->Close( filesystem.TryRemoveFile( "
+        "temporary.reset(\"; }",
+    ),
+    "parenthesized-zero-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{\n#if (0)\nProvisionedPairFixture fixture;\n#else\nreturn;\n#endif\n}",
+    ),
+    "ifndef-windows-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{\n#ifndef G_OS_WIN32\nProvisionedPairFixture fixture;\n"
+        "#else\nreturn;\n#endif\n}",
+    ),
+    "dead-if-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{ if (false) { ProvisionedPairFixture fixture; "
+        "WylSecureDuckdbFileSystem filesystem( fixture.namespace_, false); "
+        "filesystem.TemporaryDirectory(); filesystem.OpenFile(); "
+        "filesystem.Write(); filesystem.FileSync(); filesystem.Read(); "
+        "temporary->Close(); filesystem.TryRemoveFile(); temporary.reset(); } }",
+    ),
+    "dead-main-registration": replace_function_body(
+        secure_temp_fixture,
+        "main (int argc, char **argv)",
+        "{ if (false) { g_test_init(&argc, &argv, nullptr); "
+        "g_test_add_func(\"/secure-duckdb/windows/temp-child/ownership\", "
+        "test_secure_temp_child_lifecycle); return g_test_run(); } return 0; }",
+    ),
+    "digraph-inactive-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{\n%:if 0\nProvisionedPairFixture fixture;\n"
+        "%:else\nreturn;\n%:endif\n}",
+    ),
+    "dead-lambda-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{ auto dead = [] { ProvisionedPairFixture fixture; "
+        "WylSecureDuckdbFileSystem filesystem( fixture.namespace_, false); "
+        "filesystem.TemporaryDirectory(); filesystem.OpenFile(); "
+        "filesystem.Write(); filesystem.FileSync(); filesystem.Read(); "
+        "temporary->Close(); filesystem.TryRemoveFile(); temporary.reset(); }; "
+        "(void) dead; }",
+    ),
+    "quick-exit-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{ std::quick_exit (0);" + lifecycle_source_body + "}",
+    ),
+    "sizeof-lifecycle": replace_function_body(
+        secure_temp_fixture,
+        "test_secure_temp_child_lifecycle (void)",
+        "{ ProvisionedPairFixture fixture; "
+        "WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false); "
+        "(void) sizeof ((filesystem.TemporaryDirectory (), "
+        "filesystem.OpenFile (), filesystem.Write (), filesystem.FileSync (), "
+        "filesystem.Read (), temporary->Close (), filesystem.TryRemoveFile (), "
+        "temporary.reset (), 0)); }",
+    ),
+    "macro-elided-registration": (
+        "#define g_test_add_func(...) ((void) 0)\n" + secure_temp_fixture
+    ),
+    "global-quick-exit": (
+        "#include <cstdlib>\n"
+        "static const int early_success = (std::quick_exit (0), 0);\n"
+        + secure_temp_fixture
+    ),
+}
+for mutation_name, mutation in mutations.items():
+    try:
+        validate_secure_temp_fixture(mutation)
+    except FixtureContractError:
+        continue
+    raise SystemExit(
+        f"secure fixture checker accepted {mutation_name} negative control"
+    )
+
 meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
 for target in (
     "test-windows-appverifier-probe-dll",
     "test-windows-appverifier-probe",
+    "test-secure-duckdb-temp-child-windows",
 ):
     if target not in meson:
         raise SystemExit(f"missing Windows AppVerifier probe target: {target}")
@@ -149,6 +608,20 @@ probe = meson.index("'test-windows-appverifier-probe-dll'")
 guard = meson.rindex("if host_machine.system() == 'windows'", 0, probe)
 if ".allowed()" not in meson[guard:probe]:
     raise SystemExit("AppVerifier probes must stay inside the Windows hook gate")
+secure_target = meson.index("'test-secure-duckdb-temp-child-windows'")
+secure_target_end = meson.index("\n    )", secure_target) + len("\n    )")
+secure_target_block = meson[secure_target:secure_target_end]
+for token in (
+    "wyrelog_handle_test_seams_dep",
+    "duckdb_dep",
+    "fact_test_support_deps",
+):
+    if token not in secure_target_block:
+        raise SystemExit(f"secure temp-child target lost dependency: {token}")
+if "wyrelog_dep" in secure_target_block:
+    raise SystemExit("secure temp-child target must not link the shipped library")
+if meson.count("test('secure-duckdb-temp-child-windows'") != 1:
+    raise SystemExit("secure temp-child fixture must have one Meson test selector")
 
 
 def job(workflow: str, name: str) -> str:
@@ -213,10 +686,19 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         raise SystemExit(f"{workflow_name} verifier gate ordering drifted")
     probe_compile = (
         "meson compile -C builddir test-windows-appverifier-probe "
-        "test-windows-appverifier-probe-dll"
+        "test-windows-appverifier-probe-dll "
+        "test-secure-duckdb-temp-child-windows"
     )
     if windows.count(probe_compile) != 1 or windows.index(probe_compile) > run_start:
         raise SystemExit(f"{workflow_name} must build verifier probes before the gate")
+    ordinary_secure_selector = (
+        "meson test -C builddir secure-duckdb-bridge "
+        "secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows"
+    )
+    if windows.count(ordinary_secure_selector) != 1:
+        raise SystemExit(
+            f"{workflow_name} must run the secure temp-child fixture normally"
+        )
     run_step = windows[run_start:upload_start]
     upload_step = windows[upload_start:]
     for token in (
@@ -253,6 +735,7 @@ for selector in (
     "fact-artifact-namespace-windows-temp-token-real-crash-recovery",
     "fact-artifact-namespace-windows-cross-process",
     "fact-artifact-namespace-windows-temp-root-spill-child-capabilities",
+    "fact-artifact-namespace-windows-temp-root-wrapper-ownership",
     "fact-artifact-namespace-windows-mutation-handle-lifetime",
 ):
     quoted = f"'{selector}'"
@@ -664,5 +1147,61 @@ except SystemExit as error:
         raise
 else:
     raise SystemExit("wiring self-test accepted a post-guard restore token")
+
+for token in (
+    "function Invoke-Secure-Temp-Child",
+    "secure-temp-child",
+    "test-secure-duckdb-temp-child-windows.exe",
+    "$script:secure_temp_child_image",
+    "Invoke-Secure-Temp-Child",
+    "secure_temp_child_image = $script:secure_temp_child_image",
+):
+    if token not in script:
+        raise SystemExit(f"AppVerifier secure temp-child phase drifted: {token}")
+
+secure_phase = script[
+    script.index("function Invoke-Secure-Temp-Child") : script.index(
+        "\nif ($env:OS", script.index("function Invoke-Secure-Temp-Child")
+    )
+]
+secure_phase_route = (
+    "New-Phase 'secure-temp-child'",
+    "Clear-Target -ImageName $script:secure_temp_child_image",
+    "Enable-Target -ImageName $script:secure_temp_child_image",
+    "Invoke-Captured -FilePath $script:secure_temp_child_path",
+    "Export-Phase-Logs -Phase $phase",
+    "Assert-Clean-Entries -Entries $entries -PhaseName 'secure temp-child'",
+    "Clear-Target -ImageName $script:secure_temp_child_image",
+)
+phase_offsets = []
+search_from = 0
+for token in secure_phase_route:
+    offset = secure_phase.find(token, search_from)
+    if offset < 0:
+        raise SystemExit(f"secure temp-child phase lost ordered operation: {token}")
+    phase_offsets.append(offset)
+    search_from = offset + len(token)
+if "$script:meson_path" in secure_phase:
+    raise SystemExit("secure temp-child must run as its own image, not through Meson")
+if "test-secure-duckdb-temp-child-windows.exe" in artifact_phase:
+    raise SystemExit("secure temp-child image must not be folded into artifact-suite")
+invoke_secure = script.index("  Invoke-Secure-Temp-Child")
+final_cleanup = script.index("  foreach ($image in @(")
+if not invoke_secure < script.index("} catch {", invoke_secure) < final_cleanup:
+    raise SystemExit("secure temp-child phase must precede fail-closed cleanup")
+if "$script:secure_temp_child_image" not in script[final_cleanup:]:
+    raise SystemExit("final cleanup lost the secure temp-child image")
+
+documentation = (
+    root / "docs" / "windows-artifact-handle-verifier.md"
+).read_text(encoding="utf-8")
+for token in (
+    "secure-temp-child",
+    "test-secure-duckdb-temp-child-windows.exe",
+    "WylSecureDuckdbFileSystem",
+    "provisioned pair",
+):
+    if token not in documentation:
+        raise SystemExit(f"AppVerifier documentation lost secure phase token: {token}")
 
 print("Windows Application Verifier wiring: OK")
