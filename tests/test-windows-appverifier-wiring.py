@@ -382,17 +382,273 @@ administrator_failure = script.index(
 )
 build_prerequisite = script.index("$script:build_root =")
 required_target_check = script.index("foreach ($required in")
+vcpkg_runtime_lookup = script.index(
+    "$vcpkg_installed_value = [Environment]::GetEnvironmentVariable("
+)
+if "'VCPKG_INSTALLED_DIR', 'Process')" not in script[vcpkg_runtime_lookup:]:
+    raise SystemExit("Windows AppVerifier runtime lookup must be process-local")
+vcpkg_runtime_validation = script.index(
+    "throw 'Windows AppVerifier requires the vcpkg runtime directory'"
+)
+runner_temp_validation = script.index(
+    "throw 'Windows AppVerifier vcpkg root escaped RUNNER_TEMP'"
+)
 if not (
     output_root
     < startup_evidence
     < hosted_failure
     < administrator_failure
     < build_prerequisite
+    < vcpkg_runtime_lookup
+    < vcpkg_runtime_validation
+    < runner_temp_validation
     < required_target_check
 ):
     raise SystemExit(
         "Windows AppVerifier runner must preserve startup evidence before "
-        "hosted-runner, administrator, build, and target prerequisite checks"
+        "hosted-runner, administrator, build, runtime, and target prerequisite checks"
+    )
+
+runtime_helper = script[
+    script.index("function Invoke-Secure-Fixture-With-RuntimePath") :
+    script.index("function Invoke-Secure-Temp-Child")
+]
+runtime_helper_tokens = (
+    "$previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+    "$secure_path = if ([string]::IsNullOrEmpty($previous_path))",
+    "[System.IO.Path]::PathSeparator",
+    "[Environment]::SetEnvironmentVariable('PATH', $secure_path, 'Process')",
+    "$result = Invoke-Captured -FilePath $script:secure_temp_child_path",
+    "} finally {",
+    "[Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')",
+)
+if any(runtime_helper.count(token) != 1 for token in runtime_helper_tokens):
+    raise SystemExit(
+        "secure AppVerifier runtime helper must isolate the canonical vcpkg PATH"
+    )
+if [runtime_helper.index(token) for token in runtime_helper_tokens] != sorted(
+    runtime_helper.index(token) for token in runtime_helper_tokens
+):
+    raise SystemExit(
+        "secure AppVerifier runtime helper must restore PATH after direct invocation"
+    )
+
+secure_phase = script[
+    script.index("function Invoke-Secure-Temp-Child") : script.index("\nif ($env:OS")
+]
+secure_phase_tokens = (
+    "$loader_probe = Invoke-Secure-Fixture-With-RuntimePath",
+    "'loader-preflight.txt'",
+    "Assert-Success $loader_probe 'launch secure temp-child loader preflight'",
+    "Enable-Target -ImageName $script:secure_temp_child_image",
+    "$result = Invoke-Secure-Fixture-With-RuntimePath",
+    "'process.txt'",
+    "$entries = @(Export-Phase-Logs -Phase $phase)",
+)
+if any(secure_phase.count(token) != 1 for token in secure_phase_tokens):
+    raise SystemExit(
+        "secure AppVerifier phase must prove its loader before instrumentation"
+    )
+if [secure_phase.index(token) for token in secure_phase_tokens] != sorted(
+    secure_phase.index(token) for token in secure_phase_tokens
+):
+    raise SystemExit(
+        "secure AppVerifier phase must preserve preflight, enable, run, export order"
+    )
+secure_clear = "Clear-Target -ImageName $script:secure_temp_child_image"
+if (
+    secure_phase.count(secure_clear) != 2
+    or secure_phase.index(secure_clear) > secure_phase.index(secure_phase_tokens[0])
+    or secure_phase.rindex(secure_clear) < secure_phase.index(secure_phase_tokens[-1])
+):
+    raise SystemExit("secure AppVerifier phase must bracket both direct launches")
+for token in (
+    "vcpkg_installed_directory = $script:vcpkg_installed_directory",
+    "vcpkg_runtime_directory = $script:vcpkg_runtime_directory",
+    "duckdb_linkage = 'source-pinned-static'",
+):
+    if script.count(token) != 1:
+        raise SystemExit(f"Windows AppVerifier metadata lost runtime token: {token}")
+
+
+def validate_runtime_path_contract(
+    candidate: str, *, enforce_runner_digest: bool = True
+) -> None:
+    candidate_digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+    if (
+        enforce_runner_digest
+        and candidate_digest
+        != "3ee3d306e828af600d8ea72b4177cd23b35a68464f45a661ed8e6c97726b3060"
+    ):
+        raise FixtureContractError(
+            "Windows AppVerifier runner changed outside its reviewed source allowlist"
+        )
+    required = (
+        "$vcpkg_installed_value -notmatch '^[A-Za-z]:[\\\\/]'",
+        "$vcpkg_installed_value.Contains([System.IO.Path]::PathSeparator)",
+        "$script:vcpkg_runtime_directory = (",
+        "$expected_vcpkg_runtime, [StringComparison]::OrdinalIgnoreCase",
+        "$script:vcpkg_installed_directory.StartsWith(",
+        "$runner_temp_prefix, [StringComparison]::OrdinalIgnoreCase",
+        "$script:runner_temp_directory.TrimEnd([char[]]@(",
+        "[System.IO.Path]::AltDirectorySeparatorChar))",
+        "$loader_probe = Invoke-Secure-Fixture-With-RuntimePath",
+        "Assert-Success $loader_probe 'launch secure temp-child loader preflight'",
+        "$result = Invoke-Secure-Fixture-With-RuntimePath",
+        "[Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')",
+        "duckdb_linkage = 'source-pinned-static'",
+    )
+    for token in required:
+        if token not in candidate:
+            raise FixtureContractError(
+                f"Windows AppVerifier runtime contract lost token: {token}"
+            )
+    if re.search(
+        r"\$script:runner_temp_directory\.TrimEnd\(\[char\[\]\]@\(\s*"
+        r"\[System\.IO\.Path\]::DirectorySeparatorChar,\s*"
+        r"\[System\.IO\.Path\]::AltDirectorySeparatorChar\)\)",
+        candidate,
+    ) is None:
+        raise FixtureContractError(
+            "RUNNER_TEMP trimming must include both Windows separators"
+        )
+    candidate_helper = candidate[
+        candidate.index("function Invoke-Secure-Fixture-With-RuntimePath") :
+        candidate.index("function Invoke-Secure-Temp-Child")
+    ]
+    helper_digest = hashlib.sha256(candidate_helper.encode("utf-8")).hexdigest()
+    if helper_digest != "9b83a778e91b7255b8551b17f018e34236ea2199f016aaccb6103b68b9fb3908":
+        raise FixtureContractError(
+            "secure runtime helper changed outside its reviewed full-body allowlist"
+        )
+    if (
+        candidate_helper.count("$script:secure_temp_child_path") != 1
+        or candidate_helper.count(
+            "Invoke-Captured -FilePath $script:secure_temp_child_path"
+        )
+        != 1
+    ):
+        raise FixtureContractError("secure runtime helper must launch one exact image")
+    if re.search(
+        r"(?m)^\s*(?:return|exit|throw|break|continue)\b", candidate_helper
+    ):
+        raise FixtureContractError("secure runtime helper contains early termination")
+    helper_order = (
+        "try {",
+        "[Environment]::SetEnvironmentVariable('PATH', $secure_path, 'Process')",
+        "$result = Invoke-Captured -FilePath $script:secure_temp_child_path",
+        "} finally {",
+        "[Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')",
+        "$result\n}",
+    )
+    helper_offsets = [candidate_helper.index(token) for token in helper_order]
+    if helper_offsets != sorted(helper_offsets):
+        raise FixtureContractError(
+            "secure runtime helper lost try, launch, finally, restore order"
+        )
+    candidate_phase = candidate[
+        candidate.index("function Invoke-Secure-Temp-Child") :
+        candidate.index("\nif ($env:OS")
+    ]
+    phase_digest = hashlib.sha256(candidate_phase.encode("utf-8")).hexdigest()
+    if phase_digest != "c5bf2d01f381cae8793342a6e20386f4be50682def3f2c03c176da8075e427c3":
+        raise FixtureContractError(
+            "secure AppVerifier phase changed outside its reviewed source allowlist"
+        )
+    if (
+        candidate_phase.count("Invoke-Secure-Fixture-With-RuntimePath") != 2
+        or "$script:secure_temp_child_path" in candidate_phase
+        or "${script:secure_temp_child_path}" in candidate_phase
+    ):
+        raise FixtureContractError(
+            "secure AppVerifier phase must use only its two reviewed helper calls"
+        )
+    ordered = (
+        "$loader_probe = Invoke-Secure-Fixture-With-RuntimePath",
+        "Assert-Success $loader_probe 'launch secure temp-child loader preflight'",
+        "Enable-Target -ImageName $script:secure_temp_child_image",
+        "$result = Invoke-Secure-Fixture-With-RuntimePath",
+        "$entries = @(Export-Phase-Logs -Phase $phase)",
+    )
+    offsets = [candidate_phase.index(token) for token in ordered]
+    if offsets != sorted(offsets):
+        raise FixtureContractError(
+            "secure runtime preflight and instrumented launch are out of order"
+        )
+
+
+validate_runtime_path_contract(script)
+runtime_mutations = {
+    "drive-qualified-root": "$vcpkg_installed_value -notmatch '^[A-Za-z]:[\\\\/]'",
+    "literal-bin-child": "$expected_vcpkg_runtime, [StringComparison]::OrdinalIgnoreCase",
+    "hosted-containment": "$script:vcpkg_installed_directory.StartsWith(",
+    "separator-trim": "[System.IO.Path]::AltDirectorySeparatorChar))",
+    "primary-separator-trim": "[System.IO.Path]::DirectorySeparatorChar,",
+    "loader-preflight": "$loader_probe = Invoke-Secure-Fixture-With-RuntimePath",
+    "runtime-helper": "$result = Invoke-Secure-Fixture-With-RuntimePath",
+    "exact-path-restoration": (
+        "[Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')"
+    ),
+}
+for mutation_name, removed_token in runtime_mutations.items():
+    mutation = script.replace(removed_token, f"removed-{mutation_name}", 1)
+    try:
+        validate_runtime_path_contract(mutation, enforce_runner_digest=False)
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        f"Windows AppVerifier checker accepted {mutation_name} negative control"
+    )
+early_launch_mutation = script.replace(
+    "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+    "  & $script:secure_temp_child_path\n"
+    "  return\n\n"
+    "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+    1,
+)
+try:
+    validate_runtime_path_contract(
+        early_launch_mutation, enforce_runner_digest=False
+    )
+except (FixtureContractError, ValueError):
+    pass
+else:
+    raise SystemExit(
+        "Windows AppVerifier checker accepted early untrusted launch negative control"
+    )
+braced_launch_mutation = script.replace(
+    "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+    "  if ($true) { return (Invoke-Captured -FilePath "
+    "${script:secure_temp_child_path} -Arguments @() -LogPath $LogPath) }\n\n"
+    "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+    1,
+)
+try:
+    validate_runtime_path_contract(
+        braced_launch_mutation, enforce_runner_digest=False
+    )
+except (FixtureContractError, ValueError):
+    pass
+else:
+    raise SystemExit(
+        "Windows AppVerifier checker accepted braced pre-PATH launch negative control"
+    )
+phase_launch_mutation = script.replace(
+    "function Invoke-Secure-Temp-Child {\n",
+    "function Invoke-Secure-Temp-Child {\n"
+    "  & ${script:secure_temp_child_path}\n"
+    "  return\n",
+    1,
+)
+try:
+    validate_runtime_path_contract(
+        phase_launch_mutation, enforce_runner_digest=False
+    )
+except (FixtureContractError, ValueError):
+    pass
+else:
+    raise SystemExit(
+        "Windows AppVerifier checker accepted secure-phase early launch negative control"
     )
 
 if "Handles.Traces" in script:
@@ -1167,8 +1423,10 @@ secure_phase = script[
 secure_phase_route = (
     "New-Phase 'secure-temp-child'",
     "Clear-Target -ImageName $script:secure_temp_child_image",
+    "$loader_probe = Invoke-Secure-Fixture-With-RuntimePath",
+    "Assert-Success $loader_probe 'launch secure temp-child loader preflight'",
     "Enable-Target -ImageName $script:secure_temp_child_image",
-    "Invoke-Captured -FilePath $script:secure_temp_child_path",
+    "$result = Invoke-Secure-Fixture-With-RuntimePath",
     "Export-Phase-Logs -Phase $phase",
     "Assert-Clean-Entries -Entries $entries -PhaseName 'secure temp-child'",
     "Clear-Target -ImageName $script:secure_temp_child_image",
