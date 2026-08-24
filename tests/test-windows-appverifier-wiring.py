@@ -382,6 +382,9 @@ administrator_failure = script.index(
 )
 build_prerequisite = script.index("$script:build_root =")
 required_target_check = script.index("foreach ($required in")
+libchronoid_runtime_validation = script.index(
+    "throw 'Windows AppVerifier requires the libchronoid runtime directory'"
+)
 vcpkg_runtime_lookup = script.index(
     "$vcpkg_installed_value = [Environment]::GetEnvironmentVariable("
 )
@@ -399,6 +402,7 @@ if not (
     < hosted_failure
     < administrator_failure
     < build_prerequisite
+    < libchronoid_runtime_validation
     < vcpkg_runtime_lookup
     < vcpkg_runtime_validation
     < runner_temp_validation
@@ -415,8 +419,10 @@ runtime_helper = script[
 ]
 runtime_helper_tokens = (
     "$previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+    "$runtime_prefix = [string]::Concat(",
+    "$script:libchronoid_runtime_directory,",
+    "$script:vcpkg_runtime_directory)",
     "$secure_path = if ([string]::IsNullOrEmpty($previous_path))",
-    "[System.IO.Path]::PathSeparator",
     "[Environment]::SetEnvironmentVariable('PATH', $secure_path, 'Process')",
     "$result = Invoke-Captured -FilePath $script:secure_temp_child_path",
     "} finally {",
@@ -424,7 +430,7 @@ runtime_helper_tokens = (
 )
 if any(runtime_helper.count(token) != 1 for token in runtime_helper_tokens):
     raise SystemExit(
-        "secure AppVerifier runtime helper must isolate the canonical vcpkg PATH"
+        "secure AppVerifier runtime helper must isolate canonical build and vcpkg PATHs"
     )
 if [runtime_helper.index(token) for token in runtime_helper_tokens] != sorted(
     runtime_helper.index(token) for token in runtime_helper_tokens
@@ -463,6 +469,7 @@ if (
 ):
     raise SystemExit("secure AppVerifier phase must bracket both direct launches")
 for token in (
+    "libchronoid_runtime_directory = $script:libchronoid_runtime_directory",
     "vcpkg_installed_directory = $script:vcpkg_installed_directory",
     "vcpkg_runtime_directory = $script:vcpkg_runtime_directory",
     "duckdb_linkage = 'source-pinned-static'",
@@ -472,18 +479,25 @@ for token in (
 
 
 def validate_runtime_path_contract(
-    candidate: str, *, enforce_runner_digest: bool = True
+    candidate: str,
+    *,
+    enforce_runner_digest: bool = True,
+    enforce_slice_digests: bool = True,
 ) -> None:
     candidate_digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
     if (
         enforce_runner_digest
         and candidate_digest
-        != "3ee3d306e828af600d8ea72b4177cd23b35a68464f45a661ed8e6c97726b3060"
+        != "6b1702a3f9aaf09f66f029630aed01247a480b8642fb67e9b85a817fdb6e0dd2"
     ):
         raise FixtureContractError(
             "Windows AppVerifier runner changed outside its reviewed source allowlist"
         )
     required = (
+        "$libchronoid_runtime_value -notmatch '^[A-Za-z]:[\\\\/]'",
+        "$libchronoid_runtime_value.Contains([System.IO.Path]::PathSeparator)",
+        "$script:libchronoid_runtime_directory = (",
+        "$expected_libchronoid_runtime, [StringComparison]::OrdinalIgnoreCase",
         "$vcpkg_installed_value -notmatch '^[A-Za-z]:[\\\\/]'",
         "$vcpkg_installed_value.Contains([System.IO.Path]::PathSeparator)",
         "$script:vcpkg_runtime_directory = (",
@@ -496,6 +510,7 @@ def validate_runtime_path_contract(
         "Assert-Success $loader_probe 'launch secure temp-child loader preflight'",
         "$result = Invoke-Secure-Fixture-With-RuntimePath",
         "[Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')",
+        "libchronoid_runtime_directory = $script:libchronoid_runtime_directory",
         "duckdb_linkage = 'source-pinned-static'",
     )
     for token in required:
@@ -503,6 +518,14 @@ def validate_runtime_path_contract(
             raise FixtureContractError(
                 f"Windows AppVerifier runtime contract lost token: {token}"
             )
+    if re.search(
+        r"\$libchronoid_runtime_value = Join-Path \(\s*"
+        r"Join-Path \$script:build_root 'subprojects'\) 'libchronoid'",
+        candidate,
+    ) is None:
+        raise FixtureContractError(
+            "libchronoid runtime must be the literal in-tree subproject child"
+        )
     if re.search(
         r"\$script:runner_temp_directory\.TrimEnd\(\[char\[\]\]@\(\s*"
         r"\[System\.IO\.Path\]::DirectorySeparatorChar,\s*"
@@ -517,12 +540,45 @@ def validate_runtime_path_contract(
         candidate.index("function Invoke-Secure-Temp-Child")
     ]
     helper_digest = hashlib.sha256(candidate_helper.encode("utf-8")).hexdigest()
-    if helper_digest != "9b83a778e91b7255b8551b17f018e34236ea2199f016aaccb6103b68b9fb3908":
+    if (
+        enforce_slice_digests
+        and helper_digest
+        != "81a352686b425790b42ede7091ca49d55c22d6df2a2d46731568fa6a00f15d96"
+    ):
         raise FixtureContractError(
             "secure runtime helper changed outside its reviewed full-body allowlist"
         )
+    if re.search(
+        r"\$runtime_prefix = \[string\]::Concat\(\s*"
+        r"\$script:libchronoid_runtime_directory,\s*"
+        r"\[System\.IO\.Path\]::PathSeparator,\s*"
+        r"\$script:vcpkg_runtime_directory\)",
+        candidate_helper,
+    ) is None:
+        raise FixtureContractError(
+            "secure runtime prefix must order libchronoid before vcpkg"
+        )
+    if re.search(
+        r"\$secure_path = if \(\[string\]::IsNullOrEmpty\(\$previous_path\)\) \{\s*"
+        r"\$runtime_prefix\s*\} else \{\s*"
+        r"\[string\]::Concat\(\$runtime_prefix,\s*"
+        r"\[System\.IO\.Path\]::PathSeparator,\s*\$previous_path\)\s*\}",
+        candidate_helper,
+    ) is None:
+        raise FixtureContractError(
+            "secure runtime prefix must precede the inherited process PATH"
+        )
+    secure_path_references = re.findall(
+        r"\$(?:script:secure_temp_child_path|\{script:secure_temp_child_path\})",
+        candidate_helper,
+        flags=re.IGNORECASE,
+    )
+    captured_calls = re.findall(
+        r"\bInvoke-Captured\b", candidate_helper, flags=re.IGNORECASE
+    )
     if (
-        candidate_helper.count("$script:secure_temp_child_path") != 1
+        len(secure_path_references) != 1
+        or len(captured_calls) != 1
         or candidate_helper.count(
             "Invoke-Captured -FilePath $script:secure_temp_child_path"
         )
@@ -530,7 +586,18 @@ def validate_runtime_path_contract(
     ):
         raise FixtureContractError("secure runtime helper must launch one exact image")
     if re.search(
-        r"(?m)^\s*(?:return|exit|throw|break|continue)\b", candidate_helper
+        r"&|\b(?:Start-Process|Invoke-Expression)\b|"
+        r"test-secure-duckdb-temp-child-windows\.exe",
+        candidate_helper,
+        flags=re.IGNORECASE,
+    ):
+        raise FixtureContractError(
+            "secure runtime helper contains an unreviewed launch route"
+        )
+    if re.search(
+        r"\b(?:return|exit|throw|break|continue)\b",
+        candidate_helper,
+        flags=re.IGNORECASE,
     ):
         raise FixtureContractError("secure runtime helper contains early termination")
     helper_order = (
@@ -546,22 +613,74 @@ def validate_runtime_path_contract(
         raise FixtureContractError(
             "secure runtime helper lost try, launch, finally, restore order"
         )
+    reviewed_helper = """function Invoke-Secure-Fixture-With-RuntimePath {
+  param([Parameter(Mandatory = $true)] [string] $LogPath)
+
+  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+  $runtime_prefix = [string]::Concat(
+    $script:libchronoid_runtime_directory,
+    [System.IO.Path]::PathSeparator,
+    $script:vcpkg_runtime_directory)
+  $secure_path = if ([string]::IsNullOrEmpty($previous_path)) {
+    $runtime_prefix
+  } else {
+    [string]::Concat($runtime_prefix, [System.IO.Path]::PathSeparator,
+      $previous_path)
+  }
+  try {
+    [Environment]::SetEnvironmentVariable('PATH', $secure_path, 'Process')
+    $result = Invoke-Captured -FilePath $script:secure_temp_child_path -Arguments @(
+    ) -LogPath $LogPath
+  } finally {
+    [Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')
+  }
+  $result
+}"""
+    if candidate_helper.strip() != reviewed_helper:
+        raise FixtureContractError(
+            "secure runtime helper changed outside its explicit source allowlist"
+        )
     candidate_phase = candidate[
         candidate.index("function Invoke-Secure-Temp-Child") :
         candidate.index("\nif ($env:OS")
     ]
     phase_digest = hashlib.sha256(candidate_phase.encode("utf-8")).hexdigest()
-    if phase_digest != "c5bf2d01f381cae8793342a6e20386f4be50682def3f2c03c176da8075e427c3":
+    if (
+        enforce_slice_digests
+        and phase_digest
+        != "c5bf2d01f381cae8793342a6e20386f4be50682def3f2c03c176da8075e427c3"
+    ):
         raise FixtureContractError(
             "secure AppVerifier phase changed outside its reviewed source allowlist"
         )
+    phase_direct_references = re.findall(
+        r"\$(?:script:secure_temp_child_path|\{script:secure_temp_child_path\})",
+        candidate_phase,
+        flags=re.IGNORECASE,
+    )
     if (
         candidate_phase.count("Invoke-Secure-Fixture-With-RuntimePath") != 2
-        or "$script:secure_temp_child_path" in candidate_phase
-        or "${script:secure_temp_child_path}" in candidate_phase
+        or phase_direct_references
     ):
         raise FixtureContractError(
             "secure AppVerifier phase must use only its two reviewed helper calls"
+        )
+    if re.search(
+        r"&|\b(?:Invoke-Captured|Start-Process|Invoke-Expression)\b|"
+        r"test-secure-duckdb-temp-child-windows\.exe",
+        candidate_phase,
+        flags=re.IGNORECASE,
+    ):
+        raise FixtureContractError(
+            "secure AppVerifier phase contains an unreviewed launch route"
+        )
+    if re.search(
+        r"\b(?:return|exit|break|continue)\b",
+        candidate_phase,
+        flags=re.IGNORECASE,
+    ):
+        raise FixtureContractError(
+            "secure AppVerifier phase contains early termination"
         )
     ordered = (
         "$loader_probe = Invoke-Secure-Fixture-With-RuntimePath",
@@ -575,10 +694,48 @@ def validate_runtime_path_contract(
         raise FixtureContractError(
             "secure runtime preflight and instrumented launch are out of order"
         )
+    reviewed_phase = """function Invoke-Secure-Temp-Child {
+  $phase = New-Phase 'secure-temp-child'
+  $env:VERIFIER_LOG_PATH = $phase
+  Clear-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
+  $loader_probe = Invoke-Secure-Fixture-With-RuntimePath -LogPath (
+    Join-Path $phase 'loader-preflight.txt')
+  Assert-Success $loader_probe 'launch secure temp-child loader preflight'
+  Enable-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
+  $result = Invoke-Secure-Fixture-With-RuntimePath -LogPath (
+    Join-Path $phase 'process.txt')
+  $entries = @(Export-Phase-Logs -Phase $phase)
+  if ($result.ExitCode -ne 0) {
+    throw "instrumented secure temp-child fixture exited $($result.ExitCode)"
+  }
+  Assert-Clean-Entries -Entries $entries -PhaseName 'secure temp-child'
+  Clear-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
+}"""
+    if candidate_phase.strip() != reviewed_phase:
+        raise FixtureContractError(
+            "secure AppVerifier phase changed outside its explicit source allowlist"
+        )
 
 
 validate_runtime_path_contract(script)
 runtime_mutations = {
+    "libchronoid-drive-qualified": (
+        "$libchronoid_runtime_value -notmatch '^[A-Za-z]:[\\\\/]'"
+    ),
+    "libchronoid-path-list": (
+        "$libchronoid_runtime_value.Contains([System.IO.Path]::PathSeparator)"
+    ),
+    "literal-libchronoid-child": (
+        "$libchronoid_runtime_value = Join-Path ("
+    ),
+    "libchronoid-canonical-equality": (
+        "$expected_libchronoid_runtime, [StringComparison]::OrdinalIgnoreCase"
+    ),
+    "libchronoid-runtime-prefix": "$script:libchronoid_runtime_directory,",
+    "vcpkg-runtime-prefix": "$script:vcpkg_runtime_directory)",
+    "libchronoid-runtime-metadata": (
+        "libchronoid_runtime_directory = $script:libchronoid_runtime_directory"
+    ),
     "drive-qualified-root": "$vcpkg_installed_value -notmatch '^[A-Za-z]:[\\\\/]'",
     "literal-bin-child": "$expected_vcpkg_runtime, [StringComparison]::OrdinalIgnoreCase",
     "hosted-containment": "$script:vcpkg_installed_directory.StartsWith(",
@@ -593,7 +750,47 @@ runtime_mutations = {
 for mutation_name, removed_token in runtime_mutations.items():
     mutation = script.replace(removed_token, f"removed-{mutation_name}", 1)
     try:
-        validate_runtime_path_contract(mutation, enforce_runner_digest=False)
+        validate_runtime_path_contract(
+            mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        f"Windows AppVerifier checker accepted {mutation_name} negative control"
+    )
+runtime_prefix = (
+    "  $runtime_prefix = [string]::Concat(\n"
+    "    $script:libchronoid_runtime_directory,\n"
+    "    [System.IO.Path]::PathSeparator,\n"
+    "    $script:vcpkg_runtime_directory)"
+)
+runtime_prefix_mutations = {
+    "reversed-runtime-prefix": (
+        "  $runtime_prefix = [string]::Concat(\n"
+        "    $script:vcpkg_runtime_directory,\n"
+        "    [System.IO.Path]::PathSeparator,\n"
+        "    $script:libchronoid_runtime_directory)"
+    ),
+    "tests-directory-substitution": (
+        "  $runtime_prefix = [string]::Concat(\n"
+        "    $tests_root,\n"
+        "    [System.IO.Path]::PathSeparator,\n"
+        "    $script:vcpkg_runtime_directory)"
+    ),
+    "missing-vcpkg-runtime-prefix": (
+        "  $runtime_prefix = $script:libchronoid_runtime_directory"
+    ),
+}
+for mutation_name, replacement in runtime_prefix_mutations.items():
+    mutation = script.replace(runtime_prefix, replacement, 1)
+    try:
+        validate_runtime_path_contract(
+            mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
     except (FixtureContractError, ValueError):
         continue
     raise SystemExit(
@@ -608,7 +805,9 @@ early_launch_mutation = script.replace(
 )
 try:
     validate_runtime_path_contract(
-        early_launch_mutation, enforce_runner_digest=False
+        early_launch_mutation,
+        enforce_runner_digest=False,
+        enforce_slice_digests=False,
     )
 except (FixtureContractError, ValueError):
     pass
@@ -625,13 +824,70 @@ braced_launch_mutation = script.replace(
 )
 try:
     validate_runtime_path_contract(
-        braced_launch_mutation, enforce_runner_digest=False
+        braced_launch_mutation,
+        enforce_runner_digest=False,
+        enforce_slice_digests=False,
     )
 except (FixtureContractError, ValueError):
     pass
 else:
     raise SystemExit(
         "Windows AppVerifier checker accepted braced pre-PATH launch negative control"
+    )
+for direct_reference in (
+    "$script:secure_temp_child_path",
+    "$ScRiPt:SeCuRe_TeMp_ChIlD_PaTh",
+    "${script:secure_temp_child_path}",
+    "${ScRiPt:SeCuRe_TeMp_ChIlD_PaTh}",
+):
+    helper_bypass_mutation = script.replace(
+        "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+        f"  & {direct_reference}\n"
+        "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+        1,
+    )
+    try:
+        validate_runtime_path_contract(
+            helper_bypass_mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        "Windows AppVerifier checker accepted direct helper bypass negative control: "
+        f"{direct_reference}"
+    )
+for direct_launch in (
+    "& (Join-Path $tests_root 'test-secure-duckdb-temp-child-windows.exe')",
+    "Start-Process -FilePath (Join-Path $tests_root "
+    "'test-secure-duckdb-temp-child-windows.exe') -Wait",
+    "$p = Get-Variable -Scope Script -Name secure_temp_child_path "
+    "-ValueOnly; & $p",
+    "$p = Get-Variable -Scope Script -Name secure_temp_child_path "
+    "-ValueOnly; start $p -Wait",
+    "$p = Get-Variable -Scope Script -Name secure_temp_child_path "
+    "-ValueOnly; [System.Diagnostics.Process]::Start($p)",
+    "StArT-PrOcEsS -FilePath (Join-Path $tests_root "
+    "'TeSt-SeCuRe-DuCkDb-TeMp-ChIlD-WiNdOwS.ExE') -Wait",
+):
+    helper_launch_mutation = script.replace(
+        "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+        f"  {direct_launch}\n"
+        "  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')",
+        1,
+    )
+    try:
+        validate_runtime_path_contract(
+            helper_launch_mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        "Windows AppVerifier checker accepted literal helper launch negative control: "
+        f"{direct_launch}"
     )
 phase_launch_mutation = script.replace(
     "function Invoke-Secure-Temp-Child {\n",
@@ -642,13 +898,86 @@ phase_launch_mutation = script.replace(
 )
 try:
     validate_runtime_path_contract(
-        phase_launch_mutation, enforce_runner_digest=False
+        phase_launch_mutation,
+        enforce_runner_digest=False,
+        enforce_slice_digests=False,
     )
 except (FixtureContractError, ValueError):
     pass
 else:
     raise SystemExit(
         "Windows AppVerifier checker accepted secure-phase early launch negative control"
+    )
+for direct_reference in (
+    "$script:secure_temp_child_path",
+    "$ScRiPt:SeCuRe_TeMp_ChIlD_PaTh",
+    "${script:secure_temp_child_path}",
+    "${ScRiPt:SeCuRe_TeMp_ChIlD_PaTh}",
+):
+    phase_bypass_mutation = script.replace(
+        "function Invoke-Secure-Temp-Child {\n",
+        f"function Invoke-Secure-Temp-Child {{\n  & {direct_reference}\n",
+        1,
+    )
+    try:
+        validate_runtime_path_contract(
+            phase_bypass_mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        "Windows AppVerifier checker accepted direct secure-phase bypass "
+        f"negative control: {direct_reference}"
+    )
+for direct_launch in (
+    "& (Join-Path $tests_root 'test-secure-duckdb-temp-child-windows.exe')",
+    "Start-Process -FilePath (Join-Path $tests_root "
+    "'test-secure-duckdb-temp-child-windows.exe') -Wait",
+    "$p = Get-Variable -Scope Script -Name secure_temp_child_path "
+    "-ValueOnly; & $p",
+    "$p = Get-Variable -Scope Script -Name secure_temp_child_path "
+    "-ValueOnly; start $p -Wait",
+    "$p = Get-Variable -Scope Script -Name secure_temp_child_path "
+    "-ValueOnly; [System.Diagnostics.Process]::Start($p)",
+    "StArT-PrOcEsS -FilePath (Join-Path $tests_root "
+    "'TeSt-SeCuRe-DuCkDb-TeMp-ChIlD-WiNdOwS.ExE') -Wait",
+):
+    phase_launch_mutation = script.replace(
+        "function Invoke-Secure-Temp-Child {\n",
+        f"function Invoke-Secure-Temp-Child {{\n  {direct_launch}\n",
+        1,
+    )
+    try:
+        validate_runtime_path_contract(
+            phase_launch_mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        "Windows AppVerifier checker accepted literal secure-phase launch "
+        f"negative control: {direct_launch}"
+    )
+for return_keyword in ("return", "ReTuRn"):
+    phase_return_mutation = script.replace(
+        "function Invoke-Secure-Temp-Child {\n",
+        f"function Invoke-Secure-Temp-Child {{\n  {return_keyword}\n",
+        1,
+    )
+    try:
+        validate_runtime_path_contract(
+            phase_return_mutation,
+            enforce_runner_digest=False,
+            enforce_slice_digests=False,
+        )
+    except (FixtureContractError, ValueError):
+        continue
+    raise SystemExit(
+        "Windows AppVerifier checker accepted secure-phase early return "
+        f"negative control: {return_keyword}"
     )
 
 if "Handles.Traces" in script:
