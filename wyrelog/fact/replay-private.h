@@ -34,6 +34,11 @@ typedef enum
   WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH,
   WYL_FACT_GRAPH_STATE_REPLAY_FAILED,
   WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE,
+  /* The engine is complete and the graph serves queries, but a forget
+   * recorded against it did not converge at startup.  Appended, so the
+   * existing values keep their numbers across the test binaries that compile
+   * daemon/fact-status.c separately. */
+  WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE,
 } wyl_fact_graph_state_t;
 
 typedef struct

@@ -1063,14 +1063,33 @@ distinct lines appear in the `BOOT` section:
   ledger was never read and nothing is known about any erasure for that graph.
   Usually the graph is also reported degraded, because the read-only open the
   engine build needs fails for the same reason, and the warning then adds
-  nothing to the degraded report. If the graph is reported ready instead, the
-  store refused a *write* handle while still serving reads -- that graph is
-  answering queries and may hold an erasure that never converged. Investigate
-  that combination; do not dismiss the warning on a graph that reports ready.
+  nothing to the degraded report. If the graph is reported ready *at startup*
+  instead, the store refused a *write* handle while still serving reads -- that
+  graph is answering queries and may hold an erasure that never converged.
+  Investigate that combination; do not dismiss the warning on a graph that
+  reports ready. A graph that was degraded at startup and reports ready later
+  in the run is a different case with the same appearance, and reaches it
+  without any lease refusal -- see "A graph reporting `forget_incomplete`"
+  below.
 - `a pending fact forget recorded for tenant <t> graph <g> could not be
   converged` (error) -- an intent was found and did not complete. Personal data
   that was accepted for deletion is still present in that graph. Investigate
-  before returning the graph to service.
+  before returning the graph to service. That graph also reports
+  `forget_incomplete` on `/facts/status`, so this case is visible without
+  reading logs; the warning above is not.
+
+Note that at `wyrelog_log_max_level=error`, which the option's own description
+recommends for production builds, the warning is compiled out entirely. The
+error survives.
+
+That matters most for the combination the warning bullet above singles out. In
+most configurations a store that could not be opened for the forget probe also
+failed to build an engine, so the graph reports a replay state and the warning
+adds nothing. Under the secure bridge a provisioned graph can be refused a
+*write* handle while still serving reads: there the graph reports `ready`, and
+on a production build set to `error` the warning that would have told you is
+gone. That is the case to watch, and the reason to collect `BOOT` output at
+`warn` at least once after a configuration change.
 
 The following unary `fact(V)` flow shows the required contract for a registered
 `fact(value:int64)` relation:
@@ -1137,6 +1156,70 @@ A single corrupted graph should report a degraded graph entry while unrelated
 graphs remain queryable. Stop the daemon before repairing or replacing a damaged
 `facts.duckdb`, restore only the affected `<tenant>/<graph>` fact directory,
 restart, then confirm `/facts/status` returns `"status":"ready"`.
+
+### A graph reporting `forget_incomplete`
+
+A graph whose boot forget reconciliation did not converge reports
+`"state":"forget_incomplete"` and counts toward `graphs_degraded`, so the
+aggregate `"status"` is `degraded` rather than `ready`. It means an erasure this
+graph accepted has not completed, and the data is still present.
+
+Two things about that entry are deliberate and worth knowing before acting on
+it:
+
+- **The graph is still serving queries.** Its entry reports
+  `"queryable":true`. This is a health signal, not a barrier -- the daemon does
+  not refuse reads on a graph with an outstanding erasure, because the engine
+  is complete and correct for the data that is there.
+- **This is the first degraded state with no replay failure behind it.** A
+  graph that is counted in `graphs_degraded` while still serving queries is
+  not new -- a post-mutation refresh that fails while the previous engine
+  survives leaves the graph queryable and degraded, and its reason code says
+  which replay step failed. What is new is a graph that replayed *perfectly*
+  and is degraded anyway, because it owes an erasure. Check `"state"` rather
+  than inferring a cause from the aggregate.
+
+A graph that is both unreplayable and owes an erasure reports the replay reason
+(`store_unavailable`, `schema_mismatch`, `replay_failed`), not
+`forget_incomplete`. The replay failure is the more actionable of the two and
+must be cleared first; the erasure state reappears once the graph replays.
+
+A **sealed** graph is the exception, and it is the one that matters most. Boot
+reconciliation deliberately converges a sealed graph's pending forget -- sealing
+blocks admission of new data, not erasure of data already stored, and after the
+seal there is no request path left, so startup is the only remedy. But a sealed
+graph is never given an engine, so it is permanently degraded for a replay
+reason and its `forget_incomplete` is permanently masked. The population most
+likely to strand an erasure is therefore the one that cannot display the state.
+
+Worse, the state it does show is wrong. Refusing an engine to a sealed graph
+returns a policy error, and the replay classifier maps policy errors to
+`schema_mismatch` -- so a sealed graph reports `"state":"schema_mismatch"`
+whether or not its schema is fine. Do not go looking for a schema problem on a
+sealed graph. Read the `BOOT` error line instead of `/facts/status`; it names
+the graph and the reason code directly. This misreport predates the
+`forget_incomplete` state and is expected to disappear when sealing becomes a
+first-class inactive state rather than a replay failure, which is #548. Note
+that classifying sealed separately does not by itself reveal an outstanding
+erasure on a sealed graph: the status mapping consults the erasure axis only
+where replay health would report ready, so #548 also has to decide how sealed
+composes with it.
+
+The state is a startup snapshot. It is written by the full replay that runs when
+the daemon opens its handle, and in a running daemon that happens exactly once
+-- an append, a retract, or any other targeted refresh does not read the forget
+ledger and so leaves the state alone. So a graph converges out of
+`forget_incomplete` on the next restart, not during the run, and if it persists
+across restarts the intent cannot converge on its own and needs investigation;
+the `BOOT` error line above names the reason code.
+
+The same snapshot property has a quieter consequence. A graph whose store could
+not be opened at startup gets no verdict at all, and carries none for the rest
+of the process even if the store later becomes readable and the graph returns to
+`ready` after an append. Such a graph reports `ready` with a forget ledger that
+was never reconciled. Restart re-probes it. This is not a state the daemon can
+detect while running, which is why the startup `BOOT` lines are worth
+collecting.
 
 ## Day-2 Operations
 

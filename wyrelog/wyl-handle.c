@@ -2538,7 +2538,23 @@ legacy_fact_graph_state (const WylFactGraphRuntimeStatus *status)
       || (status->state == WYL_FACT_GRAPH_RUNTIME_BUILDING
       && status->queryable
       && status->last_replay_class == WYL_FACT_GRAPH_REPLAY_NONE))
-    return WYL_FACT_GRAPH_STATE_READY;
+    /* The forget axis is consulted only where replay health would report
+     * ready, so a graph degraded for a replay reason keeps that reason.  That
+     * masks a real claim rather than declining to invent one: a graph can be
+     * both unreplayable and owed an erasure, and
+     * /fact-replay/replay-failure-outranks-erasure builds exactly that.  The
+     * replay reason wins because it is the more actionable of the two -- an
+     * operator cannot act on the erasure until the graph replays at all -- and
+     * the aggregate is degraded either way.  The rule also keeps a graph that
+     * was never the subject of any claim from raising a compliance state,
+     * which is the false alarm #547 removed from the boot log.
+     *
+     * This sits downstream of the EVICTED/ABANDONED early return in the
+     * caller, which is what keeps tombstones off the surface -- do not move it
+     * ahead of that. */
+    return status->forget_state == WYL_FACT_GRAPH_FORGET_INCOMPLETE
+           ? WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE
+           : WYL_FACT_GRAPH_STATE_READY;
   switch (status->last_replay_class) {
     case WYL_FACT_GRAPH_REPLAY_STORE_UNAVAILABLE:
       return WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE;
