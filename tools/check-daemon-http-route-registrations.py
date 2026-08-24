@@ -1003,6 +1003,8 @@ def compile_unit_enabled_features(unit: CompileUnit,
 def production_compile_units(root: Path, build_root: Path,
                              compiler_id: str) -> list[CompileUnit]:
     production_daemon_target_directory(compiler_id)
+    root = root.resolve()
+    build_root = build_root.resolve()
     database_path = build_root / "compile_commands.json"
     if not database_path.is_file():
         raise GuardError(f"missing compile database: {database_path}")
@@ -1941,6 +1943,14 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         check_root(root)
         self_test_production_compile_selection(
             root, source_path, compiler_id, compiler)
+        alias_directory = root / "path-alias"
+        alias_directory.mkdir()
+        aliased_root = alias_directory / ".."
+        self_test_production_compile_selection(
+            aliased_root,
+            aliased_root / "wyrelog" / "daemon" / "http.c",
+            compiler_id,
+            compiler)
         bounded_arguments = expanded_call_arguments(
             f'{EXACT_API}(server, "/healthz", healthz_handler, NULL, NULL);\n'
             '"unterminated tail', 0, EXACT_API)
