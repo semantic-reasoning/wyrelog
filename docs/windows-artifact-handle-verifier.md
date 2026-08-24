@@ -85,6 +85,14 @@ The runner performs four isolated phases:
    prevents a clean artifact-suite process from standing in for the production
    secure-filesystem path.
 
+   The runner launches this image directly rather than through Meson. It
+   validates and prepends the build's pinned
+   `subprojects\libchronoid` shared-runtime directory followed by the vcpkg
+   `bin` directory, preserving and then exactly restoring the caller's process
+   `PATH`. An uninstrumented direct launch must first pass and is captured in
+   `loader-preflight.txt`; only then does the runner enable AppVerifier and
+   repeat the exact image under Handles/Leak instrumentation.
+
 The activation fault is isolated to the test-only probe. The reused-slot
 ownership test retains its deliberate invalid `CloseHandle` consumption
 assertion in ordinary test runs. For the instrumented artifact phase only, the

@@ -254,11 +254,15 @@ function Invoke-Secure-Fixture-With-RuntimePath {
   param([Parameter(Mandatory = $true)] [string] $LogPath)
 
   $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+  $runtime_prefix = [string]::Concat(
+    $script:libchronoid_runtime_directory,
+    [System.IO.Path]::PathSeparator,
+    $script:vcpkg_runtime_directory)
   $secure_path = if ([string]::IsNullOrEmpty($previous_path)) {
-    $script:vcpkg_runtime_directory
+    $runtime_prefix
   } else {
-    $script:vcpkg_runtime_directory + [System.IO.Path]::PathSeparator +
-      $previous_path
+    [string]::Concat($runtime_prefix, [System.IO.Path]::PathSeparator,
+      $previous_path)
   }
   try {
     [Environment]::SetEnvironmentVariable('PATH', $secure_path, 'Process')
@@ -366,6 +370,21 @@ if ($app_verifier_hash -notmatch '^[0-9A-F]{64}$') {
 
 $script:meson_path = (Get-Command meson -ErrorAction Stop).Source
 $script:build_root = (Resolve-Path -LiteralPath $BuildDirectory).Path
+$libchronoid_runtime_value = Join-Path (
+  Join-Path $script:build_root 'subprojects') 'libchronoid'
+if ($libchronoid_runtime_value -notmatch '^[A-Za-z]:[\\/]' -or
+    $libchronoid_runtime_value.Contains([System.IO.Path]::PathSeparator) -or
+    !(Test-Path -LiteralPath $libchronoid_runtime_value -PathType Container)) {
+  throw 'Windows AppVerifier requires the libchronoid runtime directory'
+}
+$script:libchronoid_runtime_directory = (
+  Resolve-Path -LiteralPath $libchronoid_runtime_value).Path
+$expected_libchronoid_runtime = [System.IO.Path]::GetFullPath(
+  (Join-Path (Join-Path $script:build_root 'subprojects') 'libchronoid'))
+if (![string]::Equals($script:libchronoid_runtime_directory,
+    $expected_libchronoid_runtime, [StringComparison]::OrdinalIgnoreCase)) {
+  throw 'Windows AppVerifier libchronoid runtime is not the literal build child'
+}
 $vcpkg_installed_value = [Environment]::GetEnvironmentVariable(
   'VCPKG_INSTALLED_DIR', 'Process')
 if ([string]::IsNullOrWhiteSpace($vcpkg_installed_value) -or
@@ -439,6 +458,7 @@ $metadata = [ordered]@{
   administrator = $true
   os_version = [Environment]::OSVersion.VersionString
   process_64_bit = [Environment]::Is64BitProcess
+  libchronoid_runtime_directory = $script:libchronoid_runtime_directory
   vcpkg_installed_directory = $script:vcpkg_installed_directory
   vcpkg_runtime_directory = $script:vcpkg_runtime_directory
   duckdb_linkage = 'source-pinned-static'
