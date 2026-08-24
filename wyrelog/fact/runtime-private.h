@@ -53,6 +53,49 @@ typedef enum
   WYL_FACT_GRAPH_REPLAY_INTERNAL,
 } WylFactGraphReplayClass;
 
+/*
+ * Whether a forget recorded against this graph has converged.
+ *
+ * Orthogonal to replay health: a graph can serve queries from a complete
+ * engine while an erasure it accepted remains outstanding, which is the state
+ * this axis exists to make visible.  An engine refresh must leave it alone,
+ * because a refresh does not read the forget ledger and therefore learns
+ * nothing about any erasure.  The tombstone paths below are the only writers
+ * besides the reconciler, and they only ever clear it.
+ *
+ * CONVERGED is the zero value, so a graph nothing has reported on reads as
+ * converged rather than as unknown.  That is the accurate rendering of no
+ * report, not an optimistic default: the axis asserts that a forget was
+ * recorded and did not converge, and absent a report nothing has claimed it.
+ *
+ * The zero value is safe only because writers are required to be total.  A
+ * caller that writes INCOMPLETE on failure must also write CONVERGED on
+ * success, for every graph it examines.  A write made only on failure turns
+ * the zero into a lie and strands a graph that later converges.  It is
+ * deliberately not a latch.
+ *
+ * Tombstoning clears it.  try_evict and retire_unseen reset the axis as they
+ * reset last_replay_class -- at tombstone time only.  The two axes diverge at
+ * refresh, which resets last_replay_class on success and must never touch
+ * this one; eviction destroys the incarnation so both go stale together,
+ * while refresh replaces only the engine so only the replay axis does.
+ *
+ * The reset is safe at those two sites for different reasons, and only one of
+ * them is durable.  retire_unseen is called once, at the tail of the boot
+ * replay loop that also reconciles -- retirement and re-probe are the same
+ * event, so no live verdict is discarded unrepaired.  try_evict has no
+ * production caller at all; if one is ever added it will be capacity-driven
+ * and asynchronous to boot, and nothing re-probes an evicted graph, so a
+ * verdict could be discarded by a memory-pressure decision.  Whoever wires
+ * try_evict up must re-probe the graph before republishing it, or stop
+ * resetting the axis there.
+ */
+typedef enum
+{
+  WYL_FACT_GRAPH_FORGET_CONVERGED = 0,
+  WYL_FACT_GRAPH_FORGET_INCOMPLETE,
+} WylFactGraphForgetState;
+
 typedef struct
 {
   WylFactGraphKey key;
@@ -66,6 +109,7 @@ typedef struct
   guint active_engine_calls;
   guint waiting_engine_calls;
   gint64 last_replay_at_us;
+  WylFactGraphForgetState forget_state;
 } WylFactGraphRuntimeStatus;
 
 typedef struct _WylFactGraphRuntimeManager WylFactGraphRuntimeManager;
@@ -128,6 +172,7 @@ WylFactGraphRuntimeManager *wyl_fact_graph_runtime_manager_ref
   (WylFactGraphRuntimeManager * manager);
 void wyl_fact_graph_runtime_manager_unref
   (WylFactGraphRuntimeManager * manager);
+
 void wyl_fact_graph_runtime_manager_shutdown
   (WylFactGraphRuntimeManager * manager);
 
@@ -143,16 +188,61 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
     WylFactGraphRuntimeStatusFunc callback, gpointer user_data);
 
 /*
+ * Record whether this graph's pending forget intents converged.
+ *
+ * Writes an existing entry only: an unknown key is WYRELOG_E_NOT_FOUND rather
+ * than a newly minted entry.
+ *
+ * state_lock covers every read and every write of the field.  There are
+ * three writers -- this setter, try_evict and retire_unseen -- and engine
+ * refresh is not among them: refresh never reads or writes forget_state on
+ * any path, which is what makes the axis orthogonal to replay health in code
+ * rather than only in a comment.  Writes are last-writer-wins, so a caller
+ * whose write must reflect a complete ledger read may not run concurrently
+ * with another such caller, or the loser's verdict stands.
+ *
+ * WYRELOG_E_BUSY once the manager is shut down.  Shutdown and abandoned are
+ * one condition, not two: entry->abandoned is only ever set as a consequence
+ * of shutdown, and the lookup already refuses a shut-down manager before this
+ * runs.  The abandoned check here closes the window between the lookup
+ * releasing map_lock and this taking state_lock.
+ *
+ * WYRELOG_E_BUSY also for a tombstone.  retire_unseen and try_evict mark an
+ * entry EVICTED without marking it abandoned, and both clear the axis, but
+ * they release state_lock before this runs -- so this refuses EVICTED under
+ * the same lock as the write, which is what actually closes that window.
+ * Refusal here is a second guarantee, not the only one: the status reader
+ * independently skips EVICTED and ABANDONED
+ * (fact_graph_runtime_status_cb).
+ *
+ * BUSY is therefore not uniformly fatal: from shutdown it means abandon the
+ * sweep, from a tombstone it means skip this graph.  A caller that treats
+ * every BUSY as fatal will stop early on a graph that was merely retired.
+ *
+ * The refusal also imposes an ordering on callers.  A verdict written while
+ * the graph is a tombstone is refused and dropped, and a later refresh then
+ * publishes CONVERGED -- so a real INCOMPLETE can be lost by writing too
+ * early.  Call this after the graph's refresh, per graph.  That trade is
+ * deliberate: dropping a verdict for a graph that is not on the surface beats
+ * poisoning one that is about to be republished.
+ */
+wyrelog_error_t wyl_fact_graph_runtime_manager_set_forget_state
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    WylFactGraphForgetState forget_state);
+
+/*
  * try_evict() is non-blocking with respect to an entry refresh.  It returns
  * WYRELOG_E_BUSY, leaves out_evicted FALSE, and changes nothing when the
  * writer lock is owned/contended, the entry is abandoned, or any snapshot is
- * pinned.  Success detaches the current engine, sets EVICTED, preserves both
- * generation counters, and sets out_evicted TRUE.  An already-empty or
+ * pinned.  Success detaches the current engine, sets EVICTED, clears
+ * forget_state, preserves both generation counters, and sets out_evicted
+ * TRUE.  An already-empty or
  * already-evicted entry may be successfully re-marked EVICTED.
  *
  * retire_unseen() is the authoritative sweep used after a complete store
  * enumeration.  Every entry absent from seen_keys is serialized against its
- * writer, detached, and marked EVICTED without changing generation counters.
+ * writer, detached, marked EVICTED and cleared of forget_state, without
+ * changing generation counters.
  * Unlike try_evict(), retirement may detach a generation while snapshots pin
  * it: those snapshots remain usable, while subsequent acquire calls return
  * WYRELOG_E_NOT_FOUND until a refresh republishes the tombstone.  Passing an
@@ -186,8 +276,9 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
  *
  * shutdown() is idempotent and linearizes when it marks the manager shut down
  * under the map lock.  A refresh(), get_status(), foreach_status(),
- * try_evict(), retire_unseen(), or acquire_snapshot() lookup/enumeration that
- * observes the manager after that point returns WYRELOG_E_BUSY.  Operations
+ * try_evict(), retire_unseen(), set_forget_state(), or acquire_snapshot()
+ * lookup/enumeration that observes the manager after that point returns
+ * WYRELOG_E_BUSY.  Operations
  * admitted before that point may finish according to their entry-local race;
  * in particular, an in-flight refresh discards its build result and ends
  * ABANDONED instead of publishing it.  Snapshots acquired before shutdown

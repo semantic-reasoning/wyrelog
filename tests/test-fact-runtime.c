@@ -796,6 +796,226 @@ test_two_tenant_two_graph_generation_isolation (void)
   for (guint i = 0; i < G_N_ELEMENTS (keys); i++)
     wyl_fact_graph_key_clear (&keys[i]);
 }
+/* Issue #870: the per-graph forget-reconcile axis on the runtime entry.
+ *
+ * Seven properties, each of which a plausible implementation gets wrong in a
+ * different way:
+ *   1. a successful refresh must NOT clear it -- the axis is orthogonal to
+ *      replay health, and an implementation that recomputes it from
+ *      last_replay_class or resets it on READY would pass every other test;
+ *   2. the setter is total, not a latch -- writing CONVERGED after INCOMPLETE
+ *      must clear, so a later boot that converges self-heals;
+ *   3. it must be visible through foreach_status as well as get_status --
+ *      status_fill_locked is the single fill point feeding both, and omitting
+ *      the field there is the likeliest silent bug in this unit;
+ *   4. the setter must not mint an entry -- create=FALSE, so an unknown key is
+ *      NOT_FOUND rather than a silently created entry reported OK;
+ *   5. a FAILED refresh must not clear it either -- the orthogonality claim is
+ *      unconditional, and a success-only test proves the easy half while
+ *      leaving this issue's own bug shape uncovered: a transient store error
+ *      erasing an outstanding-erasure signal so the graph reports ready;
+ *   6. it is per-graph, not per-manager -- an implementation holding the axis
+ *      on the manager would satisfy every property above;
+ *   7. tombstoning both clears it and refuses later writes, which cover
+ *      disjoint orderings -- the reset handles a verdict written before the
+ *      tombstone, the refusal one arriving after, and try_evict and
+ *      retire_unseen each need their own case because a fix to one leaves the
+ *      other unproven.
+ */
+typedef struct
+{
+  const WylFactGraphKey *want;
+  WylFactGraphForgetState seen;
+  guint matched;
+} ForgetStateProbe;
+
+static wyrelog_error_t
+forget_state_cb (const WylFactGraphRuntimeStatus *status, gpointer user_data)
+{
+  ForgetStateProbe *probe = user_data;
+  if (wyl_fact_graph_key_equal (&status->key, probe->want)) {
+    probe->matched++;
+    probe->seen = status->forget_state;
+  }
+  return WYRELOG_E_OK;
+}
+
+static WylFactGraphForgetState
+forget_state_via_foreach (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key)
+{
+  ForgetStateProbe probe = { key, WYL_FACT_GRAPH_FORGET_CONVERGED, 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_foreach_status (manager,
+      forget_state_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.matched, ==, 1);
+  return probe.seen;
+}
+
+static WylFactGraphForgetState
+forget_state_via_get (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key)
+{
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, key,
+      &status), ==, WYRELOG_E_OK);
+  WylFactGraphForgetState state = status.forget_state;
+  wyl_fact_graph_runtime_status_clear (&status);
+  return state;
+}
+
+static void
+test_forget_state_is_orthogonal_and_total (void)
+{
+  WylFactGraphKey a = { 0 }, absent = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&absent, "tenant-a", "absent"),
+      ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 7 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  /* A graph nothing has reported on is converged, not unknown. */
+  g_assert_cmpint (forget_state_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+
+  /* 4: the setter never mints an entry. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &absent, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_NOT_FOUND);
+  ForgetStateProbe absent_probe = { &absent,
+                                    WYL_FACT_GRAPH_FORGET_CONVERGED, 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_foreach_status (manager,
+      forget_state_cb, &absent_probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (absent_probe.matched, ==, 0);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+
+  /* 3: visible through both readers, because one fill point feeds both. */
+  g_assert_cmpint (forget_state_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  g_assert_cmpint (forget_state_via_foreach (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+
+  /* 1: a successful refresh leaves it alone.  Replay health and erasure
+   * convergence are independent, and only a forget reconcile may clear it. */
+  BuildSpec again = {.marker = 8 };
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &again, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (status.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_assert_cmpint (forget_state_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+
+  /* 2: total, not a latch. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_CONVERGED), ==, WYRELOG_E_OK);
+  g_assert_cmpint (forget_state_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+  g_assert_cmpint (forget_state_via_foreach (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+
+  /* A FAILED refresh must leave the axis alone too, and this is the half that
+   * matters: the orthogonality claim is unconditional, but a success-only test
+   * proves only the easy direction.  Clearing the axis on a failed rebuild is
+   * this issue's own bug shape -- a transient store error would silently erase
+   * an outstanding-erasure signal, and the graph would report ready. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+  BuildSpec broken = {.failure = WYRELOG_E_IO };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &broken, &status), ==, WYRELOG_E_IO);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY_STALE);
+  g_assert_cmpint (status.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  /* Per-graph, not per-manager: a verdict on one graph must not colour
+   * another.  The issue is explicitly per-graph, so an implementation that
+   * stored this on the manager would satisfy every assertion above. */
+  WylFactGraphKey other = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&other, "tenant-b", "orders"), ==,
+      WYRELOG_E_OK);
+  BuildSpec other_spec = {.marker = 21 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &other,
+      build_marker_engine, &other_spec, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (forget_state_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  g_assert_cmpint (forget_state_via_get (manager, &other), ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+  wyl_fact_graph_key_clear (&other);
+
+  /* Tombstoning clears the axis, and the assertion is made after republish
+   * rather than on the tombstone: the status reader skips EVICTED, so a
+   * tombstone assertion would test a value no consumer ever reads.  An entry
+   * republished under the same key has not been probed, so carrying the
+   * predecessor's INCOMPLETE would report an erasure for a graph the runtime
+   * no longer holds -- and since the only in-product caller of full replay is
+   * handle open, that stale claim would persist until restart. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen (manager,
+      NULL, 0), ==, WYRELOG_E_OK);
+  BuildSpec republished = {.marker = 9 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &republished, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (status.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_assert_cmpint (forget_state_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+
+  /* try_evict clears it too, and needs its own case: retire_unseen and
+   * try_evict are separate tombstone paths, so a test that exercises only one
+   * leaves the other's reset unproven.  Verified by mutation -- removing
+   * either reset alone must fail this test. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+  BuildSpec after_evict = {.marker = 10 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &after_evict, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  /* A tombstone refuses the write, under the same lock as the write itself.
+   * The tombstone paths clear the axis but release state_lock before a
+   * reconciler verdict can land, so clearing alone leaves a window in which a
+   * late write re-poisons the tombstone and a later refresh republishes a
+   * predecessor's erasure onto a READY graph.  Refusing here is what closes
+   * it.  Asserted through a republish, because that is where the damage would
+   * have surfaced. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen (manager,
+      NULL, 0), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_BUSY);
+  BuildSpec after_refuse = {.marker = 12 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &after_refuse, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (status.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_CONVERGED);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  /* 4, second half: a shut-down manager refuses rather than reports OK. */
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_BUSY);
+
+  wyl_fact_graph_key_clear (&a);
+  wyl_fact_graph_key_clear (&absent);
+}
+
 
 int
 main (int argc, char **argv)
@@ -811,6 +1031,8 @@ main (int argc, char **argv)
       test_shutdown_keeps_pinned_snapshot_alive);
   g_test_add_func ("/fact-runtime/bounded-query-swap-evict-stress",
       test_bounded_query_swap_evict_stress);
+  g_test_add_func ("/fact-runtime/forget-state-orthogonal-and-total",
+      test_forget_state_is_orthogonal_and_total);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();

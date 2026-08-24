@@ -31,6 +31,7 @@ struct _WylFactGraphRuntimeEntry
   gboolean operation_active;
   gboolean abandoned;
   gint64 last_replay_at_us;
+  WylFactGraphForgetState forget_state;
 };
 
 struct _WylFactGraphRuntimeManager
@@ -303,6 +304,7 @@ status_fill_locked (WylFactGraphRuntimeEntry *entry,
   out_status->active_engine_calls = entry->active_engine_calls;
   out_status->waiting_engine_calls = entry->waiting_engine_calls;
   out_status->last_replay_at_us = entry->last_replay_at_us;
+  out_status->forget_state = entry->forget_state;
   return WYRELOG_E_OK;
 }
 
@@ -472,6 +474,12 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
     runtime_entry_unref (entry);
     return WYRELOG_E_BUSY;
   }
+  /* Argued, not proved: like the post-build failure path below, this must not
+   * touch forget_state, because a generation ceiling says nothing about
+   * whether an erasure converged.  No test falsifies it -- nothing reaches
+   * G_MAXUINT64 without a seam, and a seam is not worth adding to prove a
+   * comment -- so clearing the axis here would survive the suite.  The
+   * post-build sibling IS proved; this one rests on inspection. */
   if (entry->operation_generation == G_MAXUINT64
       || entry->engine_generation == G_MAXUINT64) {
     entry->state = entry->current == NULL
@@ -529,6 +537,47 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
   engine_generation_unref (old);
   engine_generation_unref (replacement);
   g_mutex_unlock (&entry->writer_lock);
+  runtime_entry_unref (entry);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_set_forget_state
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    WylFactGraphForgetState forget_state) {
+  WylFactGraphRuntimeEntry *entry = NULL;
+  /* create = FALSE: this reports on a graph the runtime already holds and must
+   * never fabricate an entry for a key it does not.  NOT_FOUND therefore means
+   * only that no entry has ever existed for this key -- a retired or evicted
+   * entry stays mapped as a tombstone, and is refused below rather than
+   * here. */
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&entry->state_lock);
+  /* Refuse a tombstone, atomically with the write under the lock already
+   * held.  This and the reset performed by try_evict and retire_unseen cover
+   * disjoint orderings and neither is redundant: the reset clears a verdict
+   * written BEFORE the tombstone, and this refuses one arriving AFTER it.
+   * Removing either restores the defect the other does not cover -- without
+   * the reset a pre-existing INCOMPLETE survives retirement, and without this
+   * a verdict landing just after a reset re-poisons the tombstone, so a later
+   * refresh republishes a predecessor's erasure onto a READY graph.
+   *
+   * Writing the axis onto a tombstone is never useful in any case: the status
+   * reader skips EVICTED, and if the entry is republished the value describes
+   * a graph that was never probed.  Refusing a CONVERGED write is harmless,
+   * because the tombstone site has already written CONVERGED.
+   *
+   * abandoned is checked for the same reason one step further out: it follows
+   * shutdown, and the lookup above already refuses a shut-down manager, so
+   * this closes the window between that lookup releasing map_lock and this
+   * taking state_lock. */
+  if (entry->abandoned || entry->state == WYL_FACT_GRAPH_RUNTIME_EVICTED)
+    rc = WYRELOG_E_BUSY;
+  else
+    entry->forget_state = forget_state;
+  g_mutex_unlock (&entry->state_lock);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -625,6 +674,7 @@ wyl_fact_graph_runtime_manager_try_evict
     entry->current = NULL;
     entry->state = WYL_FACT_GRAPH_RUNTIME_EVICTED;
     entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+    entry->forget_state = WYL_FACT_GRAPH_FORGET_CONVERGED;
     *out_evicted = TRUE;
   }
   g_mutex_unlock (&entry->state_lock);
@@ -684,6 +734,7 @@ wyl_fact_graph_runtime_manager_retire_unseen
     if (!entry->abandoned) {
       entry->state = WYL_FACT_GRAPH_RUNTIME_EVICTED;
       entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+      entry->forget_state = WYL_FACT_GRAPH_FORGET_CONVERGED;
     }
     g_mutex_unlock (&entry->state_lock);
     engine_generation_unref (old);
