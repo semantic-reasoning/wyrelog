@@ -212,6 +212,19 @@ open_existing_scratch_file (const gchar *path)
   return handle;
 }
 
+static HANDLE
+open_existing_identity_witness (const gchar *path, gboolean directory)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+  HANDLE handle = CreateFileW (wide, FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, flags, NULL);
+
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  return handle;
+}
+
 static void
 remove_scratch_file (gchar *path)
 {
@@ -348,6 +361,49 @@ deleted_object_is_open_after_wait (HANDLE volume, const wchar_t *wide,
       return TRUE;
     g_usleep ((gulong) MIN (remaining - 1, 10 * G_TIME_SPAN_MILLISECOND));
   }
+}
+
+/* Replacement reuses the old object's pathname for the new source, so the
+ * path-aware probe cannot ask about the displaced identity.  Wait on that
+ * identity directly instead.  A retained guardian keeps returning TRUE for
+ * the full bounded interval; a completed close makes the exact FileId stop
+ * resolving. */
+static gboolean
+unlinked_object_is_open_after_wait (HANDLE volume,
+    const WylFactGraphWinIdentity *identity)
+{
+  const gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+
+  while (TRUE) {
+    gint64 remaining;
+
+    if (!unlinked_object_is_open (volume, identity))
+      return FALSE;
+    remaining = deadline - g_get_monotonic_time ();
+    if (remaining <= 1)
+      return TRUE;
+    g_usleep ((gulong) MIN (remaining - 1, 10 * G_TIME_SPAN_MILLISECOND));
+  }
+}
+
+/* Establish file-ID lookup capability with an exact witness the test knows is
+ * open.  A local filesystem that cannot answer may skip this one oracle, but
+ * the hosted AppVerifier gate must never silently lose the deterministic
+ * reachability half of its evidence. */
+static gboolean
+unlinked_reachability_available (HANDLE volume, HANDLE witness,
+    const WylFactGraphWinIdentity *identity, const gchar *scenario)
+{
+  WylFactGraphWinIdentity witnessed = identity_for (witness);
+
+  g_assert_true (identity_matches (identity, &witnessed));
+  if (unlinked_object_is_open (volume, identity))
+    return TRUE;
+  if (g_getenv ("WYRELOG_APPVERIFIER_HANDLE_GATE") != NULL)
+    g_error ("%s: hosted HANDLE gate cannot look up a known-open FileId",
+        scenario);
+  g_test_skip ("the scratch volume serves no lookup by FileId");
+  return FALSE;
 }
 
 /* The session, rather than a numeric HANDLE, is the externally visible I/O
@@ -1300,6 +1356,9 @@ test_native_namespace_sidecar_replacement_isolated (void)
 {
   gchar *path = NULL;
   HANDLE graph = INVALID_HANDLE_VALUE;
+  HANDLE volume = open_scratch_volume ();
+  HANDLE old_witness = INVALID_HANDLE_VALUE;
+  HANDLE replacement_witness = INVALID_HANDLE_VALUE;
   WylFactArtifactWinNamespace *namespace_ =
       open_isolated_namespace (&path, &graph);
   WylFactArtifactWinLease *lease = NULL;
@@ -1310,7 +1369,15 @@ test_native_namespace_sidecar_replacement_isolated (void)
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
   WylFactArtifactSidecarRetireResult retire =
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  WylFactGraphWinIdentity old_identity = { 0 };
+  WylFactGraphWinIdentity replacement_identity = { 0 };
+  gboolean old_identity_observable = FALSE;
+  gboolean replacement_identity_observable = FALSE;
   gsize written = 0;
+  g_autofree gchar *destination_path = g_build_filename (path,
+          "facts.duckdb.wal", NULL);
+  g_autofree wchar_t *destination_wide = g_utf8_to_utf16 (destination_path,
+          -1, NULL, NULL, NULL);
 
   g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
         (namespace_, &lease), ==, WYRELOG_E_OK);
@@ -1320,6 +1387,8 @@ test_native_namespace_sidecar_replacement_isolated (void)
         (destination, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
+  old_identity = identity_for_path (destination_path);
+  old_witness = open_existing_scratch_file (destination_path);
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
       "isolated-sidecar", &source), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session (source,
@@ -1333,14 +1402,40 @@ test_native_namespace_sidecar_replacement_isolated (void)
       destination, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED);
+  /* The pathname now identifies |source|.  Ask only for the displaced FileId:
+   * after replacement's internal old-state cleanup, the deliberate witness
+   * must be its sole owner. */
+  old_identity_observable = unlinked_reachability_available (volume,
+          old_witness, &old_identity, "sidecar replacement old destination");
+  g_assert_true (CloseHandle (old_witness));
+  old_witness = INVALID_HANDLE_VALUE;
+  if (old_identity_observable)
+    g_assert_false (unlinked_object_is_open_after_wait (volume,
+        &old_identity));
+  replacement_identity = identity_for_path (destination_path);
+  g_assert_false (identity_matches (&old_identity, &replacement_identity));
+  replacement_witness = open_existing_scratch_file (destination_path);
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (destination,
       &retire), ==, WYRELOG_E_OK);
   g_assert_cmpint (retire, ==,
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  replacement_identity_observable = unlinked_reachability_available (volume,
+          replacement_witness, &replacement_identity, "sidecar retirement");
+  g_assert_true (CloseHandle (replacement_witness));
+  replacement_witness = INVALID_HANDLE_VALUE;
+  if (replacement_identity_observable)
+    g_assert_true (deleted_object_is_open (volume, destination_wide,
+        &replacement_identity));
   wyl_fact_artifact_win_temp_binding_free (source);
+  source = NULL;
   wyl_fact_artifact_win_sidecar_binding_free (destination);
+  destination = NULL;
+  if (replacement_identity_observable)
+    g_assert_false (deleted_object_is_open_after_wait (volume,
+        destination_wide, &replacement_identity));
   wyl_fact_artifact_win_lease_free (lease);
   wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (volume));
   g_assert_true (CloseHandle (graph));
   remove_tree_for_test (path);
   g_free (path);
@@ -1777,6 +1872,7 @@ test_locator_replace_open_destination (void)
 {
   gchar *path = NULL;
   HANDLE graph = open_scratch_directory (&path);
+  HANDLE volume = open_scratch_volume ();
   WylFactGraphWinIdentity graph_identity = { 0 };
   WylFactArtifactWinLocator *locator = open_locator_for_test (graph,
           &graph_identity);
@@ -1789,6 +1885,10 @@ test_locator_replace_open_destination (void)
   WylFactArtifactWinMutationEffect effect =
       WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
   HANDLE held = INVALID_HANDLE_VALUE;
+  gboolean old_identity_observable = FALSE;
+  g_autofree gchar *target_path = g_build_filename (path, "target", NULL);
+  g_autofree wchar_t *target_wide = g_utf8_to_utf16 (target_path, -1, NULL,
+          NULL, NULL);
   g_autofree wchar_t *directory_wide = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "tmp-source",
@@ -1814,13 +1914,38 @@ test_locator_replace_open_destination (void)
   g_assert_true (identity_matches (wyl_fact_artifact_win_entry_identity
         (resolved), &source_identity));
   wyl_fact_artifact_win_entry_free (resolved);
+  resolved = NULL;
+  old_identity_observable = unlinked_reachability_available (volume, held,
+          &target_identity, "raw rename-replace displaced destination");
   g_assert_true (CloseHandle (held));
+  held = INVALID_HANDLE_VALUE;
+  /* Raw rename does not own the displaced destination.  The caller's target
+   * entry is the remaining production object here; this assertion belongs to
+   * that entry's destructor coverage, not to the rename transport. */
+  if (old_identity_observable)
+    g_assert_true (unlinked_object_is_open (volume, &target_identity));
+  HANDLE source_witness = open_existing_identity_witness (target_path, FALSE);
   g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator, source,
       &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  gboolean source_identity_observable = unlinked_reachability_available
+        (volume, source_witness, &source_identity, "raw entry deletion");
+  g_assert_true (CloseHandle (source_witness));
+  if (source_identity_observable)
+    g_assert_true (deleted_object_is_open (volume, target_wide,
+        &source_identity));
   wyl_fact_artifact_win_entry_free (source);
+  source = NULL;
+  if (source_identity_observable)
+    g_assert_false (deleted_object_is_open_after_wait (volume, target_wide,
+        &source_identity));
   wyl_fact_artifact_win_entry_free (target);
+  target = NULL;
+  if (old_identity_observable)
+    g_assert_false (unlinked_object_is_open_after_wait (volume,
+        &target_identity));
   wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (volume));
   g_assert_true (CloseHandle (graph));
   directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
   g_assert_true (RemoveDirectoryW (directory_wide));
@@ -2824,11 +2949,26 @@ test_native_namespace_main_sidecar_lifecycle (void)
       "sidecar", 7, &written), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
+  g_autofree gchar *neutral_destination_path = g_build_filename (path,
+          "facts.duckdb.wal", NULL);
+  WylFactGraphWinIdentity neutral_old_identity =
+      identity_for_path (neutral_destination_path);
+  HANDLE neutral_witness = open_existing_scratch_file
+        (neutral_destination_path);
+  HANDLE neutral_volume = open_scratch_volume ();
   neutral_replace = WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_NOT_REPLACED;
   g_assert_cmpint (wyl_fact_artifact_sidecar_binding_replace_existing_wal
         (sidecar_source, sidecar, &neutral_replace), ==, WYRELOG_E_OK);
   g_assert_cmpint (neutral_replace, ==,
       WYL_FACT_ARTIFACT_SIDECAR_REPLACE_RESULT_REPLACED_DURABLE);
+  gboolean neutral_old_observable = unlinked_reachability_available
+        (neutral_volume, neutral_witness, &neutral_old_identity,
+          "neutral sidecar replacement old destination");
+  g_assert_true (CloseHandle (neutral_witness));
+  if (neutral_old_observable)
+    g_assert_false (unlinked_object_is_open_after_wait (neutral_volume,
+        &neutral_old_identity));
+  g_assert_true (CloseHandle (neutral_volume));
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
         (sidecar, &session), ==, WYRELOG_E_OK);
   memset (sidecar_readback, 0, sizeof sidecar_readback);
@@ -3729,7 +3869,213 @@ test_namespace_from_pair_revokes_on_directory_acl_rewrite (void)
   remove_tree_for_test (root);
 }
 
+static void
+test_mutation_handle_lifetime_temp_tokens (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  HANDLE volume = open_scratch_volume ();
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempToken *token = NULL;
+  WylFactArtifactWinTempRecoveryEvidence *evidence = NULL;
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+
+  /* Unlink keeps the terminal token owner alive until _free. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
+      "lifetime-unlink", &token), ==, WYRELOG_E_OK);
+  g_autofree gchar *unlink_path = g_build_filename (path,
+          "tmp-lifetime-unlink", NULL);
+  g_autofree wchar_t *unlink_wide = g_utf8_to_utf16 (unlink_path, -1, NULL,
+          NULL, NULL);
+  HANDLE unlink_witness = open_existing_identity_witness (unlink_path, FALSE);
+  WylFactGraphWinIdentity unlink_identity = identity_for (unlink_witness);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_unlink (token, &effect),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  gboolean unlink_observable = unlinked_reachability_available (volume,
+          unlink_witness, &unlink_identity, "temp-token unlink");
+  g_assert_true (CloseHandle (unlink_witness));
+  if (unlink_observable)
+    g_assert_true (deleted_object_is_open (volume, unlink_wide,
+        &unlink_identity));
+  wyl_fact_artifact_win_temp_token_free (token);
+  token = NULL;
+  if (unlink_observable)
+    g_assert_false (deleted_object_is_open_after_wait (volume, unlink_wide,
+        &unlink_identity));
+
+  /* Recovery v1 opens, deletes and frees its production entry inside the
+   * call.  Keep one witness across the call and prove it was the only owner
+   * left when recovery returned. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
+      "lifetime-recover-v1", &token), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_export_recovery_evidence
+        (token, &evidence), ==, WYRELOG_E_OK);
+  g_autofree gchar *v1_path = g_build_filename (path,
+          "tmp-lifetime-recover-v1", NULL);
+  HANDLE v1_witness = open_existing_identity_witness (v1_path, FALSE);
+  WylFactGraphWinIdentity v1_identity = identity_for (v1_witness);
+  wyl_fact_artifact_win_temp_token_free (token);
+  token = NULL;
+  effect = WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+      evidence, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  gboolean v1_observable = unlinked_reachability_available (volume,
+          v1_witness, &v1_identity, "temp-token recovery v1");
+  g_assert_true (CloseHandle (v1_witness));
+  if (v1_observable)
+    g_assert_false (unlinked_object_is_open_after_wait (volume, &v1_identity));
+  wyl_fact_artifact_win_temp_recovery_evidence_free (evidence);
+  evidence = NULL;
+
+  /* The authenticated v2 forwarder must have the identical lifetime result. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
+      "lifetime-recover-v2", &token), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_export_recovery_evidence
+        (token, &evidence), ==, WYRELOG_E_OK);
+  WinRecoveryMacTestProvider *mac_state = g_new0
+        (WinRecoveryMacTestProvider, 1);
+  memset (mac_state->key, 0x5a, sizeof mac_state->key);
+  WylFactRecoveryMacProvider mac_provider = {
+    win_recovery_mac_test_compute, win_recovery_mac_test_verify,
+    win_recovery_mac_test_wipe, win_recovery_mac_test_free, mac_state
+  };
+  g_autoptr (WylFactRecoveryMacHandle) mac_handle =
+      wyl_fact_recovery_mac_handle_new (&mac_provider, "lifetime-key", 1,
+          "tenant", "graph", "operation");
+  g_assert_nonnull (mac_handle);
+  g_autoptr (GBytes) v2_bytes = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_encode_v2
+        (mac_handle, evidence, &v2_bytes), ==, WYRELOG_E_OK);
+  g_autofree gchar *v2_path = g_build_filename (path,
+          "tmp-lifetime-recover-v2", NULL);
+  HANDLE v2_witness = open_existing_identity_witness (v2_path, FALSE);
+  WylFactGraphWinIdentity v2_identity = identity_for (v2_witness);
+  wyl_fact_artifact_win_temp_token_free (token);
+  token = NULL;
+  effect = WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token_v2 (lease,
+      mac_handle, v2_bytes, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  gboolean v2_observable = unlinked_reachability_available (volume,
+          v2_witness, &v2_identity, "temp-token recovery v2");
+  g_assert_true (CloseHandle (v2_witness));
+  if (v2_observable)
+    g_assert_false (unlinked_object_is_open_after_wait (volume, &v2_identity));
+  wyl_fact_artifact_win_temp_recovery_evidence_free (evidence);
+
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (volume));
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
+static void
+test_mutation_handle_lifetime_temp_tree (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  HANDLE volume = open_scratch_volume ();
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempRoot *root = NULL;
+  WylFactArtifactWinTempChild *child = NULL;
+  WylFactArtifactWinTempChildBinding *binding = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  WylFactDuckdbTempRetireResult retire =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_root (lease, &root),
+      ==, WYRELOG_E_OK);
+  g_autofree gchar *logical =
+      wyl_fact_artifact_win_temp_root_dup_logical_name (root);
+  g_assert_true (g_str_has_prefix (logical, "/wyrelog-duckdb-temp/"));
+  g_autofree gchar *root_path = g_build_filename (path,
+          logical + strlen ("/wyrelog-duckdb-temp/"), NULL);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (root,
+      "duckdb_temp_storage_DEFAULT-659.tmp", &child), ==, WYRELOG_E_OK);
+  g_autofree gchar *child_path = g_build_filename (root_path,
+          "duckdb_temp_storage_DEFAULT-659.tmp", NULL);
+  g_autofree wchar_t *child_wide = g_utf8_to_utf16 (child_path, -1, NULL,
+          NULL, NULL);
+  g_autofree wchar_t *root_wide = g_utf8_to_utf16 (root_path, -1, NULL, NULL,
+          NULL);
+  HANDLE child_witness = open_existing_identity_witness (child_path, FALSE);
+  HANDLE root_witness = open_existing_identity_witness (root_path, TRUE);
+  WylFactGraphWinIdentity child_identity = identity_for (child_witness);
+  WylFactGraphWinIdentity root_identity = identity_for (root_witness);
+
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (child, TRUE,
+      &binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
+        (binding, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_child_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (child, &retire),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (retire, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  gboolean child_observable = unlinked_reachability_available (volume,
+          child_witness, &child_identity, "temp child retirement");
+  g_assert_true (CloseHandle (child_witness));
+  if (child_observable)
+    g_assert_true (deleted_object_is_open (volume, child_wide,
+        &child_identity));
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+  if (child_observable)
+    g_assert_false (deleted_object_is_open_after_wait (volume, child_wide,
+        &child_identity));
+
+  retire = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_retire (root, &retire), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (retire, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  gboolean root_observable = unlinked_reachability_available (volume,
+          root_witness, &root_identity, "temp root retirement");
+  g_assert_true (CloseHandle (root_witness));
+  if (root_observable)
+    g_assert_true (deleted_object_is_open (volume, root_wide, &root_identity));
+  wyl_fact_artifact_win_temp_root_free (root);
+  root = NULL;
+  if (root_observable)
+    g_assert_false (deleted_object_is_open_after_wait (volume, root_wide,
+        &root_identity));
+
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (volume));
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
 static const WinGuardedCase win_guarded_cases[] = {
+  {"/fact/artifact-namespace/windows/mutation-handle-lifetime/working-guardian",
+   test_working_handle_free_closes_unlinked_object},
+  {"/fact/artifact-namespace/windows/mutation-handle-lifetime/raw-replace",
+   test_locator_replace_open_destination},
+  {"/fact/artifact-namespace/windows/mutation-handle-lifetime/sidecar-replace-retire",
+   test_native_namespace_sidecar_replacement_isolated},
+  {"/fact/artifact-namespace/windows/mutation-handle-lifetime/neutral-replace",
+   test_native_namespace_main_sidecar_lifecycle},
+  {"/fact/artifact-namespace/windows/mutation-handle-lifetime/temp-tokens",
+   test_mutation_handle_lifetime_temp_tokens},
+  {"/fact/artifact-namespace/windows/mutation-handle-lifetime/temp-tree",
+   test_mutation_handle_lifetime_temp_tree},
   {"/fact/artifact-namespace/windows/provisioned-pair/namespace",
    test_namespace_from_provisioned_pair},
   {"/fact/artifact-namespace/windows/provisioned-pair/revoke-on-acl",
