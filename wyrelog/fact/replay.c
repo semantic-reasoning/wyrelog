@@ -6,6 +6,7 @@
 #include "compound-private.h"
 #include "graph-locator-private.h"
 #include "wyrelog/wyl-engine-private.h"
+#include "wyrelog/wyl-log-private.h"
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
 #include "fact/store-open-private.h"
 #endif
@@ -575,6 +576,42 @@ resolve_fact_db_path (wyl_policy_store_t *policy, const gchar *fact_root,
   return rc;
 }
 
+/* Open one graph's fact store, choosing the same provisioned/legacy path the
+ * engine builder chooses.  Extracted so the two callers cannot drift: they
+ * differ only in whether they need to write. */
+static wyrelog_error_t
+open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info, gboolean writable,
+    wyl_fact_store_t **out_store)
+{
+  g_assert (out_store != NULL);
+  *out_store = NULL;
+  gboolean provisioned = FALSE;
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  {
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    if (wyl_policy_store_read_graph_authority (policy, graph_info->tenant_id,
+        graph_info->graph_id, &authority) == WYRELOG_E_OK
+        && authority != NULL && authority->lifecycle_state
+        != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED)
+      provisioned = TRUE;
+    wyl_policy_graph_authority_record_free (authority);
+  }
+  if (provisioned)
+    return wyl_fact_store_open_provisioned_graph (policy, fact_root,
+               graph_info->tenant_id, graph_info->graph_id, writable,
+               out_store);
+#else
+  (void) writable;
+#endif
+  g_autofree gchar *fact_db_path = NULL;
+  wyrelog_error_t rc = resolve_fact_db_path (policy, fact_root, graph_info,
+          &fact_db_path);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_fact_store_open (fact_db_path, out_store);
+}
+
 wyrelog_error_t
 wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
     const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
@@ -588,37 +625,11 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
 
-  wyrelog_error_t rc = WYRELOG_E_OK;
   g_autoptr (wyl_fact_store_t) store = NULL;
-  gboolean provisioned = FALSE;
-#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
-  /* A provisioning or active graph is read through the live secure handle on
-   * its retained pair, not the raw path open. */
-  {
-    WylPolicyGraphAuthorityRecord *authority = NULL;
-    if (wyl_policy_store_read_graph_authority (policy, graph_info->tenant_id,
-        graph_info->graph_id, &authority) == WYRELOG_E_OK
-        && authority != NULL && authority->lifecycle_state
-        != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED)
-      provisioned = TRUE;
-    wyl_policy_graph_authority_record_free (authority);
-  }
-  if (provisioned) {
-    rc = wyl_fact_store_open_provisioned_graph (policy, fact_root,
-            graph_info->tenant_id, graph_info->graph_id, FALSE, &store);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
-#endif
-  if (!provisioned) {
-    g_autofree gchar *fact_db_path = NULL;
-    rc = resolve_fact_db_path (policy, fact_root, graph_info, &fact_db_path);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_fact_store_open (fact_db_path, &store);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
+  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info,
+          FALSE, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   g_autoptr (GPtrArray) relations = NULL;
   rc = list_replay_relations (policy, store, graph_info, &relations);
   if (rc != WYRELOG_E_OK)
@@ -709,6 +720,62 @@ build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
              ctx->info, out_engine);
 }
 
+/* Converge any forget interrupted by a crash, before the engine for this graph
+ * is built.  A forget is durable in two steps -- a PENDING intent, then the
+ * deletion and its completion -- and nothing in the request path resumes the
+ * second step, so an interrupted forget stays pending until something drives
+ * it.  Since a sealed graph refuses forget at the request boundary and there
+ * is no unseal route, startup is its only remedy.
+ *
+ * Sealed graphs are therefore included deliberately: sealing blocks admission
+ * of new data, not erasure of existing data, and the store opener serves a
+ * sealed graph for exactly this reason.  That is a different question from
+ * whether a sealed graph gets a query engine, which it does not.
+ *
+ * Returns non-OK only to be counted and logged by the caller.  It must never
+ * reach the handle open, which destroys the handle on any replay failure.
+ *
+ * The line lengths of this comment are constrained by #872: some block shapes
+ * make uncrustify rewrite the continuation stars.  Re-run ./tools/format-c
+ * after editing it.
+ *
+ * A graph whose key does not validate is skipped by the caller before this
+ * runs, so it is never probed and produces neither log line.  That is
+ * deliberate: such a graph has no usable identity to name in a message.
+ *
+ * out_opened reports whether the store was opened at all, because the caller
+ * cannot say the same thing about both outcomes.  A store that would not open
+ * has told us nothing about any erasure: the graph may be DEGRADED or still
+ * PROVISIONING, in which case no forget was ever recorded for it, and the
+ * engine build about to run reports that state through its own channel.  Only
+ * a store that opened has a ledger the reconciler could read. */
+static wyrelog_error_t
+reconcile_graph_forgets (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info, gboolean *out_opened)
+{
+  g_assert (out_opened != NULL);
+  *out_opened = FALSE;
+  if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
+      || graph_info == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, TRUE,
+          &store);
+  /* A graph whose store has never been written has nothing to converge.  The
+   * resolver reports that as NOT_FOUND. */
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_opened = TRUE;
+  /* No schema creation here: this runs for every graph at every boot.  A
+   * store with no forget ledger has nothing pending, and the reconciler
+   * reports that as success rather than as a missing-table error. */
+  return wyl_fact_store_forget_reconcile (store, graph_info->tenant_id,
+             graph_info->graph_id, NULL, NULL);
+}
+
 wyrelog_error_t
 wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
@@ -740,6 +807,37 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     if (!spec->key_valid) {
       summary.graphs_degraded++;
       continue;
+    }
+    if (fact_root != NULL && fact_root[0] != '\0') {
+      gboolean opened = FALSE;
+      wyrelog_error_t forget_rc = reconcile_graph_forgets (policy, fact_root,
+              &spec->info, &opened);
+      if (forget_rc != WYRELOG_E_OK) {
+        if (opened)
+          summary.graphs_forget_reconcile_failed++;
+        else
+          summary.graphs_forget_probe_unavailable++;
+        const gchar *tenant = spec->info.tenant_id != NULL
+              ? spec->info.tenant_id : "(unset)";
+        const gchar *graph = spec->info.graph_id != NULL
+              ? spec->info.graph_id : "(unset)";
+        /* The counter alone is not observable: the only in-product caller
+         * passes a NULL summary.  An erasure that could not be converged must
+         * not be silent, or the daemon comes up reporting ready with data it
+         * promised to delete.  Say only what the outcome supports: a store
+         * that never opened is not evidence that an erasure is outstanding,
+         * and claiming otherwise on every boot of an unopenable graph would
+         * bury the case that is. */
+        if (opened)
+          WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+              "a pending fact forget recorded for tenant %s graph %s could "
+              "not be converged: rc=%d; that erasure is still incomplete",
+              tenant, graph, (int) forget_rc);
+        else
+          WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+              "could not open the fact store of tenant %s graph %s to look "
+              "for a pending forget: rc=%d", tenant, graph, (int) forget_rc);
+      }
     }
     GraphBuildCtx build = { policy, fact_root, &spec->info };
     wyrelog_error_t graph_rc = wyl_fact_graph_runtime_manager_refresh

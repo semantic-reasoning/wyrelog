@@ -1661,7 +1661,8 @@ check_fact_forget_crash_convergence (void)
         &count) || count != 1)
       return 2205;
 
-    if (wyl_fact_store_forget_reconcile (store, NULL, NULL) != WYRELOG_E_OK)
+    if (wyl_fact_store_forget_reconcile (store, "tenant-a",
+        "orders", NULL, NULL) != WYRELOG_E_OK)
       return 2206;
 
     g_autofree gchar *proj_sql = g_strdup_printf
@@ -1688,7 +1689,8 @@ check_fact_forget_crash_convergence (void)
         &count) || count != 0)
       return 2212;
 
-    if (wyl_fact_store_forget_reconcile (store, NULL, NULL) != WYRELOG_E_OK)
+    if (wyl_fact_store_forget_reconcile (store, "tenant-a",
+        "orders", NULL, NULL) != WYRELOG_E_OK)
       return 2213;
     if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
         || count != 1)
@@ -1742,7 +1744,8 @@ check_fact_forget_rejects_identifier_reuse (void)
       != 0)
     return 2236;
 
-  if (wyl_fact_store_forget_reconcile (store, NULL, NULL) != WYRELOG_E_OK)
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL) != WYRELOG_E_OK)
     return 2237;
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'dup-id';", &count)
@@ -1756,6 +1759,185 @@ check_fact_forget_rejects_identifier_reuse (void)
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
       &count) || count != 0)
     return 2240;
+  return 0;
+}
+
+/* Issue #547: seed one store with an interrupted forget whose intent is
+ * durable but whose deletes have not run, so a reconcile that executes and a
+ * reconcile that skips are distinguishable by the surviving rows. */
+static gint
+forget_seed_pending_intent (wyl_fact_store_t **out_store,
+    wyl_policy_fact_relation_schema_options_t *out_schema, gchar **out_table)
+{
+  /* Static because out_schema keeps borrowed pointers into it. */
+  static const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  *out_store = NULL;
+  *out_table = NULL;
+  if (wyl_fact_store_open (NULL, out_store) != WYRELOG_E_OK)
+    return -1;
+  if (wyl_fact_store_create_schema (*out_store) != WYRELOG_E_OK)
+    return -2;
+  *out_schema = make_schema (columns, G_N_ELEMENTS (columns));
+  if (wyl_fact_store_ensure_projection (*out_store, out_schema, out_table)
+      != WYRELOG_E_OK)
+    return -3;
+  if (forget_append_sample (*out_store, out_schema, "crash-me", "crash:1",
+      "o-1", 42) != 0)
+    return -4;
+  /* after_intent: the intent is committed, no delete has run yet. */
+  wyl_fact_store_forget_options_t opts = {
+    .batch_id = "crash-me",
+    .operator_id = "admin",
+    .reason = "gdpr-erasure",
+    .checkpoint = forget_fault_checkpoint,
+    .checkpoint_data = (gpointer) "after_intent",
+  };
+  if (wyl_fact_store_forget (*out_store, out_schema, &opts, NULL)
+      == WYRELOG_E_OK)
+    return -5;
+  return 0;
+}
+
+/* Reconciling with a scope this store does not serve must refuse and change
+ * nothing.  Asserted on both sides deliberately: a guard exercised only where
+ * it accepts is indistinguishable from no guard, so the same store is
+ * reconciled again with the scope it really serves and must then converge. */
+static gint
+check_fact_forget_reconcile_refuses_wrong_scope (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_pending_intent (&store, &schema, &table) != 0)
+    return 2250;
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+
+  if (wyl_fact_store_forget_reconcile (store, "tenant-z", "orders", NULL,
+      NULL) != WYRELOG_E_POLICY)
+    return 2251;
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "shipments", NULL,
+      NULL) != WYRELOG_E_POLICY)
+    return 2252;
+  /* An absent expectation is a caller error, not permission to skip the
+   * check: the scope arguments cannot be opted out of. */
+  if (wyl_fact_store_forget_reconcile (store, NULL, "orders", NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 2253;
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", NULL, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 2254;
+
+  g_autofree gchar *proj_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (conn, proj_sql, &count) || count != 1)
+    return 2255;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &count) || count != 1)
+    return 2256;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+      || count != 0)
+    return 2257;
+
+  /* The refusals above were caused by the scope, not by anything else about
+   * this store: with the right scope the very same call converges. */
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL) != WYRELOG_E_OK)
+    return 2258;
+  if (!count_i64 (conn, proj_sql, &count) || count != 0)
+    return 2259;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+      || count != 1)
+    return 2260;
+  return 0;
+}
+
+/* A store whose schema was materialized but never appended to has a forget
+ * ledger -- wyl_fact_store_create_schema creates fact_forget_intent -- and no
+ * bound identity, because tenant/graph metadata is written lazily on first
+ * projection.  Nothing is pending, so there is nothing to converge and nothing
+ * to delete through.  Reconcile must report that as success: refusing it would
+ * emit a boot ERROR claiming an erasure is incomplete for a graph that has
+ * never held a fact. */
+static gint
+check_fact_forget_reconcile_ignores_schema_only_store (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 2290;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2291;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  /* The ledger really does exist and really is empty, so the case under test
+   * is reached past the ledger check rather than short-circuited by it. */
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_intent;", &count)
+      || count != 0)
+    return 2292;
+  /* And the identity really is unbound, which is what the scope check would
+   * otherwise refuse. */
+  g_autofree gchar *bound = NULL;
+  /* query_text reports a missing row as FALSE with a NULL value, which is
+   * exactly the unbound state. */
+  if (query_text (conn,
+      "SELECT value FROM fact_store_metadata WHERE key = 'tenant_id';",
+      &bound) || bound != NULL)
+    return 2293;
+
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL) != WYRELOG_E_OK)
+    return 2294;
+  return 0;
+}
+
+/* An intent naming a scope this store does not serve is corruption, and the
+ * store-level check cannot catch it: the identity of the store is correct and
+ * only the intent is wrong.  The reconciler must skip that intent rather than
+ * delete through it, and must report so the caller degrades. */
+static gint
+check_fact_forget_reconcile_skips_out_of_scope_intent (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_pending_intent (&store, &schema, &table) != 0)
+    return 2270;
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+
+  duckdb_result result = { 0 };
+  duckdb_state updated = duckdb_query (conn,
+          "UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
+          "WHERE state = 'PENDING';", &result);
+  duckdb_destroy_result (&result);
+  if (updated != DuckDBSuccess)
+    return 2271;
+
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL) != WYRELOG_E_POLICY)
+    return 2272;
+
+  gint64 count = 0;
+  g_autofree gchar *proj_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (conn, proj_sql, &count) || count != 1)
+    return 2273;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'crash-me';",
+      &count) || count != 1)
+    return 2274;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
+      || count != 0)
+    return 2275;
+  /* Skipping is not completing: the intent must not be recorded as done. */
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &count) || count != 1)
+    return 2276;
   return 0;
 }
 
@@ -2473,6 +2655,15 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_rejects_identifier_reuse ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_refuses_wrong_scope ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_skips_out_of_scope_intent ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_ignores_schema_only_store ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_retract_by_batch_id ();

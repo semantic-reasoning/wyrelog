@@ -1044,6 +1044,34 @@ refuses an existing or sealed graph -- so an erasure request that arrives for
 an already-sealed graph has no in-product remedy. Seal only after any pending
 erasure work is complete.
 
+One case is recoverable, and it is worth distinguishing from the above. A forget
+is durable in two steps: a PENDING intent, then the deletion and its completion.
+If the daemon dies between them, the intent survives and nothing in the request
+path resumes it -- and after the graph is sealed, no request can. Starting the
+daemon converges it: every graph's pending forget intents are driven to
+completion before that graph's engine is built, sealed graphs included, because
+sealing blocks admission of new data rather than erasure of data already stored.
+So a forget that was already in flight when the graph was sealed will finish on
+the next start; only an erasure request that arrives after the seal is stranded.
+
+Boot convergence is best-effort by design: a graph whose forget cannot be
+converged is logged and skipped, never allowed to stop the daemon starting. Two
+distinct lines appear in the `BOOT` section:
+
+- `could not open the fact store of tenant <t> graph <g> to look for a pending
+  forget` (warning) -- the store would not open for writing, so its forget
+  ledger was never read and nothing is known about any erasure for that graph.
+  Usually the graph is also reported degraded, because the read-only open the
+  engine build needs fails for the same reason, and the warning then adds
+  nothing to the degraded report. If the graph is reported ready instead, the
+  store refused a *write* handle while still serving reads -- that graph is
+  answering queries and may hold an erasure that never converged. Investigate
+  that combination; do not dismiss the warning on a graph that reports ready.
+- `a pending fact forget recorded for tenant <t> graph <g> could not be
+  converged` (error) -- an intent was found and did not complete. Personal data
+  that was accepted for deletion is still present in that graph. Investigate
+  before returning the graph to service.
+
 The following unary `fact(V)` flow shows the required contract for a registered
 `fact(value:int64)` relation:
 

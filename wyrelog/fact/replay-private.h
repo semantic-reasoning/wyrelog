@@ -16,6 +16,15 @@ typedef struct
   guint graphs_seen;
   guint graphs_loaded;
   guint graphs_degraded;
+  /* Graphs whose forget ledger was read and whose pending intents could not
+   * be converged at startup.  Counted, never returned: a graph that cannot
+   * reconcile must not stop the daemon from opening. */
+  guint graphs_forget_reconcile_failed;
+  /* Graphs whose store would not open, so the forget ledger was never read.
+   * Distinct from the above because nothing was learned about any erasure:
+   * merging them would make this counter a near-duplicate of graphs_degraded
+   * while diluting the one signal no other counter carries. */
+  guint graphs_forget_probe_unavailable;
 } wyl_fact_replay_summary_t;
 
 typedef enum
