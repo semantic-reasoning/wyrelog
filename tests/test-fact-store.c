@@ -2025,7 +2025,7 @@ check_fact_forget_pending_count_ignores_schema_only_store (void)
 
 /* A store that is not the one the caller meant to open must be refused by the
  * survey, so boot never escalates to a write lease it would then refuse.
- * Before #869 U1 such a store took that lease on every boot and does
+ * Before #869 U1 such a store took that lease on every boot and did
  * nothing with it. */
 static gint
 check_fact_forget_pending_count_refuses_wrong_scope (void)
@@ -2115,6 +2115,204 @@ identified_open_is (const gchar *path, const WylFactStoreIdentity *identity,
       && ((rc == WYRELOG_E_OK) == (store != NULL));
   wyl_fact_store_close (store);
   return valid;
+}
+
+/* Return the size of |path|, or -1 if it does not exist. */
+static gint64
+file_size_or_missing (const gchar *path)
+{
+  GStatBuf st;
+  if (g_stat (path, &st) != 0)
+    return -1;
+  return (gint64) st.st_size;
+}
+
+static gboolean
+exec_ok_sql (duckdb_connection conn, const gchar *sql)
+{
+  duckdb_result result = { 0 };
+  duckdb_state state = duckdb_query (conn, sql, &result);
+  duckdb_destroy_result (&result);
+  return state == DuckDBSuccess;
+}
+
+/* THIS ASSERTION EXISTS TO FAIL ON A DUCKDB UPGRADE.
+ *
+ * #869 U1 made boot ask read-only whether a forget intent is pending.  A
+ * forget is durable in two steps, so a crash between them leaves a PENDING
+ * intent that may live only in the write-ahead log.  If DuckDB's read-only
+ * mode ever stops replaying the WAL, that intent becomes invisible: the probe
+ * counts zero, boot publishes CONVERGED, and an erasure the daemon accepted
+ * an instruction to perform is silently lost -- with every test in this suite
+ * still green.  It is the only failure mode in this area that is quiet;
+ * everything else fails loudly.
+ *
+ * The property is currently guaranteed only by a trace of vendored
+ * third-party code.  Line numbers below are against the IN-TREE PATCHED
+ * amalgamation of DuckDB v1.5.5; the same sites sit 73 lines earlier in
+ * duckdb.cpp.orig, so check the version before concluding a citation is
+ * stale rather than that behaviour changed.  Replay is unconditional WITH
+ * RESPECT TO READ-ONLY at :430010 (the branch selector at :429896 sends
+ * read-only down the replaying arm; its polarity is the opposite of a
+ * suppressor), and the read-only guards at :448100, :448249 and :448266
+ * suppress only mutation of the WAL -- file removal and a MoveFile -- never
+ * its replay.  A version bump can invalidate that trace with no other
+ * signal, which is why this is an assertion and not a comment.
+ *
+ * READ THESE THREE LIMITS BEFORE CITING THIS TEST.
+ *
+ *  1. It does not cover the boot probe off-bridge.  There, open_graph_store
+ *     discards |writable| (replay.c:611) and calls wyl_fact_store_open, which
+ *     never sets access_mode -- the probe opens read-WRITE and replays the WAL
+ *     trivially.  The silent failure mode this guards is therefore BRIDGE-ONLY
+ *     in production.
+ *  2. It does not cover the boot probe under the bridge either.  That path is
+ *     wyl_fact_store_open_provisioned_graph; this test reaches READ_ONLY
+ *     through wyl_fact_store_open_identified (VALIDATE_ONLY), which is a call
+ *     path the probe takes in NEITHER configuration.  What it pins is the
+ *     DuckDB-side property both would depend on.
+ *  3. It does not cover the bridge's bounded filesystem serving the WAL
+ *     sidecar read-only.  Nothing exercises a WAL-resident intent end to end
+ *     through the bridge; that gap is real and is recorded on #869.
+ *
+ * The pragma at step 3 is load-bearing and was measured, not assumed: without
+ * it the WAL is ABSENT after close, with it 134 bytes survive, and it is
+ * honoured at duckdb_close even when set on a connection since disconnected.
+ * The checkpoint at step 2 is equally load-bearing -- without it the identity
+ * table fact_store_metadata is itself WAL-only, so a non-replaying open fails
+ * loudly in identity validation (2350) and this test would pass for the wrong
+ * reason.  Note it is fact_store_metadata that fails there, NOT
+ * fact_forget_intent: an absent ledger returns OK with count 0, because
+ * forget_survey_unlocked treats a missing table as nothing-to-converge.
+ *
+ * Phase 2 is the control.  It pins that the intent is reachable ONLY through
+ * the WAL, so phase 1 cannot pass by reading the base file.  It pins the
+ * fixture's dependence on the WAL; it does not promise DuckDB will keep
+ * replaying it.  That is what phase 1 is for. */
+static gint
+check_fact_forget_read_only_open_replays_the_wal (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-wal-XXXXXX", &error);
+  if (dir == NULL)
+    return 2340;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  g_autofree gchar *wal = g_build_filename (dir, "facts.duckdb.wal", NULL);
+  g_autofree gchar *parked = g_build_filename (dir, "parked.wal", NULL);
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+
+  {
+    wyl_fact_store_t *store = NULL;
+    WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    if (wyl_fact_store_open_identified (path, &test_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result, &store)
+        != WYRELOG_E_OK || store == NULL)
+      return 2341;
+    g_autoptr (wyl_fact_store_t) owned = store;
+    if (wyl_fact_store_create_schema (owned) != WYRELOG_E_OK)
+      return 2342;
+    g_autofree gchar *table = NULL;
+    if (wyl_fact_store_ensure_projection (owned, &schema, &table)
+        != WYRELOG_E_OK)
+      return 2343;
+    if (forget_append_sample (owned, &schema, "wal-batch", "wal:1", "o-1", 7)
+        != 0)
+      return 2344;
+
+    duckdb_connection conn = wyl_fact_store_get_connection (owned);
+    /* Step 2: drive schema and data into the base file. */
+    if (!exec_ok_sql (conn, "CHECKPOINT;"))
+      return 2345;
+    if (file_size_or_missing (wal) > 0)
+      return 2346;
+    /* Step 3: stop the shutdown checkpoint from absorbing the WAL. */
+    if (!exec_ok_sql (conn, "PRAGMA disable_checkpoint_on_shutdown;"))
+      return 2347;
+    /* Step 4: crash after the intent is durable and before the delete. */
+    wyl_fact_store_forget_options_t opts = {
+      .batch_id = "wal-batch",
+      .operator_id = "admin",
+      .reason = "gdpr-erasure",
+      .checkpoint = forget_fault_checkpoint,
+      .checkpoint_data = (gpointer) "after_intent",
+    };
+    if (wyl_fact_store_forget (owned, &schema, &opts, NULL) == WYRELOG_E_OK)
+      return 2348;
+  }
+
+  /* The control for phase 1: the intent really is in the WAL and the WAL
+   * really did survive the close.  Without this a silently ignored pragma
+   * would make every assertion below vacuous. */
+  gint64 wal_size = file_size_or_missing (wal);
+  if (wal_size <= 0)
+    return 2349;
+
+  /* Phase 1: THE STANDING ASSERTION.  A read-only open must see it. */
+  {
+    wyl_fact_store_t *store = NULL;
+    WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    if (wyl_fact_store_open_identified (path, &test_identity,
+        WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result, &store)
+        != WYRELOG_E_OK || store == NULL)
+      return 2350;
+    g_autoptr (wyl_fact_store_t) owned = store;
+    /* The handle really is read-only.  Without this, a refactor that made
+     * VALIDATE_ONLY open read-write would leave 2352 and 2357 both passing
+     * and the test would silently stop being about read-only replay at all
+     * -- which is its entire subject. */
+    if (exec_ok_sql (wyl_fact_store_get_connection (owned),
+        "CREATE TABLE wal_probe_rw (x INTEGER);"))
+      return 2360;
+    gsize pending = 0;
+    if (wyl_fact_store_forget_pending_count (owned, "tenant-a", "orders",
+        &pending) != WYRELOG_E_OK)
+      return 2351;
+    if (pending != 1)
+      return 2352;
+  }
+  /* Read-only did not consume the WAL, so the fixture is re-assertable. */
+  if (file_size_or_missing (wal) != wal_size)
+    return 2353;
+
+  /* Phase 2, the control: with the WAL moved aside the same open succeeds,
+   * the ledger table still exists in the checkpointed base file, and the
+   * count is zero with no error anywhere.  That is the silent-stranding
+   * shape, and it is what phase 1 rules out. */
+  if (g_rename (wal, parked) != 0)
+    return 2354;
+  {
+    wyl_fact_store_t *store = NULL;
+    WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    if (wyl_fact_store_open_identified (path, &test_identity,
+        WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result, &store)
+        != WYRELOG_E_OK || store == NULL)
+      return 2355;
+    g_autoptr (wyl_fact_store_t) owned = store;
+    /* The ledger really is in the base file, so the zero below is the WAL
+     * being gone and not the table being absent -- forget_survey_unlocked
+     * returns OK with count 0 for a missing table, which would satisfy 2357
+     * for entirely the wrong reason. */
+    gint64 ledger_rows = -1;
+    if (!count_i64 (wyl_fact_store_get_connection (owned),
+        "SELECT COUNT(*) FROM fact_forget_intent;", &ledger_rows)
+        || ledger_rows != 0)
+      return 2359;
+    gsize pending = 99;
+    if (wyl_fact_store_forget_pending_count (owned, "tenant-a", "orders",
+        &pending) != WYRELOG_E_OK)
+      return 2356;
+    if (pending != 0)
+      return 2357;
+  }
+  if (g_rename (parked, wal) != 0)
+    return 2358;
+  return 0;
 }
 
 static gint
@@ -2774,6 +2972,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_read_only_open_replays_the_wal ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_identity_basic ();
