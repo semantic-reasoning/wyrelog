@@ -286,10 +286,9 @@ seed_legacy_fact_metadata (const gchar *fact_root, const gchar *graph_id,
     }
     duckdb_destroy_result (&result);
   }
-#ifndef G_OS_WIN32
-  if (g_chmod (db_path, 0600) != 0)
+  g_autoptr (GError) error = NULL;
+  if (!wyl_test_secure_regular_file (db_path, &error))
     return 4104;
-#endif
   return 0;
 }
 
