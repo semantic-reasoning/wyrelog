@@ -27,6 +27,12 @@ RAW_SINGLETON_OWNER = "wyl_daemon_http_add_singleton_handler"
 EXACT_OWNER = "wyl_daemon_http_add_exact_handler"
 FACT = "WYL_HAS_FACT_STORE"
 AUDIT = "WYL_HAS_AUDIT"
+PRODUCTION_DAEMON_TARGET_DIRS = {
+    "gcc": "wyrelog/wyrelogd.p",
+    "clang": "wyrelog/wyrelogd.p",
+    "clang-cl": "wyrelog/wyrelogd.exe.p",
+    "msvc": "wyrelog/wyrelogd.exe.p",
+}
 OWNERSHIP_API = re.compile(
     r"(?:soup_server_add_[A-Za-z0-9_]*handler|"
     r"[A-Za-z_][A-Za-z0-9_]*add_(?:exact|prefix|singleton)_handler)\Z")
@@ -932,6 +938,28 @@ class CompileUnit:
     arguments: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ValidatedCompileUnit:
+    unit: CompileUnit
+    output: Path
+    relative_output: str
+
+
+def production_daemon_target_directory(compiler_id: str) -> str:
+    try:
+        return PRODUCTION_DAEMON_TARGET_DIRS[compiler_id]
+    except KeyError as error:
+        raise GuardError(
+            f"unsupported compiler dialect: {compiler_id}") from error
+
+
+def is_production_daemon_output(relative_output: str,
+                                compiler_id: str) -> bool:
+    parent, separator, _name = relative_output.rpartition("/")
+    return (bool(separator)
+            and parent == production_daemon_target_directory(compiler_id))
+
+
 def compile_unit_enabled_features(unit: CompileUnit,
                                   compiler_id: str) -> frozenset[str]:
     windows = compiler_id in {"clang-cl", "msvc"}
@@ -974,6 +1002,7 @@ def compile_unit_enabled_features(unit: CompileUnit,
 
 def production_compile_units(root: Path, build_root: Path,
                              compiler_id: str) -> list[CompileUnit]:
+    production_daemon_target_directory(compiler_id)
     database_path = build_root / "compile_commands.json"
     if not database_path.is_file():
         raise GuardError(f"missing compile database: {database_path}")
@@ -984,7 +1013,8 @@ def production_compile_units(root: Path, build_root: Path,
     if not isinstance(database, list):
         raise GuardError("compile database root must be an array")
     windows = compiler_id in {"clang-cl", "msvc"}
-    units = []
+    daemon_http = (root / "wyrelog" / "daemon" / "http.c").resolve()
+    validated = []
     outputs = set()
     for entry in database:
         if not isinstance(entry, dict):
@@ -997,21 +1027,36 @@ def production_compile_units(root: Path, build_root: Path,
         try:
             relative_source = source.relative_to(root).as_posix()
         except ValueError:
-            continue
-        if not (relative_source.startswith("wyrelog/")
-                and relative_source.endswith(".c")):
-            continue
+            relative_source = None
+        is_project_source = (
+            relative_source is not None
+            and relative_source.startswith("wyrelog/")
+            and relative_source.endswith(".c"))
         output_value = entry.get("output")
         if not isinstance(output_value, str) or not output_value:
-            raise GuardError(f"production compile entry lacks output: "
-                             f"{render_source_identity(relative_source)}")
+            if is_project_source:
+                raise GuardError(f"production compile entry lacks output: "
+                                 f"{render_source_identity(relative_source)}")
+            continue
         output = resolve_argument_path(output_value, directory)
         try:
             relative_output = output.relative_to(build_root).as_posix()
         except ValueError:
+            relative_output = None
+        claims_production_target = (
+            relative_output is not None
+            and is_production_daemon_output(relative_output, compiler_id))
+        if claims_production_target and not is_project_source:
+            raise GuardError(
+                "production target compile entry has non-project source: "
+                f"{render_source_identity(source)}")
+        if not is_project_source:
             continue
-        if not relative_output.startswith("wyrelog/"):
-            continue
+        assert relative_source is not None
+        if relative_output is None:
+            raise GuardError(
+                "production compile output escapes build root: "
+                f"{render_source_identity(relative_source)}")
         if output in outputs:
             raise GuardError(f"ambiguous production compile output: "
                              f"{render_source_identity(output)}")
@@ -1026,18 +1071,26 @@ def production_compile_units(root: Path, build_root: Path,
                 arguments = (windows_command_line_split(entry["command"])
                              if windows else
                              shlex.split(entry["command"], posix=True))
-            except ValueError as error:
+            except (GuardError, ValueError) as error:
                 raise GuardError("invalid compiler command quoting") from error
         else:
             raise GuardError("compile entry lacks arguments/command")
         unit = CompileUnit(source, directory, tuple(arguments))
-        units.append(unit)
-    daemon_http = (root / "wyrelog" / "daemon" / "http.c").resolve()
-    daemon_units = [unit for unit in units if unit.source == daemon_http]
+        validated.append(ValidatedCompileUnit(
+            unit, output, relative_output))
+    admitted = [record for record in validated
+                if record.relative_output.startswith("wyrelog/")]
+    daemon_units = [record.unit for record in admitted
+                    if record.unit.source == daemon_http
+                    and is_production_daemon_output(
+                        record.relative_output, compiler_id)]
     if not daemon_units:
         raise GuardError("production daemon HTTP translation unit is missing")
     if len(daemon_units) != 1:
         raise GuardError("ambiguous production daemon HTTP translation unit")
+    units = [record.unit for record in admitted
+             if record.unit.source != daemon_http]
+    units.append(daemon_units[0])
     return sorted(units, key=lambda unit: (unit.source.as_posix(),
                                            unit.arguments))
 
@@ -1486,6 +1539,34 @@ def expect_guard_error(callback, message: str) -> None:
     raise GuardError(f"negative fixture accepted: {message}")
 
 
+def expect_guard_error_message(callback, expected: str, message: str) -> None:
+    try:
+        callback()
+    except GuardError as error:
+        if str(error) != expected:
+            raise GuardError(
+                f"negative fixture returned the wrong error: {message}: "
+                f"expected={expected!r}; actual={str(error)!r}") from error
+        return
+    raise GuardError(f"negative fixture accepted: {message}")
+
+
+def expect_guard_error_contains(callback, fragments: tuple[str, ...],
+                                message: str) -> None:
+    try:
+        callback()
+    except GuardError as error:
+        actual = str(error)
+        missing = [fragment for fragment in fragments
+                   if fragment not in actual]
+        if missing:
+            raise GuardError(
+                f"negative fixture returned the wrong error: {message}: "
+                f"missing={missing!r}; actual={actual!r}") from error
+        return
+    raise GuardError(f"negative fixture accepted: {message}")
+
+
 def semantic_fixture_result(root: Path, build_root: Path, source: Path,
                             marked: Path, symbol: str,
                             marker_style: str = "gcc") \
@@ -1506,14 +1587,263 @@ def semantic_fixture_result(root: Path, build_root: Path, source: Path,
 
 def self_test_compile_unit(source: Path, root: Path, build_root: Path,
                            compiler_id: str, compiler: tuple[str, ...],
-                           extra: tuple[str, ...] = ()) -> CompileUnit:
-    output = build_root / "wyrelog" / "daemon" / "http.c.o"
+                           extra: tuple[str, ...] = (),
+                           output: Path | None = None) -> CompileUnit:
+    if output is None:
+        output = build_root / "wyrelog" / "daemon" / "http.c.o"
     output.parent.mkdir(parents=True, exist_ok=True)
     if compiler_id in {"clang-cl", "msvc"}:
         arguments = (*compiler, *extra, f"/Fo{output}", "/c", str(source))
     else:
         arguments = (*compiler, *extra, "-o", str(output), "-c", str(source))
     return CompileUnit(source.resolve(), root.resolve(), arguments)
+
+
+def self_test_compile_entry(source: Path, root: Path, build_root: Path,
+                            compiler_id: str, compiler: tuple[str, ...],
+                            output: str,
+                            extra: tuple[str, ...] = ()) -> dict[str, object]:
+    output_path = build_root / output
+    unit = self_test_compile_unit(
+        source, root, build_root, compiler_id, compiler, extra, output_path)
+    return {
+        "directory": str(build_root),
+        "file": str(source),
+        "output": output,
+        "arguments": list(unit.arguments),
+    }
+
+
+def write_self_test_compile_database(build_root: Path,
+                                     entries: object) -> None:
+    build_root.mkdir(parents=True, exist_ok=True)
+    write_exact_fixture(
+        build_root / "compile_commands.json",
+        json.dumps(entries, ensure_ascii=True) + "\n")
+
+
+def self_test_production_compile_selection(
+        root: Path, source: Path, compiler_id: str,
+        compiler: tuple[str, ...]) -> None:
+    for dialect, expected, other in (
+            ("gcc", "wyrelog/wyrelogd.p/daemon_http.c.o",
+             "wyrelog/wyrelogd.exe.p/daemon_http.c.obj"),
+            ("clang", "wyrelog/wyrelogd.p/daemon_http.c.o",
+             "wyrelog/wyrelogd.exe.p/daemon_http.c.obj"),
+            ("clang-cl", "wyrelog/wyrelogd.exe.p/daemon_http.c.obj",
+             "wyrelog/wyrelogd.p/daemon_http.c.o"),
+            ("msvc", "wyrelog/wyrelogd.exe.p/daemon_http.c.obj",
+             "wyrelog/wyrelogd.p/daemon_http.c.o")):
+        if not is_production_daemon_output(expected, dialect):
+            raise GuardError(
+                f"canonical {dialect} production target was not selected")
+        for lookalike in (
+                other,
+                expected.replace("wyrelogd", "wyrelogd-helper", 1),
+                expected.replace("/daemon_http", "/nested/daemon_http", 1),
+                expected.replace(
+                    "wyrelogd", "wyrelogd-readiness-persistent-test", 1)):
+            if is_production_daemon_output(lookalike, dialect):
+                raise GuardError(
+                    f"{dialect} production target lookalike was selected")
+    expect_guard_error_message(
+        lambda: is_production_daemon_output(
+            "wyrelog/wyrelogd.p/daemon_http.c.o", "unknown"),
+        "unsupported compiler dialect: unknown",
+        "unknown production target compiler dialect")
+
+    windows = compiler_id in {"clang-cl", "msvc"}
+    target = ("wyrelog/wyrelogd.exe.p" if windows
+              else "wyrelog/wyrelogd.p")
+    other_target = ("wyrelog/wyrelogd.p" if windows
+                    else "wyrelog/wyrelogd.exe.p")
+    readiness_target = ("wyrelog/wyrelogd-readiness-persistent-test.exe.p"
+                        if windows else
+                        "wyrelog/wyrelogd-readiness-persistent-test.p")
+    suffix = ".obj" if windows else ".o"
+    production_output = f"{target}/daemon_http.c{suffix}"
+    readiness_output = f"{readiness_target}/daemon_http.c{suffix}"
+    define = "/D" if windows else "-D"
+    build_root = root / "compile-selection-build"
+
+    production = self_test_compile_entry(
+        source, root, build_root, compiler_id, compiler, production_output,
+        (f"{define}{FACT}",))
+    readiness = self_test_compile_entry(
+        source, root, build_root, compiler_id, compiler, readiness_output,
+        (f"{define}{AUDIT}",
+         f"{define}WYL_TEST_PERSISTENT_READINESS_STORE"))
+    write_self_test_compile_database(build_root, [production, readiness])
+    units = production_compile_units(root, build_root, compiler_id)
+    daemon_units = [unit for unit in units if unit.source == source.resolve()]
+    if len(daemon_units) != 1:
+        raise GuardError(
+            "production-plus-readiness fixture did not select one HTTP unit")
+    if compile_unit_enabled_features(
+            daemon_units[0], compiler_id) != frozenset({FACT}):
+        raise GuardError(
+            "readiness feature flags contaminated production HTTP selection")
+    check_semantic_boundary(root, build_root, compiler_id)
+
+    audit_only = self_test_compile_entry(
+        source, root, build_root, compiler_id, compiler, production_output,
+        (f"{define}{AUDIT}",))
+    conflicting_readiness = self_test_compile_entry(
+        source, root, build_root, compiler_id, compiler, readiness_output,
+        (f"{define}{FACT}",
+         f"{define}WYL_TEST_PERSISTENT_READINESS_STORE"))
+    write_self_test_compile_database(
+        build_root, [audit_only, conflicting_readiness])
+    units = production_compile_units(root, build_root, compiler_id)
+    daemon_unit = next(unit for unit in units
+                       if unit.source == source.resolve())
+    if compile_unit_enabled_features(
+            daemon_unit, compiler_id) != frozenset({AUDIT}):
+        raise GuardError("fact flags contaminated audit-only HTTP selection")
+    check_semantic_boundary(root, build_root, compiler_id)
+
+    write_self_test_compile_database(build_root, [readiness])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "production daemon HTTP translation unit is missing",
+        "readiness-only compile database")
+
+    duplicate = self_test_compile_entry(
+        source, root, build_root, compiler_id, compiler,
+        f"{target}/daemon_http_duplicate.c{suffix}")
+    write_self_test_compile_database(build_root, [production, duplicate])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "ambiguous production daemon HTTP translation unit",
+        "two canonical production HTTP contexts")
+
+    write_self_test_compile_database(build_root, [production, production])
+    duplicate_path = (build_root / production_output).resolve()
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "ambiguous production compile output: "
+        f"{render_source_identity(duplicate_path)}",
+        "duplicate canonical production output")
+
+    wrong_dialect = dict(production)
+    wrong_dialect["output"] = (
+        f"{other_target}/daemon_http.c{suffix}")
+    write_self_test_compile_database(build_root, [wrong_dialect])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "production daemon HTTP translation unit is missing",
+        "cross-dialect production target")
+    for name, lookalike in {
+        "prefixed target": f"{target}-helper/daemon_http.c{suffix}",
+        "nested target": f"{target}/nested/daemon_http.c{suffix}",
+        "readiness target": readiness_output,
+    }.items():
+        entry = dict(production)
+        entry["output"] = lookalike
+        write_self_test_compile_database(build_root, [entry])
+        expect_guard_error_message(
+            lambda: production_compile_units(root, build_root, compiler_id),
+            "production daemon HTTP translation unit is missing", name)
+
+    database = build_root / "compile_commands.json"
+    write_exact_fixture(database, "{\n")
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "invalid compile database", "malformed JSON database")
+    write_self_test_compile_database(build_root, {})
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "compile database root must be an array", "non-array database")
+    write_self_test_compile_database(build_root, [None])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "invalid compile database entry", "non-dictionary database entry")
+
+    missing_output = dict(production)
+    del missing_output["output"]
+    write_self_test_compile_database(build_root, [missing_output])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        'production compile entry lacks output: "wyrelog/daemon/http.c"',
+        "production entry missing output")
+
+    invalid_arguments = dict(production)
+    invalid_arguments["arguments"] = [1]
+    write_self_test_compile_database(build_root, [invalid_arguments])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "invalid compile entry arguments", "invalid arguments list")
+    missing_command = dict(production)
+    del missing_command["arguments"]
+    write_self_test_compile_database(build_root, [missing_command])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "compile entry lacks arguments/command", "missing compiler command")
+
+    for dialect, target_dir, command in (
+            ("gcc", "wyrelog/wyrelogd.p", "cc '"),
+            ("clang-cl", "wyrelog/wyrelogd.exe.p", 'clang-cl "')):
+        invalid_quoting = dict(production)
+        invalid_quoting["output"] = (
+            f"{target_dir}/daemon_http.c"
+            + (".obj" if dialect == "clang-cl" else ".o"))
+        del invalid_quoting["arguments"]
+        invalid_quoting["command"] = command
+        write_self_test_compile_database(build_root, [invalid_quoting])
+        expect_guard_error_message(
+            lambda dialect=dialect: production_compile_units(
+                root, build_root, dialect),
+            "invalid compiler command quoting",
+            f"{dialect} compiler command quoting")
+
+    escaping_output = dict(production)
+    escaping_output["output"] = str(root.parent / "escaped-http.o")
+    write_self_test_compile_database(build_root, [escaping_output])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        'production compile output escapes build root: '
+        '"wyrelog/daemon/http.c"',
+        "project compile output escaping build root")
+
+    outside_source = root.parent / "outside-http.c"
+    target_claim = dict(production)
+    target_claim["file"] = str(outside_source)
+    write_self_test_compile_database(build_root, [target_claim])
+    expect_guard_error_message(
+        lambda: production_compile_units(root, build_root, compiler_id),
+        "production target compile entry has non-project source: "
+        f"{render_source_identity(outside_source.resolve())}",
+        "production target claiming an outside source")
+
+    generated = build_root / "generated" / "hidden-route.h"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    write_exact_fixture(
+        generated,
+        "#define CAT_RAW(a,b) a ## b\n"
+        "#define CAT(a,b) CAT_RAW(a,b)\n"
+        "#define HIDDEN_ADD CAT(soup_server_add_,handler)\n")
+    library = root / "wyrelog" / "library.c"
+    write_exact_fixture(
+        library,
+        "static void hidden_library_owner(void) {\n"
+        "  HIDDEN_ADD(server, \"/hidden\", callback, data, NULL);\n"
+        "}\n")
+    forced = ((f"/FI{generated}",) if windows
+              else ("-include", str(generated)))
+    library_output = (
+        "wyrelog/libwyrelog.dll.p/library.c.obj" if windows else
+        "wyrelog/libwyrelog.so.0.p/library.c.o")
+    library_entry = self_test_compile_entry(
+        library, root, build_root, compiler_id, compiler, library_output,
+        forced)
+    write_self_test_compile_database(
+        build_root, [production, readiness, library_entry])
+    expect_guard_error_contains(
+        lambda: check_semantic_boundary(root, build_root, compiler_id),
+        ("preprocessed ownership map differs", "wyrelog/library.c", SOUP_API),
+        "non-daemon production semantic inventory")
+    library.unlink()
+    generated.unlink()
 
 
 def self_test_preprocess(source: Path, root: Path, build_root: Path,
@@ -1609,6 +1939,8 @@ def self_test(compiler_id: str, compiler: tuple[str, ...]) -> None:
         baseline = fixture_source()
         write_exact_fixture(source_path, baseline)
         check_root(root)
+        self_test_production_compile_selection(
+            root, source_path, compiler_id, compiler)
         bounded_arguments = expanded_call_arguments(
             f'{EXACT_API}(server, "/healthz", healthz_handler, NULL, NULL);\n'
             '"unterminated tail', 0, EXACT_API)

@@ -394,6 +394,7 @@ meson compile -C build-daemon-http-shared-audit-disabled \\
   wyrelogd"""
 expected_audit_disabled_test = """\
 meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \\
+  daemon-http-route-registrations \\
   daemon-checks-noaudit \\
   wyrelogd-check \\
   wyrelogd-healthz \\
@@ -649,8 +650,9 @@ sudo apt-get install -y --no-install-recommends \\
         "Test audit-disabled daemon readiness",
     ) != run_step_body(expected_audit_disabled_test):
         fail(
-            f"{workflow_path} must run no-audit readiness, real --check, "
-            "ordinary startup, and durable repeat readiness"
+            f"{workflow_path} must run the route-registration guard, "
+            "no-audit readiness, real --check, ordinary startup, and "
+            "durable repeat readiness"
         )
     if audit_disabled_job.count("-Denable_audit=disabled") != 1:
         fail(f"{workflow_path} must explicitly disable audit exactly once")

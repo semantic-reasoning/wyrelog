@@ -602,6 +602,7 @@ jobs:
       - name: Test audit-disabled daemon readiness
         run: |
           meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \
+            daemon-http-route-registrations \
             daemon-checks-noaudit \
             wyrelogd-check \
             wyrelogd-healthz \
