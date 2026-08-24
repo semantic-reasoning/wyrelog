@@ -9,6 +9,7 @@
 #include <sodium.h>
 #include <windows.h>
 
+#include "fact/artifact-io-session-private.h"
 #include "fact/graph-artifact-windows-handle-private.h"
 #include "fact/graph-artifact-windows-locator-private.h"
 #include "fact/graph-artifact-windows-lock-private.h"
@@ -3475,6 +3476,7 @@ typedef struct
   /* What the body is permitted to leave armed. */
   DWORD expected_flush_error;
   WylFactArtifactWinNamespaceTestFault expected_namespace_fault;
+  WylFactArtifactWinTempChildTestSeam expected_temp_child_seam;
 } WinGuardedCase;
 
 static void
@@ -3484,6 +3486,8 @@ win_fault_guard_set_up (WinFaultGuard *guard, gconstpointer user_data)
       wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test ();
   WylFactArtifactWinNamespaceTestFault fault =
       wyl_fact_artifact_win_namespace_take_test_fault ();
+  WylFactArtifactWinTempChildTestSeam temp_child_seam =
+      wyl_fact_artifact_win_temp_child_take_test_seam ();
 
   (void) guard;
   (void) user_data;
@@ -3494,6 +3498,8 @@ win_fault_guard_set_up (WinFaultGuard *guard, gconstpointer user_data)
    * entirely and would silently stop being guarded. */
   g_assert_cmpuint (flush_error, ==, ERROR_SUCCESS);
   g_assert_cmpint (fault, ==, WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE);
+  g_assert_cmpint (temp_child_seam, ==,
+      WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE);
 }
 
 static void
@@ -3513,6 +3519,8 @@ win_fault_guard_tear_down (WinFaultGuard *guard, gconstpointer user_data)
       wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test ();
   WylFactArtifactWinNamespaceTestFault fault =
       wyl_fact_artifact_win_namespace_take_test_fault ();
+  WylFactArtifactWinTempChildTestSeam temp_child_seam =
+      wyl_fact_artifact_win_temp_child_take_test_seam ();
 
   (void) guard;
   /* Both globals are already disarmed by the takes above, so the process is
@@ -3523,17 +3531,21 @@ win_fault_guard_tear_down (WinFaultGuard *guard, gconstpointer user_data)
    * up a level.  g_test_fail is effective from teardown because test_case_run
    * reads its success flag after fixture_teardown returns. */
   if (flush_error != guarded->expected_flush_error
-      || fault != guarded->expected_namespace_fault) {
+      || fault != guarded->expected_namespace_fault
+      || temp_child_seam != guarded->expected_temp_child_seam) {
     g_test_message ("%s left an unexpected Windows artifact test fault armed: "
-        "flush=%lu want %lu, namespace=%d want %d", guarded->path,
+        "flush=%lu want %lu, namespace=%d want %d, temp-child=%d want %d",
+        guarded->path,
         (gulong) flush_error, (gulong) guarded->expected_flush_error,
-        (gint) fault, (gint) guarded->expected_namespace_fault);
+        (gint) fault, (gint) guarded->expected_namespace_fault,
+        (gint) temp_child_seam, (gint) guarded->expected_temp_child_seam);
     g_test_fail ();
   }
 }
 
 G_STATIC_ASSERT (ERROR_SUCCESS == 0
-    && WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE == 0);
+    && WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE == 0
+    && WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE == 0);
 
 static void
 test_io_session_query_metadata_and_revalidate (void)
@@ -3601,11 +3613,14 @@ test_temp_root_spill_child_capabilities (void)
   WylFactArtifactWinNamespace *ns = NULL;
   WylFactArtifactWinLease *lease = NULL;
   WylFactArtifactWinTempRoot *root = NULL;
+  WylFactArtifactWinTempChild *child = NULL;
   WylFactArtifactWinTempChildBinding *binding = NULL;
   WylFactArtifactWinTempOrphanEvidence *root_evidence = NULL;
   WylFactArtifactWinTempOrphanEvidence *child_evidence = NULL;
   gboolean exists = FALSE;
   GPtrArray *children = NULL;
+  WylFactDuckdbTempRetireResult retired =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &main_entry), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb.lock", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &lock_entry), ==, WYRELOG_E_OK);
@@ -3625,13 +3640,10 @@ test_temp_root_spill_child_capabilities (void)
   g_assert_false (exists);
 
   /* Atomic create-and-bind with orphan evidence */
-  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (root, "duckdb_temp_storage_S32K-1.tmp", TRUE, &binding, &child_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (root, "duckdb_temp_storage_S32K-1.tmp", TRUE, &child, &binding, &child_evidence), ==, WYRELOG_E_OK);
+  g_assert_nonnull (child);
   g_assert_nonnull (binding);
-  g_assert_nonnull (child_evidence);
-  GBytes *child_bytes = wyl_fact_artifact_win_temp_orphan_evidence_bytes (child_evidence);
-  g_assert_nonnull (child_bytes);
-  g_bytes_unref (child_bytes);
-  wyl_fact_artifact_win_temp_orphan_evidence_free (child_evidence);
+  g_assert_null (child_evidence);
 
   /* Check existing child */
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root, "duckdb_temp_storage_S32K-1.tmp", &exists), ==, WYRELOG_E_OK);
@@ -3645,10 +3657,301 @@ test_temp_root_spill_child_capabilities (void)
   g_ptr_array_free (children, TRUE);
 
   wyl_fact_artifact_win_temp_child_binding_free (binding);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (child, &retired),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (retired, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_temp_child_free (child);
+  retired = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_retire (root, &retired), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (retired, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
   wyl_fact_artifact_win_temp_root_free (root);
   wyl_fact_artifact_win_lease_free (lease);
   wyl_fact_artifact_win_namespace_free (ns);
   CloseHandle (graph);
+}
+
+static void
+retire_temp_child_exact (WylFactArtifactWinTempChild *child)
+{
+  WylFactDuckdbTempRetireResult retired =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (child, &retired),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (retired, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+}
+
+static void
+test_temp_child_wrapper_ownership (void)
+{
+  static const WylFactArtifactWinTempChildTestSeam creation_seams[] = {
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_CHILD_CREATE,
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_BINDING_ACQUIRE,
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_IO_SESSION_ACQUIRE,
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_WRAPPER_POPULATE,
+  };
+  g_autofree gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  HANDLE volume = open_scratch_volume ();
+  WylFactGraphWinIdentity identity_unused = { 0 };
+  WylFactArtifactWinLocator *locator =
+      open_locator_for_test (graph, &identity_unused);
+  WylFactArtifactWinEntry *main_entry = NULL;
+  WylFactArtifactWinEntry *lock_entry = NULL;
+  WylFactArtifactWinNamespace *ns = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempRoot *root = NULL;
+  WylFactArtifactWinTempChild *child = NULL;
+  WylFactArtifactIoSession *session = NULL;
+  WylFactArtifactWinTempOrphanEvidence *evidence = NULL;
+  g_autofree gchar *root_logical = NULL;
+  g_autofree gchar *root_name = NULL;
+  g_autofree gchar *root_path = NULL;
+  GBytes *evidence_bytes = NULL;
+  gboolean file_id_reachability_unavailable = FALSE;
+  gsize n = 0;
+  gchar readback[8] = { 0 };
+
+  g_assert_cmpint (volume != INVALID_HANDLE_VALUE, !=, FALSE);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+      "facts.duckdb", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE,
+      &main_entry), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+      "facts.duckdb.lock", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE,
+      &lock_entry), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_adopt_entries_for_test (
+        locator, main_entry, lock_entry, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns,
+      &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_root (lease,
+      &root), ==, WYRELOG_E_OK);
+  root_logical = wyl_fact_artifact_win_temp_root_dup_logical_name (root);
+  g_assert_nonnull (root_logical);
+  root_name = g_path_get_basename (root_logical);
+  root_path = g_build_filename (path, root_name, NULL);
+
+  /* OPEN -> CLOSED keeps only the binding.  After retirement and release of
+   * the caller's child and deliberate witness, that binding is the sole
+   * owner keeping the deleted File ID reachable. */
+  const gchar *closed_name = "duckdb_temp_storage_S32K-10.tmp";
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      closed_name, TRUE, &child, &session, &evidence), ==, WYRELOG_E_OK);
+  g_assert_nonnull (child);
+  g_assert_nonnull (session);
+  g_assert_null (evidence);
+  g_assert_cmpint (wyl_fact_artifact_io_session_write (session, 0, "closed",
+      6, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 6);
+  g_assert_cmpint (wyl_fact_artifact_io_session_flush (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_read (session, 0, readback,
+      6, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (readback, n, "closed", 6);
+  g_assert_cmpint (wyl_fact_artifact_io_session_close (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_revalidate (session), ==,
+      WYRELOG_E_INVALID);
+
+  g_autofree gchar *closed_path =
+      g_build_filename (root_path, closed_name, NULL);
+  g_autofree wchar_t *closed_wide =
+      g_utf8_to_utf16 (closed_path, -1, NULL, NULL, NULL);
+  HANDLE witness = open_existing_scratch_file (closed_path);
+  WylFactGraphWinIdentity closed_identity = identity_for (witness);
+  retire_temp_child_exact (child);
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+  /* Establish that this volume can answer the File-ID question while the
+   * deliberate witness is known to be open. */
+  if (!unlinked_object_is_open (volume, &closed_identity)) {
+    if (g_strcmp0 (g_getenv ("WYRELOG_APPVERIFIER_HANDLE_GATE"), "1") == 0)
+      g_error ("AppVerifier wrapper gate requires File-ID reachability");
+    file_id_reachability_unavailable = TRUE;
+    g_assert_true (CloseHandle (witness));
+    wyl_fact_artifact_io_session_free (session);
+    session = NULL;
+  } else {
+    g_assert_true (CloseHandle (witness));
+    g_assert_true (unlinked_object_is_open (volume, &closed_identity));
+    wyl_fact_artifact_io_session_free (session);
+    session = NULL;
+    g_assert_false (deleted_object_is_open_after_wait (volume, closed_wide,
+        &closed_identity));
+  }
+
+  /* finish and abort both release session-specific ownership before the
+   * caller retires its healthy child. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "duckdb_temp_storage_S32K-11.tmp", TRUE, &child, &session,
+      &evidence), ==, WYRELOG_E_OK);
+  g_assert_null (evidence);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  retire_temp_child_exact (child);
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "duckdb_temp_storage_S32K-12.tmp", TRUE, &child, &session,
+      &evidence), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_io_session_abort (session);
+  session = NULL;
+  retire_temp_child_exact (child);
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+
+  /* Open-existing borrows the caller's child and transfers only its new
+   * binding into the wrapper. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "duckdb_temp_storage_S32K-13.tmp", TRUE, &child, &session,
+      &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_existing_temp_child (
+        child, TRUE, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_write (session, 0, "again",
+      5, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  retire_temp_child_exact (child);
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_existing_temp_child (
+        child, TRUE, &session), ==, WYRELOG_E_POLICY);
+  g_assert_null (session);
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+
+  /* The safe result seam performs the real finish first.  Finish releases the
+   * binding despite the reported error; close retains only the binding husk. */
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "duckdb_temp_storage_S32K-14.tmp", TRUE, &child, &session,
+      &evidence), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_child_set_test_seam (
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_REPORT_FINISH_ERROR);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_IO);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_take_test_seam (), ==,
+      WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE);
+  retire_temp_child_exact (child);
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "duckdb_temp_storage_S32K-15.tmp", TRUE, &child, &session,
+      &evidence), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_child_set_test_seam (
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_REPORT_FINISH_ERROR);
+  g_assert_cmpint (wyl_fact_artifact_io_session_close (session), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_artifact_io_session_read (session, 0, readback,
+      1, &n), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  retire_temp_child_exact (child);
+  wyl_fact_artifact_win_temp_child_free (child);
+  child = NULL;
+
+  /* Every ownership boundary is a one-shot failure with atomic null outputs
+   * and exact rollback. */
+  for (guint i = 0; i < G_N_ELEMENTS (creation_seams); i++) {
+    g_autofree gchar *name = g_strdup_printf (
+      "duckdb_temp_storage_S32K-%u.tmp", 20 + i);
+    gboolean exists = TRUE;
+
+    child = (WylFactArtifactWinTempChild *) (guintptr) 1;
+    session = (WylFactArtifactIoSession *) (guintptr) 1;
+    evidence = (WylFactArtifactWinTempOrphanEvidence *) (guintptr) 1;
+    wyl_fact_artifact_win_temp_child_set_test_seam (creation_seams[i]);
+    g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+        name, TRUE, &child, &session, &evidence), ==, WYRELOG_E_NOMEM);
+    g_assert_null (child);
+    g_assert_null (session);
+    g_assert_null (evidence);
+    g_assert_cmpint (wyl_fact_artifact_win_temp_child_take_test_seam (), ==,
+        WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE);
+    g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root, name,
+        &exists), ==, WYRELOG_E_OK);
+    g_assert_false (exists);
+  }
+
+  /* A post-delete directory-flush uncertainty transfers the preallocated
+   * evidence while still publishing no child or session. */
+  child = (WylFactArtifactWinTempChild *) (guintptr) 1;
+  session = (WylFactArtifactIoSession *) (guintptr) 1;
+  evidence = (WylFactArtifactWinTempOrphanEvidence *) (guintptr) 1;
+  wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test (
+    ERROR_WRITE_FAULT);
+  wyl_fact_artifact_win_temp_child_set_test_seam (
+    WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_IO_SESSION_ACQUIRE);
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "duckdb_temp_storage_S32K-30.tmp", TRUE, &child, &session,
+      &evidence), ==, WYRELOG_E_NOMEM);
+  g_assert_null (child);
+  g_assert_null (session);
+  g_assert_nonnull (evidence);
+  evidence_bytes =
+      wyl_fact_artifact_win_temp_orphan_evidence_bytes (evidence);
+  g_assert_nonnull (evidence_bytes);
+  const gchar *uncertain_name = "duckdb_temp_storage_S32K-30.tmp";
+  gsize evidence_size = 0;
+  const guint8 *serialized = g_bytes_get_data (evidence_bytes,
+          &evidence_size);
+  WylFactGraphWinIdentity evidence_identity = { 0 };
+  static const guint8 zero_file_id[16] = { 0 };
+  g_assert_cmpuint (evidence_size, ==,
+      strlen (uncertain_name) + 1 + sizeof evidence_identity);
+  g_assert_cmpstr ((const gchar *) serialized, ==, uncertain_name);
+  memcpy (&evidence_identity, serialized + strlen (uncertain_name) + 1,
+      sizeof evidence_identity);
+  g_assert_cmpuint (evidence_identity.volume_serial, >, 0);
+  g_assert_cmpint (memcmp (evidence_identity.file_id, zero_file_id,
+      sizeof zero_file_id), !=, 0);
+  g_bytes_unref (evidence_bytes);
+  evidence_bytes = NULL;
+  wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);
+  evidence = NULL;
+  g_assert_cmpint (
+    wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test (),
+    ==, ERROR_SUCCESS);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_take_test_seam (), ==,
+      WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE);
+
+  child = (WylFactArtifactWinTempChild *) (guintptr) 1;
+  session = (WylFactArtifactIoSession *) (guintptr) 1;
+  evidence = (WylFactArtifactWinTempOrphanEvidence *) (guintptr) 1;
+  g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
+      "bad-name", TRUE, &child, &session, &evidence), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (child);
+  g_assert_null (session);
+  g_assert_null (evidence);
+
+  if (session != NULL)
+    wyl_fact_artifact_io_session_free (session);
+  if (child != NULL && child != (WylFactArtifactWinTempChild *) (guintptr) 1)
+    wyl_fact_artifact_win_temp_child_free (child);
+  WylFactDuckdbTempRetireResult root_retired =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_retire (root,
+      &root_retired), ==, WYRELOG_E_OK);
+  g_assert_cmpint (root_retired, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_temp_root_free (root);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (ns);
+  g_assert_true (CloseHandle (volume));
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  if (file_id_reachability_unavailable)
+    g_test_skip ("volume does not expose File-ID reachability");
 }
 
 static void
@@ -4164,6 +4467,8 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_io_session_query_metadata_and_revalidate},
   {"/fact/artifact-namespace/windows/temp-root/spill-child-capabilities",
    test_temp_root_spill_child_capabilities},
+  {"/fact/artifact-namespace/windows/temp-root/wrapper-ownership",
+   test_temp_child_wrapper_ownership},
   {"/fact/artifact-namespace/windows/io-session/read-only-access-intent",
    test_io_session_read_only_access_intent},
 };

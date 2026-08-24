@@ -1278,6 +1278,7 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
     ['temp-token-real-crash-recovery', '/fact/artifact-namespace/windows/namespace/temp-token-real-crash-recovery'],
     ['cross-process', '/fact/artifact-namespace/windows/lock-domain/cross-process'],
     ['temp-root-spill-child-capabilities', '/fact/artifact-namespace/windows/temp-root/spill-child-capabilities'],
+    ['temp-root-wrapper-ownership', '/fact/artifact-namespace/windows/temp-root/wrapper-ownership'],
     ['mutation-handle-lifetime', '/fact/artifact-namespace/windows/mutation-handle-lifetime'],
   ]
     test('fact-artifact-namespace-windows-' + lifecycle_case[0],
@@ -2982,6 +2983,14 @@ test('windows-artifact-handle-lifetime-boundary', python3,
 
 test('windows-artifact-handle-lifetime-boundary-self-test', python3,
   args : [files('test-windows-artifact-handle-lifetime-boundary.py'),
+    '--self-test', meson.project_source_root()])
+
+test('windows-temp-child-ownership-boundary', python3,
+  args : [files('test-windows-temp-child-ownership-boundary.py'),
+    meson.project_source_root()])
+
+test('windows-temp-child-ownership-boundary-self-test', python3,
+  args : [files('test-windows-temp-child-ownership-boundary.py'),
     '--self-test', meson.project_source_root()])
 
 if host_machine.system() == 'linux'

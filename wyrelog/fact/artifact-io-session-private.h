@@ -44,6 +44,12 @@ wyrelog_error_t wyl_fact_artifact_io_session_create_temp_root (
   WylFactArtifactMutationLease *lease,
   WylFactDuckdbTempRoot **out_root);
 
+/* Atomically returns an independently owned child and a wrapper session.  The
+ * wrapper owns its platform binding until terminal teardown; close consumes
+ * only the I/O transport and leaves an idle binding in the wrapper husk.
+ * Success returns no orphan evidence.  A failure returns no child or session;
+ * evidence is non-NULL only when an unpublished filesystem mutation could not
+ * be retired exactly. */
 wyrelog_error_t wyl_fact_artifact_io_session_create_temp_child (
   WylFactDuckdbTempRoot *root,
   const gchar *name,
@@ -52,6 +58,9 @@ wyrelog_error_t wyl_fact_artifact_io_session_create_temp_child (
   WylFactArtifactIoSession **out_session,
   WylFactDuckdbTempOrphanEvidence **out_evidence);
 
+/* Borrows |child| and returns a wrapper that owns only its newly acquired
+ * binding and I/O transport.  Terminal teardown never consumes the caller's
+ * independent child ownership. */
 wyrelog_error_t wyl_fact_artifact_io_session_open_existing_temp_child (
   WylFactDuckdbTempChild *child,
   gboolean writable,

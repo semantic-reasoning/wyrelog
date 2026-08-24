@@ -64,6 +64,28 @@ WylFactArtifactWinNamespaceTestFault
 wyl_fact_artifact_win_namespace_take_test_fault (void);
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+/* One-shot ownership checkpoints compiled only into the non-installed
+ * wyrelog_handle_test_seams archive.  Production libraries carry neither the
+ * vocabulary nor process-wide state. */
+typedef enum
+{
+  WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE = 0,
+  WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_CHILD_CREATE,
+  WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_BINDING_ACQUIRE,
+  WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_IO_SESSION_ACQUIRE,
+  WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_WRAPPER_POPULATE,
+  WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_REPORT_FINISH_ERROR,
+} WylFactArtifactWinTempChildTestSeam;
+
+void wyl_fact_artifact_win_temp_child_set_test_seam
+  (WylFactArtifactWinTempChildTestSeam);
+WylFactArtifactWinTempChildTestSeam
+wyl_fact_artifact_win_temp_child_take_test_seam (void);
+gboolean wyl_fact_artifact_win_temp_child_take_specific_test_seam
+  (WylFactArtifactWinTempChildTestSeam);
+#endif /* WYL_TEST_HANDLE_SEAMS */
+
 /* Opens only an already-provisioned main and lock pair.  It never creates
  * either artifact; callers that need initial main provisioning must use the
  * #615 evidence import below. */
@@ -243,18 +265,29 @@ wyrelog_error_t wyl_fact_artifact_win_temp_root_child_exists
   (WylFactArtifactWinTempRoot *, const gchar * name, gboolean * out_exists);
 wyrelog_error_t wyl_fact_artifact_win_temp_root_snapshot_children
   (WylFactArtifactWinTempRoot *, GPtrArray ** out_children_names);
+typedef struct WylFactArtifactWinTempOrphanEvidence WylFactArtifactWinTempOrphanEvidence;
+
 wyrelog_error_t wyl_fact_artifact_win_temp_root_create_child_binding
   (WylFactArtifactWinTempRoot *, const gchar * name, gboolean writable,
-    WylFactArtifactWinTempChildBinding ** out_binding);
-
-typedef struct WylFactArtifactWinTempOrphanEvidence WylFactArtifactWinTempOrphanEvidence;
+    WylFactArtifactWinTempChild ** out_child,
+    WylFactArtifactWinTempChildBinding ** out_binding,
+    WylFactArtifactWinTempOrphanEvidence ** out_evidence);
 
 wyrelog_error_t wyl_fact_artifact_win_temp_root_create_with_orphan_evidence
   (WylFactArtifactWinLease *, WylFactArtifactWinTempRoot ** out_root,
     WylFactArtifactWinTempOrphanEvidence ** out_evidence);
 wyrelog_error_t wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence
   (WylFactArtifactWinTempRoot *, const gchar * name, gboolean writable,
+    WylFactArtifactWinTempChild ** out_child,
     WylFactArtifactWinTempChildBinding ** out_binding,
+    WylFactArtifactWinTempOrphanEvidence ** out_evidence);
+WylFactArtifactWinTempOrphanEvidence *
+wyl_fact_artifact_win_temp_orphan_evidence_new_for_name (const gchar * name);
+/* Retire and release a child that was never published.  The preallocated
+ * evidence is freed after an exact retirement and transferred to
+ * |out_evidence| only when cleanup cannot be proven exact. */
+void wyl_fact_artifact_win_temp_child_discard_unpublished
+  (WylFactArtifactWinTempChild *, WylFactArtifactWinTempOrphanEvidence *,
     WylFactArtifactWinTempOrphanEvidence ** out_evidence);
 void wyl_fact_artifact_win_temp_orphan_evidence_free
   (WylFactArtifactWinTempOrphanEvidence *);
