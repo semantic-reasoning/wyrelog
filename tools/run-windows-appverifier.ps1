@@ -233,6 +233,7 @@ function Invoke-Artifact-Suite {
       'fact-artifact-namespace-windows-temp-token-real-crash-recovery',
       'fact-artifact-namespace-windows-cross-process',
       'fact-artifact-namespace-windows-temp-root-spill-child-capabilities',
+      'fact-artifact-namespace-windows-mutation-handle-lifetime',
       '--print-errorlogs'
     ) -LogPath (Join-Path $phase 'meson-test.txt')
   } finally {
@@ -363,6 +364,7 @@ $metadata = [ordered]@{
     'fact-artifact-namespace-windows-temp-token-real-crash-recovery',
     'fact-artifact-namespace-windows-cross-process',
     'fact-artifact-namespace-windows-temp-root-spill-child-capabilities'
+    'fact-artifact-namespace-windows-mutation-handle-lifetime'
   )
 }
 $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (
