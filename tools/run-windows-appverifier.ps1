@@ -250,13 +250,36 @@ function Invoke-Artifact-Suite {
   Clear-Target -ImageName $script:suite_image -EvidenceDirectory $phase
 }
 
+function Invoke-Secure-Fixture-With-RuntimePath {
+  param([Parameter(Mandatory = $true)] [string] $LogPath)
+
+  $previous_path = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+  $secure_path = if ([string]::IsNullOrEmpty($previous_path)) {
+    $script:vcpkg_runtime_directory
+  } else {
+    $script:vcpkg_runtime_directory + [System.IO.Path]::PathSeparator +
+      $previous_path
+  }
+  try {
+    [Environment]::SetEnvironmentVariable('PATH', $secure_path, 'Process')
+    $result = Invoke-Captured -FilePath $script:secure_temp_child_path -Arguments @(
+    ) -LogPath $LogPath
+  } finally {
+    [Environment]::SetEnvironmentVariable('PATH', $previous_path, 'Process')
+  }
+  $result
+}
+
 function Invoke-Secure-Temp-Child {
   $phase = New-Phase 'secure-temp-child'
   $env:VERIFIER_LOG_PATH = $phase
   Clear-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
+  $loader_probe = Invoke-Secure-Fixture-With-RuntimePath -LogPath (
+    Join-Path $phase 'loader-preflight.txt')
+  Assert-Success $loader_probe 'launch secure temp-child loader preflight'
   Enable-Target -ImageName $script:secure_temp_child_image -EvidenceDirectory $phase
-  $result = Invoke-Captured -FilePath $script:secure_temp_child_path -Arguments @(
-  ) -LogPath (Join-Path $phase 'process.txt')
+  $result = Invoke-Secure-Fixture-With-RuntimePath -LogPath (
+    Join-Path $phase 'process.txt')
   $entries = @(Export-Phase-Logs -Phase $phase)
   if ($result.ExitCode -ne 0) {
     throw "instrumented secure temp-child fixture exited $($result.ExitCode)"
@@ -343,6 +366,51 @@ if ($app_verifier_hash -notmatch '^[0-9A-F]{64}$') {
 
 $script:meson_path = (Get-Command meson -ErrorAction Stop).Source
 $script:build_root = (Resolve-Path -LiteralPath $BuildDirectory).Path
+$vcpkg_installed_value = [Environment]::GetEnvironmentVariable(
+  'VCPKG_INSTALLED_DIR', 'Process')
+if ([string]::IsNullOrWhiteSpace($vcpkg_installed_value) -or
+    $vcpkg_installed_value -notmatch '^[A-Za-z]:[\\/]' -or
+    $vcpkg_installed_value.Contains([System.IO.Path]::PathSeparator) -or
+    $vcpkg_installed_value -match '(?:^|[\\/])\.\.(?:[\\/]|$)' -or
+    !(Test-Path -LiteralPath $vcpkg_installed_value -PathType Container)) {
+  throw 'Windows AppVerifier requires VCPKG_INSTALLED_DIR'
+}
+$script:vcpkg_installed_directory = (
+  Resolve-Path -LiteralPath $vcpkg_installed_value).Path
+$vcpkg_runtime_value = Join-Path $script:vcpkg_installed_directory 'bin'
+if (!(Test-Path -LiteralPath $vcpkg_runtime_value -PathType Container)) {
+  throw 'Windows AppVerifier requires the vcpkg runtime directory'
+}
+$script:vcpkg_runtime_directory = (
+  Resolve-Path -LiteralPath $vcpkg_runtime_value).Path
+$expected_vcpkg_runtime = [System.IO.Path]::GetFullPath(
+  (Join-Path $script:vcpkg_installed_directory 'bin'))
+if (![string]::Equals($script:vcpkg_runtime_directory,
+    $expected_vcpkg_runtime, [StringComparison]::OrdinalIgnoreCase)) {
+  throw 'Windows AppVerifier vcpkg runtime is not the literal bin child'
+}
+if ($env:GITHUB_ACTIONS -eq 'true') {
+  $runner_temp_value = [Environment]::GetEnvironmentVariable(
+    'RUNNER_TEMP', 'Process')
+  if ([string]::IsNullOrWhiteSpace($runner_temp_value) -or
+      $runner_temp_value -notmatch '^[A-Za-z]:[\\/]' -or
+      $runner_temp_value.Contains([System.IO.Path]::PathSeparator) -or
+      $runner_temp_value -match '(?:^|[\\/])\.\.(?:[\\/]|$)' -or
+      !(Test-Path -LiteralPath $runner_temp_value -PathType Container)) {
+    throw 'Windows AppVerifier requires canonical RUNNER_TEMP'
+  }
+  $script:runner_temp_directory = (
+    Resolve-Path -LiteralPath $runner_temp_value).Path
+  $runner_temp_prefix = [string]::Concat(
+    $script:runner_temp_directory.TrimEnd([char[]]@(
+      [System.IO.Path]::DirectorySeparatorChar,
+      [System.IO.Path]::AltDirectorySeparatorChar)),
+    [System.IO.Path]::DirectorySeparatorChar)
+  if (!$script:vcpkg_installed_directory.StartsWith(
+      $runner_temp_prefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Windows AppVerifier vcpkg root escaped RUNNER_TEMP'
+  }
+}
 $tests_root = Join-Path $script:build_root 'tests'
 $script:probe_path = Join-Path $tests_root 'test-windows-appverifier-probe.exe'
 $script:probe_dll_path = Join-Path $tests_root 'test-windows-appverifier-probe-dll.dll'
@@ -371,6 +439,9 @@ $metadata = [ordered]@{
   administrator = $true
   os_version = [Environment]::OSVersion.VersionString
   process_64_bit = [Environment]::Is64BitProcess
+  vcpkg_installed_directory = $script:vcpkg_installed_directory
+  vcpkg_runtime_directory = $script:vcpkg_runtime_directory
+  duckdb_linkage = 'source-pinned-static'
   probe_image = $script:probe_image
   suite_image = $script:suite_image
   secure_temp_child_image = $script:secure_temp_child_image
