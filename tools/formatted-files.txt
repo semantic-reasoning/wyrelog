@@ -6,6 +6,7 @@ tests/test-client-audit-daemon.c
 tests/test-daemon-checks-noaudit.c
 tests/test-daemon-checks.c
 tests/test-daemon-http-decide.c
+tests/test-daemon-http-facts.c
 tests/test-daemon-http-mfa.c
 tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
@@ -16,6 +17,7 @@ tests/test-events.c
 tests/test-fact-artifact-inventory.c
 tests/test-fact-artifact-namespace-windows.c
 tests/test-fact-artifact-namespace.c
+tests/test-fact-compound.c
 tests/test-fact-graph-locator-windows.c
 tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
@@ -87,6 +89,7 @@ wyrelog/fact/artifact-io-session-posix-private.c
 wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/artifact-io-session-windows-private.c
 wyrelog/fact/compound-private.h
+wyrelog/fact/compound.c
 wyrelog/fact/graph-artifact-inventory-private.c
 wyrelog/fact/graph-artifact-inventory-private.h
 wyrelog/fact/graph-artifact-namespace-private.c
@@ -100,6 +103,8 @@ wyrelog/fact/graph-artifact-windows-namespace-private.h
 wyrelog/fact/graph-locator-private.h
 wyrelog/fact/graph-locator-windows-private.c
 wyrelog/fact/graph-provisioned-pair-internal.h
+wyrelog/fact/legacy-store-identity-private.c
+wyrelog/fact/legacy-store-identity-private.h
 wyrelog/fact/mutation-outcome-private.h
 wyrelog/fact/provisioning-construct-private.c
 wyrelog/fact/provisioning-construct-private.h

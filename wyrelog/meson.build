@@ -133,7 +133,8 @@ if get_option('enable_audit').allowed()
 endif
 wyrelog_sources += files('fact/graph-artifact-inventory-private.c')
 if get_option('enable_fact_store').allowed()
-  wyrelog_sources += files('fact/compound.c', 'fact/query.c',
+  wyrelog_sources += files('fact/compound.c',
+    'fact/legacy-store-identity-private.c', 'fact/query.c',
     'fact/provisioning-private.c', 'fact/replay.c', 'fact/runtime-private.c',
     'fact/store.c',
     'fact/store-identity-private.c')

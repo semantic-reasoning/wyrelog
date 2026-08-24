@@ -72,7 +72,7 @@ static gint
 check_response_request_id_header (SoupMessage *msg, gint failure_code)
 {
   const gchar *request_id = soup_message_headers_get_one
-      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
   return is_request_id_shape (request_id) ? 0 : failure_code;
 }
 
@@ -98,20 +98,20 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
     return 100;
   if (access_token != NULL) {
     g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-        access_token);
+            access_token);
     soup_message_headers_replace (soup_message_get_request_headers (msg),
         "Authorization", authorization);
   }
   if (request_body != NULL) {
     g_autoptr (GBytes) bytes = g_bytes_new_static (request_body,
-        strlen (request_body));
+            strlen (request_body));
     soup_message_set_request_body_from_bytes (msg,
         "text/tab-separated-values", bytes);
   }
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 101;
   gint rc = check_response_request_id_header (msg, 102);
@@ -156,16 +156,16 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   for (gsize i = 0; i < G_N_ELEMENTS (perms); i++) {
     wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
-        subject, perms[i], WYL_TENANT_DEFAULT);
+            subject, perms[i], WYL_TENANT_DEFAULT);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_policy_store_set_permission_state (store, subject, perms[i],
-        WYL_TENANT_DEFAULT, "armed");
+            WYL_TENANT_DEFAULT, "armed");
     if (rc != WYRELOG_E_OK)
       return rc;
   }
   wyrelog_error_t rc = wyl_policy_store_set_session_state (store,
-      WYL_TENANT_DEFAULT, "active");
+          WYL_TENANT_DEFAULT, "active");
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_reload_engine_pair (handle);
@@ -200,7 +200,7 @@ graph_state_matches (wyl_policy_store_t *store, const gchar *tenant,
     return TRUE;
   gboolean active = FALSE;
   return wyl_policy_store_fact_graph_is_active (store, tenant, graph, &active)
-      == WYRELOG_E_OK && active == expected_active;
+         == WYRELOG_E_OK && active == expected_active;
 }
 
 static gboolean
@@ -258,6 +258,77 @@ check_fact_projection_row_count (const gchar *fact_root,
   return count == expected_rows ? 0 : 304;
 }
 
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+static gint
+seed_legacy_fact_metadata (const gchar *fact_root, const gchar *graph_id,
+    const gchar *sql)
+{
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 4100;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  if (path == NULL)
+    return 4101;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 4102;
+    duckdb_result result = { 0 };
+    if (duckdb_query (wyl_fact_store_get_connection (store), sql, &result)
+        != DuckDBSuccess) {
+      duckdb_destroy_result (&result);
+      return 4103;
+    }
+    duckdb_destroy_result (&result);
+  }
+#ifndef G_OS_WIN32
+  if (g_chmod (db_path, 0600) != 0)
+    return 4104;
+#endif
+  return 0;
+}
+
+static gint
+check_legacy_metadata_key_count (const gchar *fact_root,
+    const gchar *graph_id, const gchar *key, gint64 expected)
+{
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 4110;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  if (path == NULL)
+    return 4111;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+    return 4112;
+  duckdb_prepared_statement statement = NULL;
+  duckdb_result result = { 0 };
+  if (duckdb_prepare (wyl_fact_store_get_connection (store),
+      "SELECT COUNT(*) FROM fact_store_metadata WHERE key=?;", &statement)
+      != DuckDBSuccess)
+    return 4113;
+  if (duckdb_bind_varchar (statement, 1, key) != DuckDBSuccess
+      || duckdb_execute_prepared (statement, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&statement);
+    duckdb_destroy_result (&result);
+    return 4114;
+  }
+  duckdb_destroy_prepare (&statement);
+  gint64 count = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return count == expected ? 0 : 4115;
+}
+#endif
+
 static gint
 check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
     const gchar *base_url)
@@ -290,9 +361,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   guint status = 0;
   g_autofree gchar *body = NULL;
   g_autofree gchar *graphs_query = g_strdup_printf ("tenant=%s&%s",
-      WYL_TENANT_DEFAULT, FACT_GUARD);
+          WYL_TENANT_DEFAULT, FACT_GUARD);
   gint rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
-      NULL, NULL, &status, &body);
+          NULL, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"graph_auth_required\"") == NULL)
@@ -300,7 +371,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
-      deny_token, NULL, &status, &body);
+          deny_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"graph_denied\"") == NULL)
@@ -308,24 +379,24 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *create_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
-      WYL_TENANT_DEFAULT, FACT_GUARD);
+          WYL_TENANT_DEFAULT, FACT_GUARD);
   static const gchar *const graph_create_aliases[] = {
     "/graphs/create/x",
     "/graphs/createx",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (graph_create_aliases); i++) {
     rc = send_raw (session, "POST", base_url, graph_create_aliases[i],
-        create_query, admin_token, NULL, &status, &body);
+            create_query, admin_token, NULL, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !graph_state_matches (store, WYL_TENANT_DEFAULT, "orders", FALSE,
-            FALSE))
+        FALSE))
       return 520 + (gint) i;
     g_clear_pointer (&body, g_free);
   }
   rc = send_raw (session, "POST", base_url, "/graphs/create", create_query,
-      admin_token, NULL, &status, &body);
+          admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"created\":true") == NULL ||
@@ -333,10 +404,10 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       != NULL)
     return 22;
   if (sqlite3_exec (wyl_policy_store_get_db (wyl_handle_get_policy_store
-              (handle)),
-          "UPDATE fact_graphs SET storage_path='/outside/redirect' "
-          "WHERE tenant_id='__wr_default' AND graph_id='orders';",
-          NULL, NULL, NULL) != SQLITE_OK)
+        (handle)),
+      "UPDATE fact_graphs SET storage_path='/outside/redirect' "
+      "WHERE tenant_id='__wr_default' AND graph_id='orders';",
+      NULL, NULL, NULL) != SQLITE_OK)
     return 221;
 
   static const gchar *const graph_list_aliases[] = {
@@ -346,22 +417,22 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   for (gsize i = 0; i < G_N_ELEMENTS (graph_list_aliases); i++) {
     g_clear_pointer (&body, g_free);
     rc = send_raw (session, "GET", base_url, graph_list_aliases[i],
-        graphs_query, admin_token, NULL, &status, &body);
+            graphs_query, admin_token, NULL, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !graph_state_matches (store, WYL_TENANT_DEFAULT, "orders", TRUE,
-            TRUE))
+        TRUE))
       return 522 + (gint) i;
   }
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
-      admin_token, NULL, &status, &body);
+          admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"graph_id\":\"orders\"") == NULL
       || strstr (body, "storage_path") != NULL || strstr (body,
-          "facts.duckdb") != NULL)
+      "facts.duckdb") != NULL)
     return 23;
 
   const gchar *schema_body =
@@ -369,15 +440,15 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       "order_id\tsymbol\tfalse\ttrue\n" "amount\tint64\tfalse\ttrue\n";
   g_clear_pointer (&body, g_free);
   g_autofree gchar *schema_query = g_strdup_printf
-      ("tenant=%s&graph=orders&namespace=shop&relation=orders&"
-      "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=orders&namespace=shop&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   static const gchar *const schema_aliases[] = {
     "/facts/schema/register/x",
     "/facts/schema/registerx",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (schema_aliases); i++) {
     rc = send_raw (session, "POST", base_url, schema_aliases[i], schema_query,
-        admin_token, schema_body, &status, &body);
+            admin_token, schema_body, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
@@ -386,8 +457,8 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
     wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
     gsize n_columns = 0;
     if (wyl_policy_store_load_fact_relation_schema_columns
-        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
-            "shop", "orders", 1, &visible, &columns, &n_columns)
+          (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+        "shop", "orders", 1, &visible, &columns, &n_columns)
         != WYRELOG_E_NOT_FOUND) {
       wyl_policy_fact_relation_schema_columns_free (columns, n_columns);
       return 224 + (gint) i;
@@ -395,7 +466,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
     g_clear_pointer (&body, g_free);
   }
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
-      schema_query, admin_token, schema_body, &status, &body);
+          schema_query, admin_token, schema_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -403,11 +474,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_schema_query = g_strdup_printf
-      ("tenant=%s&graph=orders&namespace=shop&relation=bad&"
-      "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=orders&namespace=shop&relation=bad&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
-      bad_schema_query, admin_token, "column_name\tcolumn_type\nonly_name\n",
-      &status, &body);
+          bad_schema_query, admin_token, "column_name\tcolumn_type\nonly_name\n",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_schema_payload\"") == NULL)
@@ -416,17 +487,17 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   wyl_policy_fact_relation_schema_column_info_t *bad_cols = NULL;
   gsize n_bad_cols = 0;
   if (wyl_policy_store_load_fact_relation_schema_columns
-      (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
-          "shop", "bad", 1, &bad_visible, &bad_cols, &n_bad_cols)
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+      "shop", "bad", 1, &bad_visible, &bad_cols, &n_bad_cols)
       != WYRELOG_E_NOT_FOUND)
     return 26;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_max_rows_query = g_strdup_printf
-      ("tenant=%s&graph=orders&namespace=shop&relation=bad_rows&"
-      "schema_version=1&max_rows=0&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=orders&namespace=shop&relation=bad_rows&"
+          "schema_version=1&max_rows=0&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
-      bad_max_rows_query, admin_token, schema_body, &status, &body);
+          bad_max_rows_query, admin_token, schema_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_schema_request\"") == NULL)
@@ -434,11 +505,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *too_many_max_rows_query = g_strdup_printf
-      ("tenant=%s&graph=orders&namespace=shop&relation=too_many_rows&"
-      "schema_version=1&max_rows=1000001&%s", WYL_TENANT_DEFAULT,
-      FACT_GUARD);
+        ("tenant=%s&graph=orders&namespace=shop&relation=too_many_rows&"
+          "schema_version=1&max_rows=1000001&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
-      too_many_max_rows_query, admin_token, schema_body, &status, &body);
+          too_many_max_rows_query, admin_token, schema_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_schema_request\"") == NULL)
@@ -447,11 +518,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   const gchar *fact_body = "order_id\tamount\no-1\t42\n";
   g_clear_pointer (&body, g_free);
   g_autofree gchar *append_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-1&"
-      "idempotency_key=key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-1&"
+          "idempotency_key=key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", append_query, admin_token,
-      fact_body, &status, &body);
+          "/facts/__wr_default/orders/orders:append", append_query, admin_token,
+          fact_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL) {
@@ -465,8 +536,8 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", append_query, admin_token,
-      fact_body, &status, &body);
+          "/facts/__wr_default/orders/orders:append", append_query, admin_token,
+          fact_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":false") == NULL)
@@ -477,11 +548,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *datalog_query = g_strdup_printf ("tenant=%s&%s",
-      WYL_TENANT_DEFAULT, FACT_GUARD);
+          WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, NULL,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, NULL,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"datalog_auth_required\"") == NULL)
@@ -489,9 +560,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, deny_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, deny_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"datalog_denied\"") == NULL)
@@ -506,8 +577,8 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_datalog_bodies); i++) {
     g_clear_pointer (&body, g_free);
     rc = send_raw (session, "POST", base_url,
-        "/datalog/__wr_default/orders/query", datalog_query, admin_token,
-        invalid_datalog_bodies[i], &status, &body);
+            "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+            invalid_datalog_bodies[i], &status, &body);
     if (rc != 0)
       return rc;
     if (status != 400 || strstr (body, "\"invalid_datalog_request\"") == NULL)
@@ -516,9 +587,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   gboolean status_ok = status == 200;
@@ -541,9 +612,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
-      "{\"query\":\"payments(P)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+          "{\"query\":\"payments(P)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"datalog_relation_denied\"") == NULL)
@@ -553,9 +624,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
     return 334;
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
-      "{\"query\":\"orders(\\\"o-1\\\",A)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+          "{\"query\":\"orders(\\\"o-1\\\",A)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "{\"A\":42}") == NULL ||
@@ -564,11 +635,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *append_query_2 = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-7&"
-      "idempotency_key=key-7&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-7&"
+          "idempotency_key=key-7&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", append_query_2,
-      admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+          "/facts/__wr_default/orders/orders:append", append_query_2,
+          admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
@@ -579,9 +650,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":1}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":1}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"row_count\":1") == NULL ||
@@ -590,9 +661,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *create_bulk_query = g_strdup_printf
-      ("tenant=%s&graph=bulk&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=bulk&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/graphs/create",
-      create_bulk_query, admin_token, NULL, &status, &body);
+          create_bulk_query, admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"created\":true") == NULL)
@@ -600,10 +671,10 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bulk_schema_query = g_strdup_printf
-      ("tenant=%s&graph=bulk&namespace=shop&relation=orders&"
-      "schema_version=1&max_rows=1100&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=bulk&namespace=shop&relation=orders&"
+          "schema_version=1&max_rows=1100&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
-      bulk_schema_query, admin_token, schema_body, &status, &body);
+          bulk_schema_query, admin_token, schema_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -614,11 +685,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
     g_string_append_printf (bulk_rows, "bulk-%u\t%u\n", i, i);
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bulk_append_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=bulk-1&"
-      "idempotency_key=bulk-key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=bulk-1&"
+          "idempotency_key=bulk-key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/bulk/orders:append", bulk_append_query,
-      admin_token, bulk_rows->str, &status, &body);
+          "/facts/__wr_default/bulk/orders:append", bulk_append_query,
+          admin_token, bulk_rows->str, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
@@ -626,11 +697,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bulk_datalog_query = g_strdup_printf ("tenant=%s&%s",
-      WYL_TENANT_DEFAULT, FACT_GUARD);
+          WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":1005}",
-      &status, &body);
+          "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":1005}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"row_count\":1005") == NULL ||
@@ -639,8 +710,8 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\"}", &status, &body);
+          "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"row_count\":1100") == NULL ||
@@ -649,9 +720,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *create_unary_query = g_strdup_printf
-      ("tenant=%s&graph=unary&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=unary&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/graphs/create",
-      create_unary_query, admin_token, NULL, &status, &body);
+          create_unary_query, admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"created\":true") == NULL)
@@ -659,11 +730,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *unary_missing_schema_query = g_strdup_printf
-      ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-raw-1&"
-      "idempotency_key=fact-raw-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-raw-1&"
+          "idempotency_key=fact-raw-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/unary/fact:retract", unary_missing_schema_query,
-      admin_token, "value\n1\n", &status, &body);
+          "/facts/__wr_default/unary/fact:retract", unary_missing_schema_query,
+          admin_token, "value\n1\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 404 || strstr (body, "\"fact_schema_not_found\"") == NULL)
@@ -674,10 +745,10 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       "value\tint64\tfalse\ttrue\n";
   g_clear_pointer (&body, g_free);
   g_autofree gchar *unary_schema_query = g_strdup_printf
-      ("tenant=%s&graph=unary&namespace=examples&relation=fact&"
-      "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&graph=unary&namespace=examples&relation=fact&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url, "/facts/schema/register",
-      unary_schema_query, admin_token, unary_schema_body, &status, &body);
+          unary_schema_query, admin_token, unary_schema_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -685,11 +756,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *unary_append_query = g_strdup_printf
-      ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-1&"
-      "idempotency_key=fact-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-1&"
+          "idempotency_key=fact-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/unary/fact:append", unary_append_query,
-      admin_token, "value\n1\n2\n3\n", &status, &body);
+          "/facts/__wr_default/unary/fact:append", unary_append_query,
+          admin_token, "value\n1\n2\n3\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
@@ -697,11 +768,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *unary_datalog_query = g_strdup_printf ("tenant=%s&%s",
-      WYL_TENANT_DEFAULT, FACT_GUARD);
+          WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/unary/query", unary_datalog_query, admin_token,
-      "{\"query\":\"fact(V)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/unary/query", unary_datalog_query, admin_token,
+          "{\"query\":\"fact(V)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"relation\":\"fact\"") == NULL ||
@@ -714,11 +785,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *unary_retract_query = g_strdup_printf
-      ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-r1&"
-      "idempotency_key=fact-r1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-r1&"
+          "idempotency_key=fact-r1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/unary/fact:retract", unary_retract_query,
-      admin_token, "value\n1\n", &status, &body);
+          "/facts/__wr_default/unary/fact:retract", unary_retract_query,
+          admin_token, "value\n1\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
@@ -726,9 +797,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/unary/query", unary_datalog_query, admin_token,
-      "{\"query\":\"fact(V)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/unary/query", unary_datalog_query, admin_token,
+          "{\"query\":\"fact(V)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"row_count\":2") == NULL ||
@@ -739,11 +810,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Retract case 1: normal retract of o-2 -> 200 inserted=true. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *retract_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r1&"
-      "idempotency_key=key-r1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r1&"
+          "idempotency_key=key-r1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract", retract_query,
-      admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract", retract_query,
+          admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL ||
@@ -753,9 +824,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
     return 401;
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
-      &status, &body);
+          "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"row_count\":1") == NULL ||
@@ -766,8 +837,8 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Retract case 2: idempotent replay -> 200 inserted=false. */
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract", retract_query,
-      admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract", retract_query,
+          admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":false") == NULL)
@@ -776,8 +847,8 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Retract case 3: content_hash mismatch (same batch_id, different rows). */
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract", retract_query,
-      admin_token, "order_id\tamount\no-3\t99\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract", retract_query,
+          admin_token, "order_id\tamount\no-3\t99\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 409 || strstr (body, "\"fact_batch_conflict\"") == NULL)
@@ -786,11 +857,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Retract case 4: op/path mismatch (path :retract + query op=assert). */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *mismatch_op_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r4&"
-      "idempotency_key=key-r4&op=assert&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r4&"
+          "idempotency_key=key-r4&op=assert&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract", mismatch_op_query,
-      admin_token, "order_id\tamount\no-1\t42\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract", mismatch_op_query,
+          admin_token, "order_id\tamount\no-1\t42\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_request\"") == NULL)
@@ -799,11 +870,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Retract case 5: no permission -> 403 fact_denied. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *retract_deny_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r5&"
-      "idempotency_key=key-r5&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r5&"
+          "idempotency_key=key-r5&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract", retract_deny_query,
-      deny_token, "order_id\tamount\no-1\t42\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract", retract_deny_query,
+          deny_token, "order_id\tamount\no-1\t42\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"fact_denied\"") == NULL)
@@ -813,12 +884,12 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
    * (Case 6 sealed-graph retract is tested after seal_query below.) */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *retract_missing_schema_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=99&batch_id=batch-r7&"
-      "idempotency_key=key-r7&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=99&batch_id=batch-r7&"
+          "idempotency_key=key-r7&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract",
-      retract_missing_schema_query, admin_token,
-      "order_id\tamount\no-1\t42\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract",
+          retract_missing_schema_query, admin_token,
+          "order_id\tamount\no-1\t42\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 404 || strstr (body, "\"fact_schema_not_found\"") == NULL)
@@ -826,11 +897,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_append_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-2&"
-      "idempotency_key=key-2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-2&"
+          "idempotency_key=key-2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", bad_append_query,
-      admin_token, "order_id\tamount\no-2\tnot-int\n", &status, &body);
+          "/facts/__wr_default/orders/orders:append", bad_append_query,
+          admin_token, "order_id\tamount\no-2\tnot-int\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
@@ -843,11 +914,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_path_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-3&"
-      "idempotency_key=key-3&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-3&"
+          "idempotency_key=key-3&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/wr.bad:append", bad_path_query,
-      admin_token, fact_body, &status, &body);
+          "/facts/__wr_default/orders/wr.bad:append", bad_path_query,
+          admin_token, fact_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_request\"") == NULL)
@@ -855,11 +926,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *malformed_tenant_query = g_strdup_printf
-      ("tenant=bad%%20tenant&namespace=shop&schema_version=1&"
-      "batch_id=batch-4&idempotency_key=key-4&%s", FACT_GUARD);
+        ("tenant=bad%%20tenant&namespace=shop&schema_version=1&"
+          "batch_id=batch-4&idempotency_key=key-4&%s", FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", malformed_tenant_query,
-      admin_token, fact_body, &status, &body);
+          "/facts/__wr_default/orders/orders:append", malformed_tenant_query,
+          admin_token, fact_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
@@ -867,36 +938,123 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *mismatch_query = g_strdup_printf
-      ("tenant=tenant-b&namespace=shop&schema_version=1&batch_id=batch-5&"
-      "idempotency_key=key-5&%s", FACT_GUARD);
+        ("tenant=tenant-b&namespace=shop&schema_version=1&batch_id=batch-5&"
+          "idempotency_key=key-5&%s", FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", mismatch_query,
-      admin_token, fact_body, &status, &body);
+          "/facts/__wr_default/orders/orders:append", mismatch_query,
+          admin_token, fact_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"tenant_denied\"") == NULL)
     return 30;
 
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* A malformed tenant-only legacy identity with durable batches is an
+   * internal store invariant failure (500), not a complete identity conflict
+   * (409).  The failed request must not repair graph_id. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *partial_create_query = g_strdup_printf
+        ("tenant=%s&graph=partial-identity&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+          partial_create_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 4120;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *partial_schema_query = g_strdup_printf
+        ("tenant=%s&graph=partial-identity&namespace=shop&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          partial_schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 4121;
+  rc = seed_legacy_fact_metadata (fact_root, "partial-identity",
+          "INSERT INTO fact_store_metadata VALUES "
+          "('tenant_id','__wr_default');"
+          "INSERT INTO fact_batches VALUES ('existing','__wr_default',"
+          "'partial-identity','shop','orders',1,NULL,NULL,'existing:1',"
+          "'assert',0,'hash',1);");
+  if (rc != 0)
+    return rc;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *partial_append_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=partial-1&"
+          "idempotency_key=partial:1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/partial-identity/orders:append",
+          partial_append_query, admin_token, fact_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 500 || strstr (body, "\"fact_append_failed\"") == NULL)
+    return 4122;
+  rc = check_legacy_metadata_key_count (fact_root, "partial-identity",
+          "graph_id", 0);
+  if (rc != 0)
+    return rc;
+
+  /* A complete but foreign legacy tuple remains a normal policy mismatch and
+   * therefore keeps the established 409 fact_batch_conflict response. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *foreign_create_query = g_strdup_printf
+        ("tenant=%s&graph=identity-mismatch&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+          foreign_create_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 4123;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *foreign_schema_query = g_strdup_printf
+        ("tenant=%s&graph=identity-mismatch&namespace=shop&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          foreign_schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 4124;
+  rc = seed_legacy_fact_metadata (fact_root, "identity-mismatch",
+          "INSERT INTO fact_store_metadata VALUES "
+          "('tenant_id','__wr_default'),('graph_id','other');");
+  if (rc != 0)
+    return rc;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *foreign_append_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=foreign-1&"
+          "idempotency_key=foreign:1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/identity-mismatch/orders:append",
+          foreign_append_query, admin_token, fact_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"fact_batch_conflict\"") == NULL)
+    return 4125;
+#endif
+
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
-      WYL_TENANT_DEFAULT, FACT_GUARD);
+          WYL_TENANT_DEFAULT, FACT_GUARD);
   static const gchar *const graph_seal_aliases[] = {
     "/graphs/seal/x",
     "/graphs/sealx",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (graph_seal_aliases); i++) {
     rc = send_raw (session, "POST", base_url, graph_seal_aliases[i],
-        seal_query, admin_token, NULL, &status, &body);
+            seal_query, admin_token, NULL, &status, &body);
     if (rc != 0)
       return rc;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0
         || !graph_state_matches (store, WYL_TENANT_DEFAULT, "orders", TRUE,
-            TRUE))
+        TRUE))
       return 524 + (gint) i;
     g_clear_pointer (&body, g_free);
   }
   rc = send_raw (session, "POST", base_url, "/graphs/seal", seal_query,
-      admin_token, NULL, &status, &body);
+          admin_token, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"sealed\":true") == NULL)
@@ -904,11 +1062,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *sealed_append_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-6&"
-      "idempotency_key=key-6&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-6&"
+          "idempotency_key=key-6&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:append", sealed_append_query,
-      admin_token, fact_body, &status, &body);
+          "/facts/__wr_default/orders/orders:append", sealed_append_query,
+          admin_token, fact_body, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
@@ -917,11 +1075,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Retract case 6: sealed graph -> 409 graph_sealed. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *sealed_retract_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r6&"
-      "idempotency_key=key-r6&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r6&"
+          "idempotency_key=key-r6&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
-      "/facts/__wr_default/orders/orders:retract", sealed_retract_query,
-      admin_token, "order_id\tamount\no-1\t42\n", &status, &body);
+          "/facts/__wr_default/orders/orders:retract", sealed_retract_query,
+          admin_token, "order_id\tamount\no-1\t42\n", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
@@ -930,12 +1088,12 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Forget case 1: normal forget of batch-1 -> 200 rows_purged>=1. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *forget_query = g_strdup_printf
-      ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
-      FACT_GUARD);
+        ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
   rc = send_raw (session, "DELETE", base_url,
-      "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
-      "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
-      "\"reason\":\"gdpr-erasure\"}", &status, &body);
+          "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
+          "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
+          "\"reason\":\"gdpr-erasure\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL ||
@@ -945,9 +1103,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
   /* Forget case 2: no permission -> 403 fact_denied. */
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "DELETE", base_url,
-      "/facts/__wr_default/orders/orders:forget", forget_query, deny_token,
-      "{\"batch_id\":\"batch-1\",\"operator\":\"deny\","
-      "\"reason\":\"test\"}", &status, &body);
+          "/facts/__wr_default/orders/orders:forget", forget_query, deny_token,
+          "{\"batch_id\":\"batch-1\",\"operator\":\"deny\","
+          "\"reason\":\"test\"}", &status, &body);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"fact_denied\"") == NULL)
@@ -961,7 +1119,7 @@ main (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *fact_root = wyl_test_make_secure_fact_root
-      ("wyl-daemon-facts-XXXXXX", &error);
+        ("wyl-daemon-facts-XXXXXX", &error);
   if (fact_root == NULL)
     return 1;
 
@@ -988,11 +1146,11 @@ main (void)
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   if (http.server == NULL)
     return 6;
   GThread *thread = g_thread_new ("daemon-http-facts",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
