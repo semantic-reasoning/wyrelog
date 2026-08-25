@@ -14,6 +14,80 @@ trap 'rm -rf "$TEST_ROOT"' EXIT HUP INT TERM
 TEST_REPO="$TEST_ROOT/repo"
 OUTPUT="$TEST_ROOT/output"
 
+# ---------------------------------------------------------------------------
+# Uncrustify 0.83.0's default multi-line comment indentation can pull correctly
+# aligned continuation stars one column left.  Keep the trigger here as a
+# runnable fixture, prove the repository configuration is a fixed point, and
+# retain the previous configuration as a negative control.
+# ---------------------------------------------------------------------------
+COMMENT_CANONICAL="$TEST_ROOT/comment-indent-canonical.c"
+COMMENT_FORMATTED="$TEST_ROOT/comment-indent-formatted.c"
+COMMENT_OLD_OUTPUT="$TEST_ROOT/comment-indent-old-output.c"
+OLD_CONFIG="$TEST_ROOT/uncrustify-old.cfg"
+COMMENT_OPTION='cmt_indent_multi      = false'
+
+cat > "$COMMENT_CANONICAL" <<'EOF'
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+static int
+f (void)
+{
+  /* The control: two intents really are PENDING before the rename, so a zero
+   * count below is the survey failing and not an empty fixture.  This is a
+   * seeding check, not a convergence check -- no reconcile pass runs here. */
+  return 0;
+}
+EOF
+
+cp "$COMMENT_CANONICAL" "$COMMENT_FORMATTED"
+if ! (cd "$REPO_ROOT" && ./tools/format-c "$COMMENT_FORMATTED"); then
+  echo "test-format-tooling: current comment fixture formatting failed" >&2
+  exit 1
+fi
+if ! cmp -s "$COMMENT_CANONICAL" "$COMMENT_FORMATTED"; then
+  echo "test-format-tooling: aligned comment is not a formatter fixed point" >&2
+  diff -u "$COMMENT_CANONICAL" "$COMMENT_FORMATTED" >&2 || true
+  exit 1
+fi
+echo "test-format-tooling: aligned comment fixed point: OK"
+
+UNCRUSTIFY=$(command -v uncrustify 2> /dev/null) || {
+  echo "test-format-tooling: pinned uncrustify is unavailable" >&2
+  exit 1
+}
+if [ "$("$UNCRUSTIFY" --version 2>&1 | head -1)" != "Uncrustify-0.83.0_f" ]; then
+  echo "test-format-tooling: old-config control requires Uncrustify-0.83.0_f" >&2
+  exit 1
+fi
+
+if [ "$(grep -Fxc "$COMMENT_OPTION" "$REPO_ROOT/tools/uncrustify.cfg")" -ne 1 ]; then
+  echo "test-format-tooling: expected exactly one '$COMMENT_OPTION' assignment" >&2
+  exit 1
+fi
+if ! awk -v expected="$COMMENT_OPTION" '
+  $0 == expected { removed++; next }
+  { print }
+  END { if (removed != 1) exit 1 }
+' "$REPO_ROOT/tools/uncrustify.cfg" > "$OLD_CONFIG"; then
+  echo "test-format-tooling: could not construct exact old formatter config" >&2
+  exit 1
+fi
+if grep -Eq '^[[:space:]]*cmt_indent_multi[[:space:]]*=' "$OLD_CONFIG"; then
+  echo "test-format-tooling: old formatter config retained cmt_indent_multi" >&2
+  exit 1
+fi
+
+cp "$COMMENT_CANONICAL" "$COMMENT_OLD_OUTPUT"
+if ! "$UNCRUSTIFY" -c "$OLD_CONFIG" -l C --replace --no-backup -q \
+  "$COMMENT_OLD_OUTPUT"; then
+  echo "test-format-tooling: old formatter config did not execute successfully" >&2
+  exit 1
+fi
+if cmp -s "$COMMENT_CANONICAL" "$COMMENT_OLD_OUTPUT"; then
+  echo "test-format-tooling: old formatter config did not reproduce #872" >&2
+  exit 1
+fi
+echo "test-format-tooling: old comment rewrite reproduced: OK"
+
 expect_failure()
 {
   label=$1
