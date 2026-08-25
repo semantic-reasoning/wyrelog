@@ -1236,8 +1236,8 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
   # HANDLE ownership or runtime behavior.
   #
   # It also requires enable_windows_artifact_test_hooks (#741): every case in
-  # this binary runs through the WinFaultGuard fixture, which arms and disarms
-  # both native artifact fault hooks between cases.
+  # this binary runs through the WinFaultGuard fixture, which disarms every
+  # native artifact fault family between cases.
   #
   # To support both default_library=static and default_library=shared on
   # Windows without exporting private test-only symbols from libwyrelog.dll,
@@ -1280,6 +1280,7 @@ if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
     ['temp-root-spill-child-capabilities', '/fact/artifact-namespace/windows/temp-root/spill-child-capabilities'],
     ['temp-root-wrapper-ownership', '/fact/artifact-namespace/windows/temp-root/wrapper-ownership'],
     ['mutation-handle-lifetime', '/fact/artifact-namespace/windows/mutation-handle-lifetime'],
+    ['inventory', '/fact/artifact-namespace/windows/inventory'],
   ]
     test('fact-artifact-namespace-windows-' + lifecycle_case[0],
       test_fact_artifact_namespace_windows,
