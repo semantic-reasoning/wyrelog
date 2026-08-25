@@ -488,7 +488,7 @@ def validate_runtime_path_contract(
     if (
         enforce_runner_digest
         and candidate_digest
-        != "6b1702a3f9aaf09f66f029630aed01247a480b8642fb67e9b85a817fdb6e0dd2"
+        != "f69a421e81d3fbd1f4704c5254d1dab79f0cc97d9b8a12ffb567479aa5794a14"
     ):
         raise FixtureContractError(
             "Windows AppVerifier runner changed outside its reviewed source allowlist"

@@ -120,6 +120,21 @@ def check(root: Path) -> None:
         ["wyl_fact_artifact_win_io_session_finish", "temp_child_binding_free"],
         "finish must consume the session before releasing its binding",
     )
+    existing = function_body(
+        session_c, "wyl_fact_artifact_io_session_open_existing_temp_child"
+    )
+    if "*out_session = NULL" not in existing:
+        raise AssertionError("open-existing wrapper does not initialize its output")
+    for token in ("session->temp_child_binding = binding", "*out_session = session"):
+        if token not in existing:
+            raise AssertionError(
+                f"open-existing binding transfer missing: {token}"
+            )
+    require_in_order(
+        function_body(session_c, "temp_child_session_abort_and_release"),
+        ["wyl_fact_artifact_win_io_session_abort", "temp_child_binding_free"],
+        "abort must consume the session before releasing its binding",
+    )
 
     if "/fact/artifact-namespace/windows/temp-root/wrapper-ownership" not in runtime:
         raise AssertionError("missing native wrapper ownership runtime selector")
@@ -132,12 +147,27 @@ def self_test(root: Path) -> None:
     mutations = {
         "owner": ("wyrelog/fact/artifact-io-session-windows-private.c",
                   "session->temp_child_binding = binding", "session->sidecar_binding = binding"),
+        "open-existing-owner": (
+            "wyrelog/fact/artifact-io-session-windows-private.c",
+            "session->temp_child_binding = binding;\n  *out_session = session;\n  return WYRELOG_E_OK;\n}\n\nWylFactArtifactIoSessionKind",
+            "session->sidecar_binding = binding;\n  *out_session = session;\n  return WYRELOG_E_OK;\n}\n\nWylFactArtifactIoSessionKind",
+        ),
         "publication": ("wyrelog/fact/graph-artifact-windows-namespace-private.c",
                         "wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);\n  *out_child = child",
                         "wyl_fact_artifact_win_temp_orphan_evidence_free (evidence);\n  /* child not published */"),
         "order": ("wyrelog/fact/artifact-io-session-windows-private.c",
             "wyl_fact_artifact_win_io_session_finish (win_session)",
             "wyl_fact_artifact_win_io_session_abort (win_session)",
+        ),
+        "finish-release": (
+            "wyrelog/fact/artifact-io-session-windows-private.c",
+            "if (release_binding)\n    temp_child_binding_free (session);",
+            "if (release_binding)\n    session->temp_child_binding = NULL;",
+        ),
+        "abort-release": (
+            "wyrelog/fact/artifact-io-session-windows-private.c",
+            "wyl_fact_artifact_win_io_session_abort (win_session);\n  temp_child_binding_free (session);",
+            "wyl_fact_artifact_win_io_session_abort (win_session);\n  session->temp_child_binding = NULL;",
         ),
         "gate": ("wyrelog/fact/graph-artifact-windows-namespace-private.h",
                  "#ifdef WYL_TEST_HANDLE_SEAMS", "#if 1 /* shipped seam */"),
