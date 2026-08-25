@@ -54,6 +54,7 @@ FORMATTER="$REPO_ROOT/tools/format-c"
 
 for executable_path in \
   tools/format-c \
+  tools/check-comment-alignment.sh \
   tools/check-format.sh \
   tools/install-uncrustify.sh \
   tools/setup-git-hooks.sh \
