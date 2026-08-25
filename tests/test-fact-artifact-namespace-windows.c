@@ -3453,8 +3453,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
  * surface as WYRELOG_E_POLICY -- the very code a genuine authority violation
  * returns -- so the leak presents as an unrelated later case failing a policy
  * assertion.  Every case therefore runs inside this fixture: set_up disarms
- * both globals before the body, and tear_down disarms them again and requires
- * what it found to match the row's declared expectation.
+ * all native artifact test-fault state before the body, and tear_down disarms
+ * it again and requires what it found to match the row's declared expectation.
  *
  * The guarantee is a clean-run property only.  A case that aborts never
  * reaches its tear_down, so a passing run proves nothing about a failing
@@ -3477,6 +3477,7 @@ typedef struct
   DWORD expected_flush_error;
   WylFactArtifactWinNamespaceTestFault expected_namespace_fault;
   WylFactArtifactWinTempChildTestSeam expected_temp_child_seam;
+  WylFactArtifactWinInventoryTestFault expected_inventory_fault;
 } WinGuardedCase;
 
 static void
@@ -3488,6 +3489,8 @@ win_fault_guard_set_up (WinFaultGuard *guard, gconstpointer user_data)
       wyl_fact_artifact_win_namespace_take_test_fault ();
   WylFactArtifactWinTempChildTestSeam temp_child_seam =
       wyl_fact_artifact_win_temp_child_take_test_seam ();
+  WylFactArtifactWinInventoryTestFault inventory_fault =
+      wyl_fact_artifact_win_locator_take_inventory_test_fault ();
 
   (void) guard;
   (void) user_data;
@@ -3500,6 +3503,8 @@ win_fault_guard_set_up (WinFaultGuard *guard, gconstpointer user_data)
   g_assert_cmpint (fault, ==, WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE);
   g_assert_cmpint (temp_child_seam, ==,
       WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE);
+  g_assert_cmpint (inventory_fault, ==,
+      WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_NONE);
 }
 
 static void
@@ -3521,6 +3526,8 @@ win_fault_guard_tear_down (WinFaultGuard *guard, gconstpointer user_data)
       wyl_fact_artifact_win_namespace_take_test_fault ();
   WylFactArtifactWinTempChildTestSeam temp_child_seam =
       wyl_fact_artifact_win_temp_child_take_test_seam ();
+  WylFactArtifactWinInventoryTestFault inventory_fault =
+      wyl_fact_artifact_win_locator_take_inventory_test_fault ();
 
   (void) guard;
   /* Both globals are already disarmed by the takes above, so the process is
@@ -3532,20 +3539,24 @@ win_fault_guard_tear_down (WinFaultGuard *guard, gconstpointer user_data)
    * reads its success flag after fixture_teardown returns. */
   if (flush_error != guarded->expected_flush_error
       || fault != guarded->expected_namespace_fault
-      || temp_child_seam != guarded->expected_temp_child_seam) {
+      || temp_child_seam != guarded->expected_temp_child_seam
+      || inventory_fault != guarded->expected_inventory_fault) {
     g_test_message ("%s left an unexpected Windows artifact test fault armed: "
-        "flush=%lu want %lu, namespace=%d want %d, temp-child=%d want %d",
+        "flush=%lu want %lu, namespace=%d want %d, temp-child=%d want %d, "
+        "inventory=%d want %d",
         guarded->path,
         (gulong) flush_error, (gulong) guarded->expected_flush_error,
         (gint) fault, (gint) guarded->expected_namespace_fault,
-        (gint) temp_child_seam, (gint) guarded->expected_temp_child_seam);
+        (gint) temp_child_seam, (gint) guarded->expected_temp_child_seam,
+        (gint) inventory_fault, (gint) guarded->expected_inventory_fault);
     g_test_fail ();
   }
 }
 
 G_STATIC_ASSERT (ERROR_SUCCESS == 0
     && WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE == 0
-    && WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE == 0);
+    && WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_NONE == 0
+    && WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_NONE == 0);
 
 static void
 test_io_session_query_metadata_and_revalidate (void)
@@ -4380,6 +4391,254 @@ test_mutation_handle_lifetime_temp_tree (void)
   g_free (path);
 }
 
+static void
+assert_inventory_empty_failure (WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventoryStatus status)
+{
+  g_assert_nonnull (snapshot);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      status);
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN));
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_LOCK));
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_logical_bytes
+        (snapshot), ==, 0);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_allocated_bytes
+        (snapshot), ==, 0);
+}
+
+static void
+test_inventory_stable_temp_and_unknown (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE);
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN));
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_LOCK));
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_WAL));
+  WylFactArtifactInventoryIdentity inventory_main = { 0 };
+  wyl_fact_artifact_inventory_snapshot_slot_identity (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_MAIN, &inventory_main);
+  g_autofree gchar *main_path = g_build_filename (path, "facts.duckdb", NULL);
+  WylFactGraphWinIdentity native_main = identity_for_path (main_path);
+  g_assert_cmpuint (inventory_main.domain, ==, native_main.volume_serial);
+  g_assert_cmpuint (inventory_main.object_width, ==,
+      sizeof native_main.file_id);
+  g_assert_cmpmem (inventory_main.object_bytes,
+      sizeof inventory_main.object_bytes, native_main.file_id,
+      sizeof native_main.file_id);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempRoot *root = NULL;
+  WylFactArtifactWinTempChild *child = NULL;
+  WylFactArtifactWinTempChildBinding *binding = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  gsize written = 0;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+      &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_root (lease, &root),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (root,
+      "duckdb_temp_storage_DEFAULT-1.tmp", &child), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (child, TRUE,
+      &binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
+        (binding, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0,
+      "spill", 5, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (written, ==, 5);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_child_binding_free (binding);
+  wyl_fact_artifact_win_temp_child_free (child);
+  wyl_fact_artifact_win_temp_root_free (root);
+  wyl_fact_artifact_win_lease_free (lease);
+
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph,
+          &graph_identity);
+  WylFactArtifactWinEntry *unknown = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+      "inventory-unknown", GENERIC_READ | GENERIC_WRITE, TRUE, &unknown), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_entry_free (unknown);
+  wyl_fact_artifact_win_locator_free (locator);
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_TEMP));
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_logical_bytes
+        (snapshot), ==, 5);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_allocated_bytes
+        (snapshot), >=, 5);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, 1);
+
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
+static void
+test_inventory_faults_discard_partial_results (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+
+  wyl_fact_artifact_win_locator_set_inventory_test_fault
+    (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ENUMERATION_IO);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_IO);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  wyl_fact_artifact_win_locator_set_inventory_test_fault
+    (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_FIXED_METADATA_IO);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_IO);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  wyl_fact_artifact_win_locator_set_inventory_test_fault
+    (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ALLOCATION_UNSUPPORTED);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_POLICY);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSUPPORTED_ALLOCATION);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  wyl_fact_artifact_win_namespace_set_test_fault
+    (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_BUSY);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSTABLE);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinTempRoot *root = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+      &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_root (lease, &root),
+      ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_temp_root_free (root);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_locator_set_inventory_test_fault
+    (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_TEMP_METADATA_IO);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_IO);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
+static void
+test_inventory_hostile_and_bounded_namespace (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ =
+      open_isolated_namespace (&path, &graph);
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph,
+          &graph_identity);
+  WylFactArtifactWinEntry *collision = NULL;
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+      "FACTS.DUCKDB.WAL", GENERIC_READ | GENERIC_WRITE, TRUE, &collision), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_entry_free (collision);
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_AMBIGUOUS_ENTRY), ==, 1);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  g_autofree gchar *main_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autofree gchar *link_path = g_build_filename (path, "inventory-hardlink",
+          NULL);
+  g_autofree wchar_t *main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL,
+          NULL);
+  g_autofree wchar_t *link_wide = g_utf8_to_utf16 (link_path, -1, NULL, NULL,
+          NULL);
+  g_assert_true (CreateHardLinkW (link_wide, main_wide, NULL));
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_POLICY);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_true (DeleteFileW (link_wide));
+
+  g_autofree gchar *reparse_path = g_build_filename (path,
+          "inventory-reparse", NULL);
+  g_autofree wchar_t *reparse_wide = g_utf8_to_utf16 (reparse_path, -1, NULL,
+          NULL, NULL);
+  if (!CreateSymbolicLinkW (reparse_wide, main_wide,
+      SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)
+      && !CreateSymbolicLinkW (reparse_wide, main_wide, 0))
+    g_error ("inventory reparse fixture unavailable: error=%lu",
+        (gulong) GetLastError ());
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY), >=, 1);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_true (DeleteFileW (reparse_wide));
+
+  for (guint i = 0; i < 256; i++) {
+    g_autofree gchar *name = g_strdup_printf ("inventory-overflow-%03u", i);
+    g_autofree gchar *file_path = g_build_filename (path, name, NULL);
+    g_autofree wchar_t *file_wide = g_utf8_to_utf16 (file_path, -1, NULL,
+            NULL, NULL);
+    HANDLE file = CreateFileW (file_wide, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    g_assert_true (file != INVALID_HANDLE_VALUE);
+    g_assert_true (CloseHandle (file));
+  }
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (namespace_,
+      &snapshot), ==, WYRELOG_E_POLICY);
+  assert_inventory_empty_failure (snapshot,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+  g_free (path);
+}
+
 static const WinGuardedCase win_guarded_cases[] = {
 #if defined (test_working_handle_free_closes_unlinked_object)                 \
   || defined (test_locator_replace_open_destination)                          \
@@ -4485,6 +4744,12 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_temp_child_wrapper_ownership},
   {"/fact/artifact-namespace/windows/io-session/read-only-access-intent",
    test_io_session_read_only_access_intent},
+  {"/fact/artifact-namespace/windows/inventory/stable-temp-unknown",
+   test_inventory_stable_temp_and_unknown},
+  {"/fact/artifact-namespace/windows/inventory/fault-discard",
+   test_inventory_faults_discard_partial_results},
+  {"/fact/artifact-namespace/windows/inventory/hostile-bounded",
+   test_inventory_hostile_and_bounded_namespace},
 };
 
 int

@@ -3,6 +3,7 @@
 
 #include <glib.h>
 
+#include "fact/graph-artifact-inventory-private.h"
 #include "fact/graph-locator-private.h"
 #include "wyrelog/error.h"
 
@@ -17,6 +18,29 @@ G_BEGIN_DECLS
 typedef struct WylFactArtifactWinLocator WylFactArtifactWinLocator;
 typedef struct WylFactArtifactWinEntry WylFactArtifactWinEntry;
 typedef struct WylFactArtifactWinDirectory WylFactArtifactWinDirectory;
+
+/* Value-only observation returned to the inventory provider.  The locator
+ * owns every native handle and consumes every directory spelling internally;
+ * none of those authorities are represented here. */
+typedef struct
+{
+  gboolean present;
+  WylFactGraphWinIdentity identity;
+  guint64 logical_bytes;
+  gboolean allocation_supported;
+  guint64 allocated_bytes;
+} WylFactArtifactWinInventoryValue;
+
+typedef struct
+{
+  WylFactGraphWinIdentity directory_identity;
+  guint64 fingerprint;
+  WylFactArtifactWinInventoryValue fixed
+  [WYL_FACT_ARTIFACT_INVENTORY_LOCK + 1];
+  WylFactArtifactWinInventoryValue temporary;
+  guint anomalies[WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT];
+  WylFactArtifactInventoryStatus failure_status;
+} WylFactArtifactWinInventoryScan;
 
 typedef enum
 {
@@ -91,6 +115,20 @@ wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator *
  * map to IO.  In both cases callers must reconcile rather than claim durable
  * publication. */
 #ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+typedef enum
+{
+  WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_NONE = 0,
+  WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ENUMERATION_IO,
+  WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_FIXED_METADATA_IO,
+  WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_TEMP_METADATA_IO,
+  WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ALLOCATION_UNSUPPORTED,
+} WylFactArtifactWinInventoryTestFault;
+
+void wyl_fact_artifact_win_locator_set_inventory_test_fault
+  (WylFactArtifactWinInventoryTestFault fault);
+WylFactArtifactWinInventoryTestFault
+wyl_fact_artifact_win_locator_take_inventory_test_fault (void);
+
 /* Substitutes the next native directory-flush result.  Compiled only under
  * enable_windows_artifact_test_hooks: a shipped library declares neither this
  * hook nor its disarm below, and its flush path holds no armable state. */
@@ -110,6 +148,11 @@ void wyl_fact_artifact_win_locator_fail_next_rename_status_for_test
   (NTSTATUS status);
 NTSTATUS wyl_fact_artifact_win_locator_take_next_rename_status_for_test (void);
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
+
+/* Produce one bounded, sanitized observation of the retained graph
+ * directory.  Names and HANDLEs never leave the locator. */
+wyrelog_error_t wyl_fact_artifact_win_locator_inventory_scan
+  (WylFactArtifactWinLocator *, WylFactArtifactWinInventoryScan *out_scan);
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
 const gchar *wyl_fact_artifact_win_entry_name (const WylFactArtifactWinEntry *);

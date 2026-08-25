@@ -3163,4 +3163,171 @@ wyl_fact_artifact_win_namespace_adopt_entries_for_test (
   *out_namespace = ns;
   return WYRELOG_E_OK;
 }
+
+static WylFactArtifactInventoryIdentity
+inventory_identity_from_windows (const WylFactGraphWinIdentity *identity)
+{
+  WylFactArtifactInventoryIdentity result = { 0 };
+  if (identity == NULL)
+    return result;
+  result.domain = identity->volume_serial;
+  memcpy (result.object_bytes, identity->file_id, sizeof result.object_bytes);
+  result.object_width = sizeof result.object_bytes;
+  return result;
+}
+
+static WylFactArtifactInventoryObservation
+inventory_observation_from_windows (const WylFactArtifactWinInventoryScan *scan,
+    const WylFactGraphWinIdentity *guard_identity)
+{
+  WylFactArtifactInventoryObservation observation = { 0 };
+  observation.directory_identity =
+      inventory_identity_from_windows (&scan->directory_identity);
+  observation.guard_identity =
+      inventory_identity_from_windows (guard_identity);
+  observation.entry_fingerprint = scan->fingerprint;
+  return observation;
+}
+
+static WylFactArtifactInventoryStatus
+inventory_failure_status (wyrelog_error_t rc,
+    WylFactArtifactInventoryStatus provider_status,
+    const WylFactArtifactInventorySnapshot *snapshot)
+{
+  WylFactArtifactInventoryStatus status = provider_status;
+  if (status == WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID
+      && snapshot != NULL)
+    status = wyl_fact_artifact_inventory_snapshot_status (snapshot);
+  if (status != WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID)
+    return status;
+  if (rc == WYRELOG_E_BUSY)
+    return WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSTABLE;
+  if (rc == WYRELOG_E_CANCELLED)
+    return WYL_FACT_ARTIFACT_INVENTORY_STATUS_CANCELLED;
+  if (rc == WYRELOG_E_POLICY)
+    return WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY;
+  return WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_inventory_snapshot
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactInventorySnapshot **out_snapshot)
+{
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+  WylFactArtifactWinLease *reader = NULL;
+  WylFactArtifactWinInventoryScan begin_scan = { 0 };
+  WylFactArtifactWinInventoryScan end_scan = { 0 };
+  WylFactArtifactInventoryStatus provider_status =
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID;
+  const WylFactGraphWinIdentity *main_identity;
+  const WylFactGraphWinIdentity *guard_identity;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (namespace_ == NULL || out_snapshot == NULL)
+    return WYRELOG_E_INVALID;
+  snapshot = wyl_fact_artifact_inventory_snapshot_new (256);
+  if (snapshot == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_fact_artifact_win_namespace_acquire_reader (namespace_, &reader);
+  if (rc != WYRELOG_E_OK)
+    goto done;
+  rc = lease_revalidate (reader);
+  if (rc != WYRELOG_E_OK)
+    goto done;
+  rc = wyl_fact_artifact_win_locator_inventory_scan (namespace_->locator,
+          &begin_scan);
+  if (rc != WYRELOG_E_OK) {
+    provider_status = begin_scan.failure_status;
+    goto done;
+  }
+  main_identity = wyl_fact_artifact_win_entry_identity
+        (namespace_->main_entry);
+  guard_identity = wyl_fact_artifact_win_entry_identity
+        (namespace_->lock_entry);
+  if (!begin_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_MAIN].present
+      || !begin_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].present
+      || !identity_equal
+        (&begin_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_MAIN].identity,
+      main_identity)
+      || !identity_equal
+        (&begin_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].identity,
+      guard_identity)) {
+    rc = WYRELOG_E_POLICY;
+    provider_status = WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY;
+    goto done;
+  }
+  WylFactArtifactInventoryObservation observation =
+      inventory_observation_from_windows (&begin_scan, guard_identity);
+  wyl_fact_artifact_inventory_snapshot_begin (snapshot, &observation);
+  for (guint slot = 0; slot <= WYL_FACT_ARTIFACT_INVENTORY_LOCK; slot++) {
+    const WylFactArtifactWinInventoryValue *value = &begin_scan.fixed[slot];
+    WylFactArtifactInventoryIdentity identity =
+        inventory_identity_from_windows (&value->identity);
+    rc = wyl_fact_artifact_inventory_snapshot_set_slot (snapshot, slot,
+            value->present ? &identity : NULL, value->present,
+            value->logical_bytes, value->allocation_supported,
+            value->allocated_bytes);
+    if (rc != WYRELOG_E_OK)
+      goto done;
+  }
+  rc = wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
+          WYL_FACT_ARTIFACT_INVENTORY_TEMP, NULL,
+          begin_scan.temporary.present, begin_scan.temporary.logical_bytes,
+          begin_scan.temporary.allocation_supported,
+          begin_scan.temporary.allocated_bytes);
+  if (rc != WYRELOG_E_OK)
+    goto done;
+  for (guint anomaly = 0;
+      anomaly < WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT; anomaly++)
+    for (guint count = 0; count < begin_scan.anomalies[anomaly]; count++) {
+      rc = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
+              (WylFactArtifactInventoryAnomaly) anomaly);
+      if (rc != WYRELOG_E_OK)
+        goto done;
+    }
+  rc = lease_revalidate (reader);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_locator_inventory_scan (namespace_->locator,
+            &end_scan);
+  if (rc != WYRELOG_E_OK) {
+    provider_status = end_scan.failure_status;
+    goto done;
+  }
+  if (!end_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_MAIN].present
+      || !end_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].present
+      || !identity_equal
+        (&end_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_MAIN].identity,
+      main_identity)
+      || !identity_equal
+        (&end_scan.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].identity,
+      guard_identity)) {
+    rc = WYRELOG_E_POLICY;
+    provider_status = WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY;
+    goto done;
+  }
+  WylFactArtifactInventoryObservation end =
+      inventory_observation_from_windows (&end_scan, guard_identity);
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  if (win_namespace_fault_take
+        (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE))
+    end.entry_fingerprint ^= G_GUINT64_CONSTANT (1);
+#endif
+  wyl_fact_artifact_inventory_snapshot_end (snapshot, &end);
+  rc = wyl_fact_artifact_inventory_snapshot_finalize (snapshot);
+done:
+  if (rc != WYRELOG_E_OK) {
+    WylFactArtifactInventoryObservation failure_observation = { 0 };
+    WylFactArtifactInventoryStatus status = inventory_failure_status (rc,
+            provider_status, snapshot);
+    wyl_fact_artifact_inventory_snapshot_clear (snapshot);
+    wyl_fact_artifact_inventory_snapshot_begin (snapshot,
+        &failure_observation);
+    wyl_fact_artifact_inventory_snapshot_fail (snapshot, status);
+  }
+  wyl_fact_artifact_win_lease_free (reader);
+  *out_snapshot = snapshot;
+  return rc;
+}
 #endif
