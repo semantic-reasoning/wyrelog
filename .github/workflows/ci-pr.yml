@@ -623,7 +623,9 @@ jobs:
     # The pinned source build and focused secure-bridge tests are deliberately
     # retained in full, but a hung native child must not consume a runner
     # indefinitely (#846).
-    timeout-minutes: 90
+    # Temporary #881 evidence collection adds 25 isolated runs, 20 paired
+    # runs, and two complete suites on the fact-disabled row.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -871,6 +873,82 @@ jobs:
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect issue 881 lifecycle progress evidence
+        if: always() && matrix.fact_store == 'disabled' && matrix.secure_bridge == 'disabled'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force builddir\issue-881-evidence | Out-Null
+          $command = @'
+          @echo off
+          setlocal EnableDelayedExpansion
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          set EVIDENCE_STATUS=0
+          git rev-parse HEAD > builddir\issue-881-evidence\candidate.txt
+          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --mode prove-pre-exit --timeout 60 > builddir\issue-881-evidence\pre-exit.jsonl
+          if errorlevel 1 set EVIDENCE_STATUS=1
+          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --mode prove-termination --timeout 60 > builddir\issue-881-evidence\termination.jsonl
+          if errorlevel 1 set EVIDENCE_STATUS=1
+          rem 60 seconds is the temporary 2x observation budget over the
+          rem registered 30-second lifecycle timeout.
+          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --repeat 25 --timeout 60 > builddir\issue-881-evidence\isolated-25.jsonl
+          if errorlevel 1 set EVIDENCE_STATUS=1
+          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --companion builddir\tests\test-session-username.exe --pair-mode serial --repeat 10 --timeout 60 > builddir\issue-881-evidence\serial-pairs-10.jsonl
+          if errorlevel 1 set EVIDENCE_STATUS=1
+          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --companion builddir\tests\test-session-username.exe --pair-mode parallel --repeat 10 --timeout 60 > builddir\issue-881-evidence\parallel-pairs-10.jsonl
+          if errorlevel 1 set EVIDENCE_STATUS=1
+          exit /b !EVIDENCE_STATUS!
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect issue 881 normal full-suite evidence
+        if: always() && matrix.fact_store == 'disabled' && matrix.secure_bridge == 'disabled'
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          setlocal EnableDelayedExpansion
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          set EVIDENCE_STATUS=0
+          for /L %%I in (1,1,2) do (
+            meson test -C builddir --no-rebuild --print-errorlogs --suite wyrelog --logbase issue-881-full-%%I
+            if errorlevel 1 set EVIDENCE_STATUS=1
+          )
+          exit /b !EVIDENCE_STATUS!
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect issue 881 fact-enabled control
+        if: always() && matrix.fact_store == 'enabled' && matrix.secure_bridge == 'disabled'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force builddir\issue-881-evidence | Out-Null
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          git rev-parse HEAD > builddir\issue-881-evidence\candidate.txt
+          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --timeout 60 > builddir\issue-881-evidence\fact-enabled-control.jsonl
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload issue 881 lifecycle evidence
+        if: always() && matrix.secure_bridge == 'disabled'
+        uses: actions/upload-artifact@v6
+        with:
+          name: issue-881-lifecycle-evidence-windows${{ matrix.job_suffix }}
+          path: |
+            builddir/issue-881-evidence/
+            builddir/meson-logs/issue-881-full-*
+          if-no-files-found: error
 
       - name: Run Windows Application Verifier handle gate
         if: matrix.secure_bridge == 'enabled'

@@ -7,7 +7,10 @@ import sys
 
 
 root = Path(sys.argv[1])
-required_timeout = "    timeout-minutes: 90\n"
+required_timeouts = {
+    "ci-pr.yml": "    timeout-minutes: 180\n",
+    "ci-main.yml": "    timeout-minutes: 90\n",
+}
 required_steps = (
     "      - name: Bootstrap vendored vcpkg",
     "      - name: Build and test (clang-cl)",
@@ -34,9 +37,9 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     end = (start + len("  build-windows:\n") + next_job.start()
            if next_job is not None else len(workflow))
     job = workflow[start:end]
-    if job.count(required_timeout) != 1:
+    if job.count(required_timeouts[workflow_name]) != 1:
         raise SystemExit(
-            f"{workflow_name} build-windows must have one 90-minute timeout")
+            f"{workflow_name} build-windows has the wrong bounded timeout")
     for token in required_steps:
         if token not in job:
             raise SystemExit(
