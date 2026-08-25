@@ -95,7 +95,7 @@ else
 endif
 
 wirelog_version = '>= 0.54.0'
-libchronoid_version = '>= 1.0.2'
+libchronoid_version = '>= 1.2.0'
 force_fallback_for = get_option('force_fallback_for')
 wrap_mode = get_option('wrap_mode')
 
