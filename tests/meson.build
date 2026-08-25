@@ -2668,7 +2668,23 @@ test_session_username_lifecycle = executable('test-session-username-lifecycle',
     service_session_private_dep],
 )
 
-test('session-username-lifecycle', test_session_username_lifecycle)
+session_username_lifecycle_progress_env = environment()
+session_username_lifecycle_progress_env.set(
+  'WYL_TEST_SESSION_USERNAME_LIFECYCLE_PROGRESS', '1')
+
+test('session-username-lifecycle', test_session_username_lifecycle,
+  env : session_username_lifecycle_progress_env,
+)
+
+check_session_username_lifecycle = find_program(
+  '../tools/check-session-username-lifecycle.py',
+)
+
+test('check-session-username-lifecycle-self-test',
+  check_session_username_lifecycle,
+  args : ['--self-test'],
+  env : python_strict_encoding_env,
+)
 
 test_decide_req = executable('test-decide-req',
   'test-decide-req.c',
