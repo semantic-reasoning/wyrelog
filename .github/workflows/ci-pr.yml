@@ -887,17 +887,17 @@ jobs:
           set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           set EVIDENCE_STATUS=0
           git rev-parse HEAD > builddir\issue-881-evidence\candidate.txt
-          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --mode prove-pre-exit --timeout 60 > builddir\issue-881-evidence\pre-exit.jsonl
+          meson devenv -C builddir --workdir %GITHUB_WORKSPACE% python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --mode prove-pre-exit --timeout 60 > builddir\issue-881-evidence\pre-exit.jsonl
           if errorlevel 1 set EVIDENCE_STATUS=1
-          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --mode prove-termination --timeout 60 > builddir\issue-881-evidence\termination.jsonl
+          meson devenv -C builddir --workdir %GITHUB_WORKSPACE% python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --mode prove-termination --timeout 60 > builddir\issue-881-evidence\termination.jsonl
           if errorlevel 1 set EVIDENCE_STATUS=1
           rem 60 seconds is the temporary 2x observation budget over the
           rem registered 30-second lifecycle timeout.
-          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --repeat 25 --timeout 60 > builddir\issue-881-evidence\isolated-25.jsonl
+          meson devenv -C builddir --workdir %GITHUB_WORKSPACE% python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --repeat 25 --timeout 60 > builddir\issue-881-evidence\isolated-25.jsonl
           if errorlevel 1 set EVIDENCE_STATUS=1
-          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --companion builddir\tests\test-session-username.exe --pair-mode serial --repeat 10 --timeout 60 > builddir\issue-881-evidence\serial-pairs-10.jsonl
+          meson devenv -C builddir --workdir %GITHUB_WORKSPACE% python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --companion builddir\tests\test-session-username.exe --pair-mode serial --repeat 10 --timeout 60 > builddir\issue-881-evidence\serial-pairs-10.jsonl
           if errorlevel 1 set EVIDENCE_STATUS=1
-          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --companion builddir\tests\test-session-username.exe --pair-mode parallel --repeat 10 --timeout 60 > builddir\issue-881-evidence\parallel-pairs-10.jsonl
+          meson devenv -C builddir --workdir %GITHUB_WORKSPACE% python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --companion builddir\tests\test-session-username.exe --pair-mode parallel --repeat 10 --timeout 60 > builddir\issue-881-evidence\parallel-pairs-10.jsonl
           if errorlevel 1 set EVIDENCE_STATUS=1
           exit /b !EVIDENCE_STATUS!
           '@
@@ -935,7 +935,7 @@ jobs:
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           git rev-parse HEAD > builddir\issue-881-evidence\candidate.txt
-          python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --timeout 60 > builddir\issue-881-evidence\fact-enabled-control.jsonl
+          meson devenv -C builddir --workdir %GITHUB_WORKSPACE% python3 tools\check-session-username-lifecycle.py builddir\tests\test-session-username-lifecycle.exe --timeout 60 > builddir\issue-881-evidence\fact-enabled-control.jsonl
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
