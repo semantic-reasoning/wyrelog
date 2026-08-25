@@ -78,6 +78,46 @@ The formatter runs twice per file. Uncrustify is single-pass, but the contract
 being enforced is that a file is a fixed point, and a second pass is what
 demonstrates the first converged rather than assuming it.
 
+### Multi-line block comments
+
+Continuation stars in a block comment align with the star in the opening
+`/*`. For example:
+
+```c
+  /* The first line introduces the comment and continues below.
+   * The continuation star remains aligned with the opening star. */
+```
+
+Uncrustify 0.83.0's default `cmt_indent_multi` behavior can violate that rule.
+For a long comment with at least two star-prefixed lines after the opener, with
+the last of those lines ending in an inline `*/`, it can move correctly aligned
+continuation stars one column left. The misaligned result is itself a fixed
+point, so running the formatter twice does not detect the problem.
+
+The defect was initially observed through two prose-sensitive effects:
+shortening either the first or last line could preserve alignment, and removing
+an apostrophe from one larger comment could do the same. Those observations
+helped isolate the formatter behavior, but neither is a general rule. A smaller
+reproduction showed that absolute line width is not the trigger: long text,
+multiple continuation lines, and an inline closing delimiter are the relevant
+shape. Putting `*/` on its own line or shortening the comment was a workable
+pre-fix escape hatch.
+
+Wyrelog pins `cmt_indent_multi = false` so the correctly aligned form is the
+authoritative fixed point. `tools/test-format-tooling.sh` embeds the exact
+nine-line reproduction and checks both directions:
+
+```sh
+./tools/test-format-tooling.sh
+```
+
+The test requires the repository configuration to preserve the canonical
+fixture byte for byte. It also removes exactly that one option in a temporary
+configuration, runs the same pinned Uncrustify binary successfully, and
+requires the historical rewrite to reappear. That negative control invokes
+Uncrustify directly because `tools/format-c` intentionally always binds the
+repository's `tools/uncrustify.cfg`.
+
 `--ledger` and `--changed` re-verify the whole migrated set, which is what
 catches a formatter or configuration change: altering `tools/uncrustify.cfg`
 without reformatting the ledger fails CI. `--staged` deliberately does not scan
