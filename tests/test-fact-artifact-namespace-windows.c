@@ -3640,7 +3640,9 @@ test_temp_root_spill_child_capabilities (void)
   g_assert_false (exists);
 
   /* Atomic create-and-bind with orphan evidence */
-  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (root, "duckdb_temp_storage_S32K-1.tmp", TRUE, &child, &binding, &child_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child_binding (root,
+      "duckdb_temp_storage_S32K-1.tmp", TRUE, &child, &binding,
+      &child_evidence), ==, WYRELOG_E_OK);
   g_assert_nonnull (child);
   g_assert_nonnull (binding);
   g_assert_null (child_evidence);
@@ -3805,8 +3807,9 @@ test_temp_child_wrapper_ownership (void)
   wyl_fact_artifact_win_temp_child_free (child);
   child = NULL;
 
-  /* Open-existing borrows the caller's child and transfers only its new
-   * binding into the wrapper. */
+  /* Open-existing borrows the caller's child and transfers only each new
+  * binding into the wrapper.  Exercise every terminal wrapper disposition
+  * before proving that the independently owned child remains healthy. */
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
       "duckdb_temp_storage_S32K-13.tmp", TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_OK);
@@ -3819,6 +3822,17 @@ test_temp_child_wrapper_ownership (void)
       5, &n), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
       WYRELOG_E_OK);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_existing_temp_child (
+        child, TRUE, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_close (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_existing_temp_child (
+        child, TRUE, &session), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_io_session_abort (session);
   session = NULL;
   retire_temp_child_exact (child);
   g_assert_cmpint (wyl_fact_artifact_io_session_open_existing_temp_child (

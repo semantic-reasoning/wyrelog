@@ -147,13 +147,24 @@ fault arms/probes, and rejects direct native-transport bypasses. It records
 which rows have an object-reachability oracle and which remain
 AppVerifier-only.
 
-Two temporary-child wrapper rows remain explicit residuals. The create wrapper
-does not return its created child or release its successful binding ownership;
-the open-existing wrapper immediately releases a live binding and requires a
-transfer audit. [Issue #882](https://github.com/semantic-reasoning/wyrelog/issues/882)
-owns that production repair and blocks the final exactly-once claim in #659.
-Neither the inventory nor a clean run of the currently reachable selectors is
-evidence that those residual paths are fixed.
+The temporary-child wrapper rows carry no unresolved ownership residual. The
+create wrapper returns an independently owned child and transfers its binding
+and I/O duplicate into the wrapper session. Open-existing borrows the caller's
+child and transfers only its newly acquired binding and duplicate. Finish,
+close-then-finish, and abort consume those session-specific owners without
+terminalizing the caller's child. Rollback consumes an unpublished child and
+either frees its preallocated orphan evidence after a certain retirement or
+returns that evidence when the post-delete directory flush is uncertain.
+
+The independently registered `temp-root-wrapper-ownership` selector exercises
+those transfers and terminal dispositions. The structural inventory also pins
+the three creation wrappers' directory-flush fault reachability and the
+delete-linearized unpublished-child cleanup. These checks resolve
+[issue #882](https://github.com/semantic-reasoning/wyrelog/issues/882), but they
+do not replace runtime HANDLE evidence: ordinary runs may skip the File-ID
+reachability oracle when the volume cannot answer it, while the hosted
+Application Verifier gate makes that condition fatal and remains authoritative
+for named-object leaks and invalid closes.
 
 ## Evidence and cleanup
 

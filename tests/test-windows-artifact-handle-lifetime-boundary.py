@@ -60,13 +60,7 @@ PHASES = frozenset(
     }
 )
 REACHABILITY = frozenset({"covered", "unreachable"})
-RESIDUALS = frozenset(
-    {
-        "none",
-        "confirmed_temp_child_ownership_defect",
-        "temp_child_transfer_audit_required",
-    }
-)
+RESIDUALS = frozenset({"none"})
 
 
 @dataclass(frozen=True)
@@ -124,15 +118,13 @@ FAULT_HOOKS = {
     ),
 }
 
-RESIDUAL_CONTRACTS = {
-    "wyl_fact_artifact_io_session_create_temp_child": (
-        "missing",
-        "confirmed_temp_child_ownership_defect",
-    ),
-    "wyl_fact_artifact_io_session_open_existing_temp_child": (
+RESOLVED_OWNERSHIP_CONTRACTS = {
+    "wyl_fact_artifact_io_session_create_temp_child":
         "wyl_fact_artifact_win_temp_child_binding_free",
-        "temp_child_transfer_audit_required",
-    ),
+    "wyl_fact_artifact_io_session_open_existing_temp_child":
+        "wyl_fact_artifact_win_temp_child_binding_free",
+    "wyl_fact_artifact_win_temp_child_discard_unpublished":
+        "wyl_fact_artifact_win_temp_child_free",
 }
 
 
@@ -333,6 +325,7 @@ INVENTORY: tuple[InventoryRow, ...] = (
         "test_temp_root_spill_child_capabilities",
         identity="temporary child FileId",
         owner="temporary child binding",
+        faults=("locator_directory_flush",),
     ),
     row(
         "wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence",
@@ -341,6 +334,19 @@ INVENTORY: tuple[InventoryRow, ...] = (
         "test_temp_root_spill_child_capabilities",
         identity="temporary child FileId",
         owner="temporary child binding and copied evidence",
+        faults=("locator_directory_flush",),
+    ),
+    row(
+        "wyl_fact_artifact_win_temp_child_discard_unpublished",
+        "wyl_fact_artifact_win_directory_entry_delete_exact",
+        "wyl_fact_artifact_win_temp_child_free",
+        "test_temp_child_wrapper_ownership",
+        identity="unpublished temporary child FileId",
+        owner="rollback consumes child and frees or returns orphan evidence",
+        name_state="delete_pending",
+        witnesses="preallocated orphan evidence",
+        phase="post_linearization",
+        faults=("locator_directory_flush",),
     ),
     row(
         "wyl_fact_artifact_win_temp_root_child_exists",
@@ -559,20 +565,19 @@ INVENTORY: tuple[InventoryRow, ...] = (
     row(
         "wyl_fact_artifact_io_session_create_temp_child",
         "wyl_fact_artifact_win_directory_open_file",
-        "missing",
-        None,
+        "wyl_fact_artifact_win_temp_child_binding_free",
+        "test_temp_child_wrapper_ownership",
         identity="temporary child FileId",
-        owner="unreturned child plus retained internal child binding and I/O session",
-        residual="confirmed_temp_child_ownership_defect",
+        owner="caller-owned child plus wrapper-owned binding and I/O session",
+        faults=("locator_directory_flush",),
     ),
     row(
         "wyl_fact_artifact_io_session_open_existing_temp_child",
         "wyl_fact_artifact_win_temp_child_open",
         "wyl_fact_artifact_win_temp_child_binding_free",
-        None,
+        "test_temp_child_wrapper_ownership",
         identity="existing temporary child FileId",
-        owner="returned I/O session after immediate live-binding release",
-        residual="temp_child_transfer_audit_required",
+        owner="caller retains child; wrapper owns new binding and I/O session",
     ),
     row(
         "wyl_fact_artifact_io_session_open_reader_wal",
@@ -870,8 +875,7 @@ def validate(root: Path, inventory=INVENTORY, overrides=None) -> list[str]:
         if row.entry not in functions:
             problems.append(f"row names unknown entry {row.entry}")
         if row.cleanup == "missing":
-            if row.residual != "confirmed_temp_child_ownership_defect":
-                problems.append(f"{row.entry} has an unexplained missing cleanup")
+            problems.append(f"{row.entry} has an unexplained missing cleanup")
         elif row.cleanup not in functions:
             problems.append(f"{row.entry} names unknown cleanup {row.cleanup}")
         if row.linearizer not in functions:
@@ -894,16 +898,13 @@ def validate(root: Path, inventory=INVENTORY, overrides=None) -> list[str]:
             )
         if row.residual not in RESIDUALS:
             problems.append(f"{row.entry} has invalid residual {row.residual}")
-        residual_contract = RESIDUAL_CONTRACTS.get(row.entry)
-        if residual_contract is None:
-            if row.residual != "none":
-                problems.append(
-                    f"{row.entry} has an unexpected residual {row.residual}"
-                )
-        elif (row.cleanup, row.residual) != residual_contract:
+        expected_cleanup = RESOLVED_OWNERSHIP_CONTRACTS.get(row.entry)
+        if expected_cleanup is not None and (
+            row.cleanup != expected_cleanup or row.residual != "none"
+        ):
             problems.append(
-                f"{row.entry} must retain cleanup/residual contract "
-                f"{residual_contract}"
+                f"{row.entry} must retain resolved cleanup {expected_cleanup} "
+                "without a residual"
             )
         if row.oracle == "reachability_and_appverifier" and row.name_state == "named":
             problems.append(f"{row.entry} assigns reachability to a named object")
@@ -995,22 +996,49 @@ def self_test(root: Path) -> None:
     ):
         fail("self-test accepted a missing external mutation-wrapper row")
 
-    for entry in RESIDUAL_CONTRACTS:
+    for entry, cleanup in RESOLVED_OWNERSHIP_CONTRACTS.items():
+        without_entry = tuple(item for item in INVENTORY if item.entry != entry)
+        problems = validate(root, without_entry)
+        if not any(
+            entry in problem and "expected 1" in problem for problem in problems
+        ):
+            fail(f"self-test accepted a missing resolved ownership row for {entry}")
+
         mutant = tuple(
             replace(
                 item,
                 cleanup="wyl_fact_artifact_win_entry_free",
-                residual="none",
+                residual="confirmed_temp_child_ownership_defect",
             )
             if item.entry == entry else item
             for item in INVENTORY
         )
         problems = validate(root, mutant)
         if not any(
-            entry in problem and "must retain cleanup/residual" in problem
+            entry in problem and "must retain resolved cleanup" in problem
             for problem in problems
         ):
-            fail(f"self-test accepted removal of residual contract for {entry}")
+            fail(f"self-test accepted stale ownership contract for {entry}")
+
+        if not any(
+            item.entry == entry and item.cleanup == cleanup for item in INVENTORY
+        ):
+            fail(f"self-test fixture lost resolved cleanup for {entry}")
+
+    for entry in (
+        "wyl_fact_artifact_win_temp_root_create_child_binding",
+        "wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence",
+        "wyl_fact_artifact_io_session_create_temp_child",
+        "wyl_fact_artifact_win_temp_child_discard_unpublished",
+    ):
+        mutant = tuple(
+            replace(item, faults=()) if item.entry == entry else item
+            for item in INVENTORY
+        )
+        problems = validate(root, mutant)
+        if not any(entry in problem and "fault mapping" in problem
+                   for problem in problems):
+            fail(f"self-test accepted a missing directory-flush map for {entry}")
 
     locator = "wyrelog/fact/graph-artifact-windows-locator-private.c"
     locator_text = (root / locator).read_text(encoding="utf-8")
@@ -1024,6 +1052,19 @@ def self_test(root: Path) -> None:
 
     test_source = "tests/test-fact-artifact-namespace-windows.c"
     test_text = (root / test_source).read_text(encoding="utf-8")
+    without_binding_wrapper = test_text.replace(
+        "wyl_fact_artifact_win_temp_root_create_child_binding (root,",
+        "wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (root,",
+        1,
+    )
+    problems = validate(root, INVENTORY, {test_source: without_binding_wrapper})
+    if not any(
+        "test_temp_root_spill_child_capabilities does not exercise "
+        "wyl_fact_artifact_win_temp_root_create_child_binding" in problem
+        for problem in problems
+    ):
+        fail("self-test accepted a runtime bypass of the child-binding wrapper")
+
     without_test_arm = test_text.replace(
         flush_arm, f"{flush_arm}_not_the_arm"
     )
