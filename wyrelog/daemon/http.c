@@ -505,6 +505,7 @@ typedef struct _WylDaemonHttpContext
    * recorded apart. */
   gint policy_write_last_watch_armed;
   guint policy_write_terminal_entries;
+  guint64 policy_write_finalize_generation;
   WylDaemonPolicyWriteFinalizeSnapshot policy_write_finalize_snapshot;
   gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
@@ -1325,6 +1326,7 @@ policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
 {
   if (write == NULL || write->test_ctx == NULL)
     return;
+  WylDaemonHttpContext *ctx = write->test_ctx;
   WylDaemonPolicyWriteFinalizeSnapshot snapshot = {
     .primary_rc = primary_rc,
     .primary_rc_recorded = TRUE,
@@ -1354,11 +1356,18 @@ policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
     if (wyl_service_auth_rank_is_held (handle, (WylServiceAuthRank) rank))
       snapshot.post_finalize_rank_mask |= 1u << rank;
   }
+  g_mutex_lock (&ctx->lock);
+  if (ctx->policy_write_finalize_generation < G_MAXUINT64)
+    ctx->policy_write_finalize_generation++;
+  snapshot.valid = TRUE;
+  snapshot.generation = ctx->policy_write_finalize_generation;
+  snapshot.terminal_entries = ctx->policy_write_terminal_entries;
   snapshot.diagnostic_count =
-      write->test_ctx->policy_write_finalize_snapshot.diagnostic_count;
+      ctx->policy_write_finalize_snapshot.diagnostic_count;
   if (cleanup_rc != WYRELOG_E_OK)
     snapshot.diagnostic_count++;
-  write->test_ctx->policy_write_finalize_snapshot = snapshot;
+  ctx->policy_write_finalize_snapshot = snapshot;
+  g_mutex_unlock (&ctx->lock);
 }
 #endif
 
@@ -3785,7 +3794,9 @@ wyl_daemon_http_policy_write_finalize_snapshot_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL || out_snapshot == NULL)
     return FALSE;
+  g_mutex_lock (&ctx->lock);
   *out_snapshot = ctx->policy_write_finalize_snapshot;
+  g_mutex_unlock (&ctx->lock);
   return TRUE;
 }
 
@@ -6329,6 +6340,7 @@ policy_write_record_finalize_snapshot (WylDaemonPolicyWrite *write,
 {
   if (write == NULL || write->test_ctx == NULL)
     return;
+  WylDaemonHttpContext *ctx = write->test_ctx;
 
   WylDaemonPolicyWriteFinalizeSnapshot snapshot = {
     .primary_status = primary_status,
@@ -6367,13 +6379,18 @@ policy_write_record_finalize_snapshot (WylDaemonPolicyWrite *write,
       snapshot.post_finalize_rank_mask |= 1u << rank;
   }
 
+  g_mutex_lock (&ctx->lock);
+  if (ctx->policy_write_finalize_generation < G_MAXUINT64)
+    ctx->policy_write_finalize_generation++;
+  snapshot.valid = TRUE;
+  snapshot.generation = ctx->policy_write_finalize_generation;
+  snapshot.terminal_entries = ctx->policy_write_terminal_entries;
+  snapshot.diagnostic_count =
+      ctx->policy_write_finalize_snapshot.diagnostic_count;
   if (cleanup_rc != WYRELOG_E_OK)
-    snapshot.diagnostic_count =
-        write->test_ctx->policy_write_finalize_snapshot.diagnostic_count + 1;
-  else
-    snapshot.diagnostic_count =
-        write->test_ctx->policy_write_finalize_snapshot.diagnostic_count;
-  write->test_ctx->policy_write_finalize_snapshot = snapshot;
+    snapshot.diagnostic_count++;
+  ctx->policy_write_finalize_snapshot = snapshot;
+  g_mutex_unlock (&ctx->lock);
   (void) msg;
 }
 #endif
