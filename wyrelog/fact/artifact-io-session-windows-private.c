@@ -457,7 +457,7 @@ wyl_fact_artifact_io_session_finish (WylFactArtifactIoSession *session)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (session->kind == WYL_FACT_ARTIFACT_IO_SESSION_TEMP_CHILD) {
-    rc = temp_child_session_release (session, TRUE);
+    rc = temp_child_session_release (session, FALSE);
   } else if (session->win_session != NULL) {
     rc = wyl_fact_artifact_win_io_session_finish (session->win_session);
     session->win_session = NULL;
