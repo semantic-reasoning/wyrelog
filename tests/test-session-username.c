@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "wyrelog/wyrelog.h"
@@ -2326,51 +2327,173 @@ main (void)
   return 0;
 }
 #else /* WYL_TEST_VARIANT_LIFECYCLE */
+typedef gint (*LifecycleCheckFunc) (void);
+
+typedef struct
+{
+  const gchar *id;
+  LifecycleCheckFunc func;
+} LifecycleCheck;
+
+typedef enum
+{
+  LIFECYCLE_GATE_NONE,
+  LIFECYCLE_GATE_BEGIN,
+  LIFECYCLE_GATE_END,
+  LIFECYCLE_GATE_INVALID,
+} LifecycleGatePhase;
+
+typedef struct
+{
+  LifecycleGatePhase phase;
+  guint ordinal;
+} LifecycleGate;
+
+#define LIFECYCLE_PROGRESS_ENV \
+  "WYL_TEST_SESSION_USERNAME_LIFECYCLE_PROGRESS"
+#define LIFECYCLE_GATE_ENV "WYL_TEST_SESSION_USERNAME_LIFECYCLE_GATE"
+#define LIFECYCLE_PROGRESS_PREFIX "WYL_SESSION_USERNAME_LIFECYCLE"
+
+static const LifecycleCheck lifecycle_checks[] = {
+  { "close-persists-closed-state",
+    check_session_close_persists_closed_state },
+  { "logout-preserves-locked-and-revoked-principals",
+    check_session_logout_preserves_locked_and_revoked_principals },
+  { "logout-logs-out-principal", check_session_logout_logs_out_principal },
+  { "close-inserts-session-fired",
+    check_session_close_inserts_wirelog_session_fired },
+  { "close-deactivates-decision-scope",
+    check_session_close_deactivates_decision_scope },
+  { "close-rejects-invalid-args", check_session_close_rejects_invalid_args },
+  { "elevate-persists-elevated-state",
+    check_session_elevate_persists_elevated_state },
+  { "transitions-insert-session-fired",
+    check_session_transitions_insert_wirelog_session_fired },
+  { "drop-elevation-persists-active-state",
+    check_session_drop_elevation_persists_active_state },
+  { "elevated-remains-active-decision-scope",
+    check_elevated_session_remains_active_decision_scope },
+  { "elevated-close-deactivates-decision-scope",
+    check_elevated_session_close_deactivates_decision_scope },
+  { "idle-timeout-persists-idle-state",
+    check_session_idle_timeout_persists_idle_state },
+  { "idle-deactivates-decision-scope",
+    check_idle_session_deactivates_decision_scope },
+  { "elevated-idle-timeout-deactivates-scope",
+    check_elevated_session_idle_timeout_deactivates_scope },
+  { "expire-persists-expiring-state",
+    check_session_expire_persists_expiring_state },
+  { "expiring-deactivates-decision-scope",
+    check_expiring_session_deactivates_decision_scope },
+  { "expiring-expire-persists-closed-state",
+    check_expiring_session_expire_persists_closed_state },
+  { "expiry-inserts-session-fired",
+    check_session_expiry_inserts_wirelog_session_fired },
+  { "elevated-expire-persists-expiring-state",
+    check_elevated_session_expire_persists_expiring_state },
+  { "elevation-rejects-invalid-args",
+    check_session_elevation_rejects_invalid_args },
+};
+
+G_STATIC_ASSERT (G_N_ELEMENTS (lifecycle_checks) == 20);
+
+static LifecycleGate
+lifecycle_gate_from_env (void)
+{
+  LifecycleGate gate = { LIFECYCLE_GATE_NONE, 0 };
+  const gchar *value = g_getenv (LIFECYCLE_GATE_ENV);
+  if (value == NULL)
+    return gate;
+
+  const gchar *ordinal_text = NULL;
+  if (g_str_has_prefix (value, "begin:")) {
+    gate.phase = LIFECYCLE_GATE_BEGIN;
+    ordinal_text = value + strlen ("begin:");
+  } else if (g_str_has_prefix (value, "end:")) {
+    gate.phase = LIFECYCLE_GATE_END;
+    ordinal_text = value + strlen ("end:");
+  } else {
+    gate.phase = LIFECYCLE_GATE_INVALID;
+    return gate;
+  }
+
+  gchar *end = NULL;
+  guint64 ordinal = g_ascii_strtoull (ordinal_text, &end, 10);
+  if (ordinal_text[0] == '\0' || end == NULL || end[0] != '\0'
+      || ordinal == 0 || ordinal > G_N_ELEMENTS (lifecycle_checks)) {
+    gate.phase = LIFECYCLE_GATE_INVALID;
+    return gate;
+  }
+  gate.ordinal = (guint) ordinal;
+  return gate;
+}
+
+static gboolean
+lifecycle_progress_begin (const LifecycleCheck *check, guint ordinal,
+    gint64 elapsed_ms)
+{
+  return fprintf (stderr, LIFECYCLE_PROGRESS_PREFIX
+             " BEGIN id=%s ordinal=%u elapsed_ms=%" G_GINT64_FORMAT "\n",
+             check->id, ordinal, elapsed_ms) >= 0 && fflush (stderr) == 0;
+}
+
+static gboolean
+lifecycle_progress_end (const LifecycleCheck *check, guint ordinal,
+    gint64 elapsed_ms, gint64 duration_ms, gint rc)
+{
+  return fprintf (stderr, LIFECYCLE_PROGRESS_PREFIX
+             " END id=%s ordinal=%u elapsed_ms=%" G_GINT64_FORMAT
+             " duration_ms=%" G_GINT64_FORMAT " rc=%d\n",
+             check->id, ordinal, elapsed_ms, duration_ms, rc) >= 0
+         && fflush (stderr) == 0;
+}
+
+static gint
+lifecycle_gate_wait (LifecycleGate gate, LifecycleGatePhase phase,
+    guint ordinal)
+{
+  if (gate.phase != phase || gate.ordinal != ordinal)
+    return 0;
+
+  return fgetc (stdin) == EOF ? 121 : 0;
+}
+
 int
 main (void)
 {
-  gint rc;
+  const gboolean progress =
+      g_strcmp0 (g_getenv (LIFECYCLE_PROGRESS_ENV), "1") == 0;
+  const LifecycleGate gate = lifecycle_gate_from_env ();
+  if (gate.phase == LIFECYCLE_GATE_INVALID
+      || (gate.phase != LIFECYCLE_GATE_NONE && !progress))
+    return 122;
 
-  if ((rc = check_session_close_persists_closed_state ()) != 0)
-    return rc;
-  if ((rc = check_session_logout_preserves_locked_and_revoked_principals ()) != 0)
-    return rc;
-  if ((rc = check_session_logout_logs_out_principal ()) != 0)
-    return rc;
-  if ((rc = check_session_close_inserts_wirelog_session_fired ()) != 0)
-    return rc;
-  if ((rc = check_session_close_deactivates_decision_scope ()) != 0)
-    return rc;
-  if ((rc = check_session_close_rejects_invalid_args ()) != 0)
-    return rc;
-  if ((rc = check_session_elevate_persists_elevated_state ()) != 0)
-    return rc;
-  if ((rc = check_session_transitions_insert_wirelog_session_fired ()) != 0)
-    return rc;
-  if ((rc = check_session_drop_elevation_persists_active_state ()) != 0)
-    return rc;
-  if ((rc = check_elevated_session_remains_active_decision_scope ()) != 0)
-    return rc;
-  if ((rc = check_elevated_session_close_deactivates_decision_scope ()) != 0)
-    return rc;
-  if ((rc = check_session_idle_timeout_persists_idle_state ()) != 0)
-    return rc;
-  if ((rc = check_idle_session_deactivates_decision_scope ()) != 0)
-    return rc;
-  if ((rc = check_elevated_session_idle_timeout_deactivates_scope ()) != 0)
-    return rc;
-  if ((rc = check_session_expire_persists_expiring_state ()) != 0)
-    return rc;
-  if ((rc = check_expiring_session_deactivates_decision_scope ()) != 0)
-    return rc;
-  if ((rc = check_expiring_session_expire_persists_closed_state ()) != 0)
-    return rc;
-  if ((rc = check_session_expiry_inserts_wirelog_session_fired ()) != 0)
-    return rc;
-  if ((rc = check_elevated_session_expire_persists_expiring_state ()) != 0)
-    return rc;
-  if ((rc = check_session_elevation_rejects_invalid_args ()) != 0)
-    return rc;
+  const gint64 started_us = g_get_monotonic_time ();
+  for (guint i = 0; i < G_N_ELEMENTS (lifecycle_checks); i++) {
+    const LifecycleCheck *check = &lifecycle_checks[i];
+    const guint ordinal = i + 1;
+    const gint64 check_started_us = g_get_monotonic_time ();
+    if (progress && !lifecycle_progress_begin (check, ordinal,
+        (check_started_us - started_us) / 1000))
+      return 123;
+
+    gint rc = lifecycle_gate_wait (gate, LIFECYCLE_GATE_BEGIN, ordinal);
+    if (rc != 0)
+      return rc;
+
+    rc = check->func ();
+    const gint64 check_ended_us = g_get_monotonic_time ();
+    if (progress && !lifecycle_progress_end (check, ordinal,
+        (check_ended_us - started_us) / 1000,
+        (check_ended_us - check_started_us) / 1000, rc))
+      return 124;
+
+    gint gate_rc = lifecycle_gate_wait (gate, LIFECYCLE_GATE_END, ordinal);
+    if (gate_rc != 0)
+      return gate_rc;
+    if (rc != 0)
+      return rc;
+  }
 
   return 0;
 }
