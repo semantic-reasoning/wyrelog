@@ -69,6 +69,10 @@ create_duckdb_with_sql (const gchar *path, const gchar *sql)
   return ok;
 }
 
+/* A sink for reconcile calls whose counts are not the subject of the test.
+ * Tests that assert on counts declare their own local instead. */
+static wyl_fact_forget_outcome_t forget_outcome_discard;
+
 static wyl_policy_fact_relation_schema_options_t
 make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
     gsize n_columns)
@@ -1662,7 +1666,7 @@ check_fact_forget_crash_convergence (void)
       return 2205;
 
     if (wyl_fact_store_forget_reconcile (store, "tenant-a",
-        "orders", NULL, NULL) != WYRELOG_E_OK)
+        "orders", NULL, NULL, &forget_outcome_discard) != WYRELOG_E_OK)
       return 2206;
 
     g_autofree gchar *proj_sql = g_strdup_printf
@@ -1690,7 +1694,7 @@ check_fact_forget_crash_convergence (void)
       return 2212;
 
     if (wyl_fact_store_forget_reconcile (store, "tenant-a",
-        "orders", NULL, NULL) != WYRELOG_E_OK)
+        "orders", NULL, NULL, &forget_outcome_discard) != WYRELOG_E_OK)
       return 2213;
     if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
         || count != 1)
@@ -1745,7 +1749,7 @@ check_fact_forget_rejects_identifier_reuse (void)
     return 2236;
 
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
-      NULL) != WYRELOG_E_OK)
+      NULL, &forget_outcome_discard) != WYRELOG_E_OK)
     return 2237;
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'dup-id';", &count)
@@ -1817,18 +1821,18 @@ check_fact_forget_reconcile_refuses_wrong_scope (void)
   gint64 count = 0;
 
   if (wyl_fact_store_forget_reconcile (store, "tenant-z", "orders", NULL,
-      NULL) != WYRELOG_E_POLICY)
+      NULL, &forget_outcome_discard) != WYRELOG_E_POLICY)
     return 2251;
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "shipments", NULL,
-      NULL) != WYRELOG_E_POLICY)
+      NULL, &forget_outcome_discard) != WYRELOG_E_POLICY)
     return 2252;
   /* An absent expectation is a caller error, not permission to skip the
    * check: the scope arguments cannot be opted out of. */
-  if (wyl_fact_store_forget_reconcile (store, NULL, "orders", NULL, NULL)
-      != WYRELOG_E_INVALID)
+  if (wyl_fact_store_forget_reconcile (store, NULL, "orders", NULL, NULL,
+      &forget_outcome_discard) != WYRELOG_E_INVALID)
     return 2253;
-  if (wyl_fact_store_forget_reconcile (store, "tenant-a", NULL, NULL, NULL)
-      != WYRELOG_E_INVALID)
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", NULL, NULL, NULL,
+      &forget_outcome_discard) != WYRELOG_E_INVALID)
     return 2254;
 
   g_autofree gchar *proj_sql = g_strdup_printf
@@ -1846,7 +1850,7 @@ check_fact_forget_reconcile_refuses_wrong_scope (void)
   /* The refusals above were caused by the scope, not by anything else about
    * this store: with the right scope the very same call converges. */
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
-      NULL) != WYRELOG_E_OK)
+      NULL, &forget_outcome_discard) != WYRELOG_E_OK)
     return 2258;
   if (!count_i64 (conn, proj_sql, &count) || count != 0)
     return 2259;
@@ -1890,7 +1894,7 @@ check_fact_forget_reconcile_ignores_schema_only_store (void)
     return 2293;
 
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
-      NULL) != WYRELOG_E_OK)
+      NULL, &forget_outcome_discard) != WYRELOG_E_OK)
     return 2294;
   return 0;
 }
@@ -1918,7 +1922,7 @@ check_fact_forget_reconcile_skips_out_of_scope_intent (void)
     return 2271;
 
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
-      NULL) != WYRELOG_E_POLICY)
+      NULL, &forget_outcome_discard) != WYRELOG_E_POLICY)
     return 2272;
 
   gint64 count = 0;
@@ -2136,6 +2140,431 @@ exec_ok_sql (duckdb_connection conn, const gchar *sql)
   return state == DuckDBSuccess;
 }
 
+/* Seed |n| pending intents in one store, batch-N / o-N, all in scope.
+ * Ordering does not need pinning: intents load ORDER BY created_at_us, and
+ * measured single-INSERT latency through this API is ~326us, so successive
+ * forgets cannot share a microsecond.  A fixture that seeded rows by direct
+ * SQL with a literal created_at_us WOULD need pinning, via
+ * UPDATE fact_forget_intent SET created_at_us = <n> WHERE op_uuid = '<..>'. */
+static gint
+forget_seed_n_pending (wyl_fact_store_t **out_store,
+    wyl_policy_fact_relation_schema_options_t *out_schema, gchar **out_table,
+    guint n)
+{
+  static const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  *out_store = NULL;
+  *out_table = NULL;
+  if (wyl_fact_store_open (NULL, out_store) != WYRELOG_E_OK)
+    return -1;
+  if (wyl_fact_store_create_schema (*out_store) != WYRELOG_E_OK)
+    return -2;
+  *out_schema = make_schema (columns, G_N_ELEMENTS (columns));
+  if (wyl_fact_store_ensure_projection (*out_store, out_schema, out_table)
+      != WYRELOG_E_OK)
+    return -3;
+  for (guint i = 0; i < n; i++) {
+    g_autofree gchar *batch = g_strdup_printf ("batch-%u", i);
+    g_autofree gchar *idem = g_strdup_printf ("crash:%u", i);
+    g_autofree gchar *sym = g_strdup_printf ("o-%u", i);
+    if (forget_append_sample (*out_store, out_schema, batch, idem, sym,
+        (gint64) (10 + i)) != 0)
+      return -4;
+    wyl_fact_store_forget_options_t opts = {
+      .batch_id = batch,
+      .operator_id = "admin",
+      .reason = "gdpr-erasure",
+      .checkpoint = forget_fault_checkpoint,
+      .checkpoint_data = (gpointer) "after_intent",
+    };
+    if (wyl_fact_store_forget (*out_store, out_schema, &opts, NULL)
+        == WYRELOG_E_OK)
+      return -5;
+  }
+  return 0;
+}
+
+/* Rewrite one intent's tenant so the per-intent scope check refuses it.  The
+ * STORE's identity is untouched, so the store-level guard still passes and
+ * only this intent is out of scope. */
+static gboolean
+forget_mark_intent_foreign (duckdb_connection conn, const gchar *batch_id)
+{
+  g_autofree gchar *sql = g_strdup_printf
+        ("UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
+          "WHERE batch_id = '%s';", batch_id);
+  return exec_ok_sql (conn, sql);
+}
+
+/* Fail the Nth execution that reaches |point|, so a multi-intent fixture can
+ * fail one intent and leave the others alone. */
+typedef struct
+{
+  const gchar *point;
+  guint fail_on_nth;
+  guint seen;
+} ForgetNthFault;
+
+static wyrelog_error_t
+forget_fault_nth (const gchar *point, gpointer user_data)
+{
+  ForgetNthFault *fault = user_data;
+  if (g_strcmp0 (point, fault->point) != 0)
+    return WYRELOG_E_OK;
+  fault->seen++;
+  return fault->seen == fault->fail_on_nth ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+/* The hazard the sticky flag creates, and the reason the rc == OK term in
+ * "if (rc == OK && out_of_scope) rc = POLICY" is load-bearing.
+ *
+ * Three intents: the first out of scope, the second fails, the third is
+ * therefore never attempted, so a refusal is seen BEFORE a failure in the same
+ * pass.  That ordering was reachable before the sticky flag too -- the old
+ * loop also continued on refusal -- so this test pins a guard that was already
+ * load-bearing rather than one the restructure created.  If that term were
+ * dropped
+ * for the tidier "if (refused) rc = POLICY", the caller would be told this
+ * store has a scope problem when what it actually has is an I/O failure
+ * mid-erasure, and the boot log would name the wrong remedy.
+ *
+ * No other test in this file has more than one pending intent, so nothing
+ * else would catch that regression. */
+static gint
+check_fact_forget_reconcile_failure_rc_survives_a_refusal (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 3) != 0)
+    return 2440;
+  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
+      "batch-0"))
+    return 2441;
+
+  ForgetNthFault fault = {
+    .point = "before_delete_projection",
+    .fail_on_nth = 1,
+  };
+  wyl_fact_forget_outcome_t out = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_forget_reconcile (store, "tenant-a",
+          "orders", forget_fault_nth, &fault, &out);
+
+  /* The failure rc reaches the caller; POLICY must not have masked it. */
+  if (rc == WYRELOG_E_POLICY)
+    return 2442;
+  if (rc != WYRELOG_E_IO)
+    return 2443;
+  /* And every intent is accounted for, one disposition each. */
+  if (out.loaded != 3)
+    return 2444;
+  if (out.refused != 1)
+    return 2445;
+  if (out.failed != 1)
+    return 2446;
+  if (out.abandoned != 1)
+    return 2447;
+  if (out.executed != 0)
+    return 2448;
+  return 0;
+}
+
+/* A survey that fails for a reason OTHER than scope still comes back with the
+ * intents materialized, because the loader fills the array before the scope
+ * guard runs.  Those intents must reach a disposition, or the equality fires
+ * and replaces the real rc with E_INTERNAL -- which reaches the boot log as
+ * rc=-7, "wyrelog-side invariant violation", instead of rc=-3.  That is a
+ * worse misdiagnosis than the POLICY flattening that propagating the real rc
+ * was meant to prevent, and it is reachable on the production boot path:
+ * wyl_fact_store_open leaves the identity unset, so validate_store_scope_
+ * unlocked falls through to metadata_value_unlocked, whose prepare can fail.
+ *
+ * Renaming the metadata value column reproduces that: the table still exists,
+ * so table_exists_unlocked passes, and the prepare then fails. */
+static gint
+check_fact_forget_reconcile_survey_io_failure_keeps_its_rc (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
+    return 2450;
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+
+  /* The control: two intents really are PENDING before the rename, so a zero
+  * count below is the survey failing and not an empty fixture.  This is a
+  * seeding check, not a convergence check -- no reconcile pass runs here. */
+  gint64 pending_rows = 0;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &pending_rows) || pending_rows != 2)
+    return 2451;
+
+  if (!exec_ok_sql (conn,
+      "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;"))
+    return 2452;
+
+  wyl_fact_forget_outcome_t out = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_forget_reconcile (store, "tenant-a",
+          "orders", NULL, NULL, &out);
+
+  /* E_INTERNAL here means the equality ate the real rc, which is the defect
+   * this test exists for; assert the exact rc rather than merely "not OK". */
+  if (rc == WYRELOG_E_INTERNAL)
+    return 2453;
+  if (rc != WYRELOG_E_IO)
+    return 2454;
+  /* And the intents the survey loaded are accounted for, so the equality
+   * holds without needing to hide them. */
+  if (out.loaded != 2)
+    return 2455;
+  if (out.abandoned != 2)
+    return 2456;
+  if (out.executed != 0 || out.refused != 0 || out.failed != 0)
+    return 2457;
+  return 0;
+}
+
+/* abandoned outranks refused: an intent that is BOTH out of scope and
+ * reached after a failure counts as abandoned, because it was never
+ * attempted.  Evaluating the scope check first would also re-enter the store
+ * reads that may be what is failing.  Without this, moving the if (broke)
+ * block below the scope check passes every other test in the file. */
+static gint
+check_fact_forget_reconcile_abandoned_outranks_refused (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 3) != 0)
+    return 2460;
+  /* Failure first, out-of-scope second: the reverse of
+   * check_fact_forget_reconcile_failure_rc_survives_a_refusal. */
+  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
+      "batch-1"))
+    return 2461;
+
+  ForgetNthFault fault = {
+    .point = "before_delete_projection",
+    .fail_on_nth = 1,
+  };
+  wyl_fact_forget_outcome_t out = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_forget_reconcile (store, "tenant-a",
+          "orders", forget_fault_nth, &fault, &out);
+  if (rc != WYRELOG_E_IO)
+    return 2462;
+  if (out.loaded != 3 || out.failed != 1)
+    return 2463;
+  /* The out-of-scope intent at index 1 is abandoned, not refused. */
+  if (out.abandoned != 2)
+    return 2464;
+  if (out.refused != 0)
+    return 2465;
+  return 0;
+}
+
+/* Every loaded intent reaches exactly one disposition, and the counts say
+ * which.  A healthy pass: one intent in, one executed. */
+static gint
+check_fact_forget_reconcile_counts_executed (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_pending_intent (&store, &schema, &table) != 0)
+    return 2400;
+  wyl_fact_forget_outcome_t out = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL, &out) != WYRELOG_E_OK)
+    return 2401;
+  if (out.loaded != 1 || out.executed != 1)
+    return 2402;
+  if (out.refused != 0 || out.failed != 0 || out.abandoned != 0)
+    return 2403;
+  if (out.quarantined != 0)
+    return 2404;
+  return 0;
+}
+
+/* Rename the metadata column the store-scope check reads, at the first
+ * before_completion seam, so its ANSWER changes between the survey and a later
+ * iteration.  Shaped like ForgetNthFault above; no new fault machinery.
+ * |renamed| is the fixture's own control -- see the test. */
+typedef struct
+{
+  duckdb_connection conn;
+  guint seen;
+  gboolean renamed;
+} ForgetRenameAtNth;
+
+static wyrelog_error_t
+forget_rename_metadata_at_first_completion (const gchar *point,
+    gpointer user_data)
+{
+  ForgetRenameAtNth *fault = user_data;
+  if (g_strcmp0 (point, "before_completion") != 0)
+    return WYRELOG_E_OK;
+  if (++fault->seen != 1)
+    return WYRELOG_E_OK;
+  fault->renamed = exec_ok_sql (fault->conn,
+          "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
+  return WYRELOG_E_OK;
+}
+
+/* The loop-level scope check must report an unreadable store as a FAILURE, not
+ * as an out-of-scope refusal.  Those carry opposite operator meanings: refused
+ * says "this store is not the one we meant to open", failed says "this store
+ * would not answer".  Reporting the second as the first is the same false
+ * verdict, with a count behind it, that #869 U2-1 removed one level up in the
+ * survey.
+ *
+ * Reaching the branch needs the metadata read's answer to change mid-pass,
+ * which is why it survived every mutation until now.  Intent 1 executes; the
+ * seam then renames the column the scope check reads; intent 2's check returns
+ * E_IO; intent 3 is abandoned.  complete_forget_intent_unlocked touches only
+ * fact_forget_audit and fact_forget_intent, so intent 1 still completes after
+ * the rename, and there is no open transaction at that seam -- the only BEGIN
+ * in this path is inside that function, after it.
+ *
+ * This is a test seam that is NULL in production; it shows the branch is
+ * reachable, not that DDL races are a supported configuration.  See the
+ * four-part note in store-private.h for the production mechanisms.
+ *
+ * The refused and failed assertions come FIRST and are the point: treating any
+ * non-OK scope rc as out-of-scope reports refused=2 failed=0 here, and the
+ * failure should name that shape rather than the rc it also changes. */
+static gint
+check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 3) != 0)
+    return 2470;
+
+  ForgetRenameAtNth fault = {
+    .conn = wyl_fact_store_get_connection (store),
+    .seen = 0,
+    .renamed = FALSE,
+  };
+  wyl_fact_forget_outcome_t out = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_forget_reconcile (store, "tenant-a",
+          "orders", forget_rename_metadata_at_first_completion, &fault, &out);
+
+  /* The fixture's control.  A silently no-opped ALTER would let all three
+   * intents converge, failing the assertions below for a reason that has
+   * nothing to do with the loop -- and the failure would point at the code
+   * rather than at the fixture. */
+  if (!fault.renamed)
+    return 2471;
+
+  /* The shape the mutation breaks: it reports refused=2, failed=0. */
+  if (out.refused != 0)
+    return 2472;
+  if (out.failed != 1)
+    return 2473;
+  if (out.executed != 1)
+    return 2474;
+  if (out.abandoned != 1)
+    return 2475;
+  if (out.loaded != 3)
+    return 2476;
+  if (rc != WYRELOG_E_IO)
+    return 2477;
+  return 0;
+}
+
+/* A refusal must NOT stop the pass.  Two intents, the first out of scope:
+ * the second still executes, and nothing is abandoned.  A reconciler that
+ * broke on refusal leaves one intent with no disposition at all, which this
+ * fixture's executed=1 assertion (2413) contradicts.  In practice that
+ * mutation trips 2443 first, in the three-intent fixture above: the equality
+ * guard sees the short sum and returns E_INTERNAL before the POLICY promotion
+ * can run, so the rc is neither POLICY nor E_IO.  Measured on this revision --
+ * it tripped 2442 before the promotion moved below the guard, and that number
+ * was stale for one revision. */
+static gint
+check_fact_forget_reconcile_counts_refused_without_abandoning (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
+    return 2410;
+  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
+      "batch-0"))
+    return 2411;
+  wyl_fact_forget_outcome_t out = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL, &out) != WYRELOG_E_POLICY)
+    return 2412;
+  if (out.loaded != 2 || out.refused != 1 || out.executed != 1)
+    return 2413;
+  if (out.abandoned != 0 || out.failed != 0)
+    return 2414;
+  return 0;
+}
+
+/* A store-scope refusal disposes of every loaded intent identically.
+ * Reporting loaded=0 here -- as an earlier draft of this contract did --
+ * would blind the equality on the one path where materialization and
+ * disposition can diverge, because the survey fills the array BEFORE it runs
+ * the store-scope guard. */
+static gint
+check_fact_forget_reconcile_counts_a_store_scope_refusal (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
+    return 2420;
+  wyl_fact_forget_outcome_t out = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-z", "orders", NULL,
+      NULL, &out) != WYRELOG_E_POLICY)
+    return 2421;
+  if (out.loaded != 2 || out.refused != 2)
+    return 2422;
+  if (out.executed != 0 || out.failed != 0 || out.abandoned != 0)
+    return 2423;
+  return 0;
+}
+
+/* The counts are zeroed on every INVALID path, so a caller that ignores the
+ * return value cannot read a stale count as work done. */
+static gint
+check_fact_forget_reconcile_zeroes_outcome_on_invalid (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_pending_intent (&store, &schema, &table) != 0)
+    return 2430;
+  wyl_fact_forget_outcome_t out = { .loaded = 99, .executed = 99 };
+  if (wyl_fact_store_forget_reconcile (store, NULL, "orders", NULL, NULL,
+      &out) != WYRELOG_E_INVALID)
+    return 2431;
+  if (out.loaded != 0 || out.executed != 0)
+    return 2432;
+  out.loaded = 99;
+  if (wyl_fact_store_forget_reconcile (NULL, "tenant-a", "orders", NULL, NULL,
+      &out) != WYRELOG_E_INVALID)
+    return 2433;
+  if (out.loaded != 0)
+    return 2434;
+  out.loaded = 99;
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", NULL, NULL, NULL,
+      &out) != WYRELOG_E_INVALID)
+    return 2435;
+  if (out.loaded != 0)
+    return 2436;
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+      NULL, NULL) != WYRELOG_E_INVALID)
+    return 2437;
+  return 0;
+}
+
 /* THIS ASSERTION EXISTS TO FAIL ON A DUCKDB UPGRADE.
  *
  * #869 U1 made boot ask read-only whether a forget intent is pending.  A
@@ -2180,7 +2609,7 @@ exec_ok_sql (duckdb_connection conn, const gchar *sql)
  * honoured at duckdb_close even when set on a connection since disconnected.
  * The checkpoint at step 2 is equally load-bearing -- without it the identity
  * table fact_store_metadata is itself WAL-only, so a non-replaying open fails
- * loudly in identity validation (2350) and this test would pass for the wrong
+ * loudly in identity validation (2350) and this test would fire for the wrong
  * reason.  Note it is fact_store_metadata that fails there, NOT
  * fact_forget_intent: an absent ledger returns OK with count 0, because
  * forget_survey_unlocked treats a missing table as nothing-to-converge.
@@ -2972,6 +3401,30 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_survey_io_failure_keeps_its_rc ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_abandoned_outranks_refused ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_failure_rc_survives_a_refusal ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_counts_executed ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_counts_refused_without_abandoning ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_counts_a_store_scope_refusal ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_zeroes_outcome_on_invalid ();
   if (rc != 0)
     return rc;
   rc = check_fact_forget_read_only_open_replays_the_wal ();

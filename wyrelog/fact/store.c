@@ -2490,11 +2490,17 @@ forget_survey_unlocked (wyl_fact_store_t *store,
   /* Refuse a store that is not the one the caller meant to open.  A
    * mis-pointed path opens a store whose own identity and whose intents agree
    * with each other, so only an expectation held outside this file can tell
-   * them apart. */
-  if (validate_store_scope_unlocked (store, expected_tenant_id,
-      expected_graph_id, FALSE) != WYRELOG_E_OK)
-    return WYRELOG_E_POLICY;
-  return WYRELOG_E_OK;
+   * them apart.
+   *
+   * Propagate the real rc rather than flattening it to POLICY.
+   * validate_store_scope_unlocked returns E_IO as well as E_POLICY, and a
+   * store that could not be read has not told us it is the wrong store -- it
+   * has told us nothing.  Since #869 U2 the caller reports a POLICY refusal
+   * as "every loaded intent refused as out of scope", so flattening an I/O
+   * failure into POLICY would put a false verdict, with a count behind it, on
+   * the boot line. */
+  return validate_store_scope_unlocked (store, expected_tenant_id,
+             expected_graph_id, FALSE);
 }
 
 wyrelog_error_t
@@ -2526,8 +2532,13 @@ wyrelog_error_t
 wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
     const gchar *expected_tenant_id, const gchar *expected_graph_id,
     wyrelog_error_t (*checkpoint) (const gchar *, gpointer),
-    gpointer checkpoint_data)
+    gpointer checkpoint_data, wyl_fact_forget_outcome_t *out_outcome)
 {
+  if (out_outcome == NULL)
+    return WYRELOG_E_INVALID;
+  /* Zeroed before the remaining argument checks, so a caller that ignores the
+   * return value cannot read a stale count as work done. */
+  memset (out_outcome, 0, sizeof (*out_outcome));
   if (store == NULL || expected_tenant_id == NULL || expected_graph_id == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&store->lock);
@@ -2535,29 +2546,136 @@ wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
       g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
   wyrelog_error_t rc = forget_survey_unlocked (store, expected_tenant_id,
           expected_graph_id, pending);
-  if (rc != WYRELOG_E_OK || pending->len == 0) {
-    g_mutex_unlock (&store->lock);
-    return rc;
-  }
+  /* Unconditionally, whatever the survey returned.  The survey materializes
+   * the rows BEFORE it runs the store-scope guard, so a POLICY refusal comes
+   * back with the array already filled -- reporting zero there would hide
+   * exactly the load-without-disposition divergence this count exists to
+   * expose.  The other survey exits fill nothing, so they give zero on their
+   * own: a missing ledger adds no rows, and the loader either adds every row
+   * or fails before adding any. */
+  wyl_fact_forget_outcome_t outcome = { .loaded = pending->len };
+  /* Declared above the goto below: jumping past an initialised declaration is
+   * legal only while nothing at the label reads it, which is a property a
+   * later edit can silently break with no diagnostic. */
   gboolean out_of_scope = FALSE;
+  gboolean broke = FALSE;
+  if (rc != WYRELOG_E_OK || pending->len == 0) {
+    /* Every loaded intent needs a disposition here, or the equality below
+     * fires and overwrites this rc with E_INTERNAL -- turning a diagnosable
+     * I/O failure into "wyrelog-side invariant violation" on the boot line,
+     * which is a worse misdiagnosis than the one propagating the real rc was
+     * meant to prevent.
+     *
+     * The two survey failures that arrive with a full array differ in what
+     * they justify saying.  A store-scope refusal is a verdict about the
+     * intents: none of them may be deleted through, so every one is refused.
+     * Any other failure is not a verdict at all -- the survey could not
+     * finish, so nothing was decided about any intent and they are abandoned
+     * for the same reason a post-failure intent is: the pass could not
+     * proceed. */
+    if (rc == WYRELOG_E_POLICY)
+      outcome.refused = outcome.loaded;
+    else if (rc != WYRELOG_E_OK)
+      outcome.abandoned = outcome.loaded;
+    goto done;
+  }
   for (guint i = 0; i < pending->len; i++) {
     ForgetIntent *intent = g_ptr_array_index (pending, i);
+    if (broke) {
+      /* Loaded, never attempted, because an earlier intent failed.  Visited
+       * and tallied rather than skipped by a break, so every loaded intent
+       * reaches exactly one disposition.
+       *
+       * Deriving this as loaded - (executed + refused + failed) yields the
+       * same numbers on every path the tests exercise, so no assertion
+       * distinguishes the two.
+       *
+       * What the counter buys is that |abandoned| reports what happened
+       * rather than what must arithmetically be left over.  Measured: put a
+       * break back in the failure branch and this counter reports abandoned=0
+       * for a pass that skipped two intents, which
+       * check_fact_forget_reconcile_abandoned_outranks_refused catches at
+       * 2464; the derivation reports 2 either way and the suite stays green.
+       *
+       * Note what that does NOT show.  Past this point the body only
+       * increments: no I/O, no store state, no effect on rc.  So the break is
+       * unobservable to a caller who reads only rc, and the derived value is
+       * not "wrong" -- it is right by construction, which is exactly the
+       * problem.  A derived count cannot disagree with the loop, so it cannot
+       * report that the loop stopped doing its job. */
+      outcome.abandoned++;
+      continue;
+    }
     /* The pending query is not scoped, and the executor trusts the intent's
      * own projection table.  One store serves one graph, so an intent naming
      * another scope means this file is not what its identity claims: skip it
-     * rather than delete through it, and report so the caller degrades. */
-    if (validate_store_scope_unlocked (store, intent->tenant_id,
-        intent->graph_id, FALSE) != WYRELOG_E_OK) {
+     * rather than delete through it, and report so the caller degrades.
+     *
+     * Branch on the rc.  validate_store_scope_unlocked returns E_IO as well
+     * as E_POLICY, and a store that cannot answer a scope question has not
+     * told us the intent is out of scope -- it has told us it is unreadable.
+     * Deleting through it is unsafe and labelling it "refused as out of
+     * scope" is a false operator-facing verdict, so it counts as a failure
+     * and stops the pass. */
+    wyrelog_error_t scope_rc = validate_store_scope_unlocked (store,
+            intent->tenant_id, intent->graph_id, FALSE);
+    if (scope_rc == WYRELOG_E_POLICY) {
+      outcome.refused++;
       out_of_scope = TRUE;
+      continue;
+    }
+    if (scope_rc != WYRELOG_E_OK) {
+      rc = scope_rc;
+      outcome.failed++;
+      broke = TRUE;
       continue;
     }
     rc = execute_forget_intent_unlocked (store, intent, checkpoint,
             checkpoint_data, NULL);
-    if (rc != WYRELOG_E_OK)
-      break;
+    if (rc != WYRELOG_E_OK) {
+      outcome.failed++;
+      broke = TRUE;
+      continue;
+    }
+    outcome.executed++;
   }
+done:
+  /* Not an assertion: boot must never abort on a graph.
+   *
+   * Only when rc is already OK.  An equality violation means the counts are
+   * untrustworthy, but a real error rc is more useful to the operator than
+   * knowing the counts disagree -- and overwriting one cost this unit a live
+   * misdiagnosis, reporting a metadata read failure as rc=-7, "wyrelog-side
+   * invariant violation", on the commonest configuration.  The cost of the
+   * narrower guard is that a violation on a non-OK path is not surfaced at
+   * all; the loop body is structurally total, so reaching one requires adding
+   * a path that increments nothing. */
+  if (outcome.executed + outcome.refused + outcome.failed + outcome.abandoned
+      != outcome.loaded && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_INTERNAL;
+  /* The rc == OK term is load-bearing: a refusal seen before a later failure
+   * must not overwrite that failure's rc with POLICY.  Do not simplify this
+   * to "if (refused) rc = POLICY" -- dropping the term is caught at 2442.
+   *
+   * That hazard is NOT new to the sticky flag, and an earlier draft of this
+   * comment wrongly said it was.  The old loop also continued on refusal and
+   * only broke on failure, so refusal-then-failure was always reachable and
+   * this term was already load-bearing at f7bdba9c.  The sticky flag adds no
+   * new ordering -- the if (broke) block precedes the scope check, so a
+   * refusal still cannot follow a failure.  What this unit adds is the test
+   * that pins it.
+   *
+   * Promoted AFTER the equality, not before.  Promoting first meant the guard
+   * read a POLICY rc and disarmed itself on every pass that refused anything:
+   * measured at 14 of 22 reconcile calls armed before the move and 16 of 22
+   * after, the two additions being exactly the loop-refusal shapes.  The six
+   * still disarmed are genuinely non-OK.  A refusal is a routine outcome, not
+   * an error path, and it was the one interesting shape the guard was missing.
+   * Safe here because out_of_scope is FALSE on every goto done path: it is set
+   * only inside the loop. */
   if (rc == WYRELOG_E_OK && out_of_scope)
     rc = WYRELOG_E_POLICY;
+  *out_outcome = outcome;
   g_mutex_unlock (&store->lock);
   return rc;
 }

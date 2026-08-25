@@ -151,8 +151,9 @@ assert_connection_accepts_new_transaction (Fixture *fixture)
 static void
 assert_reconciles (Fixture *fixture)
 {
+  wyl_fact_forget_outcome_t outcome = { 0 };
   g_assert_cmpint (wyl_fact_store_forget_reconcile (fixture->store, "tenant-a",
-      "orders", NULL, NULL), ==, WYRELOG_E_OK);
+      "orders", NULL, NULL, &outcome), ==, WYRELOG_E_OK);
   duckdb_connection conn = wyl_fact_store_get_connection (fixture->store);
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';"),
