@@ -107,6 +107,17 @@ test('wirelog-dependency-boundary', python3,
   timeout : 600,
 )
 
+comment_alignment_checker = files(
+  '../tools/check-comment-alignment.sh',
+)
+# Asserts uncrustify leaves correctly aligned block-comment continuation stars
+# alone (#872).  Skips rather than fails when uncrustify is absent, is not the
+# pinned version, or the source tree is not a git worktree -- so a contributor
+# without the formatter, and a build from an exported tarball, are not blocked.
+# The ledger rule in CLAUDE.md already requires the formatter for anyone
+# touching a listed file, and check-format.sh --ledger is the hard gate.
+test('check-comment-alignment', comment_alignment_checker)
+
 explicit_encoding_checker = files(
   '../tools/check-explicit-encoding.py',
 )

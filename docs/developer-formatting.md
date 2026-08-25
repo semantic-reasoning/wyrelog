@@ -164,3 +164,72 @@ hook intentionally remains a small launcher and is covered by a behavior test.
 Failures distinguish a missing formatter, an incompatible version, a changed
 file that has not been migrated, an invalid ledger, and content that is not a
 fixed point.
+
+## Block-comment continuation stars
+
+`tools/uncrustify.cfg` sets `cmt_indent_multi = false`. Without it, uncrustify
+0.83.0 pulls correctly aligned continuation stars one column left, so they stop
+lining up under the `*` of the opening `/*`:
+
+```diff
+   /* The control: two intents really are PENDING before the rename, so a zero
+-   * count below is the survey failing and not an empty fixture.  This is a
+-   * seeding check, not a convergence check -- no reconcile pass runs here. */
++  * count below is the survey failing and not an empty fixture.  This is a
++  * seeding check, not a convergence check -- no reconcile pass runs here. */
+```
+
+This is correct alignment being *removed*, and the result is idempotent. That
+combination is what made it a problem rather than an annoyance: under the old
+config the misaligned form was the only fixed point, so the ledger rule above
+made it the only committable one. Editing a comment into the right shape and
+running `./tools/format-c` silently undid the edit.
+
+### The trigger is length equality
+
+The heuristic is uncrustify's `cmt_multi_check_last`, documented as: *for
+multi-line comments with a `*` lead, remove leading spaces if the first and
+last lines of the comment are the same length.* Length is measured from the
+first non-space character.
+
+It is **not** line width and **not** comment size. Measured: it reproduces at
+six characters with a single continuation line, and comments of uniform width
+are stable at every width from 30 to 78 columns.
+
+That one rule explains every workaround people stumble onto — padding the
+opening line, shortening the text, moving the closing `*/` to its own line,
+even deleting an apostrophe. Each works by breaking the length equality, not
+by satisfying any size or width condition. So advice of the form "avoid long
+comments" is wrong and will leave you bitten by a short one.
+
+### Why this option and not the narrower one
+
+`cmt_multi_check_last = false` names the behaviour exactly and would be the
+tighter fix, but it re-adds the space to comments already committed in the
+pulled-left shape: **25 of the 168 files** in `tools/formatted-files.txt` stop
+being fixed points under it. `cmt_indent_multi = false` costs no reformatting —
+all 168 remain exact fixed points — at the price of being broader: it disables
+multi-line comment interior processing generally, including `cmt_width`,
+keyword substitution and leading-character handling. That breadth is free today
+(`cmt_width` is 0, `cmt_star_cont` is false, the `cmt_insert_*` options are
+empty) but it does pre-empt setting any of them later.
+
+### What is and is not fixed
+
+`tools/format-fixtures/block-comment-alignment.c` is the reproduction and
+`tools/check-comment-alignment.sh` asserts it is a fixed point, registered as
+the `check-comment-alignment` test. It drives the fixture through
+`tools/format-c` so it inherits the version pin — calling `uncrustify` directly
+let a wrong-version binary report success, and a vacuous pass is worse than a
+skip because a skip announces itself.
+
+Note that `check-format.sh --ledger` already asserts the fixture is a fixed
+point, hard-failing and version-pinned, on every CI main run. That sweep is
+what protects the property; the `meson test` check is a targeted diagnostic
+that names #872 when it trips.
+
+Comments already committed in the pulled-left shape stay that way and stay
+fixed points — **128 continuation lines across 25 ledger files** when the
+option was added. Correcting them is cosmetic and was deliberately left out.
+What the option fixes is the direction: newly aligned comments now stay
+aligned.
