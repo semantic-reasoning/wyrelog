@@ -467,6 +467,9 @@ typedef enum
 } WylDaemonPolicyWriteObservedResource;
 typedef struct
 {
+  gboolean valid;
+  guint64 generation;
+  guint terminal_entries;
   guint diagnostic_count;
   guint primary_status;
   gchar primary_code[64];

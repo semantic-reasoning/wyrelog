@@ -7040,7 +7040,9 @@ policy_write_fault_snapshot_is_clean
     guint expected_cleanup_resources, guint expected_diagnostic_count,
     wyrelog_error_t expected_cleanup_rc, guint expected_acquire_fault_hits)
 {
-  return snapshot->diagnostic_count == expected_diagnostic_count
+  return snapshot->valid && snapshot->generation != 0
+         && snapshot->terminal_entries != 0
+         && snapshot->diagnostic_count == expected_diagnostic_count
          && snapshot->primary_status == expected_primary_status
          && g_strcmp0 (snapshot->primary_code, expected_primary_code) == 0
          && snapshot->cleanup_rc == expected_cleanup_rc
@@ -7577,22 +7579,372 @@ policy_write_cancel_fixture_teardown (PolicyWriteCancelFixture *fixture)
   g_free (fixture->session_token);
 }
 
+typedef enum
+{
+  POLICY_WRITE_CANCEL_SCENARIO_CLIENT_DISCONNECT = 0,
+  POLICY_WRITE_CANCEL_SCENARIO_SHUTDOWN,
+  POLICY_WRITE_CANCEL_SCENARIO_ACQUIRE_WINS_LATE_DISCONNECT,
+  POLICY_WRITE_CANCEL_SCENARIO_PIN_DIAGNOSTIC_EXERCISE,
+} PolicyWriteCancelScenario;
+
+typedef struct
+{
+  PolicyWriteCancelScenario scenario;
+  gboolean client_wire_write_completed;
+  gboolean client_release_requested;
+  gboolean client_joined;
+  guint terminal_entries_before;
+  guint64 finalize_generation_before;
+  guint expected_finalize_owner;
+} PolicyWriteCancelMilestones;
+
+typedef void (*PolicyWriteCancelDiagnosticSink) (const gchar * line,
+    gpointer data);
+
+static const gchar *
+policy_write_cancel_scenario_name (PolicyWriteCancelScenario scenario)
+{
+  switch (scenario) {
+    case POLICY_WRITE_CANCEL_SCENARIO_CLIENT_DISCONNECT:
+      return "client_disconnect";
+    case POLICY_WRITE_CANCEL_SCENARIO_SHUTDOWN:
+      return "shutdown";
+    case POLICY_WRITE_CANCEL_SCENARIO_ACQUIRE_WINS_LATE_DISCONNECT:
+      return "acquire_wins_late_disconnect";
+    case POLICY_WRITE_CANCEL_SCENARIO_PIN_DIAGNOSTIC_EXERCISE:
+      return "pin_diagnostic_exercise";
+    default:
+      return "unknown";
+  }
+}
+
+static gboolean
+policy_write_authority_snapshot_is_dirty
+  (const WylServiceAuthAuthoritySnapshot * snapshot)
+{
+  return snapshot->writer_active || snapshot->active_readers != 0
+         || snapshot->waiting_readers != 0
+         || snapshot->waiting_writers != 0;
+}
+
+static void
+policy_write_cancel_stderr_sink (const gchar *line, gpointer data)
+{
+  (void) data;
+  g_printerr ("%s\n", line);
+}
+
+/* Collect the complete #880 observation at the point where the test would
+ * otherwise return only 5291/5292.  The authority-before, pin, terminal,
+ * cancel/watch, finalize and authority-after samples use different locks, so
+ * the line names that order rather than presenting them as one atomic state.
+ * Every string is selected from the fixed scenario enum; request data,
+ * credentials, bodies, URLs and addresses never enter this formatter. */
 static gint
 policy_write_cancel_authority_is_clean (SoupServer *server, WylHandle *handle,
-    gint failure)
+    const PolicyWriteCancelMilestones *milestones, gint failure,
+    PolicyWriteCancelDiagnosticSink sink, gpointer sink_data)
 {
-  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
-  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
-  if (snapshot.writer_active || snapshot.active_readers != 0
-      || snapshot.waiting_readers != 0 || snapshot.waiting_writers != 0)
-    return failure;
+  WylServiceAuthAuthoritySnapshot authority_before = { 0 };
+  WylServiceAuthAuthoritySnapshot authority_after = { 0 };
+  WylDaemonPolicyWriteFinalizeSnapshot finalize = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server,
+      &authority_before);
   guint total_pins = G_MAXUINT;
   guint thread_pins = G_MAXUINT;
   wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
       &thread_pins);
-  if (total_pins != 0 || thread_pins != 0)
-    return failure + 1;
-  return 0;
+  guint terminal_entries =
+      wyl_daemon_http_policy_write_terminal_entries_for_test (server);
+  gint cancel_reason =
+      wyl_daemon_http_policy_write_last_cancel_reason_for_test (server);
+  gint watch_armed =
+      wyl_daemon_http_policy_write_last_watch_armed_for_test (server);
+  gboolean finalize_available =
+      wyl_daemon_http_policy_write_finalize_snapshot_for_test (server,
+          &finalize);
+  wyl_daemon_http_service_authority_snapshot_for_test (server,
+      &authority_after);
+
+  gboolean authority_dirty =
+      policy_write_authority_snapshot_is_dirty (&authority_before);
+  gboolean pins_dirty = total_pins != 0 || thread_pins != 0;
+  if (!authority_dirty && !pins_dirty)
+    return 0;
+
+  PolicyWriteCancelMilestones empty = { 0 };
+  if (milestones == NULL)
+    milestones = &empty;
+  gboolean finalize_since_baseline = finalize_available && finalize.valid
+      && finalize.generation > milestones->finalize_generation_before
+      && finalize.terminal_entries > milestones->terminal_entries_before;
+  gboolean finalize_owner_matches_scenario = finalize_since_baseline
+      && finalize.owner == milestones->expected_finalize_owner;
+#ifdef G_OS_WIN32
+  gboolean watch_supported = FALSE;
+#else
+  gboolean watch_supported = TRUE;
+#endif
+  gint result = authority_dirty ? failure : failure + 1;
+  g_autofree gchar *line = g_strdup_printf
+        ("WYRELOG_TEST_DIAG policy_write_cancel scenario=%s failure=%d "
+          "sample_order=authority_before,pins,terminal,cancel_watch,finalize,authority_after "
+          "authority_before_readers=%u authority_before_writer=%d "
+          "authority_before_waiting_readers=%u authority_before_waiting_writers=%u "
+          "authority_before_closing=%d pins_total=%u pins_thread=%u "
+          "client_wire_write_completed=%d client_release_requested=%d "
+          "client_joined=%d terminal_before=%u terminal_now=%u "
+          "cancel_reason=%d watch_supported=%d watch_armed=%d "
+          "finalize_available=%d finalize_valid=%d "
+          "finalize_generation_before=%" G_GUINT64_FORMAT " "
+          "finalize_generation=%" G_GUINT64_FORMAT " "
+          "finalize_since_baseline=%d finalize_expected_owner=%u "
+          "finalize_owner_matches_scenario=%d "
+          "finalize_terminal_entries=%u finalize_diagnostics=%u "
+          "finalize_primary_status=%u finalize_primary_rc=%d "
+          "finalize_primary_recorded=%d finalize_cleanup_rc=%d "
+          "finalize_pre_status=%u finalize_pre_headers=%u "
+          "finalize_pre_body=%zu "
+          "finalize_lease_live=%d finalize_store_live=%d "
+          "finalize_pins_total=%u finalize_pins_thread=%u "
+          "finalize_rank_mask=%u finalize_observed_resources=%u "
+          "finalize_acquire_fault_hits=%u finalize_transaction_active=%d "
+          "finalize_owner=%u authority_after_readers=%u "
+          "authority_after_writer=%d authority_after_waiting_readers=%u "
+          "authority_after_waiting_writers=%u authority_after_closing=%d",
+          policy_write_cancel_scenario_name (milestones->scenario), result,
+          authority_before.active_readers, authority_before.writer_active,
+          authority_before.waiting_readers, authority_before.waiting_writers,
+          authority_before.closing, total_pins, thread_pins,
+          milestones->client_wire_write_completed,
+          milestones->client_release_requested, milestones->client_joined,
+          milestones->terminal_entries_before, terminal_entries,
+          cancel_reason, watch_supported, watch_armed, finalize_available,
+          finalize.valid, milestones->finalize_generation_before,
+          finalize.generation, finalize_since_baseline,
+          milestones->expected_finalize_owner,
+          finalize_owner_matches_scenario, finalize.terminal_entries,
+          finalize.diagnostic_count, finalize.primary_status,
+          finalize.primary_rc, finalize.primary_rc_recorded,
+          finalize.cleanup_rc, finalize.pre_finalize_status,
+          finalize.pre_finalize_header_count,
+          finalize.pre_finalize_body_length,
+          finalize.post_finalize_lease_live,
+          finalize.post_finalize_store_live,
+          finalize.post_finalize_total_pins,
+          finalize.post_finalize_thread_pins, finalize.post_finalize_rank_mask,
+          finalize.observed_cleanup_resources, finalize.acquire_fault_hits,
+          finalize.post_finalize_transaction_active, finalize.owner,
+          authority_after.active_readers, authority_after.writer_active,
+          authority_after.waiting_readers, authority_after.waiting_writers,
+          authority_after.closing);
+  (sink != NULL ? sink : policy_write_cancel_stderr_sink) (line, sink_data);
+  return result;
+}
+
+typedef struct
+{
+  gchar *line;
+  guint count;
+} PolicyWriteCancelDiagnosticCapture;
+
+static void
+policy_write_cancel_capture_sink (const gchar *line, gpointer data)
+{
+  PolicyWriteCancelDiagnosticCapture *capture = data;
+  capture->count++;
+  g_free (capture->line);
+  capture->line = g_strdup (line);
+}
+
+static gboolean
+policy_write_cancel_diagnostic_has_token (const gchar *line,
+    const gchar *token)
+{
+  if (line == NULL || token == NULL || token[0] == '\0')
+    return FALSE;
+  gsize token_len = strlen (token);
+  const gchar *match = line;
+  while ((match = strstr (match, token)) != NULL) {
+    gboolean left_boundary = match == line || match[-1] == ' ';
+    gboolean right_boundary = match[token_len] == '\0'
+        || match[token_len] == ' ';
+    if (left_boundary && right_boundary)
+      return TRUE;
+    match++;
+  }
+  return FALSE;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  GMutex mutex;
+  GCond changed;
+  gboolean ready;
+  gboolean release;
+  wyrelog_error_t pin_rc;
+  wyl_policy_store_t *store;
+} PolicyWritePinHolder;
+
+static gpointer
+policy_write_pin_holder_thread (gpointer data)
+{
+  PolicyWritePinHolder *holder = data;
+  holder->pin_rc = wyl_handle_policy_store_pin_current (holder->handle,
+          &holder->store);
+  g_mutex_lock (&holder->mutex);
+  holder->ready = TRUE;
+  g_cond_broadcast (&holder->changed);
+  while (holder->pin_rc == WYRELOG_E_OK && !holder->release)
+    g_cond_wait (&holder->changed, &holder->mutex);
+  g_mutex_unlock (&holder->mutex);
+  if (holder->pin_rc == WYRELOG_E_OK)
+    wyl_handle_policy_store_unpin (holder->handle, holder->store);
+  return NULL;
+}
+
+/* Deterministically exercise the actual 5292 collector and emission path with
+ * a pin owned by another thread.  This represents the actionable CI shape
+ * (total_pins=1/current_thread_pins=0) without claiming that the intermittent
+ * owner has been identified. */
+static gint
+check_policy_write_cancel_pin_diagnostic (void)
+{
+  static const gchar *const actor = "policy-write-pin-diagnostic-actor";
+  PolicyWriteCancelFixture fixture = { 0 };
+  gint result = policy_write_cancel_fixture_setup (&fixture, actor, 5260);
+  if (result != 0) {
+    policy_write_cancel_fixture_teardown (&fixture);
+    return result;
+  }
+
+  PolicyWriteCancelMilestones milestones = {
+    .scenario = POLICY_WRITE_CANCEL_SCENARIO_PIN_DIAGNOSTIC_EXERCISE,
+    .client_wire_write_completed = TRUE,
+    .client_release_requested = TRUE,
+    .client_joined = TRUE,
+    .terminal_entries_before =
+        wyl_daemon_http_policy_write_terminal_entries_for_test
+          (fixture.server),
+    .expected_finalize_owner = 2,       /* test_policy_write */
+  };
+  WylDaemonPolicyWriteFinalizeSnapshot finalize_before = { 0 };
+  (void) wyl_daemon_http_policy_write_finalize_snapshot_for_test
+    (fixture.server, &finalize_before);
+  milestones.finalize_generation_before = finalize_before.generation;
+  if (wyl_daemon_http_policy_write_for_test (fixture.server, NULL, NULL)
+      != WYRELOG_E_OK) {
+    result = 5265;
+    goto teardown;
+  }
+
+  PolicyWritePinHolder holder = {
+    .handle = fixture.handle,
+    .pin_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&holder.mutex);
+  g_cond_init (&holder.changed);
+  GThread *holder_thread = g_thread_new ("policy-write-pin-diagnostic",
+          policy_write_pin_holder_thread, &holder);
+  g_mutex_lock (&holder.mutex);
+  while (!holder.ready)
+    g_cond_wait (&holder.changed, &holder.mutex);
+  g_mutex_unlock (&holder.mutex);
+
+  PolicyWriteCancelDiagnosticCapture capture = { 0 };
+  if (holder.pin_rc != WYRELOG_E_OK) {
+    result = 5266;
+  } else if (policy_write_cancel_authority_is_clean (fixture.server,
+      fixture.handle, &milestones, 5291, policy_write_cancel_capture_sink,
+      &capture) != 5292) {
+    result = 5267;
+  } else {
+#ifdef G_OS_WIN32
+    const gchar *watch_contract = "watch_supported=0";
+#else
+    const gchar *watch_contract = "watch_supported=1";
+#endif
+    g_autofree gchar *terminal_before = g_strdup_printf ("terminal_before=%u",
+            milestones.terminal_entries_before);
+    g_autofree gchar *terminal_now = g_strdup_printf ("terminal_now=%u",
+            milestones.terminal_entries_before + 1);
+    g_autofree gchar *finalize_terminal = g_strdup_printf
+          ("finalize_terminal_entries=%u",
+            milestones.terminal_entries_before + 1);
+    g_autofree gchar *generation_before = g_strdup_printf
+          ("finalize_generation_before=%" G_GUINT64_FORMAT,
+            milestones.finalize_generation_before);
+    g_autofree gchar *generation = g_strdup_printf
+          ("finalize_generation=%" G_GUINT64_FORMAT,
+            milestones.finalize_generation_before + 1);
+    const gchar *required[] = {
+      "scenario=pin_diagnostic_exercise",
+      "failure=5292",
+      "sample_order=authority_before,pins,terminal,cancel_watch,finalize,authority_after",
+      "authority_before_readers=0",
+      "authority_before_writer=0",
+      "authority_before_waiting_readers=0",
+      "authority_before_waiting_writers=0",
+      "pins_total=1",
+      "pins_thread=0",
+      "client_wire_write_completed=1",
+      "client_release_requested=1",
+      "client_joined=1",
+      terminal_before,
+      terminal_now,
+      "cancel_reason=0",
+      "finalize_available=1",
+      "finalize_valid=1",
+      generation_before,
+      generation,
+      "finalize_since_baseline=1",
+      "finalize_expected_owner=2",
+      "finalize_owner_matches_scenario=1",
+      finalize_terminal,
+      "finalize_primary_status=0",
+      "finalize_primary_rc=0",
+      "finalize_primary_recorded=1",
+      "finalize_cleanup_rc=0",
+      "finalize_pre_status=0",
+      "finalize_pre_headers=0",
+      "finalize_pre_body=0",
+      "finalize_lease_live=0",
+      "finalize_store_live=0",
+      "finalize_pins_total=0",
+      "finalize_pins_thread=0",
+      "finalize_rank_mask=0",
+      "finalize_transaction_active=0",
+      "authority_after_readers=0",
+      "authority_after_writer=0",
+      watch_contract,
+      "watch_armed=0",
+    };
+    gboolean complete = capture.count == 1 && capture.line != NULL;
+    for (guint i = 0; complete && i < G_N_ELEMENTS (required); i++)
+      complete = policy_write_cancel_diagnostic_has_token (capture.line,
+              required[i]);
+    complete = complete && strstr (capture.line, actor) == NULL
+        && (fixture.session_token == NULL
+        || strstr (capture.line, fixture.session_token) == NULL)
+        && strchr (capture.line, '\r') == NULL
+        && strchr (capture.line, '\n') == NULL;
+    if (!complete)
+      result = 5268;
+  }
+  g_free (capture.line);
+
+  g_mutex_lock (&holder.mutex);
+  holder.release = TRUE;
+  g_cond_broadcast (&holder.changed);
+  g_mutex_unlock (&holder.mutex);
+  g_thread_join (holder_thread);
+  g_cond_clear (&holder.changed);
+  g_mutex_clear (&holder.mutex);
+
+teardown:
+  policy_write_cancel_fixture_teardown (&fixture);
+  return result;
 }
 
 /* A client that disconnects while its policy WRITE is parked behind an active
@@ -7631,6 +7983,9 @@ check_daemon_policy_write_client_disconnect_cancellable (void)
 
   guint terminal_before =
       wyl_daemon_http_policy_write_terminal_entries_for_test (fixture.server);
+  WylDaemonPolicyWriteFinalizeSnapshot finalize_before = { 0 };
+  (void) wyl_daemon_http_policy_write_finalize_snapshot_for_test
+    (fixture.server, &finalize_before);
   g_autofree gchar *query = g_strdup_printf
         ("subject=disconnect-target&perm=cleanup.missing&scope=%s&tenant=%s"
           "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
@@ -7694,9 +8049,18 @@ release_all:
   g_thread_join (g_steal_pointer (&writer));
   raw_parked_request_join (&request);
   g_thread_join (g_steal_pointer (&client));
+  PolicyWriteCancelMilestones milestones = {
+    .scenario = POLICY_WRITE_CANCEL_SCENARIO_CLIENT_DISCONNECT,
+    .client_wire_write_completed = request.sent,
+    .client_release_requested = request.release,
+    .client_joined = TRUE,
+    .terminal_entries_before = terminal_before,
+    .finalize_generation_before = finalize_before.generation,
+    .expected_finalize_owner = 9,       /* direct_permission */
+  };
   if (result == 0)
     result = policy_write_cancel_authority_is_clean (fixture.server,
-            fixture.handle, 5215);
+            fixture.handle, &milestones, 5215, NULL, NULL);
   if (result == 0 && holder.write_rc != WYRELOG_E_OK)
     result = 5217;
   g_free (request.body);
@@ -7724,6 +8088,18 @@ check_daemon_policy_write_shutdown_cancellable (void)
   if (result != 0)
     goto cleanup;
 
+  PolicyWriteCancelMilestones milestones = {
+    .scenario = POLICY_WRITE_CANCEL_SCENARIO_SHUTDOWN,
+    .terminal_entries_before =
+        wyl_daemon_http_policy_write_terminal_entries_for_test
+          (fixture.server),
+    .expected_finalize_owner = 2,       /* test_policy_write */
+  };
+  WylDaemonPolicyWriteFinalizeSnapshot finalize_before = { 0 };
+  (void) wyl_daemon_http_policy_write_finalize_snapshot_for_test
+    (fixture.server, &finalize_before);
+  milestones.finalize_generation_before = finalize_before.generation;
+
   /* No HTTP loop is needed once the daemon is shutting down. */
   g_main_loop_quit (fixture.http.loop);
   g_thread_join (g_steal_pointer (&fixture.thread));
@@ -7747,7 +8123,7 @@ check_daemon_policy_write_shutdown_cancellable (void)
     goto cleanup;
   }
   result = policy_write_cancel_authority_is_clean (fixture.server,
-          fixture.handle, 5253);
+          fixture.handle, &milestones, 5253, NULL, NULL);
 
 cleanup:
   policy_write_cancel_fixture_teardown (&fixture);
@@ -7769,6 +8145,18 @@ check_daemon_policy_write_acquire_wins_late_disconnect (void)
     return result;
   }
 
+  PolicyWriteCancelMilestones milestones = {
+    .scenario = POLICY_WRITE_CANCEL_SCENARIO_ACQUIRE_WINS_LATE_DISCONNECT,
+    .terminal_entries_before =
+        wyl_daemon_http_policy_write_terminal_entries_for_test
+          (fixture.server),
+    .expected_finalize_owner = 9,       /* direct_permission */
+  };
+  WylDaemonPolicyWriteFinalizeSnapshot finalize_before = { 0 };
+  (void) wyl_daemon_http_policy_write_finalize_snapshot_for_test
+    (fixture.server, &finalize_before);
+  milestones.finalize_generation_before = finalize_before.generation;
+
   g_autofree gchar *query = g_strdup_printf
         ("subject=late-target&perm=cleanup.missing&scope=%s&tenant=%s"
           "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
@@ -7788,6 +8176,9 @@ check_daemon_policy_write_acquire_wins_late_disconnect (void)
   raw_parked_request_release (&request, FALSE);
   raw_parked_request_join (&request);
   g_thread_join (g_steal_pointer (&client));
+  milestones.client_wire_write_completed = request.sent;
+  milestones.client_release_requested = request.release;
+  milestones.client_joined = TRUE;
 
   /* Whatever the race outcome, the authority must quiesce and a fresh WRITE
    * must still be grantable -- proving exactly-once finalize with no leak. */
@@ -7796,7 +8187,7 @@ check_daemon_policy_write_acquire_wins_late_disconnect (void)
     goto teardown_request;
   }
   result = policy_write_cancel_authority_is_clean (fixture.server,
-          fixture.handle, 5291);
+          fixture.handle, &milestones, 5291, NULL, NULL);
   if (result == 0
       && wyl_daemon_http_policy_write_for_test (fixture.server, NULL, NULL)
       != WYRELOG_E_OK)
@@ -7830,6 +8221,7 @@ check_daemon_policy_write_cancellable_contract (void)
     (void) check_daemon_policy_write_client_disconnect_cancellable;
     (void) check_daemon_policy_write_shutdown_cancellable;
     (void) check_daemon_policy_write_acquire_wins_late_disconnect;
+    (void) check_policy_write_cancel_pin_diagnostic;
   }
   return 0;
 #else
@@ -7846,6 +8238,9 @@ check_daemon_policy_write_cancellable_contract (void)
   if (rc != 0)
     return rc;
 #endif
+  rc = check_policy_write_cancel_pin_diagnostic ();
+  if (rc != 0)
+    return rc;
   rc = check_daemon_policy_write_shutdown_cancellable ();
   if (rc != 0)
     return rc;
