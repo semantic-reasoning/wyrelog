@@ -86,6 +86,30 @@ struct WylFactArtifactWinDirectory
 #ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
 static volatile LONG next_directory_flush_error;
 static volatile LONG next_rename_status;
+static volatile LONG next_inventory_fault;
+
+void
+wyl_fact_artifact_win_locator_set_inventory_test_fault
+  (WylFactArtifactWinInventoryTestFault fault)
+{
+  InterlockedExchange (&next_inventory_fault, (LONG) fault);
+}
+
+WylFactArtifactWinInventoryTestFault
+wyl_fact_artifact_win_locator_take_inventory_test_fault (void)
+{
+  return (WylFactArtifactWinInventoryTestFault)
+         InterlockedExchange (&next_inventory_fault,
+             WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_NONE);
+}
+
+static gboolean
+inventory_fault_take (WylFactArtifactWinInventoryTestFault fault)
+{
+  return InterlockedCompareExchange (&next_inventory_fault,
+             WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_NONE,
+             (LONG) fault) == (LONG) fault;
+}
 
 void
 wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test (DWORD error)
@@ -344,6 +368,796 @@ validate_named_entry (HANDLE directory, const gchar *name,
     }
   }
   return matches == 1 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+#define WYL_WIN_INVENTORY_MAX_ROOT_ENTRIES 512u
+#define WYL_WIN_INVENTORY_MAX_TEMP_ROOTS 256u
+#define WYL_WIN_INVENTORY_MAX_TEMP_CHILDREN 256u
+#define WYL_WIN_INVENTORY_MAX_TOTAL_ENTRIES 4096u
+#define WYL_WIN_INVENTORY_MAX_ANOMALIES 256u
+#define WYL_WIN_INVENTORY_MAX_NAME_UNITS 255u
+#define WYL_WIN_INVENTORY_DIGEST_SIZE 32u
+
+typedef enum
+{
+  WYL_WIN_INVENTORY_CLASS_FIXED = 1,
+  WYL_WIN_INVENTORY_CLASS_TEMP_ROOT,
+  WYL_WIN_INVENTORY_CLASS_TEMP_CHILD,
+  WYL_WIN_INVENTORY_CLASS_UNKNOWN,
+  WYL_WIN_INVENTORY_CLASS_MALFORMED,
+} WylWinInventoryClass;
+
+typedef struct
+{
+  guint8 bytes[WYL_WIN_INVENTORY_DIGEST_SIZE];
+} WylWinInventoryDigest;
+
+typedef struct
+{
+  WylFactGraphWinIdentity identity;
+  DWORD attributes;
+  DWORD links;
+  guint64 logical_bytes;
+  guint64 allocated_bytes;
+  gboolean directory;
+  gboolean reparse;
+  gboolean delete_pending;
+  gboolean identity_matches_listing;
+  gboolean acl_valid;
+  gboolean allocation_supported;
+} WylWinInventoryMetadata;
+
+typedef struct
+{
+  GArray *digests;
+  guint total_entries;
+  guint anomaly_count;
+  guint temp_roots;
+  gboolean allocation_unsupported;
+} WylWinInventoryState;
+
+static gboolean
+inventory_enumeration_fault_take (void)
+{
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  return inventory_fault_take
+           (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ENUMERATION_IO);
+#else
+  return FALSE;
+#endif
+}
+
+static gboolean
+inventory_fixed_metadata_fault_take (void)
+{
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  return inventory_fault_take
+           (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_FIXED_METADATA_IO);
+#else
+  return FALSE;
+#endif
+}
+
+static gboolean
+inventory_temp_metadata_fault_take (void)
+{
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  return inventory_fault_take
+           (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_TEMP_METADATA_IO);
+#else
+  return FALSE;
+#endif
+}
+
+static gboolean
+inventory_allocation_fault_take (void)
+{
+#ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
+  return inventory_fault_take
+           (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ALLOCATION_UNSUPPORTED);
+#else
+  return FALSE;
+#endif
+}
+
+static wyrelog_error_t
+inventory_fail (WylFactArtifactWinInventoryScan *scan,
+    WylFactArtifactInventoryStatus status, wyrelog_error_t rc)
+{
+  if (scan->failure_status == WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID)
+    scan->failure_status = status;
+  return rc;
+}
+
+static wyrelog_error_t
+inventory_add_anomaly (WylFactArtifactWinInventoryScan *scan,
+    WylWinInventoryState *state, WylFactArtifactInventoryAnomaly anomaly)
+{
+  if (anomaly >= WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT
+      || state->anomaly_count >= WYL_WIN_INVENTORY_MAX_ANOMALIES)
+    return inventory_fail (scan,
+               WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW, WYRELOG_E_POLICY);
+  scan->anomalies[anomaly]++;
+  state->anomaly_count++;
+  return WYRELOG_E_OK;
+}
+
+static void
+inventory_checksum_u64 (GChecksum *checksum, guint64 value)
+{
+  guint8 bytes[8];
+  for (guint i = 0; i < G_N_ELEMENTS (bytes); i++) {
+    bytes[i] = (guint8) (value & 0xffu);
+    value >>= 8;
+  }
+  g_checksum_update (checksum, bytes, sizeof bytes);
+}
+
+static void
+inventory_checksum_bytes (GChecksum *checksum, gconstpointer bytes,
+    gsize length)
+{
+  inventory_checksum_u64 (checksum, length);
+  if (length > 0)
+    g_checksum_update (checksum, bytes, length);
+}
+
+static gboolean
+inventory_add_digest (WylWinInventoryState *state, guint scope,
+    const WCHAR *name, gsize name_units, WylWinInventoryClass classification,
+    const WylFileIdExtdDirInfo *listed,
+    const WylWinInventoryMetadata *metadata)
+{
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  WylWinInventoryDigest digest = { { 0 } };
+  gsize digest_length = sizeof digest.bytes;
+  if (checksum == NULL || state == NULL || listed == NULL)
+    return FALSE;
+  inventory_checksum_u64 (checksum, scope);
+  inventory_checksum_bytes (checksum, name,
+      name_units * sizeof (WCHAR));
+  inventory_checksum_u64 (checksum, classification);
+  inventory_checksum_u64 (checksum, listed->file_attributes);
+  inventory_checksum_u64 (checksum, listed->reparse_point_tag);
+  inventory_checksum_u64 (checksum, (guint64) listed->end_of_file.QuadPart);
+  inventory_checksum_u64 (checksum,
+      (guint64) listed->allocation_size.QuadPart);
+  inventory_checksum_bytes (checksum, listed->file_id.Identifier,
+      sizeof listed->file_id.Identifier);
+  inventory_checksum_u64 (checksum, metadata != NULL);
+  if (metadata != NULL) {
+    inventory_checksum_u64 (checksum, metadata->identity.volume_serial);
+    inventory_checksum_bytes (checksum, metadata->identity.file_id,
+        sizeof metadata->identity.file_id);
+    inventory_checksum_u64 (checksum, metadata->attributes);
+    inventory_checksum_u64 (checksum, metadata->links);
+    inventory_checksum_u64 (checksum, metadata->logical_bytes);
+    inventory_checksum_u64 (checksum, metadata->allocated_bytes);
+    inventory_checksum_u64 (checksum, metadata->directory);
+    inventory_checksum_u64 (checksum, metadata->reparse);
+    inventory_checksum_u64 (checksum, metadata->delete_pending);
+    inventory_checksum_u64 (checksum, metadata->identity_matches_listing);
+    inventory_checksum_u64 (checksum, metadata->acl_valid);
+    inventory_checksum_u64 (checksum, metadata->allocation_supported);
+  }
+  g_checksum_get_digest (checksum, digest.bytes, &digest_length);
+  if (digest_length != sizeof digest.bytes)
+    return FALSE;
+  g_array_append_val (state->digests, digest);
+  return TRUE;
+}
+
+static gint
+inventory_digest_compare (gconstpointer left, gconstpointer right)
+{
+  const WylWinInventoryDigest *a = left;
+  const WylWinInventoryDigest *b = right;
+  return memcmp (a->bytes, b->bytes, sizeof a->bytes);
+}
+
+static gboolean
+inventory_finish_fingerprint (WylWinInventoryState *state,
+    const WylFactGraphWinIdentity *directory_identity, guint64 *out_fingerprint)
+{
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  guint8 digest[WYL_WIN_INVENTORY_DIGEST_SIZE] = { 0 };
+  gsize digest_length = sizeof digest;
+  guint64 fingerprint = 0;
+  if (state == NULL || state->digests == NULL || directory_identity == NULL
+      || out_fingerprint == NULL || checksum == NULL)
+    return FALSE;
+  g_array_sort (state->digests, inventory_digest_compare);
+  inventory_checksum_u64 (checksum, directory_identity->volume_serial);
+  inventory_checksum_bytes (checksum, directory_identity->file_id,
+      sizeof directory_identity->file_id);
+  inventory_checksum_u64 (checksum, state->digests->len);
+  for (guint i = 0; i < state->digests->len; i++) {
+    const WylWinInventoryDigest *entry = &g_array_index (state->digests,
+            WylWinInventoryDigest, i);
+    inventory_checksum_bytes (checksum, entry->bytes, sizeof entry->bytes);
+  }
+  g_checksum_get_digest (checksum, digest, &digest_length);
+  if (digest_length != sizeof digest)
+    return FALSE;
+  for (guint i = 0; i < sizeof fingerprint; i++)
+    fingerprint = (fingerprint << 8) | digest[i];
+  *out_fingerprint = fingerprint;
+  return TRUE;
+}
+
+static gboolean
+inventory_temp_root_name (const gchar *name)
+{
+  static const gchar prefix[] = "wyrelog-duckdb-temp-";
+  const gchar *uuid;
+  if (name == NULL || !g_str_has_prefix (name, prefix))
+    return FALSE;
+  uuid = name + sizeof prefix - 1;
+  if (strlen (uuid) != 36)
+    return FALSE;
+  for (guint i = 0; i < 36; i++) {
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (uuid[i] != '-')
+        return FALSE;
+    } else if (!g_ascii_isdigit (uuid[i])
+        && !(uuid[i] >= 'a' && uuid[i] <= 'f')) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+static gboolean
+inventory_temp_child_name (const gchar *name)
+{
+  const gchar *p;
+  if (name == NULL || strpbrk (name, "/\\") != NULL)
+    return FALSE;
+  if (g_str_has_prefix (name, "duckdb_temp_storage_")) {
+    static const gchar *const classes[] = {
+      "DEFAULT", "S32K", "S64K", "S96K", "S128K", "S160K", "S192K",
+      "S224K",
+    };
+    gboolean matched = FALSE;
+    p = name + strlen ("duckdb_temp_storage_");
+    for (guint i = 0; i < G_N_ELEMENTS (classes); i++)
+      if (g_str_has_prefix (p, classes[i])) {
+        p += strlen (classes[i]);
+        matched = TRUE;
+        break;
+      }
+    if (!matched || *p++ != '-')
+      return FALSE;
+    const gchar *digits = p;
+    while (g_ascii_isdigit (*p))
+      p++;
+    return p != digits && (digits[0] == '0' ? p == digits + 1
+        : (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
+  }
+  if (!g_str_has_prefix (name, "duckdb_temp_block-"))
+    return FALSE;
+  p = name + strlen ("duckdb_temp_block-");
+  const gchar *digits = p;
+  while (g_ascii_isdigit (*p))
+    p++;
+  return p != digits && (digits[0] == '0' ? p == digits + 1
+      : (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+}
+
+static gint
+inventory_fixed_slot (const gchar *name, gboolean *out_case_collision)
+{
+  static const gchar *const names[] = {
+    "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
+    "facts.duckdb.wal.recovery", "facts.duckdb.lock",
+  };
+  if (out_case_collision != NULL)
+    *out_case_collision = FALSE;
+  for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+    if (g_strcmp0 (name, names[i]) == 0)
+      return (gint) i;
+    if (name != NULL && g_ascii_strcasecmp (name, names[i]) == 0
+        && out_case_collision != NULL)
+      *out_case_collision = TRUE;
+  }
+  return -1;
+}
+
+static wyrelog_error_t
+inventory_open_relative (HANDLE parent, const gchar *name,
+    gint expected_directory, HANDLE *out_handle)
+{
+  WylNtCreateFile create = nt_create_file ();
+  g_autofree gunichar2 *wide = NULL;
+  glong units = 0;
+  UNICODE_STRING object_name = { 0 };
+  OBJECT_ATTRIBUTES attributes = { 0 };
+  IO_STATUS_BLOCK iosb = { 0 };
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  ULONG options = FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
+  ACCESS_MASK access = FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
+  wyrelog_error_t rc;
+  if (out_handle != NULL)
+    *out_handle = INVALID_HANDLE_VALUE;
+  if (!valid_handle (parent) || out_handle == NULL || create == NULL)
+    return WYRELOG_E_INVALID;
+  if ((rc = wide_component (name, &wide, &units)) != WYRELOG_E_OK)
+    return rc;
+  if (expected_directory > 0) {
+    options |= FILE_DIRECTORY_FILE;
+    access |= FILE_LIST_DIRECTORY;
+  } else if (expected_directory == 0) {
+    options |= FILE_NON_DIRECTORY_FILE;
+  }
+  object_name.Length = (USHORT) (units * sizeof (WCHAR));
+  object_name.MaximumLength = object_name.Length;
+  object_name.Buffer = (PWSTR) wide;
+  attributes.Length = sizeof attributes;
+  attributes.RootDirectory = parent;
+  attributes.ObjectName = &object_name;
+  NTSTATUS status = create (&handle, access, &attributes, &iosb, NULL,
+          FILE_ATTRIBUTE_NORMAL,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+          options, NULL, 0);
+  if (status < 0 || !valid_handle (handle))
+    return nt_error (status);
+  if (!SetHandleInformation (handle, HANDLE_FLAG_INHERIT, 0)) {
+    CloseHandle (handle);
+    return WYRELOG_E_IO;
+  }
+  *out_handle = handle;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+inventory_query_metadata (WylFactArtifactWinLocator *locator, HANDLE handle,
+    const WylFileIdExtdDirInfo *listed, WylWinInventoryState *state,
+    WylWinInventoryMetadata *out_metadata)
+{
+  FILE_BASIC_INFO basic = { 0 };
+  FILE_STANDARD_INFO standard = { 0 };
+  FILE_ID_INFO id = { 0 };
+  DWORD flags = 0;
+  if (locator == NULL || !valid_handle (handle) || listed == NULL
+      || state == NULL || out_metadata == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_metadata, 0, sizeof *out_metadata);
+  if (!GetHandleInformation (handle, &flags) || (flags & HANDLE_FLAG_INHERIT)
+      || !GetFileInformationByHandleEx (handle, FileBasicInfo, &basic,
+      sizeof basic) || !GetFileInformationByHandleEx (handle,
+      FileStandardInfo, &standard, sizeof standard)
+      || !GetFileInformationByHandleEx (handle, FileIdInfo, &id, sizeof id))
+    return WYRELOG_E_IO;
+  if (standard.EndOfFile.QuadPart < 0 || standard.AllocationSize.QuadPart < 0)
+    return WYRELOG_E_POLICY;
+  out_metadata->identity.volume_serial = id.VolumeSerialNumber;
+  memcpy (out_metadata->identity.file_id, id.FileId.Identifier,
+      sizeof out_metadata->identity.file_id);
+  out_metadata->attributes = basic.FileAttributes;
+  out_metadata->links = standard.NumberOfLinks;
+  out_metadata->logical_bytes = (guint64) standard.EndOfFile.QuadPart;
+  out_metadata->allocated_bytes = (guint64) standard.AllocationSize.QuadPart;
+  out_metadata->directory = standard.Directory;
+  out_metadata->reparse =
+      (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+  out_metadata->delete_pending = standard.DeletePending;
+  out_metadata->identity_matches_listing =
+      id.VolumeSerialNumber == locator->identity.volume_serial
+      && memcmp (id.FileId.Identifier, listed->file_id.Identifier,
+          sizeof listed->file_id.Identifier) == 0;
+  out_metadata->acl_valid =
+      wyl_fact_graph_win_validate_protected_owner_acl_for_user (handle,
+          locator->owner, 0) == WYRELOG_E_OK;
+  out_metadata->allocation_supported = TRUE;
+  if (inventory_allocation_fault_take ()) {
+    out_metadata->allocation_supported = FALSE;
+    out_metadata->allocated_bytes = 0;
+    state->allocation_unsupported = TRUE;
+  }
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+inventory_entry_bounds_valid (const BYTE *buffer,
+    const WylFileIdExtdDirInfo *entry)
+{
+  const BYTE *start = (const BYTE *) entry;
+  gsize header = offsetof (WylFileIdExtdDirInfo, file_name);
+  if (start < buffer || start > buffer + 64 * 1024
+      || (gsize) (buffer + 64 * 1024 - start) < header
+      || entry->file_name_length > buffer + 64 * 1024 - start - header
+      || entry->file_name_length % sizeof (WCHAR) != 0)
+    return FALSE;
+  if (entry->next_entry_offset != 0
+      && (entry->next_entry_offset < header
+      || entry->next_entry_offset > buffer + 64 * 1024 - start))
+    return FALSE;
+  return TRUE;
+}
+
+static wyrelog_error_t
+inventory_add_bytes (WylFactArtifactWinInventoryScan *scan,
+    WylFactArtifactWinInventoryValue *value,
+    const WylWinInventoryMetadata *metadata)
+{
+  if (value->logical_bytes > G_MAXUINT64 - metadata->logical_bytes
+      || value->allocated_bytes > G_MAXUINT64 - metadata->allocated_bytes)
+    return inventory_fail (scan,
+               WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW, WYRELOG_E_POLICY);
+  value->logical_bytes += metadata->logical_bytes;
+  value->allocated_bytes += metadata->allocated_bytes;
+  value->allocation_supported &= metadata->allocation_supported;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+inventory_scan_temp_root (WylFactArtifactWinLocator *locator, HANDLE root,
+    WylFactArtifactWinInventoryScan *scan, WylWinInventoryState *state)
+{
+  BYTE buffer[64 * 1024];
+  gboolean restart = TRUE;
+  guint child_count = 0;
+  if (inventory_enumeration_fault_take ())
+    return inventory_fail (scan, WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+               WYRELOG_E_IO);
+  for (;;) {
+    FILE_INFO_BY_HANDLE_CLASS klass = (FILE_INFO_BY_HANDLE_CLASS)
+        (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO
+        : WYL_FILE_ID_EXTD_DIRECTORY_INFO);
+    if (!GetFileInformationByHandleEx (root, klass, buffer, sizeof buffer)) {
+      DWORD error = GetLastError ();
+      if (error == ERROR_NO_MORE_FILES)
+        break;
+      return inventory_fail (scan,
+                 error == ERROR_MORE_DATA
+          ? WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW
+          : WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+                 error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+    }
+    restart = FALSE;
+    WylFileIdExtdDirInfo *current = (WylFileIdExtdDirInfo *) buffer;
+    for (;;) {
+      g_autofree gchar *name = NULL;
+      WylWinInventoryMetadata metadata = { 0 };
+      HANDLE handle = INVALID_HANDLE_VALUE;
+      gsize units;
+      gboolean valid_name;
+      wyrelog_error_t rc;
+      if (!inventory_entry_bounds_valid (buffer, current))
+        return inventory_fail (scan,
+                   WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY, WYRELOG_E_POLICY);
+      units = current->file_name_length / sizeof (WCHAR);
+      if ((units == 1 && current->file_name[0] == L'.')
+          || (units == 2 && current->file_name[0] == L'.'
+          && current->file_name[1] == L'.'))
+        goto next_child;
+      if (child_count++ >= WYL_WIN_INVENTORY_MAX_TEMP_CHILDREN
+          || state->total_entries++ >= WYL_WIN_INVENTORY_MAX_TOTAL_ENTRIES)
+        return inventory_fail (scan,
+                   WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW, WYRELOG_E_POLICY);
+      if (units > WYL_WIN_INVENTORY_MAX_NAME_UNITS) {
+        if (!inventory_add_digest (state, 2, current->file_name, units,
+            WYL_WIN_INVENTORY_CLASS_MALFORMED, current, NULL))
+          return inventory_fail (scan,
+                     WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+        rc = inventory_add_anomaly (scan, state,
+                WYL_FACT_ARTIFACT_INVENTORY_OVER_LIMIT_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+        goto next_child;
+      }
+      name = g_utf16_to_utf8 ((const gunichar2 *) current->file_name,
+              units, NULL, NULL, NULL);
+      valid_name = name != NULL && safe_component (name)
+          && inventory_temp_child_name (name);
+      if (!valid_name) {
+        if (!inventory_add_digest (state, 2, current->file_name, units,
+            WYL_WIN_INVENTORY_CLASS_MALFORMED, current, NULL))
+          return inventory_fail (scan,
+                     WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+        rc = inventory_add_anomaly (scan, state,
+                WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+        goto next_child;
+      }
+      if (inventory_temp_metadata_fault_take ())
+        return inventory_fail (scan, WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+                   WYRELOG_E_IO);
+      rc = inventory_open_relative (root, name, 0, &handle);
+      if (rc == WYRELOG_E_OK)
+        rc = inventory_query_metadata (locator, handle, current, state,
+                &metadata);
+      if (rc != WYRELOG_E_OK) {
+        if (valid_handle (handle))
+          CloseHandle (handle);
+        if (!inventory_add_digest (state, 2, current->file_name, units,
+            WYL_WIN_INVENTORY_CLASS_TEMP_CHILD, current, NULL))
+          return inventory_fail (scan,
+                     WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+        rc = inventory_add_anomaly (scan, state,
+                WYL_FACT_ARTIFACT_INVENTORY_UNREADABLE_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+        goto next_child;
+      }
+      CloseHandle (handle);
+      if (!inventory_add_digest (state, 2, current->file_name, units,
+          WYL_WIN_INVENTORY_CLASS_TEMP_CHILD, current, &metadata))
+        return inventory_fail (scan, WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+                   WYRELOG_E_NOMEM);
+      if (!metadata.identity_matches_listing) {
+        rc = inventory_add_anomaly (scan, state,
+                WYL_FACT_ARTIFACT_INVENTORY_SUBSTITUTED_ENTRY);
+      } else if (metadata.links != 1) {
+        rc = inventory_add_anomaly (scan, state,
+                WYL_FACT_ARTIFACT_INVENTORY_AMBIGUOUS_ENTRY);
+      } else if (metadata.directory || metadata.reparse
+          || metadata.delete_pending || !metadata.acl_valid) {
+        rc = inventory_add_anomaly (scan, state,
+                WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+      } else {
+        rc = inventory_add_bytes (scan, &scan->temporary, &metadata);
+      }
+      if (rc != WYRELOG_E_OK)
+        return rc;
+next_child:
+      if (current->next_entry_offset == 0)
+        break;
+      current = (WylFileIdExtdDirInfo *) ((BYTE *) current
+          + current->next_entry_offset);
+    }
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_locator_inventory_scan (WylFactArtifactWinLocator *locator,
+    WylFactArtifactWinInventoryScan *out_scan)
+{
+  BYTE buffer[64 * 1024];
+  WylWinInventoryState state = { 0 };
+  gboolean restart = TRUE;
+  guint root_count = 0;
+  wyrelog_error_t rc;
+  if (out_scan != NULL)
+    memset (out_scan, 0, sizeof *out_scan);
+  if (locator == NULL || out_scan == NULL)
+    return WYRELOG_E_INVALID;
+  out_scan->failure_status = WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID;
+  for (guint i = 0; i <= WYL_FACT_ARTIFACT_INVENTORY_LOCK; i++)
+    out_scan->fixed[i].allocation_supported = TRUE;
+  out_scan->temporary.allocation_supported = TRUE;
+  rc = wyl_fact_artifact_win_locator_revalidate (locator);
+  if (rc != WYRELOG_E_OK)
+    return inventory_fail (out_scan,
+               rc == WYRELOG_E_POLICY ? WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY
+        : WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, rc);
+  out_scan->directory_identity = locator->identity;
+  state.digests = g_array_sized_new (FALSE, FALSE,
+          sizeof (WylWinInventoryDigest), 64);
+  if (state.digests == NULL)
+    return inventory_fail (out_scan, WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+               WYRELOG_E_NOMEM);
+  if (inventory_enumeration_fault_take ()) {
+    rc = inventory_fail (out_scan, WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+            WYRELOG_E_IO);
+    goto done;
+  }
+  for (;;) {
+    FILE_INFO_BY_HANDLE_CLASS klass = (FILE_INFO_BY_HANDLE_CLASS)
+        (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO
+        : WYL_FILE_ID_EXTD_DIRECTORY_INFO);
+    if (!GetFileInformationByHandleEx (locator->directory, klass, buffer,
+        sizeof buffer)) {
+      DWORD error = GetLastError ();
+      if (error == ERROR_NO_MORE_FILES)
+        break;
+      rc = inventory_fail (out_scan,
+              error == ERROR_MORE_DATA
+              ? WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW
+              : WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+              error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+      goto done;
+    }
+    restart = FALSE;
+    WylFileIdExtdDirInfo *current = (WylFileIdExtdDirInfo *) buffer;
+    for (;;) {
+      g_autofree gchar *name = NULL;
+      WylWinInventoryMetadata metadata = { 0 };
+      HANDLE handle = INVALID_HANDLE_VALUE;
+      gboolean case_collision = FALSE;
+      WylWinInventoryClass classification = WYL_WIN_INVENTORY_CLASS_UNKNOWN;
+      gsize units;
+      gint slot = -1;
+      if (!inventory_entry_bounds_valid (buffer, current)) {
+        rc = inventory_fail (out_scan,
+                WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY, WYRELOG_E_POLICY);
+        goto done;
+      }
+      units = current->file_name_length / sizeof (WCHAR);
+      if ((units == 1 && current->file_name[0] == L'.')
+          || (units == 2 && current->file_name[0] == L'.'
+          && current->file_name[1] == L'.'))
+        goto next_root;
+      if (root_count++ >= WYL_WIN_INVENTORY_MAX_ROOT_ENTRIES
+          || state.total_entries++ >= WYL_WIN_INVENTORY_MAX_TOTAL_ENTRIES) {
+        rc = inventory_fail (out_scan,
+                WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW, WYRELOG_E_POLICY);
+        goto done;
+      }
+      if (units > WYL_WIN_INVENTORY_MAX_NAME_UNITS) {
+        if (!inventory_add_digest (&state, 1, current->file_name, units,
+            WYL_WIN_INVENTORY_CLASS_MALFORMED, current, NULL)) {
+          rc = inventory_fail (out_scan,
+                  WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+          goto done;
+        }
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_OVER_LIMIT_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          goto done;
+        goto next_root;
+      }
+      name = g_utf16_to_utf8 ((const gunichar2 *) current->file_name,
+              units, NULL, NULL, NULL);
+      if (name == NULL || !safe_component (name)) {
+        if (!inventory_add_digest (&state, 1, current->file_name, units,
+            WYL_WIN_INVENTORY_CLASS_MALFORMED, current, NULL)) {
+          rc = inventory_fail (out_scan,
+                  WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+          goto done;
+        }
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          goto done;
+        goto next_root;
+      }
+      slot = inventory_fixed_slot (name, &case_collision);
+      if (slot >= 0)
+        classification = WYL_WIN_INVENTORY_CLASS_FIXED;
+      else if (case_collision)
+        classification = WYL_WIN_INVENTORY_CLASS_MALFORMED;
+      else if (inventory_temp_root_name (name))
+        classification = WYL_WIN_INVENTORY_CLASS_TEMP_ROOT;
+
+      if (case_collision) {
+        if (!inventory_add_digest (&state, 1, current->file_name, units,
+            classification, current, NULL)) {
+          rc = inventory_fail (out_scan,
+                  WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+          goto done;
+        }
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_AMBIGUOUS_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          goto done;
+        goto next_root;
+      }
+      if (slot >= 0 && inventory_fixed_metadata_fault_take ()) {
+        rc = inventory_fail (out_scan,
+                WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_IO);
+        goto done;
+      }
+      if (classification == WYL_WIN_INVENTORY_CLASS_TEMP_ROOT
+          && inventory_temp_metadata_fault_take ()) {
+        rc = inventory_fail (out_scan,
+                WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_IO);
+        goto done;
+      }
+      rc = inventory_open_relative (locator->directory, name,
+              slot >= 0 ? 0
+              : classification == WYL_WIN_INVENTORY_CLASS_TEMP_ROOT ? 1 : -1,
+              &handle);
+      if (rc == WYRELOG_E_OK)
+        rc = inventory_query_metadata (locator, handle, current, &state,
+                &metadata);
+      if (rc != WYRELOG_E_OK) {
+        if (valid_handle (handle))
+          CloseHandle (handle);
+        if (slot >= 0) {
+          rc = inventory_fail (out_scan,
+                  rc == WYRELOG_E_POLICY
+              ? WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY
+              : WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, rc);
+          goto done;
+        }
+        if (!inventory_add_digest (&state, 1, current->file_name, units,
+            classification, current, NULL)) {
+          rc = inventory_fail (out_scan,
+                  WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+          goto done;
+        }
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_UNREADABLE_ENTRY);
+        if (rc != WYRELOG_E_OK)
+          goto done;
+        goto next_root;
+      }
+      if (!inventory_add_digest (&state, 1, current->file_name, units,
+          classification, current, &metadata)) {
+        CloseHandle (handle);
+        rc = inventory_fail (out_scan,
+                WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, WYRELOG_E_NOMEM);
+        goto done;
+      }
+      if (slot >= 0) {
+        WylFactArtifactWinInventoryValue *value = &out_scan->fixed[slot];
+        if (value->present || !metadata.identity_matches_listing
+            || metadata.directory || metadata.reparse
+            || metadata.delete_pending || metadata.links != 1
+            || !metadata.acl_valid) {
+          CloseHandle (handle);
+          rc = inventory_fail (out_scan,
+                  WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY, WYRELOG_E_POLICY);
+          goto done;
+        }
+        value->present = TRUE;
+        value->identity = metadata.identity;
+        value->logical_bytes = metadata.logical_bytes;
+        value->allocation_supported = metadata.allocation_supported;
+        value->allocated_bytes = metadata.allocated_bytes;
+      } else if (classification == WYL_WIN_INVENTORY_CLASS_TEMP_ROOT) {
+        if (!metadata.identity_matches_listing || !metadata.directory
+            || metadata.reparse || metadata.delete_pending
+            || !metadata.acl_valid) {
+          rc = inventory_add_anomaly (out_scan, &state,
+                  WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+        } else if (state.temp_roots++ >= WYL_WIN_INVENTORY_MAX_TEMP_ROOTS) {
+          rc = inventory_fail (out_scan,
+                  WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW, WYRELOG_E_POLICY);
+        } else {
+          out_scan->temporary.present = TRUE;
+          rc = inventory_scan_temp_root (locator, handle, out_scan, &state);
+        }
+      } else if (!metadata.identity_matches_listing) {
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_SUBSTITUTED_ENTRY);
+      } else if (metadata.links != 1) {
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_AMBIGUOUS_ENTRY);
+      } else if (metadata.directory || metadata.reparse
+          || metadata.delete_pending || !metadata.acl_valid) {
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+      } else {
+        rc = inventory_add_anomaly (out_scan, &state,
+                WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY);
+      }
+      CloseHandle (handle);
+      if (rc != WYRELOG_E_OK)
+        goto done;
+next_root:
+      if (current->next_entry_offset == 0)
+        break;
+      current = (WylFileIdExtdDirInfo *) ((BYTE *) current
+          + current->next_entry_offset);
+    }
+  }
+  rc = wyl_fact_artifact_win_locator_revalidate (locator);
+  if (rc != WYRELOG_E_OK) {
+    rc = inventory_fail (out_scan,
+            rc == WYRELOG_E_POLICY ? WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY
+        : WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO, rc);
+    goto done;
+  }
+  if (state.allocation_unsupported) {
+    rc = inventory_fail (out_scan,
+            WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSUPPORTED_ALLOCATION,
+            WYRELOG_E_POLICY);
+    goto done;
+  }
+  if (!inventory_finish_fingerprint (&state, &out_scan->directory_identity,
+      &out_scan->fingerprint)) {
+    rc = inventory_fail (out_scan, WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO,
+            WYRELOG_E_IO);
+    goto done;
+  }
+  rc = WYRELOG_E_OK;
+done:
+  g_array_unref (state.digests);
+  return rc;
 }
 
 wyrelog_error_t

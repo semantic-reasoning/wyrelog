@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Guard the Windows artifact test fault hooks out of shipped code.
 
-The hooks substitute a directory-flush result and a sidecar-replacement fault.
-A shipped library must contain neither: an armed hook makes an operation report
-a failure that should have succeeded, and the armed form also costs an
-interlocked read on every directory flush.  This checks the compile gate
+The hooks substitute directory-flush, sidecar-replacement, and inventory-scan
+faults.  A shipped library must contain none of them: an armed hook makes an
+operation report a failure that should have succeeded, and the armed form also
+costs an interlocked read on a production path.  This checks the compile gate
 structurally, by preprocessing the modules with the macro undefined and proving
 no hook survives, rather than by matching spellings.
 """
@@ -26,12 +26,18 @@ HOOK_SYMBOLS = (
     "wyl_fact_artifact_win_locator_take_next_directory_flush_error_for_test",
     "wyl_fact_artifact_win_locator_fail_next_rename_status_for_test",
     "wyl_fact_artifact_win_locator_take_next_rename_status_for_test",
+    "wyl_fact_artifact_win_locator_set_inventory_test_fault",
+    "wyl_fact_artifact_win_locator_take_inventory_test_fault",
     "wyl_fact_artifact_win_namespace_set_test_fault",
     "wyl_fact_artifact_win_namespace_take_test_fault",
+    "inventory_fault_take",
     "win_namespace_fault_take",
     "next_directory_flush_error",
     "next_rename_status",
+    "next_inventory_fault",
     "win_namespace_test_fault",
+    "WylFactArtifactWinInventoryTestFault",
+    "WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_",
     "WylFactArtifactWinNamespaceTestFault",
     "WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_",
 )
@@ -168,6 +174,6 @@ condition = tests_build.rindex("if host_machine.system() == 'windows'", 0,
 if ".allowed()" not in tests_build[condition:target]:
     raise SystemExit(
         "the Windows artifact test target must be gated on "
-        f"{OPTION}: its fixture arms and disarms both hooks")
+        f"{OPTION}: its fixture disarms all native artifact test hooks")
 
 print("windows artifact test hook wiring: OK")
