@@ -834,8 +834,12 @@ reconcile_graph_forgets (wyl_policy_store_t *policy, const gchar *fact_root,
   /* No schema creation here: this runs for every graph at every boot.  A
    * store with no forget ledger has nothing pending, and the reconciler
    * reports that as success rather than as a missing-table error. */
+  /* U2-1 threads the outcome out of the reconciler; U2-2 carries it into the
+   * replay summary.  Discarded here so this unit stays one behavioural
+   * change. */
+  wyl_fact_forget_outcome_t outcome = { 0 };
   return wyl_fact_store_forget_reconcile (store, graph_info->tenant_id,
-             graph_info->graph_id, NULL, NULL);
+             graph_info->graph_id, NULL, NULL, &outcome);
 }
 
 wyrelog_error_t
