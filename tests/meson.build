@@ -2694,6 +2694,7 @@ session_username_lifecycle_progress_env.set(
 
 test('session-username-lifecycle', test_session_username_lifecycle,
   env : session_username_lifecycle_progress_env,
+  timeout : 60,
 )
 
 check_session_username_lifecycle = find_program(

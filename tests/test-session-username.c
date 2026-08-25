@@ -2135,12 +2135,14 @@ check_poisoned_engine_rejects_session_mutations (void)
  *     (close, elevate / drop-elevation, idle timeout, expire) and their
  *     decision-scope and wirelog event side-effects.
  *
- * Splitting was driven by Meson's per-test 30s timeout: under CI parallel
- * scheduling the merged test crossed the wall-clock ceiling on Windows
- * (30.10s SIGTERM, 22.77s on prior main). Both variants now run in
- * parallel and each finishes well under the timeout. Variant-irrelevant
- * static helpers stay defined in this file; the build silences the
- * resulting -Wunused-function warnings.
+ * Splitting was driven by Meson's default per-test 30s timeout: under CI
+ * parallel scheduling the merged test crossed the wall-clock ceiling on
+ * Windows (30.10s SIGTERM, 22.77s on prior main). Fixed-count Windows
+ * evidence for issue #881 measured a 24.844s maximum for this variant
+ * under two-worker contention, so its finite 60s timeout preserves at
+ * least 1.5x measured headroom. Both variants continue to run in
+ * parallel. Variant-irrelevant static helpers stay defined in this file;
+ * the build silences the resulting -Wunused-function warnings.
  */
 #ifndef WYL_TEST_VARIANT_LIFECYCLE
 /*
