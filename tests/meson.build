@@ -1215,6 +1215,14 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+test_fact_artifact_main_transition = executable(
+  'test-fact-artifact-main-transition',
+  'test-fact-artifact-main-transition.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-artifact-main-transition', test_fact_artifact_main_transition)
+
 test_fact_artifact_inventory = executable('test-fact-artifact-inventory',
   'test-fact-artifact-inventory.c',
   include_directories : include_directories('../wyrelog'),
