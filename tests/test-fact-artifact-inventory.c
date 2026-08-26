@@ -108,6 +108,16 @@ assert_no_published_evidence (WylFactArtifactInventorySnapshot *snapshot)
         (snapshot), ==, 0);
   g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_allocated_bytes
         (snapshot), ==, 0);
+  WylFactArtifactInventoryObservation published = {
+    .directory_identity = { 9, 9, { 9 }, 0 },
+    .guard_identity = { 9, 9, { 9 }, 0 },
+    .entry_fingerprint = 9,
+  };
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_get_observation
+        (snapshot, &published));
+  g_assert_cmpuint (published.directory_identity.domain, ==, 0);
+  g_assert_cmpuint (published.guard_identity.domain, ==, 0);
+  g_assert_cmpuint (published.entry_fingerprint, ==, 0);
 }
 
 static void
@@ -392,6 +402,48 @@ test_extended_identity_and_sparse_allocation (void)
       &contradictory));
 }
 
+/* The observation accessor is what lets a consumer BIND a snapshot to the
+ * directory it is reasoning about.  Corroboration cannot substitute for it:
+ * identity.domain proves only same-volume and a slot identity proves an inode
+ * rather than a directory, so this is the only direct proof in the surface. */
+static void
+test_published_observation_binding (void)
+{
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot =
+      wyl_fact_artifact_inventory_snapshot_new (4);
+  WylFactArtifactInventoryObservation point = observation (73);
+  point.directory_identity = extended_identity (31, 5);
+  point.guard_identity = extended_identity (32, 6);
+  WylFactArtifactInventoryObservation published = {
+    .directory_identity = { 9, 9, { 9 }, 0 },
+    .guard_identity = { 9, 9, { 9 }, 0 },
+    .entry_fingerprint = 9,
+  };
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_get_observation (NULL,
+      &published));
+  g_assert_cmpuint (published.entry_fingerprint, ==, 0);
+  populate_slots_except (snapshot, -1, &point);
+  published.entry_fingerprint = 9;
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_get_observation
+        (snapshot, &published));
+  g_assert_cmpuint (published.entry_fingerprint, ==, 0);
+  wyl_fact_artifact_inventory_snapshot_end (snapshot, &point);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
+      ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_get_observation
+        (snapshot, &published));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&published.directory_identity, &point.directory_identity));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&published.guard_identity, &point.guard_identity));
+  g_assert_cmpuint (published.entry_fingerprint, ==, 73);
+  g_assert_false (wyl_fact_artifact_inventory_snapshot_get_observation
+        (snapshot, NULL));
+  WylFactArtifactInventoryIdentity neighbour = extended_identity (31, 6);
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal
+        (&published.directory_identity, &neighbour));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -414,5 +466,7 @@ main (int argc, char **argv)
       test_extended_observation_mismatch_clears_evidence);
   g_test_add_func ("/fact/artifact-inventory/extended-identity-sparse",
       test_extended_identity_and_sparse_allocation);
+  g_test_add_func ("/fact/artifact-inventory/published-observation-binding",
+      test_published_observation_binding);
   return g_test_run ();
 }
