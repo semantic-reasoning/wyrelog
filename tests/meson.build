@@ -82,6 +82,35 @@ test('check-explicit-encoding-self-test', python3,
   timeout : 120,
 )
 
+posix_errno_capability_pair_checker = files(
+  'test-posix-errno-capability-pair.py',
+)
+test('posix-errno-capability-pair', python3,
+  args : [
+    posix_errno_capability_pair_checker,
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+)
+test('posix-errno-capability-pair-self', python3,
+  args : [
+    posix_errno_capability_pair_checker,
+    '--self-test',
+  ],
+  env : python_strict_encoding_env,
+  timeout : 120,
+)
+
+if host_machine.system() != 'windows'
+  test_posix_errno_capability = executable('test-posix-errno-capability',
+    'test-posix-errno-capability.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [glib_dep],
+  )
+
+  test('posix-errno-capability', test_posix_errno_capability)
+endif
+
 test('engine-session-boundary', python3,
   args : [
     files('../tools/check-engine-session-boundary.py'),

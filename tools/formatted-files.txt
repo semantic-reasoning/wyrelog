@@ -38,6 +38,7 @@ tests/test-login-req.c
 tests/test-policy-graph-authority.c
 tests/test-policy-store-totp.c
 tests/test-policy-store.c
+tests/test-posix-errno-capability.c
 tests/test-revoke-req.c
 tests/test-secure-duckdb-bridge.c
 tests/test-service-credential-domain.c
@@ -146,6 +147,7 @@ wyrelog/policy/store.c
 wyrelog/session.h
 wyrelog/version.h
 wyrelog/wyctl/wyctl-config.h
+wyrelog/wyctl/wyctl-publication-posix-private.c
 wyrelog/wyctl/wyctl-token-file.h
 wyrelog/wyl-boot-private.h
 wyrelog/wyl-boot.c
@@ -167,6 +169,7 @@ wyrelog/wyl-handle.c
 wyrelog/wyl-id-private.h
 wyrelog/wyl-keyprovider-dev-private.h
 wyrelog/wyl-keyprovider-dev.c
+wyrelog/wyl-posix-errno-private.h
 wyrelog/wyl-request-id-private.h
 wyrelog/wyl-request-id.c
 wyrelog/wyl-session-layout-private.h
