@@ -715,6 +715,7 @@ WINDOWS_SECURE_TEST_COMMAND = (
     "duckdb-fixed-wal-successful-checkpoint",
     "duckdb-fixed-wal-pre-move-abort-reopen",
     "duckdb-fixed-wal-interrupted-recovery",
+    "fact-artifact-main-transition",
     "--print-errorlogs",
 )
 SECURE_POSIX_ACTIVE_COMMANDS = (
@@ -754,7 +755,7 @@ WINDOWS_ACTIVE_COMMANDS = (
     'builddir\\wyrelog\\wyrelogd.exe --help | findstr /C:"--listen-port"',
     'if "${{ matrix.secure_bridge }}"=="enabled" (',
     "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows",
-    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery --print-errorlogs",
+    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition --print-errorlogs",
     'meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"',
     ") else (",
     "meson test -C builddir --print-errorlogs --suite wyrelog",
@@ -1881,8 +1882,8 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  build-windows:",
             None,
             "Build and test (clang-cl)",
-            "duckdb-fixed-wal-interrupted-recovery --print-errorlogs",
-            "duckdb-fixed-wal-interrupted-recovery --print-errorlogs & exit /b 0",
+            "fact-artifact-main-transition --print-errorlogs",
+            "fact-artifact-main-transition --print-errorlogs & exit /b 0",
         )
     mutations.append(
         ("windows-failure-swallow", windows_swallow, {"E_INVENTORY_CI_WINDOWS"})
