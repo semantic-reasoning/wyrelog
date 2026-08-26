@@ -283,7 +283,7 @@ static void
 test_triple_and_identity (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t1");
+  fixture_init (&fixture, "u2a-t1-XXXXXX");
   /* Deliberately different sizes and therefore different inodes, so a
    * slot-to-name mix-up diverges instead of comparing equal. */
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
@@ -325,7 +325,7 @@ test_absent_slot_combinations (void)
 {
   for (guint mask = 0; mask < 8; mask++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t2-%u", mask);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t2-%u-XXXXXX", mask);
     fixture_init (&fixture, tag);
     const gchar *names[] = {
       WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, fixture.names.stage,
@@ -359,7 +359,7 @@ static void
 test_unreadable_slot_is_not_absent (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t3");
+  fixture_init (&fixture, "u2a-t3-XXXXXX");
   make_conforming (&fixture, fixture.names.stage, 1);
   /* The seam models the openat failure directly, because a mode-based
    * fixture is unreliable when the suite runs as root -- which some CI
@@ -381,7 +381,7 @@ test_symlink_detection (void)
 {
   for (guint slot = 0; slot < MT (SLOT_COUNT); slot++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t4-%u", slot);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t4-%u-XXXXXX", slot);
     fixture_init (&fixture, tag);
     const gchar *names[] = {
       WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, fixture.names.stage,
@@ -443,7 +443,7 @@ static void
 test_hard_link_detection (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t5");
+  fixture_init (&fixture, "u2a-t5-XXXXXX");
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
   make_conforming (&fixture, fixture.names.stage, 2);
   /* RULE 1: the partner lives OUTSIDE the graph directory.  Inside, the case
@@ -491,7 +491,7 @@ test_ownership_detection (void)
   const mode_t modes[] = { 0644, 04600 };
   for (gsize index = 0; index < G_N_ELEMENTS (modes); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t6-%zu", index);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t6-%zu-XXXXXX", index);
     fixture_init (&fixture, tag);
     make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
     make_conforming (&fixture, fixture.names.stage, 2);
@@ -523,7 +523,7 @@ static void
 test_non_regular_is_not_conforming (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t7");
+  fixture_init (&fixture, "u2a-t7-XXXXXX");
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
   g_autofree gchar *fifo_path = g_build_filename (fixture.graph_path,
           fixture.names.stage, NULL);
@@ -556,7 +556,7 @@ static void
 test_probe_supported (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t8");
+  fixture_init (&fixture, "u2a-t8-XXXXXX");
   Capability capability = { 0 };
   g_assert_cmpint (wyl_fact_artifact_transition_posix_probe_capability
         (&fixture.directory, OPERATION_UUID, &capability), ==, WYRELOG_E_OK);
@@ -603,7 +603,8 @@ test_probe_unambiguity (void)
   };
   for (gsize index = 0; index < G_N_ELEMENTS (rows); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t9-%s", rows[index].label);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t9-%s-XXXXXX",
+            rows[index].label);
     fixture_init (&fixture, tag);
     Capability capability = { .no_replace_supported = TRUE };
     wyl_fact_artifact_transition_posix_set_test_rename_errno
@@ -627,7 +628,7 @@ test_probe_unambiguity (void)
   /* A CREATE failure is not a capability answer either: without a created
    * source the rename's errno says nothing about the flag. */
   Fixture create_fixture;
-  fixture_init (&create_fixture, "u2a-t9-create");
+  fixture_init (&create_fixture, "u2a-t9-create-XXXXXX");
   Capability create_capability = { .no_replace_supported = TRUE };
   wyl_fact_artifact_transition_posix_set_test_fault (PF (PROBE_CREATE));
   g_assert_cmpint (wyl_fact_artifact_transition_posix_probe_capability
@@ -652,7 +653,7 @@ static void
 test_probe_preclean_fails_closed (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t9c");
+  fixture_init (&fixture, "u2a-t9c-XXXXXX");
   make_conforming (&fixture, fixture.names.probe, 4);
   Capability capability = { .no_replace_supported = TRUE };
   wyl_fact_artifact_transition_posix_set_test_fault (PF (PROBE_PRECLEAN));
@@ -702,7 +703,7 @@ test_probe_flush_capability_rows (void)
   };
   for (gsize index = 0; index < G_N_ELEMENTS (rows); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-flush-%s",
+    g_autofree gchar *tag = g_strdup_printf ("u2a-flush-%s-XXXXXX",
             rows[index].label);
     fixture_init (&fixture, tag);
     /* POISONED, not zero-filled: { 0 } already means UNPROVEN, so asserting
@@ -761,7 +762,7 @@ test_probe_leaves_nothing_behind (void)
   };
   for (gsize index = 0; index < G_N_ELEMENTS (arms); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t10-%zu", index);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t10-%zu-XXXXXX", index);
     fixture_init (&fixture, tag);
     make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
     g_autoptr (GPtrArray) before = entry_set (&fixture);
@@ -779,7 +780,7 @@ static void
 test_probe_retire_leftover_is_recoverable (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t10r");
+  fixture_init (&fixture, "u2a-t10r-XXXXXX");
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
   g_autoptr (GPtrArray) baseline = entry_set (&fixture);
 
@@ -819,7 +820,7 @@ test_probe_recovers_from_crashed_predecessor (void)
   for (guint plant = plant_probe; plant <= (plant_probe | plant_moved);
       plant++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t10b-%u", plant);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t10b-%u-XXXXXX", plant);
     fixture_init (&fixture, tag);
     make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
     g_autoptr (GPtrArray) baseline = entry_set (&fixture);
@@ -874,7 +875,7 @@ test_end_to_end_classification (void)
   };
   for (gsize index = 0; index < G_N_ELEMENTS (rows); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t11-%zu", index);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t11-%zu-XXXXXX", index);
     fixture_init (&fixture, tag);
     /* Every fixture entry is an independent conforming file, NOT a hard link
      * to another.  A hard link would give link_count 2 and every row would
@@ -927,7 +928,7 @@ static void
 test_lease_and_directory_identity (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t12");
+  fixture_init (&fixture, "u2a-t12-XXXXXX");
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
   make_conforming (&fixture, fixture.names.stage, 2);
 
@@ -960,7 +961,7 @@ static void
 test_durability_fields_are_unproven (void)
 {
   Fixture fixture;
-  fixture_init (&fixture, "u2a-t13");
+  fixture_init (&fixture, "u2a-t13-XXXXXX");
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 1);
   make_conforming (&fixture, fixture.names.stage, 2);
   Observation observation;
@@ -991,7 +992,7 @@ test_fault_seams_are_reachable (void)
   };
   for (gsize index = 0; index < G_N_ELEMENTS (probe_arms); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t14p-%zu", index);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t14p-%zu-XXXXXX", index);
     fixture_init (&fixture, tag);
     Capability capability = { 0 };
     wyl_fact_artifact_transition_posix_set_test_fault (probe_arms[index]);
@@ -1008,7 +1009,7 @@ test_fault_seams_are_reachable (void)
   };
   for (gsize index = 0; index < G_N_ELEMENTS (observe_arms); index++) {
     Fixture fixture;
-    g_autofree gchar *tag = g_strdup_printf ("u2a-t14o-%zu", index);
+    g_autofree gchar *tag = g_strdup_printf ("u2a-t14o-%zu-XXXXXX", index);
     fixture_init (&fixture, tag);
     make_conforming (&fixture, fixture.names.stage, 2);
     Observation observation;
