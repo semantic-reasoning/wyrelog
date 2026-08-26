@@ -405,6 +405,7 @@ meson test -C build-daemon-http-shared-audit-disabled --no-rebuild \\
   daemon-http-decide-private-symbols \\
   --print-errorlogs"""
 expected_audit_disabled_steps = [
+    "Verify GitHub-hosted runner contract",
     "Check out source",
     "Install build dependencies",
     "Restore meson packagecache",
@@ -414,17 +415,21 @@ expected_audit_disabled_steps = [
     "Test audit-disabled daemon readiness",
     "Upload audit-disabled daemon HTTP meson logs on failure",
 ]
-expected_audit_disabled_checkout = "uses: actions/checkout@v5"
+expected_audit_disabled_checkout = """\
+# actions/checkout v5
+uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"""
 expected_audit_disabled_cache = """\
-uses: actions/cache/restore@v5
+# actions/cache v5
+uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
 with:
   path: subprojects/packagecache
   key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
   restore-keys: |
     Linux-packagecache-"""
 expected_audit_disabled_upload = """\
-if: failure()
-uses: actions/upload-artifact@v6
+if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+# actions/upload-artifact v6
+uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
 with:
   name: daemon-http-shared-fact-audit-disabled-logs-ubuntu-fact-${{ matrix.fact_store }}
   path: build-daemon-http-shared-audit-disabled/meson-logs/
@@ -490,8 +495,8 @@ for workflow_path in map(Path, sys.argv[5:]):
                 "provenance step"
             )
         expected_diagnostic = (
-            "if: ${{ always() && "
-            "steps.compile_daemon_http.outcome == 'success' }}\n"
+            "if: ${{ runner.environment == 'github-hosted' && (always() && "
+            "steps.compile_daemon_http.outcome == 'success') }}\n"
             "continue-on-error: true\n"
             "timeout-minutes: 6\n"
             "run: |\n"

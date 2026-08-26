@@ -19,13 +19,34 @@ jobs:
     name: actionlint
     runs-on: ubuntu-latest
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       # Workflow defects otherwise surface only once a job runs, and an invalid
       # expression takes the whole file with it. Runs on every pull request
       # rather than filtering on paths, so the check can never be pending.
       - name: Lint workflow definitions
-        uses: docker://rhysd/actionlint:1.7.12
-        with:
-          args: -color
+        shell: bash
+        run: |
+          set -euo pipefail
+          actionlint_version='1.7.12'
+          actionlint_archive="actionlint_${actionlint_version}_linux_amd64.tar.gz"
+          actionlint_url="https://github.com/rhysd/actionlint/releases/download/v${actionlint_version}/${actionlint_archive}"
+          actionlint_sha256='8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+          actionlint_dir="$RUNNER_TEMP/actionlint-${actionlint_version}"
+          mkdir -p "$actionlint_dir"
+          curl --fail --location --silent --show-error \
+            --output "$actionlint_dir/$actionlint_archive" "$actionlint_url"
+          printf '%s  %s\n' "$actionlint_sha256" \
+            "$actionlint_dir/$actionlint_archive" | sha256sum --check -
+          tar -xzf "$actionlint_dir/$actionlint_archive" -C "$actionlint_dir"
+          "$actionlint_dir/actionlint" -color

@@ -2912,6 +2912,18 @@ test('check-sccache-fallback-workflows', python3,
     meson.project_source_root()],
 )
 
+test('ci-hosted-runner-contract', python3,
+  args : [files('test-ci-hosted-runner-contract.py'),
+    meson.project_source_root()],
+  env : python_strict_encoding_env,
+)
+
+test('ci-hosted-runner-contract-self-test', python3,
+  args : [files('test-ci-hosted-runner-contract.py'),
+    '--self-test', meson.project_source_root()],
+  env : python_strict_encoding_env,
+)
+
 check_no_derived_fsm_replay = find_program(
   '../tools/check-no-derived-fsm-replay.sh',
 )

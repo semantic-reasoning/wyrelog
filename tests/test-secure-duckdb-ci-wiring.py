@@ -141,7 +141,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
             f"{workflow_name} secure swap provisioning is not Linux-only"
         )
     if (
-        "        if: always() && runner.os == 'Linux'\n" not in remove_secure
+        "        if: ${{ runner.environment == 'github-hosted' && "
+        "(always() && runner.os == 'Linux') }}\n" not in remove_secure
         or logical_commands(remove_secure)
         != ["bash .github/scripts/duckdb-compile-swap.sh cleanup secure"]
     ):
@@ -181,7 +182,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         )
     log_step = named_step(build_posix, "      - name: Upload meson logs on failure")
     if (
-        "        if: failure()\n" not in log_step
+        "        if: ${{ runner.environment == 'github-hosted' && "
+        "(failure()) }}\n" not in log_step
         or "          path: |\n" not in log_step
         or "            builddir/meson-logs/\n" not in log_step
         or "            build-secure-duckdb/meson-logs/\n" not in log_step
@@ -198,7 +200,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
             f"{workflow_name} checkpoint seam does not reuse swap provisioning"
         )
     if (
-        "        if: always() && runner.os == 'Linux'\n" not in remove_seam
+        "        if: ${{ runner.environment == 'github-hosted' && "
+        "(always() && runner.os == 'Linux') }}\n" not in remove_seam
         or logical_commands(remove_seam)
         != ["bash .github/scripts/duckdb-compile-swap.sh cleanup seam"]
     ):
