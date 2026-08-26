@@ -133,6 +133,15 @@ gboolean wyl_fact_artifact_inventory_snapshot_get_slot_evidence
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventorySlot slot,
     WylFactArtifactInventorySlotEvidence *out_evidence);
+/* Publishes the observation the snapshot was built against, so a consumer can
+ * bind the snapshot to the directory it is reasoning about rather than merely
+ * corroborate it.  Like the slot accessor above, this zero-fills the output on
+ * every entry and returns FALSE unless the snapshot is published; on TRUE it
+ * returns the begin observation, which finalization has already proven equal
+ * to the end observation. */
+gboolean wyl_fact_artifact_inventory_snapshot_get_observation
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventoryObservation *out_observation);
 gboolean wyl_fact_artifact_inventory_snapshot_slot_present
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventorySlot slot);

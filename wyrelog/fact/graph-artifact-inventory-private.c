@@ -335,6 +335,19 @@ wyl_fact_artifact_inventory_snapshot_get_slot_evidence
 }
 
 gboolean
+wyl_fact_artifact_inventory_snapshot_get_observation
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventoryObservation *out_observation)
+{
+  if (out_observation != NULL)
+    *out_observation = (WylFactArtifactInventoryObservation) { 0 };
+  if (out_observation == NULL || !snapshot_published (snapshot))
+    return FALSE;
+  *out_observation = snapshot->begin;
+  return TRUE;
+}
+
+gboolean
 wyl_fact_artifact_inventory_snapshot_slot_present
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventorySlot slot)
