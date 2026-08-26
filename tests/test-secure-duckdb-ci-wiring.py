@@ -73,12 +73,20 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     compile_command = (
         '/usr/bin/time "${time_args[@]}" '
         "meson compile -C build-secure-duckdb -j 1 "
+        "test-fact-artifact-inventory "
+        "test-fact-artifact-inventory-consumers "
+        "test-fact-artifact-namespace "
         "test-secure-duckdb-bridge "
         "test-secure-duckdb-filesystem "
         "test-secure-duckdb-recording-filesystem"
     )
     test_command = (
         "meson test -C build-secure-duckdb --no-rebuild "
+        "fact-artifact-inventory-contract "
+        "fact-artifact-inventory-consumer-contract "
+        "fact-artifact-namespace-inventory "
+        "fact-artifact-inventory-consumer-wiring "
+        "fact-artifact-inventory-consumer-wiring-self "
         "secure-duckdb-bridge secure-duckdb-filesystem "
         "secure-duckdb-recording-filesystem --print-errorlogs"
     )

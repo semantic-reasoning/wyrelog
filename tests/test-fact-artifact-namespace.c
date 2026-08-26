@@ -4354,6 +4354,32 @@ test_inventory_provider (void)
       WYL_FACT_ARTIFACT_INVENTORY_MAIN));
   g_assert_true (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_TEMP));
+  guint64 slot_logical_total = 0;
+  guint64 slot_allocated_total = 0;
+  for (guint slot = 0; slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; slot++) {
+    WylFactArtifactInventorySlotEvidence slot_evidence = { 0 };
+    g_assert_true (wyl_fact_artifact_inventory_snapshot_get_slot_evidence
+          (snapshot, slot, &slot_evidence));
+    gboolean expected_present = slot == WYL_FACT_ARTIFACT_INVENTORY_MAIN
+        || slot == WYL_FACT_ARTIFACT_INVENTORY_LOCK
+        || slot == WYL_FACT_ARTIFACT_INVENTORY_TEMP;
+    g_assert_cmpint (slot_evidence.present, ==, expected_present);
+    g_assert_true (slot_evidence.allocation_supported);
+    if (slot_evidence.present
+        && slot != WYL_FACT_ARTIFACT_INVENTORY_TEMP) {
+      g_assert_cmpuint (slot_evidence.identity.domain, !=, 0);
+      g_assert_cmpuint (slot_evidence.identity.object, !=, 0);
+    } else {
+      g_assert_cmpuint (slot_evidence.identity.domain, ==, 0);
+      g_assert_cmpuint (slot_evidence.identity.object, ==, 0);
+    }
+    slot_logical_total += slot_evidence.logical_bytes;
+    slot_allocated_total += slot_evidence.allocated_bytes;
+  }
+  g_assert_cmpuint (slot_logical_total, ==,
+      wyl_fact_artifact_inventory_snapshot_logical_bytes (snapshot));
+  g_assert_cmpuint (slot_allocated_total, ==,
+      wyl_fact_artifact_inventory_snapshot_allocated_bytes (snapshot));
   WylFactArtifactInventoryIdentity main_identity = { 0 };
   wyl_fact_artifact_inventory_snapshot_slot_identity (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_MAIN, &main_identity);
@@ -4384,6 +4410,8 @@ test_inventory_provider (void)
   g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
         (snapshot, WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY), ==, 1);
   g_assert_cmpint (unlink (malformed_path), ==, 0);
+  g_clear_pointer (&snapshot,
+      wyl_fact_artifact_inventory_snapshot_free);
 
   g_autofree gchar *foreign_path = g_build_filename (graph_path, "foreign",
           NULL);

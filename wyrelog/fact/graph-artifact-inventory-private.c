@@ -106,6 +106,15 @@ snapshot_ready_to_finalize
   return snapshot_mutable (snapshot) && snapshot->began && snapshot->ended;
 }
 
+static gboolean
+snapshot_published (const WylFactArtifactInventorySnapshot *snapshot)
+{
+  return snapshot != NULL && snapshot->finalized
+         && (snapshot->status == WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE
+         || snapshot->status
+         == WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+}
+
 WylFactArtifactInventorySnapshot *
 wyl_fact_artifact_inventory_snapshot_new (guint max_anomalies)
 {
@@ -182,7 +191,13 @@ wyl_fact_artifact_inventory_snapshot_set_slot
   if (!snapshot_building (snapshot)
       || slot >= WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT)
     return WYRELOG_E_INVALID;
-  if (identity != NULL && !inventory_identity_valid (identity))
+  if ((present && slot < WYL_FACT_ARTIFACT_INVENTORY_TEMP
+      && identity == NULL)
+      || (present && slot == WYL_FACT_ARTIFACT_INVENTORY_TEMP
+      && identity != NULL)
+      || (!present && (identity != NULL || logical_bytes != 0
+      || !allocation_supported || allocated_bytes != 0))
+      || (identity != NULL && !inventory_identity_valid (identity)))
     return wyl_fact_artifact_inventory_snapshot_fail (snapshot,
                WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY);
   if (!allocation_supported && allocated_bytes != 0)
@@ -259,6 +274,13 @@ wyl_fact_artifact_inventory_snapshot_finalize
 {
   if (!snapshot_ready_to_finalize (snapshot))
     return WYRELOG_E_INVALID;
+  for (guint slot = 0; slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; slot++) {
+    if (!snapshot->slot_set[slot]) {
+      snapshot_zero_result (snapshot);
+      snapshot->status = WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY;
+      return WYRELOG_E_POLICY;
+    }
+  }
   if (!observation_equal (&snapshot->begin, &snapshot->end)) {
     snapshot_zero_result (snapshot);
     snapshot->status = WYL_FACT_ARTIFACT_INVENTORY_STATUS_UNSTABLE;
@@ -291,12 +313,36 @@ wyl_fact_artifact_inventory_snapshot_status
 }
 
 gboolean
+wyl_fact_artifact_inventory_snapshot_get_slot_evidence
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventorySlot slot,
+    WylFactArtifactInventorySlotEvidence *out_evidence)
+{
+  if (out_evidence != NULL)
+    *out_evidence = (WylFactArtifactInventorySlotEvidence) { 0 };
+  if (out_evidence == NULL || !snapshot_published (snapshot)
+      || slot >= WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT)
+    return FALSE;
+  const WylFactArtifactInventorySlotState *state = &snapshot->slots[slot];
+  *out_evidence = (WylFactArtifactInventorySlotEvidence) {
+    .present = state->present,
+    .identity = state->identity,
+    .logical_bytes = state->logical_bytes,
+    .allocation_supported = state->allocation_supported,
+    .allocated_bytes = state->allocated_bytes,
+  };
+  return TRUE;
+}
+
+gboolean
 wyl_fact_artifact_inventory_snapshot_slot_present
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventorySlot slot)
 {
-  return snapshot != NULL && slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT
-         && snapshot->slots[slot].present;
+  WylFactArtifactInventorySlotEvidence evidence = { 0 };
+  return wyl_fact_artifact_inventory_snapshot_get_slot_evidence (snapshot,
+             slot, &evidence)
+         && evidence.present;
 }
 
 void
@@ -305,25 +351,27 @@ wyl_fact_artifact_inventory_snapshot_slot_identity
     WylFactArtifactInventorySlot slot,
     WylFactArtifactInventoryIdentity *out_identity)
 {
-  if (out_identity != NULL)
-    *out_identity = snapshot != NULL
-        && slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT
-        ? snapshot->slots[slot].identity
-        : (WylFactArtifactInventoryIdentity) { 0 };
+  WylFactArtifactInventorySlotEvidence evidence = { 0 };
+  if (out_identity != NULL) {
+    *out_identity = (WylFactArtifactInventoryIdentity) { 0 };
+    if (wyl_fact_artifact_inventory_snapshot_get_slot_evidence (snapshot,
+        slot, &evidence))
+      *out_identity = evidence.identity;
+  }
 }
 
 guint64
 wyl_fact_artifact_inventory_snapshot_logical_bytes
   (const WylFactArtifactInventorySnapshot *snapshot)
 {
-  return snapshot == NULL ? 0 : snapshot->logical_bytes;
+  return snapshot_published (snapshot) ? snapshot->logical_bytes : 0;
 }
 
 guint64
 wyl_fact_artifact_inventory_snapshot_allocated_bytes
   (const WylFactArtifactInventorySnapshot *snapshot)
 {
-  return snapshot == NULL ? 0 : snapshot->allocated_bytes;
+  return snapshot_published (snapshot) ? snapshot->allocated_bytes : 0;
 }
 
 guint
@@ -331,6 +379,7 @@ wyl_fact_artifact_inventory_snapshot_anomaly_count
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventoryAnomaly anomaly)
 {
-  return snapshot == NULL || anomaly >= WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT
+  return !snapshot_published (snapshot)
+         || anomaly >= WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT
       ? 0 : snapshot->anomalies[anomaly];
 }

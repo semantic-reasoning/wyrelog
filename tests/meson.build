@@ -1215,14 +1215,35 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
-if get_option('enable_fact_store').allowed()
-  test_fact_artifact_inventory = executable('test-fact-artifact-inventory',
-    'test-fact-artifact-inventory.c',
-    include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep],
-  )
-  test('fact-artifact-inventory-contract', test_fact_artifact_inventory)
-endif
+test_fact_artifact_inventory = executable('test-fact-artifact-inventory',
+  'test-fact-artifact-inventory.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-artifact-inventory-contract', test_fact_artifact_inventory)
+
+test_fact_artifact_inventory_consumers = executable(
+  'test-fact-artifact-inventory-consumers',
+  'test-fact-artifact-inventory-consumers.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-artifact-inventory-consumer-contract',
+  test_fact_artifact_inventory_consumers)
+
+test('fact-artifact-inventory-consumer-wiring', python3,
+  args : [
+    meson.current_source_dir() / 'test-fact-artifact-inventory-consumer-wiring.py',
+    meson.project_source_root(),
+  ],
+)
+test('fact-artifact-inventory-consumer-wiring-self', python3,
+  args : [
+    meson.current_source_dir() / 'test-fact-artifact-inventory-consumer-wiring.py',
+    '--self-test',
+    meson.project_source_root(),
+  ],
+)
 
 test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   'test-fact-artifact-namespace.c',
@@ -1230,6 +1251,11 @@ test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   dependencies : [wyrelog_handle_test_seams_dep],
 )
 test('fact-artifact-namespace', test_fact_artifact_namespace)
+if host_machine.system() != 'windows'
+  test('fact-artifact-namespace-inventory', test_fact_artifact_namespace,
+    args : ['-p', '/fact-artifact-namespace/inventory-provider'],
+  )
+endif
 if host_machine.system() == 'windows' and win_artifact_test_hooks_opt.allowed()
   # This is intentionally separate from test-fact-artifact-namespace: that
   # historical POSIX test is compiled out on Windows and cannot prove native
