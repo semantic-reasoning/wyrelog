@@ -140,7 +140,7 @@ EXPECTED_MACOS_STEP = """      - name: Install build dependencies (macOS)
           HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: |
           brew update
-          brew install meson ninja pkg-config glib sqlite libsoup libsodium gnu-patch""" + "\n"
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium gpatch""" + "\n"
 EXPECTED_GATE_STEP = r"""      - name: Test focused checkpoint seam
         run: |
           meson test -C build-duckdb-seam --no-rebuild \

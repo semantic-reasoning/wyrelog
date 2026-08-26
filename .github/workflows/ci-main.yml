@@ -344,7 +344,7 @@ jobs:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: |
           brew update
-          brew install meson ninja pkg-config glib sqlite libsoup libsodium gnu-patch
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium gpatch
 
       - name: Cache meson packagecache
         # actions/cache v5
