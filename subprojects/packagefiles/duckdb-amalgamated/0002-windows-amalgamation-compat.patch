@@ -1,7 +1,12 @@
 diff --git a/duckdb.cpp b/duckdb.cpp
 --- a/duckdb.cpp
 +++ b/duckdb.cpp
-@@ -53727,3 +53727,7 @@
+@@ -53722,8 +53722,12 @@
+-
++
+ #include <windows.h>
+-
++
  #undef CreateDirectory
 +#ifdef interface
 +#undef interface
@@ -9,7 +14,13 @@ diff --git a/duckdb.cpp b/duckdb.cpp
 +
  #undef MoveFile
  #undef RemoveDirectory
-@@ -337549,5 +337553,8 @@ class LightweightSemaphore
+-
++
+ #endif
+@@ -337545,8 +337549,11 @@
+ #endif
+-
++
  #if defined(_WIN32)
  #include <windows.h>
 +#ifdef interface
@@ -18,7 +29,10 @@ diff --git a/duckdb.cpp b/duckdb.cpp
  #elif defined(__GNUC__)
  #include <sched.h>
  #include <unistd.h>
-@@ -466172,5 +466180,8 @@
+ #if defined(__GLIBC__)
+@@ -466168,8 +466175,11 @@
+ #else
+ #ifdef _WIN32
  // Requires Windows Vista or Windows Server 2008 at minimum.
  #include <windows.h>
 +#ifdef interface
@@ -27,15 +41,23 @@ diff --git a/duckdb.cpp b/duckdb.cpp
  #if defined(WINVER) && WINVER >= 0x0600
  #define MUTEX_IS_WIN32_SRWLOCK
  #endif
-@@ -595999,4 +596011,7 @@ void mbedtls_platform_zeroize(void *buf, size_t len)
+ #else
+@@ -595996,8 +596006,11 @@
+ #include <string.h>
+-
++
  #if defined(_WIN32)
  #include <windows.h>
 +#ifdef interface
 +#undef interface
 +#endif
  #endif
+-
++
  // Detect platforms known to support explicit_bzero()
-@@ -596211,6 +596227,9 @@ int mbedtls_platform_gmtime_r(const mbedtls_time_t *tt, struct tm *tm_buf)
+ #if defined(__GLIBC__) && (__GLIBC__ >= 2) && (__GLIBC_MINOR__ >= 25)
+@@ -596208,8 +596221,11 @@
+ }
  #elif defined(_WIN32) || defined(WIN32) || defined(__CYGWIN__) || \
      defined(__MINGW32__) || defined(_WIN64)
  #include <windows.h>
@@ -45,7 +67,11 @@ diff --git a/duckdb.cpp b/duckdb.cpp
  mbedtls_ms_time_t mbedtls_ms_time(void)
  {
      FILETIME ct;
-@@ -615542,4 +615562,7 @@ static void ZSTD_wildcopy(void* dst, const void* src, ptrdiff_t length, unsigne
+     mbedtls_ms_time_t current_ms;
+@@ -615539,8 +615555,11 @@
+ #endif
+-
++
  #undef ERROR   /* reported already defined on VS 2015 (Rich Geldreich) */
  #include <windows.h>
 +#ifdef interface
@@ -53,3 +79,6 @@ diff --git a/duckdb.cpp b/duckdb.cpp
 +#endif
  #undef ERROR
  #define ERROR(name) ZSTD_ERROR(name)
+-
++
+ /* mutex */

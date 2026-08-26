@@ -333,7 +333,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config \
+            meson ninja-build pkg-config patch \
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
           sudo apt-get install -y --no-install-recommends time
           sudo apt-get clean
@@ -344,7 +344,7 @@ jobs:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: |
           brew update
-          brew install meson ninja pkg-config glib sqlite libsoup libsodium
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium gnu-patch
 
       - name: Cache meson packagecache
         # actions/cache v5
@@ -396,6 +396,9 @@ jobs:
           meson test -C build-duckdb-seam --no-rebuild \
             duckdb-after-walstart-no-wal \
             duckdb-after-walstart-rendezvous \
+            duckdb-patch-stack-determinism \
+            duckdb-patch-stack-determinism-self-test \
+            duckdb-patch-stack-determinism-strict \
             duckdb-fixed-wal-successful-checkpoint \
             duckdb-fixed-wal-pre-move-abort-reopen \
             duckdb-fixed-wal-interrupted-recovery \

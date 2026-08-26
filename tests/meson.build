@@ -1,5 +1,37 @@
 fs = import('fs')
 python3 = find_program('python3')
+
+# BEGIN duckdb-patch-stack-determinism
+test('duckdb-patch-stack-determinism', python3,
+  args : [files('test-duckdb-patch-stack-determinism.py'),
+    meson.project_source_root()])
+
+test('duckdb-patch-stack-determinism-self-test', python3,
+  args : [files('test-duckdb-patch-stack-determinism.py'),
+    '--self-test', meson.project_source_root()])
+
+if enable_secure_duckdb_bridge_opt.enabled() and \
+    get_option('duckdb_source') == 'subproject'
+  if host_machine.system() == 'linux' or \
+      host_machine.system() == 'darwin'
+    duckdb_patch_tool_name = host_machine.system() == 'darwin' ? 'gpatch' : 'patch'
+    duckdb_patch_tool = find_program(duckdb_patch_tool_name, required : true)
+    duckdb_patch_archive = meson.project_source_root() / \
+      'subprojects/packagecache/libduckdb-src-v1.5.5.zip'
+    if not fs.exists(duckdb_patch_archive)
+      error('strict DuckDB patch replay requires the resolved pinned archive')
+    endif
+    test('duckdb-patch-stack-determinism-strict', python3,
+      args : [files('test-duckdb-patch-stack-determinism.py'),
+        '--strict-apply',
+        '--archive', duckdb_patch_archive,
+        '--gnu-patch', duckdb_patch_tool.full_path(),
+        meson.project_source_root()],
+      timeout : 120)
+  endif
+endif
+# END duckdb-patch-stack-determinism
+
 meson_exe = find_program('meson')
 # Boundary checkers read repository sources.  Make an encoding-less read a
 # hard error so a checker can never silently fall back to the machine
