@@ -4427,6 +4427,30 @@ test_inventory_stable_temp_and_unknown (void)
       WYL_FACT_ARTIFACT_INVENTORY_LOCK));
   g_assert_false (wyl_fact_artifact_inventory_snapshot_slot_present (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_WAL));
+  guint64 slot_logical_total = 0;
+  guint64 slot_allocated_total = 0;
+  for (guint slot = 0; slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; slot++) {
+    WylFactArtifactInventorySlotEvidence slot_evidence = { 0 };
+    g_assert_true (wyl_fact_artifact_inventory_snapshot_get_slot_evidence
+          (snapshot, slot, &slot_evidence));
+    gboolean expected_present = slot == WYL_FACT_ARTIFACT_INVENTORY_MAIN
+        || slot == WYL_FACT_ARTIFACT_INVENTORY_LOCK;
+    g_assert_cmpint (slot_evidence.present, ==, expected_present);
+    g_assert_true (slot_evidence.allocation_supported);
+    if (slot_evidence.present) {
+      g_assert_cmpuint (slot_evidence.identity.domain, !=, 0);
+      g_assert_cmpuint (slot_evidence.identity.object_width, ==, 16);
+    } else {
+      g_assert_cmpuint (slot_evidence.identity.domain, ==, 0);
+      g_assert_cmpuint (slot_evidence.identity.object_width, ==, 0);
+    }
+    slot_logical_total += slot_evidence.logical_bytes;
+    slot_allocated_total += slot_evidence.allocated_bytes;
+  }
+  g_assert_cmpuint (slot_logical_total, ==,
+      wyl_fact_artifact_inventory_snapshot_logical_bytes (snapshot));
+  g_assert_cmpuint (slot_allocated_total, ==,
+      wyl_fact_artifact_inventory_snapshot_allocated_bytes (snapshot));
   WylFactArtifactInventoryIdentity inventory_main = { 0 };
   wyl_fact_artifact_inventory_snapshot_slot_identity (snapshot,
       WYL_FACT_ARTIFACT_INVENTORY_MAIN, &inventory_main);
@@ -4486,6 +4510,15 @@ test_inventory_stable_temp_and_unknown (void)
         (snapshot), ==, 5);
   g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_allocated_bytes
         (snapshot), >=, 5);
+  WylFactArtifactInventorySlotEvidence temp_evidence = { 0 };
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_get_slot_evidence
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_TEMP, &temp_evidence));
+  g_assert_true (temp_evidence.present);
+  g_assert_cmpuint (temp_evidence.identity.domain, ==, 0);
+  g_assert_cmpuint (temp_evidence.identity.object_width, ==, 0);
+  g_assert_cmpuint (temp_evidence.logical_bytes, ==, 5);
+  g_assert_true (temp_evidence.allocation_supported);
+  g_assert_cmpuint (temp_evidence.allocated_bytes, >=, 5);
   g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
         (snapshot, WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, 1);
 

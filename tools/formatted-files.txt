@@ -14,6 +14,7 @@ tests/test-decide-req.c
 tests/test-decide-resp.c
 tests/test-engine.c
 tests/test-events.c
+tests/test-fact-artifact-inventory-consumers.c
 tests/test-fact-artifact-inventory.c
 tests/test-fact-artifact-namespace-windows.c
 tests/test-fact-artifact-namespace.c

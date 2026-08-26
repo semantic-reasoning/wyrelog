@@ -76,6 +76,19 @@ typedef struct
   guint64 entry_fingerprint;
 } WylFactArtifactInventoryObservation;
 
+/* Published per-slot evidence is value-only.  In particular, it carries no
+ * entry name, path, descriptor, HANDLE, or token that can reopen or mutate an
+ * artifact.  A FALSE return from the accessor below always leaves this value
+ * fully initialized to zero. */
+typedef struct
+{
+  gboolean present;
+  WylFactArtifactInventoryIdentity identity;
+  guint64 logical_bytes;
+  gboolean allocation_supported;
+  guint64 allocated_bytes;
+} WylFactArtifactInventorySlotEvidence;
+
 WylFactArtifactInventorySnapshot *
 wyl_fact_artifact_inventory_snapshot_new (guint max_anomalies);
 void wyl_fact_artifact_inventory_snapshot_free
@@ -116,6 +129,10 @@ wyrelog_error_t wyl_fact_artifact_inventory_snapshot_finalize
 WylFactArtifactInventoryStatus
 wyl_fact_artifact_inventory_snapshot_status
   (const WylFactArtifactInventorySnapshot *snapshot);
+gboolean wyl_fact_artifact_inventory_snapshot_get_slot_evidence
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventorySlot slot,
+    WylFactArtifactInventorySlotEvidence *out_evidence);
 gboolean wyl_fact_artifact_inventory_snapshot_slot_present
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactInventorySlot slot);
