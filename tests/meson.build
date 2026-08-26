@@ -1215,6 +1215,18 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+if host_machine.system() != 'windows'
+  test_fact_artifact_transition_posix = executable(
+    'test-fact-artifact-transition-posix',
+    'test-fact-artifact-transition-posix.c',
+    'fact-test-support.c',
+    include_directories : include_directories('../wyrelog'),
+    c_args : fact_test_support_c_args,
+    dependencies : [wyrelog_dep] + fact_test_support_deps,
+  )
+  test('fact-artifact-transition-posix', test_fact_artifact_transition_posix)
+endif
+
 test_fact_artifact_main_transition = executable(
   'test-fact-artifact-main-transition',
   'test-fact-artifact-main-transition.c',
