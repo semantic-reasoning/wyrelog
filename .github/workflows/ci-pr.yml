@@ -87,7 +87,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config time \
+            meson ninja-build pkg-config patch time \
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
             libtss2-dev
 
@@ -97,7 +97,7 @@ jobs:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: |
           brew update
-          brew install meson ninja pkg-config glib sqlite libsoup libsodium
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium gpatch
 
       - name: Restore meson packagecache
         # actions/cache v5
@@ -163,6 +163,11 @@ jobs:
       - name: Build secure DuckDB backend from pinned source
         run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            patch --version
+          else
+            gpatch --version
+          fi | grep -F 'GNU patch'
           if [ "$RUNNER_OS" = Linux ]; then
             CC=cc CXX=c++ meson setup build-secure-duckdb \
               -Denable_fact_store=enabled \

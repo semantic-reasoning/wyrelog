@@ -721,6 +721,11 @@ WINDOWS_SECURE_TEST_COMMAND = (
 SECURE_POSIX_ACTIVE_COMMANDS = (
     "set -euo pipefail",
     'if [ "$RUNNER_OS" = Linux ]; then',
+    "patch --version",
+    "else",
+    "gpatch --version",
+    "fi | grep -F 'GNU patch'",
+    'if [ "$RUNNER_OS" = Linux ]; then',
     "CC=cc CXX=c++ meson setup build-secure-duckdb -Denable_fact_store=enabled -Dduckdb_source=subproject -Denable_secure_duckdb_bridge=enabled",
     "else",
     "meson setup build-secure-duckdb -Denable_fact_store=enabled -Dduckdb_source=subproject -Denable_secure_duckdb_bridge=enabled",
@@ -949,14 +954,18 @@ def active_inventory_commands(workflow: str) -> tuple[str, ...]:
         "  daemon-http-shared-fact-audit-disabled:",
     )
     windows = section(workflow, "  build-windows:", None)
+    secure_step = named_step(
+        posix, "Build secure DuckDB backend from pinned source"
+    )
+    secure_active = active_logical_commands(secure_step)
     steps = (
         named_step(posix, "Verify artifact inventory consumer contract"),
-        named_step(posix, "Build secure DuckDB backend from pinned source"),
+        secure_step,
         named_step(sanitizer, "Compile focused policy WRITE tests"),
         named_step(sanitizer, "Test focused policy WRITE paths"),
         named_step(windows, "Build and test (clang-cl)"),
     )
-    return tuple(
+    return tuple(secure_active[:6]) + tuple(
         command
         for step in steps
         for command in active_logical_commands(step)
@@ -1185,6 +1194,61 @@ def replace_in_named_step(
     require(old in step, "E_SELF_TEST", f"mutation anchor missing in {name}: {old}")
     changed = job[:step_begin] + step.replace(old, new, 1) + job[step_finish:]
     return workflow[:begin] + changed + workflow[finish:]
+
+
+def replace_once_in_named_step(
+    workflow: str, job_start: str, job_end: str | None, name: str, old: str, new: str
+) -> str:
+    begin = workflow.find(job_start)
+    finish = len(workflow) if job_end is None else workflow.find(
+        job_end, begin + len(job_start)
+    )
+    require(begin >= 0 and finish > begin, "E_SELF_TEST", "probe job is missing")
+    job = workflow[begin:finish]
+    marker = f"      - name: {name}"
+    step_begin = job.find(marker)
+    require(step_begin >= 0, "E_SELF_TEST", "probe step is missing")
+    step_finish = job.find("\n      - name:", step_begin + len(marker))
+    if step_finish < 0:
+        step_finish = len(job)
+    step = job[step_begin:step_finish]
+    require(
+        step.count(old) == 1,
+        "E_SELF_TEST",
+        f"probe mutation anchor count drifted: {old!r}",
+    )
+    changed = job[:step_begin] + step.replace(old, new, 1) + job[step_finish:]
+    return workflow[:begin] + changed + workflow[finish:]
+
+
+def move_secure_patch_probe_after_setup(workflow: str) -> str:
+    probe = (
+        '          if [ "$RUNNER_OS" = Linux ]; then\n'
+        "            patch --version\n"
+        "          else\n"
+        "            gpatch --version\n"
+        "          fi | grep -F 'GNU patch'\n"
+    )
+    without_probe = replace_once_in_named_step(
+        workflow,
+        "  build-posix:",
+        "  service-credential-e2e:",
+        "Build secure DuckDB backend from pinned source",
+        probe,
+        "",
+    )
+    return replace_once_in_named_step(
+        without_probe,
+        "  build-posix:",
+        "  service-credential-e2e:",
+        "Build secure DuckDB backend from pinned source",
+        "          fi\n          if [ \"$RUNNER_OS\" = Linux ]; then\n"
+        "            time_args=(-v)\n",
+        "          fi\n"
+        + probe
+        + "          if [ \"$RUNNER_OS\" = Linux ]; then\n"
+        "            time_args=(-v)\n",
+    )
 
 
 def move_windows_inventory_command_to_else(workflow: str) -> str:
@@ -1780,6 +1844,72 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "removed-fact-artifact-inventory-consumer-wiring-self",
         )
     mutations.append(("secure-runtime-test", secure_runtime, {"E_INVENTORY_CI_POSIX"}))
+
+    for label, old, new in (
+        (
+            "secure-patch-probe-removed",
+            "            patch --version\n",
+            "",
+        ),
+        (
+            "secure-gpatch-probe-replaced",
+            "            gpatch --version\n",
+            "            unapproved-patch --version\n",
+        ),
+        (
+            "secure-patch-proof-weakened",
+            "          fi | grep -F 'GNU patch'\n",
+            "          fi | grep -F patch\n",
+        ),
+        (
+            "secure-patch-proof-masked",
+            "          fi | grep -F 'GNU patch'\n",
+            "          fi | grep -F 'GNU patch' || true\n",
+        ),
+        (
+            "secure-patch-proof-early-success",
+            "          if [ \"$RUNNER_OS\" = Linux ]; then\n"
+            "            patch --version\n",
+            "          exit 0\n"
+            "          if [ \"$RUNNER_OS\" = Linux ]; then\n"
+            "            patch --version\n",
+        ),
+    ):
+        probe_mutation = dict(inputs)
+        for path in (CI_PR, CI_MAIN):
+            probe_mutation[path] = replace_once_in_named_step(
+                probe_mutation[path],
+                "  build-posix:",
+                "  service-credential-e2e:",
+                "Build secure DuckDB backend from pinned source",
+                old,
+                new,
+            )
+        mutations.append((label, probe_mutation, {"E_INVENTORY_CI_POSIX"}))
+
+    moved_probe = dict(inputs)
+    for path in (CI_PR, CI_MAIN):
+        moved_probe[path] = move_secure_patch_probe_after_setup(moved_probe[path])
+    mutations.append(
+        ("secure-patch-proof-moved", moved_probe, {"E_INVENTORY_CI_POSIX"})
+    )
+
+    probe_parity = dict(inputs)
+    probe_parity[CI_PR] = replace_once_in_named_step(
+        probe_parity[CI_PR],
+        "  build-posix:",
+        "  service-credential-e2e:",
+        "Build secure DuckDB backend from pinned source",
+        "            gpatch --version\n",
+        "            unapproved-patch --version\n",
+    )
+    mutations.append(
+        (
+            "secure-patch-proof-parity",
+            probe_parity,
+            {"E_INVENTORY_CI_POSIX", "E_INVENTORY_CI_PARITY"},
+        )
+    )
 
     for label, job_start, job_end, step_name, old, new, expected in (
         (
