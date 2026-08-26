@@ -16,6 +16,7 @@ tests/test-engine.c
 tests/test-events.c
 tests/test-fact-artifact-inventory-consumers.c
 tests/test-fact-artifact-inventory.c
+tests/test-fact-artifact-main-transition.c
 tests/test-fact-artifact-namespace-windows.c
 tests/test-fact-artifact-namespace.c
 tests/test-fact-compound.c
@@ -93,6 +94,8 @@ wyrelog/fact/compound-private.h
 wyrelog/fact/compound.c
 wyrelog/fact/graph-artifact-inventory-private.c
 wyrelog/fact/graph-artifact-inventory-private.h
+wyrelog/fact/graph-artifact-main-transition-private.c
+wyrelog/fact/graph-artifact-main-transition-private.h
 wyrelog/fact/graph-artifact-namespace-private.c
 wyrelog/fact/graph-artifact-namespace-private.h
 wyrelog/fact/graph-artifact-windows-handle-private.c

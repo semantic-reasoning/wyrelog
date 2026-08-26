@@ -132,6 +132,7 @@ if get_option('enable_audit').allowed()
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
 endif
 wyrelog_sources += files('fact/graph-artifact-inventory-private.c')
+wyrelog_sources += files('fact/graph-artifact-main-transition-private.c')
 if get_option('enable_fact_store').allowed()
   wyrelog_sources += files('fact/compound.c',
     'fact/legacy-store-identity-private.c', 'fact/query.c',
