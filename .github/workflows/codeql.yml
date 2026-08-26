@@ -23,8 +23,17 @@ jobs:
     name: analyze-c-cpp
     runs-on: ubuntu-latest
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies
         run: |
@@ -35,7 +44,8 @@ jobs:
             libtss2-dev
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        # github/codeql-action v4
+        uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28
         with:
           languages: c-cpp
           build-mode: manual
@@ -52,12 +62,14 @@ jobs:
         run: meson compile -C builddir
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4
+        # github/codeql-action v4
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28
         with:
           output: sarif-results
           upload: failure-only
 
       - name: Upload CodeQL SARIF
-        uses: github/codeql-action/upload-sarif@v4
+        # github/codeql-action v4
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28
         with:
           sarif_file: sarif-results/cpp.sarif

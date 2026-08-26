@@ -21,8 +21,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install pinned Uncrustify
         run: |
@@ -64,8 +73,17 @@ jobs:
             tpm: disabled
             duckdb: subproject
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -85,7 +103,8 @@ jobs:
           brew install meson ninja pkg-config glib sqlite libsoup libsodium
 
       - name: Cache meson packagecache
-        uses: actions/cache@v5
+        # actions/cache v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -95,7 +114,8 @@ jobs:
       - name: Set up sccache
         id: sccache
         continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
+        # mozilla-actions/sccache-action v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
 
       - name: Select compiler cache
         shell: bash
@@ -192,12 +212,12 @@ jobs:
           fi
 
       - name: Remove secure DuckDB compile swap
-        if: always() && runner.os == 'Linux'
+        if: ${{ runner.environment == 'github-hosted' && (always() && runner.os == 'Linux') }}
         run: |
           bash .github/scripts/duckdb-compile-swap.sh cleanup secure
 
       - name: Show sccache statistics
-        if: always()
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
         run: |
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || echo 'sccache statistics unavailable'
@@ -206,8 +226,9 @@ jobs:
           fi
 
       - name: Upload meson logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: meson-logs-${{ matrix.os }}
           path: |
@@ -229,8 +250,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies
         run: |
@@ -241,7 +271,8 @@ jobs:
             libtss2-dev
 
       - name: Cache meson packagecache
-        uses: actions/cache@v5
+        # actions/cache v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -268,8 +299,9 @@ jobs:
             service-credential-platform-matrix
 
       - name: Upload meson logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: meson-logs-service-credential-e2e
           path: builddir/meson-logs/
@@ -284,8 +316,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -306,7 +347,8 @@ jobs:
           brew install meson ninja pkg-config glib sqlite libsoup libsodium
 
       - name: Cache meson packagecache
-        uses: actions/cache@v5
+        # actions/cache v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -375,14 +417,15 @@ jobs:
           done
 
       - name: Remove bounded Linux compile swap
-        if: always() && runner.os == 'Linux'
+        if: ${{ runner.environment == 'github-hosted' && (always() && runner.os == 'Linux') }}
         shell: bash
         run: |
           bash .github/scripts/duckdb-compile-swap.sh cleanup seam
 
       - name: Upload seam meson logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: duckdb-checkpoint-seam-logs-${{ matrix.os }}
           path: build-duckdb-seam/meson-logs/
@@ -397,8 +440,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -417,7 +469,8 @@ jobs:
           brew install meson ninja pkg-config glib sqlite libsoup libsodium
 
       - name: Restore meson packagecache
-        uses: actions/cache/restore@v5
+        # actions/cache v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -453,8 +506,9 @@ jobs:
             --print-errorlogs
 
       - name: Upload daemon HTTP meson logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: daemon-http-shared-fact-logs-${{ matrix.os }}
           path: build-daemon-http-shared/meson-logs/
@@ -470,8 +524,17 @@ jobs:
       ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1
       UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1:print_stacktrace=1
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies
         run: |
@@ -481,7 +544,8 @@ jobs:
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
 
       - name: Restore meson packagecache
-        uses: actions/cache/restore@v5
+        # actions/cache v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -491,7 +555,8 @@ jobs:
       - name: Set up sccache
         id: sccache
         continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
+        # mozilla-actions/sccache-action v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
 
       - name: Select compiler cache
         shell: bash
@@ -553,7 +618,7 @@ jobs:
             --print-errorlogs
 
       - name: Show sccache statistics
-        if: always()
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
         run: |
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || echo 'sccache statistics unavailable'
@@ -562,8 +627,9 @@ jobs:
           fi
 
       - name: Upload policy WRITE sanitizer logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: policy-write-focused-sanitizer-logs-ubuntu
           path: build-policy-write-sanitizer/meson-logs/
@@ -578,8 +644,17 @@ jobs:
       matrix:
         fact_store: [enabled, disabled]
     steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install build dependencies
         run: |
@@ -589,7 +664,8 @@ jobs:
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
 
       - name: Restore meson packagecache
-        uses: actions/cache/restore@v5
+        # actions/cache v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -634,8 +710,9 @@ jobs:
             --print-errorlogs
 
       - name: Upload audit-disabled daemon HTTP meson logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: daemon-http-shared-fact-audit-disabled-logs-ubuntu-fact-${{ matrix.fact_store }}
           path: build-daemon-http-shared-audit-disabled/meson-logs/
@@ -685,7 +762,8 @@ jobs:
           }
 
       - name: Check out source
-        uses: actions/checkout@v5
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       # A dependency tree inside the checkout is indistinguishable from project
       # source to anything that walks the tree, which is how the POSIX runners
@@ -706,7 +784,8 @@ jobs:
       - name: Set up sccache
         id: sccache
         continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
+        # mozilla-actions/sccache-action v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
 
       - name: Select Windows compiler cache
         shell: bash
@@ -737,7 +816,8 @@ jobs:
           call "%VCPKG_ROOT%\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Cache vcpkg binary packages
-        uses: actions/cache@v5
+        # actions/cache v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           # v5, with no fallbacks: actions/cache stores archive members
@@ -749,7 +829,8 @@ jobs:
       - name: Restore vcpkg installed tree
         id: vcpkg-installed-cache
         continue-on-error: true
-        uses: actions/cache/restore@v5
+        # actions/cache v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ env.VCPKG_ROOT }}\installed
           # v3, with no fallbacks: same workspace-rooted archive contract as
@@ -794,13 +875,15 @@ jobs:
       - name: Save vcpkg installed tree
         if: steps.vcpkg-installed-cache.outcome == 'success' && steps.vcpkg-installed-cache.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@v5
+        # actions/cache v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ env.VCPKG_ROOT }}\installed
           key: ${{ steps.vcpkg-installed-cache.outputs.cache-primary-key }}
 
       - name: Cache meson packagecache
-        uses: actions/cache@v5
+        # actions/cache v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
           key: windows-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -885,15 +968,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows Application Verifier evidence
-        if: always() && matrix.secure_bridge == 'enabled'
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (always() && matrix.secure_bridge == 'enabled') }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: appverifier-windows-secure-bridge
           path: builddir/appverifier-artifacts/
           if-no-files-found: error
 
       - name: Show sccache statistics
-        if: ${{ !cancelled() }}
+        if: ${{ runner.environment == 'github-hosted' && (!cancelled()) }}
         shell: bash
         run: |
           sccache_path="$(cygpath -u "${SCCACHE_EXE:-}" 2>/dev/null || true)"
@@ -912,8 +996,9 @@ jobs:
           fi
 
       - name: Upload meson logs on failure
-        if: always()
-        uses: actions/upload-artifact@v6
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: meson-logs-windows${{ matrix.job_suffix }}
           path: builddir/meson-logs/

@@ -1297,7 +1297,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     if "continue-on-error:" in run_step:
         raise SystemExit(f"{workflow_name} verifier failure must fail its job")
     for token in (
-        "        if: always() && matrix.secure_bridge == 'enabled'",
+        "        if: ${{ runner.environment == 'github-hosted' && "
+        "(always() && matrix.secure_bridge == 'enabled') }}",
         "          path: builddir/appverifier-artifacts/",
         "          if-no-files-found: error",
     ):

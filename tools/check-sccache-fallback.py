@@ -16,7 +16,7 @@ def main() -> int:
     for name in ("ci-pr.yml", "ci-main.yml"):
         path = root / ".github" / "workflows" / name
         text = path.read_text(encoding="utf-8")
-        action = "uses: mozilla-actions/sccache-action@v0.0.10"
+        action = "uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
         if text.count(action) != 3:
             raise SystemExit(f"{path}: expected three pinned sccache actions")
         require(text, "id: sccache\n        continue-on-error: true", path)
