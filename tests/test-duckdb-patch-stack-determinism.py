@@ -51,6 +51,12 @@ SNAPSHOT_PATHS = (
     *PATCH_PATHS,
     *WORKFLOWS,
 )
+SELF_TEST_TEXT_PATHS = (
+    ".gitattributes",
+    "subprojects/duckdb-amalgamated.wrap",
+    "tests/meson.build",
+    *WORKFLOWS,
+)
 EXPECTED_STAGE_HASHES = {
     PATCHES[0]: (
         "7c7255a94955efe0d64612998159a11805c35bc0e155214ccc8f07549606083e",
@@ -117,6 +123,56 @@ EXPECTED_JOB_HEADER = """  duckdb-checkpoint-seam:
         os: [ubuntu-latest, macos-latest]
     steps:
 """
+EXPECTED_BUILD_HEADERS = {
+    ".github/workflows/ci-pr.yml": """  build-posix:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      # Relativise absolute paths baked into debug info so cache entries stay
+      # valid across runs even though the workspace path is fixed on hosted
+      # runners; matches the Windows job.
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            tpm: enabled
+          - os: macos-latest
+            tpm: disabled
+    steps:
+""",
+    ".github/workflows/ci-main.yml": """  build-posix:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # Fail fast on a wedged build instead of letting a hung compile burn the
+    # runner's full default lease (macOS still builds DuckDB from source in
+    # ~30 min, so keep comfortable headroom over that).
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      # Relativise absolute paths baked into debug info so cache entries stay
+      # valid across runs even though the workspace path is fixed on hosted
+      # runners; matches the Windows job.
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The ordinary Linux job uses prebuilt DuckDB for runtime cost. The
+          # dedicated secure-backend step below still builds the pinned source
+          # and executes the real adapter on both supported POSIX runtimes.
+          - os: ubuntu-latest
+            tpm: enabled
+            duckdb: prebuilt
+          - os: macos-latest
+            tpm: disabled
+            duckdb: subproject
+    steps:
+""",
+}
 EXPECTED_RUNNER_STEP = """      - name: Verify GitHub-hosted runner contract
         shell: bash
         run: |
@@ -125,6 +181,14 @@ EXPECTED_RUNNER_STEP = """      - name: Verify GitHub-hosted runner contract
             exit 1
           fi
 """
+EXPECTED_BUILD_LINUX_STEP = r"""      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config patch time \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
+            libtss2-dev""" + "\n"
 EXPECTED_LINUX_STEP = r"""      - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -141,6 +205,25 @@ EXPECTED_MACOS_STEP = """      - name: Install build dependencies (macOS)
         run: |
           brew update
           brew install meson ninja pkg-config glib sqlite libsoup libsodium gpatch""" + "\n"
+EXPECTED_SECURE_SETUP_PREFIX = r"""      - name: Build secure DuckDB backend from pinned source
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            patch --version
+          else
+            gpatch --version
+          fi | grep -F 'GNU patch'
+          if [ "$RUNNER_OS" = Linux ]; then
+            CC=cc CXX=c++ meson setup build-secure-duckdb \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=enabled
+          else
+            meson setup build-secure-duckdb \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=enabled
+          fi""" + "\n"
 EXPECTED_GATE_STEP = r"""      - name: Test focused checkpoint seam
         run: |
           meson test -C build-duckdb-seam --no-rebuild \
@@ -178,6 +261,19 @@ EXPECTED_CHECKOUT_STEP = """      - name: Check out source
         # actions/checkout v5
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 """
+EXPECTED_BUILD_PREFIXES = {
+    path: header
+    + "\n".join(
+        (
+            EXPECTED_RUNNER_STEP,
+            EXPECTED_CHECKOUT_STEP,
+            EXPECTED_BUILD_LINUX_STEP,
+            EXPECTED_MACOS_STEP,
+        )
+    )
+    + "\n"
+    for path, header in EXPECTED_BUILD_HEADERS.items()
+}
 EXPECTED_PROVISION_STEP = """      - name: Provision bounded Linux compile swap
         if: runner.os == 'Linux'
         shell: bash
@@ -255,6 +351,54 @@ EXPECTED_STEP_NAMES = (
     "Remove bounded Linux compile swap",
     "Upload seam meson logs on failure",
 )
+EXPECTED_BUILD_STEP_NAMES = (
+    "Verify GitHub-hosted runner contract",
+    "Check out source",
+    "Install build dependencies (Linux)",
+    "Install build dependencies (macOS)",
+    "<packagecache>",
+    "Set up sccache",
+    "Select compiler cache",
+    "Configure",
+    "Build and test",
+    "Verify artifact inventory consumer contract",
+    "Build fact-store production daemon",
+    "Provision secure DuckDB compile swap",
+    "Build secure DuckDB backend from pinned source",
+    "Remove secure DuckDB compile swap",
+    "Show sccache statistics",
+    "Upload meson logs on failure",
+)
+EXPECTED_PRE_PROOF_HASHES = {
+    ".github/workflows/ci-pr.yml": (
+        "a945595bc728d01a7a89cef07ff88356044a146c93e947eae94ec2fb71a4617f",
+        "d014532fa5ad5a4d0d75b22ebd36a4b6e51843ab043724ed6b34ef9a5a157ea3",
+        "c5df0cedcf83eeafa9d16421a3ff5ceb36726ac586d3a7f419d7b1f2e0561839",
+        "dce3707c773f8a2ba95c87148804d6e2b3a5162379d099eab66d31b533b40e42",
+        "b120f087067e39749c1fb91bb9cfae68964d8778ff9b97d11374bb13ad009318",
+        "c825456336a448175b02a0338e5888c8c0d53099d2aaa9f8c6a6df7e7e82431e",
+        "4533877c363341c71bb615646fda8b0f46540dad3f72f50450352372d3688409",
+        "6e51525425fe4a197b0bf49e9401eb4a6f6387e3cf84972e37aa82fee34dc0f3",
+        "d788fd0976e6e1a878d0359e912928961ee4fe15ea7b545855314c70c6f08373",
+        "8d197044da666a4c755918731e48f7dc95dafee567a3a8f659c31655c6626a3e",
+        "6966b52d2e6d96ac3712b8354e443d2a3a330ff715a039089bbbc8cd510ea94b",
+        "d31df101913ddab60136579dd6729e388f2287cc6930a38d078ab6d8271c2efa",
+    ),
+    ".github/workflows/ci-main.yml": (
+        "a945595bc728d01a7a89cef07ff88356044a146c93e947eae94ec2fb71a4617f",
+        "d014532fa5ad5a4d0d75b22ebd36a4b6e51843ab043724ed6b34ef9a5a157ea3",
+        "c5df0cedcf83eeafa9d16421a3ff5ceb36726ac586d3a7f419d7b1f2e0561839",
+        "dce3707c773f8a2ba95c87148804d6e2b3a5162379d099eab66d31b533b40e42",
+        "ae43fd8a04136ea2f10a22885f3d7f703059d739257ad39e6682c07d217ae974",
+        "c825456336a448175b02a0338e5888c8c0d53099d2aaa9f8c6a6df7e7e82431e",
+        "4533877c363341c71bb615646fda8b0f46540dad3f72f50450352372d3688409",
+        "2e1e6ace6dd96f006b3c9e59c3ec247d867ff998498f843e894f74e17bc9bec2",
+        "d788fd0976e6e1a878d0359e912928961ee4fe15ea7b545855314c70c6f08373",
+        "8d197044da666a4c755918731e48f7dc95dafee567a3a8f659c31655c6626a3e",
+        "589018250102ae9f33a3148db617b648fd02397645ca421fb4a72e80f69e74ba",
+        "d31df101913ddab60136579dd6729e388f2287cc6930a38d078ab6d8271c2efa",
+    ),
+}
 EXPECTED_JOB_PROJECTION = EXPECTED_JOB_HEADER + "\n".join(
     (
         EXPECTED_RUNNER_STEP,
@@ -446,8 +590,49 @@ def validate_workflow_trigger(workflow: str, path: str) -> None:
         fail("E_CI_TRIGGER", f"{path}: automatic branch trigger drifted")
 
 
+def validate_build_patch_tools(workflow: str, path: str) -> None:
+    job = extract_top_level_job(workflow, "build-posix")
+    cache_name = (
+        "Restore meson packagecache"
+        if path.endswith("ci-pr.yml")
+        else "Cache meson packagecache"
+    )
+    step_mappings = tuple(re.findall(r"(?m)^      - (.+)$", job))
+    if any(not mapping.startswith("name: ") for mapping in step_mappings):
+        fail("E_CI_STEP_MAPPING", f"{path}: build-posix has an unnamed step")
+    step_names = tuple(
+        mapping.removeprefix("name: ") for mapping in step_mappings
+    )
+    actual_steps = tuple(
+        "<packagecache>" if name == cache_name else name
+        for name in step_names
+    )
+    if actual_steps != EXPECTED_BUILD_STEP_NAMES:
+        fail("E_CI_STEP_ORDER", f"{path}: build-posix step inventory drifted")
+    linux = extract_named_step(job, "Install build dependencies (Linux)")
+    macos = extract_named_step(job, "Install build dependencies (macOS)")
+    if linux != EXPECTED_BUILD_LINUX_STEP or macos != EXPECTED_MACOS_STEP:
+        fail("E_CI_TOOL", f"{path}: build job GNU patch install steps drifted")
+    if not job.startswith(EXPECTED_BUILD_PREFIXES[path]):
+        fail("E_CI_STEP_ORDER", f"{path}: build-posix prerequisite prefix drifted")
+    secure_index = step_names.index("Build secure DuckDB backend from pinned source")
+    pre_proof_hashes = tuple(
+        hashlib.sha256(extract_named_step(job, name).encode("utf-8")).hexdigest()
+        for name in step_names[:secure_index]
+    )
+    if pre_proof_hashes != EXPECTED_PRE_PROOF_HASHES[path]:
+        fail(
+            "E_CI_EXEC_PROVENANCE",
+            f"{path}: a pre-proof step can change executable provenance",
+        )
+    secure = extract_named_step(job, "Build secure DuckDB backend from pinned source")
+    if not secure.startswith(EXPECTED_SECURE_SETUP_PREFIX):
+        fail("E_CI_TOOL_USE", f"{path}: GNU patch point-of-use proof drifted")
+
+
 def workflow_projection(workflow: str, path: str) -> str:
     validate_workflow_trigger(workflow, path)
+    validate_build_patch_tools(workflow, path)
     job = extract_top_level_job(workflow, "duckdb-checkpoint-seam")
     if "os: [ubuntu-latest, macos-latest]" not in job:
         fail("E_CI_MATRIX", f"{path}: Linux/macOS matrix drifted")
@@ -752,8 +937,8 @@ def replace_once(data: bytes, old: bytes, new: bytes) -> bytes:
     return data.replace(old, new, 1)
 
 
-def replace_in_focused_job(data: bytes, old: bytes, new: bytes) -> bytes:
-    marker = b"  duckdb-checkpoint-seam:\n"
+def replace_in_job(data: bytes, job_name: bytes, old: bytes, new: bytes) -> bytes:
+    marker = b"  " + job_name + b":\n"
     start = data.find(marker)
     if start < 0:
         fail("E_SELF_TEST", "focused workflow job fixture is missing")
@@ -761,8 +946,55 @@ def replace_in_focused_job(data: bytes, old: bytes, new: bytes) -> bytes:
     end = len(data) if match is None else start + len(marker) + match.start()
     job = data[start:end]
     if job.count(old) != 1:
-        fail("E_SELF_TEST", f"focused job token count drifted: {old!r}")
+        fail("E_SELF_TEST", f"{job_name!r} job token count drifted: {old!r}")
     return data[:start] + job.replace(old, new, 1) + data[end:]
+
+
+def replace_in_focused_job(data: bytes, old: bytes, new: bytes) -> bytes:
+    return replace_in_job(data, b"duckdb-checkpoint-seam", old, new)
+
+
+def move_build_install_steps_after_configure(data: bytes) -> bytes:
+    workflow = data.decode("utf-8")
+    job = extract_top_level_job(workflow, "build-posix")
+    linux = extract_named_step(job, "Install build dependencies (Linux)")
+    macos = extract_named_step(job, "Install build dependencies (macOS)")
+    configure = extract_named_step(job, "Configure")
+    moved = job.replace(linux + "\n", "", 1).replace(macos + "\n", "", 1)
+    moved = moved.replace(
+        configure,
+        configure + "\n" + linux + "\n" + macos,
+        1,
+    )
+    if moved == job:
+        fail("E_SELF_TEST", "build-posix install movement fixture drifted")
+    return data.replace(job.encode("utf-8"), moved.encode("utf-8"), 1)
+
+
+def move_patch_proof_after_secure_setup(data: bytes) -> bytes:
+    proof = (
+        b'          if [ "$RUNNER_OS" = Linux ]; then\n'
+        b"            patch --version\n"
+        b"          else\n"
+        b"            gpatch --version\n"
+        b"          fi | grep -F 'GNU patch'\n"
+    )
+    workflow = data.decode("utf-8")
+    job = extract_top_level_job(workflow, "build-posix").encode("utf-8")
+    secure_marker = b"      - name: Build secure DuckDB backend from pinned source\n"
+    secure_start = job.find(secure_marker)
+    secure_end = job.find(b"\n      - name: ", secure_start + len(secure_marker))
+    if secure_start < 0 or secure_end < 0:
+        fail("E_SELF_TEST", "secure build movement fixture drifted")
+    secure = job[secure_start:secure_end]
+    if secure.count(proof) != 1:
+        fail("E_SELF_TEST", "GNU patch proof fixture drifted")
+    moved = secure.replace(proof, b"", 1)
+    setup_end = b"          fi\n"
+    if moved.count(setup_end) < 1:
+        fail("E_SELF_TEST", "secure setup boundary fixture drifted")
+    moved = moved.replace(setup_end, setup_end + proof, 1)
+    return data.replace(secure, moved, 1)
 
 
 def mutate_both_workflows(
@@ -806,7 +1038,28 @@ def real_fuzz_probe(tool: Path) -> None:
         expect_error(lambda: classify_patch_result(result, "fuzz-one"), "E_PATCH_FUZZ")
 
 
-def run_self_tests(root: Path, snapshot: dict[str, bytes]) -> None:
+def normalize_self_test_snapshot(snapshot: dict[str, bytes]) -> dict[str, bytes]:
+    normalized = dict(snapshot)
+    for relative in SELF_TEST_TEXT_PATHS:
+        normalized[relative] = decode_utf8(
+            normalized[relative], relative, universal=True
+        ).encode("utf-8")
+    return normalized
+
+
+def crlf_self_test_snapshot(snapshot: dict[str, bytes]) -> dict[str, bytes]:
+    windows = normalize_self_test_snapshot(snapshot)
+    for relative in SELF_TEST_TEXT_PATHS:
+        windows[relative] = windows[relative].replace(b"\n", b"\r\n")
+    return windows
+
+
+def run_self_tests(
+    root: Path, snapshot: dict[str, bytes], *, exercise_crlf: bool = True
+) -> None:
+    validate_structural(snapshot)
+    raw_snapshot = snapshot
+    snapshot = normalize_self_test_snapshot(snapshot)
     validate_structural(snapshot)
     cases: tuple[tuple[str, dict[str, bytes]], ...] = (
         (
@@ -1040,6 +1293,188 @@ def run_self_tests(root: Path, snapshot: dict[str, bytes]) -> None:
             ),
         ),
         (
+            "E_CI_STEP_ORDER",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                move_build_install_steps_after_configure,
+            ),
+        ),
+        (
+            "E_CI_STEP_MAPPING",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"      - name: Install build dependencies (Linux)\n",
+                    b"      - run: meson setup build-too-early "
+                    b"-Dduckdb_source=subproject\n\n"
+                    b"      - name: Install build dependencies (Linux)\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_STEP_MAPPING",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"      - name: Install build dependencies (Linux)\n",
+                    b"      - uses: actions/checkout@decoy\n\n"
+                    b"      - name: Install build dependencies (Linux)\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_STEP_MAPPING",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"      - name: Install build dependencies (Linux)\n",
+                    b"      - if: runner.os == 'Linux'\n"
+                    b"        run: meson setup build-too-early\n\n"
+                    b"      - name: Install build dependencies (Linux)\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_STEP_ORDER",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"      - name: Install build dependencies (Linux)\n",
+                    b"      - name: Configure too early\n"
+                    b"        run: meson setup build-too-early\n\n"
+                    b"      - name: Install build dependencies (Linux)\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_EXEC_PROVENANCE",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"      - name: Select compiler cache\n"
+                    b"        shell: bash\n"
+                    b"        run: |\n",
+                    b"      - name: Select compiler cache\n"
+                    b"        shell: bash\n"
+                    b"        run: |\n"
+                    b"          mkdir -p \"$RUNNER_TEMP/tool-shadow\"\n"
+                    b"          printf '#!/bin/sh\\necho GNU patch 9.9\\n' > "
+                    b"\"$RUNNER_TEMP/tool-shadow/gpatch\"\n"
+                    b"          chmod +x \"$RUNNER_TEMP/tool-shadow/gpatch\"\n"
+                    b"          echo \"$RUNNER_TEMP/tool-shadow\" >> \"$GITHUB_PATH\"\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_TOOL",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"brew install meson ninja pkg-config glib sqlite "
+                    b"libsoup libsodium gpatch",
+                    b"brew install meson ninja pkg-config glib sqlite "
+                    b"libsoup libsodium",
+                ),
+            ),
+        ),
+        (
+            "E_CI_TOOL",
+            mutated(
+                snapshot,
+                WORKFLOWS[1],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"meson ninja-build pkg-config patch time",
+                    b"meson ninja-build pkg-config time",
+                ),
+            ),
+        ),
+        (
+            "E_CI_TOOL_USE",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b'          if [ "$RUNNER_OS" = Linux ]; then\n'
+                    b"            patch --version\n"
+                    b"          else\n"
+                    b"            gpatch --version\n"
+                    b"          fi | grep -F 'GNU patch'\n",
+                    b"",
+                ),
+            ),
+        ),
+        (
+            "E_CI_TOOL_USE",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                move_patch_proof_after_secure_setup,
+            ),
+        ),
+        (
+            "E_CI_TOOL_USE",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"            gpatch --version\n",
+                    b"            patch --version\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_TOOL_USE",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"          fi | grep -F 'GNU patch'\n",
+                    b"          fi | grep -F 'GNU patch' || true\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_TOOL_USE",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"          set -euo pipefail\n",
+                    b"          set -euo pipefail\n"
+                    b"          PATH=/untrusted:$PATH\n",
+                ),
+            ),
+        ),
+        (
             "E_CI_MATRIX",
             mutated(
                 snapshot,
@@ -1176,12 +1611,6 @@ def run_self_tests(root: Path, snapshot: dict[str, bytes]) -> None:
             ),
         ),
     )
-    windows_snapshot = dict(snapshot)
-    for relative in ("tests/meson.build", *WORKFLOWS):
-        windows_snapshot[relative] = windows_snapshot[relative].replace(
-            b"\n", b"\r\n"
-        )
-    validate_structural(windows_snapshot)
     for expected, candidate in cases:
         validate_structural(snapshot)
         expect_error(lambda candidate=candidate: validate_structural(candidate), expected)
@@ -1229,6 +1658,27 @@ def run_self_tests(root: Path, snapshot: dict[str, bytes]) -> None:
             pass
         else:
             real_fuzz_probe(tool)
+
+    if exercise_crlf:
+        windows_snapshot = crlf_self_test_snapshot(raw_snapshot)
+        validate_structural(windows_snapshot)
+        run_self_tests(root, windows_snapshot, exercise_crlf=False)
+
+        mixed_snapshot = dict(windows_snapshot)
+        mixed_snapshot[PATCH_PATHS[0]] = mixed_snapshot[PATCH_PATHS[0]].replace(
+            b"\n", b"\r\n", 1
+        )
+        expect_error(
+            lambda: validate_structural(mixed_snapshot),
+            "E_PATCH_CRLF",
+        )
+
+        invalid_snapshot = dict(raw_snapshot)
+        invalid_snapshot["tests/meson.build"] = b"\xff"
+        expect_error(
+            lambda: validate_structural(invalid_snapshot),
+            "E_UTF8",
+        )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
