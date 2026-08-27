@@ -99,6 +99,7 @@ fixture_clear (Fixture *fixture)
    * into the next test.  These two lines are what bound that. */
   wyl_fact_artifact_transition_posix_set_test_rename_errno (0);
   wyl_fact_artifact_transition_posix_set_test_flush_errno (0);
+  wyl_fact_artifact_transition_posix_set_test_post_open_hook (NULL, NULL);
   wyl_fact_artifact_transition_names_clear (&fixture->names);
   wyl_fact_graph_directory_clear (&fixture->directory);
   wyl_fact_graph_locator_clear (&fixture->locator);
@@ -154,6 +155,25 @@ observe (Fixture *fixture, Observation *out_observation)
         (provider, &lifecycle, out_observation);
   wyl_fact_artifact_transition_posix_free (provider);
   return status;
+}
+
+static wyrelog_error_t
+execute_current (Provider *provider, WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+{
+  if (provider == NULL)
+    return wyl_fact_artifact_transition_posix_execute (NULL, NULL, op,
+               out_effect, out_durability);
+
+  Observation authorized = { 0 };
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  wyrelog_error_t status = wyl_fact_artifact_transition_posix_observe
+        (provider, &lifecycle, &authorized);
+  if (status != WYRELOG_E_OK)
+    return status;
+  return wyl_fact_artifact_transition_posix_execute (provider, &authorized,
+             op, out_effect, out_durability);
 }
 
 /*
@@ -1046,41 +1066,54 @@ test_execute_invalid_parameters (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-inv-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = {
     .staged_file = MT (DURABILITY_PROVEN),
   };
 
   /* NULL provider */
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (NULL,
+  g_assert_cmpint (execute_current (NULL,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
 
   /* NULL effect */
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), NULL, &durability), ==, WYRELOG_E_INVALID);
 
   /* NULL durability */
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, NULL), ==, WYRELOG_E_INVALID);
 
-  /* Invalid Op: OP_NONE */
+  Observation authorized = { 0 };
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_observe (provider,
+      &lifecycle, &authorized), ==, WYRELOG_E_OK);
+
+  /* NULL or foreign authorization observation */
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider, NULL,
+      MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_INVALID);
+  authorized.operation_uuid[0] ^= 1;
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+      &authorized, MT (OP_SYNC_STAGED), &effect, &durability), ==,
+      WYRELOG_E_INVALID);
+
+  /* Invalid Op: OP_NONE */
+  g_assert_cmpint (execute_current (provider,
       MT (OP_NONE), &effect, &durability), ==, WYRELOG_E_INVALID);
 
   /* Invalid Op: OP_INSPECT */
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_INSPECT), &effect, &durability), ==, WYRELOG_E_INVALID);
 
   /* Invalid Op: OP_COUNT */
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_COUNT), &effect, &durability), ==, WYRELOG_E_INVALID);
 
   /* Lease verification failure */
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_LEASE_VERIFY));
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_POLICY);
   g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
         PF (EXECUTE_LEASE_VERIFY)));
@@ -1093,14 +1126,14 @@ test_execute_sync_staged (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-stg-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Missing stage file -> NOT_APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = {
     .staged_file = MT (DURABILITY_PROVEN),
   };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
@@ -1112,7 +1145,7 @@ test_execute_sync_staged (void)
 
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { .staged_file = MT (DURABILITY_PROVEN) };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
@@ -1122,7 +1155,7 @@ test_execute_sync_staged (void)
   make_conforming (&fixture, fixture.names.stage, 16);
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_PROVEN));
@@ -1131,7 +1164,7 @@ test_execute_sync_staged (void)
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_SYNC_STAGED_OPEN));
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { .staged_file = MT (DURABILITY_PROVEN) };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
@@ -1143,7 +1176,7 @@ test_execute_sync_staged (void)
   wyl_fact_artifact_transition_posix_set_test_flush_errno (EIO);
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { .staged_file = MT (DURABILITY_PROVEN) };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
@@ -1158,12 +1191,12 @@ test_execute_retain (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-ret-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Missing source (final) -> NOT_APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
 
@@ -1171,7 +1204,7 @@ test_execute_retain (void)
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 10);
   make_conforming (&fixture, fixture.names.rollback, 20);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   unlinkat (fixture.directory.graph_fd, fixture.names.rollback, 0);
@@ -1179,7 +1212,7 @@ test_execute_retain (void)
   /* 3. Successful RETAIN -> APPLIED */
   Identity main_id = real_identity (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
@@ -1193,10 +1226,11 @@ test_execute_retain (void)
   g_assert_cmpuint (rb_id.object, ==, main_id.object);
 
   /* 4. Injected rename fault with EIO -> UNKNOWN */
+  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 11);
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_RETAIN_RENAME));
   wyl_fact_artifact_transition_posix_set_test_rename_errno (EIO);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
@@ -1210,14 +1244,14 @@ test_execute_sync_rollback_file (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-srb-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Missing rollback file -> NOT_APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = {
     .rollback_file = MT (DURABILITY_PROVEN),
   };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   g_assert_cmpint (durability.rollback_file, ==, MT (DURABILITY_UNPROVEN));
@@ -1226,7 +1260,7 @@ test_execute_sync_rollback_file (void)
   make_conforming (&fixture, fixture.names.rollback, 16);
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.rollback_file, ==, MT (DURABILITY_PROVEN));
@@ -1235,7 +1269,7 @@ test_execute_sync_rollback_file (void)
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_SYNC_ROLLBACK_OPEN));
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { .rollback_file = MT (DURABILITY_PROVEN) };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_cmpint (durability.rollback_file, ==, MT (DURABILITY_UNPROVEN));
@@ -1250,12 +1284,12 @@ test_execute_sync_retain_dir (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-srd-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Success path on capable filesystem -> APPLIED + PROVEN */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_RETAIN_DIR), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.directory_after_retain, ==, MT (DURABILITY_PROVEN));
@@ -1265,7 +1299,7 @@ test_execute_sync_retain_dir (void)
   wyl_fact_artifact_transition_posix_set_test_flush_errno (EIO);
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { .directory_after_retain = MT (DURABILITY_PROVEN) };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_RETAIN_DIR), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_cmpint (durability.directory_after_retain, ==, MT (DURABILITY_UNPROVEN));
@@ -1277,7 +1311,7 @@ test_execute_sync_retain_dir (void)
     .no_replace_supported = TRUE,
     .directory_flush = MT (DURABILITY_UNSUPPORTED),
   };
-  g_autoptr (Provider) unsupp_provider = NULL;
+  g_autoptr (WylFactArtifactTransitionPosix) unsupp_provider = NULL;
   g_assert_cmpint (wyl_fact_artifact_transition_posix_open (&fixture.directory,
       fixture.lease, OPERATION_UUID, &unsupp_cap, &unsupp_provider), ==, WYRELOG_E_OK);
 
@@ -1285,7 +1319,7 @@ test_execute_sync_retain_dir (void)
   wyl_fact_artifact_transition_posix_set_test_flush_errno (ENOTSUP);
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (unsupp_provider,
+  g_assert_cmpint (execute_current (unsupp_provider,
       MT (OP_SYNC_RETAIN_DIR), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.directory_after_retain, ==, MT (DURABILITY_UNSUPPORTED));
@@ -1300,12 +1334,12 @@ test_execute_publish (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-pub-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Missing stage -> NOT_APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
 
@@ -1313,7 +1347,7 @@ test_execute_publish (void)
   make_conforming (&fixture, fixture.names.stage, 12);
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 24);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   unlinkat (fixture.directory.graph_fd, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 0);
@@ -1321,7 +1355,7 @@ test_execute_publish (void)
   /* 3. Successful PUBLISH -> APPLIED */
   Identity stg_id = real_identity (&fixture, fixture.names.stage);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
@@ -1335,10 +1369,11 @@ test_execute_publish (void)
   g_assert_cmpuint (final_id.object, ==, stg_id.object);
 
   /* 4. Injected fault with EINTR -> UNKNOWN */
+  make_conforming (&fixture, fixture.names.stage, 13);
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_PUBLISH_RENAME));
   wyl_fact_artifact_transition_posix_set_test_rename_errno (EINTR);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
@@ -1352,12 +1387,12 @@ test_execute_sync_publish_dir (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-spd-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Success path -> APPLIED + PROVEN */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.directory_after_publish, ==, MT (DURABILITY_PROVEN));
@@ -1367,7 +1402,7 @@ test_execute_sync_publish_dir (void)
   wyl_fact_artifact_transition_posix_set_test_flush_errno (EIO);
   effect = (WylFactArtifactMainTransitionEffect) 999;
   durability = (WylFactArtifactMainTransitionDurabilityEvidence) { .directory_after_publish = MT (DURABILITY_PROVEN) };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_cmpint (durability.directory_after_publish, ==, MT (DURABILITY_UNPROVEN));
@@ -1382,12 +1417,12 @@ test_execute_rollback_op (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-rol-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Missing rollback file -> NOT_APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_ROLLBACK), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
 
@@ -1395,7 +1430,7 @@ test_execute_rollback_op (void)
   make_conforming (&fixture, fixture.names.rollback, 18);
   Identity rb_id = real_identity (&fixture, fixture.names.rollback);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_ROLLBACK), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
@@ -1416,12 +1451,12 @@ test_execute_retire_stage (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-rst-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Already absent stage file -> APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
@@ -1431,7 +1466,7 @@ test_execute_retire_stage (void)
   g_assert_cmpint (symlinkat (target_path, fixture.directory.graph_fd, fixture.names.stage), ==, 0);
 
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   g_assert_true (g_file_test (target_path, G_FILE_TEST_EXISTS));
@@ -1440,7 +1475,7 @@ test_execute_retire_stage (void)
   /* 3. Conforming stage file -> APPLIED, unlinked */
   make_conforming (&fixture, fixture.names.stage, 22);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   struct stat st;
@@ -1452,7 +1487,7 @@ test_execute_retire_stage (void)
   make_conforming (&fixture, fixture.names.stage, 22);
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_RETIRE_STAGE_UNLINK));
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
@@ -1466,12 +1501,12 @@ test_execute_finalize (void)
 {
   Fixture fixture;
   fixture_init (&fixture, "u2b-fin-XXXXXX");
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* 1. Missing rollback link (Mode B or already finalized) -> APPLIED */
   WylFactArtifactMainTransitionEffect effect = (WylFactArtifactMainTransitionEffect) 999;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
@@ -1481,7 +1516,7 @@ test_execute_finalize (void)
   g_assert_cmpint (symlinkat (target_path, fixture.directory.graph_fd, fixture.names.rollback), ==, 0);
 
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
   g_assert_true (g_file_test (target_path, G_FILE_TEST_EXISTS));
@@ -1490,7 +1525,7 @@ test_execute_finalize (void)
   /* 3. Conforming rollback file -> APPLIED, unlinked */
   make_conforming (&fixture, fixture.names.rollback, 30);
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   struct stat st;
@@ -1502,7 +1537,7 @@ test_execute_finalize (void)
   make_conforming (&fixture, fixture.names.rollback, 30);
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_FINALIZE_UNLINK));
   effect = (WylFactArtifactMainTransitionEffect) 999;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+  g_assert_cmpint (execute_current (provider,
       MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
   g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
@@ -1527,12 +1562,12 @@ test_execute_mode_a_full_lifecycle (void)
   Request request = request_for (&observation, main_id, stage_id, FALSE);
 
   Result result;
-  g_autoptr (Transition) transition = NULL;
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
   g_assert_cmpint (admit (&observation, &request, &result, &transition), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_READY));
   g_assert_cmpint (result.next_op, ==, MT (OP_SYNC_STAGED));
 
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* Op 1: SYNC_STAGED */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
@@ -1540,7 +1575,8 @@ test_execute_mode_a_full_lifecycle (void)
   WylFactArtifactMainTransitionEffect effect;
   WylFactArtifactMainTransitionDurabilityEvidence durability;
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_SYNC_STAGED), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_PROVEN));
 
@@ -1555,7 +1591,7 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_RETAIN), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1568,7 +1604,8 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_SYNC_ROLLBACK_FILE), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.rollback_file, ==, MT (DURABILITY_PROVEN));
 
@@ -1583,7 +1620,8 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_SYNC_RETAIN_DIR), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_SYNC_RETAIN_DIR), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_SYNC_RETAIN_DIR), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.directory_after_retain, ==, MT (DURABILITY_PROVEN));
 
@@ -1598,7 +1636,7 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_PUBLISH), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1611,7 +1649,8 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_SYNC_PUBLISH_DIR), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
   g_assert_cmpint (durability.directory_after_publish, ==, MT (DURABILITY_PROVEN));
 
@@ -1626,7 +1665,7 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_FINALIZE), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1652,12 +1691,12 @@ test_execute_mode_b_full_lifecycle (void)
   Request request = request_for (&observation, (Identity) { 0 }, stage_id, TRUE);
 
   Result result;
-  g_autoptr (Transition) transition = NULL;
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
   g_assert_cmpint (admit (&observation, &request, &result, &transition), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_READY));
   g_assert_cmpint (result.next_op, ==, MT (OP_SYNC_STAGED));
 
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* Op 1: SYNC_STAGED */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
@@ -1665,7 +1704,8 @@ test_execute_mode_b_full_lifecycle (void)
   WylFactArtifactMainTransitionEffect effect;
   WylFactArtifactMainTransitionDurabilityEvidence durability;
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_SYNC_STAGED), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1679,7 +1719,7 @@ test_execute_mode_b_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_PUBLISH), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_PUBLISH), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1692,7 +1732,8 @@ test_execute_mode_b_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_SYNC_PUBLISH_DIR), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1706,7 +1747,7 @@ test_execute_mode_b_full_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_FINALIZE), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
@@ -1734,25 +1775,34 @@ test_execute_mode_a_rollback_lifecycle (void)
   Request request = request_for (&observation, main_id, stage_id, FALSE);
 
   Result result;
-  g_autoptr (Transition) transition = NULL;
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
   g_assert_cmpint (admit (&observation, &request, &result, &transition), ==, WYRELOG_E_OK);
 
-  g_autoptr (Provider) provider = open_provider (&fixture);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* SYNC_STAGED */
-  wyl_fact_artifact_main_transition_authorize (transition, MT (OP_SYNC_STAGED), &observation, &result);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+      MT (OP_SYNC_STAGED), &observation, &result), ==, WYRELOG_E_OK);
   WylFactArtifactMainTransitionEffect effect;
   WylFactArtifactMainTransitionDurabilityEvidence durability;
-  wyl_fact_artifact_transition_posix_execute (provider, MT (OP_SYNC_STAGED), &effect, &durability);
-  observe (&fixture, &observation);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+      &observation, MT (OP_SYNC_STAGED), &effect, &durability), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
   observation.durability = durability;
-  wyl_fact_artifact_main_transition_record (transition, MT (OP_SYNC_STAGED), effect, &observation, &result);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+      MT (OP_SYNC_STAGED), effect, &observation, &result), ==, WYRELOG_E_OK);
 
   /* RETAIN */
-  wyl_fact_artifact_main_transition_authorize (transition, MT (OP_RETAIN), &observation, &result);
-  wyl_fact_artifact_transition_posix_execute (provider, MT (OP_RETAIN), &effect, &durability);
-  observe (&fixture, &observation);
-  wyl_fact_artifact_main_transition_record (transition, MT (OP_RETAIN), effect, &observation, &result);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+      MT (OP_RETAIN), &observation, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+      &observation, MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+      MT (OP_RETAIN), effect, &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_RETAINED));
 
   /* Re-admit under resume_forbidden to unlock ROLLBACK */
@@ -1765,10 +1815,11 @@ test_execute_mode_a_rollback_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (abandon_tr,
       MT (OP_ROLLBACK), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_ROLLBACK), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_ROLLBACK), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
-  observe (&fixture, &observation);
+  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_main_transition_record (abandon_tr,
       MT (OP_ROLLBACK), effect, &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_ROLLED_BACK));
@@ -1778,16 +1829,224 @@ test_execute_mode_a_rollback_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (abandon_tr,
       MT (OP_RETIRE_STAGE), &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
-      MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
+      &observation, MT (OP_RETIRE_STAGE), &effect, &durability), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
-  observe (&fixture, &observation);
+  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_main_transition_record (abandon_tr,
       MT (OP_RETIRE_STAGE), effect, &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_ABANDONED));
   g_assert_true (result.terminal);
 
   wyl_fact_artifact_main_transition_free (abandon_tr);
+  fixture_clear (&fixture);
+}
+
+static void
+test_execute_authorization_binding (void)
+{
+  Fixture first;
+  Fixture second;
+  fixture_init (&first, "u2b-auth-a-XXXXXX");
+  fixture_init (&second, "u2b-auth-b-XXXXXX");
+
+  Observation first_authorized;
+  Observation second_authorized;
+  g_assert_cmpint (observe (&first, &first_authorized), ==, WYRELOG_E_OK);
+  g_assert_cmpint (observe (&second, &second_authorized), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactArtifactTransitionPosix) second_provider
+    = open_provider (&second);
+
+  WylFactArtifactMainTransitionEffect effect
+    = (WylFactArtifactMainTransitionEffect) 999;
+  WylFactArtifactMainTransitionDurabilityEvidence durability = {
+    .directory_after_retain = MT (DURABILITY_PROVEN),
+  };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute
+        (second_provider, &first_authorized, MT (OP_SYNC_RETAIN_DIR),
+      &effect, &durability), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
+  g_assert_cmpint (durability.directory_after_retain, ==,
+      MT (DURABILITY_UNPROVEN));
+
+  Observation wrong_lease = second_authorized;
+  wrong_lease.lease_identity = first_authorized.lease_identity;
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute
+        (second_provider, &wrong_lease, MT (OP_SYNC_RETAIN_DIR),
+      &effect, &durability), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (durability.directory_after_retain, ==,
+      MT (DURABILITY_UNPROVEN));
+
+  fixture_clear (&second);
+  fixture_clear (&first);
+}
+
+typedef struct
+{
+  const gchar *parked;
+} PostOpenSubstitution;
+
+static void
+substitute_after_open (gint directory_fd, const gchar *name,
+    gpointer user_data)
+{
+  const PostOpenSubstitution *substitution = user_data;
+  g_assert_cmpint (renameat (directory_fd, name, directory_fd,
+      substitution->parked), ==, 0);
+  gint fd = openat (directory_fd, name,
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_cmpint (write (fd, "foreign", 7), ==, 7);
+  g_assert_cmpint (close (fd), ==, 0);
+}
+
+static void
+test_execute_post_open_substitution (void)
+{
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_PUBLISH),
+    MT (OP_RETIRE_STAGE),
+  };
+  for (gsize index = 0; index < G_N_ELEMENTS (ops); index++) {
+    Fixture fixture;
+    g_autofree gchar *tag
+      = g_strdup_printf ("u2b-post-open-%zu-XXXXXX", index);
+    fixture_init (&fixture, tag);
+    make_conforming (&fixture, fixture.names.stage, 44);
+
+    Observation authorized;
+    g_assert_cmpint (observe (&fixture, &authorized), ==, WYRELOG_E_OK);
+    PostOpenSubstitution substitution = {
+      .parked = index == 0 ? "publish-authorized-away.duckdb"
+        : "retire-authorized-away.duckdb",
+    };
+    wyl_fact_artifact_transition_posix_set_test_post_open_hook
+      (substitute_after_open, &substitution);
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (EXECUTE_ENTRY_SUBSTITUTE));
+
+    g_autoptr (WylFactArtifactTransitionPosix) provider
+      = open_provider (&fixture);
+    WylFactArtifactMainTransitionEffect effect;
+    WylFactArtifactMainTransitionDurabilityEvidence durability;
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+        &authorized, ops[index], &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
+    g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (PF (EXECUTE_ENTRY_SUBSTITUTE)));
+
+    Identity authorized_identity
+      = authorized.entries[SLOT_STAGE].identity;
+    Identity foreign = real_identity (&fixture, fixture.names.stage);
+    g_assert_false (wyl_fact_artifact_inventory_identity_equal
+          (&authorized_identity, &foreign));
+    Identity parked = real_identity (&fixture, substitution.parked);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal
+          (&authorized_identity, &parked));
+    if (ops[index] == MT (OP_PUBLISH)) {
+      struct stat st = { 0 };
+      g_assert_cmpint (fstatat (fixture.directory.graph_fd,
+          WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, &st,
+          AT_SYMLINK_NOFOLLOW), ==, -1);
+      g_assert_cmpint (errno, ==, ENOENT);
+    }
+    fixture_clear (&fixture);
+  }
+}
+
+static void
+test_execute_identity_substitution (void)
+{
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_RETAIN),
+    MT (OP_PUBLISH),
+    MT (OP_ROLLBACK),
+    MT (OP_RETIRE_STAGE),
+    MT (OP_FINALIZE),
+  };
+
+  for (gsize index = 0; index < G_N_ELEMENTS (ops); index++) {
+    Fixture fixture;
+    g_autofree gchar *tag = g_strdup_printf ("u2b-id-%zu-XXXXXX", index);
+    fixture_init (&fixture, tag);
+
+    const gchar *source;
+    const gchar *destination = NULL;
+    switch (ops[index]) {
+      case MT (OP_RETAIN):
+        source = WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME;
+        destination = fixture.names.rollback;
+        break;
+      case MT (OP_PUBLISH):
+        source = fixture.names.stage;
+        destination = WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME;
+        break;
+      case MT (OP_ROLLBACK):
+        source = fixture.names.rollback;
+        destination = WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME;
+        break;
+      case MT (OP_RETIRE_STAGE):
+        source = fixture.names.stage;
+        break;
+      case MT (OP_FINALIZE):
+        source = fixture.names.rollback;
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+
+    make_conforming (&fixture, source, 11);
+    Observation authorized;
+    g_assert_cmpint (observe (&fixture, &authorized), ==, WYRELOG_E_OK);
+
+    g_autofree gchar *parked
+      = g_strdup_printf ("authorized-away-%zu.duckdb", index);
+    g_assert_cmpint (renameat (fixture.directory.graph_fd, source,
+        fixture.directory.graph_fd, parked), ==, 0);
+    make_conforming (&fixture, source, 22);
+    Identity foreign = real_identity (&fixture, source);
+
+    g_autoptr (WylFactArtifactTransitionPosix) provider
+      = open_provider (&fixture);
+    WylFactArtifactMainTransitionEffect effect;
+    WylFactArtifactMainTransitionDurabilityEvidence durability;
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+        &authorized, ops[index], &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
+
+    Identity after = real_identity (&fixture, source);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&foreign,
+        &after));
+    struct stat st = { 0 };
+    g_assert_cmpint (fstatat (fixture.directory.graph_fd, parked, &st,
+        AT_SYMLINK_NOFOLLOW), ==, 0);
+    if (destination != NULL) {
+      g_assert_cmpint (fstatat (fixture.directory.graph_fd, destination, &st,
+          AT_SYMLINK_NOFOLLOW), ==, -1);
+      g_assert_cmpint (errno, ==, ENOENT);
+    }
+    fixture_clear (&fixture);
+  }
+
+  /* Mode B authorizes an absent rollback name.  A later foreign occupant is
+   * not an "already finalized" success and must be preserved. */
+  Fixture fixture;
+  fixture_init (&fixture, "u2b-id-mode-b-XXXXXX");
+  Observation authorized;
+  g_assert_cmpint (observe (&fixture, &authorized), ==, WYRELOG_E_OK);
+  make_conforming (&fixture, fixture.names.rollback, 33);
+  Identity foreign = real_identity (&fixture, fixture.names.rollback);
+  g_autoptr (WylFactArtifactTransitionPosix) provider
+    = open_provider (&fixture);
+  WylFactArtifactMainTransitionEffect effect;
+  WylFactArtifactMainTransitionDurabilityEvidence durability;
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+      &authorized, MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_NOT_APPLIED));
+  Identity after = real_identity (&fixture, fixture.names.rollback);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (&foreign,
+      &after));
   fixture_clear (&fixture);
 }
 
@@ -1818,7 +2077,8 @@ test_execute_fault_seams_are_reachable (void)
     make_conforming (&fixture, fixture.names.stage, 2);
     make_conforming (&fixture, fixture.names.rollback, 3);
 
-    g_autoptr (Provider) provider = open_provider (&fixture);
+    g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+    g_autoptr (GPtrArray) before = entry_set (&fixture);
     wyl_fact_artifact_transition_posix_set_test_fault (execute_arms[index]);
 
     WylFactArtifactMainTransitionOp op;
@@ -1828,6 +2088,7 @@ test_execute_fault_seams_are_reachable (void)
         op = MT (OP_SYNC_STAGED);
         break;
       case PF (EXECUTE_RETAIN_RENAME):
+        wyl_fact_artifact_transition_posix_set_test_rename_errno (EIO);
         op = MT (OP_RETAIN);
         break;
       case PF (EXECUTE_SYNC_ROLLBACK_OPEN):
@@ -1838,12 +2099,14 @@ test_execute_fault_seams_are_reachable (void)
         op = MT (OP_SYNC_RETAIN_DIR);
         break;
       case PF (EXECUTE_PUBLISH_RENAME):
+        wyl_fact_artifact_transition_posix_set_test_rename_errno (EIO);
         op = MT (OP_PUBLISH);
         break;
       case PF (EXECUTE_SYNC_PUBLISH_DIR_FSYNC):
         op = MT (OP_SYNC_PUBLISH_DIR);
         break;
       case PF (EXECUTE_ROLLBACK_RENAME):
+        wyl_fact_artifact_transition_posix_set_test_rename_errno (EIO);
         op = MT (OP_ROLLBACK);
         break;
       case PF (EXECUTE_RETIRE_STAGE_VERIFY):
@@ -1861,9 +2124,18 @@ test_execute_fault_seams_are_reachable (void)
 
     WylFactArtifactMainTransitionEffect effect;
     WylFactArtifactMainTransitionDurabilityEvidence durability;
-    (void) wyl_fact_artifact_transition_posix_execute (provider, op, &effect, &durability);
+    wyrelog_error_t status
+      = execute_current (provider, op, &effect, &durability);
+    if (execute_arms[index] == PF (EXECUTE_LEASE_VERIFY))
+      g_assert_cmpint (status, ==, WYRELOG_E_POLICY);
+    else {
+      g_assert_cmpint (status, ==, WYRELOG_E_OK);
+      g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+    }
     g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
           execute_arms[index]));
+    g_autoptr (GPtrArray) after = entry_set (&fixture);
+    assert_entry_sets_equal (before, after);
     fixture_clear (&fixture);
   }
 }
@@ -1928,6 +2200,12 @@ main (int argc, char **argv)
       test_execute_retire_stage);
   g_test_add_func ("/fact/artifact-transition-posix/execute/finalize",
       test_execute_finalize);
+  g_test_add_func ("/fact/artifact-transition-posix/execute/authorization-binding",
+      test_execute_authorization_binding);
+  g_test_add_func ("/fact/artifact-transition-posix/execute/post-open-substitution",
+      test_execute_post_open_substitution);
+  g_test_add_func ("/fact/artifact-transition-posix/execute/identity-substitution",
+      test_execute_identity_substitution);
   g_test_add_func ("/fact/artifact-transition-posix/execute/mode-a-lifecycle",
       test_execute_mode_a_full_lifecycle);
   g_test_add_func ("/fact/artifact-transition-posix/execute/mode-b-lifecycle",
