@@ -126,8 +126,12 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ENTRY_SUBSTITUTE,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_COUNT,
 } WylFactArtifactTransitionPosixTestFault;
+
+typedef void (*WylFactArtifactTransitionPosixTestPostOpenHook)
+  (gint directory_fd, const gchar *name, gpointer user_data);
 
 /*
  * Runs the out-of-band capability experiment against |directory| using two
@@ -181,9 +185,15 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_observe
  *
  * The caller supplies the returned Effect and DurabilityEvidence to
  * wyl_fact_artifact_main_transition_record.
+ *
+ * |authorized| is the observation accepted by authorize immediately before
+ * this call.  It binds every file operation to the exact operation UUID,
+ * directory, lease, and entry identity that was authorized; the executor does
+ * not re-derive which operation is legal.
  */
 wyrelog_error_t wyl_fact_artifact_transition_posix_execute
   (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionObservation *authorized,
     WylFactArtifactMainTransitionOp op,
     WylFactArtifactMainTransitionEffect *out_effect,
     WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
@@ -215,5 +225,8 @@ void wyl_fact_artifact_transition_posix_set_test_flush_errno
   (gint errno_value);
 gboolean wyl_fact_artifact_transition_posix_test_fault_was_consumed
   (WylFactArtifactTransitionPosixTestFault fault);
+
+void wyl_fact_artifact_transition_posix_set_test_post_open_hook
+  (WylFactArtifactTransitionPosixTestPostOpenHook hook, gpointer user_data);
 
 G_END_DECLS

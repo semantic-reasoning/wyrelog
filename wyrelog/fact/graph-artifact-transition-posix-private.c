@@ -70,8 +70,6 @@ extern long syscall (long, ...);
  */
 
 #define MT_SLOT_COUNT WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT
-#define POSIX_FAULT(name) WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_ ## name
-
 struct WylFactArtifactTransitionPosix
 {
   /* Borrowed.  The provider neither closes the descriptor nor releases the
@@ -87,6 +85,9 @@ static gint transition_posix_test_fault;
 static gint transition_posix_consumed_test_fault;
 static gint transition_posix_test_rename_errno;
 static gint transition_posix_test_flush_errno;
+static WylFactArtifactTransitionPosixTestPostOpenHook
+    transition_posix_test_post_open_hook;
+static gpointer transition_posix_test_post_open_data;
 
 /*
  * Read-and-clear.  g_atomic_int_exchange would say this in one call but is
@@ -113,7 +114,7 @@ posix_fault_take (WylFactArtifactTransitionPosixTestFault fault)
 {
   gboolean consumed
     = g_atomic_int_compare_and_exchange (&transition_posix_test_fault, fault,
-          POSIX_FAULT (NONE));
+          WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
   if (consumed)
     g_atomic_int_set (&transition_posix_consumed_test_fault, fault);
   return consumed;
@@ -123,9 +124,9 @@ void
 wyl_fact_artifact_transition_posix_set_test_fault
   (WylFactArtifactTransitionPosixTestFault fault)
 {
-  if (fault >= POSIX_FAULT (NONE) && fault < POSIX_FAULT (COUNT)) {
+  if (fault >= WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE && fault < WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_COUNT) {
     g_atomic_int_set (&transition_posix_consumed_test_fault,
-        POSIX_FAULT (NONE));
+        WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
     g_atomic_int_set (&transition_posix_test_fault, fault);
   }
 }
@@ -146,10 +147,18 @@ gboolean
 wyl_fact_artifact_transition_posix_test_fault_was_consumed
   (WylFactArtifactTransitionPosixTestFault fault)
 {
-  return fault != POSIX_FAULT (NONE)
+  return fault != WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE
          && g_atomic_int_compare_and_exchange
            (&transition_posix_consumed_test_fault, fault,
-             POSIX_FAULT (NONE));
+             WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+}
+
+void
+wyl_fact_artifact_transition_posix_set_test_post_open_hook
+  (WylFactArtifactTransitionPosixTestPostOpenHook hook, gpointer user_data)
+{
+  transition_posix_test_post_open_hook = hook;
+  transition_posix_test_post_open_data = user_data;
 }
 
 /*
@@ -282,7 +291,7 @@ observe_slot (WylFactArtifactTransitionPosix *provider,
   struct stat screen = { 0 };
   *out_entry = (WylFactArtifactMainTransitionEntryEvidence) { 0 };
 
-  if (posix_fault_take (POSIX_FAULT (OBSERVE_SLOT_SUBSTITUTE))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE)) {
     out_entry->present = TRUE;
     out_entry->reparse = TRUE;
     return WYRELOG_E_OK;
@@ -306,7 +315,7 @@ observe_slot (WylFactArtifactTransitionPosix *provider,
    * that a later inserted call could clobber. */
   gint fd = -1;
   gint open_errno;
-  if (posix_fault_take (POSIX_FAULT (OBSERVE_SLOT_OPEN))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_OPEN)) {
     open_errno = EIO;
   } else {
     fd = openat (provider->graph_fd, name,
@@ -366,7 +375,7 @@ observe_slot (WylFactArtifactTransitionPosix *provider,
 static gboolean
 probe_retire (gint graph_fd, const WylFactArtifactTransitionNames *names)
 {
-  if (posix_fault_take (POSIX_FAULT (PROBE_RETIRE)))
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_RETIRE))
     return FALSE;
   gboolean retired = TRUE;
   const gchar *targets[] = { names->probe, names->probe_moved };
@@ -409,7 +418,7 @@ probe_preclean (gint graph_fd, const WylFactArtifactTransitionNames *names)
 {
   const gchar *targets[] = { names->probe, names->probe_moved };
   for (gsize index = 0; index < G_N_ELEMENTS (targets); index++) {
-    if (posix_fault_take (POSIX_FAULT (PROBE_PRECLEAN)))
+    if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_PRECLEAN))
       return WYRELOG_E_IO;
     if (unlinkat (graph_fd, targets[index], 0) != 0) {
       gint unlink_errno = errno;
@@ -495,7 +504,7 @@ wyl_fact_artifact_transition_posix_probe_capability
     goto done;
 
   gint probe_fd = -1;
-  if (posix_fault_take (POSIX_FAULT (PROBE_CREATE))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_CREATE)) {
     /* No errno is set here on purpose: this path never classifies by errno.
      * It fails on probe_fd < 0 and reports IO unconditionally, because
      * without a created source the rename's errno says nothing about the
@@ -512,7 +521,7 @@ wyl_fact_artifact_transition_posix_probe_capability
   close (probe_fd);
 
   gint rename_errno;
-  if (posix_fault_take (POSIX_FAULT (PROBE_RENAME))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_RENAME)) {
     /* Take-and-disarm, like the one-shot fault beside it -- but the clear
      * happens HERE, on consumption, so it bounds nothing when this arm is
      * never reached.  See posix_take_level. */
@@ -547,7 +556,7 @@ wyl_fact_artifact_transition_posix_probe_capability
    */
   gint flush_result;
   gint flush_errno;
-  if (posix_fault_take (POSIX_FAULT (PROBE_DIRECTORY_FSYNC))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_DIRECTORY_FSYNC)) {
     /* Take-and-disarm, as above. */
     gint injected = posix_take_level (&transition_posix_test_flush_errno);
     flush_result = -1;
@@ -664,7 +673,7 @@ wyl_fact_artifact_transition_posix_observe
     return status;
 
   struct stat directory = { 0 };
-  if (posix_fault_take (POSIX_FAULT (OBSERVE_DIRECTORY_FSTAT))
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_DIRECTORY_FSTAT)
       || fstat (provider->graph_fd, &directory) != 0)
     return WYRELOG_E_IO;
 
@@ -674,7 +683,7 @@ wyl_fact_artifact_transition_posix_observe
    * it as its guard identity.  A missing lock is a broken lease, not an
    * absent slot, so it fails the observation rather than zeroing a field. */
   struct stat lock = { 0 };
-  if (posix_fault_take (POSIX_FAULT (OBSERVE_LEASE_FSTAT))
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_LEASE_FSTAT)
       || fstatat (provider->graph_fd, WYL_FACT_ARTIFACT_TRANSITION_LOCK_NAME,
       &lock, AT_SYMLINK_NOFOLLOW) != 0)
     return WYRELOG_E_IO;
@@ -720,12 +729,136 @@ execute_classify_rename (gint rename_errno)
   return WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
 }
 
+static gboolean
+execute_open_expected (const WylFactArtifactTransitionPosix *provider,
+    const gchar *name,
+    const WylFactArtifactMainTransitionEntryEvidence *expected,
+    WylFactArtifactTransitionPosixTestFault open_fault,
+    gboolean absent_is_applied, gint *out_fd,
+    WylFactArtifactMainTransitionEffect *out_effect)
+{
+  *out_fd = -1;
+  gint fd = -1;
+  gint open_errno = 0;
+  if (open_fault != WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE && posix_fault_take (open_fault)) {
+    open_errno = EIO;
+  } else {
+    fd = openat (provider->graph_fd, name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    open_errno = fd < 0 ? errno : 0;
+  }
+  if (fd < 0) {
+    if (open_errno == ENOENT) {
+      *out_effect = absent_is_applied
+        ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+        : WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
+    } else if (open_errno == ELOOP || open_errno == EACCES
+        || open_errno == EPERM || open_errno == ENOTDIR) {
+      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
+    } else {
+      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+    }
+    return FALSE;
+  }
+
+  struct stat st = { 0 };
+  if (fstat (fd, &st) != 0) {
+    close (fd);
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+    return FALSE;
+  }
+  WylFactArtifactInventoryIdentity identity = identity_from_stat (&st);
+  if (!expected->present || expected->reparse || expected->link_count != 1
+      || expected->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !S_ISREG (st.st_mode) || st.st_uid != geteuid ()
+      || (st.st_mode & 07777) != 0600 || st.st_nlink != 1
+      || !wyl_fact_artifact_inventory_identity_equal (&identity,
+      &expected->identity)) {
+    close (fd);
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
+    return FALSE;
+  }
+
+  if (posix_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ENTRY_SUBSTITUTE)
+      && transition_posix_test_post_open_hook != NULL)
+    transition_posix_test_post_open_hook (provider->graph_fd, name,
+        transition_posix_test_post_open_data);
+
+  *out_fd = fd;
+  return TRUE;
+}
+
+static gboolean
+execute_name_still_expected (const WylFactArtifactTransitionPosix *provider,
+    const gchar *name,
+    const WylFactArtifactMainTransitionEntryEvidence *expected,
+    gboolean absent_is_applied,
+    WylFactArtifactMainTransitionEffect *out_effect)
+{
+  struct stat st = { 0 };
+  if (fstatat (provider->graph_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+    gint stat_errno = errno;
+    *out_effect = stat_errno == ENOENT && absent_is_applied
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+      : stat_errno == ENOENT
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED
+      : WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+    return FALSE;
+  }
+  WylFactArtifactInventoryIdentity identity = identity_from_stat (&st);
+  if (S_ISLNK (st.st_mode)
+      || !wyl_fact_artifact_inventory_identity_equal (&identity,
+      &expected->identity)) {
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static wyrelog_error_t
+execute_verify_authorization
+  (const WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionObservation *authorized)
+{
+  struct stat directory = { 0 };
+  if (fstat (provider->graph_fd, &directory) != 0)
+    return WYRELOG_E_IO;
+  WylFactArtifactInventoryIdentity directory_identity
+    = identity_from_stat (&directory);
+  if (!wyl_fact_artifact_inventory_identity_equal (&directory_identity,
+      &authorized->directory_identity))
+    return WYRELOG_E_POLICY;
+
+  struct stat lock = { 0 };
+  if (fstatat (provider->graph_fd, WYL_FACT_ARTIFACT_TRANSITION_LOCK_NAME,
+      &lock, AT_SYMLINK_NOFOLLOW) != 0)
+    return WYRELOG_E_IO;
+  WylFactArtifactInventoryIdentity lease_identity = identity_from_stat (&lock);
+  if (!wyl_fact_artifact_inventory_identity_equal (&lease_identity,
+      &authorized->lease_identity))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 execute_rename (const WylFactArtifactTransitionPosix *provider,
     const gchar *source, const gchar *destination,
+    const WylFactArtifactMainTransitionEntryEvidence *expected_source,
     WylFactArtifactTransitionPosixTestFault fault,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
+  gint source_fd = -1;
+  if (!execute_open_expected (provider, source, expected_source,
+      WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE, FALSE, &source_fd, out_effect))
+    return WYRELOG_E_OK;
+  if (!execute_name_still_expected (provider, source, expected_source,
+      FALSE, out_effect)) {
+    close (source_fd);
+    return WYRELOG_E_OK;
+  }
+
   gint rename_errno;
   if (posix_fault_take (fault)) {
     gint injected = posix_take_level (&transition_posix_test_rename_errno);
@@ -734,12 +867,15 @@ execute_rename (const WylFactArtifactTransitionPosix *provider,
     rename_errno = transition_rename_no_replace (provider->graph_fd, source,
             destination);
   }
+  close (source_fd);
   *out_effect = execute_classify_rename (rename_errno);
   return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
-execute_sync_file (gint dirfd, const gchar *name,
+execute_sync_file (const WylFactArtifactTransitionPosix *provider,
+    const gchar *name,
+    const WylFactArtifactMainTransitionEntryEvidence *expected,
     WylFactArtifactTransitionPosixTestFault open_fault,
     WylFactArtifactTransitionPosixTestFault fsync_fault,
     WylFactArtifactMainTransitionDurability *out_durability,
@@ -747,35 +883,9 @@ execute_sync_file (gint dirfd, const gchar *name,
 {
   *out_durability = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNPROVEN;
   gint fd = -1;
-  gint open_errno = 0;
-  if (posix_fault_take (open_fault)) {
-    open_errno = EIO;
-  } else {
-    fd = openat (dirfd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    open_errno = fd < 0 ? errno : 0;
-  }
-  if (fd < 0) {
-    if (open_errno == ENOENT || open_errno == ELOOP
-        || open_errno == EACCES || open_errno == EPERM
-        || open_errno == ENOTDIR)
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-    else
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (!execute_open_expected (provider, name, expected, open_fault,
+      FALSE, &fd, out_effect))
     return WYRELOG_E_OK;
-  }
-
-  struct stat st = { 0 };
-  if (fstat (fd, &st) != 0) {
-    close (fd);
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
-    return WYRELOG_E_OK;
-  }
-  if (!S_ISREG (st.st_mode) || st.st_uid != geteuid ()
-      || (st.st_mode & 07777) != 0600 || st.st_nlink != 1) {
-    close (fd);
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-    return WYRELOG_E_OK;
-  }
 
   gint flush_res;
   gint flush_errno;
@@ -843,53 +953,29 @@ execute_sync_dir (const WylFactArtifactTransitionPosix *provider,
 
 static wyrelog_error_t
 execute_retire_stage (const WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionEntryEvidence *expected,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
   gint fd = -1;
-  gint open_errno = 0;
-  if (posix_fault_take (POSIX_FAULT (EXECUTE_RETIRE_STAGE_VERIFY))) {
-    open_errno = EIO;
-  } else {
-    fd = openat (provider->graph_fd, provider->names.stage,
-            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    open_errno = fd < 0 ? errno : 0;
-  }
-  if (fd < 0) {
-    if (open_errno == ENOENT) {
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-      return WYRELOG_E_OK;
-    }
-    if (open_errno == ELOOP || open_errno == EACCES || open_errno == EPERM
-        || open_errno == ENOTDIR)
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-    else
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (!execute_open_expected (provider, provider->names.stage, expected,
+      WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY, TRUE, &fd, out_effect))
     return WYRELOG_E_OK;
-  }
-
-  struct stat st = { 0 };
-  if (fstat (fd, &st) != 0) {
+  if (!execute_name_still_expected (provider, provider->names.stage,
+      expected, TRUE, out_effect)) {
     close (fd);
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
     return WYRELOG_E_OK;
   }
-  if (!S_ISREG (st.st_mode) || st.st_uid != geteuid ()
-      || (st.st_mode & 07777) != 0600 || st.st_nlink != 1) {
-    close (fd);
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-    return WYRELOG_E_OK;
-  }
-  close (fd);
 
   gint unlink_res;
   gint unlink_errno;
-  if (posix_fault_take (POSIX_FAULT (EXECUTE_RETIRE_STAGE_UNLINK))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK)) {
     unlink_res = -1;
     unlink_errno = EIO;
   } else {
     unlink_res = unlinkat (provider->graph_fd, provider->names.stage, 0);
     unlink_errno = unlink_res == 0 ? 0 : errno;
   }
+  close (fd);
 
   if (unlink_res == 0 || unlink_errno == ENOENT) {
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
@@ -906,53 +992,29 @@ execute_retire_stage (const WylFactArtifactTransitionPosix *provider,
 
 static wyrelog_error_t
 execute_finalize (const WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionEntryEvidence *expected,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
   gint fd = -1;
-  gint open_errno = 0;
-  if (posix_fault_take (POSIX_FAULT (EXECUTE_FINALIZE_VERIFY))) {
-    open_errno = EIO;
-  } else {
-    fd = openat (provider->graph_fd, provider->names.rollback,
-            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    open_errno = fd < 0 ? errno : 0;
-  }
-  if (fd < 0) {
-    if (open_errno == ENOENT) {
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-      return WYRELOG_E_OK;
-    }
-    if (open_errno == ELOOP || open_errno == EACCES || open_errno == EPERM
-        || open_errno == ENOTDIR)
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-    else
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (!execute_open_expected (provider, provider->names.rollback, expected,
+      WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY, TRUE, &fd, out_effect))
     return WYRELOG_E_OK;
-  }
-
-  struct stat st = { 0 };
-  if (fstat (fd, &st) != 0) {
+  if (!execute_name_still_expected (provider, provider->names.rollback,
+      expected, TRUE, out_effect)) {
     close (fd);
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
     return WYRELOG_E_OK;
   }
-  if (!S_ISREG (st.st_mode) || st.st_uid != geteuid ()
-      || (st.st_mode & 07777) != 0600 || st.st_nlink != 1) {
-    close (fd);
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-    return WYRELOG_E_OK;
-  }
-  close (fd);
 
   gint unlink_res;
   gint unlink_errno;
-  if (posix_fault_take (POSIX_FAULT (EXECUTE_FINALIZE_UNLINK))) {
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK)) {
     unlink_res = -1;
     unlink_errno = EIO;
   } else {
     unlink_res = unlinkat (provider->graph_fd, provider->names.rollback, 0);
     unlink_errno = unlink_res == 0 ? 0 : errno;
   }
+  close (fd);
 
   if (unlink_res == 0 || unlink_errno == ENOENT) {
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
@@ -970,6 +1032,7 @@ execute_finalize (const WylFactArtifactTransitionPosix *provider,
 wyrelog_error_t
 wyl_fact_artifact_transition_posix_execute
   (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionObservation *authorized,
     WylFactArtifactMainTransitionOp op,
     WylFactArtifactMainTransitionEffect *out_effect,
     WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
@@ -978,57 +1041,77 @@ wyl_fact_artifact_transition_posix_execute
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
   if (out_durability != NULL)
     *out_durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
-  if (provider == NULL || out_effect == NULL || out_durability == NULL
+  if (provider == NULL || authorized == NULL || out_effect == NULL
+      || out_durability == NULL
       || provider->graph_fd < 0)
     return WYRELOG_E_INVALID;
   if (op <= WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_INSPECT
       || op >= WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_COUNT)
     return WYRELOG_E_INVALID;
+  if (memcmp (provider->operation_uuid, authorized->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_INVALID;
 
-  if (posix_fault_take (POSIX_FAULT (EXECUTE_LEASE_VERIFY)))
+  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_LEASE_VERIFY))
     return WYRELOG_E_POLICY;
   wyrelog_error_t status
     = wyl_fact_root_writer_lease_verify (provider->lease);
   if (status != WYRELOG_E_OK)
     return status;
+  status = execute_verify_authorization (provider, authorized);
+  if (status != WYRELOG_E_OK)
+    return status;
 
   switch (op) {
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED:
-      return execute_sync_file (provider->graph_fd, provider->names.stage,
-                 POSIX_FAULT (EXECUTE_SYNC_STAGED_OPEN),
-                 POSIX_FAULT (EXECUTE_SYNC_STAGED_FSYNC),
+      return execute_sync_file (provider, provider->names.stage,
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_OPEN,
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC,
                  &out_durability->staged_file, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN:
       return execute_rename (provider, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
                  provider->names.rollback,
-                 POSIX_FAULT (EXECUTE_RETAIN_RENAME), out_effect);
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETAIN_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE:
-      return execute_sync_file (provider->graph_fd, provider->names.rollback,
-                 POSIX_FAULT (EXECUTE_SYNC_ROLLBACK_OPEN),
-                 POSIX_FAULT (EXECUTE_SYNC_ROLLBACK_FSYNC),
+      return execute_sync_file (provider, provider->names.rollback,
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_OPEN,
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_FSYNC,
                  &out_durability->rollback_file, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR:
       return execute_sync_dir (provider,
-                 POSIX_FAULT (EXECUTE_SYNC_RETAIN_DIR_FSYNC),
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC,
                  &out_durability->directory_after_retain, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH:
       return execute_rename (provider, provider->names.stage,
                  WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
-                 POSIX_FAULT (EXECUTE_PUBLISH_RENAME), out_effect);
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR:
       return execute_sync_dir (provider,
-                 POSIX_FAULT (EXECUTE_SYNC_PUBLISH_DIR_FSYNC),
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_PUBLISH_DIR_FSYNC,
                  &out_durability->directory_after_publish, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_ROLLBACK:
       return execute_rename (provider, provider->names.rollback,
                  WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
-                 POSIX_FAULT (EXECUTE_ROLLBACK_RENAME), out_effect);
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ROLLBACK_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE:
-      return execute_retire_stage (provider, out_effect);
+      return execute_retire_stage (provider,
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE], out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE:
-      return execute_finalize (provider, out_effect);
+      return execute_finalize (provider,
+                 &authorized->entries
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK], out_effect);
     default:
       return WYRELOG_E_INVALID;
   }
 }
-
