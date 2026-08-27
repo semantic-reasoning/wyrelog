@@ -112,6 +112,20 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_LEASE_FSTAT,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_OPEN,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_LEASE_VERIFY,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_OPEN,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETAIN_RENAME,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_OPEN,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_FSYNC,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_PUBLISH_DIR_FSYNC,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ROLLBACK_RENAME,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_COUNT,
 } WylFactArtifactTransitionPosixTestFault;
 
@@ -156,6 +170,23 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_observe
   (WylFactArtifactTransitionPosix *provider,
     const WylFactArtifactTransitionPosixLifecycle *lifecycle,
     WylFactArtifactMainTransitionObservation *out_observation);
+
+/*
+ * Executes one authorized mutation operation against the held graph directory.
+ *
+ * This performs the actual POSIX filesystem syscalls (renameat2 / renameatx_np,
+ * fsync, unlinkat) for the op authorized by the contract.  It reports the
+ * empirical outcome as an Effect (APPLIED, NOT_APPLIED, or UNKNOWN) and earns
+ * durability evidence for flush operations.
+ *
+ * The caller supplies the returned Effect and DurabilityEvidence to
+ * wyl_fact_artifact_main_transition_record.
+ */
+wyrelog_error_t wyl_fact_artifact_transition_posix_execute
+  (WylFactArtifactTransitionPosix *provider,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
 
 void wyl_fact_artifact_transition_posix_free
   (WylFactArtifactTransitionPosix *provider);
