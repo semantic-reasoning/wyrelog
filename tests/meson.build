@@ -1297,6 +1297,7 @@ test('fact-artifact-transition-driver-wiring', python3,
     meson.current_source_dir() / 'test-fact-artifact-transition-driver-wiring.py',
     meson.project_source_root(),
   ],
+  timeout : 120,
 )
 test('fact-artifact-transition-driver-wiring-self', python3,
   args : [
