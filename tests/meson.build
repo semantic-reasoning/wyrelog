@@ -1296,6 +1296,18 @@ if host_machine.system() != 'windows'
   test('fact-artifact-transition-posix', test_fact_artifact_transition_posix)
 endif
 
+if host_machine.system() == 'windows'
+  test_fact_artifact_transition_windows = executable(
+    'test-fact-artifact-transition-windows',
+    'test-fact-artifact-transition-windows.c',
+    'fact-test-support.c',
+    include_directories : include_directories('../wyrelog'),
+    c_args : fact_test_support_c_args,
+    dependencies : [wyrelog_handle_test_seams_dep] + fact_test_support_deps,
+  )
+  test('fact-artifact-transition-windows', test_fact_artifact_transition_windows)
+endif
+
 test_fact_artifact_main_transition = executable(
   'test-fact-artifact-main-transition',
   'test-fact-artifact-main-transition.c',
