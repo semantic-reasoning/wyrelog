@@ -1130,7 +1130,7 @@ def require_meson_compiler_profile(
             "test('fact-artifact-transition-driver-wiring', python3, args : [ "
             "meson.current_source_dir() / "
             "'test-fact-artifact-transition-driver-wiring.py', "
-            "meson.project_source_root(), ], )",
+            "meson.project_source_root(), ], timeout : 120, )",
         ),
         "fact-artifact-transition-driver-wiring-self": (
             (),
@@ -3078,6 +3078,32 @@ def negative_mutations(root: pathlib.Path) -> list[tuple[str, dict[str, str]]]:
     )
     mutations.append(
         ("Meson wiring checker remapping", {"tests/meson.build": wiring_remap})
+    )
+    wiring_timeout_weakened = replace_once(
+        raw["tests/meson.build"],
+        "test('fact-artifact-transition-driver-wiring', python3,\n"
+        "  args : [\n"
+        "    meson.current_source_dir() / "
+        "'test-fact-artifact-transition-driver-wiring.py',\n"
+        "    meson.project_source_root(),\n"
+        "  ],\n"
+        "  timeout : 120,\n"
+        ")",
+        "test('fact-artifact-transition-driver-wiring', python3,\n"
+        "  args : [\n"
+        "    meson.current_source_dir() / "
+        "'test-fact-artifact-transition-driver-wiring.py',\n"
+        "    meson.project_source_root(),\n"
+        "  ],\n"
+        "  timeout : 30,\n"
+        ")",
+        "Meson wiring checker timeout weakening",
+    )
+    mutations.append(
+        (
+            "Meson wiring checker timeout weakening",
+            {"tests/meson.build": wiring_timeout_weakened},
+        )
     )
     python_rebind = replace_once(
         raw["tests/meson.build"],
