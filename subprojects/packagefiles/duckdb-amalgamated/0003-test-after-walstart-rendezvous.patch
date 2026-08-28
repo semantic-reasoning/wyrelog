@@ -1,7 +1,7 @@
 diff --git a/duckdb.hpp b/duckdb.hpp
 --- a/duckdb.hpp
 +++ b/duckdb.hpp
-@@ -40174,3 +40174,10 @@ struct DBConfigOptions {
+@@ -40174,3 +40174,17 @@ struct DBConfigOptions {
 -	AccessMode access_mode = AccessMode::AUTOMATIC;
 -	//! Checkpoint when WAL reaches this size (default: 16MiB)
 -	idx_t checkpoint_wal_size = 1 << 24;
@@ -15,9 +15,59 @@ diff --git a/duckdb.hpp b/duckdb.hpp
 +	after_wal_start_callback_t test_after_wal_start = nullptr;
 +	void *test_after_wal_start_context = nullptr;
 +#endif
++#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL
++	//! Wyrelog's source-pinned transaction-control failure seam. These fields
++	//! are absent from regular DuckDB builds and are not SQL-visible controls.
++	using transaction_control_callback_t = bool (*)(const char *phase, void *context);
++	transaction_control_callback_t test_transaction_control = nullptr;
++	void *test_transaction_control_context = nullptr;
++#endif
 diff --git a/duckdb.cpp b/duckdb.cpp
 --- a/duckdb.cpp
 +++ b/duckdb.cpp
+@@ -182066,6 +182066,14 @@
+-			throw TransactionException("cannot commit - no transaction is active");
+-		} else {
+-			// explicitly commit the current transaction
+-			client.transaction.Commit();
+-		}
+-		break;
++			throw TransactionException("cannot commit - no transaction is active");
++		} else {
++			// explicitly commit the current transaction
++#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL
++			auto &test_options = DBConfig::GetConfig(client).options;
++			if (test_options.test_transaction_control &&
++			    test_options.test_transaction_control("BEFORE_COMMIT",
++			        test_options.test_transaction_control_context)) {
++				throw PermissionException("Test-injected COMMIT failure");
++			}
++#endif
++			client.transaction.Commit();
++		}
++		break;
+@@ -182074,6 +182082,15 @@
+-		if (client.transaction.IsAutoCommit()) {
+-			throw TransactionException("cannot rollback - no transaction is active");
+-		} else {
+-			// Explicitly rollback the current transaction
+-			// If it is because of an invalidated transaction, we need to rollback with an error
+-			auto &valid_checker = ValidChecker::Get(client.transaction.ActiveTransaction());
++		if (client.transaction.IsAutoCommit()) {
++			throw TransactionException("cannot rollback - no transaction is active");
++		} else {
++#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL
++			auto &test_options = DBConfig::GetConfig(client).options;
++			if (info->type == TransactionType::ROLLBACK &&
++			    test_options.test_transaction_control &&
++			    test_options.test_transaction_control("BEFORE_ROLLBACK",
++			        test_options.test_transaction_control_context)) {
++				throw PermissionException("Test-injected ROLLBACK failure");
++			}
++#endif
++			// Explicitly rollback the current transaction
++			// If it is because of an invalidated transaction, we need to rollback with an error
++			auto &valid_checker = ValidChecker::Get(client.transaction.ActiveTransaction());
 @@ -392627,6 +392627,13 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 -	ActiveCheckpointWrapper active_checkpoint(transaction_manager);
 -	auto has_wal = storage_manager.WALStartCheckpoint(meta_block, options);

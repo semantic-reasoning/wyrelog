@@ -1784,6 +1784,20 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     ],
     timeout : 30,
   )
+  test('duckdb-valid-commit-failure', test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/valid-commit-failure',
+    ],
+    timeout : 30,
+  )
+  test('duckdb-valid-rollback-failure', test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/valid-rollback-failure',
+    ],
+    timeout : 30,
+  )
   test('duckdb-fixed-wal-successful-checkpoint',
     test_duckdb_after_walstart,
     args : [
@@ -3146,6 +3160,10 @@ test('duckdb-source-codegen-boundary', python3,
 
 test('duckdb-after-walstart-boundary', python3,
   args : [files('test-duckdb-after-walstart-boundary.py'),
+    meson.project_source_root()])
+
+test('duckdb-transaction-control-boundary', python3,
+  args : [files('test-duckdb-transaction-control-boundary.py'),
     meson.project_source_root()])
 
 test('duckdb-test-seam-wiring', python3,

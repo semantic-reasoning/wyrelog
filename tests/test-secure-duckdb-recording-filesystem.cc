@@ -4946,6 +4946,134 @@ assert_explicit_checkpoint_full_stream (const std::vector<Event> &events,
   assert_explicit_checkpoint_exact_trace (events, database);
 }
 
+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL
+struct TransactionControlFailure {
+  const char *armed_phase = nullptr;
+  guint injected_count = 0;
+  std::string injected_phase;
+};
+
+static bool
+inject_transaction_control_failure (const char *phase, void *context)
+{
+  auto &failure = *static_cast<TransactionControlFailure *> (context);
+  if (failure.armed_phase == nullptr
+      || g_strcmp0 (phase, failure.armed_phase) != 0)
+    return false;
+  failure.armed_phase = nullptr;
+  failure.injected_count++;
+  failure.injected_phase = phase == nullptr ? std::string () : phase;
+  return true;
+}
+
+static void
+assert_transaction_values (duckdb::Connection &connection,
+    std::initializer_list<const char *> expected)
+{
+  auto result = connection.Query ("SELECT value FROM facts ORDER BY value;");
+  g_assert_false (result->HasError ());
+  g_assert_cmpuint (result->RowCount (), ==, expected.size ());
+  duckdb::idx_t row = 0;
+  for (const auto *value : expected)
+    assert_value_text (result->GetValue (0, row++), value);
+}
+
+static void
+assert_transaction_control_failure (const char *control,
+    const char *phase, const char *candidate)
+{
+  assert_duckdb_155 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox =
+      g_dir_make_tmp ("wyl-duckdb-transaction-control-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+  TransactionControlFailure failure;
+
+  {
+    duckdb::DBConfig config;
+    config.options.maximum_threads = 1;
+    config.options.load_extensions = false;
+    config.options.test_transaction_control =
+        inject_transaction_control_failure;
+    config.options.test_transaction_control_context = &failure;
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection subject (db);
+    duckdb::Connection observer (db);
+
+    auto baseline = subject.Query (
+        "CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42);");
+    g_assert_false (baseline->HasError ());
+    assert_transaction_values (observer, { "42" });
+
+    auto begin = subject.Query ("BEGIN TRANSACTION;");
+    g_assert_false (begin->HasError ());
+    const std::string insert =
+        std::string ("INSERT INTO facts VALUES (") + candidate + ");";
+    auto candidate_result = subject.Query (insert);
+    g_assert_false (candidate_result->HasError ());
+    assert_transaction_values (subject, { "42", candidate });
+    assert_transaction_values (observer, { "42" });
+
+    failure.armed_phase = phase;
+    const std::string statement = std::string (control) + ";";
+    auto injected = subject.Query (statement);
+    g_assert_true (injected->HasError ());
+    const std::string injected_error = injected->GetError ();
+    const std::string expected_error =
+        std::string ("Test-injected ") + control + " failure";
+    g_assert_true (injected_error.find (expected_error)
+        != std::string::npos);
+    g_assert_null (failure.armed_phase);
+    g_assert_cmpuint (failure.injected_count, ==, 1);
+    g_assert_cmpstr (failure.injected_phase.c_str (), ==, phase);
+
+    auto select_one = subject.Query ("SELECT 1;");
+    g_assert_false (select_one->HasError ());
+    g_assert_cmpuint (select_one->RowCount (), ==, 1);
+    assert_value_text (select_one->GetValue (0, 0), "1");
+    assert_transaction_values (subject, { "42", candidate });
+    assert_transaction_values (observer, { "42" });
+
+    auto nested_begin = subject.Query ("BEGIN TRANSACTION;");
+    g_assert_true (nested_begin->HasError ());
+    const std::string nested_error = nested_begin->GetError ();
+    g_assert_true (nested_error.find (
+        "cannot start a transaction within a transaction")
+        != std::string::npos);
+
+    auto cleanup = subject.Query ("ROLLBACK;");
+    g_assert_false (cleanup->HasError ());
+    g_assert_cmpuint (failure.injected_count, ==, 1);
+    assert_transaction_values (subject, { "42" });
+    assert_transaction_values (observer, { "42" });
+  }
+
+  {
+    duckdb::DuckDB reopened (path_to_utf8 (database));
+    duckdb::Connection connection (reopened);
+    assert_transaction_values (connection, { "42" });
+    auto clean_cycle = connection.Query ("BEGIN TRANSACTION; ROLLBACK;");
+    g_assert_false (clean_cycle->HasError ());
+  }
+  remove_tree (sandbox);
+}
+
+static void
+test_valid_commit_failure (void)
+{
+  assert_transaction_control_failure ("COMMIT", "BEFORE_COMMIT", "100");
+}
+
+static void
+test_valid_rollback_failure (void)
+{
+  assert_transaction_control_failure (
+      "ROLLBACK", "BEFORE_ROLLBACK", "200");
+}
+#endif
+
 #ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
 struct AfterWalStartLatch {
   std::mutex mutex;
@@ -6360,6 +6488,12 @@ main (int argc, char **argv)
       test_recording_filesystem_after_wal_start_no_wal);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-rendezvous",
       test_recording_filesystem_after_wal_start_rendezvous);
+#endif
+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/valid-commit-failure",
+      test_valid_commit_failure);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/valid-rollback-failure",
+      test_valid_rollback_failure);
 #endif
   return g_test_run ();
 }
