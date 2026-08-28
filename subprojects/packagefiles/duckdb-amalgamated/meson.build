@@ -88,6 +88,7 @@ if true
   # symbol surface, and checkpoint path.
   duckdb_test_seam_compile_args = duckdb_compile_args + [
     '-DWYL_DUCKDB_TEST_AFTER_WAL_START=1',
+    '-DWYL_DUCKDB_TEST_TRANSACTION_CONTROL=1',
   ]
   duckdb_test_seam_optimization = host_machine.system() == 'linux' ? '0' : '2'
   duckdb_test_seam_lib = static_library('duckdb-test-after-wal-start',

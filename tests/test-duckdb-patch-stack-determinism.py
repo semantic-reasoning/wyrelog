@@ -25,6 +25,7 @@ ARCHIVE_MEMBERS = frozenset(
     ("duckdb.cpp", "duckdb.hpp", "duckdb.h", "duckdb_extension.h")
 )
 PATCH_DIR = "subprojects/packagefiles/duckdb-amalgamated"
+PACKAGE_MESON = f"{PATCH_DIR}/meson.build"
 PATCHES = (
     "0001-vfs-dynamic-cast.patch",
     "0002-windows-amalgamation-compat.patch",
@@ -47,6 +48,7 @@ EXPECTED_TRIGGER_BLOCKS = {
 SNAPSHOT_PATHS = (
     ".gitattributes",
     "subprojects/duckdb-amalgamated.wrap",
+    PACKAGE_MESON,
     "tests/meson.build",
     *PATCH_PATHS,
     *WORKFLOWS,
@@ -54,6 +56,7 @@ SNAPSHOT_PATHS = (
 SELF_TEST_TEXT_PATHS = (
     ".gitattributes",
     "subprojects/duckdb-amalgamated.wrap",
+    PACKAGE_MESON,
     "tests/meson.build",
     *WORKFLOWS,
 )
@@ -67,14 +70,17 @@ EXPECTED_STAGE_HASHES = {
         "88a24983c3f2dd792a3bb5cfba1d6f8ed910380c892d2fdbdcfed754ee94dba6",
     ),
     PATCHES[2]: (
-        "1f1af54c146c06aa899245772ca5e9294d23fdf16924c61884226547612a4e7e",
-        "f0a7d4c29dae4bfdf9cd11533d24dbdd56ed904a618680fe744b3755ca5b43a9",
+        "4a766471de4a8112c5d703ac52141b16c5f57d65ce31304e01e7b519fc98d69e",
+        "b84c3242dde1409d7c2303d8a4dfc2f178b609a58438e3ff9f3ded7aa09406d4",
     ),
     PATCHES[3]: (
-        "5ec21344eda3815cbc68e33fbeec9ef02296b72be43e396730fde4cdbd0485d6",
-        "f0a7d4c29dae4bfdf9cd11533d24dbdd56ed904a618680fe744b3755ca5b43a9",
+        "7ee8f12117b56ea55831d37488981bc1f3fa5b68300286ac131fd4557e6bd765",
+        "b84c3242dde1409d7c2303d8a4dfc2f178b609a58438e3ff9f3ded7aa09406d4",
     ),
 }
+EXPECTED_TRANSACTION_PATCH_SHA256 = (
+    "3468aee40e24b223f9cce9a765ce012b7f44d91f47856bd4649d7c933ca10340"
+)
 INTERFACE_GUARD = "#ifdef interface\n#undef interface\n#endif"
 EXPECTED_MESON_HEADER = """fs = import('fs')
 python3 = find_program('python3')
@@ -229,6 +235,8 @@ EXPECTED_GATE_STEP = r"""      - name: Test focused checkpoint seam
           meson test -C build-duckdb-seam --no-rebuild \
             duckdb-after-walstart-no-wal \
             duckdb-after-walstart-rendezvous \
+            duckdb-valid-commit-failure \
+            duckdb-valid-rollback-failure \
             duckdb-patch-stack-determinism \
             duckdb-patch-stack-determinism-self-test \
             duckdb-patch-stack-determinism-strict \
@@ -236,6 +244,7 @@ EXPECTED_GATE_STEP = r"""      - name: Test focused checkpoint seam
             duckdb-fixed-wal-pre-move-abort-reopen \
             duckdb-fixed-wal-interrupted-recovery \
             duckdb-after-walstart-boundary \
+            duckdb-transaction-control-boundary \
             duckdb-test-seam-wiring \
             duckdb-fixed-wal-lifecycle-boundary \
             --print-errorlogs""" + "\n"
@@ -558,6 +567,63 @@ def validate_patch_semantics(snapshot: dict[str, bytes]) -> None:
         )
     if patch3.count("+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START") != 2:
         fail("E_AFTER_WAL_SCOPE", "test seam must have exactly two compile guards")
+    transaction_fields = (
+        "+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
+        "+\t//! Wyrelog's source-pinned transaction-control failure seam. These fields\n"
+        "+\t//! are absent from regular DuckDB builds and are not SQL-visible controls.\n"
+        "+\tusing transaction_control_callback_t = bool (*)(const char *phase, "
+        "void *context);\n"
+        "+\ttransaction_control_callback_t test_transaction_control = nullptr;\n"
+        "+\tvoid *test_transaction_control_context = nullptr;\n"
+        "+#endif"
+    )
+    commit_callback = (
+        "+\t\t\t// explicitly commit the current transaction\n"
+        "+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
+        "+\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
+        "+\t\t\tif (test_options.test_transaction_control &&\n"
+        "+\t\t\t    test_options.test_transaction_control(\"BEFORE_COMMIT\",\n"
+        "+\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "+\t\t\t\tthrow PermissionException(\"Test-injected COMMIT failure\");\n"
+        "+\t\t\t}\n"
+        "+#endif\n"
+        "+\t\t\tclient.transaction.Commit();"
+    )
+    rollback_callback = (
+        "+\t\t} else {\n"
+        "+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
+        "+\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
+        "+\t\t\tif (info->type == TransactionType::ROLLBACK &&\n"
+        "+\t\t\t    test_options.test_transaction_control &&\n"
+        "+\t\t\t    test_options.test_transaction_control(\"BEFORE_ROLLBACK\",\n"
+        "+\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "+\t\t\t\tthrow PermissionException(\"Test-injected ROLLBACK failure\");\n"
+        "+\t\t\t}\n"
+        "+#endif\n"
+        "+\t\t\t// Explicitly rollback the current transaction"
+    )
+    if patch3.count(transaction_fields) != 1:
+        fail("E_TRANSACTION_FIELDS", "transaction callback fields drifted")
+    if patch3.count(commit_callback) != 1 or patch3.count(rollback_callback) != 1:
+        fail("E_TRANSACTION_BRANCH", "transaction callbacks left branch-local boundaries")
+    if patch3.count("+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL") != 3:
+        fail("E_TRANSACTION_SCOPE", "transaction seam must have exactly three guards")
+
+
+def validate_seam_build_boundary(snapshot: dict[str, bytes]) -> None:
+    package = decode_utf8(snapshot[PACKAGE_MESON], PACKAGE_MESON, universal=True)
+    regular_start = package.index("duckdb_lib = static_library(")
+    regular_end = package.index("\n)\n", regular_start)
+    regular = package[regular_start:regular_end]
+    macro = "WYL_DUCKDB_TEST_TRANSACTION_CONTROL"
+    if macro in regular:
+        fail("E_TRANSACTION_MACRO_LEAK", "transaction seam leaked into duckdb_lib")
+    if package.count("'-DWYL_DUCKDB_TEST_TRANSACTION_CONTROL=1'") != 1:
+        fail("E_TRANSACTION_MACRO_LEAK", "transaction seam macro count drifted")
+    seam_start = package.index("duckdb_test_seam_compile_args =")
+    seam_end = package.index("\n  ]", seam_start)
+    if macro not in package[seam_start:seam_end]:
+        fail("E_TRANSACTION_MACRO_LEAK", "transaction seam macro left test archive")
 
 
 def extract_top_level_job(workflow: str, name: str) -> str:
@@ -734,6 +800,7 @@ def validate_structural(snapshot: dict[str, bytes]) -> None:
     validate_patch_bytes(snapshot)
     validate_patch_order(snapshot)
     validate_patch_semantics(snapshot)
+    validate_seam_build_boundary(snapshot)
     validate_meson(snapshot)
     validate_workflows(snapshot)
 
@@ -897,11 +964,52 @@ def validate_composed_semantics(directory: Path) -> None:
     )
     if hpp.count(option_fields) != 1 or cpp.count(callback) != 1:
         fail("E_COMPOSED_AFTER_WAL", "composed AFTER_WAL_START seam drifted")
+    transaction_fields = (
+        "#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
+        "\t//! Wyrelog's source-pinned transaction-control failure seam. These fields\n"
+        "\t//! are absent from regular DuckDB builds and are not SQL-visible controls.\n"
+        "\tusing transaction_control_callback_t = bool (*)(const char *phase, "
+        "void *context);\n"
+        "\ttransaction_control_callback_t test_transaction_control = nullptr;\n"
+        "\tvoid *test_transaction_control_context = nullptr;\n"
+        "#endif"
+    )
+    commit_callback = (
+        "\t\t\t// explicitly commit the current transaction\n"
+        "#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
+        "\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
+        "\t\t\tif (test_options.test_transaction_control &&\n"
+        "\t\t\t    test_options.test_transaction_control(\"BEFORE_COMMIT\",\n"
+        "\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "\t\t\t\tthrow PermissionException(\"Test-injected COMMIT failure\");\n"
+        "\t\t\t}\n"
+        "#endif\n"
+        "\t\t\tclient.transaction.Commit();"
+    )
+    rollback_callback = (
+        "\t\t} else {\n"
+        "#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
+        "\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
+        "\t\t\tif (info->type == TransactionType::ROLLBACK &&\n"
+        "\t\t\t    test_options.test_transaction_control &&\n"
+        "\t\t\t    test_options.test_transaction_control(\"BEFORE_ROLLBACK\",\n"
+        "\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "\t\t\t\tthrow PermissionException(\"Test-injected ROLLBACK failure\");\n"
+        "\t\t\t}\n"
+        "#endif\n"
+        "\t\t\t// Explicitly rollback the current transaction"
+    )
+    if hpp.count(transaction_fields) != 1:
+        fail("E_COMPOSED_TRANSACTION", "composed transaction fields drifted")
+    if cpp.count(commit_callback) != 1 or cpp.count(rollback_callback) != 1:
+        fail("E_COMPOSED_TRANSACTION", "composed transaction callbacks drifted")
 
 
 def strict_replay(root: Path, archive: Path, tool: Path) -> None:
     verify_archive_hash(archive)
     verify_gnu_patch(tool)
+    if sha256_path(root / PATCH_PATHS[2]) != EXPECTED_TRANSACTION_PATCH_SHA256:
+        fail("E_PATCH_HASH", "transaction-control patch byte hash drifted")
     with tempfile.TemporaryDirectory(prefix="wyrelog-duckdb-patches-") as temporary:
         source = Path(temporary)
         extract_checked_archive(archive, source)
@@ -1108,6 +1216,62 @@ def run_self_tests(
                 snapshot,
                 PATCH_PATHS[2],
                 lambda data: replace_once(data, b'"AFTER_WAL_START"', b'"MOVED"'),
+            ),
+        ),
+        (
+            "E_TRANSACTION_FIELDS",
+            mutated(
+                snapshot,
+                PATCH_PATHS[2],
+                lambda data: replace_once(
+                    data,
+                    b"test_transaction_control_context = nullptr",
+                    b"moved_transaction_control_context = nullptr",
+                ),
+            ),
+        ),
+        (
+            "E_TRANSACTION_BRANCH",
+            mutated(
+                snapshot,
+                PATCH_PATHS[2],
+                lambda data: replace_once(
+                    data, b'"BEFORE_COMMIT"', b'"BEFORE_SWITCH"'
+                ),
+            ),
+        ),
+        (
+            "E_TRANSACTION_BRANCH",
+            mutated(
+                snapshot,
+                PATCH_PATHS[2],
+                lambda data: replace_once(
+                    data,
+                    b"info->type == TransactionType::ROLLBACK",
+                    b"type == TransactionType::ROLLBACK",
+                ),
+            ),
+        ),
+        (
+            "E_TRANSACTION_SCOPE",
+            mutated(
+                snapshot,
+                PATCH_PATHS[2],
+                lambda data: data
+                + b"+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n+#endif\n",
+            ),
+        ),
+        (
+            "E_TRANSACTION_MACRO_LEAK",
+            mutated(
+                snapshot,
+                PACKAGE_MESON,
+                lambda data: replace_once(
+                    data,
+                    b"  cpp_args : duckdb_compile_args,\n",
+                    b"  cpp_args : duckdb_compile_args + "
+                    b"['-DWYL_DUCKDB_TEST_TRANSACTION_CONTROL=1'],\n",
+                ),
             ),
         ),
         (

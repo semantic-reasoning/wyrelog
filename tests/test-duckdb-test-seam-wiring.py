@@ -20,6 +20,8 @@ regular_end = package.index("\n)\n", regular_start)
 regular = package[regular_start:regular_end]
 if "WYL_DUCKDB_TEST_AFTER_WAL_START" in regular:
     raise SystemExit("regular duckdb_lib must compile without the test seam")
+if "WYL_DUCKDB_TEST_TRANSACTION_CONTROL" in regular:
+    raise SystemExit("regular duckdb_lib must compile without transaction seam")
 
 seam_start = package.index(
     "duckdb_test_seam_lib = static_library('duckdb-test-after-wal-start'")
@@ -40,6 +42,9 @@ if ("duckdb_test_seam_optimization = "
 
 if package.count("'-DWYL_DUCKDB_TEST_AFTER_WAL_START=1'") != 1:
     raise SystemExit("the seam macro must be defined for exactly one dependency")
+if package.count("'-DWYL_DUCKDB_TEST_TRANSACTION_CONTROL=1'") != 1:
+    raise SystemExit(
+        "the transaction seam macro must be defined for exactly one dependency")
 if "if true" not in package:
     raise SystemExit("the seam variant must be available on every native host")
 if "duckdb_test_seam_dep = duckdb_subproject.get_variable(" not in parent:
@@ -76,6 +81,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "meson test -C build-duckdb-seam --no-rebuild",
         "duckdb-after-walstart-no-wal",
         "duckdb-after-walstart-rendezvous",
+        "duckdb-valid-commit-failure",
+        "duckdb-valid-rollback-failure",
         "duckdb-fixed-wal-successful-checkpoint",
         "duckdb-fixed-wal-pre-move-abort-reopen",
         "duckdb-fixed-wal-interrupted-recovery",
@@ -83,6 +90,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "Repeat fixed WAL lifecycle evidence",
         "for iteration in 1 2 3 4 5",
         "duckdb-after-walstart-boundary",
+        "duckdb-transaction-control-boundary",
         "duckdb-test-seam-wiring",
         "duckdb-compile-swap.sh provision seam",
         "Remove bounded Linux compile swap",
