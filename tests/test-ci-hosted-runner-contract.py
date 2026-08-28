@@ -123,6 +123,7 @@ EXPECTED_JOB_ENV = {
     ),
     "build-windows": (
         ("SCCACHE_GHA_ENABLED", '"true"'),
+        ("SCCACHE_IDLE_TIMEOUT", '"0"'),
         ("SCCACHE_BASEDIRS", "${{ github.workspace }}"),
     ),
 }
@@ -1062,6 +1063,12 @@ def run_self_test(root: Path) -> None:
     main = WORKFLOW_PATHS[1]
     actionlint = WORKFLOW_PATHS[2]
     codeql = WORKFLOW_PATHS[3]
+    windows_job_env = (
+        "            job_suffix: -secure-bridge\n"
+        "    env:\n"
+        '      SCCACHE_GHA_ENABLED: "true"\n'
+        '      SCCACHE_IDLE_TIMEOUT: "0"\n'
+    )
     hosted_failure = (
         "        if: ${{ runner.environment == 'github-hosted' && (failure()) }}"
     )
@@ -1934,6 +1941,32 @@ def run_self_test(root: Path) -> None:
                     '      SCCACHE_GHA_ENABLED: "true"\n',
                     '      SCCACHE_GHA_ENABLED: "true"\n'
                     "      BASH_ENV: /tmp/unsafe\n",
+                ),
+            ),
+            "E_JOB_ENV",
+        ),
+        (
+            "windows-sccache-idle-timeout-removed",
+            mutate(
+                pr,
+                lambda text: replace_once(
+                    text,
+                    windows_job_env,
+                    windows_job_env.replace(
+                        '      SCCACHE_IDLE_TIMEOUT: "0"\n', ""
+                    ),
+                ),
+            ),
+            "E_JOB_ENV",
+        ),
+        (
+            "windows-sccache-idle-timeout-finite",
+            mutate(
+                main,
+                lambda text: replace_once(
+                    text,
+                    windows_job_env,
+                    windows_job_env.replace('"0"', '"600"'),
                 ),
             ),
             "E_JOB_ENV",

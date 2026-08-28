@@ -775,6 +775,7 @@ jobs:
             job_suffix: -secure-bridge
     env:
       SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IDLE_TIMEOUT: "0"
       # Stays the checkout even though vcpkg no longer lives there: this only
       # relativises paths so hashes survive a moved tree, and both locations
       # are fixed on hosted runners, so the hit rate does not depend on it.
