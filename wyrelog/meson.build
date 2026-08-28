@@ -85,6 +85,7 @@ if host_machine.system() == 'windows'
   wyrelog_sources += files('fact/graph-artifact-windows-lock-private.c')
   wyrelog_sources += files('fact/graph-artifact-windows-namespace-private.c')
   wyrelog_sources += files('fact/artifact-io-session-windows-private.c')
+  wyrelog_sources += files('fact/graph-artifact-transition-windows-private.c')
 else
   wyrelog_sources += files('fact/graph-artifact-namespace-private.c')
   wyrelog_sources += files('fact/artifact-io-session-posix-private.c')
