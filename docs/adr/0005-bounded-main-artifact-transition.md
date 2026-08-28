@@ -141,6 +141,63 @@ an absence check.
 A backend that reports `NOT_APPLIED` where it owed `UNKNOWN` therefore poisons
 the operation permanently rather than merely losing a step.
 
+### Inventory and transition evidence are one capture
+
+Admission never pairs a transition observation with a separately synthesized
+or later-taken #622 snapshot. On POSIX the normal namespace and transition
+provider call one shared scanner. On Windows the transition provider asks the
+retained locator for a complete begin scan and a complete end scan. The main,
+stage, rollback, lock, directory identity, anomaly counts, and fingerprint are
+therefore values from one bounded begin/end epoch. A mismatch publishes
+neither half and reports `UNSTABLE`.
+
+The operation-derived stage and rollback remain `UNKNOWN_ENTRY` anomalies in
+the inventory. Their exact count is checked against the separately captured
+identity evidence; an extra unknown therefore cannot be mistaken for an
+operation artifact. Malformed, substituted, case-colliding, reparse, or
+ambiguous entries remain hard anomalies.
+
+Provider construction binds three authorities, not two: the exact resolver,
+the directory opened from it, and the writer lease that authorizes that
+resolver. This relation is revalidated before and after capture and before
+execution. A valid lease from another root is an authority failure, not a
+weaker valid lease.
+
+On Windows, that revalidation also requires the retained root and graph
+directory handles to remain non-inheritable and the graph directory to retain
+its protected owner-only ACL. Construction, every capture boundary, and every
+execution boundary fail closed if either native authority property changes.
+
+### The unit-4 driver is a compatibility fixture, not #552 durability
+
+The test driver persists the complete request semantics and consumer
+generation behind an injected load/compare-and-swap value-store interface.
+It writes `ATTEMPT_UNKNOWN` by CAS before a caller may invoke a mutation. A
+stale attempt CAS suppresses the invocation. If the backend action ran but the
+completion CAS is stale or the process exits first, the durable marker remains
+`ATTEMPT_UNKNOWN`; restart is inspect-only and never replays that action. After
+a process loss, a fresh provider, fresh capture, and fresh transition classify
+the physical state; no record is ever applied to a destroyed transition and no
+rename or unlink is replayed blindly.
+
+Fresh physical classification deliberately does not reproduce historical
+durability latches or the transient `ROLLED_BACK` state. A completed
+`SYNC_PUBLISH_DIR` recorded as `PUBLISHED_DURABLE` therefore reopens as
+`PUBLISHED` and may repeat only the idempotent directory sync. A completed
+rollback recorded as `ROLLED_BACK` reopens as `READY` and may retire the stage
+only when the persisted request forbids forward resume; it never repeats the
+rollback rename. Preflight cancellation returns before load, attempt CAS, or
+action invocation. Retryable sync and acknowledged `UNSUPPORTED` directory
+durability remain nonterminal and are never promoted to proven durability.
+
+The fixture's store is deliberately separate from graph state. Its in-process
+implementation proves revision ordering, and the child-process tests persist
+the complete request, generation, revision, and marker outside the graph
+directory before releasing all authority. This is a compatibility contract for
+#552, not a claim of machine-crash persistence.
+#552 still owns the real journal, registry-generation CAS, restore policy, and
+durability guarantees.
+
 ## Consequences
 
 Unit 1 proves the wiring of the `REPARSE`, `OWNERSHIP`, `LINK_SUBSTITUTION`

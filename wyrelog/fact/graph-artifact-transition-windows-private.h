@@ -75,6 +75,7 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_LEASE_FSTAT,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_SLOT_OPEN,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE,
+  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_CAPTURE_BETWEEN_SCANS_RETIRE_STAGE,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_LEASE_VERIFY,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_SYNC_STAGED_OPEN,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC,
@@ -108,11 +109,14 @@ wyrelog_error_t wyl_fact_artifact_transition_windows_probe_capability
     WylFactArtifactTransitionWindowsCapability *out_capability);
 
 /*
- * |directory| and |lease| are BORROWED and must outlive the provider.  The
+ * |resolver|, |directory|, and |lease| are BORROWED and must outlive the
+ * provider.  The resolver must be the exact resolver authorized by the lease
+ * and from which |directory| was opened.  The
  * capability must have come from probe_capability above.
  */
 wyrelog_error_t wyl_fact_artifact_transition_windows_open
-  (const WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+  (WylFactGraphResolver *resolver, const WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
     const gchar *operation_uuid,
     const WylFactArtifactTransitionWindowsCapability *capability,
     WylFactArtifactTransitionWindows **out_provider);
@@ -123,6 +127,12 @@ wyrelog_error_t wyl_fact_artifact_transition_windows_open
 wyrelog_error_t wyl_fact_artifact_transition_windows_observe
   (WylFactArtifactTransitionWindows *provider,
     const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactMainTransitionObservation *out_observation);
+
+wyrelog_error_t wyl_fact_artifact_transition_windows_capture
+  (WylFactArtifactTransitionWindows *provider,
+    const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation);
 
 /*

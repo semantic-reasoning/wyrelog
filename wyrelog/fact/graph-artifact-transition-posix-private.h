@@ -127,6 +127,7 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ENTRY_SUBSTITUTE,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_CAPTURE_PRE_FINALIZE_MUTATE_STAGE,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_COUNT,
 } WylFactArtifactTransitionPosixTestFault;
 
@@ -146,12 +147,15 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_probe_capability
     WylFactArtifactTransitionPosixCapability *out_capability);
 
 /*
- * |directory| and |lease| are BORROWED and must outlive the provider.  The
+ * |resolver|, |directory|, and |lease| are BORROWED and must outlive the
+ * provider.  The resolver must be the exact resolver authorized by the lease
+ * and from which |directory| was opened.
  * capability must have come from probe_capability above; passing an invented
  * one is the misclassification the probe exists to prevent.
  */
 wyrelog_error_t wyl_fact_artifact_transition_posix_open
-  (const WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+  (WylFactGraphResolver *resolver, const WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
     const gchar *operation_uuid,
     const WylFactArtifactTransitionPosixCapability *capability,
     WylFactArtifactTransitionPosix **out_provider);
@@ -173,6 +177,14 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_open
 wyrelog_error_t wyl_fact_artifact_transition_posix_observe
   (WylFactArtifactTransitionPosix *provider,
     const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactMainTransitionObservation *out_observation);
+
+/* Publishes a #622 snapshot and its transition observation from one correlated
+ * begin/end directory epoch.  On every failure both outputs remain empty. */
+wyrelog_error_t wyl_fact_artifact_transition_posix_capture
+  (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation);
 
 /*

@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-artifact-transition-posix-private.h"
+#include "fact/graph-artifact-inventory-posix-private.h"
 
 #include "fact/graph-artifact-transition-names-private.h"
 #include "wyl-id-private.h"
@@ -75,11 +76,65 @@ struct WylFactArtifactTransitionPosix
   /* Borrowed.  The provider neither closes the descriptor nor releases the
    * lease; both must outlive it. */
   gint graph_fd;
+  gint root_fd;
+  guint64 root_device;
+  guint64 root_inode;
+  guint64 graph_device;
+  guint64 graph_inode;
+  WylFactGraphResolver *resolver;
   WylFactRootWriterLease *lease;
   WylFactArtifactTransitionNames names;
   guint8 operation_uuid[WYL_ID_BYTES];
   WylFactArtifactTransitionPosixCapability capability;
 };
+
+static gboolean posix_fault_take
+  (WylFactArtifactTransitionPosixTestFault fault);
+
+static wyrelog_error_t
+provider_revalidate_authority (const WylFactArtifactTransitionPosix *provider)
+{
+  struct stat root = { 0 };
+  struct stat graph = { 0 };
+  if (provider == NULL || provider->resolver == NULL
+      || provider->root_fd < 0 || provider->graph_fd < 0)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t status = wyl_fact_root_writer_lease_authorizes_resolver
+        (provider->lease, provider->resolver);
+  if (status != WYRELOG_E_OK)
+    return status;
+  if (provider->resolver->device != provider->root_device
+      || provider->resolver->inode != provider->root_inode
+      || fstat (provider->root_fd, &root) != 0
+      || fstat (provider->graph_fd, &graph) != 0)
+    return WYRELOG_E_POLICY;
+  if (!S_ISDIR (root.st_mode) || !S_ISDIR (graph.st_mode)
+      || (root.st_mode & 07777) != 0700
+      || (graph.st_mode & 07777) != 0700
+      || root.st_uid != geteuid () || graph.st_uid != geteuid ()
+      || (guint64) root.st_dev != provider->root_device
+      || (guint64) root.st_ino != provider->root_inode
+      || (guint64) graph.st_dev != provider->graph_device
+      || (guint64) graph.st_ino != provider->graph_inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+inventory_provider_revalidate (gpointer user_data)
+{
+  return provider_revalidate_authority (user_data);
+}
+
+static void
+inventory_provider_before_end (gint graph_fd, gpointer user_data)
+{
+  WylFactArtifactTransitionPosix *provider = user_data;
+  if (provider != NULL
+      && posix_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_CAPTURE_PRE_FINALIZE_MUTATE_STAGE))
+    (void) fchmodat (graph_fd, provider->names.stage, 0400, 0);
+}
 
 static gint transition_posix_test_fault;
 static gint transition_posix_consumed_test_fault;
@@ -212,20 +267,6 @@ transition_rename_no_replace (gint dirfd, const gchar *source,
 #endif
 }
 
-static const gchar *
-slot_name (const WylFactArtifactTransitionPosix *provider,
-    WylFactArtifactMainTransitionSlot slot)
-{
-  switch (slot) {
-    case WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN:
-      return WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME;
-    case WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE:
-      return provider->names.stage;
-    default:
-      return provider->names.rollback;
-  }
-}
-
 static WylFactArtifactInventoryIdentity
 identity_from_stat (const struct stat *st)
 {
@@ -233,119 +274,6 @@ identity_from_stat (const struct stat *st)
            .domain = (guint64) st->st_dev,
            .object = (guint64) st->st_ino,
   };
-}
-
-/*
- * Conformance for one slot, read from the FD's own stat.
- *
- * A NON-REGULAR FILE MAPS TO OWNER_UNKNOWN rather than to a new enumerator.
- * The contract documents OWNER_UNKNOWN as the value a zero-filled entry
- * carries so that it fails closed -- that is, "conformance could not be
- * established" -- and a FIFO or a device node at one of these names is
- * exactly a failure to establish conformance.  It refuses as OWNERSHIP, which
- * is the correct outcome, without amending the merged contract for a case it
- * already rejects.
- *
- * OWNER_UNPROTECTED_ACL and OWNER_INHERITED_ACE are Windows concepts and this
- * provider never emits them.  Their absence here is not a gap.
- */
-static WylFactArtifactMainTransitionOwnerState
-owner_state_from_stat (const struct stat *st)
-{
-  if (!S_ISREG (st->st_mode))
-    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_UNKNOWN;
-  if (st->st_uid != geteuid ())
-    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_WRONG_PRINCIPAL;
-  /* 07777 rather than 0777: a setuid or setgid bit on an otherwise 0600 file
-   * must not read as conforming. */
-  if ((st->st_mode & 07777) != 0600)
-    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_WRONG_MODE;
-  return WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING;
-}
-
-/*
- * The detection ladder for one slot.  THE ORDER IS LOAD-BEARING.
- *
- * 1. fstatat with AT_SYMLINK_NOFOLLOW is a SYMLINK SCREEN ONLY.  Its values
- *    are discarded; nothing it reports is ever published.
- * 2. openat with O_NOFOLLOW.  ELOOP is the RACE ARM -- the name became a
- *    symlink between 1 and 2 -- and it is reported IDENTICALLY to a symlink
- *    seen at step 1, so the window is closed rather than narrowed.
- * 3. fstat on the descriptor is authoritative for everything published.
- *
- * THE THIRD RACE ARM, absent -> present between steps 1 and 2, is not handled
- * here and does not need to be, but the reason lives outside this file and is
- * therefore written down here: the contract authorizes a rename only when the
- * DESTINATION SLOT IS REPORTED ABSENT in the authorizing observation, and the
- * executor's rename is no-replace.  So if something appears between the
- * observation and the syscall the kernel refuses the rename and the executor
- * records a failed mutation.  A stale absence cannot become a silent
- * overwrite, which is what makes the observation window tolerable at all.
- */
-static wyrelog_error_t
-observe_slot (WylFactArtifactTransitionPosix *provider,
-    WylFactArtifactMainTransitionSlot slot,
-    WylFactArtifactMainTransitionEntryEvidence *out_entry)
-{
-  const gchar *name = slot_name (provider, slot);
-  struct stat screen = { 0 };
-  *out_entry = (WylFactArtifactMainTransitionEntryEvidence) { 0 };
-
-  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE)) {
-    out_entry->present = TRUE;
-    out_entry->reparse = TRUE;
-    return WYRELOG_E_OK;
-  }
-  if (fstatat (provider->graph_fd, name, &screen, AT_SYMLINK_NOFOLLOW) != 0) {
-    gint screen_errno = errno;
-    if (screen_errno == ENOENT)
-      return WYRELOG_E_OK;
-    return WYRELOG_E_IO;
-  }
-  if (S_ISLNK (screen.st_mode)) {
-    /* Never opened and never followed, and NO identity is published: the
-     * target's identity is not this slot's. */
-    out_entry->present = TRUE;
-    out_entry->reparse = TRUE;
-    return WYRELOG_E_OK;
-  }
-
-  /* Same capture discipline as the probe: errno becomes a local on the line
-   * that produces it, so the arms below read a value rather than a global
-   * that a later inserted call could clobber. */
-  gint fd = -1;
-  gint open_errno;
-  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_OPEN)) {
-    open_errno = EIO;
-  } else {
-    fd = openat (provider->graph_fd, name,
-            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    open_errno = fd < 0 ? errno : 0;
-  }
-  if (fd < 0) {
-    if (open_errno == ELOOP) {
-      out_entry->present = TRUE;
-      out_entry->reparse = TRUE;
-      return WYRELOG_E_OK;
-    }
-    if (open_errno == ENOENT)
-      return WYRELOG_E_OK;
-    /* A slot we cannot read is never reported absent. */
-    return WYRELOG_E_IO;
-  }
-
-  struct stat authoritative = { 0 };
-  if (fstat (fd, &authoritative) != 0) {
-    close (fd);
-    return WYRELOG_E_IO;
-  }
-  close (fd);
-  out_entry->present = TRUE;
-  out_entry->reparse = FALSE;
-  out_entry->identity = identity_from_stat (&authoritative);
-  out_entry->link_count = (guint) authoritative.st_nlink;
-  out_entry->owner_state = owner_state_from_stat (&authoritative);
-  return WYRELOG_E_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -612,20 +540,29 @@ done:
 
 wyrelog_error_t
 wyl_fact_artifact_transition_posix_open
-  (const WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+  (WylFactGraphResolver *resolver, const WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
     const gchar *operation_uuid,
     const WylFactArtifactTransitionPosixCapability *capability,
     WylFactArtifactTransitionPosix **out_provider)
 {
   if (out_provider != NULL)
     *out_provider = NULL;
-  if (directory == NULL || lease == NULL || capability == NULL
-      || out_provider == NULL || directory->graph_fd < 0)
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || capability == NULL || out_provider == NULL || resolver->fd < 0
+      || directory->root_fd < 0 || directory->graph_fd < 0)
     return WYRELOG_E_INVALID;
 
-  WylFactArtifactTransitionNames names = { 0 };
   wyrelog_error_t status
-    = wyl_fact_artifact_transition_names_derive (operation_uuid, &names);
+    = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (status != WYRELOG_E_OK)
+    return status;
+  if (resolver->device != directory->root_device
+      || resolver->inode != directory->root_inode)
+    return WYRELOG_E_POLICY;
+
+  WylFactArtifactTransitionNames names = { 0 };
+  status = wyl_fact_artifact_transition_names_derive (operation_uuid, &names);
   if (status != WYRELOG_E_OK)
     return status;
   wyl_id_t id;
@@ -636,12 +573,23 @@ wyl_fact_artifact_transition_posix_open
 
   WylFactArtifactTransitionPosix *provider
     = g_new0 (WylFactArtifactTransitionPosix, 1);
+  provider->root_fd = directory->root_fd;
   provider->graph_fd = directory->graph_fd;
+  provider->root_device = directory->root_device;
+  provider->root_inode = directory->root_inode;
+  provider->graph_device = directory->graph_device;
+  provider->graph_inode = directory->graph_inode;
+  provider->resolver = resolver;
   provider->lease = lease;
   provider->names = names;
   provider->capability = *capability;
   memcpy (provider->operation_uuid, id.bytes,
       sizeof provider->operation_uuid);
+  status = provider_revalidate_authority (provider);
+  if (status != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_posix_free (provider);
+    return status;
+  }
   *out_provider = provider;
   return WYRELOG_E_OK;
 }
@@ -662,49 +610,85 @@ wyl_fact_artifact_transition_posix_observe
     const WylFactArtifactTransitionPosixLifecycle *lifecycle,
     WylFactArtifactMainTransitionObservation *out_observation)
 {
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  return wyl_fact_artifact_transition_posix_capture (provider, lifecycle,
+             &snapshot, out_observation);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_capture
+  (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+  WylFactArtifactMainTransitionEntryEvidence entries[MT_SLOT_COUNT] = { 0 };
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
   if (out_observation != NULL)
     *out_observation = (WylFactArtifactMainTransitionObservation) { 0 };
-  if (provider == NULL || lifecycle == NULL || out_observation == NULL)
+  if (provider == NULL || lifecycle == NULL || out_snapshot == NULL
+      || out_observation == NULL)
     return WYRELOG_E_INVALID;
-
-  wyrelog_error_t status
-    = wyl_fact_root_writer_lease_verify (provider->lease);
+  if (posix_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_DIRECTORY_FSTAT))
+    return WYRELOG_E_IO;
+  wyrelog_error_t status = provider_revalidate_authority (provider);
   if (status != WYRELOG_E_OK)
     return status;
-
-  struct stat directory = { 0 };
-  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_DIRECTORY_FSTAT)
-      || fstat (provider->graph_fd, &directory) != 0)
+  if (posix_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_LEASE_FSTAT))
     return WYRELOG_E_IO;
-
-  /* The lease identity is the graph lock's (st_dev, st_ino).  The contract
-   * only requires that admission and every later observation agree; the lock
-   * is the natural choice because #612 pins it and the inventory already uses
-   * it as its guard identity.  A missing lock is a broken lease, not an
-   * absent slot, so it fails the observation rather than zeroing a field. */
-  struct stat lock = { 0 };
-  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_LEASE_FSTAT)
-      || fstatat (provider->graph_fd, WYL_FACT_ARTIFACT_TRANSITION_LOCK_NAME,
-      &lock, AT_SYMLINK_NOFOLLOW) != 0)
+  if (posix_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_OPEN))
     return WYRELOG_E_IO;
-
+  gint guard_fd = openat (provider->graph_fd,
+          WYL_FACT_ARTIFACT_TRANSITION_LOCK_NAME,
+          O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (guard_fd < 0)
+    return WYRELOG_E_IO;
+  struct stat guard = { 0 };
+  if (fstat (guard_fd, &guard) != 0 || !S_ISREG (guard.st_mode)
+      || guard.st_nlink != 1 || (guard.st_mode & 07777) != 0600
+      || guard.st_uid != geteuid ()) {
+    close (guard_fd);
+    return WYRELOG_E_POLICY;
+  }
+  status = wyl_fact_artifact_inventory_posix_capture (provider->graph_fd,
+          geteuid (), guard_fd, provider->names.stage,
+          provider->names.rollback, inventory_provider_revalidate,
+          inventory_provider_before_end, provider, &snapshot, entries);
+  close (guard_fd);
+  if (status != WYRELOG_E_OK) {
+    g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+    return status;
+  }
+  WylFactArtifactInventoryObservation inventory = { 0 };
+  if (!wyl_fact_artifact_inventory_snapshot_get_observation (snapshot,
+      &inventory)) {
+    wyl_fact_artifact_inventory_snapshot_free (snapshot);
+    return WYRELOG_E_POLICY;
+  }
   WylFactArtifactMainTransitionObservation observation = {
-    .directory_identity = identity_from_stat (&directory),
-    .lease_identity = identity_from_stat (&lock),
+    .directory_identity = inventory.directory_identity,
+    .lease_identity = inventory.guard_identity,
     .sealed = lifecycle->sealed,
     .main_binding_live = lifecycle->main_binding_live,
     .no_replace_supported = provider->capability.no_replace_supported,
   };
   memcpy (observation.operation_uuid, provider->operation_uuid,
       sizeof observation.operation_uuid);
-  for (guint slot = 0; slot < MT_SLOT_COUNT; slot++) {
-    status = observe_slot (provider, slot, &observation.entries[slot]);
-    if (status != WYRELOG_E_OK)
-      return status;
+  memcpy (observation.entries, entries, sizeof observation.entries);
+  if (posix_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE)) {
+    observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN]
+      = (WylFactArtifactMainTransitionEntryEvidence) {
+      .present = TRUE,
+      .reparse = TRUE,
+      };
   }
-  /* All four durability fields stay UNPROVEN.  They are inputs to record only
-   * and unit 2b fills them; a provider that invented them would be claiming
-   * receipts it never took. */
+  *out_snapshot = snapshot;
   *out_observation = observation;
   return WYRELOG_E_OK;
 }
@@ -1054,8 +1038,7 @@ wyl_fact_artifact_transition_posix_execute
 
   if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_LEASE_VERIFY))
     return WYRELOG_E_POLICY;
-  wyrelog_error_t status
-    = wyl_fact_root_writer_lease_verify (provider->lease);
+  wyrelog_error_t status = provider_revalidate_authority (provider);
   if (status != WYRELOG_E_OK)
     return status;
   status = execute_verify_authorization (provider, authorized);

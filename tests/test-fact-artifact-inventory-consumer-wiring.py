@@ -651,11 +651,18 @@ FOCUSED_TESTS = (
 )
 POSIX_TESTS = FOCUSED_TESTS[:2] + (
     "fact-artifact-namespace-inventory",
-) + FOCUSED_TESTS[2:]
+) + FOCUSED_TESTS[2:] + (
+    "fact-artifact-transition-driver",
+    "fact-artifact-transition-driver-wiring",
+    "fact-artifact-transition-driver-wiring-self",
+    "fact-artifact-transition-posix",
+)
 SECURE_COMPILE_TARGETS = (
     "test-fact-artifact-inventory",
     "test-fact-artifact-inventory-consumers",
     "test-fact-artifact-namespace",
+    "test-fact-artifact-transition-driver",
+    "test-fact-artifact-transition-posix",
 )
 SECURE_HISTORICAL_COMPILE_TARGETS = (
     "test-secure-duckdb-bridge",
@@ -700,6 +707,10 @@ WINDOWS_SECURE_TEST_COMMAND = (
     "secure-duckdb-recording-filesystem",
     "secure-duckdb-temp-child-windows",
     *FOCUSED_TESTS,
+    "fact-artifact-transition-driver",
+    "fact-artifact-transition-driver-wiring",
+    "fact-artifact-transition-driver-wiring-self",
+    "fact-artifact-transition-windows",
     "fact-artifact-namespace-windows",
     "fact-artifact-namespace-windows-inventory",
     "fact-artifact-namespace-windows-sidecar-replacement-isolated",
@@ -735,8 +746,8 @@ SECURE_POSIX_ACTIVE_COMMANDS = (
     "else",
     "time_args=(-l)",
     "fi",
-    '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem',
-    "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-namespace-inventory fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem --print-errorlogs",
+    '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-fact-artifact-transition-driver test-fact-artifact-transition-posix test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem',
+    "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-namespace-inventory fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-posix secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem --print-errorlogs",
     "if meson setup build-secure-duckdb-prebuilt -Denable_fact_store=enabled -Dduckdb_source=prebuilt -Denable_secure_duckdb_bridge=enabled; then",
     "echo 'secure DuckDB bridge unexpectedly accepted prebuilt DuckDB'",
     "exit 1",
@@ -759,8 +770,8 @@ WINDOWS_ACTIVE_COMMANDS = (
     "builddir\\wyrelog\\wyctl.exe --help >NUL",
     'builddir\\wyrelog\\wyrelogd.exe --help | findstr /C:"--listen-port"',
     'if "${{ matrix.secure_bridge }}"=="enabled" (',
-    "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows",
-    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition --print-errorlogs",
+    "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows test-fact-artifact-transition-driver test-fact-artifact-transition-windows",
+    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition --print-errorlogs",
     'meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"',
     ") else (",
     "meson test -C builddir --print-errorlogs --suite wyrelog",
