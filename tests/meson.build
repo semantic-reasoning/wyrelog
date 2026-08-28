@@ -1284,10 +1284,34 @@ test_fact_artifact_transition_names = executable(
 )
 test('fact-artifact-transition-names', test_fact_artifact_transition_names)
 
+test_fact_artifact_transition_driver = executable(
+  'test-fact-artifact-transition-driver',
+  'test-fact-artifact-transition-driver.c',
+  'fact-artifact-transition-driver-fixture.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-artifact-transition-driver', test_fact_artifact_transition_driver)
+test('fact-artifact-transition-driver-wiring', python3,
+  args : [
+    meson.current_source_dir() / 'test-fact-artifact-transition-driver-wiring.py',
+    meson.project_source_root(),
+  ],
+)
+test('fact-artifact-transition-driver-wiring-self', python3,
+  args : [
+    meson.current_source_dir() / 'test-fact-artifact-transition-driver-wiring.py',
+    '--self-test',
+    meson.project_source_root(),
+  ],
+  timeout : 300,
+)
+
 if host_machine.system() != 'windows'
   test_fact_artifact_transition_posix = executable(
     'test-fact-artifact-transition-posix',
     'test-fact-artifact-transition-posix.c',
+    'fact-artifact-transition-driver-fixture.c',
     'fact-test-support.c',
     include_directories : include_directories('../wyrelog'),
     c_args : fact_test_support_c_args,
@@ -1300,6 +1324,7 @@ if host_machine.system() == 'windows'
   test_fact_artifact_transition_windows = executable(
     'test-fact-artifact-transition-windows',
     'test-fact-artifact-transition-windows.c',
+    'fact-artifact-transition-driver-fixture.c',
     'fact-test-support.c',
     include_directories : include_directories('../wyrelog'),
     c_args : fact_test_support_c_args,

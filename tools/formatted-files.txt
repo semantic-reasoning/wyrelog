@@ -1,3 +1,5 @@
+tests/fact-artifact-transition-driver-fixture.c
+tests/fact-artifact-transition-driver-fixture.h
 tests/fact-test-support.h
 tests/test-access-decision.c
 tests/test-audit-emit.c
@@ -19,6 +21,7 @@ tests/test-fact-artifact-inventory.c
 tests/test-fact-artifact-main-transition.c
 tests/test-fact-artifact-namespace-windows.c
 tests/test-fact-artifact-namespace.c
+tests/test-fact-artifact-transition-driver.c
 tests/test-fact-artifact-transition-names.c
 tests/test-fact-artifact-transition-posix.c
 tests/test-fact-artifact-transition-windows.c
@@ -96,6 +99,7 @@ wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/artifact-io-session-windows-private.c
 wyrelog/fact/compound-private.h
 wyrelog/fact/compound.c
+wyrelog/fact/graph-artifact-inventory-posix-private.h
 wyrelog/fact/graph-artifact-inventory-private.c
 wyrelog/fact/graph-artifact-inventory-private.h
 wyrelog/fact/graph-artifact-main-transition-private.c

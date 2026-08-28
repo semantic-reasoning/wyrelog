@@ -7,6 +7,7 @@
 #endif
 #include "fact/graph-artifact-namespace-private.h"
 #ifndef G_OS_WIN32
+#include "fact/graph-artifact-inventory-posix-private.h"
 #include "fact/graph-provisioned-pair-internal.h"
 #endif
 #include "wyl-id-private.h"
@@ -5318,14 +5319,13 @@ inventory_hash_temp_root (gint root_fd, guint64 *hash)
 }
 
 static gboolean
-inventory_observation_for_namespace (WylFactArtifactNamespace *namespace_,
+inventory_observation_for_directory (gint graph_fd, gint guard_fd,
     WylFactArtifactInventoryObservation *observation)
 {
   struct stat directory = { 0 };
   struct stat lock = { 0 };
   guint64 fingerprint = G_GUINT64_CONSTANT (1469598103934665603);
-  if (fstat (namespace_->fd, &directory) != 0
-      || fstat (namespace_->lock_pin_fd, &lock) != 0) {
+  if (fstat (graph_fd, &directory) != 0 || fstat (guard_fd, &lock) != 0) {
     observation->directory_identity = (WylFactArtifactInventoryIdentity) { 0 };
     observation->guard_identity = (WylFactArtifactInventoryIdentity) { 0 };
     observation->entry_fingerprint = 0;
@@ -5340,7 +5340,7 @@ inventory_observation_for_namespace (WylFactArtifactNamespace *namespace_,
     .object = (guint64) lock.st_ino,
   };
   fingerprint = inventory_hash_mix (fingerprint, (guint64) directory.st_mtime);
-  gint scan_fd = openat (namespace_->fd, ".",
+  gint scan_fd = openat (graph_fd, ".",
           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   DIR *directory_stream = scan_fd >= 0 ? fdopendir (scan_fd) : NULL;
   if (directory_stream == NULL) {
@@ -5358,7 +5358,7 @@ inventory_observation_for_namespace (WylFactArtifactNamespace *namespace_,
     if (g_strcmp0 (entry->d_name, ".") == 0
         || g_strcmp0 (entry->d_name, "..") == 0)
       continue;
-    if (fstatat (namespace_->fd, entry->d_name, &named,
+    if (fstatat (graph_fd, entry->d_name, &named,
         AT_SYMLINK_NOFOLLOW) != 0
         || !inventory_hash_stat (&fingerprint, entry->d_name, &named)) {
       ok = FALSE;
@@ -5367,7 +5367,7 @@ inventory_observation_for_namespace (WylFactArtifactNamespace *namespace_,
     entry_count++;
     if (inventory_temp_root_name_is_valid (entry->d_name)
         && S_ISDIR (named.st_mode)) {
-      gint root_fd = openat (namespace_->fd, entry->d_name,
+      gint root_fd = openat (graph_fd, entry->d_name,
               O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
       if (root_fd < 0 || !inventory_hash_temp_root (root_fd, &fingerprint))
         ok = FALSE;
@@ -5457,31 +5457,63 @@ inventory_scan_temp_root (WylFactArtifactInventorySnapshot *snapshot,
   return result;
 }
 
+static wyrelog_error_t
+inventory_capture_named_entry (gint graph_fd, guint64 owner,
+    const gchar *name, WylFactArtifactMainTransitionEntryEvidence *out_entry)
+{
+  struct stat statbuf = { 0 };
+  if (out_entry != NULL)
+    *out_entry = (WylFactArtifactMainTransitionEntryEvidence) { 0 };
+  if (graph_fd < 0 || name == NULL || out_entry == NULL)
+    return WYRELOG_E_INVALID;
+  if (fstatat (graph_fd, name, &statbuf, AT_SYMLINK_NOFOLLOW) != 0)
+    return errno == ENOENT ? WYRELOG_E_OK : WYRELOG_E_IO;
+  out_entry->present = TRUE;
+  out_entry->link_count = (guint) statbuf.st_nlink;
+  out_entry->reparse = S_ISLNK (statbuf.st_mode);
+  if (!out_entry->reparse) {
+    out_entry->identity.domain = (guint64) statbuf.st_dev;
+    out_entry->identity.object = (guint64) statbuf.st_ino;
+  }
+  out_entry->owner_state = !S_ISREG (statbuf.st_mode)
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_UNKNOWN
+      : (guint64) statbuf.st_uid != owner
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_WRONG_PRINCIPAL
+      : (statbuf.st_mode & 07777) != 0600
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_WRONG_MODE
+      : WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
-wyl_fact_artifact_namespace_inventory_snapshot
-  (WylFactArtifactNamespace *namespace_,
-    WylFactArtifactInventorySnapshot **out_snapshot)
+wyl_fact_artifact_inventory_posix_capture
+  (gint graph_fd, guint64 owner, gint guard_fd, const gchar *stage_name,
+    const gchar *rollback_name,
+    WylFactArtifactInventoryPosixRevalidate revalidate,
+    WylFactArtifactInventoryPosixBeforeEnd before_end, gpointer user_data,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionEntryEvidence out_entries
+    [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT])
 {
   WylFactArtifactInventorySnapshot *snapshot = NULL;
-  WylFactArtifactMutationLease *reader = NULL;
-  WylFactArtifactInventoryObservation observation = { { 0, 0 }, { 0, 0 }, 0 };
+  WylFactArtifactInventoryObservation observation = { 0 };
   wyrelog_error_t result = WYRELOG_E_OK;
   gboolean slot_seen[WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT] = { FALSE };
   if (out_snapshot != NULL)
     *out_snapshot = NULL;
-  if (namespace_ == NULL || out_snapshot == NULL)
+  if (out_entries != NULL)
+    memset (out_entries, 0,
+        sizeof (*out_entries) * WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT);
+  if (graph_fd < 0 || guard_fd < 0 || out_snapshot == NULL)
     return WYRELOG_E_INVALID;
   snapshot = wyl_fact_artifact_inventory_snapshot_new (256);
   if (snapshot == NULL)
     return WYRELOG_E_NOMEM;
-  result = wyl_fact_artifact_namespace_acquire_reader_guard (namespace_,
-          &reader);
-  if (result != WYRELOG_E_OK)
-    goto done;
-  g_mutex_lock (&reader->mutex);
-  result = lease_revalidate_unlocked (reader);
+  if (revalidate != NULL)
+    result = revalidate (user_data);
   if (result == WYRELOG_E_OK
-      && !inventory_observation_for_namespace (namespace_, &observation))
+      && !inventory_observation_for_directory (graph_fd, guard_fd,
+      &observation))
     result = WYRELOG_E_POLICY;
   if (result == WYRELOG_E_OK)
     wyl_fact_artifact_inventory_snapshot_begin (snapshot, &observation);
@@ -5492,7 +5524,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
     WylFactArtifactInventoryIdentity identity = { 0 };
     guint64 logical = 0, allocated = 0;
     gboolean allocation_supported = FALSE;
-    if (fstatat (namespace_->fd, name, &statbuf, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (fstatat (graph_fd, name, &statbuf, AT_SYMLINK_NOFOLLOW) != 0) {
       if (errno == ENOENT) {
         result = wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
                 slot, NULL, FALSE, 0, TRUE, 0);
@@ -5502,23 +5534,48 @@ wyl_fact_artifact_namespace_inventory_snapshot
       result = WYRELOG_E_IO;
       break;
     }
-    if (!inventory_stat_regular (&statbuf, namespace_->owner, slot)
-        || !inventory_stat_bytes (&statbuf, &logical,
-        &allocation_supported, &allocated)) {
+    gboolean regular = inventory_stat_regular (&statbuf, owner, slot);
+    gboolean bytes_ok = inventory_stat_bytes (&statbuf, &logical,
+            &allocation_supported, &allocated);
+    if ((!regular || !bytes_ok) && stage_name == NULL) {
       result = wyl_fact_artifact_inventory_snapshot_fail (snapshot,
               WYL_FACT_ARTIFACT_INVENTORY_STATUS_POLICY);
       break;
+    }
+    if (!regular || !bytes_ok) {
+      result = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
+              statbuf.st_nlink > 1
+              ? WYL_FACT_ARTIFACT_INVENTORY_AMBIGUOUS_ENTRY
+              : WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+      if (result != WYRELOG_E_OK)
+        break;
+      if (!bytes_ok) {
+        logical = 0;
+        allocated = 0;
+        allocation_supported = TRUE;
+      }
     }
     identity.domain = (guint64) statbuf.st_dev;
     identity.object = (guint64) statbuf.st_ino;
     result = wyl_fact_artifact_inventory_snapshot_set_slot (snapshot, slot,
             &identity, TRUE, logical, allocation_supported, allocated);
     slot_seen[slot] = TRUE;
+    if (result == WYRELOG_E_OK && out_entries != NULL
+        && slot == WYL_FACT_ARTIFACT_INVENTORY_MAIN)
+      result = inventory_capture_named_entry (graph_fd, owner, name,
+              &out_entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN]);
   }
+  if (result == WYRELOG_E_OK && out_entries != NULL && stage_name != NULL)
+    result = inventory_capture_named_entry (graph_fd, owner, stage_name,
+            &out_entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE]);
+  if (result == WYRELOG_E_OK && out_entries != NULL
+      && rollback_name != NULL)
+    result = inventory_capture_named_entry (graph_fd, owner, rollback_name,
+            &out_entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK]);
   if (result == WYRELOG_E_OK) {
     guint64 temporary_logical = 0, temporary_allocated = 0;
     guint temporary_roots = 0;
-    gint scan_fd = openat (namespace_->fd, ".",
+    gint scan_fd = openat (graph_fd, ".",
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     DIR *directory = scan_fd >= 0 ? fdopendir (scan_fd) : NULL;
     if (directory == NULL) {
@@ -5541,7 +5598,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
           break;
         }
         struct stat named = { 0 };
-        if (fstatat (namespace_->fd, entry->d_name, &named,
+        if (fstatat (graph_fd, entry->d_name, &named,
             AT_SYMLINK_NOFOLLOW) != 0) {
           result = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
                   WYL_FACT_ARTIFACT_INVENTORY_UNREADABLE_ENTRY);
@@ -5551,7 +5608,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
         }
         if (inventory_temp_root_name_is_valid (entry->d_name)) {
           if (!S_ISDIR (named.st_mode) || (named.st_mode & 07777) != 0700
-              || (guint64) named.st_uid != namespace_->owner) {
+              || (guint64) named.st_uid != owner) {
             result = wyl_fact_artifact_inventory_snapshot_add_anomaly
                   (snapshot, WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
             if (result != WYRELOG_E_OK)
@@ -5563,7 +5620,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
                     WYL_FACT_ARTIFACT_INVENTORY_STATUS_OVERFLOW);
             break;
           }
-          gint root_fd = openat (namespace_->fd, entry->d_name,
+          gint root_fd = openat (graph_fd, entry->d_name,
                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
           if (root_fd < 0) {
             result = wyl_fact_artifact_inventory_snapshot_add_anomaly
@@ -5573,7 +5630,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
             continue;
           }
           result = inventory_scan_temp_root (snapshot, root_fd,
-                  namespace_->owner, &temporary_logical, &temporary_allocated);
+                  owner, &temporary_logical, &temporary_allocated);
           if (close (root_fd) != 0 && result == WYRELOG_E_OK)
             result = WYRELOG_E_IO;
           if (result != WYRELOG_E_OK)
@@ -5582,7 +5639,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
         }
         if (S_ISLNK (named.st_mode) || !S_ISREG (named.st_mode)
             || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
-            || (guint64) named.st_uid != namespace_->owner) {
+            || (guint64) named.st_uid != owner) {
           result = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
                   named.st_nlink > 1
               ? WYL_FACT_ARTIFACT_INVENTORY_AMBIGUOUS_ENTRY
@@ -5611,10 +5668,13 @@ wyl_fact_artifact_namespace_inventory_snapshot
     }
   }
   if (result == WYRELOG_E_OK) {
-    WylFactArtifactInventoryObservation end = { { 0, 0 }, { 0, 0 }, 0 };
-    result = lease_revalidate_unlocked (reader);
+    WylFactArtifactInventoryObservation end = { 0 };
+    if (before_end != NULL)
+      before_end (graph_fd, user_data);
+    if (revalidate != NULL)
+      result = revalidate (user_data);
     if (result == WYRELOG_E_OK
-        && !inventory_observation_for_namespace (namespace_, &end))
+        && !inventory_observation_for_directory (graph_fd, guard_fd, &end))
       result = WYRELOG_E_POLICY;
     if (result == WYRELOG_E_OK
         && namespace_fault_take
@@ -5624,12 +5684,8 @@ wyl_fact_artifact_namespace_inventory_snapshot
     if (result == WYRELOG_E_OK)
       result = wyl_fact_artifact_inventory_snapshot_finalize (snapshot);
   }
-  g_mutex_unlock (&reader->mutex);
-done:
   if (result != WYRELOG_E_OK) {
-    WylFactArtifactInventoryObservation failure_observation = {
-      { 0, 0 }, { 0, 0 }, 0
-    };
+    WylFactArtifactInventoryObservation failure_observation = { 0 };
     WylFactArtifactInventoryStatus failure_status =
         wyl_fact_artifact_inventory_snapshot_status (snapshot);
     if (failure_status == WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID)
@@ -5645,8 +5701,36 @@ done:
         &failure_observation);
     wyl_fact_artifact_inventory_snapshot_fail (snapshot, failure_status);
   }
-  wyl_fact_artifact_mutation_lease_free (reader);
   *out_snapshot = snapshot;
+  return result;
+}
+
+static wyrelog_error_t
+inventory_reader_revalidate (gpointer user_data)
+{
+  return lease_revalidate_unlocked (user_data);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_inventory_snapshot
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactInventorySnapshot **out_snapshot)
+{
+  WylFactArtifactMutationLease *reader = NULL;
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (namespace_ == NULL || out_snapshot == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t result = wyl_fact_artifact_namespace_acquire_reader_guard
+        (namespace_, &reader);
+  if (result != WYRELOG_E_OK)
+    return result;
+  g_mutex_lock (&reader->mutex);
+  result = wyl_fact_artifact_inventory_posix_capture (namespace_->fd,
+          namespace_->owner, namespace_->lock_pin_fd, NULL, NULL,
+          inventory_reader_revalidate, NULL, reader, out_snapshot, NULL);
+  g_mutex_unlock (&reader->mutex);
+  wyl_fact_artifact_mutation_lease_free (reader);
   return result;
 }
 #endif

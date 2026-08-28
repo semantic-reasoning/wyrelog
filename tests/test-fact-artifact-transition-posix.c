@@ -13,9 +13,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "fact-test-support.h"
+#include "fact-artifact-transition-driver-fixture.h"
 #include "fact/graph-artifact-inventory-private.h"
 #include "fact/graph-artifact-main-transition-private.h"
 #include "fact/graph-artifact-transition-names-private.h"
@@ -41,6 +43,7 @@ typedef WylFactArtifactTransitionPosixCapability Capability;
 typedef WylFactArtifactTransitionPosixLifecycle Lifecycle;
 
 static const gchar OPERATION_UUID[] = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+static gchar *driver_test_executable;
 
 /*
  * A real fact root, a real writer lease and a real #606 graph directory, so
@@ -87,6 +90,28 @@ fixture_init (Fixture *fixture, const gchar *tag)
           O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
   g_assert_cmpint (lock, >=, 0);
   close (lock);
+}
+
+static void
+fixture_open_existing (Fixture *fixture, const gchar *root)
+{
+  memset (fixture, 0, sizeof *fixture);
+  fixture->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+  fixture->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  fixture->root = g_strdup (root);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture->root,
+      &fixture->lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (fixture->root,
+      &fixture->resolver), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&fixture->locator, "tenant",
+      "graph"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&fixture->resolver,
+      &fixture->locator, FALSE, &fixture->directory), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_names_derive (OPERATION_UUID,
+      &fixture->names), ==, WYRELOG_E_OK);
+  fixture->graph_path
+    = wyl_fact_graph_directory_descriptive_path (&fixture->directory);
+  g_assert_nonnull (fixture->graph_path);
 }
 
 static void
@@ -140,7 +165,8 @@ open_provider (Fixture *fixture)
   };
   Provider *provider = NULL;
   g_assert_cmpint (wyl_fact_artifact_transition_posix_open
-        (&fixture->directory, fixture->lease, OPERATION_UUID, &capability,
+        (&fixture->resolver, &fixture->directory, fixture->lease,
+      OPERATION_UUID, &capability,
       &provider), ==, WYRELOG_E_OK);
   g_assert_nonnull (provider);
   return provider;
@@ -258,6 +284,32 @@ request_for (const Observation *observation, Identity expected_main,
   return request;
 }
 
+static WylTestDriverStoredValue
+completed_driver_value (const Request *request,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionState state)
+{
+  WylTestDriverStoredValue value = {
+    .version = 1,
+    .revision = 29,
+    .consumer_generation = 31,
+    .directory_identity = request->directory_identity,
+    .lease_identity = request->lease_identity,
+    .expected_main_absent = request->expected_main_absent,
+    .expected_main_identity = request->expected_main_identity,
+    .staged_main_identity = request->staged_main_identity,
+    .resume_forbidden = request->resume_forbidden,
+    .durability_unprovable_acknowledged
+      = request->durability_unprovable_acknowledged,
+    .marker = WYL_TEST_DRIVER_MARKER_COMPLETED,
+    .pending_op = op,
+    .completed_state = state,
+  };
+  g_strlcpy (value.operation_uuid, request->operation_uuid,
+      sizeof value.operation_uuid);
+  return value;
+}
+
 static wyrelog_error_t
 admit (const Observation *observation, const Request *request,
     Result *out_result, Transition **out_transition)
@@ -355,8 +407,13 @@ test_absent_slot_combinations (void)
       if ((mask & (1u << slot)) != 0)
         make_conforming (&fixture, names[slot], slot + 1);
     }
-    Observation observation;
-    g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
+    g_autoptr (WylFactArtifactTransitionPosix) provider
+      = open_provider (&fixture);
+    Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+    g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+    Observation observation = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+        &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
     for (guint slot = 0; slot < MT (SLOT_COUNT); slot++) {
       gboolean expected = (mask & (1u << slot)) != 0;
       g_assert_cmpint (observation.entries[slot].present, ==, expected);
@@ -909,8 +966,13 @@ test_end_to_end_classification (void)
     if (rows[index].rollback_present)
       make_conforming (&fixture, fixture.names.rollback, 3);
 
-    Observation observation;
-    g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
+    g_autoptr (WylFactArtifactTransitionPosix) provider
+      = open_provider (&fixture);
+    Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+    g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+    Observation observation = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+        &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
 
     /* expected_main is whichever entry the row says holds it; staged_main is
      * the entry that holds the restore content. */
@@ -931,8 +993,8 @@ test_end_to_end_classification (void)
             rows[index].expected_main_absent);
     Result result;
     Transition *transition = NULL;
-    wyrelog_error_t status = admit (&observation, &request, &result,
-            &transition);
+    wyrelog_error_t status = wyl_fact_artifact_main_transition_admit (&request,
+            snapshot, &observation, &result, &transition);
     g_assert_cmpint (status, ==, WYRELOG_E_OK);
     g_assert_cmpint (result.state, ==, rows[index].expected);
     wyl_fact_artifact_main_transition_free (transition);
@@ -1312,8 +1374,9 @@ test_execute_sync_retain_dir (void)
     .directory_flush = MT (DURABILITY_UNSUPPORTED),
   };
   g_autoptr (WylFactArtifactTransitionPosix) unsupp_provider = NULL;
-  g_assert_cmpint (wyl_fact_artifact_transition_posix_open (&fixture.directory,
-      fixture.lease, OPERATION_UUID, &unsupp_cap, &unsupp_provider), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_open (&fixture.resolver,
+      &fixture.directory, fixture.lease, OPERATION_UUID, &unsupp_cap,
+      &unsupp_provider), ==, WYRELOG_E_OK);
 
   wyl_fact_artifact_transition_posix_set_test_fault (PF (EXECUTE_SYNC_RETAIN_DIR_FSYNC));
   wyl_fact_artifact_transition_posix_set_test_flush_errno (ENOTSUP);
@@ -1554,8 +1617,12 @@ test_execute_mode_a_full_lifecycle (void)
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 100);
   make_conforming (&fixture, fixture.names.stage, 200);
 
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   Observation observation;
-  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
 
   Identity main_id = real_identity (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
   Identity stage_id = real_identity (&fixture, fixture.names.stage);
@@ -1563,11 +1630,10 @@ test_execute_mode_a_full_lifecycle (void)
 
   Result result;
   g_autoptr (WylFactArtifactMainTransition) transition = NULL;
-  g_assert_cmpint (admit (&observation, &request, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_READY));
   g_assert_cmpint (result.next_op, ==, MT (OP_SYNC_STAGED));
-
-  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* Op 1: SYNC_STAGED */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
@@ -1661,6 +1727,23 @@ test_execute_mode_a_full_lifecycle (void)
   g_assert_cmpint (result.state, ==, MT (STATE_PUBLISHED_DURABLE));
   g_assert_cmpint (result.next_op, ==, MT (OP_FINALIZE));
 
+  WylTestDriverStoredValue synced = completed_driver_value (&request,
+          MT (OP_SYNC_PUBLISH_DIR), result.state);
+  g_autoptr (WylFactArtifactInventorySnapshot) restarted_snapshot = NULL;
+  Observation restarted_observation = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &restarted_snapshot, &restarted_observation), ==,
+      WYRELOG_E_OK);
+  Result restarted_result = { 0 };
+  g_autoptr (WylFactArtifactMainTransition) restarted_transition = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request,
+      restarted_snapshot, &restarted_observation, &restarted_result,
+      &restarted_transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (restarted_result.state, ==, MT (STATE_PUBLISHED));
+  g_assert_cmpint (wyl_test_driver_restart_action (&synced,
+      restarted_result.state), ==,
+      WYL_TEST_DRIVER_RESTART_SYNC_PUBLISH_DIR);
+
   /* Op 7: FINALIZE */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
       MT (OP_FINALIZE), &observation, &result), ==, WYRELOG_E_OK);
@@ -1684,19 +1767,22 @@ test_execute_mode_b_full_lifecycle (void)
   fixture_init (&fixture, "u2b-mdb-XXXXXX");
   make_conforming (&fixture, fixture.names.stage, 200);
 
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   Observation observation;
-  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
 
   Identity stage_id = real_identity (&fixture, fixture.names.stage);
   Request request = request_for (&observation, (Identity) { 0 }, stage_id, TRUE);
 
   Result result;
   g_autoptr (WylFactArtifactMainTransition) transition = NULL;
-  g_assert_cmpint (admit (&observation, &request, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_READY));
   g_assert_cmpint (result.next_op, ==, MT (OP_SYNC_STAGED));
-
-  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
 
   /* Op 1: SYNC_STAGED */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
@@ -1767,8 +1853,12 @@ test_execute_mode_a_rollback_lifecycle (void)
   make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 100);
   make_conforming (&fixture, fixture.names.stage, 200);
 
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   Observation observation;
-  g_assert_cmpint (observe (&fixture, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
 
   Identity main_id = real_identity (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
   Identity stage_id = real_identity (&fixture, fixture.names.stage);
@@ -1776,9 +1866,8 @@ test_execute_mode_a_rollback_lifecycle (void)
 
   Result result;
   g_autoptr (WylFactArtifactMainTransition) transition = NULL;
-  g_assert_cmpint (admit (&observation, &request, &result, &transition), ==, WYRELOG_E_OK);
-
-  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
 
   /* SYNC_STAGED */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
@@ -1808,7 +1897,11 @@ test_execute_mode_a_rollback_lifecycle (void)
   /* Re-admit under resume_forbidden to unlock ROLLBACK */
   Transition *abandon_tr = NULL;
   request.resume_forbidden = TRUE;
-  g_assert_cmpint (admit (&observation, &request, &result, &abandon_tr), ==, WYRELOG_E_OK);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &abandon_tr), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.next_op, ==, MT (OP_ROLLBACK));
 
   /* ROLLBACK */
@@ -1824,6 +1917,23 @@ test_execute_mode_a_rollback_lifecycle (void)
       MT (OP_ROLLBACK), effect, &observation, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_ROLLED_BACK));
   g_assert_cmpint (result.next_op, ==, MT (OP_RETIRE_STAGE));
+
+  WylTestDriverStoredValue rolled_back = completed_driver_value (&request,
+          MT (OP_ROLLBACK), result.state);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  Result restarted_result = { 0 };
+  Transition *restarted_transition = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &restarted_result, &restarted_transition), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (restarted_result.state, ==, MT (STATE_READY));
+  g_assert_cmpint (wyl_test_driver_restart_action (&rolled_back,
+      restarted_result.state), ==, WYL_TEST_DRIVER_RESTART_RETIRE_STAGE);
+  wyl_fact_artifact_main_transition_free (abandon_tr);
+  abandon_tr = restarted_transition;
+  result = restarted_result;
 
   /* RETIRE_STAGE */
   g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (abandon_tr,
@@ -2140,9 +2250,411 @@ test_execute_fault_seams_are_reachable (void)
   }
 }
 
+static void
+test_capture_is_correlated_and_unstable_is_not_published (void)
+{
+  Fixture fixture;
+  fixture_init (&fixture, "u4-capture-XXXXXX");
+  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 3);
+  make_conforming (&fixture, fixture.names.stage, 5);
+  g_autoptr (WylFactArtifactTransitionPosix) provider
+    = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation observation = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_status (snapshot), ==,
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE_WITH_UNKNOWN);
+  g_assert_cmpuint (wyl_fact_artifact_inventory_snapshot_anomaly_count
+        (snapshot, WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, 1);
+  WylFactArtifactInventoryObservation inventory = { 0 };
+  g_assert_true (wyl_fact_artifact_inventory_snapshot_get_observation
+        (snapshot, &inventory));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&inventory.directory_identity, &observation.directory_identity));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&inventory.guard_identity, &observation.lease_identity));
+
+  Identity main_identity = real_identity (&fixture,
+          WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+  Identity stage_identity = real_identity (&fixture, fixture.names.stage);
+  Request request = request_for (&observation, main_identity, stage_identity,
+          FALSE);
+  Result result = { 0 };
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_READY));
+
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  observation = (Observation) { 0 };
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (CAPTURE_PRE_FINALIZE_MUTATE_STAGE));
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+  g_assert_cmpuint (observation.directory_identity.domain, ==, 0);
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (CAPTURE_PRE_FINALIZE_MUTATE_STAGE)));
+  fixture_clear (&fixture);
+}
+
+static void
+test_foreign_root_authority_never_mutates (void)
+{
+  Fixture fixture;
+  Fixture foreign;
+  fixture_init (&fixture, "u4-authority-a-XXXXXX");
+  fixture_init (&foreign, "u4-authority-b-XXXXXX");
+  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 3);
+  make_conforming (&fixture, fixture.names.stage, 5);
+  g_autoptr (WylFactArtifactTransitionPosix) provider
+    = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  Observation authorized = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_observe (provider,
+      &lifecycle, &authorized), ==, WYRELOG_E_OK);
+
+  Capability capability = {
+    .no_replace_supported = TRUE,
+    .directory_flush = MT (DURABILITY_PROVEN),
+  };
+  g_autoptr (WylFactArtifactTransitionPosix) refused = NULL;
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_open (&foreign.resolver,
+      &foreign.directory, fixture.lease, OPERATION_UUID, &capability,
+      &refused), ==, WYRELOG_E_POLICY);
+  g_assert_null (refused);
+
+  WylFactGraphResolver original = fixture.resolver;
+  fixture.resolver = foreign.resolver;
+  foreign.resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation observation = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  WylFactArtifactMainTransitionEffect effect = MT (EFFECT_APPLIED);
+  WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+      &authorized, MT (OP_RETAIN), &effect, &durability), ==,
+      WYRELOG_E_POLICY);
+  struct stat present = { 0 };
+  g_assert_cmpint (fstatat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, &present,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpint (fstatat (fixture.directory.graph_fd,
+      fixture.names.rollback, &present, AT_SYMLINK_NOFOLLOW), ==, -1);
+  g_assert_cmpint (errno, ==, ENOENT);
+
+  WylFactGraphResolver foreign_value = fixture.resolver;
+  fixture.resolver = original;
+  foreign.resolver = foreign_value;
+  fixture_clear (&foreign);
+  fixture_clear (&fixture);
+}
+
+typedef struct
+{
+  const gchar *path;
+} PosixFileStore;
+
+static wyrelog_error_t
+posix_store_load (gpointer user_data, WylTestDriverStoredValue *out_value)
+{
+  PosixFileStore *store = user_data;
+  gint fd = g_open (store->path, O_RDONLY | O_CLOEXEC, 0);
+  if (fd < 0)
+    return WYRELOG_E_IO;
+  gsize offset = 0;
+  while (offset < sizeof *out_value) {
+    ssize_t got = read (fd, (guint8 *) out_value + offset,
+            sizeof *out_value - offset);
+    if (got <= 0) {
+      close (fd);
+      return WYRELOG_E_IO;
+    }
+    offset += (gsize) got;
+  }
+  guint8 extra;
+  ssize_t tail = read (fd, &extra, 1);
+  gboolean closed = close (fd) == 0;
+  return tail == 0 && closed ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+posix_store_write (const gchar *path, const WylTestDriverStoredValue *value,
+    gboolean exclusive)
+{
+  gint flags = O_WRONLY | O_CLOEXEC | (exclusive ? O_CREAT | O_EXCL : O_TRUNC);
+  gint fd = g_open (path, flags, 0600);
+  if (fd < 0)
+    return WYRELOG_E_IO;
+  gsize offset = 0;
+  while (offset < sizeof *value) {
+    ssize_t wrote = write (fd, (const guint8 *) value + offset,
+            sizeof *value - offset);
+    if (wrote <= 0) {
+      close (fd);
+      return WYRELOG_E_IO;
+    }
+    offset += (gsize) wrote;
+  }
+  gboolean ok = fsync (fd) == 0 && close (fd) == 0;
+  return ok ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+posix_store_cas (gpointer user_data, guint64 expected_revision,
+    const WylTestDriverStoredValue *desired,
+    WylTestDriverStoredValue *out_committed)
+{
+  PosixFileStore *store = user_data;
+  WylTestDriverStoredValue current = { 0 };
+  wyrelog_error_t rc = posix_store_load (store, &current);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (current.revision != expected_revision)
+    return WYRELOG_E_BUSY;
+  rc = posix_store_write (store->path, desired, FALSE);
+  if (rc == WYRELOG_E_OK)
+    *out_committed = *desired;
+  return rc;
+}
+
+static WylTestDriverValueStore
+posix_value_store (PosixFileStore *file)
+{
+  return (WylTestDriverValueStore) {
+           .load = posix_store_load,
+           .compare_and_swap = posix_store_cas,
+           .user_data = file,
+  };
+}
+
+static Request
+request_from_stored (const WylTestDriverStoredValue *stored)
+{
+  return (Request) {
+           .operation_uuid = stored->operation_uuid,
+           .directory_identity = stored->directory_identity,
+           .lease_identity = stored->lease_identity,
+           .expected_main_absent = stored->expected_main_absent,
+           .expected_main_identity = stored->expected_main_identity,
+           .staged_main_identity = stored->staged_main_identity,
+           .resume_forbidden = stored->resume_forbidden,
+           .durability_unprovable_acknowledged
+             = stored->durability_unprovable_acknowledged,
+  };
+}
+
+static gboolean
+write_counter (const gchar *path, guint value)
+{
+  gchar encoded[32];
+  gint length = g_snprintf (encoded, sizeof encoded, "%u", value);
+  gint fd = g_open (path, O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0 || write (fd, encoded, length) != length) {
+    if (fd >= 0)
+      close (fd);
+    return FALSE;
+  }
+  return fsync (fd) == 0 && close (fd) == 0;
+}
+
+typedef struct
+{
+  Provider *provider;
+  Transition *transition;
+  Lifecycle lifecycle;
+  Observation observation;
+  Result result;
+  gboolean crash_after_execute;
+  const gchar *counter_path;
+} PosixDriverAction;
+
+static wyrelog_error_t
+run_posix_backend_action (WylFactArtifactMainTransitionOp op,
+    gpointer user_data,
+    WylFactArtifactMainTransitionState *out_completed_state)
+{
+  PosixDriverAction *action = user_data;
+  wyrelog_error_t rc = wyl_fact_artifact_main_transition_authorize
+        (action->transition, op, &action->observation, &action->result);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+  WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+  rc = wyl_fact_artifact_transition_posix_execute (action->provider,
+          &action->observation, op, &effect, &durability);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (action->crash_after_execute) {
+    if (effect == MT (EFFECT_APPLIED)
+        && write_counter (action->counter_path, 1))
+      _exit (77);
+    _exit (78);
+  }
+  rc = wyl_fact_artifact_transition_posix_observe (action->provider,
+          &action->lifecycle, &action->observation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  action->observation.durability = durability;
+  rc = wyl_fact_artifact_main_transition_record (action->transition, op,
+          effect, &action->observation, &action->result);
+  if (rc == WYRELOG_E_OK)
+    *out_completed_state = action->result.state;
+  return rc;
+}
+
+static int
+run_posix_driver_crash_child (const gchar *root, const gchar *store_path,
+    const gchar *counter_path)
+{
+  Fixture fixture;
+  fixture_open_existing (&fixture, root);
+  PosixFileStore file = { .path = store_path };
+  WylTestDriverValueStore store = posix_value_store (&file);
+  WylTestDriverStoredValue stored = { 0 };
+  if (store.load (store.user_data, &stored) != WYRELOG_E_OK)
+    return 78;
+  g_autoptr (WylFactArtifactTransitionPosix) provider
+    = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation observation = { 0 };
+  if (wyl_fact_artifact_transition_posix_capture (provider, &lifecycle,
+      &snapshot, &observation) != WYRELOG_E_OK)
+    return 78;
+  Request request = request_from_stored (&stored);
+  Result result = { 0 };
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
+  if (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition) != WYRELOG_E_OK)
+    return 78;
+  PosixDriverAction action = { .provider = provider,
+                               .transition = transition,
+                               .lifecycle = lifecycle,
+                               .observation = observation,
+                               .result = result };
+  WylTestDriverStoredValue attempt = { 0 };
+  WylFactArtifactMainTransitionState completed_state = MT (STATE_INVALID);
+  if (wyl_test_driver_run_mutation (&store, FALSE,
+      stored.consumer_generation,
+      MT (OP_SYNC_STAGED), run_posix_backend_action, &action, NULL, NULL,
+      &attempt, &completed_state) != WYRELOG_E_OK)
+    return 78;
+  WylTestDriverStoredValue completed = { 0 };
+  if (wyl_test_driver_complete_mutation (&store, MT (OP_SYNC_STAGED),
+      completed_state, NULL, NULL, &completed) != WYRELOG_E_OK)
+    return 78;
+  action.crash_after_execute = TRUE;
+  action.counter_path = counter_path;
+  return wyl_test_driver_run_mutation (&store, FALSE,
+             stored.consumer_generation,
+             MT (OP_RETAIN), run_posix_backend_action, &action, NULL, NULL,
+             &attempt, &completed_state) == WYRELOG_E_OK ? 79 : 78;
+}
+
+static void
+test_child_crash_restarts_from_fresh_capture (void)
+{
+  Fixture fixture;
+  fixture_init (&fixture, "u4-child-crash-XXXXXX");
+  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 3);
+  make_conforming (&fixture, fixture.names.stage, 5);
+  g_autoptr (WylFactArtifactTransitionPosix) provider
+    = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation observation = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  Request request = request_for (&observation,
+          observation.entries[SLOT_MAIN].identity,
+          observation.entries[SLOT_STAGE].identity, FALSE);
+  WylTestDriverStoredValue initial = {
+    .version = 1,
+    .revision = 11,
+    .consumer_generation = 23,
+    .directory_identity = request.directory_identity,
+    .lease_identity = request.lease_identity,
+    .expected_main_absent = request.expected_main_absent,
+    .expected_main_identity = request.expected_main_identity,
+    .staged_main_identity = request.staged_main_identity,
+    .resume_forbidden = request.resume_forbidden,
+    .durability_unprovable_acknowledged
+      = request.durability_unprovable_acknowledged,
+    .marker = WYL_TEST_DRIVER_MARKER_NONE,
+    .pending_op = MT (OP_NONE),
+    .completed_state = MT (STATE_INVALID),
+  };
+  g_strlcpy (initial.operation_uuid, OPERATION_UUID,
+      sizeof initial.operation_uuid);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  g_autofree gchar *store_path = g_build_filename (root, "driver-state",
+          NULL);
+  g_autofree gchar *counter_path = g_build_filename (root, "driver-count",
+          NULL);
+  g_assert_cmpint (posix_store_write (store_path, &initial, TRUE), ==,
+      WYRELOG_E_OK);
+  gint counter = g_open (counter_path,
+          O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+  g_assert_cmpint (counter, >=, 0);
+  g_assert_cmpint (write (counter, "0", 1), ==, 1);
+  g_assert_cmpint (fsync (counter), ==, 0);
+  g_assert_cmpint (close (counter), ==, 0);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_clear_pointer (&provider, wyl_fact_artifact_transition_posix_free);
+  fixture_clear (&fixture);
+
+  gchar *child_argv[] = { driver_test_executable, "--driver-crash-child",
+                          root, store_path, counter_path, NULL };
+  gint child_status = 0;
+  g_autoptr (GError) error = NULL;
+  g_assert_true (g_spawn_sync (NULL, child_argv, NULL, 0, NULL, NULL, NULL,
+      NULL, &child_status, &error));
+  g_assert_no_error (error);
+  g_assert_true (WIFEXITED (child_status));
+  g_assert_cmpint (WEXITSTATUS (child_status), ==, 77);
+
+  PosixFileStore file = { .path = store_path };
+  WylTestDriverValueStore store = posix_value_store (&file);
+  WylTestDriverStoredValue stored = { 0 };
+  g_assert_cmpint (store.load (store.user_data, &stored), ==, WYRELOG_E_OK);
+  g_assert_cmpint (stored.marker, ==, WYL_TEST_DRIVER_MARKER_ATTEMPT_UNKNOWN);
+  g_assert_cmpint (stored.pending_op, ==, MT (OP_RETAIN));
+  g_assert_cmpuint (stored.consumer_generation, ==, 23);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&stored.expected_main_identity, &initial.expected_main_identity));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&stored.staged_main_identity, &initial.staged_main_identity));
+
+  fixture_open_existing (&fixture, root);
+  provider = open_provider (&fixture);
+  observation = (Observation) { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  request = request_from_stored (&stored);
+  Result result = { 0 };
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_RETAINED));
+  g_assert_cmpint (wyl_test_driver_restart_action (&stored, result.state), ==,
+      WYL_TEST_DRIVER_RESTART_INSPECT_ONLY);
+  g_autofree gchar *count = NULL;
+  g_assert_true (g_file_get_contents (counter_path, &count, NULL, NULL));
+  g_assert_cmpstr (count, ==, "1");
+  fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
+  if (argc == 5 && strcmp (argv[1], "--driver-crash-child") == 0)
+    return run_posix_driver_crash_child (argv[2], argv[3], argv[4]);
+  driver_test_executable = g_canonicalize_filename (argv[0], NULL);
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/artifact-transition-posix/triple-and-identity",
       test_triple_and_identity);
@@ -2214,5 +2726,11 @@ main (int argc, char **argv)
       test_execute_mode_a_rollback_lifecycle);
   g_test_add_func ("/fact/artifact-transition-posix/execute/fault-seams",
       test_execute_fault_seams_are_reachable);
+  g_test_add_func ("/fact/artifact-transition-posix/driver/correlated-capture",
+      test_capture_is_correlated_and_unstable_is_not_published);
+  g_test_add_func ("/fact/artifact-transition-posix/driver/root-authority",
+      test_foreign_root_authority_never_mutates);
+  g_test_add_func ("/fact/artifact-transition-posix/driver/child-crash-restart",
+      test_child_crash_restarts_from_fresh_capture);
   return g_test_run ();
 }

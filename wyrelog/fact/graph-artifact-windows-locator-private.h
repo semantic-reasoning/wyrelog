@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "fact/graph-artifact-inventory-private.h"
+#include "fact/graph-artifact-main-transition-private.h"
 #include "fact/graph-locator-private.h"
 #include "wyrelog/error.h"
 
@@ -153,6 +154,14 @@ NTSTATUS wyl_fact_artifact_win_locator_take_next_rename_status_for_test (void);
  * directory.  Names and HANDLEs never leave the locator. */
 wyrelog_error_t wyl_fact_artifact_win_locator_inventory_scan
   (WylFactArtifactWinLocator *, WylFactArtifactWinInventoryScan *out_scan);
+/* The transition form recognizes only the two internally UUID-derived exact
+ * names.  They still count as UNKNOWN_ENTRY anomalies; the extra output is
+ * value-only evidence captured by the same enumeration. */
+wyrelog_error_t wyl_fact_artifact_win_locator_transition_inventory_scan
+  (WylFactArtifactWinLocator *, const gchar *stage_name,
+    const gchar *rollback_name, WylFactArtifactWinInventoryScan *out_scan,
+    WylFactArtifactMainTransitionEntryEvidence
+    out_entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT]);
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
 const gchar *wyl_fact_artifact_win_entry_name (const WylFactArtifactWinEntry *);

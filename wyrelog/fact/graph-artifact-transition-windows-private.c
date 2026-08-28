@@ -2,6 +2,7 @@
 #include "fact/graph-artifact-transition-windows-private.h"
 #include "fact/graph-artifact-transition-names-private.h"
 #include "fact/graph-artifact-inventory-private.h"
+#include "fact/graph-artifact-windows-locator-private.h"
 #include "fact/graph-windows-security-private.h"
 #include "wyrelog/wyl-log-private.h"
 
@@ -77,14 +78,73 @@ typedef struct
 
 struct WylFactArtifactTransitionWindows
 {
+  HANDLE root_handle;
   HANDLE graph_handle;
+  WylFactGraphWinIdentity root_identity;
   WylFactGraphWinIdentity directory_identity;
+  WylFactGraphResolver *resolver;
   WylFactRootWriterLease *lease;
+  WylFactArtifactWinLocator *locator;
   guint8 operation_uuid[16];
   WylFactArtifactTransitionNames names;
   WylFactArtifactTransitionWindowsCapability capability;
   PSID owner;
 };
+
+static wyrelog_error_t query_file_id_identity
+  (HANDLE handle, WylFactGraphWinIdentity *out_identity);
+
+static gboolean
+transition_win_identity_equal (const WylFactGraphWinIdentity *left,
+    const WylFactGraphWinIdentity *right)
+{
+  return left != NULL && right != NULL
+         && left->volume_serial == right->volume_serial
+         && memcmp (left->file_id, right->file_id,
+             sizeof left->file_id) == 0;
+}
+
+static wyrelog_error_t
+provider_revalidate_authority
+  (const WylFactArtifactTransitionWindows *provider)
+{
+  WylFactGraphWinIdentity root_identity = { 0 };
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  DWORD root_flags = 0;
+  DWORD graph_flags = 0;
+  if (provider == NULL || provider->resolver == NULL
+      || provider->root_handle == NULL
+      || provider->root_handle == INVALID_HANDLE_VALUE
+      || provider->graph_handle == NULL
+      || provider->graph_handle == INVALID_HANDLE_VALUE
+      || provider->owner == NULL || !IsValidSid (provider->owner))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (provider->lease, provider->resolver);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!transition_win_identity_equal (&provider->resolver->identity,
+      &provider->root_identity))
+    return WYRELOG_E_POLICY;
+  if (!GetHandleInformation (provider->root_handle, &root_flags)
+      || !GetHandleInformation (provider->graph_handle, &graph_flags)
+      || (root_flags & HANDLE_FLAG_INHERIT) != 0
+      || (graph_flags & HANDLE_FLAG_INHERIT) != 0)
+    return WYRELOG_E_POLICY;
+  rc = query_file_id_identity (provider->root_handle, &root_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = query_file_id_identity (provider->graph_handle, &graph_identity);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!transition_win_identity_equal (&root_identity,
+      &provider->root_identity)
+      || !transition_win_identity_equal (&graph_identity,
+      &provider->directory_identity))
+    return WYRELOG_E_POLICY;
+  return wyl_fact_graph_win_validate_protected_owner_acl_for_user
+           (provider->graph_handle, provider->owner,
+             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+}
 
 static volatile LONG next_windows_fault;
 static volatile LONG next_rename_status;
@@ -610,20 +670,32 @@ wyl_fact_artifact_transition_windows_probe_capability
 
 wyrelog_error_t
 wyl_fact_artifact_transition_windows_open
-  (const WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+  (WylFactGraphResolver *resolver, const WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
     const gchar *operation_uuid,
     const WylFactArtifactTransitionWindowsCapability *capability,
     WylFactArtifactTransitionWindows **out_provider)
 {
   if (out_provider != NULL)
     *out_provider = NULL;
-  if (directory == NULL || directory->graph_handle == NULL
+  if (resolver == NULL || resolver->handle == NULL || directory == NULL
+      || directory->root_handle == NULL
+      || directory->root_handle == INVALID_HANDLE_VALUE
+      || directory->graph_handle == NULL
       || directory->graph_handle == INVALID_HANDLE_VALUE || lease == NULL
       || operation_uuid == NULL || capability == NULL || out_provider == NULL)
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver (lease,
+          resolver);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!transition_win_identity_equal (&resolver->identity,
+      &directory->root_identity))
+    return WYRELOG_E_POLICY;
+
   WylFactGraphWinIdentity dir_identity = { 0 };
-  wyrelog_error_t rc = query_file_id_identity (directory->graph_handle,
+  rc = query_file_id_identity (directory->graph_handle,
           &dir_identity);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -652,14 +724,28 @@ wyl_fact_artifact_transition_windows_open
     wyl_fact_artifact_transition_names_clear (&names);
     return WYRELOG_E_NOMEM;
   }
+  p->root_handle = directory->root_handle;
   p->graph_handle = directory->graph_handle;
+  p->root_identity = directory->root_identity;
   p->directory_identity = dir_identity;
+  p->resolver = resolver;
   p->lease = lease;
   memcpy (p->operation_uuid, op_id.bytes, sizeof p->operation_uuid);
   p->names = names;
   p->capability = *capability;
   p->owner = token_user;
 
+  rc = wyl_fact_artifact_win_locator_new (directory, &p->locator);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_windows_free (p);
+    return rc;
+  }
+
+  rc = provider_revalidate_authority (p);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_windows_free (p);
+    return rc;
+  }
   *out_provider = p;
   return WYRELOG_E_OK;
 }
@@ -671,71 +757,9 @@ wyl_fact_artifact_transition_windows_free
   if (provider == NULL)
     return;
   g_clear_pointer (&provider->owner, g_free);
+  g_clear_pointer (&provider->locator, wyl_fact_artifact_win_locator_free);
   wyl_fact_artifact_transition_names_clear (&provider->names);
   g_free (provider);
-}
-
-static wyrelog_error_t
-observe_slot (WylFactArtifactTransitionWindows *provider, const gchar *name,
-    WylFactArtifactMainTransitionEntryEvidence *out_evidence)
-{
-  HANDLE handle = INVALID_HANDLE_VALUE;
-  NTSTATUS status = WYL_STATUS_SUCCESS;
-  if (out_evidence != NULL)
-    *out_evidence = (WylFactArtifactMainTransitionEntryEvidence) { 0 };
-  if (provider == NULL || name == NULL || out_evidence == NULL)
-    return WYRELOG_E_INVALID;
-
-  if (windows_fault_take (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_SLOT_OPEN))
-    return WYRELOG_E_IO;
-
-  wyrelog_error_t rc = open_entry_handle (provider->graph_handle, name,
-          READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-          FILE_OPEN, &handle, &status);
-  if (rc != WYRELOG_E_OK) {
-    if (status == WYL_STATUS_OBJECT_NAME_NOT_FOUND
-        || status == WYL_STATUS_OBJECT_PATH_NOT_FOUND
-        || status == WYL_STATUS_NO_SUCH_FILE) {
-      out_evidence->present = FALSE;
-      return WYRELOG_E_OK;
-    }
-    return rc;
-  }
-
-  WylFactGraphWinIdentity identity = { 0 };
-  guint link_count = 0;
-  gboolean reparse = FALSE;
-  WylFactArtifactMainTransitionOwnerState owner_state
-    = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_UNKNOWN;
-
-  rc = query_file_id_identity (handle, &identity);
-  if (rc == WYRELOG_E_OK)
-    rc = query_file_links_and_reparse (handle, &link_count, &reparse);
-  if (rc == WYRELOG_E_OK)
-    classify_owner_security (handle, provider->owner, &owner_state);
-
-  if (rc == WYRELOG_E_OK && !reparse) {
-    rc = validate_named_directory_entry (provider->graph_handle, name,
-            &identity);
-  }
-  CloseHandle (handle);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  out_evidence->present = TRUE;
-  out_evidence->link_count = link_count;
-  out_evidence->reparse = reparse;
-  out_evidence->owner_state = owner_state;
-  if (reparse) {
-    memset (&out_evidence->identity, 0, sizeof out_evidence->identity);
-  } else {
-    out_evidence->identity.domain = identity.volume_serial;
-    out_evidence->identity.object = 0;
-    out_evidence->identity.object_width = 16;
-    memcpy (out_evidence->identity.object_bytes, identity.file_id,
-        sizeof identity.file_id);
-  }
-  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -744,81 +768,153 @@ wyl_fact_artifact_transition_windows_observe
     const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
     WylFactArtifactMainTransitionObservation *out_observation)
 {
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  return wyl_fact_artifact_transition_windows_capture (provider, lifecycle,
+             &snapshot, out_observation);
+}
+
+static WylFactArtifactInventoryIdentity
+inventory_identity_from_windows (const WylFactGraphWinIdentity *identity)
+{
+  WylFactArtifactInventoryIdentity result = { 0 };
+  if (identity != NULL) {
+    result.domain = identity->volume_serial;
+    result.object_width = 16;
+    memcpy (result.object_bytes, identity->file_id,
+        sizeof result.object_bytes);
+  }
+  return result;
+}
+
+static wyrelog_error_t
+transition_snapshot_from_scans (const WylFactArtifactWinInventoryScan *begin,
+    const WylFactArtifactWinInventoryScan *end,
+    WylFactArtifactInventorySnapshot **out_snapshot)
+{
+  WylFactArtifactInventorySnapshot *snapshot
+    = wyl_fact_artifact_inventory_snapshot_new (256);
+  if (snapshot == NULL)
+    return WYRELOG_E_NOMEM;
+  WylFactArtifactInventoryObservation first = {
+    .directory_identity = inventory_identity_from_windows
+          (&begin->directory_identity),
+    .guard_identity = inventory_identity_from_windows
+          (&begin->fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].identity),
+    .entry_fingerprint = begin->fingerprint,
+  };
+  WylFactArtifactInventoryObservation last = {
+    .directory_identity = inventory_identity_from_windows
+          (&end->directory_identity),
+    .guard_identity = inventory_identity_from_windows
+          (&end->fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].identity),
+    .entry_fingerprint = end->fingerprint,
+  };
+  wyl_fact_artifact_inventory_snapshot_begin (snapshot, &first);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint slot = 0; rc == WYRELOG_E_OK
+      && slot <= WYL_FACT_ARTIFACT_INVENTORY_LOCK; slot++) {
+    const WylFactArtifactWinInventoryValue *value = &begin->fixed[slot];
+    WylFactArtifactInventoryIdentity identity
+      = inventory_identity_from_windows (&value->identity);
+    rc = wyl_fact_artifact_inventory_snapshot_set_slot (snapshot, slot,
+            value->present ? &identity : NULL, value->present,
+            value->logical_bytes, value->allocation_supported,
+            value->allocated_bytes);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
+            WYL_FACT_ARTIFACT_INVENTORY_TEMP, NULL,
+            begin->temporary.present, begin->temporary.logical_bytes,
+            begin->temporary.allocation_supported,
+            begin->temporary.allocated_bytes);
+  for (guint anomaly = 0; rc == WYRELOG_E_OK
+      && anomaly < WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT; anomaly++)
+    for (guint count = 0; rc == WYRELOG_E_OK
+        && count < begin->anomalies[anomaly]; count++)
+      rc = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
+              (WylFactArtifactInventoryAnomaly) anomaly);
+  if (rc == WYRELOG_E_OK) {
+    wyl_fact_artifact_inventory_snapshot_end (snapshot, &last);
+    rc = wyl_fact_artifact_inventory_snapshot_finalize (snapshot);
+  }
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_inventory_snapshot_free (snapshot);
+    return rc;
+  }
+  *out_snapshot = snapshot;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_windows_capture
+  (WylFactArtifactTransitionWindows *provider,
+    const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  WylFactArtifactWinInventoryScan begin = { 0 };
+  WylFactArtifactWinInventoryScan end = { 0 };
+  WylFactArtifactMainTransitionEntryEvidence entries[3] = { 0 };
+  WylFactArtifactMainTransitionEntryEvidence ignored[3] = { 0 };
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
   if (out_observation != NULL)
     *out_observation = (WylFactArtifactMainTransitionObservation) { 0 };
-  if (provider == NULL || lifecycle == NULL || out_observation == NULL
-      || provider->graph_handle == NULL
-      || provider->graph_handle == INVALID_HANDLE_VALUE)
+  if (provider == NULL || lifecycle == NULL || out_snapshot == NULL
+      || out_observation == NULL)
     return WYRELOG_E_INVALID;
-
-  if (windows_fault_take (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_DIRECTORY_FSTAT))
+  if (windows_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_DIRECTORY_FSTAT))
     return WYRELOG_E_IO;
-
-  WylFactGraphWinIdentity dir_identity = { 0 };
-  wyrelog_error_t rc = query_file_id_identity (provider->graph_handle,
-          &dir_identity);
+  wyrelog_error_t rc = provider_revalidate_authority (provider);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  if (windows_fault_take (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_LEASE_FSTAT))
+  if (windows_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_LEASE_FSTAT))
     return WYRELOG_E_POLICY;
-
-  rc = wyl_fact_root_writer_lease_verify (provider->lease);
+  if (windows_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_SLOT_OPEN))
+    return WYRELOG_E_IO;
+  rc = wyl_fact_artifact_win_locator_transition_inventory_scan
+        (provider->locator, provider->names.stage, provider->names.rollback,
+          &begin, entries);
+  if (rc == WYRELOG_E_OK
+      && windows_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_CAPTURE_BETWEEN_SCANS_RETIRE_STAGE))
+    rc = delete_entry_by_name (provider->graph_handle, provider->names.stage);
+  if (rc == WYRELOG_E_OK)
+    rc = provider_revalidate_authority (provider);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_locator_transition_inventory_scan
+          (provider->locator, provider->names.stage, provider->names.rollback,
+            &end, ignored);
+  if (rc == WYRELOG_E_OK)
+    rc = provider_revalidate_authority (provider);
+  if (rc != WYRELOG_E_OK || !begin.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].present
+      || !end.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].present)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  rc = transition_snapshot_from_scans (&begin, &end, &snapshot);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  WylFactArtifactMainTransitionEntryEvidence main_ev = { 0 };
-  WylFactArtifactMainTransitionEntryEvidence stage_ev = { 0 };
-  WylFactArtifactMainTransitionEntryEvidence rollback_ev = { 0 };
-
-  rc = observe_slot (provider, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
-          &main_ev);
-  if (rc == WYRELOG_E_OK)
-    rc = observe_slot (provider, provider->names.stage, &stage_ev);
-  if (rc == WYRELOG_E_OK)
-    rc = observe_slot (provider, provider->names.rollback, &rollback_ev);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  if (windows_fault_take (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE))
-    stage_ev.identity.object_bytes[15] ^= 1;
-
-  out_observation->directory_identity.domain = dir_identity.volume_serial;
-  out_observation->directory_identity.object = 0;
-  out_observation->directory_identity.object_width = 16;
-  memcpy (out_observation->directory_identity.object_bytes,
-      dir_identity.file_id, sizeof dir_identity.file_id);
-
-  /* Lease lock identity */
-  HANDLE lock_handle = INVALID_HANDLE_VALUE;
-  NTSTATUS status = WYL_STATUS_SUCCESS;
-  rc = open_entry_handle (provider->graph_handle,
-          WYL_FACT_ARTIFACT_TRANSITION_LOCK_NAME,
-          READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-          FILE_OPEN, &lock_handle, &status);
-  if (rc == WYRELOG_E_OK) {
-    WylFactGraphWinIdentity lock_id = { 0 };
-    if (query_file_id_identity (lock_handle, &lock_id) == WYRELOG_E_OK) {
-      out_observation->lease_identity.domain = lock_id.volume_serial;
-      out_observation->lease_identity.object = 0;
-      out_observation->lease_identity.object_width = 16;
-      memcpy (out_observation->lease_identity.object_bytes, lock_id.file_id,
-          sizeof lock_id.file_id);
-    }
-    CloseHandle (lock_handle);
-  }
-
-  memcpy (out_observation->operation_uuid, provider->operation_uuid,
-      sizeof out_observation->operation_uuid);
-  out_observation->sealed = lifecycle->sealed;
-  out_observation->main_binding_live = lifecycle->main_binding_live;
-  out_observation->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN]
-    = main_ev;
-  out_observation->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE]
-    = stage_ev;
-  out_observation->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK]
-    = rollback_ev;
-  out_observation->no_replace_supported = provider->capability.no_replace_supported;
+  WylFactArtifactMainTransitionObservation observation = {
+    .directory_identity = inventory_identity_from_windows
+          (&begin.directory_identity),
+    .lease_identity = inventory_identity_from_windows
+          (&begin.fixed[WYL_FACT_ARTIFACT_INVENTORY_LOCK].identity),
+    .sealed = lifecycle->sealed,
+    .main_binding_live = lifecycle->main_binding_live,
+    .no_replace_supported = provider->capability.no_replace_supported,
+  };
+  memcpy (observation.operation_uuid, provider->operation_uuid,
+      sizeof observation.operation_uuid);
+  memcpy (observation.entries, entries, sizeof observation.entries);
+  if (windows_fault_take
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_OBSERVE_SLOT_SUBSTITUTE))
+    observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE]
+    .identity.object_bytes[15] ^= 1;
+  *out_snapshot = snapshot;
+  *out_observation = observation;
   return WYRELOG_E_OK;
 }
 
@@ -1221,7 +1317,7 @@ wyl_fact_artifact_transition_windows_execute
   if (windows_fault_take (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_LEASE_VERIFY))
     return WYRELOG_E_POLICY;
 
-  wyrelog_error_t status = wyl_fact_root_writer_lease_verify (provider->lease);
+  wyrelog_error_t status = provider_revalidate_authority (provider);
   if (status != WYRELOG_E_OK)
     return status;
   status = execute_verify_authorization (provider, authorized);
