@@ -2,54 +2,23 @@
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sys/stat.h>
 
 #include "fact-test-support.h"
 #include "fact/graph-locator-private.h"
-#include "fact/provisioning-construct-private.h"
 #include "fact/store-private.h"
 
 static const gchar operation_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070891";
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070892";
 static const gchar tenant_id[] = "tenant-provision";
 static const gchar graph_id[] = "graph-provision";
+static const gchar *provision_helper_path;
 
 typedef struct
 {
   guint commit_calls;
   guint rollback_calls;
 } TransactionFault;
-
-static WylPolicyGraphProvisioningRecord
-make_record (void)
-{
-  WylPolicyGraphProvisioningRecord record = { 0 };
-  record.op_uuid = (gchar *) operation_uuid;
-  record.tenant_id = (gchar *) tenant_id;
-  record.graph_id = (gchar *) graph_id;
-  record.store_uuid = (gchar *) store_uuid;
-  record.stage_basename = (gchar *)
-      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070891.sqlite";
-  record.expected_lifecycle_generation = 1;
-  record.expected_reconciliation_generation = 0;
-  record.phase = WYL_POLICY_GRAPH_PROVISIONING_RESERVED;
-  return record;
-}
-
-static WylPolicyGraphAuthorityRecord
-make_authority (void)
-{
-  WylPolicyGraphAuthorityRecord authority = { 0 };
-  authority.tenant_id = (gchar *) tenant_id;
-  authority.graph_id = (gchar *) graph_id;
-  authority.lifecycle_state = WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING;
-  authority.store_uuid = (gchar *) store_uuid;
-  authority.format_version = 1;
-  authority.path_encoding_version = 1;
-  authority.lifecycle_generation = 1;
-  authority.reconciliation_generation = 0;
-  authority.has_store_identity = TRUE;
-  return authority;
-}
 
 static WylFactStoreIdentity
 make_identity (void)
@@ -61,6 +30,67 @@ make_identity (void)
   identity.format_version = 1;
   identity.path_encoding_version = 1;
   return identity;
+}
+
+static void
+run_provision_helper (const gchar *root)
+{
+  const gchar *argv[] = {
+    provision_helper_path,
+    root,
+    tenant_id,
+    graph_id,
+    operation_uuid,
+    store_uuid,
+    NULL,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSubprocess) process = g_subprocess_newv (argv,
+          G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
+          &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (process);
+  g_autofree gchar *stdout_text = NULL;
+  g_autofree gchar *stderr_text = NULL;
+  g_assert_true (g_subprocess_communicate_utf8 (process, NULL, NULL,
+      &stdout_text, &stderr_text, &error));
+  g_assert_no_error (error);
+  if (!g_subprocess_get_if_exited (process)
+      || g_subprocess_get_exit_status (process) != 0)
+    g_test_message ("provision helper failed: %s",
+        stderr_text != NULL ? stderr_text : "no diagnostic");
+  g_assert_true (g_subprocess_get_if_exited (process));
+  g_assert_cmpint (g_subprocess_get_exit_status (process), ==, 0);
+  g_assert_true (stdout_text == NULL || stdout_text[0] == '\0');
+}
+
+static void
+assert_retained_pair (const gchar *root)
+{
+  g_autofree gchar *tenant_component = NULL;
+  g_autofree gchar *graph_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode (tenant_id,
+      &tenant_component), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+      &graph_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *final_path = g_build_filename (root, tenant_component,
+          graph_component, "facts.duckdb", NULL);
+  g_autofree gchar *stage_basename =
+      g_strdup_printf ("provision-%s.sqlite", operation_uuid);
+  g_autofree gchar *stage_path = g_build_filename (root, tenant_component,
+          graph_component, stage_basename, NULL);
+  struct stat final_status;
+  struct stat stage_status;
+  g_assert_cmpint (stat (final_path, &final_status), ==, 0);
+  g_assert_cmpint (stat (stage_path, &stage_status), ==, 0);
+  g_assert_true (S_ISREG (final_status.st_mode));
+  g_assert_true (S_ISREG (stage_status.st_mode));
+  g_assert_cmpuint (final_status.st_mode & 0777, ==, 0600);
+  g_assert_cmpuint (stage_status.st_mode & 0777, ==, 0600);
+  g_assert_cmpuint (final_status.st_dev, ==, stage_status.st_dev);
+  g_assert_cmpuint (final_status.st_ino, ==, stage_status.st_ino);
+  g_assert_cmpuint (final_status.st_nlink, ==, 2);
+  g_assert_cmpuint (stage_status.st_nlink, ==, 2);
 }
 
 static void
@@ -151,10 +181,8 @@ test_provisioned_commit_failure_rolls_back (void)
   g_autofree gchar *root = wyl_test_make_secure_fact_root
         ("wyl-fact-store-forget-transaction-XXXXXX", &error);
   g_assert_no_error (error);
-  WylPolicyGraphProvisioningRecord record = make_record ();
-  WylPolicyGraphAuthorityRecord authority = make_authority ();
-  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
-      &authority), ==, WYRELOG_E_OK);
+  run_provision_helper (root);
+  assert_retained_pair (root);
 
   wyl_fact_store_t *store = NULL;
   g_assert_cmpint (open_live (root, &store), ==, WYRELOG_E_OK);
@@ -234,12 +262,18 @@ test_provisioned_commit_failure_rolls_back (void)
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_audit;"), ==, 1);
   wyl_fact_store_close (store);
+  assert_retained_pair (root);
   remove_root (root);
 }
 
 int
 main (int argc, char **argv)
 {
+  if (argc != 2 || argv[1] == NULL || !g_path_is_absolute (argv[1]))
+    return 2;
+  provision_helper_path = argv[1];
+  argv[1] = NULL;
+  argc = 1;
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-store/forget-transaction/provisioned-commit-failure",
       test_provisioned_commit_failure_rolls_back);

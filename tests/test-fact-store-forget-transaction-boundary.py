@@ -11,6 +11,7 @@ PATHS = (
     "wyrelog/fact/store.c",
     "wyrelog/fact/store-private.h",
     "tests/test-fact-store-forget-transaction.c",
+    "tests/test-fact-store-forget-transaction-provision-helper.c",
     "tests/test-fact-store-forget-transaction-provisioned.c",
     "tests/meson.build",
     ".github/workflows/ci-pr.yml",
@@ -55,6 +56,9 @@ def validate(files: dict[str, str]) -> None:
     store = files["wyrelog/fact/store.c"]
     header = files["wyrelog/fact/store-private.h"]
     generic = files["tests/test-fact-store-forget-transaction.c"]
+    helper_source = files[
+        "tests/test-fact-store-forget-transaction-provision-helper.c"
+    ]
     provisioned = files[
         "tests/test-fact-store-forget-transaction-provisioned.c"
     ]
@@ -185,7 +189,30 @@ def validate(files: dict[str, str]) -> None:
         if secret not in generic:
             raise AssertionError(f"diagnostic redaction proof drifted: {secret}")
 
+    require_once(
+        helper_source,
+        "wyl_fact_graph_provisioning_construct (root, &record,\n"
+        "          &authority)",
+        "production helper must invoke provisioning exactly once",
+    )
+    for forbidden in (
+        "WYL_TEST_HANDLE_SEAMS",
+        "wyl_fact_store_set_forget_transaction_test_hook",
+    ):
+        if forbidden in helper_source:
+            raise AssertionError(
+                f"production helper acquired test seams: {forbidden}"
+            )
+    if 'g_printerr ("provisioning failed: %d\\n", rc)' not in helper_source:
+        raise AssertionError(
+            "production helper must report a stable numeric error"
+        )
+    if "if (rc == WYRELOG_E_OK)\n    return 0;" not in helper_source:
+        raise AssertionError("production helper must propagate construction failure")
+
     provisioned_required = (
+        "run_provision_helper (root)",
+        "assert_retained_pair (root)",
         "wyl_fact_store_open_provisioned_pair",
         "fail_commit_once",
         'exec_ok (conn, "SELECT 1;")',
@@ -197,8 +224,62 @@ def validate(files: dict[str, str]) -> None:
     for token in provisioned_required:
         if token not in provisioned:
             raise AssertionError(f"provisioned runtime proof drifted: {token}")
+    if "wyl_fact_graph_provisioning_construct" in provisioned:
+        raise AssertionError("seam-linked parent must not provision the pair")
+    if "wyl_fact_store_open (" in provisioned:
+        raise AssertionError("provisioned proof must not use pathname store open")
     if provisioned.count("open_live (root, &store)") != 2:
         raise AssertionError("provisioned proof must close and reopen the store")
+    helper_run = function_body(provisioned, "run_provision_helper")
+    for token in (
+        "g_path_is_absolute",
+        "g_subprocess_newv",
+        "G_SUBPROCESS_FLAGS_STDOUT_PIPE",
+        "G_SUBPROCESS_FLAGS_STDERR_PIPE",
+        "g_subprocess_communicate_utf8",
+        "g_subprocess_get_if_exited",
+        "g_subprocess_get_exit_status",
+    ):
+        if token not in provisioned:
+            raise AssertionError(f"helper subprocess contract drifted: {token}")
+    if (
+        "g_subprocess_launcher" in helper_run
+        or "g_spawn_command_line" in helper_run
+    ):
+        raise AssertionError(
+            "helper must execute through an absolute argv, not a shell"
+        )
+    require_once(
+        helper_run,
+        "g_assert_cmpint (g_subprocess_get_exit_status (process), ==, 0);",
+        "helper exit status must be checked exactly",
+    )
+    retained = function_body(provisioned, "assert_retained_pair")
+    for token in (
+        '"facts.duckdb"',
+        'g_strdup_printf ("provision-%s.sqlite", operation_uuid)',
+        "S_ISREG (final_status.st_mode)",
+        "S_ISREG (stage_status.st_mode)",
+        "final_status.st_mode & 0777, ==, 0600",
+        "stage_status.st_mode & 0777, ==, 0600",
+        "final_status.st_dev, ==, stage_status.st_dev",
+        "final_status.st_ino, ==, stage_status.st_ino",
+        "final_status.st_nlink, ==, 2",
+        "stage_status.st_nlink, ==, 2",
+    ):
+        if token not in retained:
+            raise AssertionError(f"retained-pair witness drifted: {token}")
+    provisioned_test = function_body(
+        provisioned, "test_provisioned_commit_failure_rolls_back"
+    )
+    if not (
+        provisioned_test.index("run_provision_helper (root)")
+        < provisioned_test.index("assert_retained_pair (root)")
+        < provisioned_test.index("open_live (root, &store)")
+    ):
+        raise AssertionError("persisted pair handoff ordering drifted")
+    if provisioned_test.count("assert_retained_pair (root)") != 2:
+        raise AssertionError("retained pair must be checked before and after use")
 
     generic_target = call_body(
         meson, "test_fact_store_forget_transaction = executable("
@@ -207,12 +288,28 @@ def validate(files: dict[str, str]) -> None:
         raise AssertionError("generic test must link the seam archive")
     if "dependencies : [wyrelog_dep" in generic_target:
         raise AssertionError("generic test must not dual-link production wyrelog")
+    helper_target = call_body(
+        meson,
+        "test_fact_store_forget_transaction_provision_helper = executable(",
+    )
+    if (
+        "dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]"
+        not in helper_target
+    ):
+        raise AssertionError("provision helper must link the production library")
+    if (
+        "wyrelog_handle_test_seams_dep" in helper_target
+        or "WYL_TEST_HANDLE_SEAMS" in helper_target
+    ):
+        raise AssertionError("provision helper must not link test seams")
     provisioned_target = call_body(
         meson,
         "test_fact_store_forget_transaction_provisioned = executable(",
     )
     if "wyrelog_handle_test_seams_dep" not in provisioned_target:
         raise AssertionError("provisioned test must link the seam archive")
+    if "wyrelog_dep" in provisioned_target:
+        raise AssertionError("provisioned test must not dual-link production wyrelog")
     require_once(
         meson,
         "test('fact-store-forget-transaction',",
@@ -223,6 +320,16 @@ def validate(files: dict[str, str]) -> None:
         "test('fact-store-forget-transaction-provisioned',",
         "provisioned runtime must be registered once",
     )
+    provisioned_registration_body = call_body(
+        meson, "test('fact-store-forget-transaction-provisioned',"
+    )
+    if (
+        "test_fact_store_forget_transaction_provision_helper.full_path()"
+        not in provisioned_registration_body
+        or "depends : test_fact_store_forget_transaction_provision_helper"
+        not in provisioned_registration_body
+    ):
+        raise AssertionError("provisioned runtime lost its helper dependency")
     require_once(
         meson,
         "test('fact-store-forget-transaction-boundary',",
@@ -233,6 +340,19 @@ def validate(files: dict[str, str]) -> None:
         "test('fact-store-forget-transaction-boundary-self',",
         "boundary checker self-test must be registered once",
     )
+    generic_registration = meson.index("test('fact-store-forget-transaction',")
+    generic_guard = meson.rfind(
+        "if host_machine.system() != 'windows'", 0, generic_registration
+    )
+    generic_guard_end = meson.find("\n  endif", generic_guard)
+    if generic_guard == -1 or generic_guard_end < generic_registration:
+        raise AssertionError("generic runtime must stay disabled on Windows")
+    if (
+        meson.index("test_fact_store_forget_transaction = executable(")
+        > generic_guard
+    ):
+        raise AssertionError("generic executable must still compile on Windows")
+
     provisioned_registration = meson.index(
         "test('fact-store-forget-transaction-provisioned',"
     )
@@ -249,6 +369,7 @@ def validate(files: dict[str, str]) -> None:
     posix_commands = (
         "meson compile -C build-secure-duckdb -j 1 \\\n"
         "            test-fact-store-forget-transaction \\\n"
+        "            test-fact-store-forget-transaction-provision-helper \\\n"
         "            test-fact-store-forget-transaction-provisioned\n"
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-forget-transaction \\\n"
@@ -256,12 +377,10 @@ def validate(files: dict[str, str]) -> None:
         "            --print-errorlogs"
     )
     windows_step_name = (
-        "      - name: Test fact forget transaction cleanup (clang-cl)"
+        "      - name: Build fact forget transaction cleanup seam (clang-cl)"
     )
     windows_commands = (
-        "meson compile -C builddir test-fact-store-forget-transaction\n"
-        "          meson test -C builddir --no-rebuild "
-        "fact-store-forget-transaction --print-errorlogs"
+        "meson compile -C builddir test-fact-store-forget-transaction"
     )
     for workflow_path in (
         ".github/workflows/ci-pr.yml",
@@ -278,6 +397,15 @@ def validate(files: dict[str, str]) -> None:
             posix_commands,
             f"{workflow_path} POSIX secure cleanup commands drifted",
         )
+        posix_step_start = workflow.index(posix_step_name)
+        posix_step_end = workflow.index(
+            "\n      - name:", posix_step_start + len(posix_step_name)
+        )
+        posix_step = workflow[posix_step_start:posix_step_end]
+        if "runner.os == 'Linux'" in posix_step:
+            raise AssertionError(
+                f"{workflow_path} restricted POSIX runtime proof to Linux"
+            )
         if not (
             workflow.index(
                 "      - name: Build secure DuckDB backend from pinned source"
@@ -311,6 +439,18 @@ def validate(files: dict[str, str]) -> None:
             raise AssertionError(
                 f"{workflow_path} ran the POSIX provisioned case on Windows"
             )
+        for forbidden in (
+            "meson test",
+            "NDEBUG",
+            "b_ndebug",
+            "continue-on-error",
+            "retry",
+        ):
+            if forbidden in windows_step:
+                raise AssertionError(
+                    f"{workflow_path} Windows compile-only boundary drifted: "
+                    f"{forbidden}"
+                )
         if not (
             workflow.index("      - name: Build and test (clang-cl)")
             < windows_step_start
@@ -434,6 +574,89 @@ def self_test(baseline: dict[str, str]) -> None:
         "test('removed-fact-store-forget-transaction-boundary-self',",
         "missing boundary self-test registration",
     )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provision-helper.c",
+        "wyl_fact_graph_provisioning_construct (root, &record,\n"
+        "          &authority);",
+        "wyl_fact_graph_provisioning_construct (root, &record,\n"
+        "          &authority);\n  "
+        "wyl_fact_graph_provisioning_construct (root, &record,\n"
+        "          &authority);",
+        "duplicate production provisioning",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provision-helper.c",
+        "if (rc == WYRELOG_E_OK)\n    return 0;",
+        "if (TRUE)\n    return 0;",
+        "ignored production provisioning failure",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provisioned.c",
+        "run_provision_helper (root);",
+        "run_provision_helper (root);\n"
+        "  wyl_fact_graph_provisioning_construct (root, NULL, NULL);",
+        "seam-linked direct provisioning",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provisioned.c",
+        "g_subprocess_get_exit_status (process), ==, 0",
+        "g_subprocess_get_exit_status (process), >=, 0",
+        "ignored helper exit status",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provisioned.c",
+        "final_status.st_mode & 0777, ==, 0600",
+        "final_status.st_mode & 0777, !=, 0",
+        "missing retained-pair mode proof",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "'test-fact-store-forget-transaction-provision-helper.c',\n"
+        "      include_directories : include_directories('../wyrelog'),\n"
+        "      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]",
+        "'test-fact-store-forget-transaction-provision-helper.c',\n"
+        "      include_directories : include_directories('../wyrelog'),\n"
+        "      dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, "
+        "duckdb_dep]",
+        "seam-linked production helper",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, "
+        "duckdb_dep]",
+        "dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]",
+        "production-linked seam parent",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "args : [test_fact_store_forget_transaction_provision_helper."
+        "full_path()],",
+        "args : [],",
+        "missing provision helper path",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "depends : test_fact_store_forget_transaction_provision_helper,",
+        "depends : test_fact_store_forget_transaction_provisioned,",
+        "missing provision helper build dependency",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "if host_machine.system() != 'windows'\n"
+        "    test('fact-store-forget-transaction',",
+        "if true\n    test('fact-store-forget-transaction',",
+        "Windows runtime registration",
+    )
     for workflow_path in (
         ".github/workflows/ci-pr.yml",
         ".github/workflows/ci-main.yml",
@@ -448,9 +671,18 @@ def self_test(baseline: dict[str, str]) -> None:
         expect_rejected(
             baseline,
             workflow_path,
-            "      - name: Test fact forget transaction cleanup (clang-cl)",
-            "      - name: Removed fact forget transaction cleanup (clang-cl)",
+            "      - name: Build fact forget transaction cleanup seam (clang-cl)",
+            "      - name: Removed fact forget transaction cleanup seam (clang-cl)",
             f"missing Windows cleanup step in {workflow_path}",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            "meson compile -C builddir test-fact-store-forget-transaction",
+            "meson compile -C builddir test-fact-store-forget-transaction\n"
+            "          meson test -C builddir --no-rebuild "
+            "fact-store-forget-transaction",
+            f"Windows runtime exception bypass in {workflow_path}",
         )
 
 
