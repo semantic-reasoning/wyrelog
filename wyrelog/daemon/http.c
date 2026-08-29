@@ -300,6 +300,18 @@ typedef struct
   gboolean entered;
   gboolean released;
 } WylHumanRefreshTestLatch;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  guint64 generation;
+  gboolean armed;
+  gboolean claimed;
+  gboolean entered;
+  gboolean released;
+  gboolean aborted;
+} WylPolicyWriteAcquireTestLatch;
 #endif
 
 typedef enum
@@ -507,6 +519,8 @@ typedef struct _WylDaemonHttpContext
   guint policy_write_terminal_entries;
   guint64 policy_write_finalize_generation;
   WylDaemonPolicyWriteFinalizeSnapshot policy_write_finalize_snapshot;
+  GCond policy_write_finalize_changed;
+  WylPolicyWriteAcquireTestLatch policy_write_acquire_latch;
   gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
   gboolean fail_next_tenant_lifecycle_audit_insert;
@@ -1302,6 +1316,35 @@ wyl_daemon_policy_write_finish_result (WylDaemonPolicyWrite *write,
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
+static gboolean
+policy_write_acquire_test_latch_reach (WylDaemonHttpContext *ctx,
+    WylDaemonPolicyWriteOwner owner)
+{
+  if (owner != WYL_DAEMON_POLICY_WRITE_OWNER_DIRECT_PERMISSION)
+    return TRUE;
+
+  WylPolicyWriteAcquireTestLatch *latch = &ctx->policy_write_acquire_latch;
+  g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&latch->mutex);
+  if (!latch->armed || latch->claimed)
+    return TRUE;
+
+  guint64 generation = latch->generation;
+  latch->claimed = TRUE;
+  latch->entered = TRUE;
+  g_cond_broadcast (&latch->changed);
+  gint64 deadline = g_get_monotonic_time () + 10 * G_TIME_SPAN_SECOND;
+  while (latch->armed && latch->generation == generation && !latch->released)
+    if (!g_cond_wait_until (&latch->changed, &latch->mutex, deadline)) {
+      latch->armed = FALSE;
+      latch->aborted = TRUE;
+      g_cond_broadcast (&latch->changed);
+      return FALSE;
+    }
+  gboolean released = latch->generation == generation && latch->released
+      && !latch->aborted;
+  return released;
+}
+
 static void
 policy_write_terminal_checkpoint (gpointer data)
 {
@@ -1367,6 +1410,7 @@ policy_write_record_non_http_finalize_snapshot (WylDaemonPolicyWrite *write,
   if (cleanup_rc != WYRELOG_E_OK)
     snapshot.diagnostic_count++;
   ctx->policy_write_finalize_snapshot = snapshot;
+  g_cond_broadcast (&ctx->policy_write_finalize_changed);
   g_mutex_unlock (&ctx->lock);
 }
 #endif
@@ -1451,6 +1495,9 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
         rc = WYRELOG_E_INTERNAL;
       }
     }
+    if (rc == WYRELOG_E_OK
+        && !policy_write_acquire_test_latch_reach (ctx, owner))
+      rc = WYRELOG_E_INTERNAL;
 #endif
   }
   if (rc != WYRELOG_E_OK && write->state == WYL_DAEMON_POLICY_WRITE_ACTIVE) {
@@ -1836,6 +1883,9 @@ wyl_daemon_http_context_unref (gpointer data)
   g_clear_pointer (&ctx->exact_route_probes, g_hash_table_unref);
   g_mutex_clear (&ctx->refresh_latch.mutex);
   g_cond_clear (&ctx->refresh_latch.changed);
+  g_cond_clear (&ctx->policy_write_finalize_changed);
+  g_mutex_clear (&ctx->policy_write_acquire_latch.mutex);
+  g_cond_clear (&ctx->policy_write_acquire_latch.changed);
 #endif
   g_mutex_clear (&ctx->lock);
   g_clear_pointer (&ctx->service_auth_registry,
@@ -1876,6 +1926,9 @@ wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
       ctx->shutting_down = TRUE;
       ctx->auth_epoch++;
     }
+#ifdef WYL_TEST_DAEMON_HTTP
+    g_cond_broadcast (&ctx->policy_write_finalize_changed);
+#endif
     g_mutex_unlock (&ctx->lock);
     /* Release every policy WRITE request currently parked behind an active
      * writer.  shutting_down is already latched above, so any acquire racing
@@ -1890,6 +1943,12 @@ wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
     ctx->refresh_latch.released = TRUE;
     ctx->refresh_latch.armed = FALSE;
     g_cond_broadcast (&ctx->refresh_latch.changed);
+    g_autoptr (GMutexLocker) policy_write_locker = g_mutex_locker_new
+          (&ctx->policy_write_acquire_latch.mutex);
+    ctx->policy_write_acquire_latch.released = TRUE;
+    ctx->policy_write_acquire_latch.aborted = TRUE;
+    ctx->policy_write_acquire_latch.armed = FALSE;
+    g_cond_broadcast (&ctx->policy_write_acquire_latch.changed);
   }
 #endif
 }
@@ -2182,6 +2241,9 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_init (&ctx->refresh_latch.mutex);
   g_cond_init (&ctx->refresh_latch.changed);
+  g_cond_init (&ctx->policy_write_finalize_changed);
+  g_mutex_init (&ctx->policy_write_acquire_latch.mutex);
+  g_cond_init (&ctx->policy_write_acquire_latch.changed);
   ctx->refresh_generated_ids = g_ptr_array_new_with_free_func
         ((GDestroyNotify) wyl_sensitive_string_free);
   ctx->exact_route_probes = g_hash_table_new_full (g_str_hash, g_str_equal,
@@ -3785,6 +3847,98 @@ wyl_daemon_http_policy_write_terminal_entries_for_test (SoupServer *server)
   guint entries = ctx->policy_write_terminal_entries;
   g_mutex_unlock (&ctx->lock);
   return entries;
+}
+
+guint64
+wyl_daemon_http_arm_policy_write_acquired_latch_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return 0;
+  WylPolicyWriteAcquireTestLatch *latch = &ctx->policy_write_acquire_latch;
+  g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&latch->mutex);
+  if (latch->armed)
+    return 0;
+  latch->generation++;
+  if (latch->generation == 0)
+    latch->generation++;
+  latch->armed = TRUE;
+  latch->claimed = FALSE;
+  latch->entered = FALSE;
+  latch->released = FALSE;
+  latch->aborted = FALSE;
+  return latch->generation;
+}
+
+gboolean
+wyl_daemon_http_wait_policy_write_acquired_latch_for_test
+  (SoupServer * server, guint64 generation, gint64 deadline_us)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || generation == 0)
+    return FALSE;
+  WylPolicyWriteAcquireTestLatch *latch = &ctx->policy_write_acquire_latch;
+  g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&latch->mutex);
+  while (latch->generation == generation && latch->armed && !latch->entered)
+    if (!g_cond_wait_until (&latch->changed, &latch->mutex, deadline_us))
+      break;
+  return latch->generation == generation && latch->armed && latch->claimed
+         && latch->entered && !latch->released;
+}
+
+void
+wyl_daemon_http_release_policy_write_acquired_latch_for_test
+  (SoupServer * server, guint64 generation)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  WylPolicyWriteAcquireTestLatch *latch = &ctx->policy_write_acquire_latch;
+  g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&latch->mutex);
+  if (latch->generation == generation && latch->armed && latch->claimed) {
+    latch->released = TRUE;
+    latch->aborted = FALSE;
+    latch->armed = FALSE;
+    g_cond_broadcast (&latch->changed);
+  }
+}
+
+void
+wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+  (SoupServer * server, guint64 generation)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  WylPolicyWriteAcquireTestLatch *latch = &ctx->policy_write_acquire_latch;
+  g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&latch->mutex);
+  if (latch->generation == generation) {
+    latch->released = FALSE;
+    latch->aborted = TRUE;
+    latch->armed = FALSE;
+    g_cond_broadcast (&latch->changed);
+  }
+}
+
+gboolean
+wyl_daemon_http_wait_policy_write_finalize_for_test (SoupServer *server,
+    guint64 baseline_generation, gint64 deadline_us,
+    WylDaemonPolicyWriteFinalizeSnapshot *out_snapshot)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || out_snapshot == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  while (ctx->policy_write_finalize_generation <= baseline_generation
+      && !ctx->shutting_down)
+    if (!g_cond_wait_until (&ctx->policy_write_finalize_changed, &ctx->lock,
+        deadline_us))
+      break;
+  gboolean finalized = ctx->policy_write_finalize_generation
+      > baseline_generation;
+  *out_snapshot = ctx->policy_write_finalize_snapshot;
+  g_mutex_unlock (&ctx->lock);
+  return finalized;
 }
 
 gboolean
@@ -6390,6 +6544,7 @@ policy_write_record_finalize_snapshot (WylDaemonPolicyWrite *write,
   if (cleanup_rc != WYRELOG_E_OK)
     snapshot.diagnostic_count++;
   ctx->policy_write_finalize_snapshot = snapshot;
+  g_cond_broadcast (&ctx->policy_write_finalize_changed);
   g_mutex_unlock (&ctx->lock);
   (void) msg;
 }

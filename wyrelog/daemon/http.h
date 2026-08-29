@@ -575,6 +575,21 @@ wyrelog_error_t wyl_daemon_http_resolve_tenant_create_outcome_for_test
     WylDaemonTenantCreateOutcomeEffect * out_effect);
 guint wyl_daemon_http_policy_write_terminal_entries_for_test
   (SoupServer * server);
+/* One-shot owner-9 barrier reached after the direct-permission WRITE has
+ * acquired its policy-store pin but before the handler mutates policy. */
+guint64 wyl_daemon_http_arm_policy_write_acquired_latch_for_test
+  (SoupServer * server);
+gboolean wyl_daemon_http_wait_policy_write_acquired_latch_for_test
+  (SoupServer * server, guint64 generation, gint64 deadline_us);
+void wyl_daemon_http_release_policy_write_acquired_latch_for_test
+  (SoupServer * server, guint64 generation);
+void wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+  (SoupServer * server, guint64 generation);
+/* Wait for publication of a finalize snapshot newer than @baseline_generation.
+ * Publication follows terminal lease release, including policy-store unpin. */
+gboolean wyl_daemon_http_wait_policy_write_finalize_for_test
+  (SoupServer * server, guint64 baseline_generation, gint64 deadline_us,
+    WylDaemonPolicyWriteFinalizeSnapshot * out_snapshot);
 gboolean wyl_daemon_http_policy_write_finalize_snapshot_for_test
   (SoupServer * server, WylDaemonPolicyWriteFinalizeSnapshot * out_snapshot);
 /* Reason (WylDaemonPolicyWriteCancel: 0 none, 1 client-disconnect, 2 shutdown)
