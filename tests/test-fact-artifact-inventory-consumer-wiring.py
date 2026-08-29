@@ -14,6 +14,25 @@ import sys
 HEADER = "wyrelog/fact/graph-artifact-inventory-private.h"
 MODEL = "wyrelog/fact/graph-artifact-inventory-private.c"
 POSIX_PROVIDER = "wyrelog/fact/graph-artifact-namespace-private.c"
+POSIX_NAMESPACE_HEADER = "wyrelog/fact/graph-artifact-namespace-private.h"
+POSIX_INVENTORY_HEADER = (
+    "wyrelog/fact/graph-artifact-inventory-posix-private.h"
+)
+MAIN_TRANSITION_HEADER = (
+    "wyrelog/fact/graph-artifact-main-transition-private.h"
+)
+POSIX_LOCK_HEADER_CLOSURE = (
+    POSIX_NAMESPACE_HEADER,
+    POSIX_INVENTORY_HEADER,
+    "wyrelog/fact/graph-provisioned-pair-internal.h",
+    "wyrelog/wyl-id-private.h",
+    "wyrelog/error.h",
+    HEADER,
+    MAIN_TRANSITION_HEADER,
+    "wyrelog/fact/graph-locator-private.h",
+    "wyrelog/fact/graph-windows-security-private.h",
+    "wyrelog/fact/recovery-mac-private.h",
+)
 WINDOWS_PROVIDER = "wyrelog/fact/graph-artifact-windows-namespace-private.c"
 MODEL_TEST = "tests/test-fact-artifact-inventory.c"
 CONSUMER_TEST = "tests/test-fact-artifact-inventory-consumers.c"
@@ -27,22 +46,34 @@ ARTIFACT_LOCK_DIAGNOSTIC = (
     "state for that graph"
 )
 EXPECTED_POSIX_OPENAT_PROFILE_SHA256 = (
-    "8cf4fc3e385afa0e8f8745cdd43f7f822cd0c02a83c99789ad6e8dfac5401beb"
+    "e53298e179e2c767efd021602bda7a69ae88ab46b28320d6f10dbb3ec86c0e17"
 )
 EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
-    "df0c47f7c56653f218c0b7d30b9ec5d861d7330357e2e7424013f9b4bcebe035"
+    "69108df5a6a6d79a09a4ad1b958b564713f017c2136e0d8c5cfefad8f2a67afd"
 )
 EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "f7df0467104ad1b75bf2751d738e07ebb5f2960020454a6e5ab112109179c5db"
+    "ffaed524b3b2d44242b6dd32d4945be5db2709150270aa336ae53c6cda21d03d"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "667d2e08f620dd0ce24b0b02139438ed88b2df69f4c6f93543b4c31100520349"
+    "5b651cd1884c7ee6d07eb98a1597db975215377b0d3f99868d8d1d266c21f8ee"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
-    "87b9dd21aefe5725d9909310b5ec5d0fc66fc0451f6393ab19e05a7f8c72f911"
+    "07f8350343c85cef694e626ecd42f6797231e3a9aafa2f812f8262b90248ac36"
+)
+EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS = (
+    13, 7, 8, 8, 2, 3, 4, 31, 6, 5,
+)
+EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256 = (
+    "04067b70ebc6999371235c08978f65bdaa7c212e1707c68f8708dd84f56f0f6c"
+)
+EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS = (
+    1299, 70, 62, 98, 89, 364, 501, 777, 120, 315,
+)
+EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256 = (
+    "25761c69260a6ff69d9d4fc9d74d2185b1f56c6dbb8ae4eeb3f97b886de0d2d6"
 )
 POSIX_CALL_CALLEE_PATTERN = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
@@ -89,9 +120,9 @@ PROHIBITED_POSIX_DIRECT_OPEN_PATTERN = re.compile(
 )
 
 TRACKED_INPUTS = (
-    HEADER,
     MODEL,
     POSIX_PROVIDER,
+    *POSIX_LOCK_HEADER_CLOSURE,
     WINDOWS_PROVIDER,
     MODEL_TEST,
     CONSUMER_TEST,
@@ -504,6 +535,36 @@ def c_source_profile_sha256(items: tuple[str, ...]) -> str:
     return hashlib.sha256(repr(profile).encode("ascii")).hexdigest()
 
 
+def posix_lock_header_closure_profile(
+    inputs: dict[str, str],
+) -> tuple[tuple[int, ...], str, tuple[int, ...], str]:
+    directive_counts: list[int] = []
+    directive_profile: list[tuple[str, tuple[tuple[str, ...], ...]]] = []
+    semantic_counts: list[int] = []
+    semantic_profile: list[tuple[str, tuple[str, ...]]] = []
+    directive_pattern = re.compile(
+        r"^\s*(?:#|%:|\?\?=)[^\n]*", re.MULTILINE
+    )
+    for path in POSIX_LOCK_HEADER_CLOSURE:
+        source = strip_c_comments(normalize_c_line_splices(inputs[path]))
+        directives = tuple(directive_pattern.findall(source))
+        semantic_tokens = c_tokens(
+            strip_c_literals(directive_pattern.sub("", source))
+        )
+        directive_counts.append(len(directives))
+        directive_profile.append(
+            (path, tuple(c_tokens(directive) for directive in directives))
+        )
+        semantic_counts.append(len(semantic_tokens))
+        semantic_profile.append((path, semantic_tokens))
+    return (
+        tuple(directive_counts),
+        hashlib.sha256(repr(tuple(directive_profile)).encode("utf-8")).hexdigest(),
+        tuple(semantic_counts),
+        hashlib.sha256(repr(tuple(semantic_profile)).encode("utf-8")).hexdigest(),
+    )
+
+
 def artifact_lock_require(condition: bool) -> None:
     require(
         condition,
@@ -535,6 +596,28 @@ def body_brace_depth_at(body: str, offset: int) -> int | None:
 
 
 def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
+    (
+        header_directive_counts,
+        header_directive_hash,
+        header_semantic_counts,
+        header_semantic_hash,
+    ) = posix_lock_header_closure_profile(inputs)
+    artifact_lock_require(
+        header_directive_counts
+        == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS
+    )
+    artifact_lock_require(
+        header_directive_hash
+        == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256
+    )
+    artifact_lock_require(
+        header_semantic_counts
+        == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS
+    )
+    artifact_lock_require(
+        header_semantic_hash
+        == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256
+    )
     translation_unit = normalize_c_line_splices(inputs[POSIX_PROVIDER])
     common_end_anchor = "\n#ifdef G_OS_WIN32\nstruct WylFactArtifactNamespace"
     artifact_lock_require(translation_unit.count(common_end_anchor) == 1)
@@ -560,6 +643,7 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
         include_directives
         == [
             ("#", '"fact/graph-artifact-namespace-private.h"'),
+            ("#", '"fact/graph-artifact-inventory-posix-private.h"'),
             ("#", '"fact/graph-provisioned-pair-internal.h"'),
             ("#", '"wyl-id-private.h"'),
             ("#", "<sodium.h>"),
@@ -632,13 +716,13 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 30307)
+        artifact_lock_require(len(semantic_tokens) == 30808)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
         )
         call_profile = c_named_call_profile(commentless_source)
-        artifact_lock_require(call_profile is not None and len(call_profile) == 2045)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2076)
         assert call_profile is not None
         artifact_lock_require(
             hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
@@ -1783,6 +1867,289 @@ def run_self_test(inputs: dict[str, str]) -> None:
     validate(inputs)
     mutations: list[tuple[str, dict[str, str], set[str]]] = []
 
+    def require_header_profile(
+        label: str,
+        mutated: dict[str, str],
+        expected_directive_hash: str,
+        expected_semantic_hash: str,
+    ) -> None:
+        directive_counts, directive_hash, semantic_counts, semantic_hash = (
+            posix_lock_header_closure_profile(mutated)
+        )
+        require(
+            directive_counts
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS,
+            "E_SELF_TEST",
+            f"mutation {label} did not preserve directive counts",
+        )
+        require(
+            directive_hash == expected_directive_hash,
+            "E_SELF_TEST",
+            f"mutation {label} produced the wrong directive profile",
+        )
+        require(
+            semantic_counts
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS,
+            "E_SELF_TEST",
+            f"mutation {label} did not preserve semantic token counts",
+        )
+        require(
+            semantic_hash == expected_semantic_hash,
+            "E_SELF_TEST",
+            f"mutation {label} produced the wrong semantic profile",
+        )
+
+    header_members = tuple(
+        (
+            path,
+            re.sub(r"[^a-z0-9]+", "-", Path(path).stem.lower()).strip("-"),
+        )
+        for path in POSIX_LOCK_HEADER_CLOSURE
+    )
+    for index, (path, slug) in enumerate(header_members):
+        label = f"pre-fcntl-{slug}-directive-membership"
+        mutation = dict(inputs)
+        mutation[path] += (
+            f"\n#define WYL_ARTIFACT_LOCK_HEADER_MEMBERSHIP_{index} 1\n"
+        )
+        directive_counts, directive_hash, semantic_counts, semantic_hash = (
+            posix_lock_header_closure_profile(mutation)
+        )
+        expected_counts = list(
+            EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS
+        )
+        expected_counts[index] += 1
+        require(
+            directive_counts == tuple(expected_counts),
+            "E_SELF_TEST",
+            f"mutation {label} did not affect only its directive count",
+        )
+        require(
+            directive_hash
+            != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} did not change the directive profile",
+        )
+        require(
+            semantic_counts
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS
+            and semantic_hash
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} changed the semantic profile",
+        )
+        mutations.append((label, mutation, {"E_ARTIFACT_LOCK_ACCESS_MODE"}))
+
+    for index, (path, slug) in enumerate(header_members):
+        label = f"pre-fcntl-{slug}-semantic-membership"
+        mutation = dict(inputs)
+        mutation[path] += (
+            f"\ntypedef int WylArtifactLockHeaderMembership{index};\n"
+        )
+        directive_counts, directive_hash, semantic_counts, semantic_hash = (
+            posix_lock_header_closure_profile(mutation)
+        )
+        expected_counts = list(
+            EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS
+        )
+        expected_counts[index] += 4
+        require(
+            directive_counts
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS
+            and directive_hash
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} changed the directive profile",
+        )
+        require(
+            semantic_counts == tuple(expected_counts),
+            "E_SELF_TEST",
+            f"mutation {label} did not affect only its semantic token count",
+        )
+        require(
+            semantic_hash
+            != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} did not change the semantic profile",
+        )
+        mutations.append((label, mutation, {"E_ARTIFACT_LOCK_ACCESS_MODE"}))
+
+    for label, path in (
+        (
+            "pre-fcntl-inventory-posix-count-preserving-lock-alias",
+            POSIX_INVENTORY_HEADER,
+        ),
+        (
+            "pre-fcntl-main-transition-count-preserving-lock-alias",
+            MAIN_TRANSITION_HEADER,
+        ),
+        (
+            "pre-fcntl-namespace-count-preserving-lock-alias",
+            POSIX_NAMESPACE_HEADER,
+        ),
+        (
+            "pre-fcntl-inventory-count-preserving-lock-alias",
+            HEADER,
+        ),
+    ):
+        for anchor in (
+            "#pragma once",
+            "#include <glib.h>",
+            '#include "wyrelog/error.h"',
+        ):
+            require(
+                inputs[path].count(anchor) == 1,
+                "E_SELF_TEST",
+                f"mutation anchor count drifted in {path}: {anchor!r}",
+            )
+        mutation = replaced(inputs, path, "#pragma once", "#include <fcntl.h>")
+        mutation = replaced(
+            mutation, path, "#include <glib.h>", "#undef O_RDWR"
+        )
+        mutation = replaced(
+            mutation,
+            path,
+            '#include "wyrelog/error.h"',
+            "#define O_RDWR O_RDONLY",
+        )
+        directive_profile = posix_lock_header_closure_profile(mutation)[1]
+        require(
+            directive_profile
+            != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} did not change the directive profile",
+        )
+        require_header_profile(
+            label,
+            mutation,
+            directive_profile,
+            EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+        )
+        mutations.append((label, mutation, {"E_ARTIFACT_LOCK_ACCESS_MODE"}))
+
+    for label, path in (
+        ("pre-fcntl-namespace-header-lock-alias", POSIX_NAMESPACE_HEADER),
+        ("pre-fcntl-inventory-header-lock-alias", HEADER),
+    ):
+        mutation = replaced(
+            inputs,
+            path,
+            "#include <glib.h>\n",
+            "#include <glib.h>\n#include <fcntl.h>\n"
+            "#undef O_RDWR\n#define O_RDWR O_RDONLY\n",
+        )
+        directive_counts, directive_hash, semantic_counts, semantic_hash = (
+            posix_lock_header_closure_profile(mutation)
+        )
+        expected_counts = list(
+            EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS
+        )
+        expected_counts[POSIX_LOCK_HEADER_CLOSURE.index(path)] += 3
+        require(
+            directive_counts == tuple(expected_counts)
+            and directive_hash
+            != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256
+            and semantic_counts
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS
+            and semantic_hash
+            == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} did not isolate the full directive profile",
+        )
+        mutations.append((label, mutation, {"E_ARTIFACT_LOCK_ACCESS_MODE"}))
+
+    for label, path, old, new in (
+        (
+            "direct-posix-header-count-preserving-parameter-rename",
+            POSIX_INVENTORY_HEADER,
+            "(gpointer user_data);",
+            "(gpointer callback_data);",
+        ),
+        (
+            "transitive-main-transition-header-count-preserving-parameter-rename",
+            MAIN_TRANSITION_HEADER,
+            "void wyl_fact_artifact_main_transition_free\n"
+            "  (WylFactArtifactMainTransition *transition);",
+            "void wyl_fact_artifact_main_transition_free\n"
+            "  (WylFactArtifactMainTransition *transition_to_free);",
+        ),
+        (
+            "pre-fcntl-inventory-count-preserving-free-parameter",
+            HEADER,
+            "void wyl_fact_artifact_inventory_snapshot_free\n"
+            "  (WylFactArtifactInventorySnapshot *snapshot);",
+            "void wyl_fact_artifact_inventory_snapshot_free\n"
+            "  (WylFactArtifactInventorySnapshot *snapshot_to_free);",
+        ),
+    ):
+        require(
+            inputs[path].count(old) == 1,
+            "E_SELF_TEST",
+            f"mutation anchor count drifted in {path}: {old!r}",
+        )
+        mutation = replaced(inputs, path, old, new)
+        semantic_profile = posix_lock_header_closure_profile(mutation)[3]
+        require(
+            semantic_profile
+            != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+            "E_SELF_TEST",
+            f"mutation {label} did not change the semantic profile",
+        )
+        require_header_profile(
+            label,
+            mutation,
+            EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256,
+            semantic_profile,
+        )
+        mutations.append((label, mutation, {"E_ARTIFACT_LOCK_ACCESS_MODE"}))
+
+    openat_interposition = dict(inputs)
+    openat_interposition[HEADER] += (
+        "\nextern long syscall (long number, ...);\n\n"
+        "int\nopenat (int directory_fd, const char *path, int flags, ...)\n"
+        "{\n"
+        "  (void) flags;\n"
+        "  return (int) syscall (257L, directory_fd, path, 0);\n"
+        "}\n"
+    )
+    interposition_profile = posix_lock_header_closure_profile(
+        openat_interposition
+    )
+    require(
+        interposition_profile[0]
+        == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS
+        and interposition_profile[1]
+        == EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256
+        and interposition_profile[2]
+        != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS
+        and interposition_profile[3]
+        != EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+        "E_SELF_TEST",
+        "semantic openat interposition did not isolate the semantic profile",
+    )
+    mutations.append(
+        (
+            "pre-fcntl-inventory-openat-read-only-interposition",
+            openat_interposition,
+            {"E_ARTIFACT_LOCK_ACCESS_MODE"},
+        )
+    )
+
+    directive_comment = dict(inputs)
+    directive_comment[HEADER] += (
+        "\n/*\n#include <fcntl.h>\n#undef O_RDWR\n"
+        "#define O_RDWR O_RDONLY\n*/\n"
+    )
+    require_header_profile(
+        "pre-fcntl-inventory-directive-comment-decoy",
+        directive_comment,
+        EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256,
+        EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256,
+    )
+    mutations.append(
+        ("pre-fcntl-inventory-directive-comment-decoy", directive_comment, set())
+    )
+
     lock_create = (
         "O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL"
     )
@@ -2304,7 +2671,13 @@ def run_self_test(inputs: dict[str, str]) -> None:
         "  gboolean present;",
         "  gboolean present;\n  gpointer handle;",
     )
-    mutations.append(("raw-authority", raw_authority, {"E_INVENTORY_VALUE_AUTHORITY"}))
+    mutations.append(
+        (
+            "raw-authority",
+            raw_authority,
+            {"E_ARTIFACT_LOCK_ACCESS_MODE", "E_INVENTORY_VALUE_AUTHORITY"},
+        )
+    )
     for label, declaration in (
         ("typed-namespace-authority", "WylFactArtifactNamespace *namespace_;"),
         ("entry-name-array", "gchar entry_name[256];"),
@@ -2316,7 +2689,13 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  gboolean present;",
             f"  gboolean present;\n  {declaration}",
         )
-        mutations.append((label, extra_field, {"E_INVENTORY_VALUE_AUTHORITY"}))
+        mutations.append(
+            (
+                label,
+                extra_field,
+                {"E_ARTIFACT_LOCK_ACCESS_MODE", "E_INVENTORY_VALUE_AUTHORITY"},
+            )
+        )
 
     weakened = replaced(
         inputs,
