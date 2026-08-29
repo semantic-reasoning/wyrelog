@@ -1633,6 +1633,19 @@ if get_option('enable_fact_store').allowed()
     timeout : 60,
   )
 
+  test_fact_store_forget_transaction = executable(
+    'test-fact-store-forget-transaction',
+    'test-fact-store-forget-transaction.c',
+    c_args : ['-DWYL_TEST_HANDLE_SEAMS'],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep],
+  )
+
+  test('fact-store-forget-transaction',
+    test_fact_store_forget_transaction,
+    timeout : 60,
+  )
+
   test_fact_compound = executable('test-fact-compound',
     'test-fact-compound.c',
     c_args : [
@@ -1776,6 +1789,21 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   # Same POSIX retained-pair invariant as fact-provisioning-run (#816).
   if host_machine.system() != 'windows'
     test('fact-store-provisioned', test_fact_store_provisioned,
+      timeout : 60,
+    )
+
+    test_fact_store_forget_transaction_provisioned = executable(
+      'test-fact-store-forget-transaction-provisioned',
+      'test-fact-store-forget-transaction-provisioned.c',
+      'fact-test-support.c',
+      c_args : fact_test_support_c_args
+        + ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE', '-DWYL_TEST_HANDLE_SEAMS'],
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
+        + fact_test_support_deps,
+    )
+    test('fact-store-forget-transaction-provisioned',
+      test_fact_store_forget_transaction_provisioned,
       timeout : 60,
     )
   endif
@@ -3182,6 +3210,14 @@ test('duckdb-after-walstart-boundary', python3,
 test('duckdb-transaction-control-boundary', python3,
   args : [files('test-duckdb-transaction-control-boundary.py'),
     meson.project_source_root()])
+
+test('fact-store-forget-transaction-boundary', python3,
+  args : [files('test-fact-store-forget-transaction-boundary.py'),
+    meson.project_source_root()])
+
+test('fact-store-forget-transaction-boundary-self', python3,
+  args : [files('test-fact-store-forget-transaction-boundary.py'),
+    '--self-test', meson.project_source_root()])
 
 test('duckdb-test-seam-wiring', python3,
   args : [files('test-duckdb-test-seam-wiring.py'),

@@ -219,6 +219,16 @@ jobs:
             exit 1
           fi
 
+      - name: Test fact forget transaction cleanup with secure DuckDB
+        run: |
+          meson compile -C build-secure-duckdb -j 1 \
+            test-fact-store-forget-transaction \
+            test-fact-store-forget-transaction-provisioned
+          meson test -C build-secure-duckdb --no-rebuild \
+            fact-store-forget-transaction \
+            fact-store-forget-transaction-provisioned \
+            --print-errorlogs
+
       - name: Remove secure DuckDB compile swap
         if: ${{ runner.environment == 'github-hosted' && (always() && runner.os == 'Linux') }}
         run: |
@@ -1007,6 +1017,21 @@ jobs:
           ) else (
             meson test -C builddir --print-errorlogs --suite wyrelog
           )
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test fact forget transaction cleanup (clang-cl)
+        if: matrix.secure_bridge == 'enabled'
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          meson compile -C builddir test-fact-store-forget-transaction
+          meson test -C builddir --no-rebuild fact-store-forget-transaction --print-errorlogs
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

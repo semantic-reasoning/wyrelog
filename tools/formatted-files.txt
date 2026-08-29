@@ -33,6 +33,8 @@ tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
 tests/test-fact-provisioning.c
 tests/test-fact-replay.c
+tests/test-fact-store-forget-transaction-provisioned.c
+tests/test-fact-store-forget-transaction.c
 tests/test-fact-store-provisioned.c
 tests/test-fact-store.c
 tests/test-fsm-principal.c

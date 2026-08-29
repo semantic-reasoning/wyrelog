@@ -6,6 +6,7 @@
 #include "compound-private.h"
 #include "legacy-store-identity-private.h"
 #include "store-identity-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 /* Opaque even in non-secure builds so the store handle can carry the live
  * provisioned-pair bridge as a plain pointer (NULL everywhere but the secure
@@ -34,6 +35,10 @@ struct wyl_fact_store_t
   guint64 identity_format_version;
   guint64 identity_path_encoding_version;
   WylSecureDuckdbBridge *provisioned_bridge;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  WylFactStoreForgetTransactionTestHook forget_transaction_test_hook;
+  gpointer forget_transaction_test_hook_data;
+#endif
 };
 
 static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
@@ -364,6 +369,30 @@ void wyl_fact_store_identity_set_validation_test_hook
   identity_validation_test_hook_data = user_data;
   G_UNLOCK (identity_validation_test_hook);
 }
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+void
+wyl_fact_store_set_forget_transaction_test_hook (wyl_fact_store_t *store,
+    WylFactStoreForgetTransactionTestHook hook, gpointer user_data)
+{
+  if (store == NULL)
+    return;
+  g_mutex_lock (&store->lock);
+  store->forget_transaction_test_hook = hook;
+  store->forget_transaction_test_hook_data = user_data;
+  g_mutex_unlock (&store->lock);
+}
+
+static wyrelog_error_t
+forget_transaction_test_hook_unlocked (wyl_fact_store_t *store,
+    WylFactStoreForgetTransactionTestPhase phase)
+{
+  if (store->forget_transaction_test_hook == NULL)
+    return WYRELOG_E_OK;
+  return store->forget_transaction_test_hook (phase,
+             store->forget_transaction_test_hook_data);
+}
+#endif
 
 static gboolean
 fact_identity_bind_param (duckdb_prepared_statement statement, idx_t index,
@@ -1958,6 +1987,25 @@ prepared_delete_batch_unlocked (wyl_fact_store_t *store, const gchar *sql,
   return rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+static wyrelog_error_t
+rollback_forget_transaction_unlocked (wyl_fact_store_t *store,
+    wyrelog_error_t primary_rc)
+{
+  wyrelog_error_t rollback_rc = WYRELOG_E_OK;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  rollback_rc = forget_transaction_test_hook_unlocked (store,
+          WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK);
+#endif
+  if (rollback_rc == WYRELOG_E_OK)
+    rollback_rc = exec_sql (store->conn, "ROLLBACK;");
+  if (rollback_rc != WYRELOG_E_OK) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+        "fact forget transaction rollback failed");
+    return WYRELOG_E_INTERNAL;
+  }
+  return primary_rc;
+}
+
 /* Final step: record the audit row and flip the intent COMPLETED in one
  * transaction (no FK-delete, so DuckDB commits it atomically). */
 static wyrelog_error_t
@@ -1967,6 +2015,12 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
   wyrelog_error_t rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
   if (rc != WYRELOG_E_OK)
     return rc;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  rc = forget_transaction_test_hook_unlocked (store,
+          WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+#endif
   gint64 now_us = g_get_real_time ();
   duckdb_prepared_statement stmt = NULL;
   static const gchar *audit_sql =
@@ -1976,8 +2030,8 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
       "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit), "
       "?, ?, ?, ?, ?, ?, ?);";
   if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess) {
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto rollback;
   }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, intent->batch_id)
       | duckdb_bind_varchar (stmt, 2, intent->tenant_id)
@@ -1988,37 +2042,49 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
       | duckdb_bind_int64 (stmt, 7, now_us);
   if (ok != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto rollback;
   }
   duckdb_state exec = duckdb_execute_prepared (stmt, NULL);
   duckdb_destroy_prepare (&stmt);
   if (exec != DuckDBSuccess) {
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto rollback;
   }
   duckdb_prepared_statement ustmt = NULL;
   static const gchar *update_sql =
       "UPDATE fact_forget_intent SET state = 'COMPLETED', "
       "completed_at_us = ? WHERE op_uuid = ?;";
   if (duckdb_prepare (store->conn, update_sql, &ustmt) != DuckDBSuccess) {
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto rollback;
   }
   duckdb_state uok = duckdb_bind_int64 (ustmt, 1, now_us)
       | duckdb_bind_varchar (ustmt, 2, intent->op_uuid);
   if (uok != DuckDBSuccess) {
     duckdb_destroy_prepare (&ustmt);
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto rollback;
   }
   duckdb_state uexec = duckdb_execute_prepared (ustmt, NULL);
   duckdb_destroy_prepare (&ustmt);
   if (uexec != DuckDBSuccess) {
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto rollback;
   }
-  return exec_sql (store->conn, "COMMIT;");
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  rc = forget_transaction_test_hook_unlocked (store,
+          WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+#endif
+  rc = exec_sql (store->conn, "COMMIT;");
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  return WYRELOG_E_OK;
+
+rollback:
+  return rollback_forget_transaction_unlocked (store, rc);
 }
 
 /* Drive one intent to its terminal COMPLETED record.  Idempotent: an already
