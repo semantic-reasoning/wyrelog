@@ -374,6 +374,7 @@ EXPECTED_BUILD_STEP_NAMES = (
     "Build fact-store production daemon",
     "Provision secure DuckDB compile swap",
     "Build secure DuckDB backend from pinned source",
+    "Test fact forget transaction cleanup with secure DuckDB",
     "Remove secure DuckDB compile swap",
     "Show sccache statistics",
     "Upload meson logs on failure",
@@ -1079,6 +1080,20 @@ def move_build_install_steps_after_configure(data: bytes) -> bytes:
     return data.replace(job.encode("utf-8"), moved.encode("utf-8"), 1)
 
 
+def move_forget_cleanup_after_secure_removal(data: bytes) -> bytes:
+    workflow = data.decode("utf-8")
+    job = extract_top_level_job(workflow, "build-posix")
+    cleanup = extract_named_step(
+        job, "Test fact forget transaction cleanup with secure DuckDB"
+    )
+    removal = extract_named_step(job, "Remove secure DuckDB compile swap")
+    moved = job.replace(cleanup + "\n", "", 1)
+    moved = moved.replace(removal, removal + "\n" + cleanup, 1)
+    if moved == job:
+        fail("E_SELF_TEST", "fact forget cleanup movement fixture drifted")
+    return data.replace(job.encode("utf-8"), moved.encode("utf-8"), 1)
+
+
 def move_patch_proof_after_secure_setup(data: bytes) -> bytes:
     proof = (
         b'          if [ "$RUNNER_OS" = Linux ]; then\n'
@@ -1462,6 +1477,29 @@ def run_self_tests(
                 snapshot,
                 WORKFLOWS[0],
                 move_build_install_steps_after_configure,
+            ),
+        ),
+        (
+            "E_CI_STEP_ORDER",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"build-posix",
+                    b"      - name: Test fact forget transaction cleanup "
+                    b"with secure DuckDB\n",
+                    b"      - name: Removed fact forget transaction cleanup "
+                    b"with secure DuckDB\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_STEP_ORDER",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                move_forget_cleanup_after_secure_removal,
             ),
         ),
         (

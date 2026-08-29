@@ -17,6 +17,18 @@ typedef struct wyl_fact_store_t wyl_fact_store_t;
 typedef void (*WylFactStoreIdentityValidationTestHook) (duckdb_database db,
     gpointer user_data);
 
+#if defined(WYL_TEST_HANDLE_SEAMS)
+typedef enum
+{
+  WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN = 0,
+  WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT,
+  WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK,
+} WylFactStoreForgetTransactionTestPhase;
+
+typedef wyrelog_error_t (*WylFactStoreForgetTransactionTestHook)
+  (WylFactStoreForgetTransactionTestPhase phase, gpointer user_data);
+#endif
+
 typedef enum
 {
   WYL_FACT_STORE_OP_ASSERT = 0,
@@ -62,6 +74,11 @@ void wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault
     fault);
 void wyl_fact_store_identity_set_validation_test_hook
   (WylFactStoreIdentityValidationTestHook hook, gpointer user_data);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+void wyl_fact_store_set_forget_transaction_test_hook
+  (wyl_fact_store_t * store, WylFactStoreForgetTransactionTestHook hook,
+    gpointer user_data);
+#endif
 void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 
