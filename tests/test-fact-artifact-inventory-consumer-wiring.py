@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 import re
 import shlex
@@ -19,6 +20,73 @@ CONSUMER_TEST = "tests/test-fact-artifact-inventory-consumers.c"
 MESON = "tests/meson.build"
 CI_PR = ".github/workflows/ci-pr.yml"
 CI_MAIN = ".github/workflows/ci-main.yml"
+
+ARTIFACT_LOCK_DIAGNOSTIC = (
+    "#869 ruling 1 would be invalid: a read-only mount could admit a read-only "
+    "open the engine builder refuses, causing boot to report a pending-erasure "
+    "state for that graph"
+)
+EXPECTED_POSIX_OPENAT_PROFILE_SHA256 = (
+    "8cf4fc3e385afa0e8f8745cdd43f7f822cd0c02a83c99789ad6e8dfac5401beb"
+)
+EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
+    "df0c47f7c56653f218c0b7d30b9ec5d861d7330357e2e7424013f9b4bcebe035"
+)
+EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
+    "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
+)
+EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
+    "f7df0467104ad1b75bf2751d738e07ebb5f2960020454a6e5ab112109179c5db"
+)
+EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
+    "667d2e08f620dd0ce24b0b02139438ed88b2df69f4c6f93543b4c31100520349"
+)
+BASELINE_POSIX_COMMENTLESS_SHA256 = (
+    "87b9dd21aefe5725d9909310b5ec5d0fc66fc0451f6393ab19e05a7f8c72f911"
+)
+POSIX_CALL_CALLEE_PATTERN = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+PROHIBITED_POSIX_INDIRECT_CALL_PATTERN = re.compile(r"[\)\]]\s*\(")
+PROHIBITED_POSIX_UCN_PATTERN = re.compile(
+    r"\\(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"
+)
+POSIX_STANDALONE_STRING_DECLARATION_PATTERN = re.compile(
+    r"\bstatic\s+const\s+(?:char|gchar)\s*\*\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+    r'"(?:\\.|[^"\\])*"\s*;',
+    re.DOTALL,
+)
+PROHIBITED_POSIX_DIRECT_OPEN_FUNCTIONS = (
+    "open",
+    "open64",
+    "openat64",
+    "openat2",
+    "creat",
+    "creat64",
+    "fopen",
+    "fopen64",
+    "freopen",
+    "freopen64",
+    "__open",
+    "__open64",
+    "__open_alias",
+    "__open64_alias",
+    "__open_2",
+    "__open64_2",
+    "__openat_alias",
+    "__openat64_alias",
+    "__openat_2",
+    "__openat64_2",
+    "__openat2_alias",
+    "__creat",
+    "__creat64",
+)
+PROHIBITED_POSIX_DIRECT_OPEN_PATTERN = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(function) for function in PROHIBITED_POSIX_DIRECT_OPEN_FUNCTIONS)
+    + r")\b"
+)
 
 TRACKED_INPUTS = (
     HEADER,
@@ -60,6 +128,7 @@ test('fact-artifact-inventory-consumer-wiring-self', python3,
     '--self-test',
     meson.project_source_root(),
   ],
+  timeout : 60,
 )
 """
 
@@ -328,6 +397,414 @@ def c_function_body_bounds(source: str, function: str) -> tuple[int, int] | None
 def c_function_body(source: str, function: str) -> str | None:
     bounds = c_function_body_bounds(source, function)
     return None if bounds is None else source[bounds[0]:bounds[1]]
+
+
+def split_c_arguments(arguments: str) -> tuple[str, ...] | None:
+    result: list[str] = []
+    start = 0
+    depth = 0
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closing = set(pairs.values())
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(arguments):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ("'", '"'):
+            quote = character
+            continue
+        if character in pairs:
+            stack.append(pairs[character])
+            depth += 1
+        elif character in closing:
+            if not stack or stack.pop() != character:
+                return None
+            depth -= 1
+        elif character == "," and depth == 0:
+            result.append(arguments[start:index].strip())
+            start = index + 1
+    if stack or quote is not None:
+        return None
+    result.append(arguments[start:].strip())
+    return tuple(result)
+
+
+def c_call_arguments(source: str, function: str) -> tuple[tuple[str, ...], ...] | None:
+    calls: list[tuple[str, ...]] = []
+    discovery = strip_c_literals(source)
+    for match in re.finditer(rf"\b{re.escape(function)}\s*\(", discovery):
+        opening = match.end() - 1
+        depth = 1
+        index = opening + 1
+        while index < len(discovery) and depth:
+            if discovery[index] == "(":
+                depth += 1
+            elif discovery[index] == ")":
+                depth -= 1
+            index += 1
+        if depth:
+            return None
+        arguments = split_c_arguments(source[opening + 1:index - 1])
+        if arguments is None:
+            return None
+        calls.append(arguments)
+    return tuple(calls)
+
+
+def c_named_call_profile(
+    source: str,
+) -> tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] | None:
+    calls: list[tuple[str, tuple[tuple[str, ...], ...]]] = []
+    discovery = strip_c_literals(source)
+    for match in POSIX_CALL_CALLEE_PATTERN.finditer(discovery):
+        opening = match.end() - 1
+        depth = 1
+        index = opening + 1
+        while index < len(discovery) and depth:
+            if discovery[index] == "(":
+                depth += 1
+            elif discovery[index] == ")":
+                depth -= 1
+            index += 1
+        if depth:
+            return None
+        arguments = split_c_arguments(source[opening + 1:index - 1])
+        if arguments is None:
+            return None
+        calls.append(
+            (
+                match.group(1),
+                tuple(c_tokens(argument) for argument in arguments),
+            )
+        )
+    return tuple(calls)
+
+
+def c_tokens(source: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+|->|\S", source))
+
+
+def c_call_profile_sha256(calls: tuple[tuple[str, ...], ...]) -> str:
+    profile = tuple(
+        tuple(c_tokens(argument) for argument in arguments)
+        for arguments in calls
+    )
+    return hashlib.sha256(repr(profile).encode("ascii")).hexdigest()
+
+
+def c_source_profile_sha256(items: tuple[str, ...]) -> str:
+    profile = tuple(c_tokens(item) for item in items)
+    return hashlib.sha256(repr(profile).encode("ascii")).hexdigest()
+
+
+def artifact_lock_require(condition: bool) -> None:
+    require(
+        condition,
+        "E_ARTIFACT_LOCK_ACCESS_MODE",
+        ARTIFACT_LOCK_DIAGNOSTIC,
+    )
+
+
+def direct_flag_set(expression: str) -> frozenset[str] | None:
+    compact = re.sub(r"\s+", "", expression)
+    if re.fullmatch(r"O_[A-Z0-9_]+(?:\|O_[A-Z0-9_]+)*", compact) is None:
+        return None
+    flags = compact.split("|")
+    if len(flags) != len(set(flags)):
+        return None
+    return frozenset(flags)
+
+
+def body_brace_depth_at(body: str, offset: int) -> int | None:
+    depth = 0
+    for character in body[:offset]:
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth < 0:
+                return None
+    return depth
+
+
+def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
+    translation_unit = normalize_c_line_splices(inputs[POSIX_PROVIDER])
+    common_end_anchor = "\n#ifdef G_OS_WIN32\nstruct WylFactArtifactNamespace"
+    artifact_lock_require(translation_unit.count(common_end_anchor) == 1)
+    posix_anchor = "#else\n#include <errno.h>"
+    artifact_lock_require(translation_unit.count(posix_anchor) == 1)
+    common_source = translation_unit[:translation_unit.index(common_end_anchor)]
+    source = translation_unit[translation_unit.index(posix_anchor):]
+    include_source = strip_c_comments(common_source + "\n" + source)
+    active_directives = tuple(
+        re.findall(r"^\s*(?:#|%:|\?\?=)[^\n]*", include_source, re.MULTILINE)
+    )
+    artifact_lock_require(
+        c_source_profile_sha256(active_directives)
+        == EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256
+    )
+    include_directives = re.findall(
+        r"^\s*(?P<intro>#|%:|\?\?=)\s*include\s+"
+        r"(?P<operand>[^\n]+?)\s*$",
+        include_source,
+        re.MULTILINE,
+    )
+    artifact_lock_require(
+        include_directives
+        == [
+            ("#", '"fact/graph-artifact-namespace-private.h"'),
+            ("#", '"fact/graph-provisioned-pair-internal.h"'),
+            ("#", '"wyl-id-private.h"'),
+            ("#", "<sodium.h>"),
+            ("#", "<string.h>"),
+            ("#", "<errno.h>"),
+            ("#", "<fcntl.h>"),
+            ("#", "<sys/file.h>"),
+            ("#", "<sys/stat.h>"),
+            ("#", "<unistd.h>"),
+            ("#", "<stdio.h>"),
+            ("#", "<dirent.h>"),
+            ("#", "<sys/syscall.h>"),
+        ]
+    )
+    commentless_source = strip_c_comments(source)
+    name_table_discovery = strip_c_literals(commentless_source)
+    name_tables = tuple(
+        re.finditer(
+            r"\bstatic\s+const\s+gchar\s*\*\s*names\s*\[\s*\]\s*=\s*"
+            r"\{(?P<body>.*?)\}\s*;",
+            name_table_discovery,
+            re.DOTALL,
+        )
+    )
+    artifact_lock_require(len(name_tables) == 1)
+    name_body = commentless_source[
+        name_tables[0].start("body"):name_tables[0].end("body")
+    ]
+    c_string = re.compile(r'"(?:\\.|[^"\\])*"')
+    artifact_lock_require(
+        tuple(literal[1:-1] for literal in c_string.findall(name_body))
+        == (
+            "facts.duckdb",
+            "facts.duckdb.wal",
+            "facts.duckdb.wal.checkpoint",
+            "facts.duckdb.wal.recovery",
+            "facts.duckdb.lock",
+        )
+    )
+    artifact_lock_require(
+        c_tokens(c_string.sub("STRING", name_body))
+        == (
+            "STRING", ",", "STRING", ",", "STRING", ",", "STRING",
+            ",", "STRING", ",", "NULL",
+        )
+    )
+    openat_profile = c_call_arguments(commentless_source, "openat")
+    artifact_lock_require(openat_profile is not None and len(openat_profile) == 23)
+    assert openat_profile is not None
+    artifact_lock_require(
+        c_call_profile_sha256(openat_profile)
+        == EXPECTED_POSIX_OPENAT_PROFILE_SHA256
+    )
+    syscall_profile = c_call_arguments(commentless_source, "syscall")
+    artifact_lock_require(syscall_profile is not None and len(syscall_profile) == 2)
+    assert syscall_profile is not None
+    artifact_lock_require(
+        c_call_profile_sha256(syscall_profile)
+        == EXPECTED_POSIX_SYSCALL_PROFILE_SHA256
+    )
+    artifact_lock_require(
+        len(re.findall(r'"facts\.duckdb\.lock"', commentless_source)) == 1
+    )
+    source = strip_c_literals(commentless_source)
+    if (
+        hashlib.sha256(commentless_source.encode("utf-8")).hexdigest()
+        != BASELINE_POSIX_COMMENTLESS_SHA256
+    ):
+        semantic_source = POSIX_STANDALONE_STRING_DECLARATION_PATTERN.sub(
+            "", commentless_source
+        )
+        semantic_tokens = c_tokens(strip_c_literals(semantic_source))
+        artifact_lock_require(len(semantic_tokens) == 30307)
+        artifact_lock_require(
+            hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
+            == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
+        )
+        call_profile = c_named_call_profile(commentless_source)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2045)
+        assert call_profile is not None
+        artifact_lock_require(
+            hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
+            == EXPECTED_POSIX_CALL_PROFILE_SHA256
+        )
+    artifact_lock_require(source.isascii())
+    artifact_lock_require("$" not in source)
+    artifact_lock_require(PROHIBITED_POSIX_UCN_PATTERN.search(source) is None)
+    artifact_lock_require(PROHIBITED_POSIX_INDIRECT_CALL_PATTERN.search(source) is None)
+    artifact_lock_require(PROHIBITED_POSIX_DIRECT_OPEN_PATTERN.search(source) is None)
+    artifact_lock_require(len(re.findall(r"\bnames\b", source)) == 2)
+    name_for_body = c_function_body(source, "name_for")
+    artifact_lock_require(name_for_body is not None)
+    assert name_for_body is not None
+    artifact_lock_require(
+        c_tokens(name_for_body)
+        == (
+            "return", "n", "<", "=", "WYL_FACT_ARTIFACT_LOCK", "?",
+            "names", "[", "n", "]", ":", "NULL", ";",
+        )
+    )
+    artifact_lock_require(
+        len(re.findall(r"\bWYL_FACT_ARTIFACT_LOCK\b", source)) == 9
+    )
+    protected_directive_token = re.compile(
+        r"\b(?:O_RDWR|O_RDONLY|WYL_FACT_ARTIFACT_LOCK|openat|"
+        r"open_checked_lock|acquire_lease)\b"
+    )
+    directives = re.findall(r"^\s*(?:#|%:|\?\?=)[^\n]*", source, re.MULTILINE)
+    artifact_lock_require(
+        all(protected_directive_token.search(directive) is None for directive in directives)
+    )
+    artifact_lock_require(
+        all(
+            re.search(r"##|%:%:|\?\?=\s*\?\?=", directive) is None
+            for directive in directives
+        )
+    )
+
+    definitions = tuple(
+        re.finditer(r"\bopen_checked_lock\s*\((?P<params>[^;{}]*)\)\s*\{", source)
+    )
+    artifact_lock_require(len(definitions) == 1)
+    definition = definitions[0]
+    artifact_lock_require(
+        c_tokens(definition.group("params"))
+        == (
+            "WylFactArtifactNamespace",
+            "*",
+            "n",
+            ",",
+            "gint",
+            "*",
+            "out_fd",
+        )
+    )
+    lock_body = c_function_body(source, "open_checked_lock")
+    artifact_lock_require(lock_body is not None)
+    assert lock_body is not None
+    artifact_lock_require(re.search(r"^\s*#", lock_body, re.MULTILINE) is None)
+
+    calls = c_call_arguments(lock_body, "openat")
+    artifact_lock_require(calls is not None and len(calls) == 3)
+    assert calls is not None
+    all_openat_calls = c_call_arguments(source, "openat")
+    artifact_lock_require(all_openat_calls is not None)
+    assert all_openat_calls is not None
+    artifact_lock_require(len(all_openat_calls) == 23)
+    artifact_lock_require(
+        len(re.findall(r"\bopenat\b", source)) == len(all_openat_calls)
+    )
+    all_lock_calls = tuple(
+        arguments
+        for arguments in all_openat_calls
+        if len(arguments) >= 2
+        and "WYL_FACT_ARTIFACT_LOCK" in c_tokens(arguments[1])
+    )
+    artifact_lock_require(all_lock_calls == calls)
+    create_flags = frozenset(
+        {"O_RDWR", "O_NONBLOCK", "O_CLOEXEC", "O_NOFOLLOW", "O_CREAT", "O_EXCL"}
+    )
+    existing_flags = frozenset(
+        {"O_RDWR", "O_NONBLOCK", "O_CLOEXEC", "O_NOFOLLOW"}
+    )
+    profiles: list[str] = []
+    for arguments in calls:
+        artifact_lock_require(len(arguments) in (3, 4))
+        artifact_lock_require(c_tokens(arguments[0]) == ("n", "->", "fd"))
+        artifact_lock_require(
+            c_tokens(arguments[1])
+            == ("name_for", "(", "WYL_FACT_ARTIFACT_LOCK", ")")
+        )
+        flags = direct_flag_set(arguments[2])
+        if len(arguments) == 4:
+            artifact_lock_require(flags == create_flags)
+            artifact_lock_require(c_tokens(arguments[3]) == ("0600",))
+            profiles.append("create")
+        else:
+            artifact_lock_require(flags == existing_flags)
+            profiles.append("existing")
+    artifact_lock_require(sorted(profiles) == ["create", "existing", "existing"])
+
+    pin_body = c_function_body(source, "pin_lock_domain")
+    artifact_lock_require(pin_body is not None)
+    assert pin_body is not None
+    pin_calls = c_call_arguments(pin_body, "open_checked_lock")
+    artifact_lock_require(pin_calls == (("n", "&fd"),))
+    artifact_lock_require(
+        len(
+            re.findall(
+                r"\bwyrelog_error_t\s+r\s*=\s*"
+                r"open_checked_lock\s*\(\s*n\s*,\s*&fd\s*\)\s*;",
+                pin_body,
+            )
+        )
+        == 1
+    )
+
+    acquire_body = c_function_body(source, "acquire_lease")
+    artifact_lock_require(acquire_body is not None)
+    assert acquire_body is not None
+    artifact_lock_require(re.search(r"^\s*#", acquire_body, re.MULTILINE) is None)
+    acquire_calls = c_call_arguments(acquire_body, "open_checked_lock")
+    artifact_lock_require(acquire_calls == (("n", "&fd"),))
+    direct_call = re.search(
+        r"\bwyrelog_error_t\s+r\s*=\s*"
+        r"open_checked_lock\s*\(\s*n\s*,\s*&fd\s*\)\s*;",
+        acquire_body,
+    )
+    artifact_lock_require(direct_call is not None)
+    assert direct_call is not None
+    artifact_lock_require(body_brace_depth_at(acquire_body, direct_call.start()) == 0)
+    first_mode_use = re.search(r"\bexclusive\b", acquire_body)
+    artifact_lock_require(
+        first_mode_use is not None and direct_call.end() < first_mode_use.start()
+    )
+
+    wrappers = (
+        (
+            "wyl_fact_artifact_namespace_acquire_reader_guard",
+            "FALSE",
+        ),
+        (
+            "wyl_fact_artifact_namespace_acquire_mutation_lease",
+            "TRUE",
+        ),
+    )
+    for function, mode in wrappers:
+        body = c_function_body(source, function)
+        artifact_lock_require(body is not None)
+        assert body is not None
+        artifact_lock_require(
+            c_tokens(body)
+            == (
+                "return",
+                "acquire_lease",
+                "(",
+                "n",
+                ",",
+                mode,
+                ",",
+                "out_lease",
+                ")",
+                ";",
+            )
+        )
 
 
 def straight_line_c_body(body: str) -> bool:
@@ -1122,6 +1599,7 @@ def validate(inputs: dict[str, str]) -> None:
     validate_model_completeness(inputs)
     validate_provider_slots(inputs, POSIX_PROVIDER, "E_INVENTORY_POSIX_SLOTS")
     validate_provider_slots(inputs, WINDOWS_PROVIDER, "E_INVENTORY_WINDOWS_SLOTS")
+    validate_artifact_lock_access_mode(inputs)
     validate_runtime_tests(inputs)
     validate_meson(inputs)
     validate_ci(inputs)
@@ -1134,6 +1612,7 @@ def diagnostic_codes(inputs: dict[str, str]) -> set[str]:
         validate_model_completeness,
         lambda value: validate_provider_slots(value, POSIX_PROVIDER, "E_INVENTORY_POSIX_SLOTS"),
         lambda value: validate_provider_slots(value, WINDOWS_PROVIDER, "E_INVENTORY_WINDOWS_SLOTS"),
+        validate_artifact_lock_access_mode,
         validate_runtime_tests,
         validate_meson,
         validate_ci,
@@ -1291,6 +1770,521 @@ def run_self_test(inputs: dict[str, str]) -> None:
     validate(inputs)
     mutations: list[tuple[str, dict[str, str], set[str]]] = []
 
+    lock_create = (
+        "O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL"
+    )
+    for label, old, new in (
+        ("lock-create-read-only", lock_create, lock_create.replace("O_RDWR", "O_RDONLY")),
+        (
+            "lock-fallback-read-only",
+            "pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),\n"
+            "              O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);",
+            "pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),\n"
+            "              O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);",
+        ),
+        (
+            "lock-guard-read-only",
+            "gint fd = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),\n"
+            "          O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);",
+            "gint fd = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),\n"
+            "          O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);",
+        ),
+        ("lock-dynamic-flags", lock_create, "lock_flags"),
+        (
+            "lock-conditional-flags",
+            lock_create,
+            "(n->lock_pin_fd < 0 ? O_RDWR : O_RDONLY) | O_NONBLOCK | "
+            "O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL",
+        ),
+        (
+            "lock-access-parameter",
+            "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)",
+            "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd, "
+            "gboolean writable)",
+        ),
+        (
+            "lock-call-redirect",
+            "name_for (WYL_FACT_ARTIFACT_LOCK),\n"
+            "            O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT",
+            "name_for (WYL_FACT_ARTIFACT_MAIN),\n"
+            "            O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT",
+        ),
+        (
+            "lock-call-removed",
+            "pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),",
+            "pin = guarded_openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),",
+        ),
+        (
+            "reader-wrapper-mode",
+            "return acquire_lease (n, FALSE, out_lease);",
+            "return acquire_lease (n, TRUE, out_lease);",
+        ),
+        (
+            "mutation-wrapper-mode",
+            "return acquire_lease (n, TRUE, out_lease);",
+            "return acquire_lease (n, FALSE, out_lease);",
+        ),
+    ):
+        mutation = replaced(inputs, POSIX_PROVIDER, old, new)
+        mutations.append((label, mutation, {"E_ARTIFACT_LOCK_ACCESS_MODE"}))
+
+    conditional_call = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "  wyrelog_error_t r = open_checked_lock (n, &fd);\n"
+        "  if (r != WYRELOG_E_OK)\n"
+        "    return r;\n"
+        "  if (flock (fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0)",
+        "  wyrelog_error_t r = WYRELOG_E_OK;\n"
+        "  if (exclusive)\n"
+        "    r = open_checked_lock (n, &fd);\n"
+        "  if (r != WYRELOG_E_OK)\n"
+        "    return r;\n"
+        "  if (flock (fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0)",
+    )
+    mutations.append(
+        ("conditional-acquire-call", conditional_call, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    pin_bypass = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "  wyrelog_error_t r = open_checked_lock (n, &fd);",
+        "  wyrelog_error_t r = open_unchecked_lock (n, &fd);",
+    )
+    mutations.append(
+        ("pin-lock-domain-bypass", pin_bypass, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    macro_alias = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "#include <fcntl.h>\n",
+        "#include <fcntl.h>\n#undef O_RDWR\n#define O_RDWR O_RDONLY\n",
+    )
+    mutations.append(
+        ("lock-access-macro-alias", macro_alias, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    directive_comment = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "#include <fcntl.h>\n",
+        "#include <fcntl.h> /* declares openat; O_RDWR is required */\n",
+    )
+    mutations.append(("lock-directive-comment", directive_comment, set()))
+
+    included_alias = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "#include <fcntl.h>\n",
+        '#include <fcntl.h>\n#include "artifact-lock-read-only-alias.h"\n',
+    )
+    included_alias["artifact-lock-read-only-alias.h"] = (
+        "#undef O_RDWR\n#define O_RDWR O_RDONLY\n"
+    )
+    mutations.append(
+        ("included-lock-access-alias", included_alias, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    def with_extra_posix_source(extra: str) -> dict[str, str]:
+        result = dict(inputs)
+        provider_prefix, provider_suffix = result[POSIX_PROVIDER].rsplit(
+            "#endif\n", 1
+        )
+        result[POSIX_PROVIDER] = (
+            provider_prefix + extra + "#endif\n" + provider_suffix
+        )
+        return result
+
+    for label, callee, target in (
+        (
+            "extra-read-only-lock-open",
+            "openat",
+            "name_for (WYL_FACT_ARTIFACT_LOCK)",
+        ),
+        (
+            "parenthesized-lock-target",
+            "openat",
+            "(name_for (WYL_FACT_ARTIFACT_LOCK))",
+        ),
+        (
+            "comma-expression-lock-target",
+            "openat",
+            "(0, name_for (WYL_FACT_ARTIFACT_LOCK))",
+        ),
+        (
+            "literal-lock-target",
+            "openat",
+            '"facts.duckdb.lock"',
+        ),
+        (
+            "parenthesized-openat-callee",
+            "(openat)",
+            "name_for (WYL_FACT_ARTIFACT_LOCK)",
+        ),
+        (
+            "dereferenced-openat-callee",
+            "(*openat)",
+            "name_for (WYL_FACT_ARTIFACT_LOCK)",
+        ),
+    ):
+        extra_lock_open = with_extra_posix_source(
+            "static void artifact_lock_extra_open (WylFactArtifactNamespace *n)\n"
+            "{\n"
+            f"  (void) {callee} (n->fd, {target},\n"
+            "      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);\n"
+            "}\n"
+        )
+        mutations.append(
+            (label, extra_lock_open, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+        )
+
+    helper_returned_lock = with_extra_posix_source(
+        "static const gchar *artifact_lock_hidden_name (void)\n"
+        "{\n"
+        "  return name_for (WYL_FACT_ARTIFACT_LOCK);\n"
+        "}\n"
+        "static void artifact_lock_helper_return_open "
+        "(WylFactArtifactNamespace *n)\n"
+        "{\n"
+        "  (void) openat (n->fd, artifact_lock_hidden_name (),\n"
+        "      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);\n"
+        "}\n"
+    )
+    mutations.append(
+        ("helper-returned-lock-target", helper_returned_lock,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    existing_main_target = (
+        "name_for (WYL_FACT_ARTIFACT_MAIN),\n"
+        "            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW"
+    )
+    for label, replacement in (
+        (
+            "balanced-adjacent-literal-lock-target",
+            '"facts.duckdb." "lock",\n'
+            "            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW",
+        ),
+        (
+            "balanced-numeric-lock-target",
+            "name_for ((WylFactArtifactName) 4),\n"
+            "            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW",
+        ),
+    ):
+        balanced_substitution = replaced(
+            inputs,
+            POSIX_PROVIDER,
+            existing_main_target,
+            replacement,
+        )
+        mutations.append(
+            (label, balanced_substitution, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+        )
+
+    token_pasted_open = with_extra_posix_source(
+        "#define WYL_JOIN_TOKENS_(left, right) left ## right\n"
+        "#define WYL_JOIN_TOKENS(left, right) "
+        "WYL_JOIN_TOKENS_(left, right)\n"
+        "static void artifact_lock_token_pasted_open "
+        "(WylFactArtifactNamespace *n)\n"
+        "{\n"
+        "  (void) WYL_JOIN_TOKENS (open, at) "
+        "(n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),\n"
+        "      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);\n"
+        "}\n"
+    )
+    mutations.append(
+        ("token-pasted-lock-open", token_pasted_open, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    early_mode_use = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "  if (!n || !out_lease)\n"
+        "    return WYRELOG_E_INVALID;\n"
+        "  gint fd = -1;\n"
+        "  wyrelog_error_t r = open_checked_lock (n, &fd);",
+        "  if (!n || !out_lease)\n"
+        "    return WYRELOG_E_INVALID;\n"
+        "  gint fd = exclusive ? -1 : -1;\n"
+        "  wyrelog_error_t r = open_checked_lock (n, &fd);",
+    )
+    mutations.append(
+        ("mode-used-before-lock", early_mode_use, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    threaded_mode = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)",
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd, "
+        "gboolean exclusive)",
+    )
+    threaded_mode = replaced(
+        threaded_mode,
+        POSIX_PROVIDER,
+        lock_create,
+        "(exclusive ? O_RDWR : O_RDONLY) | O_NONBLOCK | O_CLOEXEC | "
+        "O_NOFOLLOW | O_CREAT | O_EXCL",
+    )
+    threaded_mode = replaced(
+        threaded_mode,
+        POSIX_PROVIDER,
+        "  wyrelog_error_t r = open_checked_lock (n, &fd);",
+        "  wyrelog_error_t r = open_checked_lock (n, &fd, TRUE);",
+    )
+    threaded_mode = replaced(
+        threaded_mode,
+        POSIX_PROVIDER,
+        "  wyrelog_error_t r = open_checked_lock (n, &fd);",
+        "  wyrelog_error_t r = open_checked_lock (n, &fd, exclusive);",
+    )
+    mutations.append(
+        ("thread-reader-access-mode", threaded_mode, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    decoys = dict(inputs)
+    decoys[POSIX_PROVIDER] += (
+        "\n/* open_checked_lock(n, fd, O_RDONLY); "
+        "openat(n->fd, name_for(WYL_FACT_ARTIFACT_LOCK), flags); "
+        "facts.duckdb.lock */\n"
+        "static const char *artifact_lock_decoy = "
+        "\"openat(n->fd, name, O_RDONLY)\";\n"
+        "static const char *artifact_name_table_decoy = "
+        "\"static const gchar *names[] = { NULL };\";\n"
+    )
+    mutations.append(("artifact-lock-decoys", decoys, set()))
+
+    swapped_name_mapping = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        '{ "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",\n'
+        '  "facts.duckdb.wal.recovery", "facts.duckdb.lock", NULL};',
+        '{ "facts.duckdb.lock", "facts.duckdb.wal", '
+        '"facts.duckdb.wal.checkpoint",\n'
+        '  "facts.duckdb.wal.recovery", "facts.duckdb", NULL};',
+    )
+    mutations.append(
+        ("main-lock-name-mapping-swap", swapped_name_mapping,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    for label, directive in (
+        ("artifact-name-table-macro-redirect", "#define names redirected_names\n"),
+        ("artifact-main-enum-macro-redirect", "#define WYL_FACT_ARTIFACT_MAIN 4\n"),
+    ):
+        macro_redirect = replaced(
+            inputs,
+            POSIX_PROVIDER,
+            "#include <fcntl.h>\n",
+            "#include <fcntl.h>\n" + directive,
+        )
+        mutations.append(
+            (label, macro_redirect, {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+        )
+
+    runtime_name_retarget = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)\n{",
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)\n"
+        "{\n  names[0] = names[4];",
+    )
+    mutations.append(
+        ("runtime-artifact-name-retarget", runtime_name_retarget,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    raw_open_syscall = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "extern long syscall (long, ...);\n",
+        "extern long syscall (long, ...);\n"
+        "static void artifact_lock_raw_open (gint dirfd)\n"
+        "{\n"
+        "  (void) syscall (SYS_openat, dirfd, "
+        '"facts.duckdb." "lock",\n'
+        "      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);\n"
+        "}\n",
+    )
+    mutations.append(
+        ("raw-open-syscall", raw_open_syscall,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    raw_libc_open = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "extern long syscall (long, ...);\n",
+        "extern long syscall (long, ...);\n"
+        "static void artifact_lock_libc_open (gint dirfd)\n"
+        "{\n"
+        "  g_autofree gchar *path = g_strdup_printf (\"/proc/self/fd/%d/%s\",\n"
+        "      dirfd, \"facts.duckdb.\" \"lock\");\n"
+        "  (void) open (path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);\n"
+        "}\n",
+    )
+    mutations.append(
+        ("raw-libc-open", raw_libc_open,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    raw_libc_openat64_2 = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "extern long syscall (long, ...);\n",
+        "extern long syscall (long, ...);\n"
+        "extern int __openat64_2 (int, const char *, int);\n"
+        "static void artifact_lock_libc_openat64_2 (gint dirfd)\n"
+        "{\n"
+        "  (void) __openat64_2 (dirfd, \"facts.duckdb.\" \"lock\",\n"
+        "      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);\n"
+        "}\n",
+    )
+    mutations.append(
+        ("raw-libc-openat64-2", raw_libc_openat64_2,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    raw_glib_mapped_file = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "extern long syscall (long, ...);\n",
+        "extern long syscall (long, ...);\n"
+        "static void artifact_lock_glib_map (gint dirfd)\n"
+        "{\n"
+        "  g_autofree gchar *path = g_strdup_printf (\"/proc/self/fd/%d/%s\",\n"
+        "      dirfd, \"facts.duckdb.\" \"lock\");\n"
+        "  (void) g_mapped_file_new (path, FALSE, NULL);\n"
+        "}\n",
+    )
+    mutations.append(
+        ("raw-glib-mapped-file", raw_glib_mapped_file,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    parenthesized_glib_mapped_file = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)\n{",
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)\n"
+        "{\n"
+        "  g_autofree gchar *review_path = (g_strdup_printf) "
+        "(\"/proc/self/fd/%d/%s\",\n"
+        "      n->fd, \"facts.duckdb.\" \"lock\");\n"
+        "  (void) (g_mapped_file_new) (review_path, FALSE, NULL);",
+    )
+    mutations.append(
+        ("parenthesized-glib-mapped-file", parenthesized_glib_mapped_file,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    unicode_glib_aliases = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)\n{",
+        "open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)\n"
+        "{\n"
+        "  __auto_type \u03bb = g_strdup_printf;\n"
+        "  __auto_type \u03bc = g_mapped_file_new;\n"
+        "  g_autofree gchar *review_path = \u03bb (\"/proc/self/fd/%d/%s\",\n"
+        "      n->fd, \"facts.duckdb.\" \"lock\");\n"
+        "  (void) \u03bc (review_path, FALSE, NULL);",
+    )
+    mutations.append(
+        ("unicode-glib-aliases", unicode_glib_aliases,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+    ucn_glib_aliases = dict(unicode_glib_aliases)
+    ucn_glib_aliases[POSIX_PROVIDER] = (
+        ucn_glib_aliases[POSIX_PROVIDER]
+        .replace("\u03bb", "\\u03bb")
+        .replace("\u03bc", "\\u03bc")
+    )
+    mutations.append(
+        ("ucn-glib-aliases", ucn_glib_aliases,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+    dollar_glib_aliases = dict(unicode_glib_aliases)
+    dollar_glib_aliases[POSIX_PROVIDER] = (
+        dollar_glib_aliases[POSIX_PROVIDER]
+        .replace("\u03bb", "$0")
+        .replace("\u03bc", "$1")
+    )
+    mutations.append(
+        ("dollar-glib-aliases", dollar_glib_aliases,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    existing_callee_retarget = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "g_autofree gchar *destination = g_strdup_printf "
+        "(\"tmp-%s\", destination_token);",
+        "g_autofree gchar *destination = g_strdup_printf "
+        "(\"/proc/self/fd/%d/%s\", lease->namespace_->fd, "
+        "\"facts.duckdb.\" \"lock\");",
+    )
+    existing_callee_retarget = replaced(
+        existing_callee_retarget,
+        POSIX_PROVIDER,
+        "  g_autofree gchar *source = NULL;\n",
+        "  g_autofree gchar *source = NULL;\n"
+        "  __auto_type g_strcmp0 = g_mapped_file_new;\n",
+    )
+    existing_callee_retarget = replaced(
+        existing_callee_retarget,
+        POSIX_PROVIDER,
+        "if (g_strcmp0 (binding->token, destination_token) == 0)",
+        "if (g_strcmp0 (destination, FALSE, NULL) == NULL)",
+    )
+    mutations.append(
+        ("existing-callee-retarget", existing_callee_retarget,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    unchanged_call_retarget = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "temp_evidence_v2_text_valid (const gchar *value, guint16 length,\n"
+        "    gboolean required)\n{",
+        "temp_evidence_v2_text_valid (const gchar *value, guint16 length,\n"
+        "    gboolean required)\n"
+        "{\n"
+        "  __auto_type g_utf8_validate = g_mapped_file_new;\n"
+        "  value = \"/proc/self/fd/3/facts.duckdb.\" \"lock\";\n"
+        "  length = FALSE;\n"
+        "  required = FALSE;",
+    )
+    mutations.append(
+        ("unchanged-call-retarget", unchanged_call_retarget,
+         {"E_ARTIFACT_LOCK_ACCESS_MODE"})
+    )
+
+    message_mutation = replaced(
+        inputs,
+        POSIX_PROVIDER,
+        "O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL",
+        "O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL",
+    )
+    try:
+        validate_artifact_lock_access_mode(message_mutation)
+    except ContractError as error:
+        require(
+            str(error)
+            == "E_ARTIFACT_LOCK_ACCESS_MODE: " + ARTIFACT_LOCK_DIAGNOSTIC,
+            "E_SELF_TEST",
+            "artifact lock diagnostic no longer names #869 ruling 1 and its "
+            "pending-erasure consequence",
+        )
+    else:
+        raise ContractError(
+            "E_SELF_TEST",
+            "artifact lock diagnostic mutation unexpectedly passed",
+        )
+
     raw_authority = replaced(
         inputs,
         HEADER,
@@ -1329,7 +2323,13 @@ def run_self_test(inputs: dict[str, str]) -> None:
         "WYL_FACT_ARTIFACT_INVENTORY_TEMP, NULL",
         "WYL_FACT_ARTIFACT_INVENTORY_LOCK, NULL",
     )
-    mutations.append(("posix-omit-temp", posix_omit, {"E_INVENTORY_POSIX_SLOTS"}))
+    mutations.append(
+        (
+            "posix-omit-temp",
+            posix_omit,
+            {"E_ARTIFACT_LOCK_ACCESS_MODE", "E_INVENTORY_POSIX_SLOTS"},
+        )
+    )
 
     windows_omit = replaced(
         inputs,
