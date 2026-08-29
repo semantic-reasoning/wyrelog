@@ -133,6 +133,7 @@ if get_option('enable_audit').allowed()
   wyrelog_deps += duckdb_dep
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
 endif
+wyrelog_sources += files('fact/graph-artifact-durability-journal-codec-private.c')
 wyrelog_sources += files('fact/graph-artifact-durability-private.c')
 wyrelog_sources += files('fact/graph-artifact-inventory-private.c')
 wyrelog_sources += files('fact/graph-artifact-main-transition-private.c')

@@ -1349,6 +1349,15 @@ test_fact_artifact_durability = executable('test-fact-artifact-durability',
 )
 test('fact-artifact-durability-contract', test_fact_artifact_durability)
 
+test_fact_artifact_durability_journal_codec = executable(
+  'test-fact-artifact-durability-journal-codec',
+  'test-fact-artifact-durability-journal-codec.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-artifact-durability-journal-codec',
+  test_fact_artifact_durability_journal_codec)
+
 test_fact_artifact_inventory = executable('test-fact-artifact-inventory',
   'test-fact-artifact-inventory.c',
   include_directories : include_directories('../wyrelog'),
