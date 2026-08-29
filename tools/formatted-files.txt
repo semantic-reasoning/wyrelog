@@ -16,6 +16,7 @@ tests/test-decide-req.c
 tests/test-decide-resp.c
 tests/test-engine.c
 tests/test-events.c
+tests/test-fact-artifact-durability.c
 tests/test-fact-artifact-inventory-consumers.c
 tests/test-fact-artifact-inventory.c
 tests/test-fact-artifact-main-transition.c
@@ -99,6 +100,8 @@ wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/artifact-io-session-windows-private.c
 wyrelog/fact/compound-private.h
 wyrelog/fact/compound.c
+wyrelog/fact/graph-artifact-durability-private.c
+wyrelog/fact/graph-artifact-durability-private.h
 wyrelog/fact/graph-artifact-inventory-posix-private.h
 wyrelog/fact/graph-artifact-inventory-private.c
 wyrelog/fact/graph-artifact-inventory-private.h
