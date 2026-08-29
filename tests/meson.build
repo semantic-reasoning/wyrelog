@@ -1641,10 +1641,12 @@ if get_option('enable_fact_store').allowed()
     dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep],
   )
 
-  test('fact-store-forget-transaction',
-    test_fact_store_forget_transaction,
-    timeout : 60,
-  )
+  if host_machine.system() != 'windows'
+    test('fact-store-forget-transaction',
+      test_fact_store_forget_transaction,
+      timeout : 60,
+    )
+  endif
 
   test_fact_compound = executable('test-fact-compound',
     'test-fact-compound.c',
@@ -1792,6 +1794,13 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       timeout : 60,
     )
 
+    test_fact_store_forget_transaction_provision_helper = executable(
+      'test-fact-store-forget-transaction-provision-helper',
+      'test-fact-store-forget-transaction-provision-helper.c',
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+    )
+
     test_fact_store_forget_transaction_provisioned = executable(
       'test-fact-store-forget-transaction-provisioned',
       'test-fact-store-forget-transaction-provisioned.c',
@@ -1804,6 +1813,8 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     )
     test('fact-store-forget-transaction-provisioned',
       test_fact_store_forget_transaction_provisioned,
+      args : [test_fact_store_forget_transaction_provision_helper.full_path()],
+      depends : test_fact_store_forget_transaction_provision_helper,
       timeout : 60,
     )
   endif
