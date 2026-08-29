@@ -229,9 +229,13 @@ jobs:
       - name: Test fact forget transaction cleanup with secure DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 1 \
+            test-fact-store-provisioned \
             test-fact-store-forget-transaction \
             test-fact-store-forget-transaction-provision-helper \
             test-fact-store-forget-transaction-provisioned
+          meson test -C build-secure-duckdb --no-rebuild \
+            fact-store-provisioned \
+            --print-errorlogs
           meson test -C build-secure-duckdb --no-rebuild \
             fact-store-forget-transaction \
             fact-store-forget-transaction-provisioned \

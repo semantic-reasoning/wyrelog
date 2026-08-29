@@ -2,9 +2,9 @@
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <string.h>
 #include <sys/stat.h>
 
-#include "fact-test-support.h"
 #include "fact/graph-locator-private.h"
 #include "fact/store-private.h"
 
@@ -32,12 +32,11 @@ make_identity (void)
   return identity;
 }
 
-static void
-run_provision_helper (const gchar *root)
+static gchar *
+run_provision_helper (void)
 {
   const gchar *argv[] = {
     provision_helper_path,
-    root,
     tenant_id,
     graph_id,
     operation_uuid,
@@ -61,7 +60,16 @@ run_provision_helper (const gchar *root)
         stderr_text != NULL ? stderr_text : "no diagnostic");
   g_assert_true (g_subprocess_get_if_exited (process));
   g_assert_cmpint (g_subprocess_get_exit_status (process), ==, 0);
-  g_assert_true (stdout_text == NULL || stdout_text[0] == '\0');
+  g_assert_nonnull (stdout_text);
+  g_assert_true (stderr_text == NULL || stderr_text[0] == '\0');
+  gsize length = strlen (stdout_text);
+  g_assert_cmpuint (length, >, 1);
+  g_assert_cmpint (stdout_text[length - 1], ==, '\n');
+  g_assert_null (memchr (stdout_text, '\n', length - 1));
+  g_assert_null (memchr (stdout_text, '\r', length));
+  stdout_text[length - 1] = '\0';
+  g_assert_true (g_path_is_absolute (stdout_text));
+  return g_steal_pointer (&stdout_text);
 }
 
 static void
@@ -177,11 +185,7 @@ fail_commit_once (WylFactStoreForgetTransactionTestPhase phase,
 static void
 test_provisioned_commit_failure_rolls_back (void)
 {
-  g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = wyl_test_make_secure_fact_root
-        ("wyl-fact-store-forget-transaction-XXXXXX", &error);
-  g_assert_no_error (error);
-  run_provision_helper (root);
+  g_autofree gchar *root = run_provision_helper ();
   assert_retained_pair (root);
 
   wyl_fact_store_t *store = NULL;
