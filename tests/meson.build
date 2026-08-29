@@ -1788,12 +1788,17 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
-  # Same POSIX retained-pair invariant as fact-provisioning-run (#816).
-  if host_machine.system() != 'windows'
+  # macOS currently rejects the first secure provisioning construct with
+  # WYRELOG_E_POLICY; #921 owns restoring its provisioned runtime coverage.
+  # Keep the executable available for platform compilation, while Linux keeps
+  # the retained-pair runtime control.
+  if host_machine.system() == 'linux'
     test('fact-store-provisioned', test_fact_store_provisioned,
       timeout : 60,
     )
+  endif
 
+  if host_machine.system() != 'windows'
     test_fact_store_forget_transaction_provision_helper = executable(
       'test-fact-store-forget-transaction-provision-helper',
       'test-fact-store-forget-transaction-provision-helper.c',
@@ -1811,12 +1816,14 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       include_directories : include_directories('../wyrelog'),
       dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep],
     )
-    test('fact-store-forget-transaction-provisioned',
-      test_fact_store_forget_transaction_provisioned,
-      args : [test_fact_store_forget_transaction_provision_helper.full_path()],
-      depends : test_fact_store_forget_transaction_provision_helper,
-      timeout : 60,
-    )
+    if host_machine.system() == 'linux'
+      test('fact-store-forget-transaction-provisioned',
+        test_fact_store_forget_transaction_provisioned,
+        args : [test_fact_store_forget_transaction_provision_helper.full_path()],
+        depends : test_fact_store_forget_transaction_provision_helper,
+        timeout : 60,
+      )
+    endif
   endif
   test_duckdb_after_walstart = executable(
     'test-duckdb-after-walstart',
