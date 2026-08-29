@@ -1797,19 +1797,19 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     test_fact_store_forget_transaction_provision_helper = executable(
       'test-fact-store-forget-transaction-provision-helper',
       'test-fact-store-forget-transaction-provision-helper.c',
+      'fact-test-support.c',
+      c_args : fact_test_support_c_args,
       include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep],
+      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+        + fact_test_support_deps,
     )
 
     test_fact_store_forget_transaction_provisioned = executable(
       'test-fact-store-forget-transaction-provisioned',
       'test-fact-store-forget-transaction-provisioned.c',
-      'fact-test-support.c',
-      c_args : fact_test_support_c_args
-        + ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE', '-DWYL_TEST_HANDLE_SEAMS'],
+      c_args : ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE', '-DWYL_TEST_HANDLE_SEAMS'],
       include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
-        + fact_test_support_deps,
+      dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep],
     )
     test('fact-store-forget-transaction-provisioned',
       test_fact_store_forget_transaction_provisioned,

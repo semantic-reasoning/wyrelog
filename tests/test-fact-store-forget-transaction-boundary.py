@@ -195,6 +195,18 @@ def validate(files: dict[str, str]) -> None:
         "          &authority)",
         "production helper must invoke provisioning exactly once",
     )
+    require_once(
+        helper_source,
+        'wyl_test_make_secure_fact_root\n'
+        '        ("wyl-fact-store-forget-transaction-XXXXXX", &error)',
+        "production helper must create the secure root",
+    )
+    if not (
+        helper_source.index("wyl_test_make_secure_fact_root")
+        < helper_source.index("wyl_fact_graph_provisioning_construct")
+        < helper_source.index('g_print ("%s\\n", root)')
+    ):
+        raise AssertionError("helper create/construct/output ordering drifted")
     for forbidden in (
         "WYL_TEST_HANDLE_SEAMS",
         "wyl_fact_store_set_forget_transaction_test_hook",
@@ -203,15 +215,23 @@ def validate(files: dict[str, str]) -> None:
             raise AssertionError(
                 f"production helper acquired test seams: {forbidden}"
             )
-    if 'g_printerr ("provisioning failed: %d\\n", rc)' not in helper_source:
+    if '"provisioning failed: %s (%d); stage=%d final=%d "' not in helper_source:
         raise AssertionError(
-            "production helper must report a stable numeric error"
+            "production helper must report symbolic and numeric failure evidence"
         )
-    if "if (rc == WYRELOG_E_OK)\n    return 0;" not in helper_source:
-        raise AssertionError("production helper must propagate construction failure")
+    require_once(
+        helper_source,
+        'if (rc == WYRELOG_E_OK) {\n    g_print ("%s\\n", root);',
+        "production helper must emit the root only after successful construction",
+    )
+    for constant in (
+        '"01890f47-3c4b-7cc2-b8c4-dc0c0c070891"',
+        '"01890f47-3c4b-7cc2-b8c4-dc0c0c070892"',
+    ):
+        require_once(provisioned, constant, f"fixture identity drifted: {constant}")
 
     provisioned_required = (
-        "run_provision_helper (root)",
+        "g_autofree gchar *root = run_provision_helper ()",
         "assert_retained_pair (root)",
         "wyl_fact_store_open_provisioned_pair",
         "fail_commit_once",
@@ -226,6 +246,8 @@ def validate(files: dict[str, str]) -> None:
             raise AssertionError(f"provisioned runtime proof drifted: {token}")
     if "wyl_fact_graph_provisioning_construct" in provisioned:
         raise AssertionError("seam-linked parent must not provision the pair")
+    if "wyl_test_make_secure_fact_root" in provisioned:
+        raise AssertionError("seam-linked parent must not create the secure root")
     if "wyl_fact_store_open (" in provisioned:
         raise AssertionError("provisioned proof must not use pathname store open")
     if provisioned.count("open_live (root, &store)") != 2:
@@ -239,8 +261,12 @@ def validate(files: dict[str, str]) -> None:
         "g_subprocess_communicate_utf8",
         "g_subprocess_get_if_exited",
         "g_subprocess_get_exit_status",
+        "stderr_text == NULL || stderr_text[0] == '\\0'",
+        "stdout_text[length - 1], ==, '\\n'",
+        "g_assert_null (memchr (stdout_text, '\\n', length - 1));",
+        "g_assert_null (memchr (stdout_text, '\\r', length));",
     ):
-        if token not in provisioned:
+        if token not in helper_run:
             raise AssertionError(f"helper subprocess contract drifted: {token}")
     if (
         "g_subprocess_launcher" in helper_run
@@ -273,7 +299,7 @@ def validate(files: dict[str, str]) -> None:
         provisioned, "test_provisioned_commit_failure_rolls_back"
     )
     if not (
-        provisioned_test.index("run_provision_helper (root)")
+        provisioned_test.index("run_provision_helper ()")
         < provisioned_test.index("assert_retained_pair (root)")
         < provisioned_test.index("open_live (root, &store)")
     ):
@@ -295,8 +321,11 @@ def validate(files: dict[str, str]) -> None:
     if (
         "dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]"
         not in helper_target
+        or "'fact-test-support.c'" not in helper_target
+        or "c_args : fact_test_support_c_args" not in helper_target
+        or "+ fact_test_support_deps" not in helper_target
     ):
-        raise AssertionError("provision helper must link the production library")
+        raise AssertionError("provision helper lost production root support")
     if (
         "wyrelog_handle_test_seams_dep" in helper_target
         or "WYL_TEST_HANDLE_SEAMS" in helper_target
@@ -310,6 +339,8 @@ def validate(files: dict[str, str]) -> None:
         raise AssertionError("provisioned test must link the seam archive")
     if "wyrelog_dep" in provisioned_target:
         raise AssertionError("provisioned test must not dual-link production wyrelog")
+    if "fact-test-support.c" in provisioned_target:
+        raise AssertionError("seam parent must not own secure-root test support")
     require_once(
         meson,
         "test('fact-store-forget-transaction',",
@@ -368,9 +399,13 @@ def validate(files: dict[str, str]) -> None:
     )
     posix_commands = (
         "meson compile -C build-secure-duckdb -j 1 \\\n"
+        "            test-fact-store-provisioned \\\n"
         "            test-fact-store-forget-transaction \\\n"
         "            test-fact-store-forget-transaction-provision-helper \\\n"
         "            test-fact-store-forget-transaction-provisioned\n"
+        "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+        "            fact-store-provisioned \\\n"
+        "            --print-errorlogs\n"
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
@@ -588,17 +623,33 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/test-fact-store-forget-transaction-provision-helper.c",
-        "if (rc == WYRELOG_E_OK)\n    return 0;",
-        "if (TRUE)\n    return 0;",
+        'if (rc == WYRELOG_E_OK) {\n    g_print ("%s\\n", root);',
+        'g_print ("%s\\n", root);\n  if (rc == WYRELOG_E_OK) {',
         "ignored production provisioning failure",
     )
     expect_rejected(
         baseline,
+        "tests/test-fact-store-forget-transaction-provision-helper.c",
+        'wyl_test_make_secure_fact_root\n'
+        '        ("wyl-fact-store-forget-transaction-XXXXXX", &error)',
+        'g_dir_make_tmp ("wyl-fact-store-forget-transaction-XXXXXX", &error)',
+        "missing helper-owned secure root",
+    )
+    expect_rejected(
+        baseline,
         "tests/test-fact-store-forget-transaction-provisioned.c",
-        "run_provision_helper (root);",
-        "run_provision_helper (root);\n"
+        "g_autofree gchar *root = run_provision_helper ();",
+        "g_autofree gchar *root = run_provision_helper ();\n"
         "  wyl_fact_graph_provisioning_construct (root, NULL, NULL);",
         "seam-linked direct provisioning",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provisioned.c",
+        "g_autofree gchar *root = run_provision_helper ();",
+        "g_autofree gchar *root = wyl_test_make_secure_fact_root "
+        "(\"bad-XXXXXX\", NULL);",
+        "seam-parent secure-root creation",
     )
     expect_rejected(
         baseline,
@@ -606,6 +657,20 @@ def self_test(baseline: dict[str, str]) -> None:
         "g_subprocess_get_exit_status (process), ==, 0",
         "g_subprocess_get_exit_status (process), >=, 0",
         "ignored helper exit status",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provisioned.c",
+        "g_assert_null (memchr (stdout_text, '\\n', length - 1));",
+        "(void) memchr (stdout_text, '\\n', length - 1);",
+        "accepted multiple helper output records",
+    )
+    expect_rejected(
+        baseline,
+        "tests/test-fact-store-forget-transaction-provisioned.c",
+        "g_assert_null (memchr (stdout_text, '\\r', length));",
+        "(void) memchr (stdout_text, '\\r', length);",
+        "accepted carriage return in helper output",
     )
     expect_rejected(
         baseline,
@@ -618,13 +683,35 @@ def self_test(baseline: dict[str, str]) -> None:
         baseline,
         "tests/meson.build",
         "'test-fact-store-forget-transaction-provision-helper.c',\n"
+        "      'fact-test-support.c',\n"
+        "      c_args : fact_test_support_c_args,\n"
         "      include_directories : include_directories('../wyrelog'),\n"
-        "      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]",
+        "      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]\n"
+        "        + fact_test_support_deps",
         "'test-fact-store-forget-transaction-provision-helper.c',\n"
+        "      'fact-test-support.c',\n"
+        "      c_args : fact_test_support_c_args,\n"
         "      include_directories : include_directories('../wyrelog'),\n"
         "      dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, "
-        "duckdb_dep]",
+        "duckdb_dep]\n        + fact_test_support_deps",
         "seam-linked production helper",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "'test-fact-store-forget-transaction-provision-helper.c',\n"
+        "      'fact-test-support.c',",
+        "'test-fact-store-forget-transaction-provision-helper.c',",
+        "helper without secure-root test support",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        "'test-fact-store-forget-transaction-provisioned.c',\n"
+        "      c_args :",
+        "'test-fact-store-forget-transaction-provisioned.c',\n"
+        "      'fact-test-support.c',\n      c_args :",
+        "seam parent with secure-root test support",
     )
     expect_rejected(
         baseline,
@@ -667,6 +754,18 @@ def self_test(baseline: dict[str, str]) -> None:
             "      - name: Test fact forget transaction cleanup with secure DuckDB",
             "      - name: Removed fact forget transaction cleanup with secure DuckDB",
             f"missing POSIX cleanup step in {workflow_path}",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-store-provisioned \\\n"
+            "            --print-errorlogs\n"
+            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-store-forget-transaction",
+            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-store-forget-transaction",
+            f"missing or reordered provisioning control in {workflow_path}",
         )
         expect_rejected(
             baseline,
