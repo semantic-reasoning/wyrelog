@@ -1,8 +1,8 @@
 {
-  "aggregate": "b98d3b571c732f713e247040e88228589e3d4c5ba9d020c0aab54d58c748051b",
+  "aggregate": "59f52a2b3d5f751ccc49a01e15a3d2b8a0b4a676a23162238709abe006b584d8",
   "directives": {
-    "count": 496,
-    "sha256": "822c158cf9cc2527c744f35bcb82ab5cecc63188b8754bec68f31887d509260f"
+    "count": 498,
+    "sha256": "852da5437f3d7a5616659285fc014756f5a6b99117a49be3d576f0aa93f117e2"
   },
   "functions": {
     "direct_permission_mutation_handler": "a92ce39084b189af1cc8a3fa09412338b774397d870852ad20fb3c08ec5a4656",
@@ -21,8 +21,8 @@
     "policy_role_grant_handler": "dc65e4712f0cf0f334b7e1aa23cb8c20bbd3c16607b46dcd5deb358becf1bdc7",
     "policy_role_revoke_handler": "e3acff4dec329c9ffe946248a53d6058f136f6591942a9adef6b71df12bdddf4",
     "policy_write_acquire_fault_hit_count": "2605b465d8d8e648c155cb9f2e6d3c6e6fe877657fdc60ae6b4cb4bad0211f9b",
-    "policy_write_record_finalize_snapshot": "dc876074b09c5f97c8a52bd37ce9b88fe3216b17417e2d5781b07eaad12b0008",
-    "policy_write_record_non_http_finalize_snapshot": "2b512156393e9ef6004c6fb54f596a8dfa1ea1eb66abcf93c39e4e5e340dc649",
+    "policy_write_record_finalize_snapshot": "bde07c783dfc29508642b1d11c83c5a21fe6e798e530ba5272149dd0e72c9e75",
+    "policy_write_record_non_http_finalize_snapshot": "6fbafe96a8d4657ad901624aaeb121d7f64cee8d26211e91524bfebffc9cd427",
     "role_membership_mutation_handler": "256550ecf4e0bdbaf038a8917d0e15980412e8fc76d34bc42e2ca67bd9a011c4",
     "schema_register_handler": "cca2dcf77243a09eb507e04101679eb0bed4f2bf0c343cf0226726ab600734e8",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
@@ -53,7 +53,7 @@
     "wyl_daemon_http_fail_next_policy_write_finalize_for_test": "f05c46ab764d425bac67044cd3ea697a2bf5578f2bb40989f0ebb6051306bc7d",
     "wyl_daemon_http_policy_write_for_test": "f007bfb7fcf32cd2d24d5417208860a993e6d3d1da458e459c861c8b59de4e61",
     "wyl_daemon_http_resolve_tenant_create_outcome_for_test": "fd1eb40947acaf85185621162361fa2265c49f4b825ace41081dda870e6be950",
-    "wyl_daemon_policy_write_acquire": "8fa263d7a56073164e0fb1761dfdecc2a6ba5b458db5aa2d1476b80b1b805880",
+    "wyl_daemon_policy_write_acquire": "b8873c3d2971856bb4e9a65cdf742d19e1b61c78e0af48175a302c61973a5573",
     "wyl_daemon_policy_write_clear": "efdfcd18f7e13b8ecb87616f8fcf90b6d0f6047c2665ea438dfe7c06002aa93f",
     "wyl_daemon_policy_write_detach_message": "d78b824fd228e7a751025a43dadb93aff955ba01acd3c2ba8a158346513e8c4a",
     "wyl_daemon_policy_write_finalize": "e2b4e754c9cdcd29b85b22c20ca54fb729f986b643cc233bbfe4ce361f755ed9",

@@ -7434,6 +7434,19 @@ raw_parked_request_wait_sent (RawParkedRequest *request)
   g_mutex_unlock (&request->mutex);
 }
 
+static gboolean
+raw_parked_request_wait_sent_until (RawParkedRequest *request,
+    gint64 deadline_us)
+{
+  g_mutex_lock (&request->mutex);
+  while (!request->sent)
+    if (!g_cond_wait_until (&request->changed, &request->mutex, deadline_us))
+      break;
+  gboolean sent = request->sent;
+  g_mutex_unlock (&request->mutex);
+  return sent;
+}
+
 static void
 raw_parked_request_release (RawParkedRequest *request, gboolean read_response)
 {
@@ -7451,6 +7464,26 @@ raw_parked_request_join (RawParkedRequest *request)
   while (!request->done)
     g_cond_wait (&request->changed, &request->mutex);
   g_mutex_unlock (&request->mutex);
+}
+
+static gboolean
+raw_parked_request_join_until (RawParkedRequest *request, gint64 deadline_us)
+{
+  g_mutex_lock (&request->mutex);
+  while (!request->done)
+    if (!g_cond_wait_until (&request->changed, &request->mutex, deadline_us))
+      break;
+  gboolean done = request->done;
+  g_mutex_unlock (&request->mutex);
+  return done;
+}
+
+static void
+raw_parked_request_join_bounded_or_abort (RawParkedRequest *request)
+{
+  if (!raw_parked_request_join_until (request,
+      g_get_monotonic_time () + 10 * G_TIME_SPAN_SECOND))
+    g_error ("raw policy request did not terminate after release");
 }
 
 /* Bounded poll for a waiting-writer count; returns TRUE once reached. */
@@ -7634,6 +7667,13 @@ policy_write_cancel_stderr_sink (const gchar *line, gpointer data)
   g_printerr ("%s\n", line);
 }
 
+typedef struct
+{
+  void (*after_authority_before) (gpointer data);
+  void (*before_authority_after) (gpointer data);
+  gpointer data;
+} PolicyWriteCancelSampleHooks;
+
 /* Collect the complete #880 observation at the point where the test would
  * otherwise return only 5291/5292.  The authority-before, pin, terminal,
  * cancel/watch, finalize and authority-after samples use different locks, so
@@ -7643,13 +7683,16 @@ policy_write_cancel_stderr_sink (const gchar *line, gpointer data)
 static gint
 policy_write_cancel_authority_is_clean (SoupServer *server, WylHandle *handle,
     const PolicyWriteCancelMilestones *milestones, gint failure,
-    PolicyWriteCancelDiagnosticSink sink, gpointer sink_data)
+    PolicyWriteCancelDiagnosticSink sink, gpointer sink_data,
+    const PolicyWriteCancelSampleHooks *sample_hooks)
 {
   WylServiceAuthAuthoritySnapshot authority_before = { 0 };
   WylServiceAuthAuthoritySnapshot authority_after = { 0 };
   WylDaemonPolicyWriteFinalizeSnapshot finalize = { 0 };
   wyl_daemon_http_service_authority_snapshot_for_test (server,
       &authority_before);
+  if (sample_hooks != NULL && sample_hooks->after_authority_before != NULL)
+    sample_hooks->after_authority_before (sample_hooks->data);
   guint total_pins = G_MAXUINT;
   guint thread_pins = G_MAXUINT;
   wyl_handle_policy_store_pin_snapshot_for_test (handle, &total_pins,
@@ -7663,6 +7706,8 @@ policy_write_cancel_authority_is_clean (SoupServer *server, WylHandle *handle,
   gboolean finalize_available =
       wyl_daemon_http_policy_write_finalize_snapshot_for_test (server,
           &finalize);
+  if (sample_hooks != NULL && sample_hooks->before_authority_after != NULL)
+    sample_hooks->before_authority_after (sample_hooks->data);
   wyl_daemon_http_service_authority_snapshot_for_test (server,
       &authority_after);
 
@@ -7857,7 +7902,7 @@ check_policy_write_cancel_pin_diagnostic (void)
     result = 5266;
   } else if (policy_write_cancel_authority_is_clean (fixture.server,
       fixture.handle, &milestones, 5291, policy_write_cancel_capture_sink,
-      &capture) != 5292) {
+      &capture, NULL) != 5292) {
     result = 5267;
   } else {
 #ifdef G_OS_WIN32
@@ -7943,6 +7988,201 @@ check_policy_write_cancel_pin_diagnostic (void)
   g_mutex_clear (&holder.mutex);
 
 teardown:
+  policy_write_cancel_fixture_teardown (&fixture);
+  return result;
+}
+
+typedef struct
+{
+  SoupServer *server;
+  RawParkedRequest *request;
+  GThread *client;
+  guint64 acquire_generation;
+  guint64 finalize_generation_before;
+  PolicyWriteCancelMilestones *milestones;
+  gboolean acquired;
+  gboolean wire_sent;
+  gboolean client_joined;
+  gboolean finalized;
+  WylDaemonPolicyWriteFinalizeSnapshot finalize;
+} PolicyWriteMixedSampleExercise;
+
+static void
+policy_write_mixed_sample_start_request (gpointer data)
+{
+  PolicyWriteMixedSampleExercise *exercise = data;
+  exercise->client = g_thread_new ("policy-write-mixed-sample",
+          raw_parked_request_thread, exercise->request);
+  exercise->wire_sent = raw_parked_request_wait_sent_until
+        (exercise->request,
+          g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND);
+  if (exercise->wire_sent)
+    exercise->acquired =
+        wyl_daemon_http_wait_policy_write_acquired_latch_for_test
+          (exercise->server, exercise->acquire_generation,
+            g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND);
+  if (exercise->client != NULL) {
+    raw_parked_request_release (exercise->request, FALSE);
+    if (raw_parked_request_join_until (exercise->request,
+        g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND)) {
+      g_thread_join (exercise->client);
+      exercise->client = NULL;
+      exercise->client_joined = TRUE;
+    }
+    exercise->milestones->client_wire_write_completed =
+        exercise->request->sent;
+    exercise->milestones->client_release_requested =
+        exercise->request->release;
+    exercise->milestones->client_joined = exercise->client_joined;
+  }
+}
+
+static void
+policy_write_mixed_sample_finish_request (gpointer data)
+{
+  PolicyWriteMixedSampleExercise *exercise = data;
+  wyl_daemon_http_release_policy_write_acquired_latch_for_test
+    (exercise->server, exercise->acquire_generation);
+  if (exercise->client != NULL) {
+    raw_parked_request_release (exercise->request, FALSE);
+    if (raw_parked_request_join_until (exercise->request,
+        g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND)) {
+      g_thread_join (exercise->client);
+      exercise->client = NULL;
+      exercise->client_joined = TRUE;
+      exercise->milestones->client_joined = TRUE;
+    }
+  }
+  exercise->finalized = wyl_daemon_http_wait_policy_write_finalize_for_test
+        (exercise->server, exercise->finalize_generation_before,
+          g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND,
+          &exercise->finalize);
+  wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+    (exercise->server, exercise->acquire_generation);
+}
+
+/* Reproduce the exact non-atomic #880 observation without a retained pin.
+ * The request begins only after authority_before was sampled clean, pauses
+ * after owner 9 acquired its pin, then finalizes only after the collector has
+ * sampled that pin plus the stale terminal/finalize state. */
+static gint
+check_policy_write_cancel_non_atomic_observation (void)
+{
+  PolicyWriteCancelFixture fixture = { 0 };
+  gint result = policy_write_cancel_fixture_setup (&fixture,
+          "policy-write-mixed-sample-actor", 5270);
+  if (result != 0) {
+    policy_write_cancel_fixture_teardown (&fixture);
+    return result;
+  }
+
+  WylDaemonPolicyWriteFinalizeSnapshot finalize_before = { 0 };
+  (void) wyl_daemon_http_policy_write_finalize_snapshot_for_test
+    (fixture.server, &finalize_before);
+  PolicyWriteCancelMilestones milestones = {
+    .scenario = POLICY_WRITE_CANCEL_SCENARIO_ACQUIRE_WINS_LATE_DISCONNECT,
+    .terminal_entries_before =
+        wyl_daemon_http_policy_write_terminal_entries_for_test
+          (fixture.server),
+    .finalize_generation_before = finalize_before.generation,
+    .expected_finalize_owner = 9,       /* direct_permission */
+  };
+  g_autofree gchar *query = g_strdup_printf
+        ("subject=mixed-sample-target&perm=cleanup.missing&scope=%s&tenant=%s"
+          "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49", WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT,
+          fixture.session_token);
+  RawParkedRequest request = {
+    .base_url = fixture.base_url,
+    .path = "/policy/permissions/grant",
+    .query = query,
+  };
+  g_mutex_init (&request.mutex);
+  g_cond_init (&request.changed);
+  PolicyWriteMixedSampleExercise exercise = {
+    .server = fixture.server,
+    .request = &request,
+    .acquire_generation =
+        wyl_daemon_http_arm_policy_write_acquired_latch_for_test
+          (fixture.server),
+    .finalize_generation_before = finalize_before.generation,
+    .milestones = &milestones,
+  };
+  PolicyWriteCancelSampleHooks hooks = {
+    .after_authority_before = policy_write_mixed_sample_start_request,
+    .before_authority_after = policy_write_mixed_sample_finish_request,
+    .data = &exercise,
+  };
+  PolicyWriteCancelDiagnosticCapture capture = { 0 };
+  gint observation = policy_write_cancel_authority_is_clean (fixture.server,
+          fixture.handle, &milestones, 5291,
+          policy_write_cancel_capture_sink, &capture, &hooks);
+
+  g_autofree gchar *terminal_before = g_strdup_printf ("terminal_before=%u",
+          milestones.terminal_entries_before);
+  g_autofree gchar *terminal_now = g_strdup_printf ("terminal_now=%u",
+          milestones.terminal_entries_before);
+  g_autofree gchar *generation_before = g_strdup_printf
+        ("finalize_generation_before=%" G_GUINT64_FORMAT,
+          milestones.finalize_generation_before);
+  g_autofree gchar *generation = g_strdup_printf
+        ("finalize_generation=%" G_GUINT64_FORMAT,
+          milestones.finalize_generation_before);
+  const gchar *required[] = {
+    "scenario=acquire_wins_late_disconnect",
+    "failure=5292",
+    "authority_before_readers=0",
+    "authority_before_writer=0",
+    "authority_before_waiting_readers=0",
+    "authority_before_waiting_writers=0",
+    "pins_total=1",
+    "pins_thread=0",
+    terminal_before,
+    terminal_now,
+    generation_before,
+    generation,
+    "finalize_since_baseline=0",
+    "finalize_expected_owner=9",
+    "finalize_owner_matches_scenario=0",
+    "authority_after_readers=0",
+    "authority_after_writer=0",
+    "authority_after_waiting_readers=0",
+    "authority_after_waiting_writers=0",
+  };
+  gboolean complete = observation == 5292 && capture.count == 1
+      && capture.line != NULL && exercise.acquired && exercise.client_joined
+      && exercise.finalized && exercise.finalize.valid
+      && exercise.finalize.generation == finalize_before.generation + 1
+      && exercise.finalize.terminal_entries
+      == milestones.terminal_entries_before + 1
+      && exercise.finalize.owner == 9
+      && !exercise.finalize.post_finalize_lease_live
+      && !exercise.finalize.post_finalize_store_live
+      && exercise.finalize.post_finalize_total_pins == 0
+      && exercise.finalize.post_finalize_thread_pins == 0
+      && exercise.finalize.post_finalize_rank_mask == 0
+      && !exercise.finalize.post_finalize_transaction_active;
+  for (guint i = 0; complete && i < G_N_ELEMENTS (required); i++)
+    complete = policy_write_cancel_diagnostic_has_token (capture.line,
+            required[i]);
+  if (!complete)
+    result = 5271;
+  else
+    result = 0;
+
+  if (exercise.client != NULL) {
+    raw_parked_request_release (&request, FALSE);
+    wyl_daemon_http_release_policy_write_acquired_latch_for_test
+      (fixture.server, exercise.acquire_generation);
+    raw_parked_request_join_bounded_or_abort (&request);
+    g_thread_join (exercise.client);
+  }
+  wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+    (fixture.server, exercise.acquire_generation);
+  g_free (capture.line);
+  g_free (request.body);
+  g_cond_clear (&request.changed);
+  g_mutex_clear (&request.mutex);
   policy_write_cancel_fixture_teardown (&fixture);
   return result;
 }
@@ -8060,7 +8300,7 @@ release_all:
   };
   if (result == 0)
     result = policy_write_cancel_authority_is_clean (fixture.server,
-            fixture.handle, &milestones, 5215, NULL, NULL);
+            fixture.handle, &milestones, 5215, NULL, NULL, NULL);
   if (result == 0 && holder.write_rc != WYRELOG_E_OK)
     result = 5217;
   g_free (request.body);
@@ -8123,16 +8363,17 @@ check_daemon_policy_write_shutdown_cancellable (void)
     goto cleanup;
   }
   result = policy_write_cancel_authority_is_clean (fixture.server,
-          fixture.handle, &milestones, 5253, NULL, NULL);
+          fixture.handle, &milestones, 5253, NULL, NULL, NULL);
 
 cleanup:
   policy_write_cancel_fixture_teardown (&fixture);
   return result;
 }
 
-/* A client that disconnects around an acquire-wins grant (no competing writer)
- * must not break exactly-once finalize or leak the writer/pin, regardless of
- * whether the disconnect is observed before or after the lease is granted. */
+/* Once a no-contention request has acquired owner 9, a later client disconnect
+ * cannot turn it into cancel-wins.  Wait for the request's own finalize
+ * generation before sampling cleanup; client-thread completion alone does not
+ * establish server lifecycle completion. */
 static gint
 check_daemon_policy_write_acquire_wins_late_disconnect (void)
 {
@@ -8156,6 +8397,11 @@ check_daemon_policy_write_acquire_wins_late_disconnect (void)
   (void) wyl_daemon_http_policy_write_finalize_snapshot_for_test
     (fixture.server, &finalize_before);
   milestones.finalize_generation_before = finalize_before.generation;
+  guint64 acquire_generation =
+      wyl_daemon_http_arm_policy_write_acquired_latch_for_test
+        (fixture.server);
+  gboolean client_joined = FALSE;
+  gboolean latch_released = FALSE;
 
   g_autofree gchar *query = g_strdup_printf
         ("subject=late-target&perm=cleanup.missing&scope=%s&tenant=%s"
@@ -8171,29 +8417,83 @@ check_daemon_policy_write_acquire_wins_late_disconnect (void)
   g_cond_init (&request.changed);
   g_autoptr (GThread) client = g_thread_new ("late-disconnect-request",
           raw_parked_request_thread, &request);
-  raw_parked_request_wait_sent (&request);
-  /* No competing writer: close immediately, racing the grant. */
+  if (!raw_parked_request_wait_sent_until (&request,
+      g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND)) {
+    result = 5295;
+    goto teardown_request;
+  }
+  if (!wyl_daemon_http_wait_policy_write_acquired_latch_for_test
+        (fixture.server, acquire_generation,
+      g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND)) {
+    result = 5290;
+    goto teardown_request;
+  }
+
+  /* The socket watch is already disarmed and owner 9 holds the pin. */
   raw_parked_request_release (&request, FALSE);
-  raw_parked_request_join (&request);
+  if (!raw_parked_request_join_until (&request,
+      g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND)) {
+    result = 5296;
+    goto teardown_request;
+  }
   g_thread_join (g_steal_pointer (&client));
+  client_joined = TRUE;
   milestones.client_wire_write_completed = request.sent;
   milestones.client_release_requested = request.release;
   milestones.client_joined = TRUE;
 
-  /* Whatever the race outcome, the authority must quiesce and a fresh WRITE
-   * must still be grantable -- proving exactly-once finalize with no leak. */
-  if (!poll_waiting_writers (fixture.server, 0)) {
-    result = 5290;
+  wyl_daemon_http_release_policy_write_acquired_latch_for_test
+    (fixture.server, acquire_generation);
+  latch_released = TRUE;
+  WylDaemonPolicyWriteFinalizeSnapshot finalize = { 0 };
+  if (!wyl_daemon_http_wait_policy_write_finalize_for_test (fixture.server,
+      finalize_before.generation,
+      g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND, &finalize)) {
+    result = 5291;
+    goto teardown_request;
+  }
+  wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+    (fixture.server, acquire_generation);
+
+  if (!finalize.valid
+      || finalize.generation != finalize_before.generation + 1
+      || finalize.terminal_entries != milestones.terminal_entries_before + 1
+      || finalize.owner != 9 || finalize.primary_status != 400
+      || g_strcmp0 (finalize.primary_code, "invalid_policy_mutation") != 0
+      || finalize.primary_rc_recorded
+      || finalize.primary_rc != WYRELOG_E_OK
+      || finalize.cleanup_rc != WYRELOG_E_OK
+      || finalize.post_finalize_lease_live
+      || finalize.post_finalize_store_live
+      || finalize.post_finalize_total_pins != 0
+      || finalize.post_finalize_thread_pins != 0
+      || finalize.post_finalize_rank_mask != 0
+      || finalize.post_finalize_transaction_active) {
+    result = 5294;
     goto teardown_request;
   }
   result = policy_write_cancel_authority_is_clean (fixture.server,
-          fixture.handle, &milestones, 5291, NULL, NULL);
+          fixture.handle, &milestones, 5291, NULL, NULL, NULL);
   if (result == 0
       && wyl_daemon_http_policy_write_for_test (fixture.server, NULL, NULL)
       != WYRELOG_E_OK)
     result = 5293;
 
 teardown_request:
+  if (!client_joined) {
+    raw_parked_request_release (&request, FALSE);
+    if (!latch_released)
+      wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+        (fixture.server, acquire_generation);
+    raw_parked_request_join_bounded_or_abort (&request);
+    if (client != NULL)
+      g_thread_join (g_steal_pointer (&client));
+  } else if (!latch_released) {
+    wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+      (fixture.server, acquire_generation);
+  }
+  wyl_daemon_http_disarm_policy_write_acquired_latch_for_test
+    (fixture.server, acquire_generation);
   g_free (request.body);
   g_cond_clear (&request.changed);
   g_mutex_clear (&request.mutex);
@@ -8222,16 +8522,16 @@ check_daemon_policy_write_cancellable_contract (void)
     (void) check_daemon_policy_write_shutdown_cancellable;
     (void) check_daemon_policy_write_acquire_wins_late_disconnect;
     (void) check_policy_write_cancel_pin_diagnostic;
+    (void) check_policy_write_cancel_non_atomic_observation;
   }
   return 0;
 #else
   /* Only the first case needs the client-disconnect watch, which
    * wyl_daemon_policy_write_arm_socket_watch installs on POSIX alone: it
    * asserts the cancel reason is CLIENT_DISCONNECT, which nothing on Windows
-   * can produce. The other two are platform-neutral and must keep running
-   * everywhere -- the late-disconnect case deliberately accepts either race
-   * outcome and only checks quiesce, a clean authority and a grantable fresh
-   * WRITE, none of which depend on the watch existing. */
+   * can produce. The remaining cases are platform-neutral.  The acquired
+   * latch makes owner 9 mandatory before the late disconnect, while the
+   * separate parked case remains the cancel-wins contract. */
   gint rc;
 #ifndef G_OS_WIN32
   rc = check_daemon_policy_write_client_disconnect_cancellable ();
@@ -8239,6 +8539,9 @@ check_daemon_policy_write_cancellable_contract (void)
     return rc;
 #endif
   rc = check_policy_write_cancel_pin_diagnostic ();
+  if (rc != 0)
+    return rc;
+  rc = check_policy_write_cancel_non_atomic_observation ();
   if (rc != 0)
     return rc;
   rc = check_daemon_policy_write_shutdown_cancellable ();
