@@ -111,6 +111,15 @@ if host_machine.system() != 'windows'
   test('posix-errno-capability', test_posix_errno_capability)
 endif
 
+if host_machine.system() == 'darwin'
+  test_fact_graph_locator_macos = executable(
+    'test-fact-graph-locator-macos',
+    'test-fact-graph-locator-macos.c',
+    dependencies : [glib_dep],
+  )
+  test('fact-graph-locator-macos', test_fact_graph_locator_macos)
+endif
+
 test('engine-session-boundary', python3,
   args : [
     files('../tools/check-engine-session-boundary.py'),
