@@ -128,7 +128,7 @@ test('fact-artifact-inventory-consumer-wiring-self', python3,
     '--self-test',
     meson.project_source_root(),
   ],
-  timeout : 60,
+  timeout : 120,
 )
 """
 

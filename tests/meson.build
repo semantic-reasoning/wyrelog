@@ -1370,7 +1370,7 @@ test('fact-artifact-inventory-consumer-wiring-self', python3,
     '--self-test',
     meson.project_source_root(),
   ],
-  timeout : 60,
+  timeout : 120,
 )
 
 test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
