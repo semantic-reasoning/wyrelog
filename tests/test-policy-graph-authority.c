@@ -842,6 +842,24 @@ static const gchar fixture_windows_insert_guard_sql[] =
     "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
 
+static gint
+fixture_disable_sqlite_defensive_mode (sqlite3 *db)
+{
+  gint previous = 0;
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, -1,
+      &previous), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, 0, NULL),
+      ==, SQLITE_OK);
+  return previous;
+}
+
+static void
+fixture_restore_sqlite_defensive_mode (sqlite3 *db, gint previous)
+{
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, previous,
+      NULL), ==, SQLITE_OK);
+}
+
 
 static void
 install_provisioning_schema_fixture (sqlite3 *db, const gchar *table_sql,
@@ -864,6 +882,8 @@ install_provisioning_schema_fixture (sqlite3 *db, const gchar *table_sql,
   memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
       strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
   sqlite3_stmt *stmt = NULL;
+  gint defensive = fixture_disable_sqlite_defensive_mode (db);
+  gint64 schema_version = scalar_int64 (db, "PRAGMA schema_version;");
   exec_ok (db, "PRAGMA writable_schema=ON;");
   g_assert_cmpint (sqlite3_prepare_v2 (db,
       "UPDATE main.sqlite_schema SET sql=? WHERE type='table' AND "
@@ -893,24 +913,26 @@ install_provisioning_schema_fixture (sqlite3 *db, const gchar *table_sql,
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   g_assert_cmpint (sqlite3_changes (db), ==, 1);
   sqlite3_finalize (stmt);
-  exec_ok (db, "PRAGMA writable_schema=OFF;");
-  gint64 schema_version = scalar_int64 (db, "PRAGMA schema_version;");
   g_autofree gchar *advance = g_strdup_printf ("PRAGMA schema_version=%" G_GINT64_FORMAT
           ";", schema_version + 1);
   exec_ok (db, advance);
+  exec_ok (db, "PRAGMA writable_schema=RESET;");
+  fixture_restore_sqlite_defensive_mode (db, defensive);
 }
 
 static void
 remove_sqlite_sequence_fixture (sqlite3 *db)
 {
+  gint defensive = fixture_disable_sqlite_defensive_mode (db);
+  gint64 schema_version = scalar_int64 (db, "PRAGMA schema_version;");
   exec_ok (db, "PRAGMA writable_schema=ON;"
       "DELETE FROM main.sqlite_schema WHERE type='table' AND "
-      "name='sqlite_sequence';"
-      "PRAGMA writable_schema=OFF;");
-  gint64 schema_version = scalar_int64 (db, "PRAGMA schema_version;");
+      "name='sqlite_sequence';");
   g_autofree gchar *advance = g_strdup_printf ("PRAGMA schema_version=%"
           G_GINT64_FORMAT ";", schema_version + 1);
   exec_ok (db, advance);
+  exec_ok (db, "PRAGMA writable_schema=RESET;");
+  fixture_restore_sqlite_defensive_mode (db, defensive);
   g_assert_cmpint (scalar_int64 (db,
       "SELECT count(*) FROM main.sqlite_schema WHERE type='table' AND "
       "name='sqlite_sequence';"), ==, 0);
@@ -991,10 +1013,16 @@ run_provisioning_predecessor_migration (gboolean windows)
         "unrelated_sequence BEGIN SELECT RAISE(ABORT,'preserve'); END;"
         "CREATE VIEW unrelated_sequence_view AS SELECT id,value FROM "
         "unrelated_sequence;");
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, 1,
+        NULL), ==, SQLITE_OK);
     install_provisioning_schema_fixture (db,
         windows ? fixture_windows_table_sql : fixture_pre_windows_table_sql,
         windows ? fixture_windows_immutable_trigger_sql :
         fixture_pre_windows_immutable_trigger_sql);
+    gint defensive = 0;
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, -1,
+        &defensive), ==, SQLITE_OK);
+    g_assert_cmpint (defensive, ==, 1);
     g_assert_cmpint (scalar_int64 (db,
         "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
         "WHERE name='darwin_operation_evidence';"), ==, 0);
@@ -1101,9 +1129,15 @@ test_provisioning_migration_preserves_sequence_absence (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, 1, NULL),
+      ==, SQLITE_OK);
   install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
       fixture_pre_windows_immutable_trigger_sql);
   remove_sqlite_sequence_fixture (db);
+  gint defensive = 0;
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, -1,
+      &defensive), ==, SQLITE_OK);
+  g_assert_cmpint (defensive, ==, 1);
   wyl_policy_store_graph_authority_migration_fail_once (store,
       WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,

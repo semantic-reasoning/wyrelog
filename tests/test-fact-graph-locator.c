@@ -44,7 +44,7 @@ test_encoding_vectors (void)
     g_autofree gchar *decoded = NULL;
 
     g_assert_cmpint (wyl_fact_graph_component_encode (vectors[i].plain,
-            &encoded), ==, WYRELOG_E_OK);
+        &encoded), ==, WYRELOG_E_OK);
     g_assert_cmpstr (encoded, ==, vectors[i].encoded);
     g_assert_cmpstr (encoded, !=, ".");
     g_assert_cmpstr (encoded, !=, "..");
@@ -112,13 +112,13 @@ static void
 test_owner_mode_contract (void)
 {
   g_assert_true (wyl_fact_graph_owner_mode_is_secure_for_test (0700, 1000,
-          1000, 0700));
+      1000, 0700));
   g_assert_false (wyl_fact_graph_owner_mode_is_secure_for_test (0700, 1001,
-          1000, 0700));
+      1000, 0700));
   g_assert_false (wyl_fact_graph_owner_mode_is_secure_for_test (01700, 1000,
-          1000, 0700));
+      1000, 0700));
   g_assert_false (wyl_fact_graph_owner_mode_is_secure_for_test (0750, 1000,
-          1000, 0700));
+      1000, 0700));
 }
 
 static void
@@ -131,7 +131,7 @@ test_locator_round_trip (void)
   g_autofree gchar *expected_path = NULL;
 
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant/雪",
-          "../orders"), ==, WYRELOG_E_OK);
+      "../orders"), ==, WYRELOG_E_OK);
   g_assert_cmpuint (locator.version, ==, WYL_FACT_GRAPH_PATH_VERSION);
   g_assert_cmpstr (locator.tenant_component, ==, "v1-ehimsobeegnuj6ta");
   g_assert_cmpstr (locator.graph_component, ==, "v1-5on2urrichin4so");
@@ -139,7 +139,7 @@ test_locator_round_trip (void)
   relative = wyl_fact_graph_locator_relative_dir (&locator);
   path = wyl_fact_graph_locator_descriptive_path ("/facts", &locator);
   expected_path = g_build_filename ("/facts", "v1-ehimsobeegnuj6ta",
-      "v1-5on2urrichin4so", NULL);
+          "v1-5on2urrichin4so", NULL);
   g_assert_cmpstr (relative, ==, expected_relative);
   g_assert_true (wyl_fact_graph_relative_path_is_valid (relative));
   g_assert_cmpstr (path, ==, expected_path);
@@ -231,11 +231,11 @@ test_posix_resolver_creates_validated_graph (void)
   WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
 
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant/a",
-          "../graph"), ==, WYRELOG_E_OK);
+      "../graph"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path (&graph);
   g_assert_true (g_file_test (path, G_FILE_TEST_IS_DIR));
   g_assert_true (g_str_has_prefix (path, root));
@@ -268,20 +268,20 @@ test_posix_resolver_rejects_symlinked_components (void)
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
       ==, WYRELOG_E_OK);
   g_autofree gchar *tenant = g_build_filename (root,
-      locator.tenant_component, NULL);
+          locator.tenant_component, NULL);
   g_assert_cmpint (symlink (outer, tenant), ==, 0);
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
+      &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (tenant), ==, 0);
   g_assert_cmpint (g_mkdir (tenant, 0700), ==, 0);
   g_autofree gchar *graph_path = g_build_filename (tenant,
-      locator.graph_component, NULL);
+          locator.graph_component, NULL);
   g_assert_cmpint (symlink (outer, graph_path), ==, 0);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
+      &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);
@@ -304,7 +304,7 @@ test_posix_resolver_rejects_root_replacement (void)
   g_assert_cmpint (g_rename (root, old_root), ==, 0);
   g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_POLICY);
+      &locator, TRUE, &graph), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);
@@ -329,12 +329,12 @@ test_posix_resolver_rejects_wrong_type_and_mode (void)
       WYRELOG_E_POLICY);
   g_assert_cmpint (g_chmod (root, 0700), ==, 0);
   g_autofree gchar *tenant = g_build_filename (root,
-      locator.tenant_component, NULL);
+          locator.tenant_component, NULL);
   g_assert_true (g_file_set_contents (tenant, "x", 1, NULL));
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
+      &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);
@@ -356,14 +356,14 @@ test_posix_resolver_component_length_boundaries (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpuint (strlen (locator.graph_component), ==, 208);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_locator_clear (&locator);
 
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, long_tenant,
-          "graph"), ==, WYRELOG_E_OK);
+      "graph"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_POLICY);
+      &locator, TRUE, &graph), ==, WYRELOG_E_POLICY);
   wyl_fact_graph_locator_clear (&locator);
   wyl_fact_graph_resolver_clear (&resolver);
   remove_tree (root);
@@ -382,9 +382,9 @@ test_posix_resolver_stages_and_publishes_durably (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-          "facts.duckdb", &stage), ==, WYRELOG_E_OK);
+      "facts.duckdb", &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (write (stage.fd, "duck", 4), ==, 4);
   g_assert_cmpint (wyl_fact_graph_stage_sync (&stage), ==, WYRELOG_E_OK);
   g_autofree gchar *final_path =
@@ -396,7 +396,7 @@ test_posix_resolver_stages_and_publishes_durably (void)
 
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
   gchar buf[5] = { 0 };
   g_assert_cmpint (read (fd, buf, 4), ==, 4);
   g_assert_cmpstr (buf, ==, "duck");
@@ -422,9 +422,9 @@ test_posix_resolver_stage_abort_and_final_substitution (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-          "facts.duckdb", &stage), ==, WYRELOG_E_OK);
+      "facts.duckdb", &stage), ==, WYRELOG_E_OK);
   g_autofree gchar *final_path =
       wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
   g_assert_false (g_file_test (final_path, G_FILE_TEST_EXISTS));
@@ -438,10 +438,10 @@ test_posix_resolver_stage_abort_and_final_substitution (void)
   g_assert_cmpint (symlink (outside, final_path), ==, 0);
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_graph_directory_secure_file_mode (&graph,
-          "facts.duckdb"), ==, WYRELOG_E_POLICY);
+      "facts.duckdb"), ==, WYRELOG_E_POLICY);
 
   wyl_fact_graph_stage_clear (&stage);
   wyl_fact_graph_directory_clear (&graph);
@@ -462,7 +462,7 @@ test_posix_resolver_rejects_graph_replacement_and_file_mode (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph);
   g_autofree gchar *old_graph = g_strdup_printf ("%s-old", graph_path);
@@ -470,22 +470,22 @@ test_posix_resolver_rejects_graph_replacement_and_file_mode (void)
   g_assert_cmpint (g_mkdir (graph_path, 0700), ==, 0);
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-          "facts.duckdb", &stage), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", &stage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_rmdir (graph_path), ==, 0);
   g_assert_cmpint (g_rename (old_graph, graph_path), ==, 0);
 
   g_autofree gchar *file = g_build_filename (graph_path, "facts.duckdb",
-      NULL);
+          NULL);
   g_assert_true (g_file_set_contents (file, "db", 2, NULL));
   g_assert_cmpint (g_chmod (file, 0640), ==, 0);
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_graph_directory_secure_file_mode (&graph,
-          "facts.duckdb"), ==, WYRELOG_E_OK);
+      "facts.duckdb"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (close (fd), ==, 0);
 
   wyl_fact_graph_stage_clear (&stage);
@@ -508,9 +508,9 @@ test_posix_resolver_never_overwrites_final_or_replaced_stage (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph,
-          "facts.duckdb", &stage), ==, WYRELOG_E_OK);
+      "facts.duckdb", &stage), ==, WYRELOG_E_OK);
   g_autofree gchar *final_path =
       wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
   g_assert_true (g_file_set_contents (final_path, "foreign", -1, NULL));
@@ -525,7 +525,7 @@ test_posix_resolver_never_overwrites_final_or_replaced_stage (void)
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph);
   g_autofree gchar *stage_path = g_build_filename (graph_path,
-      stage.stage_basename, NULL);
+          stage.stage_basename, NULL);
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_true (g_file_set_contents (stage_path, "replacement", -1, NULL));
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
@@ -585,7 +585,7 @@ replace_exact_stage_name (const gchar *point, gpointer user_data)
   g_assert_cmpint (g_rename (replacement->stage_path, replacement->backup_path),
       ==, 0);
   g_assert_true (g_file_set_contents (replacement->stage_path, "foreign", -1,
-          NULL));
+      NULL));
   g_assert_cmpint (g_chmod (replacement->stage_path, 0600), ==, 0);
   return WYRELOG_E_OK;
 }
@@ -601,7 +601,7 @@ replace_exact_final_after_sync (const gchar *point, gpointer user_data)
   g_assert_cmpint (g_rename (replacement->final_path, replacement->backup_path),
       ==, 0);
   g_assert_true (g_file_set_contents (replacement->final_path, "foreign", -1,
-          NULL));
+      NULL));
   g_assert_cmpint (g_chmod (replacement->final_path, 0600), ==, 0);
   return WYRELOG_E_OK;
 }
@@ -629,6 +629,18 @@ replace_provisioned_name (const gchar *point, gpointer user_data)
   return WYRELOG_E_OK;
 }
 
+#ifdef __APPLE__
+static wyrelog_error_t
+record_unexpected_provisioned_checkpoint (const gchar *point,
+    gpointer user_data)
+{
+  gboolean *fired = user_data;
+  (void) point;
+  *fired = TRUE;
+  return WYRELOG_E_IO;
+}
+#endif
+
 static void
 create_provisioned_pair (const gchar *stage_path, const gchar *final_path)
 {
@@ -650,13 +662,13 @@ test_posix_resolver_open_provisioned_final_exact (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph);
   g_autofree gchar *stage_path = g_build_filename (graph_path,
-      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
   g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
-      NULL);
+          NULL);
   g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
   g_assert_true (g_file_set_contents (outside, "outside", -1, NULL));
   g_assert_cmpint (g_chmod (outside, 0600), ==, 0);
@@ -668,15 +680,15 @@ test_posix_resolver_open_provisioned_final_exact (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
     g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-        (&graph, invalid[i], &final), ==, WYRELOG_E_INVALID);
+          (&graph, invalid[i], &final), ==, WYRELOG_E_INVALID);
 
   create_provisioned_pair (stage_path, final_path);
   gint generic_fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &generic_fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &generic_fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (generic_fd, ==, -1);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_OK);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_OK);
   gchar contents[5] = { 0 };
   g_assert_cmpint (read (final.fd, contents, 4), ==, 4);
   g_assert_cmpstr (contents, ==, "held");
@@ -684,14 +696,14 @@ test_posix_resolver_open_provisioned_final_exact (void)
 
   g_assert_cmpint (g_remove (final_path), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_NOT_FOUND);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_true (g_file_set_contents (stage_path, "stage", -1, NULL));
   g_assert_true (g_file_set_contents (final_path, "final", -1, NULL));
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
   g_assert_cmpint (g_chmod (final_path, 0600), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_cmpint (g_remove (final_path), ==, 0);
 
@@ -699,7 +711,7 @@ test_posix_resolver_open_provisioned_final_exact (void)
   g_assert_true (g_file_set_contents (final_path, "final", -1, NULL));
   g_assert_cmpint (g_chmod (final_path, 0600), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_true (g_file_test (stage_path, G_FILE_TEST_IS_SYMLINK));
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_cmpint (g_remove (final_path), ==, 0);
@@ -707,17 +719,17 @@ test_posix_resolver_open_provisioned_final_exact (void)
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
   g_assert_cmpint (symlink (outside, final_path), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_true (g_file_test (final_path, G_FILE_TEST_IS_SYMLINK));
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_cmpint (g_remove (final_path), ==, 0);
 
   create_provisioned_pair (stage_path, final_path);
   g_autofree gchar *alias = g_build_filename (graph_path, "foreign-link",
-      NULL);
+          NULL);
   g_assert_cmpint (link (stage_path, alias), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_true (g_file_test (alias, G_FILE_TEST_IS_REGULAR));
   g_assert_cmpint (g_remove (alias), ==, 0);
   g_assert_cmpint (g_remove (final_path), ==, 0);
@@ -731,7 +743,7 @@ test_posix_resolver_open_provisioned_final_exact (void)
   graph.checkpoint = replace_provisioned_name;
   graph.checkpoint_data = &replacement;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_true (replacement.fired);
   g_autofree gchar *foreign = NULL;
   g_assert_true (g_file_get_contents (final_path, &foreign, NULL, NULL));
@@ -745,11 +757,12 @@ test_posix_resolver_open_provisioned_final_exact (void)
   create_provisioned_pair (stage_path, final_path);
   g_autofree gchar *stage_backup = g_strdup_printf ("%s-held", stage_path);
   replacement = (ProvisionedFinalReplacement) {
-  "provisioned-final-validated", stage_path, stage_backup, FALSE};
+    "provisioned-final-validated", stage_path, stage_backup, FALSE
+  };
   graph.checkpoint = replace_provisioned_name;
   graph.checkpoint_data = &replacement;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_OK);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_OK);
   g_assert_true (replacement.fired);
   memset (contents, 0, sizeof contents);
   g_assert_cmpint (read (final.fd, contents, 4), ==, 4);
@@ -761,7 +774,7 @@ test_posix_resolver_open_provisioned_final_exact (void)
   graph.checkpoint = NULL;
   graph.checkpoint_data = NULL;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_cmpint (g_remove (final_path), ==, 0);
   g_assert_cmpint (g_remove (stage_backup), ==, 0);
@@ -771,11 +784,12 @@ test_posix_resolver_open_provisioned_final_exact (void)
    * result could only have come from following the foreign final name. */
   create_provisioned_pair (stage_path, final_path);
   replacement = (ProvisionedFinalReplacement) {
-  "provisioned-final-validated", final_path, final_backup, FALSE};
+    "provisioned-final-validated", final_path, final_backup, FALSE
+  };
   graph.checkpoint = replace_provisioned_name;
   graph.checkpoint_data = &replacement;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_true (replacement.fired);
   g_assert_cmpint (final.fd, ==, -1);
   g_clear_pointer (&foreign, g_free);
@@ -803,20 +817,20 @@ test_posix_resolver_provisioned_final_rejects_directory_replacement (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph);
   g_autofree gchar *stage_path = g_build_filename (graph_path,
-      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
   g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
-      NULL);
+          NULL);
   create_provisioned_pair (stage_path, final_path);
 
   g_autofree gchar *root_backup = g_strdup_printf ("%s-old", root);
   g_assert_cmpint (g_rename (root, root_backup), ==, 0);
   g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_rmdir (root), ==, 0);
   g_assert_cmpint (g_rename (root_backup, root), ==, 0);
 
@@ -824,7 +838,7 @@ test_posix_resolver_provisioned_final_rejects_directory_replacement (void)
   g_assert_cmpint (g_rename (graph_path, graph_backup), ==, 0);
   g_assert_cmpint (g_mkdir (graph_path, 0700), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
-      (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_rmdir (graph_path), ==, 0);
   g_assert_cmpint (g_rename (graph_backup, graph_path), ==, 0);
 
@@ -848,20 +862,37 @@ test_posix_provisioned_pair_authority (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph);
   g_autofree gchar *stage_path = g_build_filename (graph_path,
-      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
   g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
-      NULL);
+          NULL);
 
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, "01890F47-3C4B-7CC2-B8C4-DC0C0C070544", &pair), ==,
+        (&graph, "01890F47-3C4B-7CC2-B8C4-DC0C0C070544", &pair), ==,
       WYRELOG_E_INVALID);
   g_assert_null (pair);
+#ifdef __APPLE__
+  gboolean checkpoint_fired = FALSE;
+  graph.checkpoint = record_unexpected_provisioned_checkpoint;
+  graph.checkpoint_data = &checkpoint_fired;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &pair), ==,
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+  g_assert_null (pair);
+  g_assert_false (checkpoint_fired);
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (final_path, G_FILE_TEST_EXISTS));
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+  g_assert_cmpint (count_open_fds (), ==, baseline_fds);
+  return;
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &pair), ==,
       WYRELOG_E_NOT_FOUND);
   g_assert_null (pair);
   create_provisioned_pair (stage_path, final_path);
@@ -869,12 +900,12 @@ test_posix_provisioned_pair_authority (void)
       g_build_filename (graph_path, "third-alias", NULL);
   g_assert_cmpint (link (final_path, third_alias), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
   g_assert_null (pair);
   g_assert_cmpint (g_remove (third_alias), ==, 0);
   gint generic_fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", TRUE, &generic_fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", TRUE, &generic_fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (generic_fd, ==, -1);
 
   g_autofree gchar *final_backup = g_strdup_printf ("%s-acquire", final_path);
@@ -885,25 +916,27 @@ test_posix_provisioned_pair_authority (void)
   graph.checkpoint = replace_provisioned_name;
   graph.checkpoint_data = &replacement;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
   g_assert_true (replacement.fired);
   g_assert_null (pair);
   g_assert_cmpint (g_remove (stage_path), ==, 0);
   g_assert_cmpint (g_rename (stage_backup, stage_path), ==, 0);
 
   replacement = (ProvisionedFinalReplacement) {
-  "provisioned-pair-pre-writable-open", final_path, final_backup, FALSE};
+    "provisioned-pair-pre-writable-open", final_path, final_backup, FALSE
+  };
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
   g_assert_true (replacement.fired);
   g_assert_null (pair);
   g_assert_cmpint (g_remove (final_path), ==, 0);
   g_assert_cmpint (g_rename (final_backup, final_path), ==, 0);
 
   replacement = (ProvisionedFinalReplacement) {
-  "provisioned-pair-post-writable-open", final_path, final_backup, FALSE};
+    "provisioned-pair-post-writable-open", final_path, final_backup, FALSE
+  };
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_POLICY);
   g_assert_true (replacement.fired);
   g_assert_null (pair);
   g_assert_cmpint (g_remove (final_path), ==, 0);
@@ -912,7 +945,7 @@ test_posix_provisioned_pair_authority (void)
   graph.checkpoint_data = NULL;
 
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-      (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_OK);
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (pair), ==,
       WYRELOG_E_OK);
 
@@ -967,6 +1000,7 @@ test_posix_provisioned_pair_authority (void)
   wyl_fact_graph_provisioned_pair_free (pair);
   remove_tree (root);
   g_assert_cmpint (count_open_fds (), ==, baseline_fds);
+#endif
 }
 
 static void
@@ -982,9 +1016,9 @@ test_posix_resolver_exact_stage_create_open_publish (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpstr (stage.stage_basename, ==,
       "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite");
   g_assert_cmpstr (stage.final_basename, ==, "facts.duckdb");
@@ -993,7 +1027,7 @@ test_posix_resolver_exact_stage_create_open_publish (void)
   wyl_fact_graph_stage_clear (&stage);
 
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
 #ifdef __linux__
   g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
       WYRELOG_E_OK);
@@ -1006,7 +1040,7 @@ test_posix_resolver_exact_stage_create_open_publish (void)
   /* A post-link crash leaves the precise stage and final aliases.  That is
    * the only nlink=2 form the exact reopen API accepts. */
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   wyl_fact_graph_stage_clear (&stage);
 #else
   g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
@@ -1036,7 +1070,7 @@ test_posix_resolver_exact_stage_rejects_conflicts_and_invalid_ids (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   static const gchar *invalid[] = {
     "", "../01890f47-3c4b-7cc2-b8c4-dc0c0c070544",
     "01890f47-3c4b-6cc2-b8c4-dc0c0c070544",
@@ -1044,14 +1078,14 @@ test_posix_resolver_exact_stage_rejects_conflicts_and_invalid_ids (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
     g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-            invalid[i], &stage), ==, WYRELOG_E_INVALID);
+        invalid[i], &stage), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_NOT_FOUND);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (write (stage.fd, "first", 5), ==, 5);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          exact_operation_uuid, &conflict), ==, WYRELOG_E_BUSY);
+      exact_operation_uuid, &conflict), ==, WYRELOG_E_BUSY);
   gchar buffer[6] = { 0 };
   g_assert_cmpint (pread (stage.fd, buffer, 5, 0), ==, 5);
   g_assert_cmpstr (buffer, ==, "first");
@@ -1078,13 +1112,13 @@ test_posix_resolver_exact_stage_adversarial_states (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path =
       wyl_fact_graph_directory_descriptive_path (&graph);
   g_autofree gchar *stage_path = g_build_filename (graph_path,
-      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
   g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
-      NULL);
+          NULL);
   g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
   g_assert_true (g_file_set_contents (outside, "outside", -1, NULL));
   g_assert_cmpint (g_chmod (outside, 0600), ==, 0);
@@ -1092,37 +1126,37 @@ test_posix_resolver_exact_stage_adversarial_states (void)
   /* A symlink at the recorded name is rejected and never removed. */
   g_assert_cmpint (symlink (outside, stage_path), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
   g_assert_true (g_file_test (stage_path, G_FILE_TEST_IS_SYMLINK));
   g_assert_cmpint (g_remove (stage_path), ==, 0);
 
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (write (stage.fd, "held", 4), ==, 4);
   wyl_fact_graph_stage_clear (&stage);
   g_autofree gchar *alias = g_build_filename (graph_path, "foreign-link",
-      NULL);
+          NULL);
   g_assert_cmpint (link (stage_path, alias), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
   g_assert_true (g_file_test (alias, G_FILE_TEST_IS_REGULAR));
   g_assert_cmpint (g_remove (alias), ==, 0);
 
   /* The one permitted two-link form is the recorded stage plus final. */
   g_assert_cmpint (link (stage_path, final_path), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   wyl_fact_graph_stage_clear (&stage);
   g_assert_cmpint (link (stage_path, alias), ==, 0);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (alias), ==, 0);
   g_assert_cmpint (g_remove (final_path), ==, 0);
 
   /* The held descriptor is the only link source.  Replacing its name during
    * the test seam cannot publish the foreign replacement. */
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   g_autofree gchar *backup = g_strdup_printf ("%s-held", stage_path);
   ExactStageReplacement replacement = { stage_path, backup, FALSE };
   graph.checkpoint = replace_exact_stage_name;
@@ -1169,11 +1203,11 @@ test_posix_resolver_exact_stage_collision_and_durability (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *final_path =
       wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (write (stage.fd, "held", 4), ==, 4);
   g_assert_true (g_file_set_contents (final_path, "foreign", -1, NULL));
   g_assert_cmpint (g_chmod (final_path, 0600), ==, 0);
@@ -1238,12 +1272,12 @@ test_posix_resolver_exact_stage_create_sync_failure (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   ExactStageFault fault = { "stage-created", FALSE };
   graph.checkpoint = fail_exact_stage_checkpoint_once;
   graph.checkpoint_data = &fault;
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_IO);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_IO);
   g_assert_true (fault.fired);
   g_assert_cmpint (stage.fd, ==, -1);
   /* Failure never advertises a durable create, but it also never unlinks the
@@ -1251,20 +1285,21 @@ test_posix_resolver_exact_stage_create_sync_failure (void)
   graph.checkpoint = NULL;
   graph.checkpoint_data = NULL;
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+      exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
   wyl_fact_graph_stage_clear (&stage);
   fault = (ExactStageFault) {
-  "stage-create-parent-synced", FALSE};
+    "stage-create-parent-synced", FALSE
+  };
   graph.checkpoint = fail_exact_stage_checkpoint_once;
   graph.checkpoint_data = &fault;
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &stage), ==, WYRELOG_E_IO);
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &stage), ==, WYRELOG_E_IO);
   g_assert_true (fault.fired);
   g_assert_cmpint (stage.fd, ==, -1);
   graph.checkpoint = NULL;
   graph.checkpoint_data = NULL;
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
-          "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &stage), ==, WYRELOG_E_OK);
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &stage), ==, WYRELOG_E_OK);
   wyl_fact_graph_stage_clear (&stage);
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
@@ -1309,7 +1344,7 @@ test_posix_resolver_opens_nested_relative_regular_file (void)
   g_assert_cmpint (g_chmod (path, 0600), ==, 0);
 
   g_assert_true (wyl_fact_graph_relative_path_is_valid
-      ("tenant/graph/legacy/nested/facts.duckdb"));
+        ("tenant/graph/legacy/nested/facts.duckdb"));
   static const gchar *invalid[] = {
     "", "/", ".", "..", "tenant//graph", "tenant/./graph",
     "tenant/../graph", "tenant\\graph", "tenant:graph",
@@ -1321,7 +1356,7 @@ test_posix_resolver_opens_nested_relative_regular_file (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          "tenant/graph/legacy/nested/facts.duckdb", &file), ==, WYRELOG_E_OK);
+      "tenant/graph/legacy/nested/facts.duckdb", &file), ==, WYRELOG_E_OK);
   g_assert_cmpuint (file.size_bytes, ==, 4);
   gchar contents[5] = { 0 };
   g_assert_cmpint (read (file.fd, contents, 4), ==, 4);
@@ -1343,11 +1378,11 @@ test_posix_resolver_rejects_hardlink_and_aliases (void)
   g_autofree gchar *legacy = g_build_filename (graph, "legacy", NULL);
   g_autofree gchar *path = g_build_filename (legacy, "facts.duckdb", NULL);
   g_autofree gchar *hardlink = g_build_filename (legacy, "facts-hard.duckdb",
-      NULL);
+          NULL);
   g_autofree gchar *branch_link = g_build_filename (graph, "legacy-link",
-      NULL);
+          NULL);
   g_autofree gchar *final_link = g_build_filename (legacy, "facts-link.duckdb",
-      NULL);
+          NULL);
   g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
 
   g_assert_cmpint (g_mkdir (tenant, 0700), ==, 0);
@@ -1360,20 +1395,20 @@ test_posix_resolver_rejects_hardlink_and_aliases (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          "tenant/graph/legacy/facts.duckdb", &file), ==, WYRELOG_E_POLICY);
+      "tenant/graph/legacy/facts.duckdb", &file), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_unlink (hardlink), ==, 0);
 
   g_assert_true (g_file_set_contents (outside, "outside", -1, NULL));
   g_assert_cmpint (g_chmod (outside, 0600), ==, 0);
   g_assert_cmpint (symlink (outside, branch_link), ==, 0);
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          "tenant/graph/legacy-link/facts.duckdb", &file), ==,
+      "tenant/graph/legacy-link/facts.duckdb", &file), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (branch_link), ==, 0);
 
   g_assert_cmpint (symlink (outside, final_link), ==, 0);
   g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
-          "tenant/graph/legacy/facts-link.duckdb", &file), ==,
+      "tenant/graph/legacy/facts-link.duckdb", &file), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (final_link), ==, 0);
 
@@ -1394,14 +1429,14 @@ test_posix_resolver_publish_retries_converge (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
 
   static const gchar *points[] = { "stage-linked", "stage-unlinked" };
   for (gsize i = 0; i < G_N_ELEMENTS (points); i++) {
     g_autofree gchar *final = g_strdup_printf ("facts-%zu.duckdb", i);
     WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
     g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph, final,
-            &stage), ==, WYRELOG_E_OK);
+        &stage), ==, WYRELOG_E_OK);
     PublishFault fault = {.point = points[i] };
     graph.checkpoint = fail_publish_checkpoint_once;
     graph.checkpoint_data = &fault;
@@ -1441,11 +1476,11 @@ test_posix_resolver_rejects_stage_tampering_and_cross_graph_use (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator_a, TRUE, &graph_a), ==, WYRELOG_E_OK);
+      &locator_a, TRUE, &graph_a), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator_b, TRUE, &graph_b), ==, WYRELOG_E_OK);
+      &locator_b, TRUE, &graph_b), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create (&graph_a,
-          "facts.duckdb", &stage), ==, WYRELOG_E_OK);
+      "facts.duckdb", &stage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_publish (&graph_b, &stage), ==,
       WYRELOG_E_INVALID);
   g_autofree gchar *valid_final = g_steal_pointer (&stage.final_basename);
@@ -1515,13 +1550,13 @@ test_posix_resolver_checkpoint_replacements_fail_closed (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   wyl_fact_graph_directory_clear (&graph);
 
   g_autofree gchar *tenant = g_build_filename (root,
-      locator.tenant_component, NULL);
+          locator.tenant_component, NULL);
   g_autofree gchar *graph_path = g_build_filename (tenant,
-      locator.graph_component, NULL);
+          locator.graph_component, NULL);
   static const gchar *points[] = {
     "root-opened", "tenant-opened", "graph-opened",
   };
@@ -1537,15 +1572,15 @@ test_posix_resolver_checkpoint_replacements_fail_closed (void)
     wyl_fact_graph_resolver_set_checkpoint_for_test (&resolver,
         replace_at_resolver_checkpoint, &race);
     g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-            &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
+        &locator, FALSE, &graph), ==, WYRELOG_E_POLICY);
     restore_raced_target (&race);
   }
 
   wyl_fact_graph_resolver_set_checkpoint_for_test (&resolver, NULL, NULL);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
-          &locator, FALSE, &graph), ==, WYRELOG_E_OK);
+      &locator, FALSE, &graph), ==, WYRELOG_E_OK);
   g_autofree gchar *file = g_build_filename (graph_path, "facts.duckdb",
-      NULL);
+          NULL);
   g_assert_true (g_file_set_contents (file, "db", 2, NULL));
   g_assert_cmpint (g_chmod (file, 0600), ==, 0);
   g_autofree gchar *backup = g_strdup_printf ("%s-raced", file);
@@ -1562,7 +1597,7 @@ test_posix_resolver_checkpoint_replacements_fail_closed (void)
   graph.checkpoint_data = &file_race;
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
-          "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
+      "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, -1);
   restore_raced_target (&file_race);
 
@@ -1629,7 +1664,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-graph-locator/posix/provisioned-pair-authority",
       test_posix_provisioned_pair_authority);
   g_test_add_func
-      ("/fact-graph-locator/posix/provisioned-final-directory-replacement",
+    ("/fact-graph-locator/posix/provisioned-final-directory-replacement",
       test_posix_resolver_provisioned_final_rejects_directory_replacement);
   g_test_add_func ("/fact-graph-locator/posix/publish-retry",
       test_posix_resolver_publish_retries_converge);

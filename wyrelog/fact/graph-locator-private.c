@@ -1615,15 +1615,18 @@ wyl_fact_graph_directory_open_provisioned_pair_exact
     *out_pair = NULL;
   if (directory == NULL || out_pair == NULL)
     return WYRELOG_E_INVALID;
+  g_autofree gchar *stage_basename = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+          &stage_basename);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 #ifdef __APPLE__
-  (void) operation_uuid;
   return WYRELOG_E_POLICY;
 #else
 
   WylFactGraphRegularFile held =
       (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
-  wyrelog_error_t rc =
-      wyl_fact_graph_directory_open_provisioned_final_exact (directory,
+  rc = wyl_fact_graph_directory_open_provisioned_final_exact (directory,
           operation_uuid, &held);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1643,9 +1646,8 @@ wyl_fact_graph_directory_open_provisioned_pair_exact
   pair->expected_inode = held.inode;
   pair->expected_owner = (guint64) geteuid ();
   pair->operation_uuid = try_strdup (operation_uuid);
-  rc = provisioning_stage_name_from_operation (operation_uuid,
-          &pair->stage_basename);
-  if (pair->operation_uuid == NULL)
+  pair->stage_basename = g_steal_pointer (&stage_basename);
+  if (pair->operation_uuid == NULL || pair->stage_basename == NULL)
     rc = WYRELOG_E_NOMEM;
   if (rc == WYRELOG_E_OK)
     rc = directory_clone (directory, &pair->directory);
