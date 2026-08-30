@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sqlite3.h>
 #include <sys/stat.h>
 
 #include "fact-test-support.h"
 #include "fact/graph-locator-private.h"
-#include "fact/provisioning-construct-private.h"
+#include "fact/provisioning-run-private.h"
 
 static const gchar *
 error_name (wyrelog_error_t rc)
@@ -64,7 +65,7 @@ remove_root (const gchar *root)
 static void
 report_failure (wyrelog_error_t rc, const gchar *root,
     const gchar *tenant_id, const gchar *graph_id,
-    const gchar *operation_uuid)
+    const gchar *stage_basename)
 {
   g_autofree gchar *tenant_component = NULL;
   g_autofree gchar *graph_component = NULL;
@@ -76,15 +77,14 @@ report_failure (wyrelog_error_t rc, const gchar *root,
         error_name (rc), rc);
     return;
   }
-  g_autofree gchar *stage_basename =
-      g_strdup_printf ("provision-%s.sqlite", operation_uuid);
-  g_autofree gchar *stage_path = g_build_filename (root, tenant_component,
-          graph_component, stage_basename, NULL);
+  g_autofree gchar *stage_path = stage_basename == NULL ? NULL :
+      g_build_filename (root, tenant_component, graph_component,
+          stage_basename, NULL);
   g_autofree gchar *final_path = g_build_filename (root, tenant_component,
           graph_component, "facts.duckdb", NULL);
   struct stat stage_status;
   struct stat final_status;
-  gboolean has_stage = stat (stage_path, &stage_status) == 0;
+  gboolean has_stage = stage_path != NULL && stat (stage_path, &stage_status) == 0;
   gboolean has_final = stat (final_path, &final_status) == 0;
   gboolean same_inode = has_stage && has_final
       && stage_status.st_dev == final_status.st_dev
@@ -96,10 +96,36 @@ report_failure (wyrelog_error_t rc, const gchar *root,
       has_final ? (guint64) final_status.st_nlink : 0);
 }
 
+static gboolean
+exec_ok (sqlite3 *db, const gchar *sql)
+{
+  char *message = NULL;
+  int rc = sqlite3_exec (db, sql, NULL, NULL, &message);
+  if (rc != SQLITE_OK)
+    g_printerr ("sqlite error: %s\n", message != NULL ? message : "unknown");
+  sqlite3_free (message);
+  return rc == SQLITE_OK;
+}
+
+static gboolean
+seed_graph (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
+    "VALUES ('%s',0,1,1);"
+    "INSERT INTO fact_graphs "
+    "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+    "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
+    "('%s','%s','file:///legacy','/legacy',1,'%s',0,1,1,NULL);",
+    tenant_id, tenant_id, graph_id, tenant_id);
+  return exec_ok (wyl_policy_store_get_db (store), sql);
+}
+
 int
 main (int argc, char **argv)
 {
-  if (argc != 5)
+  if (argc != 4)
     return 2;
   for (gint i = 1; i < argc; i++) {
     if (argv[i] == NULL || argv[i][0] == '\0')
@@ -108,44 +134,50 @@ main (int argc, char **argv)
 
   const gchar *tenant_id = argv[1];
   const gchar *graph_id = argv[2];
-  const gchar *operation_uuid = argv[3];
-  const gchar *store_uuid = argv[4];
+  const gchar *store_uuid = argv[3];
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = wyl_test_make_secure_fact_root
+  g_autofree gchar *container = wyl_test_make_secure_fact_root
         ("wyl-fact-store-forget-transaction-XXXXXX", &error);
-  if (root == NULL || error != NULL || !g_path_is_absolute (root)) {
+  if (container == NULL || error != NULL || !g_path_is_absolute (container)) {
     g_printerr ("secure root creation failed\n");
     return 1;
   }
-  g_autofree gchar *stage_basename =
-      g_strdup_printf ("provision-%s.sqlite", operation_uuid);
-  WylPolicyGraphProvisioningRecord record = { 0 };
-  record.op_uuid = (gchar *) operation_uuid;
-  record.tenant_id = (gchar *) tenant_id;
-  record.graph_id = (gchar *) graph_id;
-  record.store_uuid = (gchar *) store_uuid;
-  record.stage_basename = stage_basename;
-  record.expected_lifecycle_generation = 1;
-  record.expected_reconciliation_generation = 0;
-  record.phase = WYL_POLICY_GRAPH_PROVISIONING_RESERVED;
-  WylPolicyGraphAuthorityRecord authority = { 0 };
-  authority.tenant_id = (gchar *) tenant_id;
-  authority.graph_id = (gchar *) graph_id;
-  authority.lifecycle_state = WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING;
-  authority.store_uuid = (gchar *) store_uuid;
-  authority.format_version = 1;
-  authority.path_encoding_version = 1;
-  authority.lifecycle_generation = 1;
-  authority.reconciliation_generation = 0;
-  authority.has_store_identity = TRUE;
-
-  wyrelog_error_t rc = wyl_fact_graph_provisioning_construct (root, &record,
-          &authority);
+  g_autofree gchar *root = g_build_filename (container, "facts", NULL);
+  g_autofree gchar *policy_path = g_build_filename (container, "policy.sqlite",
+          NULL);
+  if (g_mkdir (root, 0700) != 0) {
+    g_printerr ("fact root creation failed\n");
+    remove_root (container);
+    return 1;
+  }
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyrelog_error_t rc = wyl_policy_store_open (policy_path, &store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_create_schema (store);
+  if (rc == WYRELOG_E_OK && !seed_graph (store, tenant_id, graph_id))
+    rc = WYRELOG_E_POLICY;
+  const WylPolicyGraphProvisioningInput input = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .store_uuid = store_uuid,
+    .format_version = 1,
+    .path_encoding_version = 1,
+    .expected_lifecycle_generation = 0,
+    .expected_reconciliation_generation = 0,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioning_run (store, &input, root, &record);
   if (rc == WYRELOG_E_OK) {
-    g_print ("%s\n", root);
+    wyl_policy_graph_provisioning_record_free (record);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    g_print ("%s\n%s\n", root, policy_path);
     return 0;
   }
-  report_failure (rc, root, tenant_id, graph_id, operation_uuid);
-  remove_root (root);
+  report_failure (rc, root, tenant_id, graph_id,
+      record != NULL ? record->stage_basename : NULL);
+  wyl_policy_graph_provisioning_record_free (record);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  remove_root (container);
   return 1;
 }

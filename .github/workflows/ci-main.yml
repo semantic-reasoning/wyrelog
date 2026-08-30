@@ -239,21 +239,11 @@ jobs:
             test-fact-store-forget-transaction \
             test-fact-store-forget-transaction-provision-helper \
             test-fact-store-forget-transaction-provisioned
-          # macOS secure provisioning currently returns POLICY; #921 owns
-          # restoring its provisioned runtime coverage. Keep all targets built.
-          if [ "$RUNNER_OS" = Linux ]; then
-            meson test -C build-secure-duckdb --no-rebuild \
-              fact-store-provisioned \
-              --print-errorlogs
-          fi
           meson test -C build-secure-duckdb --no-rebuild \
+            fact-store-provisioned \
             fact-store-forget-transaction \
+            fact-store-forget-transaction-provisioned \
             --print-errorlogs
-          if [ "$RUNNER_OS" = Linux ]; then
-            meson test -C build-secure-duckdb --no-rebuild \
-              fact-store-forget-transaction-provisioned \
-              --print-errorlogs
-          fi
 
       - name: Remove secure DuckDB compile swap
         if: ${{ runner.environment == 'github-hosted' && (always() && runner.os == 'Linux') }}
