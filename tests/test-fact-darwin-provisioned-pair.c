@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -94,7 +95,18 @@ fixture_create (void)
     .graph = WYL_FACT_GRAPH_DIRECTORY_INIT,
   };
   g_autoptr (GError) error = NULL;
-  fixture.root = g_dir_make_tmp ("wyl-darwin-pair-XXXXXX", &error);
+  g_autofree gchar *created =
+      g_dir_make_tmp ("wyl-darwin-pair-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (created);
+  fixture.root = realpath (created, NULL);
+  if (fixture.root == NULL) {
+    gint saved_errno = errno;
+    (void) g_rmdir (created);
+    g_set_error (&error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  }
   g_assert_no_error (error);
   g_assert_nonnull (fixture.root);
   g_assert_cmpint (g_chmod (fixture.root, 0700), ==, 0);
