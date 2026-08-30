@@ -212,7 +212,8 @@ jobs:
             test-fact-artifact-transition-posix \
             test-secure-duckdb-bridge \
             test-secure-duckdb-filesystem \
-            test-secure-duckdb-recording-filesystem
+            test-secure-duckdb-recording-filesystem \
+            test-fact-replay
           meson test -C build-secure-duckdb --no-rebuild \
             fact-artifact-inventory-contract \
             fact-artifact-inventory-consumer-contract \
@@ -225,6 +226,7 @@ jobs:
             fact-artifact-transition-posix \
             secure-duckdb-bridge \
             secure-duckdb-filesystem secure-duckdb-recording-filesystem \
+            fact-replay \
             --print-errorlogs
           if meson setup build-secure-duckdb-prebuilt \
               -Denable_fact_store=enabled \

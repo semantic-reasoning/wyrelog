@@ -12,6 +12,12 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "wyrelog/fact/provisioning-run-private.h"
+#include "wyrelog/fact/store-open-private.h"
+#include "wyrelog/wyl-id-private.h"
+#endif
+
 #define TEST(name) g_test_message ("%s", name)
 
 wyrelog_error_t wyl_engine_open_source (const gchar * dl_src,
@@ -906,6 +912,391 @@ test_boot_converges_forget_on_sealed_graph (void)
 
   remove_tree (root);
 }
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+static void
+provisioned_871_create_graph (wyl_policy_store_t *policy, const gchar *root,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  const wyl_policy_fact_graph_column_t graph_columns[] = {
+    {"order_id", "symbol"},
+    {"amount", "int64"},
+    {"expedited", "bool"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"orders-rel", graph_columns, G_N_ELEMENTS (graph_columns)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph_opts = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .fact_root = root,
+    .schema_version = 1,
+    .owner_scope = tenant_id,
+    .relations = graph_relations,
+    .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_provisioning (policy,
+      &graph_opts, NULL, op_uuid), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (op_uuid, !=, "");
+  g_assert_cmpint (wyl_fact_graph_provisioning_recover (policy, op_uuid, root,
+      NULL), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &schema), ==, WYRELOG_E_OK);
+}
+
+static gchar *
+provisioned_871_append_one (wyl_fact_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *batch_id,
+    const gchar *idempotency_key, const gchar *order_id, gint64 amount,
+    gboolean expedited)
+{
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_assert_nonnull (table);
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = order_id},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = amount},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = expedited},
+  };
+  wyl_fact_row_t rows[] = {
+    {values, G_N_ELEMENTS (values)},
+  };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = 1,
+    .source = "issue-871",
+    .idempotency_key = idempotency_key,
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+      &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  return g_steal_pointer (&table);
+}
+
+static gint64
+provisioned_871_count (wyl_fact_store_t *store, const gchar *sql)
+{
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (wyl_fact_store_get_connection (store), sql,
+      &result), ==, DuckDBSuccess);
+  g_assert_cmpuint (duckdb_row_count (&result), ==, 1);
+  gint64 value = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return value;
+}
+
+static gchar *
+provisioned_871_text (wyl_fact_store_t *store, const gchar *sql)
+{
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (wyl_fact_store_get_connection (store), sql,
+      &result), ==, DuckDBSuccess);
+  g_assert_cmpuint (duckdb_row_count (&result), ==, 1);
+  gchar *value = duckdb_value_varchar (&result, 0, 0);
+  g_assert_nonnull (value);
+  gchar *copy = g_strdup (value);
+  duckdb_free (value);
+  duckdb_destroy_result (&result);
+  return copy;
+}
+
+typedef struct
+{
+  guint seen;
+  gboolean saw_active_ready;
+  gboolean saw_sealed_without_engine;
+} Provisioned871StatusProbe;
+
+static wyrelog_error_t
+provisioned_871_status_cb (const wyl_fact_graph_status_t *status,
+    gpointer user_data)
+{
+  Provisioned871StatusProbe *probe = user_data;
+  probe->seen++;
+  if (g_strcmp0 (status->tenant_id, "tenant-871") == 0
+      && g_strcmp0 (status->graph_id, "active-orders") == 0
+      && status->state == WYL_FACT_GRAPH_STATE_READY && status->queryable
+      && status->last_error_class == NULL)
+    probe->saw_active_ready = TRUE;
+  if (g_strcmp0 (status->tenant_id, "tenant-871") == 0
+      && g_strcmp0 (status->graph_id, "sealed-orders") == 0
+      && status->state != WYL_FACT_GRAPH_STATE_READY && !status->queryable)
+    probe->saw_sealed_without_engine = TRUE;
+  return WYRELOG_E_OK;
+}
+#endif
+
+/* Issue #871: the legacy sealed-store path is covered above, but provisioned
+ * stores cross a distinct authority gate.  This case proves startup may open
+ * a retained SEALED pair to finish an already-recorded erasure without
+ * publishing an engine or changing the graph's authority. */
+static void
+test_boot_converges_forget_on_sealed_provisioned_graph (void)
+{
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_test_skip ("requires the secure DuckDB provisioned-store bridge");
+  return;
+#else
+  TEST ("opening a handle converges a provisioned sealed graph's pending "
+      "forget");
+  const gchar *tenant_id = "tenant-871";
+  const gchar *target_graph = "sealed-orders";
+  const gchar *control_graph = "active-orders";
+  const gchar *batch_id = "sealed-batch-871";
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-provisioned-sealed-871-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  WylPolicyGraphAuthorityRecord *sealed_authority = NULL;
+  g_autofree gchar *forget_op_uuid = NULL;
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
+        &created), ==, WYRELOG_E_OK);
+    g_assert_true (created);
+    provisioned_871_create_graph (policy, root, tenant_id, target_graph);
+    provisioned_871_create_graph (policy, root, tenant_id, control_graph);
+
+    WylPolicyGraphAuthorityRecord *target_active = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+        target_graph, &target_active), ==, WYRELOG_E_OK);
+    g_assert_nonnull (target_active);
+    g_assert_cmpint (target_active->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+    g_assert_cmpint (target_active->last_error_class, ==,
+        WYL_POLICY_GRAPH_ERROR_NONE);
+    g_assert_true (target_active->has_store_identity);
+    g_assert_nonnull (target_active->store_uuid);
+    g_assert_cmpstr (target_active->store_uuid, !=, "");
+
+    g_autoptr (wyl_fact_store_t) control_store = NULL;
+    g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+        tenant_id, control_graph, TRUE, &control_store), ==, WYRELOG_E_OK);
+    g_autofree gchar *control_table = provisioned_871_append_one
+          (control_store, tenant_id, control_graph, "control-batch-871",
+            "control-key-871", "order-b", 22, FALSE);
+    g_assert_cmpint (provisioned_871_count (control_store,
+        "SELECT COUNT(*) FROM fact_batches "
+        "WHERE batch_id = 'control-batch-871';"), ==, 1);
+    g_clear_pointer (&control_store, wyl_fact_store_close);
+
+    g_autoptr (wyl_fact_store_t) target_store = NULL;
+    g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+        tenant_id, target_graph, TRUE, &target_store), ==, WYRELOG_E_OK);
+    g_autofree gchar *target_table = provisioned_871_append_one
+          (target_store, tenant_id, target_graph, batch_id, "sealed-key-871",
+            "order-sealed", 71, TRUE);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+      {"expedited", "bool", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+            target_graph, columns, G_N_ELEMENTS (columns));
+    const wyl_fact_store_forget_options_t forget_opts = {
+      .batch_id = batch_id,
+      .operator_id = "operator-871",
+      .reason = "sealed-erasure-871",
+      .checkpoint = forget_crash_at,
+      .checkpoint_data = (gpointer) "after_intent",
+    };
+    g_assert_cmpint (wyl_fact_store_forget (target_store, &schema,
+        &forget_opts, NULL), ==, WYRELOG_E_IO);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_forget_intent "
+        "WHERE batch_id = 'sealed-batch-871' AND state = 'PENDING' "
+        "AND rows_purged = 1;"), ==, 1);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_forget_intent "
+        "WHERE batch_id = 'sealed-batch-871' AND state = 'COMPLETED';"), ==,
+        0);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_batches "
+        "WHERE batch_id = 'sealed-batch-871';"), ==, 1);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_event_log "
+        "WHERE batch_id = 'sealed-batch-871';"), ==, 1);
+    g_autofree gchar *projection_before_sql = g_strdup_printf
+          ("SELECT COUNT(*) FROM %s WHERE __wyl_batch_id = "
+            "'sealed-batch-871';", target_table);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        projection_before_sql), ==, 1);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_forget_audit "
+        "WHERE batch_id = 'sealed-batch-871';"), ==, 0);
+    forget_op_uuid = provisioned_871_text (target_store,
+            "SELECT op_uuid FROM fact_forget_intent "
+            "WHERE batch_id = 'sealed-batch-871' AND state = 'PENDING';");
+    g_assert_nonnull (forget_op_uuid);
+    g_clear_pointer (&target_store, wyl_fact_store_close);
+
+    g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, tenant_id,
+        target_graph), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+        target_graph, &sealed_authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (sealed_authority);
+    g_assert_cmpint (sealed_authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_cmpint (sealed_authority->last_error_class, ==,
+        WYL_POLICY_GRAPH_ERROR_NONE);
+    g_assert_true (sealed_authority->has_store_identity);
+    g_assert_cmpstr (sealed_authority->store_uuid, ==,
+        target_active->store_uuid);
+    g_assert_cmpuint (sealed_authority->format_version, ==,
+        target_active->format_version);
+    g_assert_cmpuint (sealed_authority->path_encoding_version, ==,
+        target_active->path_encoding_version);
+    g_assert_cmpuint (sealed_authority->lifecycle_generation, ==,
+        target_active->lifecycle_generation + 1);
+    g_assert_cmpuint (sealed_authority->reconciliation_generation, ==,
+        target_active->reconciliation_generation);
+    wyl_policy_graph_authority_record_free (target_active);
+  }
+
+  /* A genuinely fresh handle is the only thing allowed to drive reconcile. */
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    const WylHandleOpenOptions opts = {
+      .policy_store_path = policy_path,
+      .fact_root = root,
+    };
+    g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+          ("shop.ns", "orders-rel");
+    g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+    SnapshotProbe control = { observed, 0, FALSE };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+        tenant_id, control_graph, observed, handle_snapshot_cb, &control), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (control.count, ==, 1);
+    g_assert_true (control.saw_order_b);
+    SnapshotProbe sealed = { observed, 0, FALSE };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+        tenant_id, target_graph, observed, handle_snapshot_cb, &sealed), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpuint (sealed.count, ==, 0);
+    Provisioned871StatusProbe statuses = { 0 };
+    g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+        provisioned_871_status_cb, &statuses), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (statuses.seen, ==, 2);
+    g_assert_true (statuses.saw_active_ready);
+    g_assert_true (statuses.saw_sealed_without_engine);
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    WylPolicyGraphAuthorityRecord *after = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+        target_graph, &after), ==, WYRELOG_E_OK);
+    g_assert_nonnull (after);
+    g_assert_cmpint (after->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_cmpint (after->last_error_class, ==,
+        WYL_POLICY_GRAPH_ERROR_NONE);
+    g_assert_true (after->has_store_identity);
+    g_assert_cmpstr (after->store_uuid, ==, sealed_authority->store_uuid);
+    g_assert_cmpuint (after->format_version, ==,
+        sealed_authority->format_version);
+    g_assert_cmpuint (after->path_encoding_version, ==,
+        sealed_authority->path_encoding_version);
+    g_assert_cmpuint (after->lifecycle_generation, ==,
+        sealed_authority->lifecycle_generation);
+    g_assert_cmpuint (after->reconciliation_generation, ==,
+        sealed_authority->reconciliation_generation);
+    wyl_policy_graph_authority_record_free (after);
+
+    WylPolicyGraphAuthorityRecord *control_authority = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+        control_graph, &control_authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (control_authority);
+    g_assert_cmpint (control_authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+    g_assert_cmpint (control_authority->last_error_class, ==,
+        WYL_POLICY_GRAPH_ERROR_NONE);
+    wyl_policy_graph_authority_record_free (control_authority);
+
+    g_autoptr (wyl_fact_store_t) target_store = NULL;
+    g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+        tenant_id, target_graph, FALSE, &target_store), ==, WYRELOG_E_OK);
+    g_autofree gchar *pending_sql = g_strdup_printf
+          ("SELECT COUNT(*) FROM fact_forget_intent WHERE op_uuid = '%s' "
+            "AND state = 'PENDING';", forget_op_uuid);
+    g_autofree gchar *completed_sql = g_strdup_printf
+          ("SELECT COUNT(*) FROM fact_forget_intent WHERE op_uuid = '%s' "
+            "AND state = 'COMPLETED' AND rows_purged = 1;", forget_op_uuid);
+    g_assert_cmpint (provisioned_871_count (target_store, pending_sql), ==, 0);
+    g_assert_cmpint (provisioned_871_count (target_store, completed_sql), ==,
+        1);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_batches "
+        "WHERE batch_id = 'sealed-batch-871';"), ==, 0);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_event_log "
+        "WHERE batch_id = 'sealed-batch-871';"), ==, 0);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+      {"expedited", "bool", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+            target_graph, columns, G_N_ELEMENTS (columns));
+    g_autofree gchar *target_table =
+        wyl_fact_store_projection_table_name (&schema);
+    g_autofree gchar *projection_after_sql = g_strdup_printf
+          ("SELECT COUNT(*) FROM %s WHERE __wyl_batch_id = "
+            "'sealed-batch-871';", target_table);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        projection_after_sql), ==, 0);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_forget_audit "
+        "WHERE batch_id = 'sealed-batch-871';"), ==, 1);
+    g_assert_cmpint (provisioned_871_count (target_store,
+        "SELECT COUNT(*) FROM fact_forget_audit "
+        "WHERE batch_id = 'sealed-batch-871' "
+        "AND tenant_id = 'tenant-871' AND graph_id = 'sealed-orders' "
+        "AND operator = 'operator-871' AND reason = 'sealed-erasure-871' "
+        "AND rows_purged = 1;"), ==, 1);
+  }
+
+  wyl_policy_graph_authority_record_free (sealed_authority);
+  remove_tree (root);
+#endif
+}
+
 
 /* Leave a durable, unconverged erasure on a graph that is otherwise healthy.
  *
@@ -2108,6 +2499,9 @@ main (int argc, char **argv)
       test_status_is_not_ready_while_an_erasure_is_outstanding);
   g_test_add_func ("/fact-replay/boot-converges-forget-on-sealed-graph",
       test_boot_converges_forget_on_sealed_graph);
+  g_test_add_func
+    ("/fact-replay/boot-converges-forget-on-sealed-provisioned-graph",
+      test_boot_converges_forget_on_sealed_provisioned_graph);
   g_test_add_func ("/fact-replay/no-fact-root-is-not-a-probe-disagreement",
       test_no_fact_root_is_not_a_probe_disagreement);
   g_test_add_func ("/fact-replay/direct",

@@ -1229,11 +1229,13 @@ SECURE_HISTORICAL_COMPILE_TARGETS = (
     "test-secure-duckdb-bridge",
     "test-secure-duckdb-filesystem",
     "test-secure-duckdb-recording-filesystem",
+    "test-fact-replay",
 )
 SECURE_HISTORICAL_TESTS = (
     "secure-duckdb-bridge",
     "secure-duckdb-filesystem",
     "secure-duckdb-recording-filesystem",
+    "fact-replay",
 )
 SANITIZER_COMPILE_COMMAND = (
     "meson",
@@ -1313,8 +1315,8 @@ SECURE_POSIX_ACTIVE_COMMANDS = (
     "meson compile -C build-secure-duckdb -j 1 test-fact-darwin-provisioned-pair",
     "meson test -C build-secure-duckdb --no-rebuild fact-darwin-provisioned-pair --print-errorlogs",
     "fi",
-    '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-fact-artifact-transition-driver test-fact-artifact-transition-posix test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem',
-    "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-namespace-inventory fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-posix secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem --print-errorlogs",
+    '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-fact-artifact-transition-driver test-fact-artifact-transition-posix test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem test-fact-replay',
+    "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-namespace-inventory fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-posix secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem fact-replay --print-errorlogs",
     "if meson setup build-secure-duckdb-prebuilt -Denable_fact_store=enabled -Dduckdb_source=prebuilt -Denable_secure_duckdb_bridge=enabled; then",
     "echo 'secure DuckDB bridge unexpectedly accepted prebuilt DuckDB'",
     "exit 1",
