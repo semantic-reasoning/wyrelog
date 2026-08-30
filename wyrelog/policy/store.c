@@ -7907,6 +7907,82 @@ persist_policy_store_encrypted_checked (wyl_policy_store_t *store,
          (durable ? WYRELOG_E_OK : WYRELOG_E_IO));
 }
 
+static void graph_provisioning_poison_store
+  (wyl_policy_store_t * store, wyrelog_error_t error);
+
+wyrelog_error_t
+wyl_policy_store_coordinator_fence_acquire (wyl_policy_store_t *store,
+    WylPolicyStoreCoordinatorFence *out_fence)
+{
+  if (out_fence != NULL)
+    *out_fence = (WylPolicyStoreCoordinatorFence)
+        WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  if (store == NULL || store->db == NULL || out_fence == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_mutex *connection_mutex = sqlite3_db_mutex (store->db);
+  if (connection_mutex == NULL) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_INTERNAL;
+  }
+  sqlite3_mutex_enter (connection_mutex);
+  wyrelog_error_t rc = policy_store_terminal_gate (store);
+  if (rc == WYRELOG_E_OK && sqlite3_get_autocommit (store->db) == 0)
+    rc = WYRELOG_E_BUSY;
+  if (rc != WYRELOG_E_OK) {
+    sqlite3_mutex_leave (connection_mutex);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return rc;
+  }
+  out_fence->store = store;
+  out_fence->connection_mutex = connection_mutex;
+  out_fence->owner = g_thread_self ();
+  out_fence->graph_locked = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_coordinator_fence_publish (
+  WylPolicyStoreCoordinatorFence *fence)
+{
+  if (fence == NULL || fence->store == NULL || !fence->graph_locked
+      || fence->connection_mutex == NULL || fence->owner != g_thread_self ())
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = policy_store_terminal_gate (fence->store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!sqlite3_get_autocommit (fence->store->db))
+    return WYRELOG_E_BUSY;
+  if (!fence->store->encrypted)
+    return WYRELOG_E_OK;
+
+  gboolean publication_pin_valid = TRUE;
+  rc = graph_authority_migration_checkpoint (fence->store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COORDINATOR_PUBLICATION);
+  if (rc == WYRELOG_E_OK)
+    rc = persist_policy_store_encrypted_checked (fence->store,
+            &publication_pin_valid);
+  if (rc != WYRELOG_E_OK || !publication_pin_valid) {
+    rc = rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
+    graph_provisioning_poison_store (fence->store, rc);
+  }
+  return rc;
+}
+
+void
+wyl_policy_store_coordinator_fence_clear (
+  WylPolicyStoreCoordinatorFence *fence)
+{
+  if (fence == NULL || fence->store == NULL || !fence->graph_locked)
+    return;
+  g_assert (fence->owner == g_thread_self ());
+  sqlite3_mutex_leave ((sqlite3_mutex *) fence->connection_mutex);
+  g_rec_mutex_unlock (&fence->store->graph_authority_mutex);
+  *fence = (WylPolicyStoreCoordinatorFence)
+      WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+}
+
 wyrelog_error_t
 wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {

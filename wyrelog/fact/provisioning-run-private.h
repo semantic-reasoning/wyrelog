@@ -9,16 +9,17 @@ G_BEGIN_DECLS;
 /* Crash-safe provisioning coordinator: drives one per-graph store from
  * reservation to ACTIVE around the filesystem construct, keeping the policy
  * FSM (fact_graph_provisioning phase + coupled graph authority lifecycle) and
- * the on-disk retained pair consistent across every crash seam.  Still DARK:
- * no live create/open call path is rewired here.
+ * the platform filesystem authority consistent across every crash seam.  POSIX
+ * platforms other than Darwin retain the staged pair; Darwin binds its direct
+ * single-link final to durable operation evidence.  Still DARK: no live
+ * create/open call path is rewired here.
  *
- * The coordinator drives ONLY wyl_policy_store_graph_provisioning_transition;
- * that primitive atomically couples the graph authority (PROVISIONING -> ACTIVE
- * on verified->active, or -> DEGRADED on any fault).  The persisted provisioning
- * phase is the single source of truth for where to resume; every filesystem
- * step is idempotent so a resume re-executes the step for the persisted phase.
- * A step commits its filesystem effect first, then records the phase, so the
- * durable phase lags true progress by at most one seam. */
+ * Policy phase transitions atomically couple the graph authority
+ * (PROVISIONING -> ACTIVE on verified->active, or -> DEGRADED on a classified
+ * storage fault).  Darwin additionally publishes RESERVED, evidence, and every
+ * exact phase CAS to the authenticated canonical policy image before proceeding.
+ * The persisted phase is the source of truth for resume; filesystem steps are
+ * idempotent and commit before the phase that names their completion. */
 
 /* Reserve (mints the operation UUID + moves the authority to PROVISIONING) and
  * drive a fresh provisioning to ACTIVE.  If an in-flight operation already
@@ -40,6 +41,25 @@ wyrelog_error_t wyl_fact_graph_provisioning_run (wyl_policy_store_t * store,
 wyrelog_error_t wyl_fact_graph_provisioning_recover (wyl_policy_store_t * store,
     const gchar * op_uuid, const gchar * fact_root,
     WylPolicyGraphProvisioningRecord ** out_record);
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+typedef enum
+{
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_RESERVED_PUBLICATION = 0,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_FINAL_CREATION,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_EVIDENCE_PUBLICATION,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_STAGED_PUBLICATION,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_PUBLISHED_PUBLICATION,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_VERIFIED_PUBLICATION,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_ACTIVE_PUBLICATION,
+  WYL_FACT_GRAPH_DARWIN_COORDINATOR_BEFORE_FINAL_CREATION,
+} WylFactGraphDarwinCoordinatorCheckpoint;
+typedef void (*WylFactGraphDarwinCoordinatorTestHook)
+  (WylFactGraphDarwinCoordinatorCheckpoint checkpoint, const gchar * op_uuid,
+    gpointer user_data);
+void wyl_fact_graph_darwin_coordinator_set_test_hook
+  (WylFactGraphDarwinCoordinatorTestHook hook, gpointer user_data);
+#endif
 
 /* Reconcile one relation reserved in ACTIVATING state.  The caller must hold
  * the writable, graph-scoped fact-store lease.  Projection preparation and

@@ -15,7 +15,7 @@
 
 extern "C" G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
-    (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
 
 static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5",
     "secure DuckDB bridge requires DuckDB v1.5.5 headers");
@@ -37,6 +37,7 @@ struct WylSecureDuckdbBridge
   std::shared_ptr < WylSecureDuckdbHealth > health;
   WylSecureDuckdbMode mode = WYL_SECURE_DUCKDB_INIT_EMPTY;
   bool finalized = false;
+  bool preconstruction_provenance_failure = false;
 };
 
 namespace {
@@ -55,6 +56,9 @@ namespace {
   WylFactStorePairPreflightForTest pinned_pair_preflight_test_error_seam =
       WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
   wyrelog_error_t pinned_pair_preflight_test_error = WYRELOG_E_OK;
+  wyrelog_error_t pinned_pair_test_authority_error = WYRELOG_E_OK;
+  wyrelog_error_t pinned_pair_test_finalize_error = WYRELOG_E_OK;
+  wyrelog_error_t pinned_pair_test_r5_error = WYRELOG_E_OK;
 
   struct PinnedTestControl
   {
@@ -81,6 +85,9 @@ namespace {
     WylFactStorePairPreflightForTest preflight_error_seam =
         WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
     wyrelog_error_t preflight_error = WYRELOG_E_OK;
+    wyrelog_error_t authority_error = WYRELOG_E_OK;
+    wyrelog_error_t finalize_error = WYRELOG_E_OK;
+    wyrelog_error_t r5_error = WYRELOG_E_OK;
 
     void
     FirePreflight (WylFactStorePairPreflightForTest seam) const
@@ -92,7 +99,8 @@ namespace {
     PinnedTestControl
     Lifecycle () const
     {
-      return { lifecycle_hook, lifecycle_data };
+      return { lifecycle_hook, lifecycle_data, authority_error,
+               finalize_error, r5_error };
     }
   };
 
@@ -126,6 +134,9 @@ namespace {
       pinned_pair_preflight_test_hook_data,
       pinned_pair_preflight_test_error_seam,
       pinned_pair_preflight_test_error,
+      pinned_pair_test_authority_error,
+      pinned_pair_test_finalize_error,
+      pinned_pair_test_r5_error,
     };
     pinned_pair_test_hook = nullptr;
     pinned_pair_test_hook_data = nullptr;
@@ -134,6 +145,9 @@ namespace {
     pinned_pair_preflight_test_error_seam =
         WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
     pinned_pair_preflight_test_error = WYRELOG_E_OK;
+    pinned_pair_test_authority_error = WYRELOG_E_OK;
+    pinned_pair_test_finalize_error = WYRELOG_E_OK;
+    pinned_pair_test_r5_error = WYRELOG_E_OK;
     return result;
   }
 
@@ -147,9 +161,18 @@ namespace {
   {
     bridge->mode = read_only ? WYL_SECURE_DUCKDB_VALIDATE_ONLY
         : WYL_SECURE_DUCKDB_INIT_EMPTY;
-    auto filesystem =
-        wyl_secure_duckdb_filesystem_new (namespace_, read_only,
-        allow_temporary_storage);
+    duckdb::unique_ptr<WylSecureDuckdbFileSystem> filesystem;
+    try {
+      filesystem = wyl_secure_duckdb_filesystem_new (namespace_, read_only,
+              allow_temporary_storage);
+    } catch (const WylSecureDuckdbAuthorityException &)
+    {
+      /* The constructor has no health object to return when initial namespace
+       * or lease authority fails.  Preserve that typed origin on the bridge
+       * before propagating the original error. */
+      bridge->preconstruction_provenance_failure = true;
+      throw;
+    }
     bridge->health = filesystem->SharedHealth ();
     bridge->authority_lease.reset (filesystem->DetachLeaseOwnership ());
     config->options.access_mode = read_only ? duckdb::AccessMode::READ_ONLY
@@ -221,8 +244,8 @@ namespace {
             if (params[i].as.bytes.data == nullptr)
               return WYRELOG_E_IO;
             values.emplace_back (duckdb::string (
-                    reinterpret_cast<const char *>(params[i].as.bytes.data),
-                    params[i].as.bytes.length));
+                  reinterpret_cast<const char *>(params[i].as.bytes.data),
+                  params[i].as.bytes.length));
             break;
           default:
             return WYRELOG_E_IO;
@@ -451,7 +474,7 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
     return WYRELOG_E_POLICY;
   try {
     auto bridge = bridge_new_bounded (namespace_,
-        mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY);
+            mode == WYL_SECURE_DUCKDB_VALIDATE_ONLY);
     if (mode == WYL_SECURE_DUCKDB_INIT_EMPTY) {
       auto emptiness =
           bridge->
@@ -580,7 +603,7 @@ wyl_fact_store_pinned_set_test_hook (WylFactStorePinnedTestHook hook,
 
 extern "C" void
 wyl_fact_store_pinned_set_test_stage_errors
-    (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+  (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
     wyrelog_error_t r5_error)
 {
   std::lock_guard<std::mutex> lock (pinned_test_control_mutex);
@@ -591,7 +614,7 @@ wyl_fact_store_pinned_set_test_stage_errors
 
 extern "C" void
 wyl_fact_store_pinned_set_pair_test_hook_for_test
-    (WylFactStorePinnedTestHook hook, gpointer user_data)
+  (WylFactStorePinnedTestHook hook, gpointer user_data)
 {
   std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
   pinned_pair_test_hook = hook;
@@ -600,7 +623,7 @@ wyl_fact_store_pinned_set_pair_test_hook_for_test
 
 extern "C" void
 wyl_fact_store_pinned_set_pair_preflight_hook_for_test
-    (WylFactStorePairPreflightTestHook hook, gpointer user_data)
+  (WylFactStorePairPreflightTestHook hook, gpointer user_data)
 {
   std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
   pinned_pair_preflight_test_hook = hook;
@@ -609,20 +632,34 @@ wyl_fact_store_pinned_set_pair_preflight_hook_for_test
 
 extern "C" void
 wyl_fact_store_pinned_set_pair_preflight_error_for_test
-    (WylFactStorePairPreflightForTest seam, wyrelog_error_t error)
+  (WylFactStorePairPreflightForTest seam, wyrelog_error_t error)
 {
   std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
   pinned_pair_preflight_test_error_seam = seam;
   pinned_pair_preflight_test_error = error;
 }
 
+extern "C" void
+wyl_fact_store_pinned_set_pair_test_stage_errors_for_test
+  (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+    wyrelog_error_t r5_error)
+{
+  std::lock_guard<std::mutex> lock (pinned_pair_test_control_mutex);
+  pinned_pair_test_authority_error = authority_error;
+  pinned_pair_test_finalize_error = finalize_error;
+  pinned_pair_test_r5_error = r5_error;
+}
+
 static wyrelog_error_t
 open_identified_pinned_core (WylFactArtifactNamespace *namespace_,
     const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
     WylFactStoreIdentityResult *out_result,
+    WylFactStorePinnedFailureOrigin *out_failure_origin,
+    bool notify_failure_observed,
     const PinnedTestControl &control)
 {
   *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
+  *out_failure_origin = WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_NONE;
   wyl_fact_store_identity_process_guard_lock ();
   struct ProcessGuard
   {
@@ -635,8 +672,15 @@ open_identified_pinned_core (WylFactArtifactNamespace *namespace_,
   control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_PRECONSTRUCT);
   const auto r0_result =
       wyl_fact_artifact_namespace_revalidate (namespace_);
-  if (r0_result != WYRELOG_E_OK)
+  if (r0_result != WYRELOG_E_OK) {
+    *out_failure_origin = WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE;
+    if (notify_failure_observed)
+      control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_FAILURE_OBSERVED);
     return r0_result;
+  }
+  if (notify_failure_observed)
+    control.Fire (
+      WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_POSTREVALIDATE_PRECONSTRUCT);
 
   std::unique_ptr<WylSecureDuckdbBridge> bridge;
   try {
@@ -648,6 +692,7 @@ open_identified_pinned_core (WylFactArtifactNamespace *namespace_,
 
   PinnedLifecycleResults results;
   bool populated = false;
+  bool provenance_failure = false;
   try {
     bridge_populate_bounded (bridge.get (), namespace_,
         mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, false);
@@ -656,42 +701,62 @@ open_identified_pinned_core (WylFactArtifactNamespace *namespace_,
   {
     results.body = current_exception_error ();
   }
+  provenance_failure = bridge->preconstruction_provenance_failure;
 
   if (populated) {
     control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R1_POSTCONSTRUCT);
     const auto r1_result =
         pinned_authority_revalidate (bridge.get (), namespace_);
+    if (r1_result != WYRELOG_E_OK)
+      provenance_failure = true;
     if (results.body == WYRELOG_E_OK && r1_result != WYRELOG_E_OK)
       results.body = r1_result;
 
     control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R2_PREIDENTITY);
     const auto r2_result =
         pinned_authority_revalidate (bridge.get (), namespace_);
+    if (r2_result != WYRELOG_E_OK)
+      provenance_failure = true;
     if (results.body == WYRELOG_E_OK && r2_result != WYRELOG_E_OK)
       results.body = r2_result;
 
     if (results.body == WYRELOG_E_OK) {
+      if (notify_failure_observed)
+        control.Fire (
+          WYL_FACT_STORE_PINNED_RENDEZVOUS_INTERNAL_PREIDENTITY);
       WylFactStoreIdentityExecutor executor = {
         bridge->connection.get (), cpp_identity_execute, nullptr
       };
       results.body =
           wyl_fact_store_identity_execute (&executor, identity, mode,
-          out_result);
+              out_result);
     }
   }
 
   const bool storage_interacted = populated
       || bridge->authority_lease != nullptr || bridge->health != nullptr;
-  if (!storage_interacted)
+  if (!storage_interacted) {
+    if (results.body != WYRELOG_E_OK) {
+      *out_failure_origin = provenance_failure ?
+          WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE :
+          WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_STORAGE;
+      if (provenance_failure && notify_failure_observed)
+        control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_FAILURE_OBSERVED);
+    }
     return results.body;
+  }
 
   control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R3_POSTIDENTITY);
   results.authority =
       pinned_authority_revalidate (bridge.get (), namespace_);
+  if (results.authority != WYRELOG_E_OK)
+    provenance_failure = true;
 
   control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R4_PREFINALIZE);
   const auto r4_result =
       pinned_authority_revalidate (bridge.get (), namespace_);
+  if (r4_result != WYRELOG_E_OK)
+    provenance_failure = true;
   if (results.authority == WYRELOG_E_OK && r4_result != WYRELOG_E_OK)
     results.authority = r4_result;
   if (results.authority == WYRELOG_E_OK
@@ -710,17 +775,30 @@ open_identified_pinned_core (WylFactArtifactNamespace *namespace_,
 
   control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE);
   results.r5 = pinned_authority_revalidate (bridge.get (), namespace_);
+  if (results.r5 != WYRELOG_E_OK)
+    provenance_failure = true;
   if (results.r5 == WYRELOG_E_OK && control.r5_error != WYRELOG_E_OK)
     results.r5 = control.r5_error;
+
+  if (bridge->health != nullptr
+      && bridge->health->ProvenanceFailureObserved ())
+    provenance_failure = true;
 
   bridge->authority_lease.reset ();
   bridge.reset ();
 
   bool cleanup_uncertain = false;
   const auto selected = reduce_pinned_lifecycle (results,
-      &cleanup_uncertain);
+          &cleanup_uncertain);
   if (cleanup_uncertain)
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+  if (selected != WYRELOG_E_OK) {
+    *out_failure_origin = provenance_failure ?
+        WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE :
+        WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_STORAGE;
+    if (provenance_failure && notify_failure_observed)
+      control.Fire (WYL_FACT_STORE_PINNED_RENDEZVOUS_FAILURE_OBSERVED);
+  }
   return selected;
 }
 
@@ -736,19 +814,34 @@ wyl_fact_store_open_identified_pinned (WylFactArtifactNamespace *namespace_,
       || !wyl_fact_store_identity_mode_is_valid (mode))
     return WYRELOG_E_INVALID;
   const auto control = take_pinned_test_control ();
+  WylFactStorePinnedFailureOrigin failure_origin;
   return open_identified_pinned_core (namespace_, identity, mode, out_result,
-      control);
+             &failure_origin, false, control);
 }
 
 extern "C" wyrelog_error_t
 wyl_fact_store_open_identified_provisioned_pair_pinned
-    (WylFactGraphProvisionedPair *pair,
+  (WylFactGraphProvisionedPair *pair,
     const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
     WylFactStoreIdentityResult *out_result)
 {
+  WylFactStorePinnedFailureOrigin failure_origin;
+  return wyl_fact_store_open_identified_provisioned_pair_pinned_classified
+           (pair, identity, mode, out_result, &failure_origin);
+}
+
+extern "C" wyrelog_error_t
+wyl_fact_store_open_identified_provisioned_pair_pinned_classified
+  (WylFactGraphProvisionedPair *pair,
+    const WylFactStoreIdentity *identity, WylFactStoreIdentityOpenMode mode,
+    WylFactStoreIdentityResult *out_result,
+    WylFactStorePinnedFailureOrigin *out_failure_origin)
+{
   if (out_result != nullptr)
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
-  if (pair == nullptr || out_result == nullptr
+  if (out_failure_origin != nullptr)
+    *out_failure_origin = WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_NONE;
+  if (pair == nullptr || out_result == nullptr || out_failure_origin == nullptr
       || !wyl_fact_store_identity_input_is_valid (identity)
       || !wyl_fact_store_identity_mode_is_valid (mode))
     return WYRELOG_E_INVALID;
@@ -763,23 +856,32 @@ wyl_fact_store_open_identified_provisioned_pair_pinned
   constexpr auto preflight = WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY;
   control.FirePreflight (preflight);
   if (control.preflight_error != WYRELOG_E_OK
-      && control.preflight_error_seam == preflight)
+      && control.preflight_error_seam == preflight) {
+    *out_failure_origin = WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_STORAGE;
     return control.preflight_error;
+  }
   const auto authority_result =
       wyl_fact_graph_provisioned_pair_revalidate (pair);
-  if (authority_result != WYRELOG_E_OK)
+  if (authority_result != WYRELOG_E_OK) {
+    *out_failure_origin = WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE;
     return authority_result;
+  }
 
   WylFactArtifactNamespace *namespace_ = nullptr;
   const auto result =
       wyl_fact_artifact_namespace_open_provisioned_pair_internal (pair,
-      &namespace_);
-  if (result != WYRELOG_E_OK)
+          &namespace_);
+  if (result != WYRELOG_E_OK) {
+    *out_failure_origin = result == WYRELOG_E_POLICY
+        || result == WYRELOG_E_NOT_FOUND ?
+        WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE :
+        WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_STORAGE;
     return result;
+  }
   const auto lifecycle_control = control.Lifecycle ();
   const auto open_result =
       open_identified_pinned_core (namespace_, identity, mode, out_result,
-      lifecycle_control);
+          out_failure_origin, true, lifecycle_control);
   wyl_fact_artifact_namespace_free (namespace_);
   return open_result;
 }

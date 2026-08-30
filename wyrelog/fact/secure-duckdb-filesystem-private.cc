@@ -132,8 +132,8 @@ namespace {
   writer_main_existing_flags ()
   {
     return duckdb::FileOpenFlags (writer_main_existing_flag_bits,
-        duckdb::FileLockType::WRITE_LOCK,
-        duckdb::FileCompressionType::UNCOMPRESSED);
+               duckdb::FileLockType::WRITE_LOCK,
+               duckdb::FileCompressionType::UNCOMPRESSED);
   }
 
   void validate_flags (const LogicalPath & logical, duckdb::FileOpenFlags flags,
@@ -146,9 +146,9 @@ namespace {
           && exact_flags (flags, 2433, duckdb::FileLockType::READ_LOCK))
           || (!read_only
           && (exact_flags (flags, writer_main_existing_flag_bits,
-              duckdb::FileLockType::WRITE_LOCK)
+          duckdb::FileLockType::WRITE_LOCK)
           || exact_flags (flags, writer_main_create_flag_bits,
-              duckdb::FileLockType::WRITE_LOCK)));
+          duckdb::FileLockType::WRITE_LOCK)));
     } else if (logical.kind == LogicalKind::SIDECAR) {
       accepted = exact_flags (flags, 129, duckdb::FileLockType::NO_LOCK)
           || (logical.artifact == WYL_FACT_ARTIFACT_WAL
@@ -216,9 +216,11 @@ WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
   read_only_ (read_only),
   health_ (std::make_shared<WylSecureDuckdbHealth> ())
 {
-  if (namespace_ == nullptr
-      || wyl_fact_artifact_namespace_revalidate (namespace_) != WYRELOG_E_OK)
-    io_reject ("invalid namespace binding");
+  if (namespace_ == nullptr)
+    throw WylSecureDuckdbAuthorityException (WYRELOG_E_INVALID,
+        "invalid namespace binding");
+  require_ok (wyl_fact_artifact_namespace_revalidate (namespace_),
+      "initial namespace revalidation");
   const auto lease_result = read_only_
       ? wyl_fact_artifact_namespace_acquire_reader_guard (namespace_, &lease_)
       : wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,

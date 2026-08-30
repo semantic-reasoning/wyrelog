@@ -1792,13 +1792,17 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       timeout : 120,
     )
   endif
+  test_fact_provisioning_run_wyrelog_dep = wyrelog_dep
+  if host_machine.system() == 'darwin'
+    test_fact_provisioning_run_wyrelog_dep = wyrelog_handle_test_seams_dep
+  endif
   test_fact_provisioning_run = executable(
     'test-fact-provisioning-run',
     'test-fact-provisioning-run.c',
     'fact-test-support.c',
     c_args : fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+    dependencies : [test_fact_provisioning_run_wyrelog_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
   # Asserts st_nlink == 2 on the published graph, which is the POSIX
@@ -1807,7 +1811,7 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   # Windows pair has a durable evidence home (#816).
   if host_machine.system() != 'windows'
     test('fact-provisioning-run', test_fact_provisioning_run,
-      timeout : 60,
+      timeout : host_machine.system() == 'darwin' ? 300 : 60,
     )
   endif
   test_fact_store_provisioned = executable(
