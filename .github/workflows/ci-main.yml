@@ -195,6 +195,12 @@ jobs:
           else
             time_args=(-l)
           fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            meson compile -C build-secure-duckdb -j 1 \
+              test-fact-darwin-provisioned-pair
+            meson test -C build-secure-duckdb --no-rebuild \
+              fact-darwin-provisioned-pair --print-errorlogs
+          fi
           /usr/bin/time "${time_args[@]}" \
             meson compile -C build-secure-duckdb -j 1 \
             test-fact-artifact-inventory \

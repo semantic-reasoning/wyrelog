@@ -948,6 +948,16 @@ static gint namespace_test_fault;
 static gint namespace_consumed_test_fault;
 static gint pair_access_modes[3] = { -1, -1, -1 };
 
+static guint64
+provisioned_pair_required_links (void)
+{
+#ifdef __APPLE__
+  return 1;
+#else
+  return 2;
+#endif
+}
+
 static WylFactDuckdbTempChild *duckdb_temp_child_ref (WylFactDuckdbTempChild *);
 static wyrelog_error_t duckdb_temp_child_matches_unlocked
   (WylFactDuckdbTempChild *);
@@ -1082,12 +1092,14 @@ check_provisioned_pair (WylFactArtifactNamespace *n)
       || (guint64) directory.st_dev != n->device
       || (guint64) directory.st_ino != n->inode || n->main_fd < 0
       || fstat (n->main_fd, &held) != 0 || !S_ISREG (held.st_mode)
-      || held.st_nlink != 2 || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_nlink != provisioned_pair_required_links ()
+      || (held.st_mode & 07777) != 0600
       || (guint64) held.st_uid != n->owner
       || (guint64) held.st_dev != n->main_device
       || (guint64) held.st_ino != n->main_inode || n->writable_main_fd < 0
       || fstat (n->writable_main_fd, &writable) != 0
-      || !S_ISREG (writable.st_mode) || writable.st_nlink != 2
+      || !S_ISREG (writable.st_mode)
+      || (guint64) writable.st_nlink != provisioned_pair_required_links ()
       || (writable.st_mode & 07777) != 0600
       || (guint64) writable.st_uid != n->owner
       || (guint64) writable.st_dev != n->main_device
@@ -1454,14 +1466,16 @@ wyl_fact_artifact_namespace_open_provisioned_pair_internal
       || (guint64) directory.st_dev != pair->directory.graph_device
       || (guint64) directory.st_ino != pair->directory.graph_inode
       || fstat (main_fd, &main) != 0 || !S_ISREG (main.st_mode)
-      || main.st_nlink != 2 || (main.st_mode & 07777) != 0600
+      || (guint64) main.st_nlink != provisioned_pair_required_links ()
+      || (main.st_mode & 07777) != 0600
       || main.st_uid != geteuid ()
       || (guint64) main.st_dev != pair->expected_device
       || (guint64) main.st_ino != pair->expected_inode
       || (fcntl (main_fd, F_GETFL) & O_ACCMODE) != O_RDONLY
       || fstat (writable_main_fd, &writable_main) != 0
       || !S_ISREG (writable_main.st_mode)
-      || writable_main.st_nlink != 2
+      || (guint64) writable_main.st_nlink
+      != provisioned_pair_required_links ()
       || (writable_main.st_mode & 07777) != 0600
       || writable_main.st_uid != geteuid ()
       || (guint64) writable_main.st_dev != pair->expected_device
@@ -1716,7 +1730,8 @@ main_binding_matches_unlocked (WylFactArtifactMainBinding *binding)
   struct stat pinned, named;
   if (namespace_->provisioned_pair != NULL) {
     if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
-        || !S_ISREG (pinned.st_mode) || pinned.st_nlink != 2
+        || !S_ISREG (pinned.st_mode)
+        || (guint64) pinned.st_nlink != provisioned_pair_required_links ()
         || (pinned.st_mode & 07777) != 0600
         || (guint64) pinned.st_uid != namespace_->owner
         || (guint64) pinned.st_dev != binding->device
@@ -1961,7 +1976,8 @@ main_binding_revalidate_fd_unlocked (WylFactArtifactMainBinding *binding,
   wyrelog_error_t result = main_binding_revalidate_unlocked (binding);
   struct stat working;
   guint64 required_links =
-      binding->lease->namespace_->provisioned_pair != NULL ? 2 : 1;
+      binding->lease->namespace_->provisioned_pair != NULL
+      ? provisioned_pair_required_links () : 1;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
       || !S_ISREG (working.st_mode)
@@ -2134,7 +2150,8 @@ reader_main_binding_matches_unlocked (WylFactArtifactReaderMainBinding *binding)
   WylFactArtifactMutationLease *lease = binding->lease;
   WylFactArtifactNamespace *namespace_ = lease->namespace_;
   struct stat pinned;
-  guint64 required_links = namespace_->provisioned_pair != NULL ? 2 : 1;
+  guint64 required_links = namespace_->provisioned_pair != NULL
+      ? provisioned_pair_required_links () : 1;
   if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
       || !S_ISREG (pinned.st_mode)
       || (guint64) pinned.st_nlink != required_links
@@ -2172,7 +2189,8 @@ reader_main_binding_revalidate_fd_unlocked
   wyrelog_error_t result = reader_main_binding_revalidate_unlocked (binding);
   struct stat working;
   guint64 required_links =
-      binding->lease->namespace_->provisioned_pair != NULL ? 2 : 1;
+      binding->lease->namespace_->provisioned_pair != NULL
+      ? provisioned_pair_required_links () : 1;
   if (result == WYRELOG_E_OK
       && (working_fd < 0 || fstat (working_fd, &working) != 0
       || !S_ISREG (working.st_mode)

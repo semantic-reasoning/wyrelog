@@ -2563,6 +2563,10 @@ main (int argc, char **argv)
       test_main_symlink_substitution_fails_closed);
   g_test_add_func ("/secure-duckdb-filesystem/pinned-identified/modes",
       test_pinned_identified_modes_and_identity);
+#ifndef __APPLE__
+  /* Darwin uses a direct-final, evidence-backed pair rather than the retained
+   * POSIX hard-link fixture below.  Its equivalent mode, preflight, and R0-R5
+   * coverage lives in fact-darwin-provisioned-pair. */
   g_test_add_func ("/secure-duckdb-filesystem/provisioned-pair/modes",
       test_provisioned_pair_pinned_modes);
   g_test_add_func (
@@ -2574,6 +2578,7 @@ main (int argc, char **argv)
   g_test_add_func (
     "/secure-duckdb-filesystem/provisioned-pair/control-isolation",
     test_provisioned_pair_pinned_control_isolation);
+#endif
   g_test_add_func (
     "/secure-duckdb-filesystem/pinned-identified/validate-no-write",
     test_pinned_validate_only_does_not_initialize);
