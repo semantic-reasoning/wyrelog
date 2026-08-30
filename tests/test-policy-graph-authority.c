@@ -3,10 +3,16 @@
 #include <glib/gstdio.h>
 
 #include <sodium.h>
+#include <stdlib.h>
 #include <string.h>
+
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
 
 #include "fact/recovery-mac-private.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-keyprovider-file-private.h"
 
 typedef struct
 {
@@ -644,6 +650,1555 @@ test_dangling_provisioning_record_fails_closed (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
 }
+
+static gchar *make_store_path (gchar **out_root);
+static void cleanup_store_path (const gchar *root, const gchar *path);
+
+static gboolean
+write_policy_key (const gchar *path)
+{
+  guint8 key[32];
+  for (gsize i = 0; i < sizeof key; i++)
+    key[i] = (guint8) (0x41u + i);
+  return g_file_set_contents (path, (const gchar *) key, sizeof key, NULL);
+}
+
+static wyrelog_error_t
+open_encrypted_policy_store_with_maintenance (const gchar *store_path,
+    const gchar *key_path, gboolean maintenance,
+    wyl_policy_store_t **out_store)
+{
+  wyl_keyprovider_file_t *provider = wyl_keyprovider_file_new (key_path);
+  if (provider == NULL)
+    return WYRELOG_E_IO;
+  wyl_policy_store_open_options_t options = {
+    .path = store_path,
+    .keyprovider_vtable = wyl_keyprovider_file_get_vtable (),
+    .keyprovider_state = provider,
+    .keyprovider_state_free =
+        (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+    .maintenance_exclusive = maintenance,
+  };
+  return wyl_policy_store_open_with_options (&options, out_store);
+}
+
+static wyrelog_error_t
+open_encrypted_policy_store (const gchar *store_path, const gchar *key_path,
+    wyl_policy_store_t **out_store)
+{
+  return open_encrypted_policy_store_with_maintenance (store_path, key_path,
+             FALSE, out_store);
+}
+
+/* Frozen historical fixtures are intentionally independent of production
+ * schema constants so migration tests detect accidental common-mode edits. */
+static const gchar fixture_pre_windows_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fixture_pre_windows_immutable_trigger_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
+    "BEFORE UPDATE ON fact_graph_provisioning WHEN "
+    "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
+    "OR NEW.graph_id IS NOT OLD.graph_id OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.stage_basename IS NOT OLD.stage_basename OR "
+    "NEW.expected_lifecycle_generation IS NOT OLD.expected_lifecycle_generation "
+    "OR NEW.expected_reconciliation_generation IS NOT OLD.expected_reconciliation_generation "
+    "OR NEW.created_at IS NOT OLD.created_at "
+    "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
+
+
+static const gchar fixture_windows_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "windows_operation_evidence_version INTEGER,"
+    /* Volume serials use SQLite INTEGER as a lossless signed bit container;
+     * existing positive rows require no data rewrite during this migration. */
+    "windows_graph_volume_serial INTEGER,"
+    "windows_graph_file_id BLOB,"
+    "windows_artifact_volume_serial INTEGER,"
+    "windows_artifact_file_id BLOB,"
+    "CHECK ((windows_operation_evidence_version IS NULL AND "
+    "windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL AND "
+    "windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL) OR "
+    "(typeof(windows_operation_evidence_version)='integer' AND "
+    "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_volume_serial)='integer' AND "
+    "windows_graph_volume_serial != 0 AND "
+    "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
+    "typeof(windows_artifact_volume_serial)='integer' AND "
+    "windows_artifact_volume_serial != 0 AND "
+    "typeof(windows_artifact_file_id)='blob' AND "
+    "length(windows_artifact_file_id)=16)),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fixture_windows_immutable_trigger_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
+    "BEFORE UPDATE ON fact_graph_provisioning WHEN "
+    "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
+    "OR NEW.graph_id IS NOT OLD.graph_id OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.stage_basename IS NOT OLD.stage_basename OR "
+    "NEW.expected_lifecycle_generation IS NOT OLD.expected_lifecycle_generation "
+    "OR NEW.expected_reconciliation_generation IS NOT OLD.expected_reconciliation_generation "
+    "OR NEW.created_at IS NOT OLD.created_at OR "
+    "(OLD.windows_operation_evidence_version IS NOT NULL AND "
+    "(NEW.windows_operation_evidence_version IS NOT OLD.windows_operation_evidence_version OR "
+    "NEW.windows_graph_volume_serial IS NOT OLD.windows_graph_volume_serial OR "
+    "NEW.windows_graph_file_id IS NOT OLD.windows_graph_file_id OR "
+    "NEW.windows_artifact_volume_serial IS NOT OLD.windows_artifact_volume_serial OR "
+    "NEW.windows_artifact_file_id IS NOT OLD.windows_artifact_file_id)) OR "
+    "(OLD.windows_operation_evidence_version IS NULL AND NOT ("
+    "(NEW.windows_operation_evidence_version IS NULL AND "
+    "NEW.windows_graph_volume_serial IS NULL AND "
+    "NEW.windows_graph_file_id IS NULL AND "
+    "NEW.windows_artifact_volume_serial IS NULL AND "
+    "NEW.windows_artifact_file_id IS NULL) OR "
+    "(NEW.windows_operation_evidence_version IS NOT NULL AND "
+    "NEW.windows_graph_volume_serial IS NOT NULL AND "
+    "NEW.windows_graph_file_id IS NOT NULL AND "
+    "NEW.windows_artifact_volume_serial IS NOT NULL AND "
+    "NEW.windows_artifact_file_id IS NOT NULL))) "
+    "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
+
+static const gchar fixture_windows_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
+
+static void
+install_provisioning_schema_fixture (sqlite3 *db, const gchar *table_sql,
+    const gchar *immutable_trigger_sql)
+{
+  g_autofree gchar *canonical_table = g_strdup (table_sql);
+  g_autofree gchar *canonical_trigger = g_strdup (immutable_trigger_sql);
+  g_autofree gchar *canonical_insert_guard =
+      g_strdup (fixture_windows_insert_guard_sql);
+  gchar *if_not_exists = strstr (canonical_table, " IF NOT EXISTS");
+  g_assert_nonnull (if_not_exists);
+  memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
+      strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
+  if_not_exists = strstr (canonical_insert_guard, " IF NOT EXISTS");
+  g_assert_nonnull (if_not_exists);
+  memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
+      strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
+  if_not_exists = strstr (canonical_trigger, " IF NOT EXISTS");
+  g_assert_nonnull (if_not_exists);
+  memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
+      strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
+  sqlite3_stmt *stmt = NULL;
+  exec_ok (db, "PRAGMA writable_schema=ON;");
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE main.sqlite_schema SET sql=? WHERE type='table' AND "
+      "name='fact_graph_provisioning';", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, canonical_table, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE main.sqlite_schema SET sql=? WHERE type='trigger' AND "
+      "name='fact_graph_provisioning_insert_guard';", -1, &stmt, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, canonical_insert_guard, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE main.sqlite_schema SET sql=? WHERE type='trigger' AND "
+      "name='fact_graph_provisioning_immutable';", -1, &stmt, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, canonical_trigger, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  sqlite3_finalize (stmt);
+  exec_ok (db, "PRAGMA writable_schema=OFF;");
+  gint64 schema_version = scalar_int64 (db, "PRAGMA schema_version;");
+  g_autofree gchar *advance = g_strdup_printf ("PRAGMA schema_version=%" G_GINT64_FORMAT
+          ";", schema_version + 1);
+  exec_ok (db, advance);
+}
+
+static void
+remove_sqlite_sequence_fixture (sqlite3 *db)
+{
+  exec_ok (db, "PRAGMA writable_schema=ON;"
+      "DELETE FROM main.sqlite_schema WHERE type='table' AND "
+      "name='sqlite_sequence';"
+      "PRAGMA writable_schema=OFF;");
+  gint64 schema_version = scalar_int64 (db, "PRAGMA schema_version;");
+  g_autofree gchar *advance = g_strdup_printf ("PRAGMA schema_version=%"
+          G_GINT64_FORMAT ";", schema_version + 1);
+  exec_ok (db, advance);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM main.sqlite_schema WHERE type='table' AND "
+      "name='sqlite_sequence';"), ==, 0);
+}
+
+static void
+prepare_provisioning_fixture_row (wyl_policy_store_t *store, sqlite3 *db,
+    gboolean windows_evidence)
+{
+  insert_graph (db, "tenant-migrate", "graph-migrate", FALSE);
+  WylPolicyAuthorityMutationResult mutation;
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+      "tenant-migrate", "graph-migrate",
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c079101", 1, 1, 0, 0,
+      &mutation), ==, WYRELOG_E_OK);
+  const gchar *evidence_columns = windows_evidence ?
+      ",windows_operation_evidence_version,windows_graph_volume_serial,"
+      "windows_graph_file_id,windows_artifact_volume_serial,"
+      "windows_artifact_file_id" : "";
+  const gchar *evidence_values = windows_evidence ?
+      ",1,-9223372036854775807,x'80000000000000000000000000000001',"
+      "-1,x'ff000000000000000000000000000002'" : "";
+  g_autofree gchar *insert = g_strdup_printf (
+    "INSERT INTO fact_graph_provisioning ("
+    "op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+    "expected_lifecycle_generation,expected_reconciliation_generation,"
+    "phase,attempt,created_at,updated_at%s) VALUES ("
+    "'01890f47-3c4b-7cc2-b8c4-dc0c0c079100','tenant-migrate',"
+    "'graph-migrate','01890f47-3c4b-7cc2-b8c4-dc0c0c079101',"
+    "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c079100.sqlite',"
+    "1,0,'reserved',0,1,1%s);", evidence_columns, evidence_values);
+  exec_ok (db, insert);
+}
+
+static void
+run_provisioning_predecessor_migration (gboolean windows)
+{
+  const WylPolicyGraphAuthorityMigrationFailStage stages[] = {
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_FOREIGN_KEYS_OFF,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_UUID_INDEX,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_TENANT_TRIGGERS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_GRAPH_TRIGGERS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_VALIDATION,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TEMP,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COPY,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_DROP,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_CREATE,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_ROWS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TRIGGERS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_VALIDATION,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TEMP_DROP,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_COMMIT,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT,
+  };
+  for (gsize stage_index = 0; stage_index < G_N_ELEMENTS (stages);
+      stage_index++) {
+    g_test_message ("predecessor=%s stage=%u", windows ? "windows" :
+        "pre-windows", (guint) stages[stage_index]);
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    prepare_provisioning_fixture_row (store, db, windows);
+    gint64 provisioning_rowid = scalar_int64 (db,
+            "SELECT rowid FROM fact_graph_provisioning;");
+    exec_ok (db,
+        "CREATE TABLE unrelated_sequence(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "value TEXT NOT NULL);"
+        "INSERT INTO unrelated_sequence(value) VALUES('preserve');"
+        "CREATE INDEX unrelated_sequence_value ON unrelated_sequence(value);"
+        "CREATE TRIGGER unrelated_sequence_guard BEFORE DELETE ON "
+        "unrelated_sequence BEGIN SELECT RAISE(ABORT,'preserve'); END;"
+        "CREATE VIEW unrelated_sequence_view AS SELECT id,value FROM "
+        "unrelated_sequence;");
+    install_provisioning_schema_fixture (db,
+        windows ? fixture_windows_table_sql : fixture_pre_windows_table_sql,
+        windows ? fixture_windows_immutable_trigger_sql :
+        fixture_pre_windows_immutable_trigger_sql);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 0);
+
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        stages[stage_index]);
+    gboolean committed_report = stages[stage_index] ==
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT;
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        committed_report ? WYRELOG_E_OK : WYRELOG_E_IO);
+    g_assert_cmpint (scalar_int64 (db, "PRAGMA foreign_keys;"), ==, 1);
+    if (committed_report) {
+      g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+          "WHERE name='darwin_operation_evidence';"), ==, 1);
+      g_clear_pointer (&store, wyl_policy_store_close);
+      g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+          WYRELOG_E_OK);
+      g_clear_pointer (&store, wyl_policy_store_close);
+      cleanup_store_path (root, path);
+      continue;
+    }
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 0);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM fact_graph_provisioning;"), ==, 1);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT seq FROM sqlite_sequence WHERE name='unrelated_sequence';"), ==,
+        1);
+
+    g_clear_pointer (&store, wyl_policy_store_close);
+    g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+    db = wyl_policy_store_get_db (store);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 0);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (scalar_int64 (db, "PRAGMA foreign_keys;"), ==, 1);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence' AND type='BLOB';"), ==, 1);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM fact_graph_provisioning WHERE "
+        "darwin_operation_evidence IS NULL;"), ==, 1);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT rowid FROM fact_graph_provisioning;"), ==, provisioning_rowid);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM sqlite_schema WHERE name IN "
+        "('unrelated_sequence','unrelated_sequence_value',"
+        "'unrelated_sequence_guard','unrelated_sequence_view');"), ==, 4);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT seq FROM sqlite_sequence WHERE name='unrelated_sequence';"), ==,
+        1);
+    if (windows) {
+      g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM fact_graph_provisioning WHERE "
+          "windows_operation_evidence_version=1 AND "
+          "windows_graph_volume_serial=-9223372036854775807 AND "
+          "windows_graph_file_id=x'80000000000000000000000000000001' AND "
+          "windows_artifact_volume_serial=-1 AND "
+          "windows_artifact_file_id=x'ff000000000000000000000000000002';"),
+          ==, 1);
+    } else {
+      g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM fact_graph_provisioning WHERE "
+          "windows_operation_evidence_version IS NULL AND "
+          "windows_graph_volume_serial IS NULL AND "
+          "windows_graph_file_id IS NULL AND "
+          "windows_artifact_volume_serial IS NULL AND "
+          "windows_artifact_file_id IS NULL;"), ==, 1);
+    }
+    g_clear_pointer (&store, wyl_policy_store_close);
+    g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 1);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    cleanup_store_path (root, path);
+  }
+}
+
+static void
+test_pre_windows_provisioning_schema_migrates (void)
+{
+  run_provisioning_predecessor_migration (FALSE);
+}
+
+static void
+test_windows_provisioning_schema_migrates (void)
+{
+  run_provisioning_predecessor_migration (TRUE);
+}
+
+static void
+test_provisioning_migration_preserves_sequence_absence (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
+      fixture_pre_windows_immutable_trigger_sql);
+  remove_sqlite_sequence_fixture (db);
+  wyl_policy_store_graph_authority_migration_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM main.sqlite_schema WHERE name='sqlite_sequence';"),
+      ==, 0);
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM main.sqlite_schema WHERE name='sqlite_sequence';"),
+      ==, 0);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM main.sqlite_schema WHERE name='sqlite_sequence';"),
+      ==, 0);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static gchar *
+prepare_evidence_test_operation (wyl_policy_store_t *store, sqlite3 *db,
+    const gchar *graph_id, const gchar *store_uuid)
+{
+  insert_graph (db, graph_id, graph_id, FALSE);
+  WylPolicyGraphProvisioningInput input = {
+    .tenant_id = graph_id,
+    .graph_id = graph_id,
+    .store_uuid = store_uuid,
+    .format_version = 1,
+    .path_encoding_version = 1,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  WylPolicyAuthorityMutationResult mutation;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
+      &record, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  gchar *op_uuid = g_strdup (record->op_uuid);
+  wyl_policy_graph_provisioning_record_free (record);
+  return op_uuid;
+}
+
+static void
+test_darwin_evidence_schema_is_structural_and_immutable (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  gint64 canonical_rootpage = scalar_int64 (db,
+          "SELECT rootpage FROM sqlite_schema WHERE type='table' AND "
+          "name='fact_graph_provisioning';");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT rootpage FROM sqlite_schema WHERE type='table' AND "
+      "name='fact_graph_provisioning';"), ==, canonical_rootpage);
+  g_autofree gchar *opaque = prepare_evidence_test_operation (store, db,
+          "graph-opaque", "01890f47-3c4b-7cc2-b8c4-dc0c0c079201");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=printf('%056d',0) WHERE "
+      "graph_id='graph-opaque';");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=zeroblob(55) WHERE graph_id='graph-opaque';");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=zeroblob(57) WHERE graph_id='graph-opaque';");
+  /* Policy deliberately accepts semantically opaque bytes; the locator owns
+   * version, UUID, and object-identity decoding. */
+  exec_ok (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=zeroblob(56) WHERE graph_id='graph-opaque';");
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, opaque,
+      &record), ==, WYRELOG_E_OK);
+  g_assert_nonnull (record->darwin_operation_evidence);
+  gsize evidence_size = 0;
+  const guint8 *evidence = g_bytes_get_data (record->darwin_operation_evidence,
+          &evidence_size);
+  g_assert_cmpuint (evidence_size, ==, 56);
+  for (gsize i = 0; i < evidence_size; i++)
+    g_assert_cmpuint (evidence[i], ==, 0);
+  wyl_policy_graph_provisioning_record_free (record);
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=randomblob(56) WHERE graph_id='graph-opaque';");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=NULL WHERE graph_id='graph-opaque';");
+
+  g_autofree gchar *staged = prepare_evidence_test_operation (store, db,
+          "graph-staged", "01890f47-3c4b-7cc2-b8c4-dc0c0c079202");
+  exec_ok (db, "UPDATE fact_graph_provisioning SET phase='staged',"
+      "updated_at=updated_at+1 WHERE graph_id='graph-staged';");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=zeroblob(56) WHERE graph_id='graph-staged';");
+
+  g_autofree gchar *windows = prepare_evidence_test_operation (store, db,
+          "graph-windows", "01890f47-3c4b-7cc2-b8c4-dc0c0c079203");
+  exec_ok (db, "UPDATE fact_graph_provisioning SET "
+      "windows_operation_evidence_version=1,windows_graph_volume_serial=1,"
+      "windows_graph_file_id=randomblob(16),"
+      "windows_artifact_volume_serial=2,"
+      "windows_artifact_file_id=randomblob(16) WHERE graph_id='graph-windows';");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=zeroblob(56) WHERE graph_id='graph-windows';");
+  g_autofree gchar *insert = prepare_evidence_test_operation (store, db,
+          "graph-insert", "01890f47-3c4b-7cc2-b8c4-dc0c0c079204");
+  g_autofree gchar *delete_insert = g_strdup_printf (
+    "DELETE FROM fact_graph_provisioning WHERE op_uuid='%s';"
+    "INSERT INTO fact_graph_provisioning (op_uuid,tenant_id,graph_id,"
+    "store_uuid,stage_basename,expected_lifecycle_generation,"
+    "expected_reconciliation_generation,phase,attempt,created_at,updated_at,"
+    "darwin_operation_evidence) VALUES ('%s','graph-insert','graph-insert',"
+    "'01890f47-3c4b-7cc2-b8c4-dc0c0c079204','provision-%s.sqlite',"
+    "1,0,'reserved',0,1,1,zeroblob(56));", insert, insert, insert);
+  exec_rejected (db, delete_insert);
+  g_assert_nonnull (opaque);
+  g_assert_nonnull (staged);
+  g_assert_nonnull (windows);
+  g_assert_nonnull (insert);
+}
+
+static void
+open_pre_windows_fixture (wyl_policy_store_t **out_store, sqlite3 **out_db)
+{
+  *out_store = NULL;
+  *out_db = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, out_store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (*out_store), ==,
+      WYRELOG_E_OK);
+  *out_db = wyl_policy_store_get_db (*out_store);
+  install_provisioning_schema_fixture (*out_db,
+      fixture_pre_windows_table_sql,
+      fixture_pre_windows_immutable_trigger_sql);
+}
+
+static void
+test_provisioning_migration_preflight_is_fail_closed (void)
+{
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "BEGIN;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (scalar_int64 (db, "PRAGMA foreign_keys;"), ==, 1);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 0);
+    exec_ok (db, "ROLLBACK;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE VIEW external_provisioning_view AS SELECT op_uuid "
+        "FROM \"fact_graph_provisioning\";");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 0);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE TEMP VIEW external_temp_provisioning_view AS "
+        "SELECT op_uuid FROM [fact_graph_provisioning];");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE VIEW qualified_single_quoted_view AS "
+        "SELECT op_uuid FROM main.'fact_graph_provisioning';");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE TABLE trigger_source(value INTEGER);"
+        "CREATE TRIGGER quoted_update_reference AFTER UPDATE ON "
+        "trigger_source BEGIN UPDATE OR ABORT 'fact_graph_provisioning' "
+        "SET attempt=attempt; END;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE TEMP TABLE fact_graph_provisioning AS "
+        "SELECT * FROM main.fact_graph_provisioning WHERE 0;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+    exec_ok (db, "DROP TABLE temp.fact_graph_provisioning;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE TEMP TABLE FaCt_GrApH_PrOvIsIoNiNg AS "
+        "SELECT * FROM main.fact_graph_provisioning WHERE 0;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE TABLE inbound_provisioning_reference("
+        "op_uuid TEXT REFERENCES fact_graph_provisioning(op_uuid));");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "ATTACH ':memory:' AS foreign_schema;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE VIEW harmless_provisioning_text AS SELECT "
+        "'fact_graph_provisioning' AS value /* fact_graph_provisioning */;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM sqlite_schema WHERE type='view' AND "
+        "name='harmless_provisioning_text';"), ==, 1);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    exec_ok (db, "CREATE VIEW single_quoted_provisioning_view AS "
+        "SELECT op_uuid FROM 'fact_graph_provisioning';");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==,
+        WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    exec_ok (db, "CREATE TABLE unrelated_owned_name(value INTEGER);"
+        "CREATE TRIGGER fact_graph_provisioning_immutable BEFORE UPDATE ON "
+        "unrelated_owned_name BEGIN SELECT 1; END;");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning');"),
+        ==, 0);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    sqlite3 *db = NULL;
+    open_pre_windows_fixture (&store, &db);
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (scalar_int64 (db,
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==, 1);
+  }
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  gboolean reached;
+  gboolean release;
+  gboolean fact_root_entered;
+  gboolean rotation_intent_entered;
+  wyl_policy_store_t *store;
+  wyrelog_error_t migration_result;
+} ProvisioningMigrationGate;
+
+typedef struct
+{
+  ProvisioningMigrationGate *gate;
+  const gchar *fact_root;
+  wyrelog_error_t result;
+} FactRootWaiter;
+
+typedef enum
+{
+  ROTATION_INTENT_WAITER_WRITE,
+  ROTATION_INTENT_WAITER_CLEAR,
+  ROTATION_INTENT_WAITER_STATUS,
+} RotationIntentWaiterOperation;
+
+typedef struct
+{
+  ProvisioningMigrationGate *gate;
+  RotationIntentWaiterOperation operation;
+  WylPolicyRotationIntent intent;
+  guint8 auth_key[crypto_generichash_KEYBYTES];
+  WylPolicyRotationIntentStatus status;
+  wyrelog_error_t result;
+} RotationIntentWaiter;
+
+static void
+provisioning_migration_gate (gpointer data,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  ProvisioningMigrationGate *gate = data;
+  if (stage !=
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_FOREIGN_KEYS_OFF)
+    return;
+  g_mutex_lock (&gate->mutex);
+  gate->reached = TRUE;
+  g_cond_broadcast (&gate->condition);
+  while (!gate->release)
+    g_cond_wait (&gate->condition, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static gpointer
+run_gated_provisioning_migration (gpointer data)
+{
+  ProvisioningMigrationGate *gate = data;
+  gate->migration_result = wyl_policy_store_create_schema (gate->store);
+  return NULL;
+}
+
+static void
+fact_root_entry_gate (gpointer data)
+{
+  ProvisioningMigrationGate *gate = data;
+  g_mutex_lock (&gate->mutex);
+  gate->fact_root_entered = TRUE;
+  g_cond_broadcast (&gate->condition);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static void
+rotation_intent_entry_gate (gpointer data)
+{
+  ProvisioningMigrationGate *gate = data;
+  g_mutex_lock (&gate->mutex);
+  gate->rotation_intent_entered = TRUE;
+  g_cond_broadcast (&gate->condition);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static gpointer
+run_fact_root_waiter (gpointer data)
+{
+  FactRootWaiter *waiter = data;
+  waiter->result = wyl_policy_store_bind_fact_root (waiter->gate->store,
+          waiter->fact_root);
+  return NULL;
+}
+
+static gpointer
+run_rotation_intent_waiter (gpointer data)
+{
+  RotationIntentWaiter *waiter = data;
+  switch (waiter->operation) {
+    case ROTATION_INTENT_WAITER_WRITE:
+      waiter->result = wyl_policy_rotation_intent_write_sidecar
+            (waiter->gate->store, &waiter->intent, waiter->auth_key,
+              sizeof waiter->auth_key);
+      break;
+    case ROTATION_INTENT_WAITER_CLEAR:
+      waiter->result =
+          wyl_policy_rotation_intent_clear_sidecar (waiter->gate->store);
+      break;
+    case ROTATION_INTENT_WAITER_STATUS:
+      waiter->result = wyl_policy_store_rotation_intent_status
+            (waiter->gate->store, &waiter->status);
+      break;
+  }
+  return NULL;
+}
+
+static void
+test_provisioning_migration_fences_same_handle_sql (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  sqlite3 *db = NULL;
+  open_pre_windows_fixture (&store, &db);
+  ProvisioningMigrationGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.condition);
+  gate.store = store;
+  sqlite3_stmt *prepared_before_fence = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT count(*) FROM permissions;", -1, &prepared_before_fence, NULL),
+      ==, SQLITE_OK);
+  wyl_policy_store_graph_authority_migration_gate (store,
+      provisioning_migration_gate, &gate);
+  GThread *thread = g_thread_new ("provisioning-migration",
+          run_gated_provisioning_migration, &gate);
+  g_mutex_lock (&gate.mutex);
+  while (!gate.reached)
+    g_cond_wait (&gate.condition, &gate.mutex);
+  g_mutex_unlock (&gate.mutex);
+
+  int prepared_step = sqlite3_step (prepared_before_fence);
+  g_assert_true (prepared_step == SQLITE_INTERRUPT
+      || prepared_step == SQLITE_AUTH);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (store,
+      "test.concurrent", "test.concurrent", "test"), ==, WYRELOG_E_IO);
+
+  g_mutex_lock (&gate.mutex);
+  gate.release = TRUE;
+  g_cond_broadcast (&gate.condition);
+  g_mutex_unlock (&gate.mutex);
+  g_thread_join (thread);
+  sqlite3_finalize (prepared_before_fence);
+  wyl_policy_store_graph_authority_migration_gate (store, NULL, NULL);
+  g_assert_cmpint (gate.migration_result, ==, WYRELOG_E_OK);
+  gboolean exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_permission_exists (store,
+      "test.concurrent", &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+  g_cond_clear (&gate.condition);
+  g_mutex_clear (&gate.mutex);
+}
+
+static void
+test_provisioning_terminal_fences_fact_root_waiter (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  sqlite3 *db = NULL;
+  open_pre_windows_fixture (&store, &db);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *fact_root = g_dir_make_tmp ("wyl-terminal-root-XXXXXX",
+          &error);
+  g_assert_no_error (error);
+  ProvisioningMigrationGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.condition);
+  gate.store = store;
+  wyl_policy_store_graph_authority_migration_gate (store,
+      provisioning_migration_gate, &gate);
+  wyl_policy_store_fact_root_entry_gate (store, fact_root_entry_gate, &gate);
+  wyl_policy_store_graph_authority_migration_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FOREIGN_KEYS_RESTORE);
+  GThread *migration = g_thread_new ("terminal-migration",
+          run_gated_provisioning_migration, &gate);
+  g_mutex_lock (&gate.mutex);
+  while (!gate.reached)
+    g_cond_wait (&gate.condition, &gate.mutex);
+  g_mutex_unlock (&gate.mutex);
+
+  FactRootWaiter waiter = {
+    .gate = &gate,
+    .fact_root = fact_root,
+  };
+  GThread *fact_root_thread = g_thread_new ("terminal-fact-root",
+          run_fact_root_waiter, &waiter);
+  g_mutex_lock (&gate.mutex);
+  while (!gate.fact_root_entered)
+    g_cond_wait (&gate.condition, &gate.mutex);
+  gate.release = TRUE;
+  g_cond_broadcast (&gate.condition);
+  g_mutex_unlock (&gate.mutex);
+
+  g_thread_join (migration);
+  g_thread_join (fact_root_thread);
+  g_assert_cmpint (gate.migration_result, ==, WYRELOG_E_IO);
+  g_assert_cmpint (waiter.result, ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (g_rmdir (fact_root), ==, 0);
+  g_cond_clear (&gate.condition);
+  g_mutex_clear (&gate.mutex);
+}
+
+static void
+test_provisioning_terminal_fences_rotation_intent_waiters (void)
+{
+  for (guint operation = ROTATION_INTENT_WAITER_WRITE;
+      operation <= ROTATION_INTENT_WAITER_STATUS; operation++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    g_autofree gchar *sidecar =
+        g_strconcat (path, ".wyrelog-rotation-intent", NULL);
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (path, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+    install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
+        fixture_pre_windows_table_sql,
+        fixture_pre_windows_immutable_trigger_sql);
+    static const gchar sentinel[] = "unchanged-sidecar";
+    g_assert_true (g_file_set_contents (sidecar, sentinel,
+        sizeof sentinel - 1, NULL));
+
+    ProvisioningMigrationGate gate = { 0 };
+    g_mutex_init (&gate.mutex);
+    g_cond_init (&gate.condition);
+    gate.store = store;
+    wyl_policy_store_graph_authority_migration_gate (store,
+        provisioning_migration_gate, &gate);
+    wyl_policy_store_rotation_intent_entry_gate (store,
+        rotation_intent_entry_gate, &gate);
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FOREIGN_KEYS_RESTORE);
+    GThread *migration = g_thread_new ("terminal-migration",
+            run_gated_provisioning_migration, &gate);
+    g_mutex_lock (&gate.mutex);
+    while (!gate.reached)
+      g_cond_wait (&gate.condition, &gate.mutex);
+    g_mutex_unlock (&gate.mutex);
+
+    RotationIntentWaiter waiter = {
+      .gate = &gate,
+      .operation = (RotationIntentWaiterOperation) operation,
+      .intent = {
+        .state = WYL_POLICY_ROTATION_INTENT_PENDING,
+        .old_generation = 1,
+        .expected_new_generation = 2,
+      },
+    };
+    waiter.intent.transaction_id.bytes[0] = 1;
+    memset (waiter.intent.canonical_digest, 1,
+        sizeof waiter.intent.canonical_digest);
+    memset (waiter.intent.old_provider_id, 2,
+        sizeof waiter.intent.old_provider_id);
+    memset (waiter.intent.new_provider_id, 3,
+        sizeof waiter.intent.new_provider_id);
+    memset (waiter.auth_key, 4, sizeof waiter.auth_key);
+    GThread *sidecar_thread = g_thread_new ("terminal-sidecar",
+            run_rotation_intent_waiter, &waiter);
+    g_mutex_lock (&gate.mutex);
+    while (!gate.rotation_intent_entered)
+      g_cond_wait (&gate.condition, &gate.mutex);
+    gate.release = TRUE;
+    g_cond_broadcast (&gate.condition);
+    g_mutex_unlock (&gate.mutex);
+
+    g_thread_join (migration);
+    g_thread_join (sidecar_thread);
+    g_assert_cmpint (gate.migration_result, ==, WYRELOG_E_IO);
+    g_assert_cmpint (waiter.result, ==, WYRELOG_E_IO);
+    g_assert_cmpint (waiter.status.state, ==,
+        WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (sidecar, &after, &after_len, NULL));
+    g_assert_cmpuint (after_len, ==, sizeof sentinel - 1);
+    g_assert_cmpint (memcmp (after, sentinel, sizeof sentinel - 1), ==, 0);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    g_cond_clear (&gate.condition);
+    g_mutex_clear (&gate.mutex);
+    (void) g_remove (sidecar);
+    cleanup_store_path (root, path);
+  }
+}
+
+static void
+test_provisioning_migration_terminalizes_restore_failure (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
+      fixture_pre_windows_immutable_trigger_sql);
+  wyl_policy_store_graph_authority_migration_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FOREIGN_KEYS_RESTORE);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
+      WYRELOG_E_IO);
+  g_assert_null (wyl_policy_store_get_db (store));
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_IO);
+  gboolean exists = FALSE;
+  g_assert_cmpint (wyl_policy_store_table_exists (store, "permissions",
+      &exists), ==, WYRELOG_E_IO);
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+      "WHERE name='darwin_operation_evidence';"), ==, 1);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static void
+provisioning_verifier_intrusion_gate (gpointer data,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  if (stage != WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER)
+    return;
+  const gchar *path = data;
+  sqlite3 *intruder = NULL;
+  g_assert_cmpint (sqlite3_open_v2 (path, &intruder,
+      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL), ==, SQLITE_OK);
+  exec_ok (intruder,
+      "CREATE TABLE verifier_intrusion(value TEXT NOT NULL);");
+  g_assert_cmpint (sqlite3_close (intruder), ==, SQLITE_OK);
+}
+
+static void
+test_provisioning_migration_verifier_snapshot_is_exact (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
+      fixture_pre_windows_table_sql,
+      fixture_pre_windows_immutable_trigger_sql);
+  wyl_policy_store_graph_authority_migration_gate (store,
+      provisioning_verifier_intrusion_gate, path);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (wyl_policy_store_get_db (store));
+  wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_DATA;
+  g_assert_cmpint (wyl_policy_store_permission_plane (store,
+      "nonexistent.fast.path", &plane), ==, WYRELOG_E_POLICY);
+  gboolean table_exists = FALSE;
+  g_assert_cmpint (wyl_policy_store_table_exists (store, "permissions",
+      &table_exists), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
+      WYRELOG_E_POLICY);
+  WylPolicyRotationIntentStatus intent_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store,
+      &intent_status), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *fact_root = g_build_filename (root, "facts", NULL);
+  g_assert_cmpint (g_mkdir (fact_root, 0700), ==, 0);
+  g_assert_cmpint (wyl_policy_store_bind_fact_root (store, fact_root), ==,
+      WYRELOG_E_POLICY);
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+      "WHERE name='darwin_operation_evidence';"), ==, 1);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM sqlite_schema WHERE type='table' AND "
+      "name='verifier_intrusion';"), ==, 1);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  (void) g_rmdir (fact_root);
+  cleanup_store_path (root, path);
+}
+
+static void
+test_provisioning_migration_competing_writer_is_not_retried (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
+      fixture_pre_windows_immutable_trigger_sql);
+  sqlite3 *writer = NULL;
+  g_assert_cmpint (sqlite3_open_v2 (path, &writer,
+      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL), ==, SQLITE_OK);
+  exec_ok (writer, "BEGIN IMMEDIATE;");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (scalar_int64 (db, "PRAGMA foreign_keys;"), ==, 1);
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+      "WHERE name='darwin_operation_evidence';"), ==, 0);
+  exec_ok (writer, "ROLLBACK;");
+  g_assert_cmpint (sqlite3_close (writer), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static void
+provisioning_rollback_failure_gate (gpointer data,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  wyl_policy_store_t *store = data;
+  if (stage ==
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT)
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_COMMIT);
+  else if (stage ==
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_ROLLBACK)
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_ROLLBACK);
+}
+
+static void
+test_provisioning_migration_terminalizes_rollback_failure (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
+      fixture_windows_table_sql, fixture_windows_immutable_trigger_sql);
+  wyl_policy_store_graph_authority_migration_gate (store,
+      provisioning_rollback_failure_gate, store);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
+      WYRELOG_E_IO);
+  g_assert_null (wyl_policy_store_get_db (store));
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+      "WHERE name='darwin_operation_evidence';"), ==, 0);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static void
+test_encrypted_provisioning_migration_publication (void)
+{
+  for (guint predecessor = 0; predecessor < 2; predecessor++) {
+    for (guint fail_publication = 0; fail_publication < 2;
+        fail_publication++) {
+      g_test_message ("encrypted predecessor=%s publication=%s",
+          predecessor == 0 ? "pre-windows" : "windows",
+          fail_publication == 0 ? "success" : "failure");
+      g_autofree gchar *root = NULL;
+      g_autofree gchar *path = make_store_path (&root);
+      g_autofree gchar *key_path = g_build_filename (root, "policy.key",
+              NULL);
+      g_autofree gchar *lock_path = g_strconcat (path, ".wyrelog-lock",
+              NULL);
+      g_assert_true (write_policy_key (key_path));
+      g_autoptr (wyl_policy_store_t) store = NULL;
+      g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+          ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+          WYRELOG_E_OK);
+      sqlite3 *db = wyl_policy_store_get_db (store);
+      install_provisioning_schema_fixture (db,
+          predecessor == 0 ? fixture_pre_windows_table_sql :
+          fixture_windows_table_sql,
+          predecessor == 0 ? fixture_pre_windows_immutable_trigger_sql :
+          fixture_windows_immutable_trigger_sql);
+      g_clear_pointer (&store, wyl_policy_store_close);
+
+      g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+          ==, WYRELOG_E_OK);
+      sqlite3_stmt *held_statement = NULL;
+      if (fail_publication != 0)
+        g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+            "SELECT count(*) FROM permissions;", -1, &held_statement, NULL),
+            ==, SQLITE_OK);
+      if (fail_publication != 0)
+        wyl_policy_store_graph_authority_migration_fail_once (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_PUBLICATION);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+          fail_publication == 0 ? WYRELOG_E_OK : WYRELOG_E_IO);
+      if (fail_publication != 0) {
+        g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
+            WYRELOG_E_IO);
+        g_assert_null (wyl_policy_store_get_db (store));
+      }
+      g_clear_pointer (&store, wyl_policy_store_close);
+      if (held_statement != NULL)
+        g_assert_cmpint (sqlite3_finalize (held_statement), ==, SQLITE_OK);
+
+      g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+          ==, WYRELOG_E_OK);
+      db = wyl_policy_store_get_db (store);
+      g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+          "WHERE name='darwin_operation_evidence';"), ==,
+          fail_publication == 0 ? 1 : 0);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+          "WHERE name='darwin_operation_evidence';"), ==, 1);
+      g_clear_pointer (&store, wyl_policy_store_close);
+      (void) g_remove (key_path);
+      (void) g_remove (lock_path);
+      cleanup_store_path (root, path);
+    }
+  }
+}
+
+typedef struct
+{
+  const gchar *path;
+  WylPolicyGraphAuthorityMigrationFailStage stage;
+} MaintenanceSubstitutionGate;
+
+static void
+assert_distinct_file_identity (const gchar *left, const gchar *right)
+{
+#ifdef G_OS_WIN32
+  wchar_t *left_wide = (wchar_t *) g_utf8_to_utf16 (left, -1, NULL, NULL,
+          NULL);
+  wchar_t *right_wide = (wchar_t *) g_utf8_to_utf16 (right, -1, NULL, NULL,
+          NULL);
+  g_assert_nonnull (left_wide);
+  g_assert_nonnull (right_wide);
+  HANDLE left_handle = CreateFileW (left_wide, FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  HANDLE right_handle = CreateFileW (right_wide, FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  g_free (left_wide);
+  g_free (right_wide);
+  g_assert_true (left_handle != INVALID_HANDLE_VALUE);
+  g_assert_true (right_handle != INVALID_HANDLE_VALUE);
+  BY_HANDLE_FILE_INFORMATION left_info;
+  BY_HANDLE_FILE_INFORMATION right_info;
+  g_assert_true (GetFileInformationByHandle (left_handle, &left_info));
+  g_assert_true (GetFileInformationByHandle (right_handle, &right_info));
+  g_assert_true (CloseHandle (left_handle));
+  g_assert_true (CloseHandle (right_handle));
+  g_assert_true (left_info.dwVolumeSerialNumber !=
+      right_info.dwVolumeSerialNumber
+      || left_info.nFileIndexHigh != right_info.nFileIndexHigh
+      || left_info.nFileIndexLow != right_info.nFileIndexLow);
+#else
+  GStatBuf left_stat;
+  GStatBuf right_stat;
+  g_assert_cmpint (g_stat (left, &left_stat), ==, 0);
+  g_assert_cmpint (g_stat (right, &right_stat), ==, 0);
+  g_assert_true (left_stat.st_dev != right_stat.st_dev
+      || left_stat.st_ino != right_stat.st_ino);
+#endif
+}
+
+static void
+maintenance_post_publication_substitution_gate (gpointer data,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  MaintenanceSubstitutionGate *gate = data;
+  if (stage != gate->stage)
+    return;
+  const gchar *path = gate->path;
+  g_autofree gchar *replacement = g_strconcat (path, ".replacement", NULL);
+  g_autofree gchar *published = NULL;
+  gsize published_len = 0;
+  g_assert_true (g_file_get_contents (path, &published, &published_len, NULL));
+  g_assert_true (g_file_set_contents (replacement, published, published_len,
+      NULL));
+  g_assert_cmpint (g_chmod (replacement, 0600), ==, 0);
+  assert_distinct_file_identity (path, replacement);
+#ifdef G_OS_WIN32
+  if (stage == WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER) {
+    g_autofree gchar *aside = g_strconcat (path, ".pinned-original", NULL);
+    wchar_t *path_wide = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL,
+            NULL);
+    wchar_t *replacement_wide = (wchar_t *) g_utf8_to_utf16 (replacement, -1,
+            NULL, NULL, NULL);
+    wchar_t *aside_wide = (wchar_t *) g_utf8_to_utf16 (aside, -1, NULL, NULL,
+            NULL);
+    g_assert_nonnull (path_wide);
+    g_assert_nonnull (replacement_wide);
+    g_assert_nonnull (aside_wide);
+    g_assert_true (MoveFileExW (path_wide, aside_wide,
+        MOVEFILE_WRITE_THROUGH));
+    g_assert_true (MoveFileExW (replacement_wide, path_wide,
+        MOVEFILE_WRITE_THROUGH));
+    g_free (path_wide);
+    g_free (replacement_wide);
+    g_free (aside_wide);
+    return;
+  }
+  g_assert_cmpint (g_remove (path), ==, 0);
+#endif
+  g_assert_cmpint (g_rename (replacement, path), ==, 0);
+}
+
+static void
+test_encrypted_maintenance_migration_identity_gate (void)
+{
+  for (guint mode = 0; mode < 6; mode++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    g_autofree gchar *key_path = g_build_filename (root, "policy.key", NULL);
+    g_autofree gchar *backup_path = g_build_filename (root, "policy.backup",
+            NULL);
+    g_autofree gchar *lock_path = g_strconcat (path, ".wyrelog-lock", NULL);
+    g_assert_true (write_policy_key (key_path));
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+    install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
+        fixture_pre_windows_table_sql,
+        fixture_pre_windows_immutable_trigger_sql);
+    g_clear_pointer (&store, wyl_policy_store_close);
+
+    g_assert_cmpint (open_encrypted_policy_store_with_maintenance (path,
+        key_path, TRUE, &store), ==, WYRELOG_E_OK);
+    g_autofree gchar *canonical_before = NULL;
+    gsize canonical_before_len = 0;
+    g_assert_true (g_file_get_contents (path, &canonical_before,
+        &canonical_before_len, NULL));
+    if (mode == 1) {
+      g_assert_cmpint (g_rename (path, backup_path), ==, 0);
+      g_assert_true (g_file_set_contents (path, canonical_before,
+          canonical_before_len, NULL));
+    }
+    if (mode == 2)
+      wyl_policy_store_graph_authority_migration_fail_once (store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_MAINTENANCE_PIN_REFRESH);
+    MaintenanceSubstitutionGate substitution_gate = {
+      .path = path,
+      .stage = mode == 3 ?
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_MAINTENANCE_PIN_REFRESH :
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER,
+    };
+    if (mode == 3 || mode == 5)
+      wyl_policy_store_graph_authority_migration_gate (store,
+          maintenance_post_publication_substitution_gate, &substitution_gate);
+    if (mode == 4)
+      wyl_policy_store_graph_authority_migration_fail_once (store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_DIRECTORY_SYNC);
+    gboolean success_expected = mode == 0;
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        success_expected ? WYRELOG_E_OK :
+        (mode == 2 || mode == 4 ? WYRELOG_E_IO : WYRELOG_E_POLICY));
+    if (!success_expected) {
+      g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
+          mode == 2 || mode == 4 ? WYRELOG_E_IO : WYRELOG_E_POLICY);
+      g_assert_null (wyl_policy_store_get_db (store));
+    }
+    if (mode == 1) {
+      g_autofree gchar *substituted_after = NULL;
+      gsize substituted_after_len = 0;
+      g_assert_true (g_file_get_contents (path, &substituted_after,
+          &substituted_after_len, NULL));
+      g_assert_cmpuint (substituted_after_len, ==, canonical_before_len);
+      g_assert_cmpint (memcmp (substituted_after, canonical_before,
+          canonical_before_len), ==, 0);
+    }
+    g_clear_pointer (&store, wyl_policy_store_close);
+    g_autofree gchar *pinned_original =
+        g_strconcat (path, ".pinned-original", NULL);
+    (void) g_remove (pinned_original);
+
+    g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+        "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+        "WHERE name='darwin_operation_evidence';"), ==,
+        mode == 1 ? 0 : 1);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    (void) g_remove (backup_path);
+    (void) g_remove (key_path);
+    (void) g_remove (lock_path);
+    cleanup_store_path (root, path);
+  }
+}
+
+static void
+provisioning_migration_crash_gate (gpointer data,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  if (stage == (WylPolicyGraphAuthorityMigrationFailStage)
+      GPOINTER_TO_INT (data))
+    _Exit (73);
+}
+
+static void
+test_provisioning_migration_process_crashes (void)
+{
+  if (g_test_subprocess ()) {
+    const gchar *path = g_getenv ("WYL_TEST_PROVISIONING_CRASH_PATH");
+    const gchar *key_path =
+        g_getenv ("WYL_TEST_PROVISIONING_CRASH_KEY_PATH");
+    gboolean encrypted = g_strcmp0
+          (g_getenv ("WYL_TEST_PROVISIONING_CRASH_ENCRYPTED"), "1") == 0;
+    gint stage = (gint) g_ascii_strtoll
+          (g_getenv ("WYL_TEST_PROVISIONING_CRASH_STAGE"), NULL, 10);
+    wyl_policy_store_t *store = NULL;
+    wyrelog_error_t rc = encrypted ?
+        open_encrypted_policy_store (path, key_path, &store) :
+        wyl_policy_store_open (path, &store);
+    if (rc != WYRELOG_E_OK)
+      _Exit (74);
+    wyl_policy_store_graph_authority_migration_gate (store,
+        provisioning_migration_crash_gate, GINT_TO_POINTER (stage));
+    (void) wyl_policy_store_create_schema (store);
+    _Exit (75);
+  }
+
+  static const struct
+  {
+    gboolean encrypted;
+    WylPolicyGraphAuthorityMigrationFailStage stage;
+    gboolean canonical_after_crash;
+  } scenarios[] = {
+    {FALSE,
+     WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT,
+     FALSE},
+    {FALSE,
+     WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT,
+     TRUE},
+    {TRUE,
+     WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT,
+     FALSE},
+    {TRUE,
+     WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_ENCRYPTED_PUBLICATION,
+     TRUE},
+  };
+  for (guint predecessor = 0; predecessor < 2; predecessor++) {
+    for (gsize scenario = 0; scenario < G_N_ELEMENTS (scenarios); scenario++) {
+      g_autofree gchar *root = NULL;
+      g_autofree gchar *path = make_store_path (&root);
+      g_autofree gchar *key_path = g_build_filename (root, "policy.key",
+              NULL);
+      g_autofree gchar *lock_path = g_strconcat (path, ".wyrelog-lock",
+              NULL);
+      if (scenarios[scenario].encrypted)
+        g_assert_true (write_policy_key (key_path));
+      g_autoptr (wyl_policy_store_t) store = NULL;
+      g_assert_cmpint (scenarios[scenario].encrypted ?
+          open_encrypted_policy_store (path, key_path, &store) :
+          wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+          WYRELOG_E_OK);
+      install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
+          predecessor == 0 ? fixture_pre_windows_table_sql :
+          fixture_windows_table_sql,
+          predecessor == 0 ? fixture_pre_windows_immutable_trigger_sql :
+          fixture_windows_immutable_trigger_sql);
+      g_clear_pointer (&store, wyl_policy_store_close);
+
+      g_autofree gchar *stage = g_strdup_printf ("%u",
+              (guint) scenarios[scenario].stage);
+      g_setenv ("WYL_TEST_PROVISIONING_CRASH_PATH", path, TRUE);
+      g_setenv ("WYL_TEST_PROVISIONING_CRASH_KEY_PATH", key_path, TRUE);
+      g_setenv ("WYL_TEST_PROVISIONING_CRASH_ENCRYPTED",
+          scenarios[scenario].encrypted ? "1" : "0", TRUE);
+      g_setenv ("WYL_TEST_PROVISIONING_CRASH_STAGE", stage, TRUE);
+      g_test_trap_subprocess (NULL, 10 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_failed ();
+      g_unsetenv ("WYL_TEST_PROVISIONING_CRASH_PATH");
+      g_unsetenv ("WYL_TEST_PROVISIONING_CRASH_KEY_PATH");
+      g_unsetenv ("WYL_TEST_PROVISIONING_CRASH_ENCRYPTED");
+      g_unsetenv ("WYL_TEST_PROVISIONING_CRASH_STAGE");
+
+      g_assert_cmpint (scenarios[scenario].encrypted ?
+          open_encrypted_policy_store (path, key_path, &store) :
+          wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+      g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
+          "WHERE name='darwin_operation_evidence';"), ==,
+          scenarios[scenario].canonical_after_crash ? 1 : 0);
+      g_clear_pointer (&store, wyl_policy_store_close);
+      (void) g_remove (key_path);
+      (void) g_remove (lock_path);
+      cleanup_store_path (root, path);
+    }
+  }
+}
+
+
 
 static void
 test_malformed_provisioning_schema_fails_closed (void)
@@ -1769,9 +3324,18 @@ test_mutation_faults_roll_back (void)
 static void
 test_fresh_migration_failures_reopen_and_retry (void)
 {
-  for (WylPolicyGraphAuthorityMigrationFailStage stage =
-      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL;
-      stage < WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT; stage++) {
+  const WylPolicyGraphAuthorityMigrationFailStage stages[] = {
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_UUID_INDEX,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_TENANT_TRIGGERS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_GRAPH_TRIGGERS,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_VALIDATION,
+    WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE,
+  };
+  for (gsize stage_index = 0; stage_index < G_N_ELEMENTS (stages);
+      stage_index++) {
+    WylPolicyGraphAuthorityMigrationFailStage stage = stages[stage_index];
     g_autofree gchar *root = NULL;
     g_autofree gchar *path = make_store_path (&root);
     wyl_policy_store_t *store = NULL;
@@ -2518,6 +4082,36 @@ main (int argc, char **argv)
       test_provisioning_degraded_terminal_coupling);
   g_test_add_func ("/policy/graph-authority/malformed-provisioning-schema",
       test_malformed_provisioning_schema_fails_closed);
+  g_test_add_func ("/policy/graph-authority/pre-windows-provisioning-migration",
+      test_pre_windows_provisioning_schema_migrates);
+  g_test_add_func ("/policy/graph-authority/windows-provisioning-migration",
+      test_windows_provisioning_schema_migrates);
+  g_test_add_func ("/policy/graph-authority/provisioning-sequence-absence",
+      test_provisioning_migration_preserves_sequence_absence);
+  g_test_add_func ("/policy/graph-authority/darwin-evidence-schema",
+      test_darwin_evidence_schema_is_structural_and_immutable);
+  g_test_add_func ("/policy/graph-authority/provisioning-migration-preflight",
+      test_provisioning_migration_preflight_is_fail_closed);
+  g_test_add_func ("/policy/graph-authority/provisioning-migration-sql-fence",
+      test_provisioning_migration_fences_same_handle_sql);
+  g_test_add_func ("/policy/graph-authority/provisioning-terminal-fact-root",
+      test_provisioning_terminal_fences_fact_root_waiter);
+  g_test_add_func ("/policy/graph-authority/provisioning-terminal-sidecars",
+      test_provisioning_terminal_fences_rotation_intent_waiters);
+  g_test_add_func ("/policy/graph-authority/provisioning-migration-terminal",
+      test_provisioning_migration_terminalizes_restore_failure);
+  g_test_add_func ("/policy/graph-authority/provisioning-verifier-snapshot",
+      test_provisioning_migration_verifier_snapshot_is_exact);
+  g_test_add_func ("/policy/graph-authority/provisioning-competing-writer",
+      test_provisioning_migration_competing_writer_is_not_retried);
+  g_test_add_func ("/policy/graph-authority/provisioning-rollback-terminal",
+      test_provisioning_migration_terminalizes_rollback_failure);
+  g_test_add_func ("/policy/graph-authority/provisioning-migration-encrypted",
+      test_encrypted_provisioning_migration_publication);
+  g_test_add_func ("/policy/graph-authority/provisioning-maintenance-identity",
+      test_encrypted_maintenance_migration_identity_gate);
+  g_test_add_func ("/policy/graph-authority/provisioning-migration-crash",
+      test_provisioning_migration_process_crashes);
   g_test_add_func ("/policy/graph-authority/provisioning-trigger-verified",
       test_provisioning_immutable_trigger_is_verified);
   g_test_add_func ("/policy/graph-authority/provisioning-private-api",

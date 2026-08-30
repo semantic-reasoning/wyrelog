@@ -25,6 +25,20 @@
 #error "WYL_TEST_SQLITE_SCHEMA_PATH must be defined by the build."
 #endif
 
+static gboolean
+pragma_integer_equals (sqlite3 *db, const gchar *sql, gint expected)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return FALSE;
+  int step = sqlite3_step (stmt);
+  gboolean matches = step == SQLITE_ROW
+      && sqlite3_column_type (stmt, 0) == SQLITE_INTEGER
+      && sqlite3_column_int (stmt, 0) == expected;
+  sqlite3_finalize (stmt);
+  return matches;
+}
+
 static gint
 check_store_creates_authority_schema (void)
 {
@@ -32,6 +46,17 @@ check_store_creates_authority_schema (void)
 
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
     return 10;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  if (!pragma_integer_equals (db, "PRAGMA foreign_keys;", 1))
+    return 101;
+  if (!pragma_integer_equals (db, "PRAGMA synchronous;", 2))
+    return 102;
+#ifdef __APPLE__
+  if (!pragma_integer_equals (db, "PRAGMA fullfsync;", 1))
+    return 103;
+  if (!pragma_integer_equals (db, "PRAGMA checkpoint_fullfsync;", 1))
+    return 104;
+#endif
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 11;
 
@@ -5904,7 +5929,8 @@ check_store_provisions_fact_graph (void)
       "AND windows_graph_volume_serial IS NULL "
       "AND windows_graph_file_id IS NULL "
       "AND windows_artifact_volume_serial IS NULL "
-      "AND windows_artifact_file_id IS NULL;", &absent_evidence_count) != 0)
+      "AND windows_artifact_file_id IS NULL "
+      "AND darwin_operation_evidence IS NULL;", &absent_evidence_count) != 0)
     return 9691;
   if (absent_evidence_count != 1)
     return 9692;

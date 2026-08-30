@@ -111,6 +111,25 @@ typedef enum
 {
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_FOREIGN_KEYS_OFF,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TEMP,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COPY,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_DROP,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_CREATE,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_ROWS,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TRIGGERS,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_VALIDATION,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TEMP_DROP,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_COMMIT,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_ROLLBACK,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FOREIGN_KEYS_RESTORE,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_PUBLICATION,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_ENCRYPTED_PUBLICATION,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_MAINTENANCE_PIN_REFRESH,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_DIRECTORY_SYNC,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_UUID_INDEX,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_TENANT_TRIGGERS,
@@ -119,6 +138,11 @@ typedef enum
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT,
 } WylPolicyGraphAuthorityMigrationFailStage;
+
+typedef void (*WylPolicyGraphAuthorityMigrationGateFunc)
+  (gpointer data, WylPolicyGraphAuthorityMigrationFailStage stage);
+typedef void (*WylPolicyStoreFactRootEntryGateFunc) (gpointer data);
+typedef void (*WylPolicyStoreRotationIntentEntryGateFunc) (gpointer data);
 
 typedef enum
 {
@@ -325,6 +349,8 @@ typedef struct
   gboolean has_windows_evidence;
   WylFactGraphWinOperationEvidence windows_evidence;
 #endif
+  /* Opaque policy-owned envelope. Locator code alone decodes its 56 bytes. */
+  GBytes *darwin_operation_evidence;
 } WylPolicyGraphProvisioningRecord;
 
 void wyl_policy_graph_provisioning_record_free
@@ -1480,6 +1506,17 @@ wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 void wyl_policy_store_graph_authority_migration_fail_once
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMigrationFailStage stage);
+void wyl_policy_store_graph_authority_migration_gate
+  (wyl_policy_store_t * store,
+    WylPolicyGraphAuthorityMigrationGateFunc gate, gpointer data);
+wyrelog_error_t wyl_policy_store_terminal_result
+  (wyl_policy_store_t * store);
+void wyl_policy_store_fact_root_entry_gate
+  (wyl_policy_store_t * store, WylPolicyStoreFactRootEntryGateFunc gate,
+    gpointer data);
+void wyl_policy_store_rotation_intent_entry_gate
+  (wyl_policy_store_t * store, WylPolicyStoreRotationIntentEntryGateFunc gate,
+    gpointer data);
 void wyl_policy_store_graph_authority_mutation_fail_once
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMutationFailStage stage);
