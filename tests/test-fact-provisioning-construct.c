@@ -86,10 +86,11 @@ file_information (const gchar *path, BY_HANDLE_FILE_INFORMATION *out_info)
 #endif
 
 /* Construction stages, publishes, and initializes+validates exact identity.
- * POSIX leaves the retained facts.duckdb pair at nlink 2: both the final and
+ * Linux leaves the retained facts.duckdb pair at nlink 2: both the final and
  * staged names bind the same inode, the anti-swap invariant the secure open
  * requires.  Windows publishes by rename, so its witness is the operation
- * evidence rather than a second name; each arm asserts its own shape. */
+ * evidence rather than a second name.  Darwin rejects this stateless helper
+ * before filesystem mutation; each arm asserts its own shape. */
 static void
 test_construct_publishes_verified_single_store (void)
 {
@@ -100,6 +101,39 @@ test_construct_publishes_verified_single_store (void)
   WylPolicyGraphProvisioningRecord record = make_record ();
   WylPolicyGraphAuthorityRecord authority = make_authority ();
 
+#ifdef __APPLE__
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (NULL, &record,
+      &authority), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct ("", &record,
+      &authority), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, NULL,
+      &authority), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
+      NULL), ==, WYRELOG_E_INVALID);
+  authority.store_uuid = (gchar *)
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
+      &authority), ==, WYRELOG_E_INVALID);
+  authority = make_authority ();
+  record.phase = WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED;
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
+      &authority), ==, WYRELOG_E_INVALID);
+  record = make_record ();
+  record.op_uuid = (gchar *)
+      "01890F47-3C4B-7CC2-B8C4-DC0C0C070544";
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
+      &authority), ==, WYRELOG_E_INVALID);
+  record = make_record ();
+  g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
+      &authority), ==, WYRELOG_E_POLICY);
+  g_autoptr (GDir) directory = g_dir_open (root, 0, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (directory);
+  g_assert_null (g_dir_read_name (directory));
+  g_clear_pointer (&directory, g_dir_close);
+  remove_root (root);
+  return;
+#else
   g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
       &authority), ==, WYRELOG_E_OK);
 
@@ -137,8 +171,10 @@ test_construct_publishes_verified_single_store (void)
 #endif
 
   remove_root (root);
+#endif
 }
 
+#ifndef __APPLE__
 /* A second construction over a published store never overwrites it: the stage
  * gate rejects the already-final facts.duckdb. */
 static void
@@ -205,6 +241,7 @@ test_construct_never_overwrites_published_store (void)
 
   remove_root (root);
 }
+#endif
 
 int
 main (int argc, char *argv[])
@@ -213,8 +250,10 @@ main (int argc, char *argv[])
   g_test_add_func (
     "/fact/provisioning-construct/publishes-verified-single-store",
     test_construct_publishes_verified_single_store);
+#ifndef __APPLE__
   g_test_add_func (
     "/fact/provisioning-construct/never-overwrites-published-store",
     test_construct_never_overwrites_published_store);
+#endif
   return g_test_run ();
 }

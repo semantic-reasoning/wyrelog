@@ -68,6 +68,26 @@ test_prepare_exact_stage_reopens_after_crash (void)
   WylPolicyGraphProvisioningRecord record = make_record ();
   WylPolicyGraphAuthorityRecord authority = make_authority ();
   WylFactGraphProvisioningStage first = WYL_FACT_GRAPH_PROVISIONING_STAGE_INIT;
+#ifdef __APPLE__
+  g_assert_cmpint (wyl_fact_graph_provisioning_stage_prepare (root, &record,
+      &authority, &first), ==, WYRELOG_E_POLICY);
+  g_assert_null (first.tenant_id);
+  g_assert_null (first.graph_id);
+  g_assert_null (first.store_uuid);
+  g_assert_null (first.stage.stage_basename);
+  g_assert_null (first.stage.final_basename);
+  g_assert_cmpint (first.resolver.fd, ==, -1);
+  g_assert_cmpint (first.directory.root_fd, ==, -1);
+  g_assert_cmpint (first.directory.tenant_fd, ==, -1);
+  g_assert_cmpint (first.directory.graph_fd, ==, -1);
+  g_assert_cmpint (first.stage.fd, ==, -1);
+  g_autoptr (GDir) directory = g_dir_open (root, 0, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (directory);
+  g_assert_null (g_dir_read_name (directory));
+  g_clear_pointer (&directory, g_dir_close);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+#else
   g_assert_cmpint (wyl_fact_graph_provisioning_stage_prepare (root, &record,
       &authority, &first), ==, WYRELOG_E_OK);
   g_assert_cmpstr (first.stage.stage_basename, ==, record.stage_basename);
@@ -90,6 +110,7 @@ test_prepare_exact_stage_reopens_after_crash (void)
 #endif
   wyl_fact_graph_provisioning_stage_clear (&retry);
   remove_root (root);
+#endif
 }
 
 static void

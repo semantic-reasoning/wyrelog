@@ -91,6 +91,13 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
       || !record_matches_authority (record, authority))
     return WYRELOG_E_INVALID;
 
+#ifdef __APPLE__
+  /* The staged hard-link protocol is not a Darwin provisioning authority.
+   * Only the policy-backed coordinator can persist the direct-final evidence
+   * needed for secure recovery.  Refuse before locator or filesystem access. */
+  return WYRELOG_E_POLICY;
+#endif
+
   WylFactGraphLocator locator = { 0 };
   wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, record->tenant_id,
           record->graph_id);
