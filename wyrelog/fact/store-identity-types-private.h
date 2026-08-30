@@ -42,6 +42,13 @@ typedef enum
 
 typedef enum
 {
+  WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_NONE = 0,
+  WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE,
+  WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_STORAGE,
+} WylFactStorePinnedFailureOrigin;
+
+typedef enum
+{
   WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE = 0,
   WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_CREATE,
   WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_KIND,
@@ -63,6 +70,9 @@ typedef enum
   WYL_FACT_STORE_PINNED_RENDEZVOUS_R3_POSTIDENTITY,
   WYL_FACT_STORE_PINNED_RENDEZVOUS_R4_PREFINALIZE,
   WYL_FACT_STORE_PINNED_RENDEZVOUS_R5_FINAL_REVALIDATE,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_FAILURE_OBSERVED,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_INTERNAL_PREIDENTITY,
+  WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_POSTREVALIDATE_PRECONSTRUCT,
 } WylFactStorePinnedRendezvous;
 
 typedef void (*WylFactStorePinnedTestHook) (WylFactStorePinnedRendezvous,
@@ -88,12 +98,21 @@ wyrelog_error_t wyl_fact_store_open_identified_provisioned_pair_pinned
   (WylFactGraphProvisionedPair * pair,
     const WylFactStoreIdentity * identity,
     WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result);
+wyrelog_error_t
+wyl_fact_store_open_identified_provisioned_pair_pinned_classified
+  (WylFactGraphProvisionedPair * pair,
+    const WylFactStoreIdentity * identity,
+    WylFactStoreIdentityOpenMode mode, WylFactStoreIdentityResult * out_result,
+    WylFactStorePinnedFailureOrigin * out_failure_origin);
 void wyl_fact_store_pinned_set_pair_test_hook_for_test
   (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_pair_preflight_hook_for_test
   (WylFactStorePairPreflightTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_pair_preflight_error_for_test
   (WylFactStorePairPreflightForTest seam, wyrelog_error_t error);
+void wyl_fact_store_pinned_set_pair_test_stage_errors_for_test
+  (wyrelog_error_t authority_error, wyrelog_error_t finalize_error,
+    wyrelog_error_t r5_error);
 void wyl_fact_store_pinned_set_test_hook
   (WylFactStorePinnedTestHook hook, gpointer user_data);
 void wyl_fact_store_pinned_set_test_stage_errors

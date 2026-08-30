@@ -43,7 +43,7 @@ path_to_utf8 (const fs::path &path)
 {
 #ifdef G_OS_WIN32
   return (gchar *) g_utf16_to_utf8 ((const gunichar2 *) path.c_str (), -1,
-      nullptr, nullptr, nullptr);
+             nullptr, nullptr, nullptr);
 #else
   return g_strdup (path.c_str ());
 #endif
@@ -54,9 +54,9 @@ create_symlink (const gchar *target, const gchar *link_path)
 {
 #ifdef G_OS_WIN32
   g_autofree gunichar2 *wide_target = g_utf8_to_utf16 (target, -1, nullptr,
-      nullptr, nullptr);
+          nullptr, nullptr);
   g_autofree gunichar2 *wide_link = g_utf8_to_utf16 (link_path, -1, nullptr,
-      nullptr, nullptr);
+          nullptr, nullptr);
   if (wide_target == nullptr || wide_link == nullptr)
     return -1;
   DWORD flags = g_file_test (target, G_FILE_TEST_IS_DIR)
@@ -69,7 +69,7 @@ create_symlink (const gchar *target, const gchar *link_path)
       flags | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
     return 0;
   return CreateSymbolicLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_target,
-      flags) ? 0 : -1;
+             flags) ? 0 : -1;
 #else
   return symlink (target, link_path);
 #endif
@@ -80,13 +80,13 @@ create_hard_link (const gchar *target, const gchar *link_path)
 {
 #ifdef G_OS_WIN32
   g_autofree gunichar2 *wide_target = g_utf8_to_utf16 (target, -1, nullptr,
-      nullptr, nullptr);
+          nullptr, nullptr);
   g_autofree gunichar2 *wide_link = g_utf8_to_utf16 (link_path, -1, nullptr,
-      nullptr, nullptr);
+          nullptr, nullptr);
   if (wide_target == nullptr || wide_link == nullptr)
     return -1;
   return CreateHardLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_target,
-      nullptr) ? 0 : -1;
+             nullptr) ? 0 : -1;
 #else
   return link (target, link_path);
 #endif
@@ -94,11 +94,11 @@ create_hard_link (const gchar *target, const gchar *link_path)
 
 extern "C"
 {
-  typedef struct wyl_fact_store_t wyl_fact_store_t;
-  wyrelog_error_t wyl_fact_store_open_identified (const gchar *,
-      const WylFactStoreIdentity *, WylFactStoreIdentityOpenMode,
-      WylFactStoreIdentityResult *, wyl_fact_store_t **);
-  void wyl_fact_store_close (wyl_fact_store_t *);
+typedef struct wyl_fact_store_t wyl_fact_store_t;
+wyrelog_error_t wyl_fact_store_open_identified (const gchar *,
+    const WylFactStoreIdentity *, WylFactStoreIdentityOpenMode,
+    WylFactStoreIdentityResult *, wyl_fact_store_t **);
+void wyl_fact_store_close (wyl_fact_store_t *);
 }
 
 static void
@@ -263,21 +263,21 @@ struct ProvisionedPairFixture
     stage_path = g_build_filename (graph_path, stage.stage_basename, nullptr);
     g_assert_cmpint (wyl_fact_graph_stage_sync (&stage), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
-        (&stage, &evidence), ==, WYRELOG_E_OK);
+          (&stage, &evidence), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&directory,
         &stage, &evidence), ==, WYRELOG_E_OK);
     g_assert_cmpint (
-        wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+      wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
         (&directory, operation_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
     wyl_fact_graph_stage_clear (&stage);
 #else
     stage_path = g_build_filename (graph_path,
-        "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
+            "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
     g_assert_true (g_file_set_contents (stage_path, "", 0, nullptr));
     g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
     g_assert_cmpint (create_hard_link (stage_path, final_path), ==, 0);
     g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
-        (&directory, operation_uuid, &pair), ==, WYRELOG_E_OK);
+          (&directory, operation_uuid, &pair), ==, WYRELOG_E_OK);
 #endif
   }
 
@@ -379,18 +379,18 @@ run_crash_writer_child (const gchar *root)
 
   if (wyl_fact_graph_resolver_open (root, &resolver) != WYRELOG_E_OK
       || wyl_fact_graph_locator_init (&locator, "tenant", "graph")
-          != WYRELOG_E_OK
+      != WYRELOG_E_OK
       || wyl_fact_graph_resolver_open_directory (&resolver, &locator, TRUE,
-             &directory) != WYRELOG_E_OK)
+      &directory) != WYRELOG_E_OK)
     return 91;
   g_autofree gchar *relative_dir =
       wyl_fact_graph_locator_relative_dir (&locator);
   g_autofree gchar *relative_main =
       g_strdup_printf ("%s/facts.duckdb", relative_dir);
   if (wyl_fact_graph_resolver_open_relative_regular (&resolver, relative_main,
-          &main) != WYRELOG_E_OK
+      &main) != WYRELOG_E_OK
       || wyl_fact_artifact_namespace_open (&directory, &main, &namespace_)
-          != WYRELOG_E_OK)
+      != WYRELOG_E_OK)
     return 92;
 
   try {
@@ -415,17 +415,17 @@ spawn_crash_writer_child (const gchar *root)
 {
   wchar_t executable[MAX_PATH + 1] = { 0 };
   DWORD length = GetModuleFileNameW (NULL, executable,
-      G_N_ELEMENTS (executable));
+          G_N_ELEMENTS (executable));
   /* On truncation the call returns the buffer size and leaves the text
    * unterminated, so the range must be checked before it is converted. */
   g_assert_cmpuint (length, >, 0);
   g_assert_cmpuint (length, <, G_N_ELEMENTS (executable));
   g_autofree gchar *exe_utf8 = g_utf16_to_utf8 (
-      (const gunichar2 *) executable, length, nullptr, nullptr, nullptr);
+    (const gunichar2 *) executable, length, nullptr, nullptr, nullptr);
   g_autofree gchar *command_utf8 = g_strdup_printf (
-      "\"%s\" --secure-duckdb-crash-writer \"%s\"", exe_utf8, root);
+    "\"%s\" --secure-duckdb-crash-writer \"%s\"", exe_utf8, root);
   g_autofree gunichar2 *command = g_utf8_to_utf16 (command_utf8, -1,
-      nullptr, nullptr, nullptr);
+          nullptr, nullptr, nullptr);
   STARTUPINFOW startup = { sizeof startup };
   PROCESS_INFORMATION process = { 0 };
 
@@ -1322,12 +1322,12 @@ test_provisioned_pair_pinned_modes (void)
   g_assert_cmpint (before.st_size, ==, 0);
   wyl_fact_artifact_namespace_pair_access_reset_for_test ();
   g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-      (fixture.pair, &pinned_identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        (fixture.pair, &pinned_identity,
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
-      (WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING, O_RDWR));
+        (WYL_FACT_ARTIFACT_PAIR_ACCESS_WRITER_BINDING, O_RDWR));
   g_assert_cmpint (g_stat (fixture.final_path, &initialized), ==, 0);
   g_assert_cmpint (initialized.st_size, >, 0);
   g_assert_cmpuint (initialized.st_nlink, ==, 2);
@@ -1339,13 +1339,13 @@ test_provisioned_pair_pinned_modes (void)
   result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   wyl_fact_artifact_namespace_pair_access_reset_for_test ();
   g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-      (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
-          &result), ==, WYRELOG_E_OK);
+        (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
-      (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, O_RDONLY));
+        (WYL_FACT_ARTIFACT_PAIR_ACCESS_READ_PIN, O_RDONLY));
   g_assert_true (wyl_fact_artifact_namespace_pair_access_observed_for_test
-      (WYL_FACT_ARTIFACT_PAIR_ACCESS_READER_BINDING, O_RDONLY));
+        (WYL_FACT_ARTIFACT_PAIR_ACCESS_READER_BINDING, O_RDONLY));
   g_autofree gchar *after_bytes = nullptr;
   gsize after_size = 0;
   g_assert_true (g_file_get_contents (fixture.final_path, &after_bytes,
@@ -1396,15 +1396,15 @@ test_provisioned_pair_pinned_preflight_no_mutation (void)
         g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
     PairPreflightAction action = { fixture.stage_path, FALSE, 0 };
     wyl_fact_store_pinned_set_pair_preflight_hook_for_test
-        (pair_preflight_action, &action);
+      (pair_preflight_action, &action);
     wyl_fact_store_pinned_set_pair_preflight_error_for_test
-        (WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY, WYRELOG_E_POLICY);
+      (WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY, WYRELOG_E_POLICY);
 
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_POLICY);
     g_assert_cmpuint (action.calls, ==, 1);
     struct stat stage_after, final_after;
@@ -1439,7 +1439,7 @@ test_provisioned_pair_pinned_preflight_no_mutation (void)
     auto expected_names = names_before;
     g_autofree gchar *stage_name = g_path_get_basename (fixture.stage_path);
     expected_names.erase (std::remove (expected_names.begin (),
-            expected_names.end (), std::string (stage_name)),
+        expected_names.end (), std::string (stage_name)),
         expected_names.end ());
     g_autofree gchar *lock_path =
         g_build_filename (fixture.graph_path, "facts.duckdb.lock", nullptr);
@@ -1447,13 +1447,13 @@ test_provisioned_pair_pinned_preflight_no_mutation (void)
         g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
     PairPreflightAction action = { fixture.stage_path, TRUE, 0 };
     wyl_fact_store_pinned_set_pair_preflight_hook_for_test
-        (pair_preflight_action, &action);
+      (pair_preflight_action, &action);
 
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_POLICY);
     g_assert_cmpuint (action.calls, ==, 1);
     g_assert_false (g_file_test (fixture.stage_path, G_FILE_TEST_EXISTS));
@@ -1504,14 +1504,14 @@ attack_pair_lifecycle (WylFactStorePinnedRendezvous rendezvous,
       break;
     case PairLifecycleAttack::FINAL_SUBSTITUTION:
       g_assert_cmpint (g_rename (context->fixture->final_path,
-              context->saved_path), ==, 0);
+          context->saved_path), ==, 0);
       g_assert_true (g_file_set_contents (context->fixture->final_path,
           "attacker", -1, nullptr));
       g_assert_cmpint (g_chmod (context->fixture->final_path, 0600), ==, 0);
       break;
     case PairLifecycleAttack::GRAPH_REPLACEMENT:
       g_assert_cmpint (g_rename (context->fixture->graph_path,
-              context->saved_path), ==, 0);
+          context->saved_path), ==, 0);
       g_assert_cmpint (g_mkdir (context->fixture->graph_path, 0700), ==, 0);
       break;
   }
@@ -1526,8 +1526,8 @@ test_provisioned_pair_pinned_actual_rendezvous (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_OK);
     g_autofree gchar *database_bytes = nullptr;
     gsize database_size = 0;
@@ -1558,8 +1558,8 @@ test_provisioned_pair_pinned_actual_rendezvous (void)
     wyl_fact_store_pinned_set_pair_test_hook_for_test (attack_pair_lifecycle,
         &context);
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
-            &result), ==, WYRELOG_E_POLICY);
+          (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+        &result), ==, WYRELOG_E_POLICY);
     g_assert_true (context.fired);
 
     gchar *authority_path = fixture.graph_path;
@@ -1585,12 +1585,12 @@ test_provisioned_pair_pinned_actual_rendezvous (void)
       g_autofree gchar *stage_name =
           g_path_get_basename (fixture.stage_path);
       expected_names.erase (std::remove (expected_names.begin (),
-              expected_names.end (), std::string (stage_name)),
+          expected_names.end (), std::string (stage_name)),
           expected_names.end ());
       g_assert_true (snapshot_directory_names (fixture.graph_path)
           == expected_names);
       g_assert_cmpint (create_hard_link (fixture.final_path,
-              fixture.stage_path), ==, 0);
+          fixture.stage_path), ==, 0);
     } else if (attack == PairLifecycleAttack::FINAL_SUBSTITUTION) {
       assert_file_bytes (fixture.stage_path, database_bytes, database_size);
       assert_file_contents (fixture.final_path, "attacker");
@@ -1604,7 +1604,7 @@ test_provisioned_pair_pinned_actual_rendezvous (void)
     } else {
       g_autofree gchar *authority_stage =
           g_build_filename (authority_path,
-          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
+              "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", nullptr);
       assert_file_bytes (authority_stage, database_bytes, database_size);
       g_assert_cmpint (g_rmdir (fixture.graph_path), ==, 0);
       g_assert_cmpint (g_rename (saved_path, fixture.graph_path), ==, 0);
@@ -1614,9 +1614,88 @@ test_provisioned_pair_pinned_actual_rendezvous (void)
     g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
         ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
-            &result), ==, WYRELOG_E_OK);
+          (fixture.pair, &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+        &result), ==, WYRELOG_E_OK);
     g_assert_cmpuint (context.calls, ==, calls_after_attack);
+  }
+}
+
+struct PairInternalRestoreContext
+{
+  WylFactStorePinnedRendezvous substitute_at;
+  WylFactStorePinnedRendezvous restore_at;
+  const gchar *final_path;
+  const gchar *saved_path;
+  gboolean substituted = FALSE;
+  gboolean restored = FALSE;
+};
+
+static void
+substitute_then_restore_pair (
+  WylFactStorePinnedRendezvous rendezvous, gpointer user_data)
+{
+  auto *context = static_cast<PairInternalRestoreContext *> (user_data);
+  if (rendezvous == context->substitute_at) {
+    g_assert_false (context->substituted);
+    g_assert_cmpint (g_rename (context->final_path, context->saved_path), ==,
+        0);
+    g_assert_true (g_file_set_contents (context->final_path, "attacker", -1,
+        nullptr));
+    g_assert_cmpint (g_chmod (context->final_path, 0600), ==, 0);
+    context->substituted = TRUE;
+  } else if (rendezvous == context->restore_at) {
+    g_assert_true (context->substituted);
+    g_assert_false (context->restored);
+    g_assert_cmpint (g_remove (context->final_path), ==, 0);
+    g_assert_cmpint (g_rename (context->saved_path, context->final_path), ==,
+        0);
+    context->restored = TRUE;
+  }
+}
+
+static void
+test_provisioned_pair_provenance_survives_restore (void)
+{
+  const WylFactStorePinnedRendezvous substitutions[] = {
+    WYL_FACT_STORE_PINNED_RENDEZVOUS_R0_POSTREVALIDATE_PRECONSTRUCT,
+    WYL_FACT_STORE_PINNED_RENDEZVOUS_INTERNAL_PREIDENTITY,
+  };
+  const WylFactStorePinnedRendezvous restorations[] = {
+    WYL_FACT_STORE_PINNED_RENDEZVOUS_FAILURE_OBSERVED,
+    WYL_FACT_STORE_PINNED_RENDEZVOUS_R3_POSTIDENTITY,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (substitutions); i++) {
+    ProvisionedPairFixture fixture;
+    WylFactStoreIdentityResult result =
+        WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+          (fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *saved_path =
+        g_build_filename (fixture.graph_path, "facts.duckdb.saved", nullptr);
+    PairInternalRestoreContext context = {
+      substitutions[i],
+      restorations[i],
+      fixture.final_path,
+      saved_path,
+    };
+    wyl_fact_store_pinned_set_pair_test_hook_for_test (
+      substitute_then_restore_pair, &context);
+    WylFactStorePinnedFailureOrigin origin =
+        WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_NONE;
+    result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    g_assert_cmpint (
+      wyl_fact_store_open_identified_provisioned_pair_pinned_classified
+        (fixture.pair, &pinned_identity,
+      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result, &origin), ==,
+      WYRELOG_E_POLICY);
+    g_assert_true (context.substituted);
+    g_assert_true (context.restored);
+    g_assert_cmpint (origin, ==,
+        WYL_FACT_STORE_PINNED_FAILURE_ORIGIN_PROVENANCE);
+    g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate (fixture.pair),
+        ==, WYRELOG_E_OK);
   }
 }
 
@@ -1645,27 +1724,27 @@ test_provisioned_pair_pinned_control_isolation (void)
       pair_fixture.stage_path, FALSE, 0
     };
     wyl_fact_store_pinned_set_pair_preflight_hook_for_test
-        (pair_preflight_action, &pair_trace);
+      (pair_preflight_action, &pair_trace);
     wyl_fact_store_pinned_set_pair_preflight_error_for_test
-        (WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY, WYRELOG_E_POLICY);
+      (WYL_FACT_STORE_PAIR_PREFLIGHT_PRE_FACTORY, WYRELOG_E_POLICY);
 
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned
-        (generic_fixture.namespace_, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (generic_fixture.namespace_, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_OK);
     g_assert_cmpuint (pair_trace.calls, ==, 0);
 
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (pair_fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (pair_fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_POLICY);
     g_assert_cmpuint (pair_trace.calls, ==, 1);
 
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (pair_fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (pair_fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_OK);
     g_assert_cmpuint (pair_trace.calls, ==, 1);
   }
@@ -1682,21 +1761,21 @@ test_provisioned_pair_pinned_control_isolation (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
-        (pair_fixture.pair, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (pair_fixture.pair, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_OK);
     g_assert_cmpuint (generic_trace.calls, ==, 0);
 
     g_assert_cmpint (wyl_fact_store_open_identified_pinned
-        (generic_fixture.namespace_, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+          (generic_fixture.namespace_, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
         WYRELOG_E_POLICY);
     g_assert_cmpuint (generic_trace.calls, ==, 6);
     g_assert_cmpuint (generic_trace.fired, ==, (1U << 6) - 1);
 
     g_assert_cmpint (wyl_fact_store_open_identified_pinned
-        (generic_fixture.namespace_, &pinned_identity,
-            WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
+          (generic_fixture.namespace_, &pinned_identity,
+        WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
         WYRELOG_E_OK);
     g_assert_cmpuint (generic_trace.calls, ==, 6);
   }
@@ -1715,22 +1794,22 @@ test_pinned_identified_modes_and_identity (void)
   g_assert_cmpint (initial_status.st_size, ==, 0);
 
   g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-          &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-          &result), ==, WYRELOG_E_OK);
+      &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-          &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-          &result), ==, WYRELOG_E_OK);
+      &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-          &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
+      &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
 
   WylFactStoreIdentity foreign = pinned_identity;
   foreign.graph_id = "foreign";
   g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-          &foreign, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
+      &foreign, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY);
 
@@ -1738,14 +1817,14 @@ test_pinned_identified_modes_and_identity (void)
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_modes); i++) {
     result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity,
-            static_cast<WylFactStoreIdentityOpenMode> (invalid_modes[i]),
-            &result), ==, WYRELOG_E_INVALID);
+        &pinned_identity,
+        static_cast<WylFactStoreIdentityOpenMode> (invalid_modes[i]),
+        &result), ==, WYRELOG_E_INVALID);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   }
   result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   g_assert_cmpint (wyl_fact_store_open_identified_pinned (nullptr,
-          &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
+      &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
       ==, WYRELOG_E_INVALID);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
 
@@ -1766,7 +1845,7 @@ test_pinned_validate_only_does_not_initialize (void)
   WylFactStoreIdentityResult result =
       WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
   g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-          &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
+      &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
       ==, WYRELOG_E_POLICY);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA);
 
@@ -1775,8 +1854,8 @@ test_pinned_validate_only_does_not_initialize (void)
   duckdb::DuckDB database (main_path);
   duckdb::Connection connection (database);
   auto count = connection.Query (
-      "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
-      "WHERE NOT internal");
+    "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
+    "WHERE NOT internal");
   g_assert_false (count->HasError ());
   g_assert_cmpint (count->GetValue (0, 0).GetValue<int64_t> (), ==, 0);
 }
@@ -1792,16 +1871,16 @@ test_pinned_initialization_faults_roll_back (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_NONE;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_INTERNAL);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_INTERNAL);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
         ==, WYRELOG_E_POLICY);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA);
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_OK);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_OK);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   }
   {
@@ -1811,12 +1890,12 @@ test_pinned_initialization_faults_roll_back (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_NONE;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_IO);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_IO);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_OPEN);
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_OK);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_OK);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   }
   {
@@ -1826,8 +1905,8 @@ test_pinned_initialization_faults_roll_back (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_NONE;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_INTERNAL);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_INTERNAL);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
   }
 }
@@ -1887,8 +1966,8 @@ test_pinned_rendezvous_substitution_fails_closed (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_POLICY);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_POLICY);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
     g_assert_true (trace.substituted);
     g_assert_cmpuint (trace.fired, ==, (1U << 6) - 1);
@@ -1937,8 +2016,8 @@ test_pinned_lifecycle_precedence (void)
         test_case.finalize_error, test_case.r5_error);
     WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, test_case.expected);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, test_case.expected);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
   }
 
@@ -1948,8 +2027,8 @@ test_pinned_lifecycle_precedence (void)
     wyl_fact_store_pinned_set_test_hook (pinned_finalize_fault_hook, &fired);
     WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_POLICY);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_POLICY);
     g_assert_true (fired);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
   }
@@ -1961,8 +2040,8 @@ test_pinned_lifecycle_precedence (void)
       | WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_CHECKED_CLOSE_REVALIDATION);
     WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_POLICY);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_POLICY);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
   }
 }
@@ -1990,7 +2069,7 @@ test_pinned_provider_open_seams_fail_closed (void)
             WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
         g_assert_cmpint (wyl_fact_store_open_identified_pinned
               (fixture.namespace_, &pinned_identity,
-              WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &initialized), ==,
+            WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &initialized), ==,
             WYRELOG_E_OK);
       }
       g_autofree gchar *main_path =
@@ -2065,13 +2144,13 @@ assert_pathname_pinned_validation_parity (Fixture &fixture,
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     wyl_fact_store_t *store = nullptr;
     wyrelog_error_t pathname_rc = wyl_fact_store_open_identified (main_path,
-        &pinned_identity, mode, &pathname_result, &store);
+            &pinned_identity, mode, &pathname_result, &store);
     wyl_fact_store_close (store);
     WylFactStoreIdentityResult pinned_result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     wyrelog_error_t pinned_rc =
         wyl_fact_store_open_identified_pinned (fixture.namespace_,
-        &pinned_identity, mode, &pinned_result);
+            &pinned_identity, mode, &pinned_result);
     g_assert_cmpint (pinned_rc, ==, pathname_rc);
     g_assert_cmpint (pathname_result, ==, expected);
     g_assert_cmpint (pinned_result, ==, expected);
@@ -2089,48 +2168,48 @@ test_pinned_pathname_identity_corpus_parity (void)
   const CorpusCase cases[] = {
     {
       "UPDATE fact_store_metadata SET value='2' "
-          "WHERE key='format_version';",
+      "WHERE key='format_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT,
     },
     {
       "UPDATE fact_store_metadata SET value='01' "
-          "WHERE key='format_version';",
+      "WHERE key='format_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT,
     },
     {
       "UPDATE fact_store_metadata SET value='0' "
-          "WHERE key='format_version';",
+      "WHERE key='format_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT,
     },
     {
       "UPDATE fact_store_metadata SET value='9223372036854775808' "
-          "WHERE key='format_version';",
+      "WHERE key='format_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT,
     },
     {
       "UPDATE fact_store_metadata SET value='2' "
-          "WHERE key='path_encoding_version';",
+      "WHERE key='path_encoding_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING,
     },
     {
       "UPDATE fact_store_metadata SET value='01' "
-          "WHERE key='path_encoding_version';",
+      "WHERE key='path_encoding_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING,
     },
     {
       "UPDATE fact_store_metadata SET value='0' "
-          "WHERE key='path_encoding_version';",
+      "WHERE key='path_encoding_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING,
     },
     {
       "UPDATE fact_store_metadata SET value='9223372036854775808' "
-          "WHERE key='path_encoding_version';",
+      "WHERE key='path_encoding_version';",
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING,
     },
     {
       "UPDATE fact_store_metadata SET value="
-          "'01890F47-3c4b-6cc2-b8c4-dc0c0c073989' "
-          "WHERE key='store_uuid';",
+      "'01890F47-3c4b-6cc2-b8c4-dc0c0c073989' "
+      "WHERE key='store_uuid';",
       WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY,
     },
     {
@@ -2143,24 +2222,24 @@ test_pinned_pathname_identity_corpus_parity (void)
     },
     {
       "DROP TABLE fact_store_metadata;"
-          "CREATE TABLE fact_store_metadata(key VARCHAR,value VARCHAR NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact'),('store_kind','wyrelog.fact'),"
-          "('format_version','1'),"
-          "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
-          "('path_encoding_version','1'),('tenant_id','tenant'),"
-          "('graph_id','graph');",
+      "CREATE TABLE fact_store_metadata(key VARCHAR,value VARCHAR NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact'),('store_kind','wyrelog.fact'),"
+      "('format_version','1'),"
+      "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
+      "('path_encoding_version','1'),('tenant_id','tenant'),"
+      "('graph_id','graph');",
       WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA,
     },
     {
       "DROP TABLE fact_store_metadata;"
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR PRIMARY KEY,value VARCHAR);"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact'),('format_version','1'),"
-          "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
-          "('path_encoding_version','1'),('tenant_id',NULL),"
-          "('graph_id','graph');",
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR PRIMARY KEY,value VARCHAR);"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact'),('format_version','1'),"
+      "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
+      "('path_encoding_version','1'),('tenant_id',NULL),"
+      "('graph_id','graph');",
       WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA,
     },
     {
@@ -2173,33 +2252,33 @@ test_pinned_pathname_identity_corpus_parity (void)
     },
     {
       "CREATE INDEX extra_metadata_index "
-          "ON fact_store_metadata(value);",
+      "ON fact_store_metadata(value);",
       WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA,
     },
     {
       "DROP TABLE fact_store_metadata;"
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR COLLATE nocase PRIMARY KEY,"
-          "value VARCHAR COLLATE nocase NOT NULL);"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact'),('format_version','1'),"
-          "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
-          "('path_encoding_version','1'),('tenant_id','tenant'),"
-          "('graph_id','graph');",
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR COLLATE nocase PRIMARY KEY,"
+      "value VARCHAR COLLATE nocase NOT NULL);"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact'),('format_version','1'),"
+      "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
+      "('path_encoding_version','1'),('tenant_id','tenant'),"
+      "('graph_id','graph');",
       WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA,
     },
     {
       "DROP TABLE fact_store_metadata;"
-          "CREATE TABLE fact_store_metadata("
-          "key VARCHAR NOT NULL,value VARCHAR NOT NULL,"
-          "PRIMARY KEY(key,value));"
-          "INSERT INTO fact_store_metadata VALUES"
-          "('store_kind','wyrelog.fact'),"
-          "('format_version','1'),"
-          "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
-          "('path_encoding_version','1'),"
-          "('tenant_id','tenant'),"
-          "('graph_id','graph');",
+      "CREATE TABLE fact_store_metadata("
+      "key VARCHAR NOT NULL,value VARCHAR NOT NULL,"
+      "PRIMARY KEY(key,value));"
+      "INSERT INTO fact_store_metadata VALUES"
+      "('store_kind','wyrelog.fact'),"
+      "('format_version','1'),"
+      "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073989'),"
+      "('path_encoding_version','1'),"
+      "('tenant_id','tenant'),"
+      "('graph_id','graph');",
       WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA,
     },
     {
@@ -2212,8 +2291,8 @@ test_pinned_pathname_identity_corpus_parity (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_OK);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_OK);
     g_autofree gchar *main_path =
         g_build_filename (fixture.graph_path, "facts.duckdb", nullptr);
     {
@@ -2235,15 +2314,15 @@ test_pinned_pathname_identity_corpus_parity (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-            &result), ==, WYRELOG_E_OK);
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &result), ==, WYRELOG_E_OK);
     g_autofree gchar *main_path =
         g_build_filename (fixture.graph_path, "facts.duckdb", nullptr);
     {
       duckdb::DuckDB database (main_path);
       duckdb::Connection connection (database);
       auto statement = connection.Prepare (
-          "UPDATE fact_store_metadata SET value=? WHERE key='tenant_id'");
+        "UPDATE fact_store_metadata SET value=? WHERE key='tenant_id'");
       g_assert_nonnull (statement);
       g_assert_false (statement->HasError ());
       duckdb::vector<duckdb::Value> values;
@@ -2271,7 +2350,7 @@ test_pinned_pathname_identity_corpus_parity (void)
           WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
       wyl_fact_store_t *store = nullptr;
       g_assert_cmpint (wyl_fact_store_open_identified (main_path,
-              &invalid_utf8, mode, &pathname_result, &store), ==,
+          &invalid_utf8, mode, &pathname_result, &store), ==,
           WYRELOG_E_INVALID);
       g_assert_null (store);
       g_assert_cmpint (pathname_result, ==,
@@ -2279,7 +2358,7 @@ test_pinned_pathname_identity_corpus_parity (void)
       WylFactStoreIdentityResult pinned_result =
           WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
       g_assert_cmpint (wyl_fact_store_open_identified_pinned (
-              fixture.namespace_, &invalid_utf8, mode, &pinned_result), ==,
+            fixture.namespace_, &invalid_utf8, mode, &pinned_result), ==,
           WYRELOG_E_INVALID);
       g_assert_cmpint (pinned_result, ==,
           WYL_FACT_STORE_IDENTITY_RESULT_NONE);
@@ -2337,7 +2416,7 @@ test_pinned_symlink_and_parent_decoys_fail_closed (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
         ==, WYRELOG_E_POLICY);
     g_assert_true (seam.fired);
     assert_file_contents (attacker, "attacker");
@@ -2357,7 +2436,7 @@ test_pinned_symlink_and_parent_decoys_fail_closed (void)
     WylFactStoreIdentityResult result =
         WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_open_identified_pinned (fixture.namespace_,
-            &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
+        &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result),
         ==, WYRELOG_E_POLICY);
     g_assert_true (seam.fired);
     g_autofree gchar *decoy =
@@ -2407,13 +2486,13 @@ identity_open_thread (gpointer user_data)
   if (thread->pinned) {
     thread->rc =
         wyl_fact_store_open_identified_pinned (thread->namespace_,
-        &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
-        &thread->result);
+            &pinned_identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+            &thread->result);
   } else {
     wyl_fact_store_t *store = nullptr;
     thread->rc = wyl_fact_store_open_identified (thread->path,
-        &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
-        &thread->result, &store);
+            &pinned_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+            &thread->result, &store);
     wyl_fact_store_close (store);
   }
   return nullptr;
@@ -2575,6 +2654,9 @@ main (int argc, char **argv)
   g_test_add_func (
     "/secure-duckdb-filesystem/provisioned-pair/actual-rendezvous",
     test_provisioned_pair_pinned_actual_rendezvous);
+  g_test_add_func (
+    "/secure-duckdb-filesystem/provisioned-pair/internal-provenance-restore",
+    test_provisioned_pair_provenance_survives_restore);
   g_test_add_func (
     "/secure-duckdb-filesystem/provisioned-pair/control-isolation",
     test_provisioned_pair_pinned_control_isolation);

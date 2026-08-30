@@ -14,11 +14,13 @@ class WylSecureDuckdbHealth final
 {
 public:
   wyrelog_error_t Status () const;
+  bool ProvenanceFailureObserved () const;
   void Poison (wyrelog_error_t);
 
 private:
   mutable std::mutex mutex_;
   wyrelog_error_t error_ = WYRELOG_E_OK;
+  bool provenance_failure_observed_ = false;
 };
 
 /* Own the provider-issued session until FileHandle construction has

@@ -112,10 +112,22 @@ WylSecureDuckdbHealth::Status () const
   return error_;
 }
 
+bool
+WylSecureDuckdbHealth::ProvenanceFailureObserved () const
+{
+  std::lock_guard<std::mutex> lock (mutex_);
+  return provenance_failure_observed_;
+}
+
 void
 WylSecureDuckdbHealth::Poison (wyrelog_error_t error)
 {
   std::lock_guard<std::mutex> lock (mutex_);
+  /* A missing or policy-rejected object inside the bounded filesystem is an
+   * authority/provenance loss.  Record it independently of the first terminal
+   * error so a later namespace restoration cannot erase its origin. */
+  if (error == WYRELOG_E_POLICY || error == WYRELOG_E_NOT_FOUND)
+    provenance_failure_observed_ = true;
   if (error_ == WYRELOG_E_OK)
     error_ = error == WYRELOG_E_OK ? WYRELOG_E_IO : error;
 }

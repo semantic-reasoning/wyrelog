@@ -123,13 +123,13 @@ TOKEN_PASTE_ALLOWLIST = {
 
 CXX_SOURCE_DIGESTS = {
     "wyrelog/fact/secure-duckdb-bridge-private.cc":
-        "3de47398ac37a28e3f2edcef5710c8d97f72bfe900b88b3cac08ddc573466b40",
+        "4ce1c455c8e63e4e1a1968f98649a21ca247f2f761a671e8a25fb0c5bd3d73ff",
     "wyrelog/fact/secure-duckdb-file-handle-private.cc":
-        "1a8fd363822ccc7282edcae7348e25fff860b62fe611bba18b27db7db8a0f085",
+        "e8bc7ae828e424cf8ba18828d1b966e12b0e561d60237a5ea745499389968d36",
     "wyrelog/fact/secure-duckdb-file-handle-private.hpp":
-        "caca939d0af0dfa6d9dfd6f755dc8d1cf82edea210d9322c04967186ad08738b",
+        "260beeedcd799a2e02d8a562a5c46faf311331276eb62d4f29bcd4dc7e5892d7",
     "wyrelog/fact/secure-duckdb-filesystem-private.cc":
-        "e0304778be60bb635b4ffc51e4a30b5950c9c6040bd8be8fb4fa1dd937188343",
+        "2d4993079472ba1b23162b4716322b62df38215af80f49b11dd6e3edc3d1e3ab",
     "wyrelog/fact/secure-duckdb-filesystem-private.hpp":
         "4b64f8c807ab167a08f039af3c4e835f74058236217a7c8da7fdfa2708f71ea2",
 }

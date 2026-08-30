@@ -21,6 +21,29 @@ G_BEGIN_DECLS;
 #define WYL_POLICY_FACT_QUERY_MAX_ROWS 1000000
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
+
+/* Same-thread coordinator frame.  It excludes same-handle SQL transactions
+ * across policy/filesystem work.  publish authenticates and durably replaces
+ * an encrypted canonical policy image while both locks remain held; plaintext
+ * SQLite is already durable at commit. */
+typedef struct
+{
+  wyl_policy_store_t *store;
+  gpointer connection_mutex;
+  GThread *owner;
+  gboolean graph_locked;
+} WylPolicyStoreCoordinatorFence;
+
+#define WYL_POLICY_STORE_COORDINATOR_FENCE_INIT { 0 }
+
+wyrelog_error_t wyl_policy_store_coordinator_fence_acquire
+  (wyl_policy_store_t * store, WylPolicyStoreCoordinatorFence * out_fence);
+wyrelog_error_t wyl_policy_store_coordinator_fence_publish
+  (WylPolicyStoreCoordinatorFence * fence);
+void wyl_policy_store_coordinator_fence_clear
+  (WylPolicyStoreCoordinatorFence * fence);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylPolicyStoreCoordinatorFence,
+    wyl_policy_store_coordinator_fence_clear)
 typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
 
 /* Non-nestable, same-thread frame holding the FULLMUTEX SQLite connection and
@@ -136,6 +159,7 @@ typedef enum
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_GRAPH_TRIGGERS,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_VALIDATION,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COORDINATOR_PUBLICATION,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT,
 } WylPolicyGraphAuthorityMigrationFailStage;
 

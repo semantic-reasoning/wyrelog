@@ -1257,6 +1257,12 @@ typedef struct
   wyrelog_error_t result;
 } DarwinEvidenceTransactionWaiter;
 
+typedef struct
+{
+  sqlite3_mutex *mutex;
+  int result;
+} CoordinatorFenceMutexTry;
+
 static void
 darwin_evidence_publication_gate (gpointer data,
     WylPolicyDarwinEvidenceGateStage stage)
@@ -1305,6 +1311,51 @@ run_darwin_evidence_transaction_waiter (gpointer data)
   if (waiter->result == WYRELOG_E_OK)
     wyl_policy_store_rollback_mutation (waiter->store);
   return NULL;
+}
+
+static gpointer
+run_coordinator_fence_mutex_try (gpointer data)
+{
+  CoordinatorFenceMutexTry *attempt = data;
+  attempt->result = sqlite3_mutex_try (attempt->mutex);
+  if (attempt->result == SQLITE_OK)
+    sqlite3_mutex_leave (attempt->mutex);
+  return NULL;
+}
+
+static void
+test_coordinator_fence_owns_connection_transaction (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==,
+      WYRELOG_E_OK);
+  WylPolicyStoreCoordinatorFence fence =
+      WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  g_assert_cmpint (wyl_policy_store_coordinator_fence_acquire (store, &fence),
+      ==, WYRELOG_E_BUSY);
+  wyl_policy_store_rollback_mutation (store);
+
+  g_assert_cmpint (wyl_policy_store_coordinator_fence_acquire (store, &fence),
+      ==, WYRELOG_E_OK);
+  CoordinatorFenceMutexTry held_attempt = {
+    .mutex = sqlite3_db_mutex (wyl_policy_store_get_db (store)),
+  };
+  GThread *thread = g_thread_new ("coordinator-fence-held-try",
+          run_coordinator_fence_mutex_try, &held_attempt);
+  g_thread_join (thread);
+  g_assert_cmpint (held_attempt.result, ==, SQLITE_BUSY);
+
+  wyl_policy_store_coordinator_fence_clear (&fence);
+  CoordinatorFenceMutexTry released_attempt = {
+    .mutex = sqlite3_db_mutex (wyl_policy_store_get_db (store)),
+  };
+  thread = g_thread_new ("coordinator-fence-released-try",
+          run_coordinator_fence_mutex_try, &released_attempt);
+  g_thread_join (thread);
+  g_assert_cmpint (released_attempt.result, ==, SQLITE_OK);
 }
 
 static void
@@ -4552,6 +4603,8 @@ main (int argc, char **argv)
   g_test_add_func
     ("/policy/graph-authority/darwin-evidence-encrypted-publication",
       test_darwin_evidence_encrypted_immediate_publication);
+  g_test_add_func ("/policy/graph-authority/coordinator-fence-transaction",
+      test_coordinator_fence_owns_connection_transaction);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-preflight",
       test_provisioning_migration_preflight_is_fail_closed);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-sql-fence",
