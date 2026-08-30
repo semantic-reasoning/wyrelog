@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/attr.h>
 #include <sys/mount.h>
@@ -339,15 +340,32 @@ remove_tree (const gchar *path)
   g_assert_cmpint (g_rmdir (path), ==, 0);
 }
 
-static void
-run_direct_final_case (const gchar *fail_at)
+static gchar *
+make_resolver_root (const gchar *template_name)
 {
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root =
-      g_dir_make_tmp ("wyl-macos-direct-final-XXXXXX", &error);
+  g_autofree gchar *created = g_dir_make_tmp (template_name, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (created);
+  gchar *root = realpath (created, NULL);
+  if (root == NULL) {
+    gint saved_errno = errno;
+    (void) g_rmdir (created);
+    g_set_error (&error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  }
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+  return root;
+}
+
+static void
+run_direct_final_case (const gchar *fail_at)
+{
+  g_autofree gchar *root =
+      make_resolver_root ("wyl-macos-direct-final-XXXXXX");
 
   DirectFinalCheckpoint checkpoint = {
     .fail_at = fail_at,
@@ -436,12 +454,8 @@ test_direct_final_contract (void)
 static void
 run_direct_substitution_case (const gchar *action_at, gboolean replace_graph)
 {
-  g_autoptr (GError) error = NULL;
   g_autofree gchar *root =
-      g_dir_make_tmp ("wyl-macos-direct-substitution-XXXXXX", &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (root);
-  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+      make_resolver_root ("wyl-macos-direct-substitution-XXXXXX");
 
   DirectFinalCheckpoint checkpoint = {
     .replace_final_at = replace_graph ? NULL : action_at,
@@ -514,12 +528,8 @@ test_direct_final_substitution (void)
 static void
 run_direct_preexisting_case (gboolean legacy_stage)
 {
-  g_autoptr (GError) error = NULL;
   g_autofree gchar *root =
-      g_dir_make_tmp ("wyl-macos-direct-preexisting-XXXXXX", &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (root);
-  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+      make_resolver_root ("wyl-macos-direct-preexisting-XXXXXX");
 
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
