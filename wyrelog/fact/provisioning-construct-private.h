@@ -21,7 +21,11 @@ G_BEGIN_DECLS;
  * the operation-evidence tuple captured before that rename rather than a
  * retained pair; the description above is the POSIX shape.  Note the fresh
  * path only: a stage left behind by an interrupted construct cannot be
- * reopened on Windows, so that operation UUID is spent.  See #816. */
+ * reopened on Windows, so that operation UUID is spent.  See #816.
+ *
+ * Darwin deliberately rejects this stateless constructor before filesystem
+ * access.  Its direct-final protocol requires operation evidence to be
+ * persisted by the policy-backed run/recover coordinator. */
 wyrelog_error_t wyl_fact_graph_provisioning_construct (const gchar * fact_root,
     const WylPolicyGraphProvisioningRecord * record,
     const WylPolicyGraphAuthorityRecord * authority);
