@@ -15,6 +15,12 @@
 #include <unistd.h>
 #include <uuid/uuid.h>
 
+#include "fact/graph-locator-darwin-private.h"
+#include "fact/graph-locator-private.h"
+
+static const gchar operation_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
+
 typedef struct
 {
   guint8 volume_uuid[16];
@@ -160,6 +166,22 @@ identity_equal (const DarwinIdentity *left, const DarwinIdentity *right)
              sizeof left->volume_uuid) == 0;
 }
 
+static void
+assert_production_evidence (gint graph_fd, gint artifact_fd,
+    const DarwinIdentity *graph, const DarwinIdentity *artifact)
+{
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_capture (graph_fd,
+      artifact_fd, operation_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (evidence.bytes + 24, 16, graph->volume_uuid, 16);
+  guint64 graph_be = GUINT64_TO_BE (graph->file_id);
+  guint64 artifact_be = GUINT64_TO_BE (artifact->file_id);
+  g_assert_cmpmem (evidence.bytes + 40, 8, &graph_be, 8);
+  g_assert_cmpmem (evidence.bytes + 48, 8, &artifact_be, 8);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_compare (graph_fd,
+      artifact_fd, operation_uuid, &evidence), ==, WYRELOG_E_OK);
+}
+
 static ProbeFixture
 fixture_create (void)
 {
@@ -224,6 +246,8 @@ test_hosted_volume_contract (void)
   g_assert_cmpmem (graph.volume_uuid, sizeof graph.volume_uuid,
       artifact.volume_uuid, sizeof artifact.volume_uuid);
   g_assert_cmpuint (graph.file_id, !=, artifact.file_id);
+  assert_production_evidence (fixture.graph_fd, fixture.artifact_fd, &graph,
+      &artifact);
 
   g_test_message ("filesystem=%s format-capabilities=0x%08x "
       "identity=darwin-fileid64", filesystem.f_fstypename, supported);
@@ -232,6 +256,327 @@ test_hosted_volume_contract (void)
   g_assert_cmpint (g_rmdir (fixture.root), !=, 0);
   g_assert_cmpint (unlinkat (fixture.root_fd, "graph", AT_REMOVEDIR), ==, 0);
   fixture_clear (&fixture);
+}
+
+typedef struct
+{
+  const gchar *fail_at;
+  const gchar *replace_final_at;
+  const gchar *replace_graph_at;
+  WylFactGraphDirectory *graph;
+  gboolean acted;
+  GPtrArray *seen;
+} DirectFinalCheckpoint;
+
+static void
+replace_final_with_foreign (DirectFinalCheckpoint *checkpoint)
+{
+  g_assert_nonnull (checkpoint->graph);
+  g_assert_cmpint (unlinkat (checkpoint->graph->graph_fd, "facts.duckdb", 0),
+      ==, 0);
+  gint foreign = openat (checkpoint->graph->graph_fd, "facts.duckdb",
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  g_assert_cmpint (foreign, >=, 0);
+  g_assert_true (write_exact (foreign, "foreign", 7));
+  g_assert_cmpint (fsync (foreign), ==, 0);
+  g_assert_cmpint (close (foreign), ==, 0);
+  checkpoint->acted = TRUE;
+}
+
+static void
+replace_graph_with_foreign (DirectFinalCheckpoint *checkpoint)
+{
+  g_assert_nonnull (checkpoint->graph);
+  g_assert_cmpint (renameat (checkpoint->graph->tenant_fd,
+      checkpoint->graph->graph_component, checkpoint->graph->tenant_fd,
+      "graph-held"), ==, 0);
+  g_assert_cmpint (mkdirat (checkpoint->graph->tenant_fd,
+      checkpoint->graph->graph_component, 0700), ==, 0);
+  gint replacement = openat (checkpoint->graph->tenant_fd,
+          checkpoint->graph->graph_component,
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (replacement, >=, 0);
+  gint marker = openat (replacement, "foreign.keep",
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  g_assert_cmpint (marker, >=, 0);
+  g_assert_true (write_exact (marker, "foreign", 7));
+  g_assert_cmpint (fsync (marker), ==, 0);
+  g_assert_cmpint (close (marker), ==, 0);
+  g_assert_cmpint (fsync (replacement), ==, 0);
+  g_assert_cmpint (close (replacement), ==, 0);
+  g_assert_cmpint (fsync (checkpoint->graph->tenant_fd), ==, 0);
+  checkpoint->acted = TRUE;
+}
+
+static wyrelog_error_t
+direct_final_checkpoint (const gchar *point, gpointer user_data)
+{
+  DirectFinalCheckpoint *checkpoint = user_data;
+  g_ptr_array_add (checkpoint->seen, g_strdup (point));
+  if (g_strcmp0 (point, checkpoint->replace_final_at) == 0)
+    replace_final_with_foreign (checkpoint);
+  if (g_strcmp0 (point, checkpoint->replace_graph_at) == 0)
+    replace_graph_with_foreign (checkpoint);
+  return g_strcmp0 (point, checkpoint->fail_at) == 0 ?
+         WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static void
+remove_tree (const gchar *path)
+{
+  g_autoptr (GDir) directory = g_dir_open (path, 0, NULL);
+  if (directory != NULL) {
+    const gchar *name;
+    while ((name = g_dir_read_name (directory)) != NULL) {
+      g_autofree gchar *child = g_build_filename (path, name, NULL);
+      if (g_file_test (child, G_FILE_TEST_IS_DIR)
+          && !g_file_test (child, G_FILE_TEST_IS_SYMLINK))
+        remove_tree (child);
+      else
+        g_assert_cmpint (g_remove (child), ==, 0);
+    }
+  }
+  g_assert_cmpint (g_rmdir (path), ==, 0);
+}
+
+static void
+run_direct_final_case (const gchar *fail_at)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root =
+      g_dir_make_tmp ("wyl-macos-direct-final-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (root);
+  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+
+  DirectFinalCheckpoint checkpoint = {
+    .fail_at = fail_at,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_resolver_set_checkpoint_for_test (&resolver,
+      direct_final_checkpoint, &checkpoint);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant-provision",
+      "graph-provision"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+      TRUE, &graph), ==, WYRELOG_E_OK);
+  g_ptr_array_set_size (checkpoint.seen, 0);
+
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  wyrelog_error_t rc =
+      wyl_fact_graph_directory_create_darwin_provisioned_final (&graph,
+          operation_uuid, &evidence, &final);
+  g_assert_cmpint (rc, ==, fail_at == NULL ? WYRELOG_E_OK : WYRELOG_E_IO);
+
+  g_autofree gchar *final_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+  g_autofree gchar *stage_basename =
+      g_strdup_printf ("provision-%s.sqlite", operation_uuid);
+  g_autofree gchar *stage_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, stage_basename);
+  struct stat final_status;
+  g_assert_cmpint (stat (final_path, &final_status), ==, 0);
+  g_assert_true (S_ISREG (final_status.st_mode));
+  g_assert_cmpuint (final_status.st_mode & 0777, ==, 0600);
+  g_assert_cmpuint (final_status.st_nlink, ==, 1);
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+
+  if (fail_at == NULL) {
+    const gchar *expected[] = {
+      "darwin-final-created",
+      "darwin-final-synced",
+      "darwin-evidence-captured",
+      "darwin-directory-synced",
+    };
+    g_assert_cmpuint (checkpoint.seen->len, ==, G_N_ELEMENTS (expected));
+    for (gsize i = 0; i < G_N_ELEMENTS (expected); i++)
+      g_assert_cmpstr (g_ptr_array_index (checkpoint.seen, i), ==, expected[i]);
+    g_assert_cmpint (wyl_fact_graph_darwin_evidence_compare (graph.graph_fd,
+        final.fd, operation_uuid, &evidence), ==, WYRELOG_E_OK);
+    WylFactGraphDarwinOperationEvidence second_evidence = { 0 };
+    WylFactGraphRegularFile second_final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+    g_assert_cmpint (
+      wyl_fact_graph_directory_create_darwin_provisioned_final (&graph,
+      operation_uuid, &second_evidence, &second_final), ==, WYRELOG_E_BUSY);
+    g_assert_cmpint (stat (final_path, &final_status), ==, 0);
+    g_assert_cmpuint (final_status.st_nlink, ==, 1);
+  } else {
+    const WylFactGraphDarwinOperationEvidence zero = { 0 };
+    g_assert_cmpmem (&evidence, sizeof evidence, &zero, sizeof zero);
+    g_assert_cmpint (final.fd, ==, -1);
+  }
+
+  wyl_fact_graph_regular_file_clear (&final);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_ptr_array_unref (checkpoint.seen);
+  remove_tree (root);
+}
+
+static void
+test_direct_final_contract (void)
+{
+  run_direct_final_case (NULL);
+  const gchar *faults[] = {
+    "darwin-final-created",
+    "darwin-final-synced",
+    "darwin-evidence-captured",
+    "darwin-directory-synced",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++)
+    run_direct_final_case (faults[i]);
+}
+
+static void
+run_direct_substitution_case (const gchar *action_at, gboolean replace_graph)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root =
+      g_dir_make_tmp ("wyl-macos-direct-substitution-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (root);
+  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+
+  DirectFinalCheckpoint checkpoint = {
+    .replace_final_at = replace_graph ? NULL : action_at,
+    .replace_graph_at = replace_graph ? action_at : NULL,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_resolver_set_checkpoint_for_test (&resolver,
+      direct_final_checkpoint, &checkpoint);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant-provision",
+      "graph-provision"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+      TRUE, &graph), ==, WYRELOG_E_OK);
+  checkpoint.graph = &graph;
+  g_ptr_array_set_size (checkpoint.seen, 0);
+
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (
+    wyl_fact_graph_directory_create_darwin_provisioned_final (&graph,
+    operation_uuid, &evidence, &final), ==, WYRELOG_E_POLICY);
+  const WylFactGraphDarwinOperationEvidence zero = { 0 };
+  g_assert_true (checkpoint.acted);
+  g_assert_cmpmem (&evidence, sizeof evidence, &zero, sizeof zero);
+  g_assert_cmpint (final.fd, ==, -1);
+
+  if (replace_graph) {
+    gint replacement = openat (graph.tenant_fd, graph.graph_component,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint (replacement, >=, 0);
+    gint marker = openat (replacement, "foreign.keep",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint (marker, >=, 0);
+    g_assert_cmpint (close (marker), ==, 0);
+    g_assert_cmpint (close (replacement), ==, 0);
+    struct stat original_final;
+    g_assert_cmpint (fstatat (graph.graph_fd, "facts.duckdb",
+        &original_final, AT_SYMLINK_NOFOLLOW), ==, 0);
+  } else {
+    gint foreign = openat (graph.graph_fd, "facts.duckdb",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint (foreign, >=, 0);
+    gchar contents[7];
+    g_assert_true (read_exact (foreign, contents, sizeof contents));
+    g_assert_cmpmem (contents, sizeof contents, "foreign", 7);
+    g_assert_cmpint (close (foreign), ==, 0);
+  }
+
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_ptr_array_unref (checkpoint.seen);
+  remove_tree (root);
+}
+
+static void
+test_direct_final_substitution (void)
+{
+  run_direct_substitution_case ("darwin-final-synced", FALSE);
+  run_direct_substitution_case ("darwin-evidence-captured", FALSE);
+  run_direct_substitution_case ("darwin-directory-synced", FALSE);
+  run_direct_substitution_case ("darwin-evidence-captured", TRUE);
+  run_direct_substitution_case ("darwin-directory-synced", TRUE);
+}
+
+static void
+run_direct_preexisting_case (gboolean legacy_stage)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root =
+      g_dir_make_tmp ("wyl-macos-direct-preexisting-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (root);
+  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant-provision",
+      "graph-provision"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+      TRUE, &graph), ==, WYRELOG_E_OK);
+
+  g_autofree gchar *stage_basename =
+      g_strdup_printf ("provision-%s.sqlite", operation_uuid);
+  if (legacy_stage) {
+    gint stage = openat (graph.graph_fd, stage_basename,
+            O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    g_assert_cmpint (stage, >=, 0);
+    g_assert_cmpint (close (stage), ==, 0);
+  } else {
+    g_assert_cmpint (symlinkat ("foreign-target", graph.graph_fd,
+        "facts.duckdb"), ==, 0);
+  }
+
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (
+    wyl_fact_graph_directory_create_darwin_provisioned_final (&graph,
+    operation_uuid, &evidence, &final), ==,
+    legacy_stage ? WYRELOG_E_POLICY : WYRELOG_E_BUSY);
+  const WylFactGraphDarwinOperationEvidence zero = { 0 };
+  g_assert_cmpmem (&evidence, sizeof evidence, &zero, sizeof zero);
+  g_assert_cmpint (final.fd, ==, -1);
+  if (legacy_stage) {
+    struct stat stage_status;
+    g_assert_cmpint (fstatat (graph.graph_fd, stage_basename, &stage_status,
+        AT_SYMLINK_NOFOLLOW), ==, 0);
+    g_assert_cmpint (fstatat (graph.graph_fd, "facts.duckdb", &stage_status,
+        AT_SYMLINK_NOFOLLOW), ==, -1);
+    g_assert_cmpint (errno, ==, ENOENT);
+  } else {
+    gchar target[32] = { 0 };
+    g_assert_cmpint (readlinkat (graph.graph_fd, "facts.duckdb", target,
+        sizeof target), ==, 14);
+    g_assert_cmpstr (target, ==, "foreign-target");
+  }
+
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree (root);
+}
+
+static void
+test_direct_final_preexisting_entries (void)
+{
+  run_direct_preexisting_case (FALSE);
+  run_direct_preexisting_case (TRUE);
 }
 
 static void
@@ -331,5 +676,12 @@ main (int argc, char **argv)
       test_hosted_volume_contract);
   g_test_add_func ("/fact/macos-object-identity/stability-and-replacement",
       test_descriptor_stability_and_replacement);
+  g_test_add_func ("/fact/macos-object-identity/direct-final-contract",
+      test_direct_final_contract);
+  g_test_add_func ("/fact/macos-object-identity/direct-final-substitution",
+      test_direct_final_substitution);
+  g_test_add_func (
+    "/fact/macos-object-identity/direct-final-preexisting-entries",
+    test_direct_final_preexisting_entries);
   return g_test_run ();
 }
