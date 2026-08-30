@@ -66,12 +66,22 @@ struct wyl_policy_store_lease_t
 static GMutex lease_registry_mutex;
 static GHashTable *lease_registry;
 
+static gboolean
+store_identity_equal (const WylPolicyStoreFileIdentity *left,
+    const WylPolicyStoreFileIdentity *right)
+{
+  return left != NULL && right != NULL && left->valid && right->valid
+         && left->device == right->device && left->file == right->file
+         && left->owner == right->owner && left->mode == right->mode
+         && left->nlink == right->nlink;
+}
+
 static GHashTable *
 registry_get (void)
 {
   if (lease_registry == NULL)
     lease_registry = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
-        NULL);
+            NULL);
   return lease_registry;
 }
 
@@ -109,12 +119,12 @@ static gchar *
 final_path_from_handle (HANDLE handle)
 {
   DWORD needed = GetFinalPathNameByHandleW (handle, NULL, 0,
-      FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+          FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   if (needed == 0)
     return NULL;
   wchar_t *wide = g_new0 (wchar_t, needed + 1);
   DWORD written = GetFinalPathNameByHandleW (handle, wide, needed + 1,
-      FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+          FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   if (written == 0 || written > needed) {
     g_free (wide);
     return NULL;
@@ -151,22 +161,23 @@ win_parent_identity (HANDLE handle, guint64 *volume, guint64 *index)
  * points, directories, and hardlinked (nNumberOfLinks != 1) inodes so the
  * offline remediation tool fails closed on substitution. */
 static wyrelog_error_t
-pin_store_file (wyl_policy_store_lease_t *lease)
+pin_store_file (wyl_policy_store_lease_t *lease,
+    const WylPolicyStoreFileIdentity *expected_identity)
 {
   wchar_t *wstore = (wchar_t *) g_utf8_to_utf16 (lease->resolved_path, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   if (wstore == NULL)
     return WYRELOG_E_INVALID;
   HANDLE handle = CreateFileW (wstore, READ_CONTROL | FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING,
-      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING,
+          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   DWORD last_error = handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
   g_free (wstore);
   if (handle == INVALID_HANDLE_VALUE)
     return (last_error == ERROR_FILE_NOT_FOUND
-        || last_error == ERROR_PATH_NOT_FOUND) ? WYRELOG_E_NOT_FOUND :
-        WYRELOG_E_IO;
+           || last_error == ERROR_PATH_NOT_FOUND) ? WYRELOG_E_NOT_FOUND :
+           WYRELOG_E_IO;
   BY_HANDLE_FILE_INFORMATION info;
   if (!GetFileInformationByHandle (handle, &info)
       || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
@@ -175,10 +186,20 @@ pin_store_file (wyl_policy_store_lease_t *lease)
     CloseHandle (handle);
     return WYRELOG_E_POLICY;
   }
+  WylPolicyStoreFileIdentity actual = {
+    .valid = TRUE,
+    .device = info.dwVolumeSerialNumber,
+    .file = ((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow,
+    .nlink = info.nNumberOfLinks,
+  };
+  if (expected_identity != NULL
+      && !store_identity_equal (&actual, expected_identity)) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
   lease->store_handle = handle;
-  lease->store_volume = info.dwVolumeSerialNumber;
-  lease->store_file_index =
-      ((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow;
+  lease->store_volume = actual.device;
+  lease->store_file_index = actual.file;
   lease->store_nlink = info.nNumberOfLinks;
   lease->maintenance = TRUE;
   return WYRELOG_E_OK;
@@ -196,12 +217,12 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   g_autofree gchar *parent = g_path_get_dirname (absolute);
   g_autofree gchar *basename = g_path_get_basename (absolute);
   wchar_t *wparent = (wchar_t *) g_utf8_to_utf16 (parent, -1, NULL, NULL,
-      NULL);
+          NULL);
   if (wparent == NULL)
     return WYRELOG_E_INVALID;
   HANDLE parent_handle = CreateFileW (wparent, FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-      FILE_FLAG_BACKUP_SEMANTICS, NULL);
+          FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+          FILE_FLAG_BACKUP_SEMANTICS, NULL);
   g_free (wparent);
   if (parent_handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_IO;
@@ -216,10 +237,10 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   }
   g_autofree gchar *resolved = g_build_filename (final_parent, basename, NULL);
   g_autofree gchar *lock_path = g_strdup_printf ("%s%s", resolved,
-      WYL_POLICY_STORE_LOCK_SUFFIX);
+          WYL_POLICY_STORE_LOCK_SUFFIX);
   g_autofree gchar *path_key = g_utf8_casefold (resolved, -1);
   g_autofree gchar *location_key = g_strdup_printf ("win:%" G_GUINT64_FORMAT
-      ":%" G_GUINT64_FORMAT ":%s", volume, parent_index, basename);
+          ":%" G_GUINT64_FORMAT ":%s", volume, parent_index, basename);
 
   g_mutex_lock (&lease_registry_mutex);
   if (registry_lookup (path_key) != NULL
@@ -230,22 +251,22 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   }
 
   wchar_t *wlock = (wchar_t *) g_utf8_to_utf16 (lock_path, -1, NULL, NULL,
-      NULL);
+          NULL);
   if (wlock == NULL) {
     g_mutex_unlock (&lease_registry_mutex);
     CloseHandle (parent_handle);
     return WYRELOG_E_INVALID;
   }
   HANDLE lock_handle = CreateFileW (wlock, GENERIC_READ | GENERIC_WRITE, 0,
-      NULL, OPEN_ALWAYS,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+          NULL, OPEN_ALWAYS,
+          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   DWORD last_error = lock_handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
   g_free (wlock);
   if (lock_handle == INVALID_HANDLE_VALUE) {
     g_mutex_unlock (&lease_registry_mutex);
     CloseHandle (parent_handle);
     return (last_error == ERROR_SHARING_VIOLATION
-        || last_error == ERROR_LOCK_VIOLATION) ? WYRELOG_E_BUSY : WYRELOG_E_IO;
+           || last_error == ERROR_LOCK_VIOLATION) ? WYRELOG_E_BUSY : WYRELOG_E_IO;
   }
   BY_HANDLE_FILE_INFORMATION lock_info;
   if (!GetFileInformationByHandle (lock_handle, &lock_info)
@@ -270,7 +291,7 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   registry_bind (lease, location_key);
   g_mutex_unlock (&lease_registry_mutex);
   if (maintenance) {
-    wyrelog_error_t prc = pin_store_file (lease);
+    wyrelog_error_t prc = pin_store_file (lease, NULL);
     if (prc != WYRELOG_E_OK) {
       wyl_policy_store_lease_release (lease);
       return prc;
@@ -302,8 +323,8 @@ wyl_policy_store_lease_verify_parent (const wyl_policy_store_lease_t *lease)
   guint64 volume = 0;
   guint64 index = 0;
   return win_parent_identity (lease->parent_handle, &volume, &index)
-      && volume == lease->parent_volume && index == lease->parent_file_index ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
+         && volume == lease->parent_volume && index == lease->parent_file_index ?
+         WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 /* Re-resolve the store's final component and confirm it is still the same
@@ -317,13 +338,13 @@ wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
       || lease->store_handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_INVALID;
   wchar_t *wstore = (wchar_t *) g_utf8_to_utf16 (lease->resolved_path, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   if (wstore == NULL)
     return WYRELOG_E_INVALID;
   HANDLE handle = CreateFileW (wstore, READ_CONTROL | FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING,
-      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING,
+          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   g_free (wstore);
   if (handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
@@ -353,6 +374,16 @@ wyl_policy_store_lease_release_store_pin (wyl_policy_store_lease_t *lease)
     CloseHandle (lease->store_handle);
     lease->store_handle = INVALID_HANDLE_VALUE;
   }
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_refresh_store_pin (wyl_policy_store_lease_t *lease,
+    const WylPolicyStoreFileIdentity *expected_identity)
+{
+  if (lease == NULL || !lease->maintenance
+      || lease->store_handle != INVALID_HANDLE_VALUE)
+    return WYRELOG_E_INVALID;
+  return pin_store_file (lease, expected_identity);
 }
 
 void
@@ -390,7 +421,7 @@ lock_nonblocking (int fd)
   if (flock (fd, LOCK_EX | LOCK_NB) == 0)
     return WYRELOG_E_OK;
   return (errno == EWOULDBLOCK || errno == EAGAIN) ? WYRELOG_E_BUSY :
-      WYRELOG_E_IO;
+         WYRELOG_E_IO;
 }
 
 /* Pin the store file itself under an already-held maintenance lease. The
@@ -402,10 +433,11 @@ lock_nonblocking (int fd)
  * or loose mode. A missing store is not a fresh-create case here: the tool
  * remediates an existing store, so ENOENT is NOT_FOUND. */
 static wyrelog_error_t
-pin_store_file (wyl_policy_store_lease_t *lease)
+pin_store_file (wyl_policy_store_lease_t *lease,
+    const WylPolicyStoreFileIdentity *expected_identity)
 {
   int fd = openat (lease->parent_dirfd, lease->basename,
-      O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+          O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (fd < 0) {
     if (errno == ELOOP)
       return WYRELOG_E_POLICY;
@@ -423,11 +455,24 @@ pin_store_file (wyl_policy_store_lease_t *lease)
     close (fd);
     return WYRELOG_E_POLICY;
   }
+  WylPolicyStoreFileIdentity actual = {
+    .valid = TRUE,
+    .device = (guint64) st.st_dev,
+    .file = (guint64) st.st_ino,
+    .owner = (guint64) st.st_uid,
+    .mode = (guint32) st.st_mode,
+    .nlink = (guint32) st.st_nlink,
+  };
+  if (expected_identity != NULL
+      && !store_identity_equal (&actual, expected_identity)) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
   lease->store_fd = fd;
-  lease->store_dev = st.st_dev;
-  lease->store_ino = st.st_ino;
-  lease->store_uid = st.st_uid;
-  lease->store_mode = st.st_mode;
+  lease->store_dev = actual.device;
+  lease->store_ino = actual.file;
+  lease->store_uid = actual.owner;
+  lease->store_mode = actual.mode;
   lease->maintenance = TRUE;
   return WYRELOG_E_OK;
 }
@@ -466,14 +511,14 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
     return WYRELOG_E_POLICY;
   }
   g_autofree gchar *resolved = g_build_filename (resolved_parent, basename,
-      NULL);
+          NULL);
   g_free (resolved_parent);
   g_autofree gchar *lock_basename = g_strdup_printf ("%s%s", basename,
-      WYL_POLICY_STORE_LOCK_SUFFIX);
+          WYL_POLICY_STORE_LOCK_SUFFIX);
   g_autofree gchar *path_key = g_strdup_printf ("path:%s", resolved);
   g_autofree gchar *location_key = g_strdup_printf ("location:%"
-      G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":%s",
-      (guint64) parent_stat.st_dev, (guint64) parent_stat.st_ino, basename);
+          G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":%s",
+          (guint64) parent_stat.st_dev, (guint64) parent_stat.st_ino, basename);
 
   g_mutex_lock (&lease_registry_mutex);
   if (registry_lookup (path_key) != NULL
@@ -483,7 +528,7 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
     return WYRELOG_E_BUSY;
   }
   int lock_fd = openat (dirfd, lock_basename,
-      O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+          O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
   int open_errno = errno;
   if (lock_fd < 0) {
     g_mutex_unlock (&lease_registry_mutex);
@@ -498,8 +543,8 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
     return WYRELOG_E_POLICY;
   }
   g_autofree gchar *inode_key = g_strdup_printf ("inode:%" G_GUINT64_FORMAT
-      ":%" G_GUINT64_FORMAT, (guint64) lock_stat.st_dev,
-      (guint64) lock_stat.st_ino);
+          ":%" G_GUINT64_FORMAT, (guint64) lock_stat.st_dev,
+          (guint64) lock_stat.st_ino);
   wyl_policy_store_lease_t *same_inode = registry_lookup (inode_key);
   if (same_inode != NULL) {
     registry_bind (same_inode, path_key);
@@ -547,7 +592,7 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   registry_bind (lease, inode_key);
   g_mutex_unlock (&lease_registry_mutex);
   if (maintenance) {
-    wyrelog_error_t prc = pin_store_file (lease);
+    wyrelog_error_t prc = pin_store_file (lease, NULL);
     if (prc != WYRELOG_E_OK) {
       wyl_policy_store_lease_release (lease);
       return prc;
@@ -586,21 +631,21 @@ wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
       || lease->parent_dirfd < 0)
     return WYRELOG_E_INVALID;
   int fd = openat (lease->parent_dirfd, lease->basename,
-      O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+          O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (fd < 0)
     return (errno == ELOOP || errno == ENOENT) ? WYRELOG_E_POLICY :
-        WYRELOG_E_IO;
+           WYRELOG_E_IO;
   struct stat st;
   int rc = fstat (fd, &st);
   close (fd);
   if (rc != 0)
     return WYRELOG_E_IO;
   return (S_ISREG (st.st_mode) && st.st_nlink == 1
-      && (guint64) st.st_dev == lease->store_dev
-      && (guint64) st.st_ino == lease->store_ino
-      && (guint64) st.st_uid == lease->store_uid
-      && (guint32) st.st_mode == lease->store_mode) ? WYRELOG_E_OK :
-      WYRELOG_E_POLICY;
+         && (guint64) st.st_dev == lease->store_dev
+         && (guint64) st.st_ino == lease->store_ino
+         && (guint64) st.st_uid == lease->store_uid
+         && (guint32) st.st_mode == lease->store_mode) ? WYRELOG_E_OK :
+         WYRELOG_E_POLICY;
 }
 
 /* No-op on POSIX: renameat replaces the canonical name atomically even while
@@ -609,6 +654,17 @@ void
 wyl_policy_store_lease_release_store_pin (wyl_policy_store_lease_t *lease)
 {
   (void) lease;
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_refresh_store_pin (wyl_policy_store_lease_t *lease,
+    const WylPolicyStoreFileIdentity *expected_identity)
+{
+  if (lease == NULL || !lease->maintenance || lease->store_fd < 0)
+    return WYRELOG_E_INVALID;
+  close (lease->store_fd);
+  lease->store_fd = -1;
+  return pin_store_file (lease, expected_identity);
 }
 
 wyrelog_error_t
@@ -624,9 +680,9 @@ wyl_policy_store_lease_verify_parent (const wyl_policy_store_lease_t *lease)
   if (stat (parent, &named) != 0)
     return WYRELOG_E_POLICY;
   return (guint64) pinned.st_dev == lease->parent_dev
-      && (guint64) pinned.st_ino == lease->parent_ino
-      && pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
+         && (guint64) pinned.st_ino == lease->parent_ino
+         && pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino ?
+         WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 int

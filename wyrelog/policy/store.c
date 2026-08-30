@@ -170,6 +170,11 @@ struct wyl_policy_store_t
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
   GRecMutex graph_authority_mutex;
+  /* SQLite's FULLMUTEX serializes calls, but it does not prevent a second
+   * thread from joining a transaction opened by the first.  Schema rebuilds
+   * install an authorizer/progress fence and publish their owner here. */
+  gpointer schema_sql_owner;
+  gint terminal_result;
   gchar *fact_root_path;
   WylFactGraphResolver fact_root_resolver;
   gint service_authority_transaction_active;
@@ -179,6 +184,12 @@ struct wyl_policy_store_t
   guint64 service_authority_poison_serial;
   gint service_authority_coordination_terminal;
   WylPolicyGraphAuthorityMigrationFailStage graph_authority_migration_fail_once;
+  WylPolicyGraphAuthorityMigrationGateFunc graph_authority_migration_gate;
+  gpointer graph_authority_migration_gate_data;
+  WylPolicyStoreFactRootEntryGateFunc fact_root_entry_gate;
+  gpointer fact_root_entry_gate_data;
+  WylPolicyStoreRotationIntentEntryGateFunc rotation_intent_entry_gate;
+  gpointer rotation_intent_entry_gate_data;
   WylPolicyGraphAuthorityMutationFailStage mutation_fail_once;
 #ifdef WYL_TEST_HANDLE_SEAMS
   WylPolicySnapshotFinishFailStage snapshot_finish_fail_once;
@@ -196,6 +207,84 @@ struct wyl_policy_store_t
   WylPolicyServiceHandoffMaintenanceNowFunc service_handoff_maintenance_now;
   gpointer service_handoff_maintenance_clock_data;
 };
+
+static int
+policy_store_sql_fence_authorizer (gpointer data, int action,
+    const gchar *arg1, const gchar *arg2, const gchar *database,
+    const gchar *trigger)
+{
+  (void) action;
+  (void) arg1;
+  (void) arg2;
+  (void) database;
+  (void) trigger;
+  wyl_policy_store_t *store = data;
+  GThread *owner = g_atomic_pointer_get (&store->schema_sql_owner);
+  if (g_atomic_int_get (&store->terminal_result) != WYRELOG_E_OK)
+    return SQLITE_DENY;
+  return owner == NULL || owner == g_thread_self () ? SQLITE_OK : SQLITE_DENY;
+}
+
+static int
+policy_store_sql_fence_progress (gpointer data)
+{
+  wyl_policy_store_t *store = data;
+  GThread *owner = g_atomic_pointer_get (&store->schema_sql_owner);
+  return g_atomic_int_get (&store->terminal_result) != WYRELOG_E_OK
+         || (owner != NULL && owner != g_thread_self ());
+}
+
+static wyrelog_error_t
+policy_store_install_schema_fence (wyl_policy_store_t *store)
+{
+  sqlite3_mutex *mutex = sqlite3_db_mutex (store->db);
+  sqlite3_mutex_enter (mutex);
+  g_atomic_pointer_set (&store->schema_sql_owner, g_thread_self ());
+  int rc = sqlite3_set_authorizer (store->db,
+          policy_store_sql_fence_authorizer, store);
+  if (rc == SQLITE_OK)
+    sqlite3_progress_handler (store->db, 1, policy_store_sql_fence_progress,
+        store);
+  else
+    g_atomic_pointer_set (&store->schema_sql_owner, NULL);
+  sqlite3_mutex_leave (mutex);
+  return rc == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static void
+policy_store_remove_schema_fence (wyl_policy_store_t *store)
+{
+  sqlite3_mutex *mutex = sqlite3_db_mutex (store->db);
+  sqlite3_mutex_enter (mutex);
+  sqlite3_progress_handler (store->db, 0, NULL, NULL);
+  (void) sqlite3_set_authorizer (store->db, NULL, NULL);
+  g_atomic_pointer_set (&store->schema_sql_owner, NULL);
+  sqlite3_mutex_leave (mutex);
+}
+
+static void
+policy_store_make_terminal (wyl_policy_store_t *store,
+    wyrelog_error_t terminal_result)
+{
+  sqlite3_mutex *mutex = sqlite3_db_mutex (store->db);
+  sqlite3_mutex_enter (mutex);
+  g_atomic_int_set (&store->terminal_result,
+      terminal_result == WYRELOG_E_OK ? WYRELOG_E_IO : terminal_result);
+  g_atomic_pointer_set (&store->schema_sql_owner, NULL);
+  (void) sqlite3_set_authorizer (store->db,
+      policy_store_sql_fence_authorizer, store);
+  sqlite3_progress_handler (store->db, 1, policy_store_sql_fence_progress,
+      store);
+  sqlite3_mutex_leave (mutex);
+}
+
+static wyrelog_error_t
+policy_store_terminal_gate (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  return (wyrelog_error_t) g_atomic_int_get (&store->terminal_result);
+}
 
 gboolean
 wyl_policy_store_pinned_backend_available (void)
@@ -2155,6 +2244,9 @@ wyl_policy_store_permission_plane (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || perm_id == NULL
       || out_plane == NULL)
     return WYRELOG_E_INVALID;
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
 
   *out_plane = WYL_PERMISSION_PLANE_CONTROL;
   if (!permission_id_is_approved_data_plane (perm_id))
@@ -2615,6 +2707,56 @@ exec_sql (sqlite3 *db, const gchar *sql)
   if (sqlite3_exec (db, sql, NULL, NULL, &errmsg) != SQLITE_OK) {
     sqlite3_free (errmsg);
     return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+typedef enum
+{
+  WYL_SQLITE_CONNECTION_PLAINTEXT,
+  WYL_SQLITE_CONNECTION_ENCRYPTED_MEMORY,
+  WYL_SQLITE_CONNECTION_VERIFIER_MEMORY,
+} WylSqliteConnectionMode;
+
+static wyrelog_error_t
+configure_sqlite_connection (sqlite3 *db, WylSqliteConnectionMode mode)
+{
+  const gchar *pragmas = mode == WYL_SQLITE_CONNECTION_PLAINTEXT ?
+      "PRAGMA foreign_keys=ON;PRAGMA journal_mode=WAL;"
+      "PRAGMA synchronous=FULL;" :
+      "PRAGMA foreign_keys=ON;PRAGMA temp_store=MEMORY;"
+      "PRAGMA synchronous=FULL;";
+  if (exec_sql (db, pragmas) != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+#ifdef __APPLE__
+  if (exec_sql (db,
+      "PRAGMA fullfsync=ON;PRAGMA checkpoint_fullfsync=ON;") != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+#endif
+  static const struct
+  {
+    const gchar *sql;
+    gint expected;
+  } required_pragmas[] = {
+    {"PRAGMA foreign_keys;", 1},
+    {"PRAGMA synchronous;", 2},
+#ifdef __APPLE__
+    {"PRAGMA fullfsync;", 1},
+    {"PRAGMA checkpoint_fullfsync;", 1},
+#endif
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (required_pragmas); i++) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2 (db, required_pragmas[i].sql, -1, &stmt, NULL)
+        != SQLITE_OK)
+      return WYRELOG_E_IO;
+    int step = sqlite3_step (stmt);
+    gboolean matches = step == SQLITE_ROW
+        && sqlite3_column_type (stmt, 0) == SQLITE_INTEGER
+        && sqlite3_column_int (stmt, 0) == required_pragmas[i].expected;
+    sqlite3_finalize (stmt);
+    if (!matches)
+      return WYRELOG_E_IO;
   }
   return WYRELOG_E_OK;
 }
@@ -3191,10 +3333,15 @@ read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
 static wyrelog_error_t
 write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced)
+    gboolean *out_replaced, WylPolicyStoreFileIdentity *out_identity,
+    gboolean *out_durable)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof *out_identity);
+  if (out_durable != NULL)
+    *out_durable = FALSE;
   if (path == NULL || path[0] == '\0' || (bytes == NULL && len > 0))
     return WYRELOG_E_INVALID;
 
@@ -3306,11 +3453,22 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 
   if (out_replaced != NULL)
     *out_replaced = TRUE;
-  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+  if (out_identity != NULL) {
+    out_identity->valid = TRUE;
+    out_identity->device = info.dwVolumeSerialNumber;
+    out_identity->file =
+        ((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    out_identity->nlink = info.nNumberOfLinks;
+  }
+  gboolean durability_warning =
+      rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
       && rotation_runtime->checkpoint (rotation_runtime->data,
-      WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME) != 0)
+          WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME) != 0;
+  if (durability_warning)
     WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
         "policy store canonical replacement completed with a durability warning");
+  else if (out_durable != NULL)
+    *out_durable = TRUE;
 
   (void) g_chmod (path, 0600);
   return WYRELOG_E_OK;
@@ -3319,7 +3477,8 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 static wyrelog_error_t
 write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 {
-  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL);
+  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL, NULL,
+             NULL);
 }
 #endif /* G_OS_WIN32 */
 
@@ -3496,7 +3655,8 @@ static wyrelog_error_t read_through_dirfd (int dirfd, const gchar * basename,
 static wyrelog_error_t write_through_dirfd (int dirfd, const gchar * basename,
     const guint8 * bytes, gsize len,
     const wyl_policy_store_rotation_runtime_t * rotation_runtime,
-    gboolean * out_replaced);
+    gboolean * out_replaced, WylPolicyStoreFileIdentity * out_identity,
+    gboolean * out_durable);
 #endif
 
 static wyrelog_error_t
@@ -3525,8 +3685,8 @@ rotation_intent_sidecar_path (const wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *store,
+static wyrelog_error_t
+rotation_intent_write_sidecar_locked (wyl_policy_store_t *store,
     const WylPolicyRotationIntent *intent, const guint8 *auth_key,
     gsize auth_key_len)
 {
@@ -3542,15 +3702,33 @@ wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *store,
   rc = rotation_intent_sidecar_path (store, &path, &basename);
   if (rc == WYRELOG_E_OK) {
 #ifdef G_OS_WIN32
-    rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL);
+    rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL,
+            NULL, NULL);
 #else
     rc = write_through_dirfd (store->canonical_dirfd, basename, wire,
-            wire_len, NULL, NULL);
+            wire_len, NULL, NULL, NULL, NULL);
 #endif
   }
   sodium_memzero (wire, wire_len);
   g_free (wire);
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *store,
+    const WylPolicyRotationIntent *intent, const guint8 *auth_key,
+    gsize auth_key_len)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  if (store->rotation_intent_entry_gate != NULL)
+    store->rotation_intent_entry_gate (store->rotation_intent_entry_gate_data);
+  g_autoptr (GRecMutexLocker) locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  return terminal == WYRELOG_E_OK ?
+         rotation_intent_write_sidecar_locked (store, intent, auth_key,
+             auth_key_len) : terminal;
 }
 
 void wyl_policy_service_handoff_disposition_result_clear
@@ -6535,8 +6713,8 @@ wyl_policy_store_handoff_claim_cancellation_core
   return rc;
 }
 
-wyrelog_error_t
-wyl_policy_rotation_intent_read_sidecar (const wyl_policy_store_t *store,
+static wyrelog_error_t
+rotation_intent_read_sidecar_locked (const wyl_policy_store_t *store,
     const guint8 *auth_key, gsize auth_key_len,
     WylPolicyRotationIntent *out_intent)
 {
@@ -6567,7 +6745,26 @@ wyl_policy_rotation_intent_read_sidecar (const wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *store)
+wyl_policy_rotation_intent_read_sidecar (const wyl_policy_store_t *store,
+    const guint8 *auth_key, gsize auth_key_len,
+    WylPolicyRotationIntent *out_intent)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_policy_store_t *mutable_store = (wyl_policy_store_t *) store;
+  if (mutable_store->rotation_intent_entry_gate != NULL)
+    mutable_store->rotation_intent_entry_gate
+      (mutable_store->rotation_intent_entry_gate_data);
+  g_autoptr (GRecMutexLocker) locker =
+      g_rec_mutex_locker_new (&mutable_store->graph_authority_mutex);
+  wyrelog_error_t terminal = policy_store_terminal_gate (mutable_store);
+  return terminal == WYRELOG_E_OK ?
+         rotation_intent_read_sidecar_locked (store, auth_key, auth_key_len,
+             out_intent) : terminal;
+}
+
+static wyrelog_error_t
+rotation_intent_clear_sidecar_locked (wyl_policy_store_t *store)
 {
   g_autofree gchar *path = NULL;
   g_autofree gchar *basename = NULL;
@@ -6591,6 +6788,20 @@ wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *store)
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  if (store->rotation_intent_entry_gate != NULL)
+    store->rotation_intent_entry_gate (store->rotation_intent_entry_gate_data);
+  g_autoptr (GRecMutexLocker) locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  return terminal == WYRELOG_E_OK ?
+         rotation_intent_clear_sidecar_locked (store) : terminal;
+}
+
 static wyrelog_error_t
 rotation_intent_digest_canonical (const wyl_policy_store_t * store,
     guint8 out_digest[crypto_generichash_BYTES]);
@@ -6603,6 +6814,16 @@ wyl_policy_store_rotation_intent_status (const wyl_policy_store_t *store,
     memset (out_status, 0, sizeof *out_status);
   if (store == NULL || out_status == NULL)
     return WYRELOG_E_INVALID;
+  wyl_policy_store_t *mutable_store = (wyl_policy_store_t *) store;
+  if (mutable_store->rotation_intent_entry_gate != NULL)
+    mutable_store->rotation_intent_entry_gate
+      (mutable_store->rotation_intent_entry_gate_data);
+  g_autoptr (GRecMutexLocker) locker =
+      g_rec_mutex_locker_new (&mutable_store->graph_authority_mutex);
+  wyrelog_error_t terminal =
+      policy_store_terminal_gate (mutable_store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
 
   guint8 auth_key[crypto_generichash_KEYBYTES] = { 0 };
   guint8 canonical_digest[crypto_generichash_BYTES] = { 0 };
@@ -6612,7 +6833,7 @@ wyl_policy_store_rotation_intent_status (const wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK && store->lease != NULL)
     rc = wyl_policy_store_lease_verify_parent (store->lease);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+    rc = rotation_intent_read_sidecar_locked (store, auth_key,
             sizeof auth_key, &intent);
   if (rc == WYRELOG_E_NOT_FOUND) {
     out_status->state = WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT;
@@ -7002,10 +7223,15 @@ read_work_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
 static wyrelog_error_t
 write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced)
+    gboolean *out_replaced, WylPolicyStoreFileIdentity *out_identity,
+    gboolean *out_durable)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof *out_identity);
+  if (out_durable != NULL)
+    *out_durable = FALSE;
   g_autofree gchar *tmp_basename = g_strdup_printf ("%s%s", basename,
           WYL_POLICY_STORE_TMP_SUFFIX);
 
@@ -7044,6 +7270,16 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     return WYRELOG_E_IO;
   }
 
+  struct stat published_stat;
+  if (fstat (fd, &published_stat) != 0
+      || !S_ISREG (published_stat.st_mode) || published_stat.st_nlink != 1
+      || published_stat.st_uid != geteuid ()
+      || (published_stat.st_mode & 0077) != 0) {
+    close (fd);
+    (void) unlinkat (dirfd, tmp_basename, 0);
+    return WYRELOG_E_POLICY;
+  }
+
   if (close (fd) != 0) {
     (void) unlinkat (dirfd, tmp_basename, 0);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
@@ -7066,6 +7302,14 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
   }
   if (out_replaced != NULL)
     *out_replaced = TRUE;
+  if (out_identity != NULL) {
+    out_identity->valid = TRUE;
+    out_identity->device = (guint64) published_stat.st_dev;
+    out_identity->file = (guint64) published_stat.st_ino;
+    out_identity->owner = (guint64) published_stat.st_uid;
+    out_identity->mode = (guint32) published_stat.st_mode;
+    out_identity->nlink = (guint32) published_stat.st_nlink;
+  }
 
   if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
       && rotation_runtime->checkpoint (rotation_runtime->data,
@@ -7082,6 +7326,8 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
   if (fsync (dirfd) != 0)
     WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
         "policy store canonical replacement completed but directory fsync failed");
+  else if (out_durable != NULL)
+    *out_durable = TRUE;
 
   /* Post-linearization: the rename already committed, so this seam is log-only
    * and the rotation still succeeds. The Windows MoveFileEx twin is write-
@@ -7555,7 +7801,8 @@ static wyrelog_error_t
 publish_policy_store_encrypted (wyl_policy_store_t *store,
     const guint8 *encrypted, gsize encrypted_len,
     const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced)
+    gboolean *out_replaced, WylPolicyStoreFileIdentity *out_identity,
+    gboolean *out_durable)
 {
   if (store == NULL || encrypted == NULL || encrypted_len == 0)
     return WYRELOG_E_INVALID;
@@ -7567,15 +7814,18 @@ publish_policy_store_encrypted (wyl_policy_store_t *store,
     return WYRELOG_E_INTERNAL;
   return write_through_dirfd (store->canonical_dirfd,
              store->canonical_basename, encrypted, encrypted_len, rotation_runtime,
-             out_replaced);
+             out_replaced, out_identity, out_durable);
 #else
   return write_whole_file_atomic_private (store->canonical_path, encrypted,
-             encrypted_len, rotation_runtime, out_replaced);
+             encrypted_len, rotation_runtime, out_replaced, out_identity,
+             out_durable);
 #endif
 }
 
 static wyrelog_error_t
-persist_policy_store_encrypted (wyl_policy_store_t *store)
+persist_policy_store_encrypted_with_identity (wyl_policy_store_t *store,
+    const wyl_policy_store_rotation_runtime_t *rotation_runtime,
+    WylPolicyStoreFileIdentity *out_identity, gboolean *out_durable)
 {
   if (store == NULL)
     return WYRELOG_E_INVALID;
@@ -7591,8 +7841,68 @@ persist_policy_store_encrypted (wyl_policy_store_t *store)
           &encrypted_len);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return publish_policy_store_encrypted (store, encrypted, encrypted_len, NULL,
+  return publish_policy_store_encrypted (store, encrypted, encrypted_len,
+             rotation_runtime, NULL, out_identity, out_durable);
+}
+
+static wyrelog_error_t
+persist_policy_store_encrypted (wyl_policy_store_t *store)
+{
+  return persist_policy_store_encrypted_with_identity (store, NULL, NULL,
              NULL);
+}
+
+static wyrelog_error_t graph_authority_migration_checkpoint
+  (wyl_policy_store_t * store,
+    WylPolicyGraphAuthorityMigrationFailStage stage);
+
+static int
+graph_authority_publication_checkpoint (gpointer data,
+    wyl_policy_store_rotation_stage_t stage)
+{
+  if (stage != WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME)
+    return 0;
+  return graph_authority_migration_checkpoint (data,
+             WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_DIRECTORY_SYNC)
+         == WYRELOG_E_OK ? 0 : -1;
+}
+
+static wyrelog_error_t
+persist_policy_store_encrypted_checked (wyl_policy_store_t *store,
+    gboolean *out_pin_valid)
+{
+  *out_pin_valid = TRUE;
+  const wyl_policy_store_rotation_runtime_t publication_runtime = {
+    .checkpoint = graph_authority_publication_checkpoint,
+    .data = store,
+  };
+  gboolean durable = FALSE;
+  if (!store->maintenance_exclusive || store->lease == NULL) {
+    wyrelog_error_t rc = persist_policy_store_encrypted_with_identity (store,
+            &publication_runtime, NULL, &durable);
+    return rc != WYRELOG_E_OK ? rc :
+           (durable ? WYRELOG_E_OK : WYRELOG_E_IO);
+  }
+  wyrelog_error_t rc =
+      wyl_policy_store_lease_verify_store_identity (store->lease);
+  if (rc != WYRELOG_E_OK) {
+    *out_pin_valid = FALSE;
+    return rc;
+  }
+  wyl_policy_store_lease_release_store_pin (store->lease);
+  WylPolicyStoreFileIdentity published_identity = { 0 };
+  rc = persist_policy_store_encrypted_with_identity (store,
+          &publication_runtime, &published_identity, &durable);
+  wyrelog_error_t refresh_rc = graph_authority_migration_checkpoint (store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_MAINTENANCE_PIN_REFRESH);
+  if (refresh_rc == WYRELOG_E_OK)
+    refresh_rc = wyl_policy_store_lease_refresh_store_pin (store->lease,
+            &published_identity);
+  if (refresh_rc != WYRELOG_E_OK)
+    *out_pin_valid = FALSE;
+  return rc != WYRELOG_E_OK ? rc :
+         (refresh_rc != WYRELOG_E_OK ? refresh_rc :
+         (durable ? WYRELOG_E_OK : WYRELOG_E_IO));
 }
 
 wyrelog_error_t
@@ -8398,7 +8708,7 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
   gboolean replaced = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = publish_policy_store_encrypted (store, encrypted, encrypted_len,
-            old_opts->rotation_runtime, &replaced);
+            old_opts->rotation_runtime, &replaced, NULL, NULL);
   if (rc == WYRELOG_E_OK && !replaced)
     rc = WYRELOG_E_INTERNAL;
 
@@ -8640,10 +8950,9 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     goto fail;
   }
 
-  const gchar *open_pragmas = self->encrypted ?
-      "PRAGMA foreign_keys = ON;" "PRAGMA temp_store = MEMORY;" :
-      "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;";
-  if (exec_sql (self->db, open_pragmas) != WYRELOG_E_OK) {
+  if (configure_sqlite_connection (self->db, self->encrypted ?
+      WYL_SQLITE_CONNECTION_ENCRYPTED_MEMORY :
+      WYL_SQLITE_CONNECTION_PLAINTEXT) != WYRELOG_E_OK) {
     rc = WYRELOG_E_IO;
     goto fail;
   }
@@ -8685,7 +8994,8 @@ wyl_policy_store_close (wyl_policy_store_t *store)
      * before persisting so an offline remediation never writes its encrypted
      * image over a file substituted after the lease was taken; the deferred
      * unit-1 gate fails closed by skipping the persist. */
-    gboolean persist = store->encrypted && !store->suppress_close_persist;
+    gboolean persist = store->encrypted && !store->suppress_close_persist
+        && g_atomic_int_get (&store->terminal_result) == WYRELOG_E_OK;
     if (persist && store->maintenance_exclusive && store->lease != NULL
         && wyl_policy_store_lease_verify_store_identity (store->lease)
         != WYRELOG_E_OK)
@@ -8695,11 +9005,22 @@ wyl_policy_store_close (wyl_policy_store_t *store)
      * platforms where an open target handle would otherwise block it. */
     if (persist && store->maintenance_exclusive && store->lease != NULL)
       wyl_policy_store_lease_release_store_pin (store->lease);
-    if (persist)
-      (void) persist_policy_store_encrypted (store);
-    sqlite3_close (store->db);
+    if (persist && persist_policy_store_encrypted (store) != WYRELOG_E_OK)
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "encrypted policy store close could not publish its image");
+    sqlite3_progress_handler (store->db, 0, NULL, NULL);
+    (void) sqlite3_set_authorizer (store->db, NULL, NULL);
+    sqlite3 *closing_db = store->db;
+    int close_rc = sqlite3_close (closing_db);
     store->db = NULL;
-    if (store->deserialized_image != NULL) {
+    /* sqlite3_close_v2() may defer destruction while a caller-owned statement
+     * remains.  In that case the deserialize buffer must outlive the store;
+     * deliberately leak the secret allocation rather than free memory SQLite
+     * can still read.  Normal users finalize statements before close. */
+    gboolean image_released = close_rc == SQLITE_OK;
+    if (!image_released)
+      (void) sqlite3_close_v2 (closing_db);
+    if (image_released && store->deserialized_image != NULL) {
       sodium_memzero (store->deserialized_image,
           store->deserialized_image_capacity);
       sqlite3_free (store->deserialized_image);
@@ -8746,7 +9067,8 @@ wyl_policy_store_close (wyl_policy_store_t *store)
 sqlite3 *
 wyl_policy_store_get_db (wyl_policy_store_t *store)
 {
-  if (store == NULL)
+  if (store == NULL
+      || g_atomic_int_get (&store->terminal_result) != WYRELOG_E_OK)
     return NULL;
   return store->db;
 }
@@ -8755,6 +9077,9 @@ static wyrelog_error_t
 bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root,
     WylFactRootWriterLease *lease)
 {
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
   if (store->fact_root_path != NULL) {
     if (g_strcmp0 (store->fact_root_path, fact_root) != 0)
       return WYRELOG_E_POLICY;
@@ -8788,6 +9113,11 @@ wyl_policy_store_bind_fact_root (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || fact_root == NULL
       || fact_root[0] == '\0')
     return WYRELOG_E_INVALID;
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
+  if (store->fact_root_entry_gate != NULL)
+    store->fact_root_entry_gate (store->fact_root_entry_gate_data);
   g_autoptr (GRecMutexLocker) authority_locker =
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
   return bind_fact_root_locked (store, fact_root, NULL);
@@ -8800,6 +9130,11 @@ wyl_policy_store_bind_fact_root_authorized (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || fact_root == NULL
       || fact_root[0] == '\0' || lease == NULL)
     return WYRELOG_E_INVALID;
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
+  if (store->fact_root_entry_gate != NULL)
+    store->fact_root_entry_gate (store->fact_root_entry_gate_data);
   g_autoptr (GRecMutexLocker) authority_locker =
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
   return bind_fact_root_locked (store, fact_root, lease);
@@ -8816,6 +9151,11 @@ wyl_policy_store_open_fact_graph_directory (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || fact_root == NULL
       || fact_root[0] == '\0')
     return WYRELOG_E_INVALID;
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
+  if (store->fact_root_entry_gate != NULL)
+    store->fact_root_entry_gate (store->fact_root_entry_gate_data);
 
   WylFactGraphLocator locator = { 0 };
   wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, tenant_id,
@@ -8975,24 +9315,20 @@ static const WylGraphAuthorityColumn fact_reconcile_evidence_columns[] = {
 
 static const WylGraphAuthorityColumn fact_graph_provisioning_evidence_columns[] = {
   {"fact_graph_provisioning", "windows_operation_evidence_version", "INTEGER",
-   FALSE, NULL, NULL,
-   "ALTER TABLE fact_graph_provisioning ADD COLUMN "
-   "windows_operation_evidence_version INTEGER"},
+   FALSE, NULL, NULL, NULL},
   {"fact_graph_provisioning", "windows_graph_volume_serial", "INTEGER",
-   FALSE, NULL, NULL,
-   "ALTER TABLE fact_graph_provisioning ADD COLUMN "
-   "windows_graph_volume_serial INTEGER"},
+   FALSE, NULL, NULL, NULL},
   {"fact_graph_provisioning", "windows_graph_file_id", "BLOB", FALSE, NULL,
-   NULL,
-   "ALTER TABLE fact_graph_provisioning ADD COLUMN windows_graph_file_id BLOB"},
+   NULL, NULL},
   {"fact_graph_provisioning", "windows_artifact_volume_serial", "INTEGER",
-   FALSE, NULL, NULL,
-   "ALTER TABLE fact_graph_provisioning ADD COLUMN "
-   "windows_artifact_volume_serial INTEGER"},
+   FALSE, NULL, NULL, NULL},
   {"fact_graph_provisioning", "windows_artifact_file_id", "BLOB", FALSE, NULL,
-   NULL,
-   "ALTER TABLE fact_graph_provisioning ADD COLUMN windows_artifact_file_id BLOB"},
+   NULL, NULL},
 };
+
+static const WylGraphAuthorityColumn fact_graph_provisioning_darwin_evidence_column =
+{"fact_graph_provisioning", "darwin_operation_evidence", "BLOB", FALSE,
+ NULL, NULL, NULL};
 
 static const gchar graph_authority_uuid_index_sql[] =
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid "
@@ -9009,7 +9345,7 @@ static const gchar fact_reconcile_evidence_immutable_trigger_sql[] =
 /* A provisioning operation owns exactly one deterministic, single-component
  * staging file.  Its identity is intentionally immutable: recovery may only
  * resume an artifact which this durable record names. */
-static const gchar fact_graph_provisioning_table_sql[] =
+static const gchar fact_graph_provisioning_table_windows_sql[] =
     "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
     "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
     "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
@@ -9064,7 +9400,102 @@ static const gchar fact_graph_provisioning_table_sql[] =
     "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
     ")";
 
-static const gchar fact_graph_provisioning_immutable_trigger_sql[] =
+static const gchar fact_graph_provisioning_table_pre_windows_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fact_graph_provisioning_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "windows_operation_evidence_version INTEGER,"
+    "windows_graph_volume_serial INTEGER,"
+    "windows_graph_file_id BLOB,"
+    "windows_artifact_volume_serial INTEGER,"
+    "windows_artifact_file_id BLOB,"
+    "darwin_operation_evidence BLOB,"
+    "CHECK ((windows_operation_evidence_version IS NULL AND "
+    "windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL AND "
+    "windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL) OR "
+    "(typeof(windows_operation_evidence_version)='integer' AND "
+    "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_volume_serial)='integer' AND "
+    "windows_graph_volume_serial != 0 AND "
+    "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
+    "typeof(windows_artifact_volume_serial)='integer' AND "
+    "windows_artifact_volume_serial != 0 AND "
+    "typeof(windows_artifact_file_id)='blob' AND "
+    "length(windows_artifact_file_id)=16)),"
+    "CHECK (darwin_operation_evidence IS NULL OR ("
+    "typeof(darwin_operation_evidence)='blob' AND "
+    "length(darwin_operation_evidence)=56)),"
+    "CHECK (darwin_operation_evidence IS NULL OR "
+    "windows_operation_evidence_version IS NULL),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fact_graph_provisioning_immutable_trigger_windows_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
     "BEFORE UPDATE ON fact_graph_provisioning WHEN "
     "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
@@ -9092,6 +9523,40 @@ static const gchar fact_graph_provisioning_immutable_trigger_sql[] =
     "NEW.windows_artifact_file_id IS NOT NULL))) "
     "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
 
+static const gchar fact_graph_provisioning_immutable_trigger_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
+    "BEFORE UPDATE ON fact_graph_provisioning WHEN "
+    "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
+    "OR NEW.graph_id IS NOT OLD.graph_id OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.stage_basename IS NOT OLD.stage_basename OR "
+    "NEW.expected_lifecycle_generation IS NOT OLD.expected_lifecycle_generation "
+    "OR NEW.expected_reconciliation_generation IS NOT OLD.expected_reconciliation_generation "
+    "OR NEW.created_at IS NOT OLD.created_at OR "
+    "(OLD.windows_operation_evidence_version IS NOT NULL AND "
+    "(NEW.windows_operation_evidence_version IS NOT OLD.windows_operation_evidence_version OR "
+    "NEW.windows_graph_volume_serial IS NOT OLD.windows_graph_volume_serial OR "
+    "NEW.windows_graph_file_id IS NOT OLD.windows_graph_file_id OR "
+    "NEW.windows_artifact_volume_serial IS NOT OLD.windows_artifact_volume_serial OR "
+    "NEW.windows_artifact_file_id IS NOT OLD.windows_artifact_file_id)) OR "
+    "(OLD.windows_operation_evidence_version IS NULL AND NOT ("
+    "(NEW.windows_operation_evidence_version IS NULL AND "
+    "NEW.windows_graph_volume_serial IS NULL AND "
+    "NEW.windows_graph_file_id IS NULL AND "
+    "NEW.windows_artifact_volume_serial IS NULL AND "
+    "NEW.windows_artifact_file_id IS NULL) OR "
+    "(NEW.windows_operation_evidence_version IS NOT NULL AND "
+    "NEW.windows_graph_volume_serial IS NOT NULL AND "
+    "NEW.windows_graph_file_id IS NOT NULL AND "
+    "NEW.windows_artifact_volume_serial IS NOT NULL AND "
+    "NEW.windows_artifact_file_id IS NOT NULL))) OR "
+    "(OLD.darwin_operation_evidence IS NOT NULL AND "
+    "NEW.darwin_operation_evidence IS NOT OLD.darwin_operation_evidence) OR "
+    "(OLD.darwin_operation_evidence IS NULL AND "
+    "NEW.darwin_operation_evidence IS NOT NULL AND "
+    "(OLD.windows_operation_evidence_version IS NOT NULL OR "
+    "OLD.phase!='reserved' OR NEW.phase!='reserved')) "
+    "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
+
 static const gchar fact_graph_provisioning_immutable_trigger_pre_evidence_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
     "BEFORE UPDATE ON fact_graph_provisioning WHEN "
@@ -9103,9 +9568,29 @@ static const gchar fact_graph_provisioning_immutable_trigger_pre_evidence_sql[] 
     "OR NEW.created_at IS NOT OLD.created_at "
     "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
 
+static const gchar fact_graph_provisioning_insert_guard_windows_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
 static const gchar fact_graph_provisioning_insert_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
     "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
+    "THEN RAISE(ABORT,'Darwin provisioning evidence requires reservation') END; "
     "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
     "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
     "g.store_uuid=NEW.store_uuid AND "
@@ -9638,6 +10123,12 @@ graph_authority_canonical_sql (const gchar *sql)
   return graph_authority_normalize_sql (canonical);
 }
 
+static wyrelog_error_t graph_authority_migration_checkpoint
+  (wyl_policy_store_t * store,
+    WylPolicyGraphAuthorityMigrationFailStage stage);
+static wyrelog_error_t graph_provisioning_require_true
+  (sqlite3 * db, const gchar * sql);
+
 /* sealed_generation extended both tenant guards.  SQLite's CREATE TRIGGER IF
  * NOT EXISTS cannot replace the already-installed predecessor, so recognize
  * only the exact former definition and replace it inside the caller's schema
@@ -9679,13 +10170,907 @@ migrate_tenant_authority_guard (sqlite3 *db, const gchar *name,
   return rc == WYRELOG_E_OK ? exec_sql (db, current_sql) : rc;
 }
 
+typedef enum
+{
+  WYL_PROVISIONING_SCHEMA_ABSENT,
+  WYL_PROVISIONING_SCHEMA_PRE_WINDOWS,
+  WYL_PROVISIONING_SCHEMA_WINDOWS,
+  WYL_PROVISIONING_SCHEMA_CANONICAL,
+} WylProvisioningSchemaKind;
+
+static wyrelog_error_t
+graph_provisioning_schema_kind (sqlite3 *db,
+    WylProvisioningSchemaKind *out_kind)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *lookup =
+      "SELECT sql FROM main.sqlite_schema WHERE type='table' AND "
+      "name='fact_graph_provisioning';";
+  if (sqlite3_prepare_v2 (db, lookup, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int step = sqlite3_step (stmt);
+  g_autofree gchar *actual = step == SQLITE_ROW ?
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0)) : NULL;
+  sqlite3_finalize (stmt);
+  if (step == SQLITE_DONE) {
+    *out_kind = WYL_PROVISIONING_SCHEMA_ABSENT;
+    return WYRELOG_E_OK;
+  }
+  if (step != SQLITE_ROW || actual == NULL)
+    return WYRELOG_E_IO;
+
+  g_autofree gchar *normalized = graph_authority_normalize_sql (actual);
+  g_autofree gchar *pre_windows =
+      graph_authority_canonical_sql (fact_graph_provisioning_table_pre_windows_sql);
+  g_autofree gchar *windows =
+      graph_authority_canonical_sql (fact_graph_provisioning_table_windows_sql);
+  g_autofree gchar *canonical =
+      graph_authority_canonical_sql (fact_graph_provisioning_table_sql);
+  if (normalized == NULL || pre_windows == NULL || windows == NULL
+      || canonical == NULL)
+    return WYRELOG_E_NOMEM;
+  if (g_strcmp0 (normalized, pre_windows) == 0)
+    *out_kind = WYL_PROVISIONING_SCHEMA_PRE_WINDOWS;
+  else if (g_strcmp0 (normalized, windows) == 0)
+    *out_kind = WYL_PROVISIONING_SCHEMA_WINDOWS;
+  else if (g_strcmp0 (normalized, canonical) == 0)
+    *out_kind = WYL_PROVISIONING_SCHEMA_CANONICAL;
+  else
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+graph_provisioning_sql_references_target (const gchar *sql)
+{
+  static const gchar target[] = "fact_graph_provisioning";
+  gboolean single_quoted_table_context = FALSE;
+  if (sql == NULL)
+    return FALSE;
+  const gchar *cursor = sql;
+  while (*cursor != '\0') {
+    if (cursor[0] == '-' && cursor[1] == '-') {
+      cursor += 2;
+      while (*cursor != '\0' && *cursor != '\n')
+        cursor++;
+      continue;
+    }
+    if (cursor[0] == '/' && cursor[1] == '*') {
+      const gchar *end = strstr (cursor + 2, "*/");
+      cursor = end == NULL ? cursor + strlen (cursor) : end + 2;
+      continue;
+    }
+    if (*cursor == '\'') {
+      GString *literal = g_string_new (NULL);
+      cursor++;
+      while (*cursor != '\0') {
+        if (*cursor != '\'') {
+          g_string_append_c (literal, *cursor++);
+          continue;
+        }
+        cursor++;
+        if (*cursor == '\'') {
+          g_string_append_c (literal, '\'');
+          cursor++;
+          continue;
+        }
+        break;
+      }
+      gboolean matches = single_quoted_table_context
+          && g_ascii_strcasecmp (literal->str, target) == 0;
+      g_string_free (literal, TRUE);
+      if (matches)
+        return TRUE;
+      continue;
+    }
+    gchar delimiter = '\0';
+    gchar closing = '\0';
+    if (*cursor == '"' || *cursor == '`' || *cursor == '[') {
+      delimiter = *cursor++;
+      closing = delimiter == '[' ? ']' : delimiter;
+    }
+    const gchar *start = cursor;
+    if (delimiter != '\0') {
+      GString *identifier = g_string_new (NULL);
+      while (*cursor != '\0') {
+        if (*cursor != closing) {
+          g_string_append_c (identifier, *cursor++);
+          continue;
+        }
+        if (cursor[1] == closing) {
+          g_string_append_c (identifier, closing);
+          cursor += 2;
+          continue;
+        }
+        cursor++;
+        break;
+      }
+      gboolean matches = g_ascii_strcasecmp (identifier->str, target) == 0;
+      g_string_free (identifier, TRUE);
+      if (matches)
+        return TRUE;
+      continue;
+    }
+    if (!(g_ascii_isalpha (*cursor) || *cursor == '_')) {
+      cursor++;
+      continue;
+    }
+    cursor++;
+    while (g_ascii_isalnum (*cursor) || *cursor == '_' || *cursor == '$')
+      cursor++;
+    if ((gsize) (cursor - start) == sizeof target - 1
+        && g_ascii_strncasecmp (start, target, sizeof target - 1) == 0)
+      return TRUE;
+    g_autofree gchar *identifier = g_ascii_strdown (start,
+            (gssize) (cursor - start));
+    if (g_str_equal (identifier, "from")
+        || g_str_equal (identifier, "join")
+        || g_str_equal (identifier, "update")
+        || g_str_equal (identifier, "into")
+        || g_str_equal (identifier, "on")
+        || g_str_equal (identifier, "references")
+        || g_str_equal (identifier, "table"))
+      single_quoted_table_context = TRUE;
+    else if (single_quoted_table_context
+        && !g_str_equal (identifier, "main")
+        && !g_str_equal (identifier, "temp")
+        && !g_str_equal (identifier, "or")
+        && !g_str_equal (identifier, "rollback")
+        && !g_str_equal (identifier, "abort")
+        && !g_str_equal (identifier, "fail")
+        && !g_str_equal (identifier, "ignore")
+        && !g_str_equal (identifier, "replace"))
+      single_quoted_table_context = FALSE;
+  }
+  return FALSE;
+}
+
+static wyrelog_error_t
+graph_provisioning_external_reference_status (sqlite3 *db,
+    gboolean *out_referenced)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *queries[] = {
+    "SELECT tbl_name,sql FROM main.sqlite_schema WHERE "
+    "type IN ('trigger','view') AND sql IS NOT NULL;",
+    "SELECT tbl_name,sql FROM temp.sqlite_schema WHERE "
+    "type IN ('trigger','view') AND sql IS NOT NULL;",
+  };
+  *out_referenced = FALSE;
+  for (gsize i = 0; i < G_N_ELEMENTS (queries); i++) {
+    if (sqlite3_prepare_v2 (db, queries[i], -1, &stmt, NULL) != SQLITE_OK)
+      return WYRELOG_E_IO;
+    int step;
+    while ((step = sqlite3_step (stmt)) == SQLITE_ROW) {
+      const gchar *table = (const gchar *) sqlite3_column_text (stmt, 0);
+      const gchar *sql = (const gchar *) sqlite3_column_text (stmt, 1);
+      if (i == 0
+          && g_ascii_strcasecmp (table, "fact_graph_provisioning") == 0)
+        continue;
+      if (graph_provisioning_sql_references_target (sql)) {
+        *out_referenced = TRUE;
+        sqlite3_finalize (stmt);
+        return WYRELOG_E_OK;
+      }
+    }
+    sqlite3_finalize (stmt);
+    stmt = NULL;
+    if (step != SQLITE_DONE)
+      return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_provisioning_preflight (sqlite3 *db,
+    WylProvisioningSchemaKind *out_kind)
+{
+  wyrelog_error_t rc = graph_provisioning_schema_kind (db, out_kind);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *unexpected_objects =
+      "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE "
+      "(lower(tbl_name)='fact_graph_provisioning' OR "
+      "lower(name) IN ('fact_graph_provisioning',"
+      "'fact_graph_provisioning_immutable',"
+      "'fact_graph_provisioning_insert_guard',"
+      "'fact_graph_provisioning_update_guard')) AND NOT ("
+      "(type='table' AND name='fact_graph_provisioning') OR "
+      "(type='trigger' AND tbl_name='fact_graph_provisioning' AND "
+      "name IN ('fact_graph_provisioning_immutable',"
+      "'fact_graph_provisioning_insert_guard',"
+      "'fact_graph_provisioning_update_guard')) OR "
+      "(type='index' AND sql IS NULL AND "
+      "lower(name) GLOB 'sqlite_autoindex_fact_graph_provisioning_*')));";
+  if (sqlite3_prepare_v2 (db, unexpected_objects, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int step = sqlite3_step (stmt);
+  gboolean unexpected = step == SQLITE_ROW && sqlite3_column_int (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_ROW)
+    return WYRELOG_E_IO;
+  if (unexpected)
+    return WYRELOG_E_POLICY;
+
+  if (sqlite3_prepare_v2 (db,
+      "SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE "
+      "name NOT IN ('main','temp'));", -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  step = sqlite3_step (stmt);
+  gboolean attached = step == SQLITE_ROW && sqlite3_column_int (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_ROW)
+    return WYRELOG_E_IO;
+  if (attached)
+    return WYRELOG_E_POLICY;
+
+  if (sqlite3_prepare_v2 (db,
+      "SELECT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE "
+      "lower(name) IN ('fact_graph_provisioning',"
+      "'fact_graph_provisioning_immutable',"
+      "'fact_graph_provisioning_insert_guard',"
+      "'fact_graph_provisioning_update_guard',"
+      "'wyrelog_provision_schema_snapshot',"
+      "'wyrelog_provision_sequence_snapshot',"
+      "'wyrelog_fact_graph_provisioning_rebuild'));",
+      -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  step = sqlite3_step (stmt);
+  gboolean temp_conflict = step == SQLITE_ROW && sqlite3_column_int (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_ROW)
+    return WYRELOG_E_IO;
+  if (temp_conflict)
+    return WYRELOG_E_POLICY;
+
+  gboolean external = FALSE;
+  rc = graph_provisioning_external_reference_status (db, &external);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (external)
+    return WYRELOG_E_POLICY;
+
+  if (*out_kind == WYL_PROVISIONING_SCHEMA_ABSENT)
+    goto check_inbound_foreign_keys;
+
+  const gchar *immutable_sql = *out_kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS ?
+      fact_graph_provisioning_immutable_trigger_pre_evidence_sql :
+      (*out_kind == WYL_PROVISIONING_SCHEMA_WINDOWS ?
+      fact_graph_provisioning_immutable_trigger_windows_sql :
+      fact_graph_provisioning_immutable_trigger_sql);
+  const gchar *insert_guard_sql =
+      *out_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
+      fact_graph_provisioning_insert_guard_sql :
+      fact_graph_provisioning_insert_guard_windows_sql;
+  if ((rc = graph_authority_object_matches (db, "trigger",
+      "fact_graph_provisioning_immutable", immutable_sql)) != WYRELOG_E_OK
+      || (rc = graph_authority_object_matches (db, "trigger",
+      "fact_graph_provisioning_insert_guard",
+      insert_guard_sql)) != WYRELOG_E_OK
+      || (rc = graph_authority_object_matches (db, "trigger",
+      "fact_graph_provisioning_update_guard",
+      fact_graph_provisioning_update_guard_sql)) != WYRELOG_E_OK)
+    return rc;
+
+  rc = graph_provisioning_require_true (db,
+          "SELECT (SELECT count(*) FROM "
+          "pragma_index_list('fact_graph_provisioning'))=3 AND "
+          "(SELECT count(*) FROM pragma_index_list('fact_graph_provisioning') "
+          "WHERE name IN ('sqlite_autoindex_fact_graph_provisioning_1',"
+          "'sqlite_autoindex_fact_graph_provisioning_2',"
+          "'sqlite_autoindex_fact_graph_provisioning_3') AND \"unique\"=1 "
+          "AND partial=0 AND origin IN ('pk','u'))=3 AND "
+          "(SELECT count(*) FROM "
+          "pragma_index_xinfo('sqlite_autoindex_fact_graph_provisioning_1') "
+          "WHERE key=1 AND cid=0 AND name='op_uuid' AND desc=0 "
+          "AND coll='BINARY')=1 AND "
+          "(SELECT count(*) FROM "
+          "pragma_index_xinfo('sqlite_autoindex_fact_graph_provisioning_2') "
+          "WHERE key=1 AND ((seqno=0 AND cid=1 AND name='tenant_id') OR "
+          "(seqno=1 AND cid=2 AND name='graph_id')) AND desc=0 "
+          "AND coll='BINARY')=2 AND "
+          "(SELECT count(*) FROM "
+          "pragma_index_xinfo('sqlite_autoindex_fact_graph_provisioning_3') "
+          "WHERE key=1 AND cid=4 AND name='stage_basename' AND desc=0 "
+          "AND coll='BINARY')=1;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = graph_provisioning_require_true (db,
+          "SELECT (SELECT count(*) FROM "
+          "pragma_foreign_key_list('fact_graph_provisioning'))=2 AND "
+          "(SELECT count(*) FROM "
+          "pragma_foreign_key_list('fact_graph_provisioning') WHERE "
+          "\"table\"='fact_graphs' AND on_update='NO ACTION' AND "
+          "on_delete='NO ACTION' AND match='NONE' AND ((seq=0 AND "
+          "\"from\"='tenant_id' AND \"to\"='tenant_id') OR (seq=1 AND "
+          "\"from\"='graph_id' AND \"to\"='graph_id')))=2;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+check_inbound_foreign_keys:
+  if (sqlite3_prepare_v2 (db,
+      "SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name;",
+      -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  while ((step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *table = (const gchar *) sqlite3_column_text (stmt, 0);
+    gchar *pragma = sqlite3_mprintf ("PRAGMA main.foreign_key_list(\"%w\");",
+            table);
+    if (pragma == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_NOMEM;
+    }
+    sqlite3_stmt *foreign_keys = NULL;
+    int prepare = sqlite3_prepare_v2 (db, pragma, -1, &foreign_keys, NULL);
+    sqlite3_free (pragma);
+    if (prepare != SQLITE_OK) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+    int fk_step;
+    while ((fk_step = sqlite3_step (foreign_keys)) == SQLITE_ROW) {
+      const gchar *parent =
+          (const gchar *) sqlite3_column_text (foreign_keys, 2);
+      if (g_strcmp0 (table, "fact_graph_provisioning") != 0
+          && g_strcmp0 (parent, "fact_graph_provisioning") == 0) {
+        sqlite3_finalize (foreign_keys);
+        sqlite3_finalize (stmt);
+        return WYRELOG_E_POLICY;
+      }
+    }
+    sqlite3_finalize (foreign_keys);
+    if (fk_step != SQLITE_DONE) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+graph_provisioning_verify_foreign_keys (sqlite3 *db, gboolean expected)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, "PRAGMA foreign_keys;", -1, &stmt, NULL)
+      != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int step = sqlite3_step (stmt);
+  gboolean enabled = step == SQLITE_ROW && sqlite3_column_int (stmt, 0) != 0;
+  sqlite3_finalize (stmt);
+  return step == SQLITE_ROW && enabled == expected ? WYRELOG_E_OK :
+         WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+graph_provisioning_foreign_key_check (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, "PRAGMA main.foreign_key_check;", -1, &stmt,
+      NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int step = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step == SQLITE_DONE)
+    return WYRELOG_E_OK;
+  return step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+graph_provisioning_require_true (sqlite3 *db, const gchar *sql)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int step = sqlite3_step (stmt);
+  gboolean valid = step == SQLITE_ROW
+      && sqlite3_column_type (stmt, 0) == SQLITE_INTEGER
+      && sqlite3_column_int (stmt, 0) == 1;
+  sqlite3_finalize (stmt);
+  return step == SQLITE_ROW ? (valid ? WYRELOG_E_OK : WYRELOG_E_POLICY) :
+         WYRELOG_E_IO;
+}
+
+typedef struct
+{
+  WylProvisioningSchemaKind predecessor_kind;
+  GBytes *predecessor_unrelated_schema;
+  GBytes *predecessor_sequence;
+  GBytes *canonical_unrelated_schema;
+  GBytes *canonical_sequence;
+  GBytes *predecessor_rows;
+  GBytes *canonical_rows;
+} WylProvisioningMigrationSnapshot;
+
+static void
+graph_provisioning_snapshot_clear (WylProvisioningMigrationSnapshot *snapshot)
+{
+  g_clear_pointer (&snapshot->predecessor_unrelated_schema, g_bytes_unref);
+  g_clear_pointer (&snapshot->predecessor_sequence, g_bytes_unref);
+  g_clear_pointer (&snapshot->canonical_unrelated_schema, g_bytes_unref);
+  g_clear_pointer (&snapshot->canonical_sequence, g_bytes_unref);
+  g_clear_pointer (&snapshot->predecessor_rows, g_bytes_unref);
+  g_clear_pointer (&snapshot->canonical_rows, g_bytes_unref);
+}
+
+static void
+graph_provisioning_snapshot_append_u64 (GByteArray *bytes, guint64 value)
+{
+  guint64 encoded = GUINT64_TO_LE (value);
+  g_byte_array_append (bytes, (const guint8 *) &encoded, sizeof encoded);
+}
+
+static wyrelog_error_t
+graph_provisioning_snapshot_query (sqlite3 *db, const gchar *sql,
+    GBytes **out_bytes)
+{
+  sqlite3_stmt *stmt = NULL;
+  *out_bytes = NULL;
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  GByteArray *bytes = g_byte_array_new ();
+  int step;
+  guint64 rows = 0;
+  while ((step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    rows++;
+    graph_provisioning_snapshot_append_u64 (bytes,
+        (guint64) sqlite3_column_count (stmt));
+    for (int column = 0; column < sqlite3_column_count (stmt); column++) {
+      int type = sqlite3_column_type (stmt, column);
+      guint8 encoded_type = (guint8) type;
+      g_byte_array_append (bytes, &encoded_type, 1);
+      if (type == SQLITE_NULL)
+        continue;
+      if (type == SQLITE_INTEGER) {
+        graph_provisioning_snapshot_append_u64 (bytes,
+            (guint64) sqlite3_column_int64 (stmt, column));
+        continue;
+      }
+      if (type != SQLITE_TEXT && type != SQLITE_BLOB) {
+        sqlite3_finalize (stmt);
+        g_byte_array_unref (bytes);
+        return WYRELOG_E_POLICY;
+      }
+      int length = sqlite3_column_bytes (stmt, column);
+      const guint8 *value = type == SQLITE_TEXT ?
+          sqlite3_column_text (stmt, column) :
+          sqlite3_column_blob (stmt, column);
+      if (length < 0 || (length > 0 && value == NULL)) {
+        sqlite3_finalize (stmt);
+        g_byte_array_unref (bytes);
+        return WYRELOG_E_IO;
+      }
+      graph_provisioning_snapshot_append_u64 (bytes, (guint64) length);
+      if (length > 0)
+        g_byte_array_append (bytes, value, (guint) length);
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_DONE) {
+    g_byte_array_unref (bytes);
+    return WYRELOG_E_IO;
+  }
+  GByteArray *framed = g_byte_array_sized_new (bytes->len + sizeof rows);
+  graph_provisioning_snapshot_append_u64 (framed, rows);
+  g_byte_array_append (framed, bytes->data, bytes->len);
+  g_byte_array_unref (bytes);
+  *out_bytes = g_byte_array_free_to_bytes (framed);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_provisioning_snapshot_sequence (sqlite3 *db, GBytes **out_bytes)
+{
+  gboolean exists = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db,
+      "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' "
+      "AND name='sqlite_sequence');", -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int step = sqlite3_step (stmt);
+  if (step == SQLITE_ROW)
+    exists = sqlite3_column_int (stmt, 0) != 0;
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_ROW)
+    return WYRELOG_E_IO;
+  if (!exists) {
+    guint8 absent = 0;
+    *out_bytes = g_bytes_new (&absent, 1);
+    return WYRELOG_E_OK;
+  }
+  g_autoptr(GBytes) rows = NULL;
+  wyrelog_error_t rc = graph_provisioning_snapshot_query (db,
+          "SELECT name,seq FROM main.sqlite_sequence ORDER BY name;", &rows);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize length = 0;
+  const guint8 *data = g_bytes_get_data (rows, &length);
+  GByteArray *framed = g_byte_array_sized_new (length + 1);
+  guint8 present = 1;
+  g_byte_array_append (framed, &present, 1);
+  g_byte_array_append (framed, data, length);
+  *out_bytes = g_byte_array_free_to_bytes (framed);
+  return WYRELOG_E_OK;
+}
+
+static const gchar *
+graph_provisioning_predecessor_rows_sql (WylProvisioningSchemaKind kind)
+{
+  if (kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS)
+    return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+           "expected_lifecycle_generation,expected_reconciliation_generation,"
+           "phase,attempt,created_at,updated_at FROM "
+           "main.fact_graph_provisioning ORDER BY rowid;";
+  return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+         "expected_lifecycle_generation,expected_reconciliation_generation,"
+         "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+         "windows_graph_volume_serial,windows_graph_file_id,"
+         "windows_artifact_volume_serial,windows_artifact_file_id FROM "
+         "main.fact_graph_provisioning ORDER BY rowid;";
+}
+
+static const gchar *
+graph_provisioning_expected_canonical_rows_sql (WylProvisioningSchemaKind kind)
+{
+  if (kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS)
+    return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+           "expected_lifecycle_generation,expected_reconciliation_generation,"
+           "phase,attempt,created_at,updated_at,NULL,NULL,NULL,NULL,NULL,NULL FROM "
+           "main.fact_graph_provisioning ORDER BY rowid;";
+  return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+         "expected_lifecycle_generation,expected_reconciliation_generation,"
+         "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+         "windows_graph_volume_serial,windows_graph_file_id,"
+         "windows_artifact_volume_serial,windows_artifact_file_id,NULL FROM "
+         "main.fact_graph_provisioning ORDER BY rowid;";
+}
+
+static wyrelog_error_t
+graph_provisioning_snapshot_capture (sqlite3 *db,
+    WylProvisioningSchemaKind kind,
+    WylProvisioningMigrationSnapshot *snapshot)
+{
+  memset (snapshot, 0, sizeof *snapshot);
+  snapshot->predecessor_kind = kind;
+  wyrelog_error_t rc = graph_provisioning_snapshot_query (db,
+          "SELECT type,name,tbl_name,rootpage,sql FROM main.sqlite_schema "
+          "WHERE tbl_name!='fact_graph_provisioning' "
+          "ORDER BY type,name,tbl_name,rootpage,sql;",
+          &snapshot->predecessor_unrelated_schema);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_sequence (db,
+            &snapshot->predecessor_sequence);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_query (db,
+            graph_provisioning_predecessor_rows_sql (kind),
+            &snapshot->predecessor_rows);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_query (db,
+            graph_provisioning_expected_canonical_rows_sql (kind),
+            &snapshot->canonical_rows);
+  if (rc != WYRELOG_E_OK)
+    graph_provisioning_snapshot_clear (snapshot);
+  return rc;
+}
+
+static wyrelog_error_t
+graph_provisioning_snapshot_capture_canonical_context (sqlite3 *db,
+    WylProvisioningMigrationSnapshot *snapshot)
+{
+  wyrelog_error_t rc = graph_provisioning_snapshot_query (db,
+          "SELECT type,name,tbl_name,rootpage,sql FROM main.sqlite_schema "
+          "WHERE tbl_name!='fact_graph_provisioning' "
+          "ORDER BY type,name,tbl_name,rootpage,sql;",
+          &snapshot->canonical_unrelated_schema);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_sequence (db,
+            &snapshot->canonical_sequence);
+  return rc;
+}
+
+static wyrelog_error_t
+graph_provisioning_snapshot_verify (sqlite3 *db,
+    WylProvisioningSchemaKind observed_kind,
+    const WylProvisioningMigrationSnapshot *snapshot)
+{
+  g_autoptr(GBytes) unrelated = NULL;
+  g_autoptr(GBytes) sequence = NULL;
+  g_autoptr(GBytes) rows = NULL;
+  wyrelog_error_t rc = graph_provisioning_snapshot_query (db,
+          "SELECT type,name,tbl_name,rootpage,sql FROM main.sqlite_schema "
+          "WHERE tbl_name!='fact_graph_provisioning' "
+          "ORDER BY type,name,tbl_name,rootpage,sql;", &unrelated);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_sequence (db, &sequence);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_query (db,
+            observed_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
+            "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+            "expected_lifecycle_generation,expected_reconciliation_generation,"
+            "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+            "windows_graph_volume_serial,windows_graph_file_id,"
+            "windows_artifact_volume_serial,windows_artifact_file_id,"
+            "darwin_operation_evidence FROM main.fact_graph_provisioning "
+            "ORDER BY rowid;" :
+            graph_provisioning_predecessor_rows_sql (observed_kind), &rows);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  GBytes *expected_rows = observed_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
+      snapshot->canonical_rows : snapshot->predecessor_rows;
+  GBytes *expected_unrelated =
+      observed_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
+      snapshot->canonical_unrelated_schema :
+      snapshot->predecessor_unrelated_schema;
+  GBytes *expected_sequence =
+      observed_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
+      snapshot->canonical_sequence : snapshot->predecessor_sequence;
+  return expected_unrelated != NULL && expected_sequence != NULL
+         && g_bytes_equal (unrelated, expected_unrelated)
+         && g_bytes_equal (sequence, expected_sequence)
+         && g_bytes_equal (rows, expected_rows) ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+graph_provisioning_classify_fresh_image (wyl_policy_store_t *store,
+    const WylProvisioningMigrationSnapshot *snapshot,
+    WylProvisioningSchemaKind *out_kind)
+{
+  sqlite3 *verifier = NULL;
+  guint8 *authenticated_image = NULL;
+  gsize authenticated_image_capacity = 0;
+  gboolean memory_verifier = store->encrypted
+      || path_is_memory_db (store->canonical_path);
+  if (store->encrypted) {
+    g_autofree guint8 *canonical_bytes = NULL;
+    gsize canonical_len = 0;
+#ifndef G_OS_WIN32
+    wyrelog_error_t read_rc = read_through_dirfd (store->canonical_dirfd,
+            store->canonical_basename, &canonical_bytes, &canonical_len);
+#else
+    wyrelog_error_t read_rc = read_whole_file (store->canonical_path,
+            &canonical_bytes, &canonical_len);
+#endif
+    if (read_rc != WYRELOG_E_OK)
+      return read_rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_IO : read_rc;
+    wyl_policy_store_t authenticated = { 0 };
+    memcpy (authenticated.encryption_key, store->encryption_key,
+        sizeof authenticated.encryption_key);
+    memcpy (authenticated.encryption_key_id, store->encryption_key_id,
+        sizeof authenticated.encryption_key_id);
+    wyrelog_error_t decrypt_rc = decrypt_policy_store_from_bytes
+          (&authenticated, canonical_bytes, canonical_len);
+    sodium_memzero (authenticated.encryption_key,
+        sizeof authenticated.encryption_key);
+    if (decrypt_rc != WYRELOG_E_OK)
+      return decrypt_rc;
+    verifier = authenticated.db;
+    authenticated_image = authenticated.deserialized_image;
+    authenticated_image_capacity = authenticated.deserialized_image_capacity;
+  } else if (!memory_verifier && sqlite3_open_v2 (store->canonical_path,
+      &verifier,
+      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
+    if (verifier != NULL)
+      sqlite3_close (verifier);
+    return WYRELOG_E_IO;
+  }
+  if (!store->encrypted && memory_verifier) {
+    sqlite3_int64 image_size = 0;
+    guint8 *image = sqlite3_serialize (store->db, "main", &image_size, 0);
+    if (image == NULL || image_size <= 0)
+      return WYRELOG_E_IO;
+    if (sqlite3_open_v2 (":memory:", &verifier,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
+      sqlite3_free (image);
+      if (verifier != NULL)
+        sqlite3_close (verifier);
+      return WYRELOG_E_IO;
+    }
+    int deserialize = sqlite3_deserialize (verifier, "main", image,
+            image_size, image_size, SQLITE_DESERIALIZE_FREEONCLOSE);
+    if (deserialize != SQLITE_OK) {
+      sqlite3_free (image);
+      sqlite3_close (verifier);
+      return WYRELOG_E_IO;
+    }
+  }
+  wyrelog_error_t rc = configure_sqlite_connection (verifier, memory_verifier ?
+          WYL_SQLITE_CONNECTION_VERIFIER_MEMORY :
+          WYL_SQLITE_CONNECTION_PLAINTEXT);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_preflight (verifier, out_kind);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_foreign_key_check (verifier);
+  if (rc == WYRELOG_E_OK && snapshot != NULL) {
+    if (*out_kind != WYL_PROVISIONING_SCHEMA_CANONICAL
+        && *out_kind != snapshot->predecessor_kind)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = graph_provisioning_snapshot_verify (verifier, *out_kind, snapshot);
+  }
+  int close_rc = sqlite3_close (verifier);
+  if (close_rc != SQLITE_OK && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (authenticated_image != NULL && close_rc == SQLITE_OK) {
+    sodium_memzero (authenticated_image, authenticated_image_capacity);
+    sqlite3_free (authenticated_image);
+  }
+  return rc;
+}
+
+static void
+graph_provisioning_poison_store (wyl_policy_store_t *store,
+    wyrelog_error_t terminal_result)
+{
+  store->suppress_close_persist = TRUE;
+  /* Keep the connection and deserialize buffer alive until ordinary close.
+   * Existing prepared statements can otherwise keep close_v2() pending and
+   * continue to reference a caller-owned buffer which poison already freed.
+   * The permanent fence removes all executable SQL authority immediately. */
+  policy_store_make_terminal (store, terminal_result);
+  if (store->encrypted) {
+#ifndef G_OS_WIN32
+    if (store->canonical_dirfd >= 0 && store->work_basename != NULL)
+      (void) unlinkat (store->canonical_dirfd, store->work_basename, 0);
+#else
+    if (store->work_path != NULL)
+      (void) g_remove (store->work_path);
+#endif
+  }
+}
+
+/* Caller owns the connection fence, has foreign_keys disabled, and holds the
+ * single top-level schema transaction.  This helper never commits. */
+static wyrelog_error_t
+rebuild_graph_provisioning_schema (wyl_policy_store_t *store,
+    WylProvisioningSchemaKind kind,
+    WylProvisioningMigrationSnapshot *snapshot)
+{
+  sqlite3 *db = store->db;
+  WylProvisioningSchemaKind locked_kind;
+  wyrelog_error_t rc = graph_provisioning_preflight (db, &locked_kind);
+  if (rc == WYRELOG_E_OK && locked_kind != kind)
+    rc = WYRELOG_E_POLICY;
+  (void) snapshot;
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db,
+            "CREATE TEMP TABLE wyrelog_provision_schema_snapshot AS "
+            "SELECT type,name,tbl_name,rootpage,sql FROM main.sqlite_schema WHERE "
+            "tbl_name!='fact_graph_provisioning' ORDER BY type,name;"
+            "CREATE TEMP TABLE wyrelog_provision_sequence_snapshot "
+            "(name TEXT PRIMARY KEY,seq INTEGER);");
+  gboolean had_sequence = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2 (db,
+        "SELECT 1 FROM main.sqlite_schema WHERE type='table' AND "
+        "name='sqlite_sequence';", -1, &stmt, NULL) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+      had_sequence = TRUE;
+      rc = exec_sql (db, "INSERT INTO temp.wyrelog_provision_sequence_snapshot "
+              "SELECT name,seq FROM main.sqlite_sequence;");
+    } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TEMP);
+  const gchar *copy_to_temp = kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS ?
+      "CREATE TEMP TABLE wyrelog_fact_graph_provisioning_rebuild AS SELECT "
+      "rowid AS wyrelog_preserved_rowid,"
+      "op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at,NULL AS windows_operation_evidence_version,"
+      "NULL AS windows_graph_volume_serial,NULL AS windows_graph_file_id,"
+      "NULL AS windows_artifact_volume_serial,NULL AS windows_artifact_file_id,"
+      "NULL AS darwin_operation_evidence FROM main.fact_graph_provisioning;" :
+      "CREATE TEMP TABLE wyrelog_fact_graph_provisioning_rebuild AS SELECT "
+      "rowid AS wyrelog_preserved_rowid,"
+      "op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+      "windows_graph_volume_serial,windows_graph_file_id,"
+      "windows_artifact_volume_serial,windows_artifact_file_id,"
+      "NULL AS darwin_operation_evidence FROM main.fact_graph_provisioning;";
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, copy_to_temp);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COPY);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, "DROP TABLE main.fact_graph_provisioning;");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_DROP);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_table_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_CREATE);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db,
+            "INSERT INTO main.fact_graph_provisioning "
+            "(rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+            "expected_lifecycle_generation,expected_reconciliation_generation,"
+            "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+            "windows_graph_volume_serial,windows_graph_file_id,"
+            "windows_artifact_volume_serial,windows_artifact_file_id,"
+            "darwin_operation_evidence) SELECT * FROM "
+            "temp.wyrelog_fact_graph_provisioning_rebuild;");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_ROWS);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_immutable_trigger_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_insert_guard_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_update_guard_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TRIGGERS);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_require_true (db,
+            "SELECT NOT EXISTS(SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,"
+            "stage_basename,expected_lifecycle_generation,"
+            "expected_reconciliation_generation,phase,attempt,created_at,updated_at,"
+            "windows_operation_evidence_version,windows_graph_volume_serial,"
+            "windows_graph_file_id,windows_artifact_volume_serial,"
+            "windows_artifact_file_id,darwin_operation_evidence FROM "
+            "main.fact_graph_provisioning EXCEPT SELECT * FROM "
+            "temp.wyrelog_fact_graph_provisioning_rebuild) AND NOT EXISTS("
+            "SELECT * FROM temp.wyrelog_fact_graph_provisioning_rebuild EXCEPT "
+            "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+            "expected_lifecycle_generation,expected_reconciliation_generation,"
+            "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+            "windows_graph_volume_serial,windows_graph_file_id,"
+            "windows_artifact_volume_serial,windows_artifact_file_id,"
+            "darwin_operation_evidence FROM main.fact_graph_provisioning);");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_require_true (db,
+            "SELECT NOT EXISTS("
+            "SELECT type,name,tbl_name,rootpage,sql FROM temp.wyrelog_provision_schema_snapshot "
+            "EXCEPT SELECT type,name,tbl_name,rootpage,sql FROM main.sqlite_schema WHERE "
+            "tbl_name!='fact_graph_provisioning') AND NOT EXISTS("
+            "SELECT type,name,tbl_name,rootpage,sql FROM main.sqlite_schema WHERE "
+            "tbl_name!='fact_graph_provisioning' EXCEPT "
+            "SELECT type,name,tbl_name,rootpage,sql FROM temp.wyrelog_provision_schema_snapshot);");
+  if (rc == WYRELOG_E_OK && had_sequence)
+    rc = graph_provisioning_require_true (db,
+            "SELECT NOT EXISTS("
+            "SELECT name,seq FROM temp.wyrelog_provision_sequence_snapshot "
+            "EXCEPT SELECT name,seq FROM main.sqlite_sequence) AND NOT EXISTS("
+            "SELECT name,seq FROM main.sqlite_sequence EXCEPT "
+            "SELECT name,seq FROM temp.wyrelog_provision_sequence_snapshot);");
+  if (rc == WYRELOG_E_OK && !had_sequence)
+    rc = graph_provisioning_require_true (db,
+            "SELECT NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE "
+            "type='table' AND name='sqlite_sequence');");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_foreign_key_check (db);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_VALIDATION);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db,
+            "DROP TABLE temp.wyrelog_fact_graph_provisioning_rebuild;"
+            "DROP TABLE temp.wyrelog_provision_schema_snapshot;"
+            "DROP TABLE temp.wyrelog_provision_sequence_snapshot;");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_TEMP_DROP);
+  return rc;
+}
+
 static wyrelog_error_t
 validate_graph_authority_rows (sqlite3 *db)
 {
-  /* Keep the SQL row gate aligned with the durable tuple shape, but leave
-   * all-zero file IDs to the decoder's narrower per-operation failure.  A
-   * malformed foreign row should not prevent unrelated tenants from opening;
-   * the decoder still fails closed before any filesystem access. */
+  /* Policy owns only the durable evidence envelope shape.  Platform version,
+   * kind, UUID, and object-identity semantics remain locator authority. */
   static const gchar *const validation_queries[] = {
     "SELECT EXISTS(SELECT 1 FROM tenants WHERE "
     "typeof(lifecycle_generation)!='integer' OR "
@@ -9767,6 +11152,11 @@ validate_graph_authority_rows (sqlite3 *db)
     "typeof(windows_artifact_volume_serial)='integer' AND "
     "windows_artifact_volume_serial != 0 AND "
     "typeof(windows_artifact_file_id)='blob' AND length(windows_artifact_file_id)=16)) OR "
+    "NOT (darwin_operation_evidence IS NULL OR ("
+    "typeof(darwin_operation_evidence)='blob' AND "
+    "length(darwin_operation_evidence)=56)) OR "
+    "(darwin_operation_evidence IS NOT NULL AND "
+    "windows_operation_evidence_version IS NOT NULL) OR "
     "updated_at<created_at OR NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
     "JOIN tenants AS t ON t.tenant_id=g.tenant_id WHERE "
     "g.tenant_id=fact_graph_provisioning.tenant_id AND "
@@ -9828,6 +11218,16 @@ validate_graph_authority_schema (sqlite3 *db)
     if (!exists || !matches)
       return WYRELOG_E_POLICY;
   }
+  {
+    gboolean exists = FALSE, matches = FALSE;
+    wyrelog_error_t rc = graph_authority_column_status (db,
+            &fact_graph_provisioning_darwin_evidence_column, &exists,
+            &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!exists || !matches)
+      return WYRELOG_E_POLICY;
+  }
   static const struct
   {
     const gchar *type;
@@ -9866,11 +11266,52 @@ static wyrelog_error_t
 graph_authority_migration_checkpoint (wyl_policy_store_t *store,
     WylPolicyGraphAuthorityMigrationFailStage stage)
 {
+  if (store->graph_authority_migration_gate != NULL)
+    store->graph_authority_migration_gate
+      (store->graph_authority_migration_gate_data, stage);
   if (store->graph_authority_migration_fail_once != stage)
     return WYRELOG_E_OK;
   store->graph_authority_migration_fail_once =
       WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE;
   return WYRELOG_E_IO;
+}
+
+void
+wyl_policy_store_graph_authority_migration_gate (wyl_policy_store_t *store,
+    WylPolicyGraphAuthorityMigrationGateFunc gate, gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->graph_authority_migration_gate = gate;
+  store->graph_authority_migration_gate_data = data;
+}
+
+wyrelog_error_t
+wyl_policy_store_terminal_result (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  return (wyrelog_error_t) g_atomic_int_get (&store->terminal_result);
+}
+
+void
+wyl_policy_store_fact_root_entry_gate (wyl_policy_store_t *store,
+    WylPolicyStoreFactRootEntryGateFunc gate, gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->fact_root_entry_gate = gate;
+  store->fact_root_entry_gate_data = data;
+}
+
+void
+wyl_policy_store_rotation_intent_entry_gate (wyl_policy_store_t *store,
+    WylPolicyStoreRotationIntentEntryGateFunc gate, gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->rotation_intent_entry_gate = gate;
+  store->rotation_intent_entry_gate_data = data;
 }
 
 void
@@ -9896,23 +11337,11 @@ wyl_policy_store_graph_authority_mutation_fail_once (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
-migrate_graph_authority_schema (wyl_policy_store_t *store)
+migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
 {
   sqlite3 *db = store->db;
-  wyrelog_error_t rc;
+  wyrelog_error_t rc = WYRELOG_E_OK;
   gboolean added_tenant_sealed_generation = FALSE;
-  rc = exec_sql (db, fact_graph_provisioning_table_sql);
-  if (rc == WYRELOG_E_OK)
-    rc = migrate_tenant_authority_guard (db, "fact_graph_provisioning_immutable",
-            fact_graph_provisioning_immutable_trigger_pre_evidence_sql,
-            fact_graph_provisioning_immutable_trigger_sql,
-            "DROP TRIGGER fact_graph_provisioning_immutable;");
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (db, fact_graph_provisioning_insert_guard_sql);
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (db, fact_graph_provisioning_update_guard_sql);
-  if (rc != WYRELOG_E_OK)
-    return rc;
   for (gsize i = 0; i < G_N_ELEMENTS (graph_authority_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
     rc = graph_authority_column_status (db,
@@ -9946,18 +11375,6 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
       return WYRELOG_E_POLICY;
     if (!exists && (rc = exec_sql (db,
         fact_reconcile_evidence_columns[i].alter_sql)) != WYRELOG_E_OK)
-      return rc;
-  }
-  for (gsize i = 0; i < G_N_ELEMENTS (fact_graph_provisioning_evidence_columns); i++) {
-    gboolean exists = FALSE, matches = FALSE;
-    rc = graph_authority_column_status (db,
-            &fact_graph_provisioning_evidence_columns[i], &exists, &matches);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    if (exists && !matches)
-      return WYRELOG_E_POLICY;
-    if (!exists && (rc = exec_sql (db,
-        fact_graph_provisioning_evidence_columns[i].alter_sql)) != WYRELOG_E_OK)
       return rc;
   }
   if ((rc = exec_sql (db, fact_reconcile_evidence_immutable_trigger_sql)) !=
@@ -10000,7 +11417,155 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
       WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_VALIDATION)) !=
       WYRELOG_E_OK)
     return rc;
-  return validate_graph_authority_schema (db);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+migrate_graph_authority_predecessor (wyl_policy_store_t *store,
+    const gchar *ddl, WylProvisioningSchemaKind predecessor_kind)
+{
+  sqlite3 *db = store->db;
+  WylProvisioningMigrationSnapshot snapshot = { 0 };
+  wyrelog_error_t rc = policy_store_install_schema_fence (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylProvisioningSchemaKind checked_kind;
+  rc = graph_provisioning_preflight (db, &checked_kind);
+  if (rc == WYRELOG_E_OK && checked_kind != predecessor_kind)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK) {
+    policy_store_remove_schema_fence (store);
+    return rc;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, "PRAGMA foreign_keys=OFF;");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_verify_foreign_keys (db, FALSE);
+  if (rc != WYRELOG_E_OK) {
+    graph_provisioning_poison_store (store, WYRELOG_E_IO);
+    return WYRELOG_E_IO;
+  }
+  rc = graph_authority_migration_checkpoint (store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_FOREIGN_KEYS_OFF);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, "BEGIN EXCLUSIVE;");
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_preflight (db, &checked_kind);
+  if (rc == WYRELOG_E_OK && checked_kind != predecessor_kind)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_capture (db, predecessor_kind,
+            &snapshot);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, ddl);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL);
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_graph_authority_schema_mutations (store);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_snapshot_capture_canonical_context (db,
+            &snapshot);
+  if (rc == WYRELOG_E_OK)
+    rc = rebuild_graph_provisioning_schema (store, predecessor_kind,
+            &snapshot);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_graph_authority_schema (db);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_PROVISIONING_COMMIT);
+
+  gboolean commit_attempted = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    commit_attempted = TRUE;
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_COMMIT);
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, "COMMIT;");
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT);
+
+  wyrelog_error_t rollback_rc = WYRELOG_E_OK;
+  if (sqlite3_get_autocommit (db) == 0) {
+    rollback_rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_PROVISIONING_ROLLBACK);
+    if (rollback_rc == WYRELOG_E_OK)
+      rollback_rc = exec_sql (db, "ROLLBACK;");
+    if (rollback_rc == WYRELOG_E_OK && sqlite3_get_autocommit (db) == 0)
+      rollback_rc = WYRELOG_E_IO;
+  }
+  wyrelog_error_t restore_rc = graph_authority_migration_checkpoint (store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FOREIGN_KEYS_RESTORE);
+  if (restore_rc == WYRELOG_E_OK)
+    restore_rc = exec_sql (db, "PRAGMA foreign_keys=ON;");
+  if (restore_rc == WYRELOG_E_OK)
+    restore_rc = graph_provisioning_verify_foreign_keys (db, TRUE);
+  if (restore_rc == WYRELOG_E_OK)
+    restore_rc = graph_provisioning_foreign_key_check (db);
+  if (rollback_rc != WYRELOG_E_OK || restore_rc != WYRELOG_E_OK
+      || sqlite3_get_autocommit (db) == 0) {
+    graph_provisioning_snapshot_clear (&snapshot);
+    graph_provisioning_poison_store (store, WYRELOG_E_IO);
+    return WYRELOG_E_IO;
+  }
+
+  wyrelog_error_t publication_rc = WYRELOG_E_OK;
+  gboolean publication_pin_valid = TRUE;
+  if (commit_attempted && store->encrypted) {
+    publication_rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_PUBLICATION);
+    if (publication_rc == WYRELOG_E_OK)
+      publication_rc = persist_policy_store_encrypted_checked (store,
+              &publication_pin_valid);
+    if (publication_rc == WYRELOG_E_OK)
+      publication_rc = graph_authority_migration_checkpoint (store,
+              WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_ENCRYPTED_PUBLICATION);
+  }
+  if (commit_attempted) {
+    WylProvisioningSchemaKind durable_kind;
+    wyrelog_error_t classify_rc = graph_authority_migration_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER);
+    if (classify_rc == WYRELOG_E_OK)
+      classify_rc = graph_provisioning_classify_fresh_image (store,
+              &snapshot, &durable_kind);
+    if (classify_rc == WYRELOG_E_OK && store->encrypted
+        && store->maintenance_exclusive && store->lease != NULL
+        && publication_pin_valid)
+      classify_rc =
+          wyl_policy_store_lease_verify_store_identity (store->lease);
+    if (classify_rc != WYRELOG_E_OK) {
+      graph_provisioning_snapshot_clear (&snapshot);
+      graph_provisioning_poison_store (store, classify_rc);
+      return classify_rc;
+    }
+    if (durable_kind == WYL_PROVISIONING_SCHEMA_CANONICAL) {
+      if (publication_rc != WYRELOG_E_OK || !publication_pin_valid) {
+        graph_provisioning_snapshot_clear (&snapshot);
+        graph_provisioning_poison_store (store,
+            publication_rc == WYRELOG_E_OK ? WYRELOG_E_IO : publication_rc);
+        return publication_rc == WYRELOG_E_OK ? WYRELOG_E_IO :
+               publication_rc;
+      }
+      rc = WYRELOG_E_OK;
+    } else if (durable_kind != predecessor_kind || rc == WYRELOG_E_OK
+        || publication_rc != WYRELOG_E_OK) {
+      graph_provisioning_snapshot_clear (&snapshot);
+      graph_provisioning_poison_store (store, publication_rc != WYRELOG_E_OK ?
+          publication_rc : WYRELOG_E_POLICY);
+      return publication_rc != WYRELOG_E_OK ? publication_rc :
+             WYRELOG_E_POLICY;
+    }
+  }
+  graph_provisioning_snapshot_clear (&snapshot);
+  if (g_atomic_int_get (&store->terminal_result) == WYRELOG_E_OK)
+    policy_store_remove_schema_fence (store);
+  return rc;
 }
 
 wyrelog_error_t
@@ -10578,36 +12143,104 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
 
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
-  wyrelog_error_t rc = exec_sql (store->db,
-          "SAVEPOINT wyrelog_graph_authority_schema;");
-  if (rc != WYRELOG_E_OK)
+  if (g_atomic_int_get (&store->terminal_result) != WYRELOG_E_OK)
+    return (wyrelog_error_t) g_atomic_int_get (&store->terminal_result);
+  if (service_authority_store_unavailable (store))
+    return WYRELOG_E_BUSY;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  WylProvisioningSchemaKind provisioning_kind;
+  wyrelog_error_t rc = graph_provisioning_preflight (store->db,
+          &provisioning_kind);
+  if (rc != WYRELOG_E_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
     return rc;
+  }
+  if (provisioning_kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS
+      || provisioning_kind == WYL_PROVISIONING_SCHEMA_WINDOWS) {
+    if (!sqlite3_get_autocommit (store->db)) {
+      g_rec_mutex_unlock (&store->graph_authority_mutex);
+      return WYRELOG_E_BUSY;
+    }
+    rc = migrate_graph_authority_predecessor (store, ddl,
+            provisioning_kind);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    goto graph_authority_schema_ready;
+  }
+
+  rc = policy_store_install_schema_fence (store);
+  if (rc != WYRELOG_E_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return rc;
+  }
+  gboolean nested_schema_transaction = !sqlite3_get_autocommit (store->db);
+  rc = exec_sql (store->db, nested_schema_transaction ?
+          "SAVEPOINT wyrelog_graph_authority_schema;" :
+          "BEGIN IMMEDIATE;");
+  if (rc != WYRELOG_E_OK) {
+    policy_store_remove_schema_fence (store);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return rc;
+  }
   rc = exec_sql (store->db, ddl);
   if (rc == WYRELOG_E_OK)
     rc = graph_authority_migration_checkpoint (store,
             WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL);
+  if (rc == WYRELOG_E_OK
+      && provisioning_kind == WYL_PROVISIONING_SCHEMA_ABSENT)
+    rc = exec_sql (store->db, fact_graph_provisioning_table_sql);
+  if (rc == WYRELOG_E_OK
+      && provisioning_kind == WYL_PROVISIONING_SCHEMA_ABSENT)
+    rc = exec_sql (store->db,
+            fact_graph_provisioning_immutable_trigger_sql);
+  if (rc == WYRELOG_E_OK
+      && provisioning_kind == WYL_PROVISIONING_SCHEMA_ABSENT)
+    rc = exec_sql (store->db, fact_graph_provisioning_insert_guard_sql);
+  if (rc == WYRELOG_E_OK
+      && provisioning_kind == WYL_PROVISIONING_SCHEMA_ABSENT)
+    rc = exec_sql (store->db, fact_graph_provisioning_update_guard_sql);
   if (rc == WYRELOG_E_OK)
-    rc = migrate_graph_authority_schema (store);
+    rc = migrate_graph_authority_schema_mutations (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_graph_authority_schema (store->db);
   if (rc == WYRELOG_E_OK)
     rc = graph_authority_migration_checkpoint (store,
             WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE);
-  if (rc == WYRELOG_E_OK) {
-    wyrelog_error_t release_rc = exec_sql (store->db,
-            "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
-    if (release_rc != WYRELOG_E_OK) {
-      (void) exec_sql (store->db,
-          "ROLLBACK TO SAVEPOINT wyrelog_graph_authority_schema;");
-      (void) exec_sql (store->db,
-          "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
-      return release_rc;
+  wyrelog_error_t operation_rc = rc;
+  if (operation_rc == WYRELOG_E_OK)
+    operation_rc = exec_sql (store->db, nested_schema_transaction ?
+            "RELEASE SAVEPOINT wyrelog_graph_authority_schema;" :
+            "COMMIT;");
+  if (operation_rc != WYRELOG_E_OK) {
+    wyrelog_error_t cleanup_rc;
+    if (nested_schema_transaction) {
+      cleanup_rc = exec_sql (store->db,
+              "ROLLBACK TO SAVEPOINT wyrelog_graph_authority_schema;");
+      if (cleanup_rc == WYRELOG_E_OK)
+        cleanup_rc = exec_sql (store->db,
+                "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
+    } else if (sqlite3_get_autocommit (store->db) == 0) {
+      cleanup_rc = exec_sql (store->db, "ROLLBACK;");
+    } else {
+      /* COMMIT reported failure after ending the transaction.  Without a
+       * predecessor snapshot this result is not retry-authoritative. */
+      cleanup_rc = WYRELOG_E_IO;
     }
-  } else {
-    (void) exec_sql (store->db,
-        "ROLLBACK TO SAVEPOINT wyrelog_graph_authority_schema;");
-    (void) exec_sql (store->db,
-        "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
-    return rc;
+    if (cleanup_rc != WYRELOG_E_OK) {
+      graph_provisioning_poison_store (store, WYRELOG_E_IO);
+      g_rec_mutex_unlock (&store->graph_authority_mutex);
+      return WYRELOG_E_IO;
+    }
+    policy_store_remove_schema_fence (store);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return operation_rc;
   }
+  policy_store_remove_schema_fence (store);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+
+graph_authority_schema_ready:
+  ;
   sqlite3_stmt *stmt = NULL;
   gboolean has_request_id = FALSE;
   if (sqlite3_prepare_v2 (store->db, "PRAGMA table_info(audit_events);", -1,
@@ -13727,6 +15360,7 @@ wyl_policy_graph_provisioning_record_free (WylPolicyGraphProvisioningRecord *r)
   g_free (r->graph_id);
   g_free (r->store_uuid);
   g_free (r->stage_basename);
+  g_clear_pointer (&r->darwin_operation_evidence, g_bytes_unref);
   g_free (r);
 }
 
@@ -13755,6 +15389,13 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
   for (gint i = 11; i <= 15; i++)
     if ((sqlite3_column_type (stmt, i) != SQLITE_NULL) != has_windows_evidence)
       return WYRELOG_E_POLICY;
+  gboolean has_darwin_evidence = sqlite3_column_type (stmt, 16) != SQLITE_NULL;
+  if (has_darwin_evidence
+      && (sqlite3_column_type (stmt, 16) != SQLITE_BLOB
+      || sqlite3_column_bytes (stmt, 16) !=
+      WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE
+      || has_windows_evidence))
+    return WYRELOG_E_POLICY;
 #ifdef G_OS_WIN32
   guint64 windows_evidence_version = 0;
   guint64 windows_graph_volume_serial = 0;
@@ -13850,6 +15491,9 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
         sizeof r->windows_evidence.artifact_identity.file_id);
   }
 #endif
+  if (has_darwin_evidence)
+    r->darwin_operation_evidence = g_bytes_new (sqlite3_column_blob (stmt, 16),
+            WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE);
   *out_record = r;
   return WYRELOG_E_OK;
 }
@@ -13860,7 +15504,7 @@ graph_provisioning_record_from_row (sqlite3_stmt *stmt,
   "phase,attempt,created_at,updated_at," \
   "windows_operation_evidence_version,windows_graph_volume_serial," \
   "windows_graph_file_id,windows_artifact_volume_serial," \
-  "windows_artifact_file_id"
+  "windows_artifact_file_id,darwin_operation_evidence"
 
 static wyrelog_error_t
 graph_provisioning_read_locked (wyl_policy_store_t *store,
@@ -14816,6 +16460,9 @@ wyl_policy_store_table_exists (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || table_name == NULL
       || out_exists == NULL)
     return WYRELOG_E_INVALID;
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
 
   *out_exists = FALSE;
   static const gchar *sql =

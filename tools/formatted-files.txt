@@ -164,6 +164,7 @@ wyrelog/handle.h
 wyrelog/perm.h
 wyrelog/policy/service-permission-maintenance-private.c
 wyrelog/policy/store-lease-private.h
+wyrelog/policy/store-lease.c
 wyrelog/policy/store-private.h
 wyrelog/policy/store.c
 wyrelog/session.h
