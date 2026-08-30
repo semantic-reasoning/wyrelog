@@ -49,31 +49,31 @@ EXPECTED_POSIX_OPENAT_PROFILE_SHA256 = (
     "e53298e179e2c767efd021602bda7a69ae88ab46b28320d6f10dbb3ec86c0e17"
 )
 EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
-    "69108df5a6a6d79a09a4ad1b958b564713f017c2136e0d8c5cfefad8f2a67afd"
+    "0ce8c0ada1d16956a8e35fc943a38057d1cafbafd72018303ce7b32cfffc85f7"
 )
 EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "ffaed524b3b2d44242b6dd32d4945be5db2709150270aa336ae53c6cda21d03d"
+    "b8d10b059d0affb45718474feb21a92f6560a5a539bdbfd5b8493104a68b93f8"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "5b651cd1884c7ee6d07eb98a1597db975215377b0d3f99868d8d1d266c21f8ee"
+    "39e49b4436e109c13bd9aae7aa7e11451ab6fbcb82634592c42cdf1893b18de7"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
-    "07f8350343c85cef694e626ecd42f6797231e3a9aafa2f812f8262b90248ac36"
+    "7481ee195e91afa1851283b2958c57087f0000b4e685424ed05b01cefd83bf73"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS = (
-    13, 7, 8, 8, 2, 3, 4, 31, 6, 5,
+    13, 7, 10, 8, 2, 3, 4, 36, 6, 5,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256 = (
-    "04067b70ebc6999371235c08978f65bdaa7c212e1707c68f8708dd84f56f0f6c"
+    "6d2306c7000d07c4497048196a52e8e1534775e81da4a6016b67fd7d6c66de8e"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS = (
-    1299, 70, 62, 98, 89, 364, 501, 777, 120, 315,
+    1299, 70, 65, 98, 89, 364, 501, 821, 120, 315,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "25761c69260a6ff69d9d4fc9d74d2185b1f56c6dbb8ae4eeb3f97b886de0d2d6"
+    "d8a85c02832b0a3d6bf44fecf7f3e733912670dc90e3a2929761d98fe538e694"
 )
 POSIX_CALL_CALLEE_PATTERN = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
@@ -716,13 +716,13 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 30808)
+        artifact_lock_require(len(semantic_tokens) == 30860)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
         )
         call_profile = c_named_call_profile(commentless_source)
-        artifact_lock_require(call_profile is not None and len(call_profile) == 2076)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2085)
         assert call_profile is not None
         artifact_lock_require(
             hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
@@ -1309,6 +1309,10 @@ SECURE_POSIX_ACTIVE_COMMANDS = (
     "else",
     "time_args=(-l)",
     "fi",
+    'if [ "$RUNNER_OS" = macOS ]; then',
+    "meson compile -C build-secure-duckdb -j 1 test-fact-darwin-provisioned-pair",
+    "meson test -C build-secure-duckdb --no-rebuild fact-darwin-provisioned-pair --print-errorlogs",
+    "fi",
     '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-fact-artifact-transition-driver test-fact-artifact-transition-posix test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem',
     "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-namespace-inventory fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-posix secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem --print-errorlogs",
     "if meson setup build-secure-duckdb-prebuilt -Denable_fact_store=enabled -Dduckdb_source=prebuilt -Denable_secure_duckdb_bridge=enabled; then",
@@ -1502,8 +1506,14 @@ def inventory_commands(workflow: str) -> tuple[tuple[str, ...], ...]:
     windows_step = named_step(windows, "Build and test (clang-cl)")
     return (
         posix_command(default_step, "meson test -C builddir --no-rebuild"),
-        posix_command(secure_step, "meson compile -C build-secure-duckdb -j 1"),
-        posix_command(secure_step, "meson test -C build-secure-duckdb --no-rebuild"),
+        posix_command(
+            secure_step,
+            '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1',
+        ),
+        posix_command(
+            secure_step,
+            "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract",
+        ),
         posix_command(
             sanitizer_compile_step,
             "meson compile -C build-policy-write-sanitizer",
