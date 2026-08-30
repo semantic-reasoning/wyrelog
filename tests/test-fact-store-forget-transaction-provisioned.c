@@ -6,9 +6,9 @@
 #include <sys/stat.h>
 
 #include "fact/graph-locator-private.h"
+#include "fact/store-open-private.h"
 #include "fact/store-private.h"
 
-static const gchar operation_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070891";
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070892";
 static const gchar tenant_id[] = "tenant-provision";
 static const gchar graph_id[] = "graph-provision";
@@ -20,26 +20,31 @@ typedef struct
   guint rollback_calls;
 } TransactionFault;
 
-static WylFactStoreIdentity
-make_identity (void)
+typedef struct
 {
-  WylFactStoreIdentity identity = { 0 };
-  identity.tenant_id = (gchar *) tenant_id;
-  identity.graph_id = (gchar *) graph_id;
-  identity.store_uuid = (gchar *) store_uuid;
-  identity.format_version = 1;
-  identity.path_encoding_version = 1;
-  return identity;
+  gchar *root;
+  gchar *policy_path;
+  gchar *container;
+} ProvisionedFixture;
+
+static void
+provisioned_fixture_free (ProvisionedFixture *fixture)
+{
+  if (fixture == NULL)
+    return;
+  g_free (fixture->root);
+  g_free (fixture->policy_path);
+  g_free (fixture->container);
+  g_free (fixture);
 }
 
-static gchar *
+static ProvisionedFixture *
 run_provision_helper (void)
 {
   const gchar *argv[] = {
     provision_helper_path,
     tenant_id,
     graph_id,
-    operation_uuid,
     store_uuid,
     NULL,
   };
@@ -63,17 +68,26 @@ run_provision_helper (void)
   g_assert_nonnull (stdout_text);
   g_assert_true (stderr_text == NULL || stderr_text[0] == '\0');
   gsize length = strlen (stdout_text);
-  g_assert_cmpuint (length, >, 1);
+  g_assert_cmpuint (length, >, 2);
   g_assert_cmpint (stdout_text[length - 1], ==, '\n');
-  g_assert_null (memchr (stdout_text, '\n', length - 1));
   g_assert_null (memchr (stdout_text, '\r', length));
-  stdout_text[length - 1] = '\0';
-  g_assert_true (g_path_is_absolute (stdout_text));
-  return g_steal_pointer (&stdout_text);
+  g_auto (GStrv) lines = g_strsplit (stdout_text, "\n", -1);
+  g_assert_cmpuint (g_strv_length (lines), ==, 3);
+  g_assert_cmpstr (lines[2], ==, "");
+  g_assert_true (g_path_is_absolute (lines[0]));
+  g_assert_true (g_path_is_absolute (lines[1]));
+  ProvisionedFixture *fixture = g_new0 (ProvisionedFixture, 1);
+  fixture->root = g_strdup (lines[0]);
+  fixture->policy_path = g_strdup (lines[1]);
+  fixture->container = g_path_get_dirname (fixture->root);
+  g_autofree gchar *policy_container = g_path_get_dirname (
+    fixture->policy_path);
+  g_assert_cmpstr (policy_container, ==, fixture->container);
+  return fixture;
 }
 
 static void
-assert_retained_pair (const gchar *root)
+assert_provisioned_shape (const gchar *root, const gchar *stage_basename)
 {
   g_autofree gchar *tenant_component = NULL;
   g_autofree gchar *graph_component = NULL;
@@ -83,22 +97,25 @@ assert_retained_pair (const gchar *root)
       &graph_component), ==, WYRELOG_E_OK);
   g_autofree gchar *final_path = g_build_filename (root, tenant_component,
           graph_component, "facts.duckdb", NULL);
-  g_autofree gchar *stage_basename =
-      g_strdup_printf ("provision-%s.sqlite", operation_uuid);
   g_autofree gchar *stage_path = g_build_filename (root, tenant_component,
           graph_component, stage_basename, NULL);
   struct stat final_status;
-  struct stat stage_status;
   g_assert_cmpint (stat (final_path, &final_status), ==, 0);
-  g_assert_cmpint (stat (stage_path, &stage_status), ==, 0);
   g_assert_true (S_ISREG (final_status.st_mode));
-  g_assert_true (S_ISREG (stage_status.st_mode));
   g_assert_cmpuint (final_status.st_mode & 0777, ==, 0600);
+#ifdef __APPLE__
+  g_assert_cmpuint (final_status.st_nlink, ==, 1);
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+#else
+  struct stat stage_status;
+  g_assert_cmpint (stat (stage_path, &stage_status), ==, 0);
+  g_assert_true (S_ISREG (stage_status.st_mode));
   g_assert_cmpuint (stage_status.st_mode & 0777, ==, 0600);
   g_assert_cmpuint (final_status.st_dev, ==, stage_status.st_dev);
   g_assert_cmpuint (final_status.st_ino, ==, stage_status.st_ino);
   g_assert_cmpuint (final_status.st_nlink, ==, 2);
   g_assert_cmpuint (stage_status.st_nlink, ==, 2);
+#endif
 }
 
 static void
@@ -120,32 +137,11 @@ remove_root (const gchar *root)
 }
 
 static wyrelog_error_t
-open_live (const gchar *root, wyl_fact_store_t **out_store)
+open_live (wyl_policy_store_t *policy_store, const gchar *root,
+    wyl_fact_store_t **out_store)
 {
-  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
-  WylFactGraphLocator locator = { 0 };
-  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  WylFactGraphProvisionedPair *pair = NULL;
-  WylFactStoreIdentity identity = make_identity ();
-
-  wyrelog_error_t rc = wyl_fact_graph_resolver_open (root, &resolver);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_locator_init (&locator, tenant_id, graph_id);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
-            &directory);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
-            operation_uuid, &pair);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_store_open_provisioned_pair (pair, &identity, TRUE,
-            out_store);
-
-  wyl_fact_graph_provisioned_pair_free (pair);
-  wyl_fact_graph_directory_clear (&directory);
-  wyl_fact_graph_locator_clear (&locator);
-  wyl_fact_graph_resolver_clear (&resolver);
-  return rc;
+  return wyl_fact_store_open_provisioned_graph (policy_store, root, tenant_id,
+             graph_id, TRUE, out_store);
 }
 
 static gboolean
@@ -185,11 +181,21 @@ fail_commit_once (WylFactStoreForgetTransactionTestPhase phase,
 static void
 test_provisioned_commit_failure_rolls_back (void)
 {
-  g_autofree gchar *root = run_provision_helper ();
-  assert_retained_pair (root);
+  ProvisionedFixture *fixture = run_provision_helper ();
+  g_autoptr (wyl_policy_store_t) policy_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (fixture->policy_path, &policy_store),
+      ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list (policy_store,
+      tenant_id, &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  WylPolicyGraphProvisioningRecord *record = g_ptr_array_index (records, 0);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  assert_provisioned_shape (fixture->root, record->stage_basename);
 
   wyl_fact_store_t *store = NULL;
-  g_assert_cmpint (open_live (root, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (open_live (policy_store, fixture->root, &store), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
@@ -258,7 +264,8 @@ test_provisioned_commit_failure_rolls_back (void)
       WYRELOG_E_OK);
   wyl_fact_store_close (store);
 
-  g_assert_cmpint (open_live (root, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (open_live (policy_store, fixture->root, &store), ==,
+      WYRELOG_E_OK);
   conn = wyl_fact_store_get_connection (store);
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';"),
@@ -266,8 +273,11 @@ test_provisioned_commit_failure_rolls_back (void)
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_audit;"), ==, 1);
   wyl_fact_store_close (store);
-  assert_retained_pair (root);
-  remove_root (root);
+  assert_provisioned_shape (fixture->root, record->stage_basename);
+  g_clear_pointer (&records, g_ptr_array_unref);
+  g_clear_pointer (&policy_store, wyl_policy_store_close);
+  remove_root (fixture->container);
+  provisioned_fixture_free (fixture);
 }
 
 int

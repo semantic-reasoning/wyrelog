@@ -1805,10 +1805,9 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [test_fact_provisioning_run_wyrelog_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
-  # Asserts st_nlink == 2 on the published graph, which is the POSIX
-  # retained hard-link pair. Windows publishes by renaming the stage away
-  # and keeps no second retained name, so this cannot pass there until the
-  # Windows pair has a durable evidence home (#816).
+  # Linux asserts the retained hard-link pair; Darwin asserts a direct final
+  # bound to durable operation evidence. Windows has no durable provisioning
+  # evidence home yet (#816).
   if host_machine.system() != 'windows'
     test('fact-provisioning-run', test_fact_provisioning_run,
       timeout : host_machine.system() == 'darwin' ? 300 : 60,
@@ -1823,13 +1822,12 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
-  # macOS currently rejects the first secure provisioning construct with
-  # WYRELOG_E_POLICY; #921 owns restoring its provisioned runtime coverage.
-  # Keep the executable available for platform compilation, while Linux keeps
-  # the retained-pair runtime control.
-  if host_machine.system() == 'linux'
+  # Linux retains the stage/final hard-link pair; Darwin opens its direct final
+  # through durable policy-owned operation evidence. Windows remains compile
+  # only until its provisioning evidence has a durable authority home (#816).
+  if host_machine.system() != 'windows'
     test('fact-store-provisioned', test_fact_store_provisioned,
-      timeout : 60,
+      timeout : host_machine.system() == 'darwin' ? 300 : 60,
     )
   endif
 
@@ -1851,12 +1849,14 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       include_directories : include_directories('../wyrelog'),
       dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep],
     )
-    if host_machine.system() == 'linux'
+    # Exercise the real policy-backed open path on both retained-pair Linux and
+    # evidence-backed direct-final Darwin.
+    if host_machine.system() != 'windows'
       test('fact-store-forget-transaction-provisioned',
         test_fact_store_forget_transaction_provisioned,
         args : [test_fact_store_forget_transaction_provision_helper.full_path()],
         depends : test_fact_store_forget_transaction_provision_helper,
-        timeout : 60,
+        timeout : host_machine.system() == 'darwin' ? 300 : 60,
       )
     endif
   endif

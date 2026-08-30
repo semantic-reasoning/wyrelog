@@ -191,8 +191,7 @@ def validate(files: dict[str, str]) -> None:
 
     require_once(
         helper_source,
-        "wyl_fact_graph_provisioning_construct (root, &record,\n"
-        "          &authority)",
+        "wyl_fact_graph_provisioning_run (store, &input, root, &record)",
         "production helper must invoke provisioning exactly once",
     )
     require_once(
@@ -203,10 +202,11 @@ def validate(files: dict[str, str]) -> None:
     )
     if not (
         helper_source.index("wyl_test_make_secure_fact_root")
-        < helper_source.index("wyl_fact_graph_provisioning_construct")
-        < helper_source.index('g_print ("%s\\n", root)')
+        < helper_source.index("wyl_policy_store_open (policy_path, &store)")
+        < helper_source.index("wyl_fact_graph_provisioning_run")
+        < helper_source.index('g_print ("%s\\n%s\\n", root, policy_path)')
     ):
-        raise AssertionError("helper create/construct/output ordering drifted")
+        raise AssertionError("helper create/provision/output ordering drifted")
     for forbidden in (
         "WYL_TEST_HANDLE_SEAMS",
         "wyl_fact_store_set_forget_transaction_test_hook",
@@ -221,36 +221,41 @@ def validate(files: dict[str, str]) -> None:
         )
     require_once(
         helper_source,
-        'if (rc == WYRELOG_E_OK) {\n    g_print ("%s\\n", root);',
-        "production helper must emit the root only after successful construction",
+        'g_clear_pointer (&store, wyl_policy_store_close);\n'
+        '    g_print ("%s\\n%s\\n", root, policy_path);',
+        "production helper must close policy and emit both durable paths",
     )
     for constant in (
-        '"01890f47-3c4b-7cc2-b8c4-dc0c0c070891"',
         '"01890f47-3c4b-7cc2-b8c4-dc0c0c070892"',
+        '"01890f47-3c4b-7cc2-b8c4-dc0c0c070893"',
     ):
         require_once(provisioned, constant, f"fixture identity drifted: {constant}")
 
     provisioned_required = (
-        "g_autofree gchar *root = run_provision_helper ()",
-        "assert_retained_pair (root)",
-        "wyl_fact_store_open_provisioned_pair",
+        "ProvisionedFixture *fixture = run_provision_helper ()",
+        "assert_provisioned_shape (fixture->root, record->stage_basename)",
+        "wyl_fact_store_open_provisioned_graph",
+        "wyl_policy_store_open (fixture->policy_path, &policy_store)",
+        "wyl_policy_store_graph_provisioning_list",
         "fail_commit_once",
         'exec_ok (conn, "SELECT 1;")',
         'exec_ok (conn, "BEGIN TRANSACTION;")',
         'exec_ok (conn, "ROLLBACK;")',
         "wyl_fact_store_forget_reconcile",
-        "open_live (root, &store)",
+        "open_live (policy_store, fixture->root, &store)",
     )
     for token in provisioned_required:
         if token not in provisioned:
             raise AssertionError(f"provisioned runtime proof drifted: {token}")
     if "wyl_fact_graph_provisioning_construct" in provisioned:
-        raise AssertionError("seam-linked parent must not provision the pair")
+        raise AssertionError("seam-linked parent must not provision the store")
     if "wyl_test_make_secure_fact_root" in provisioned:
         raise AssertionError("seam-linked parent must not create the secure root")
     if "wyl_fact_store_open (" in provisioned:
         raise AssertionError("provisioned proof must not use pathname store open")
-    if provisioned.count("open_live (root, &store)") != 2:
+    if provisioned.count(
+        "open_live (policy_store, fixture->root, &store)"
+    ) != 2:
         raise AssertionError("provisioned proof must close and reopen the store")
     helper_run = function_body(provisioned, "run_provision_helper")
     for token in (
@@ -263,7 +268,8 @@ def validate(files: dict[str, str]) -> None:
         "g_subprocess_get_exit_status",
         "stderr_text == NULL || stderr_text[0] == '\\0'",
         "stdout_text[length - 1], ==, '\\n'",
-        "g_assert_null (memchr (stdout_text, '\\n', length - 1));",
+        'g_strsplit (stdout_text, "\\n", -1)',
+        "g_strv_length (lines), ==, 3",
         "g_assert_null (memchr (stdout_text, '\\r', length));",
     ):
         if token not in helper_run:
@@ -280,32 +286,38 @@ def validate(files: dict[str, str]) -> None:
         "g_assert_cmpint (g_subprocess_get_exit_status (process), ==, 0);",
         "helper exit status must be checked exactly",
     )
-    retained = function_body(provisioned, "assert_retained_pair")
+    shape = function_body(provisioned, "assert_provisioned_shape")
     for token in (
         '"facts.duckdb"',
-        'g_strdup_printf ("provision-%s.sqlite", operation_uuid)',
+        "stage_basename",
         "S_ISREG (final_status.st_mode)",
         "S_ISREG (stage_status.st_mode)",
         "final_status.st_mode & 0777, ==, 0600",
         "stage_status.st_mode & 0777, ==, 0600",
+        "final_status.st_nlink, ==, 1",
+        "g_file_test (stage_path, G_FILE_TEST_EXISTS)",
         "final_status.st_dev, ==, stage_status.st_dev",
         "final_status.st_ino, ==, stage_status.st_ino",
         "final_status.st_nlink, ==, 2",
         "stage_status.st_nlink, ==, 2",
     ):
-        if token not in retained:
-            raise AssertionError(f"retained-pair witness drifted: {token}")
+        if token not in shape:
+            raise AssertionError(f"provisioned-shape witness drifted: {token}")
     provisioned_test = function_body(
         provisioned, "test_provisioned_commit_failure_rolls_back"
     )
     if not (
         provisioned_test.index("run_provision_helper ()")
-        < provisioned_test.index("assert_retained_pair (root)")
-        < provisioned_test.index("open_live (root, &store)")
+        < provisioned_test.index("assert_provisioned_shape")
+        < provisioned_test.index(
+            "open_live (policy_store, fixture->root, &store)"
+        )
     ):
-        raise AssertionError("persisted pair handoff ordering drifted")
-    if provisioned_test.count("assert_retained_pair (root)") != 2:
-        raise AssertionError("retained pair must be checked before and after use")
+        raise AssertionError("persisted provisioning handoff ordering drifted")
+    if provisioned_test.count("assert_provisioned_shape") != 2:
+        raise AssertionError(
+            "provisioned shape must be checked before and after use"
+        )
 
     generic_target = call_body(
         meson, "test_fact_store_forget_transaction = executable("
@@ -386,11 +398,11 @@ def validate(files: dict[str, str]) -> None:
 
     control_registration = meson.index("test('fact-store-provisioned',")
     control_guard = meson.rfind(
-        "if host_machine.system() == 'linux'", 0, control_registration
+        "if host_machine.system() != 'windows'", 0, control_registration
     )
     control_guard_end = meson.find("\n  endif", control_guard)
     if control_guard == -1 or control_guard_end < control_registration:
-        raise AssertionError("provisioning control escaped its Linux-only guard")
+        raise AssertionError("provisioning control escaped its POSIX guard")
     if meson.index("test_fact_store_provisioned = executable(") > control_guard:
         raise AssertionError("provisioning control executable became Linux-only")
 
@@ -414,19 +426,16 @@ def validate(files: dict[str, str]) -> None:
         < provisioned_registration
     ):
         raise AssertionError("provisioning executables became Linux-only")
-    provisioned_guard = meson.rfind(
-        "if host_machine.system() == 'linux'", 0, provisioned_registration
-    )
-    provisioned_guard_end = meson.find("\n    endif", provisioned_guard)
     if (
-        provisioned_guard < provisioned_executable
-        or provisioned_guard_end < provisioned_registration
+        "if host_machine.system() == 'linux'\n"
+        "      test('fact-store-forget-transaction-provisioned',"
+        in meson
     ):
-        raise AssertionError("provisioned runtime escaped its Linux-only guard")
+        raise AssertionError("provisioned runtime became Linux-only")
     require_once(
         meson,
-        "# WYRELOG_E_POLICY; #921 owns restoring its provisioned runtime coverage.",
-        "Meson lost the audited macOS provisioning exception",
+        "# evidence-backed direct-final Darwin.",
+        "Meson lost the audited Darwin provisioning runtime",
     )
 
     posix_step_name = (
@@ -438,21 +447,11 @@ def validate(files: dict[str, str]) -> None:
         "            test-fact-store-forget-transaction \\\n"
         "            test-fact-store-forget-transaction-provision-helper \\\n"
         "            test-fact-store-forget-transaction-provisioned\n"
-        "          # macOS secure provisioning currently returns POLICY; #921 owns\n"
-        "          # restoring its provisioned runtime coverage. Keep all targets built.\n"
-        '          if [ "$RUNNER_OS" = Linux ]; then\n'
-        "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-        "              fact-store-provisioned \\\n"
-        "              --print-errorlogs\n"
-        "          fi\n"
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+        "            fact-store-provisioned \\\n"
         "            fact-store-forget-transaction \\\n"
-        "            --print-errorlogs\n"
-        '          if [ "$RUNNER_OS" = Linux ]; then\n'
-        "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-        "              fact-store-forget-transaction-provisioned \\\n"
-        "              --print-errorlogs\n"
-        "          fi"
+        "            fact-store-forget-transaction-provisioned \\\n"
+        "            --print-errorlogs"
     )
     windows_step_name = (
         "      - name: Build fact forget transaction cleanup seam (clang-cl)"
@@ -667,19 +666,19 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/test-fact-store-forget-transaction-provision-helper.c",
-        "wyl_fact_graph_provisioning_construct (root, &record,\n"
-        "          &authority);",
-        "wyl_fact_graph_provisioning_construct (root, &record,\n"
-        "          &authority);\n  "
-        "wyl_fact_graph_provisioning_construct (root, &record,\n"
-        "          &authority);",
+        "rc = wyl_fact_graph_provisioning_run (store, &input, root, &record);",
+        "rc = wyl_fact_graph_provisioning_run (store, &input, root, &record);\n"
+        "  rc = wyl_fact_graph_provisioning_run "
+        "(store, &input, root, &record);",
         "duplicate production provisioning",
     )
     expect_rejected(
         baseline,
         "tests/test-fact-store-forget-transaction-provision-helper.c",
-        'if (rc == WYRELOG_E_OK) {\n    g_print ("%s\\n", root);',
-        'g_print ("%s\\n", root);\n  if (rc == WYRELOG_E_OK) {',
+        'g_clear_pointer (&store, wyl_policy_store_close);\n'
+        '    g_print ("%s\\n%s\\n", root, policy_path);',
+        'g_print ("%s\\n%s\\n", root, policy_path);\n'
+        "  g_clear_pointer (&store, wyl_policy_store_close);",
         "ignored production provisioning failure",
     )
     expect_rejected(
@@ -693,16 +692,18 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/test-fact-store-forget-transaction-provisioned.c",
-        "g_autofree gchar *root = run_provision_helper ();",
-        "g_autofree gchar *root = run_provision_helper ();\n"
-        "  wyl_fact_graph_provisioning_construct (root, NULL, NULL);",
+        "ProvisionedFixture *fixture = run_provision_helper ();",
+        "ProvisionedFixture *fixture = run_provision_helper ();\n"
+        "  wyl_fact_graph_provisioning_construct "
+        "(fixture->root, NULL, NULL);",
         "seam-linked direct provisioning",
     )
     expect_rejected(
         baseline,
         "tests/test-fact-store-forget-transaction-provisioned.c",
-        "g_autofree gchar *root = run_provision_helper ();",
-        "g_autofree gchar *root = wyl_test_make_secure_fact_root "
+        "ProvisionedFixture *fixture = run_provision_helper ();",
+        "ProvisionedFixture *fixture = NULL;\n"
+        "  g_autofree gchar *root = wyl_test_make_secure_fact_root "
         "(\"bad-XXXXXX\", NULL);",
         "seam-parent secure-root creation",
     )
@@ -716,8 +717,8 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/test-fact-store-forget-transaction-provisioned.c",
-        "g_assert_null (memchr (stdout_text, '\\n', length - 1));",
-        "(void) memchr (stdout_text, '\\n', length - 1);",
+        "g_assert_cmpuint (g_strv_length (lines), ==, 3);",
+        "g_assert_cmpuint (g_strv_length (lines), >=, 2);",
         "accepted multiple helper output records",
     )
     expect_rejected(
@@ -802,20 +803,20 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/meson.build",
-        "if host_machine.system() == 'linux'\n"
-        "    test('fact-store-provisioned',",
         "if host_machine.system() != 'windows'\n"
         "    test('fact-store-provisioned',",
-        "macOS provisioning control registration",
+        "if host_machine.system() == 'linux'\n"
+        "    test('fact-store-provisioned',",
+        "Linux-only provisioning control registration",
     )
     expect_rejected(
         baseline,
         "tests/meson.build",
-        "    if host_machine.system() == 'linux'\n"
-        "      test('fact-store-forget-transaction-provisioned',",
         "    if host_machine.system() != 'windows'\n"
         "      test('fact-store-forget-transaction-provisioned',",
-        "macOS provisioned cleanup registration",
+        "    if host_machine.system() == 'linux'\n"
+        "      test('fact-store-forget-transaction-provisioned',",
+        "Linux-only provisioned cleanup registration",
     )
     expect_rejected(
         baseline,
@@ -829,28 +830,16 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/meson.build",
-        "# WYRELOG_E_POLICY; #921 owns restoring its provisioned runtime coverage.",
-        "# WYRELOG_E_POLICY.",
-        "missing Meson macOS exception owner",
+        "# evidence-backed direct-final Darwin.",
+        "# direct-final Darwin.",
+        "missing Meson Darwin evidence boundary",
     )
-    workflow_control_block = (
-        '          if [ "$RUNNER_OS" = Linux ]; then\n'
-        "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-        "              fact-store-provisioned \\\n"
-        "              --print-errorlogs\n"
-        "          fi\n"
-    )
-    workflow_generic_block = (
+    workflow_runtime_block = (
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+        "            fact-store-provisioned \\\n"
         "            fact-store-forget-transaction \\\n"
-        "            --print-errorlogs\n"
-    )
-    workflow_provisioned_block = (
-        '          if [ "$RUNNER_OS" = Linux ]; then\n'
-        "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-        "              fact-store-forget-transaction-provisioned \\\n"
-        "              --print-errorlogs\n"
-        "          fi"
+        "            fact-store-forget-transaction-provisioned \\\n"
+        "            --print-errorlogs"
     )
     for workflow_path in (
         ".github/workflows/ci-pr.yml",
@@ -866,14 +855,11 @@ def self_test(baseline: dict[str, str]) -> None:
         expect_rejected(
             baseline,
             workflow_path,
-            workflow_control_block
-            + workflow_generic_block
-            + workflow_provisioned_block,
-            workflow_generic_block
-            + workflow_provisioned_block
-            + "\n"
-            + workflow_control_block.rstrip("\n"),
-            f"Linux provisioning control reordered after cleanup in {workflow_path}",
+            workflow_runtime_block,
+            '          if [ "$RUNNER_OS" = Linux ]; then\n'
+            + workflow_runtime_block.replace("          ", "            ", 1)
+            + "\n          fi",
+            f"Linux-only provisioned runtimes in {workflow_path}",
         )
         expect_rejected(
             baseline,
@@ -900,50 +886,42 @@ def self_test(baseline: dict[str, str]) -> None:
             baseline,
             workflow_path,
             "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-store-provisioned \\\n"
             "            fact-store-forget-transaction \\\n"
-            "            --print-errorlogs\n",
-            "",
+            "            fact-store-forget-transaction-provisioned \\\n"
+            "            --print-errorlogs",
+            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-store-forget-transaction \\\n"
+            "            fact-store-forget-transaction-provisioned \\\n"
+            "            --print-errorlogs",
+            f"missing macOS provisioning control runtime in {workflow_path}",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            workflow_runtime_block,
+            workflow_runtime_block.replace(
+                "            fact-store-forget-transaction \\\n", "", 1
+            ),
             f"missing generic macOS runtime in {workflow_path}",
         )
         expect_rejected(
             baseline,
             workflow_path,
-            '          if [ "$RUNNER_OS" = Linux ]; then\n'
-            "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-            "              fact-store-provisioned \\\n",
-            "          if true; then\n"
-            "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-            "              fact-store-provisioned \\\n",
-            f"macOS provisioning control runtime in {workflow_path}",
+            workflow_runtime_block,
+            workflow_runtime_block.replace(
+                "            fact-store-forget-transaction-provisioned \\\n",
+                "",
+                1,
+            ),
+            f"missing macOS provisioned cleanup runtime in {workflow_path}",
         )
         expect_rejected(
             baseline,
             workflow_path,
-            '          if [ "$RUNNER_OS" = Linux ]; then\n'
-            "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-            "              fact-store-forget-transaction-provisioned \\\n",
-            "          if true; then\n"
-            "            meson test -C build-secure-duckdb --no-rebuild \\\n"
-            "              fact-store-forget-transaction-provisioned \\\n",
-            f"macOS provisioned cleanup runtime in {workflow_path}",
-        )
-        expect_rejected(
-            baseline,
-            workflow_path,
-            "          # macOS secure provisioning currently returns POLICY; #921 owns\n",
-            "          # macOS secure provisioning currently returns POLICY.\n",
-            f"missing macOS exception owner in {workflow_path}",
-        )
-        expect_rejected(
-            baseline,
-            workflow_path,
-            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
-            "            fact-store-forget-transaction \\\n"
-            "            --print-errorlogs\n",
-            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
-            "            fact-store-forget-transaction \\\n"
-            "            --print-errorlogs || true\n",
-            f"tolerated generic macOS failure in {workflow_path}",
+            workflow_runtime_block,
+            workflow_runtime_block + " || true",
+            f"tolerated provisioned macOS failure in {workflow_path}",
         )
         expect_rejected(
             baseline,

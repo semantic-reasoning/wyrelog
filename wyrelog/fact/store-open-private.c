@@ -3,14 +3,14 @@
 
 #include "fact/graph-locator-private.h"
 #include "fact/provisioning-run-private.h"
-#include "wyl-id-private.h"
 
 /* Resolve the in-flight or active provisioning operation for a graph. */
 static wyrelog_error_t
 open_provisioned_find_op (wyl_policy_store_t *policy_store,
-    const gchar *tenant_id, const gchar *graph_id, gchar *out_op_uuid)
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphProvisioningRecord **out_record)
 {
-  out_op_uuid[0] = '\0';
+  *out_record = NULL;
   GPtrArray *records = NULL;
   wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list (policy_store,
           tenant_id, &records);
@@ -21,7 +21,7 @@ open_provisioned_find_op (wyl_policy_store_t *policy_store,
     const WylPolicyGraphProvisioningRecord *record =
         g_ptr_array_index (records, i);
     if (g_strcmp0 (record->graph_id, graph_id) == 0) {
-      g_strlcpy (out_op_uuid, record->op_uuid, WYL_ID_STRING_BUF);
+      *out_record = g_ptr_array_steal_index (records, i);
       rc = WYRELOG_E_OK;
       break;
     }
@@ -31,10 +31,32 @@ open_provisioned_find_op (wyl_policy_store_t *policy_store,
 }
 
 static wyrelog_error_t
-open_provisioned_active (wyl_policy_store_t *policy_store,
-    const gchar *fact_root, const WylPolicyGraphAuthorityRecord *authority,
-    const gchar *op_uuid, gboolean writable, wyl_fact_store_t **out_store)
+open_provisioned_active (const gchar *fact_root,
+    const WylPolicyGraphAuthorityRecord *authority,
+    const WylPolicyGraphProvisioningRecord *record, gboolean writable,
+    wyl_fact_store_t **out_store)
 {
+  if (record == NULL
+      || record->phase != WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+      || g_strcmp0 (record->tenant_id, authority->tenant_id) != 0
+      || g_strcmp0 (record->graph_id, authority->graph_id) != 0
+      || g_strcmp0 (record->store_uuid, authority->store_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize evidence_length = 0;
+  const guint8 *evidence_bytes =
+      record->darwin_operation_evidence == NULL ? NULL :
+      g_bytes_get_data (record->darwin_operation_evidence, &evidence_length);
+  if (evidence_bytes == NULL
+      || evidence_length != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_graph_darwin_evidence_decode (evidence_bytes, evidence_length,
+          record->op_uuid, &evidence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
   WylFactStoreIdentity identity = { 0 };
   identity.tenant_id = authority->tenant_id;
   identity.graph_id = authority->graph_id;
@@ -47,16 +69,23 @@ open_provisioned_active (wyl_policy_store_t *policy_store,
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactGraphProvisionedPair *pair = NULL;
 
-  wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, authority->tenant_id,
             authority->graph_id);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
             &directory);
+#ifdef __APPLE__
+  if (rc == WYRELOG_E_OK)
+    rc =
+        wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+          (&directory, record->op_uuid, &evidence, &pair);
+#else
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
-            op_uuid, &pair);
+            record->op_uuid, &pair);
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_open_provisioned_pair (pair, &identity, writable,
             out_store);
@@ -88,11 +117,12 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
   /* A provisioning graph is finished (or degraded) by the idempotent
    * coordinator, then re-read as active. */
   if (authority->lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING) {
-    gchar op_uuid[WYL_ID_STRING_BUF];
-    rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, op_uuid);
+    WylPolicyGraphProvisioningRecord *record = NULL;
+    rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, &record);
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_graph_provisioning_recover (policy_store, op_uuid, fact_root,
-              NULL);
+      rc = wyl_fact_graph_provisioning_recover (policy_store, record->op_uuid,
+              fact_root, NULL);
+    wyl_policy_graph_provisioning_record_free (record);
     wyl_policy_graph_authority_record_free (authority);
     authority = NULL;
     if (rc != WYRELOG_E_OK)
@@ -113,11 +143,12 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
     return WYRELOG_E_POLICY;
   }
 
-  gchar op_uuid[WYL_ID_STRING_BUF];
-  rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, op_uuid);
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, &record);
   if (rc == WYRELOG_E_OK)
-    rc = open_provisioned_active (policy_store, fact_root, authority, op_uuid,
-            writable, out_store);
+    rc = open_provisioned_active (fact_root, authority, record, writable,
+            out_store);
+  wyl_policy_graph_provisioning_record_free (record);
   wyl_policy_graph_authority_record_free (authority);
   return rc;
 }
