@@ -287,6 +287,16 @@ wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact_with_eviden
 wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate_bound
   (WylFactGraphProvisionedPair * pair);
 #endif
+#ifdef __APPLE__
+/* Reconstitute a Darwin provisioned authority only from durable ADR 0006
+ * evidence.  The canonical final is reopened through the held graph chain;
+ * the operation-derived legacy stage must remain absent. */
+wyrelog_error_t
+wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphDarwinOperationEvidence * expected_evidence,
+    WylFactGraphProvisionedPair ** out_pair);
+#endif
 /* Open the intentionally retained `stage + facts.duckdb` provisioning pair.
  * The operation UUID is canonical UUIDv7 and derives both names internally.
  * This is read-only and accepts only a secure nlink=2 pair whose two names

@@ -28,6 +28,7 @@ tests/test-fact-artifact-transition-names.c
 tests/test-fact-artifact-transition-posix.c
 tests/test-fact-artifact-transition-windows.c
 tests/test-fact-compound.c
+tests/test-fact-darwin-provisioned-pair.c
 tests/test-fact-graph-locator-darwin-evidence.c
 tests/test-fact-graph-locator-macos.c
 tests/test-fact-graph-locator-windows.c

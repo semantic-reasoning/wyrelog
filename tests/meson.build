@@ -1701,6 +1701,18 @@ if get_option('enable_fact_store').allowed()
 endif
 
 if get_option('enable_secure_duckdb_bridge').enabled()
+  if host_machine.system() == 'darwin'
+    test_fact_darwin_provisioned_pair = executable(
+      'test-fact-darwin-provisioned-pair',
+      'test-fact-darwin-provisioned-pair.c',
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep],
+    )
+    test('fact-darwin-provisioned-pair',
+      test_fact_darwin_provisioned_pair,
+      timeout : 120,
+    )
+  endif
   test_secure_duckdb_artifact_contract = executable(
     'test-secure-duckdb-artifact-contract',
     'test-secure-duckdb-artifact-contract.cc',

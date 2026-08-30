@@ -1386,8 +1386,14 @@ provisioned_pair_fd_revalidate (WylFactGraphProvisionedPair *pair, gint fd,
     gboolean require_writable)
 {
   struct stat held;
+#ifdef __APPLE__
+  const guint64 required_links = 1;
+#else
+  const guint64 required_links = 2;
+#endif
   if (fd < 0 || fstat (fd, &held) != 0 || !S_ISREG (held.st_mode)
-      || held.st_nlink != 2 || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_nlink != required_links
+      || (held.st_mode & 07777) != 0600
       || (guint64) held.st_uid != pair->expected_owner
       || held.st_uid != geteuid ()
       || (guint64) held.st_dev != pair->expected_device
@@ -1413,12 +1419,37 @@ wyl_fact_graph_provisioned_pair_revalidate
   if (rc != WYRELOG_E_OK
       || g_strcmp0 (derived_stage, pair->stage_basename) != 0)
     return WYRELOG_E_POLICY;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  rc = wyl_fact_graph_darwin_evidence_decode (pair->evidence.bytes,
+          sizeof pair->evidence.bytes, pair->operation_uuid, &decoded);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
   rc = directory_revalidate (&pair->directory);
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_fd_revalidate (pair, pair->held_final_fd, FALSE);
   if (rc == WYRELOG_E_OK && pair->writable_final_fd >= 0)
     rc = provisioned_pair_fd_revalidate (pair, pair->writable_final_fd, TRUE);
   struct stat named;
+#ifdef __APPLE__
+  if (rc == WYRELOG_E_OK
+      && fstatat (pair->directory.graph_fd, pair->stage_basename, &named,
+      AT_SYMLINK_NOFOLLOW) == 0)
+    rc = WYRELOG_E_POLICY;
+  else if (rc == WYRELOG_E_OK && errno != ENOENT)
+    rc = errno_to_resolver_error (errno);
+  if (rc == WYRELOG_E_OK
+      && (fstatat (pair->directory.graph_fd, "facts.duckdb", &named,
+      AT_SYMLINK_NOFOLLOW) != 0
+      || !stat_matches (&named, pair->expected_device,
+      pair->expected_inode, FALSE, 0600)
+      || named.st_nlink != 1))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_compare (pair->directory.graph_fd,
+            pair->held_final_fd, pair->operation_uuid, &decoded);
+#else
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_stat (&pair->directory, pair->stage_basename,
             "facts.duckdb", &named);
@@ -1426,8 +1457,27 @@ wyl_fact_graph_provisioned_pair_revalidate
       && ((guint64) named.st_dev != pair->expected_device
       || (guint64) named.st_ino != pair->expected_inode))
     rc = WYRELOG_E_POLICY;
+#endif
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (&pair->directory);
+#ifdef __APPLE__
+  if (rc == WYRELOG_E_OK
+      && fstatat (pair->directory.graph_fd, pair->stage_basename, &named,
+      AT_SYMLINK_NOFOLLOW) == 0)
+    rc = WYRELOG_E_POLICY;
+  else if (rc == WYRELOG_E_OK && errno != ENOENT)
+    rc = errno_to_resolver_error (errno);
+  if (rc == WYRELOG_E_OK
+      && (fstatat (pair->directory.graph_fd, "facts.duckdb", &named,
+      AT_SYMLINK_NOFOLLOW) != 0
+      || !stat_matches (&named, pair->expected_device,
+      pair->expected_inode, FALSE, 0600)
+      || named.st_nlink != 1))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_compare (pair->directory.graph_fd,
+            pair->held_final_fd, pair->operation_uuid, &decoded);
+#else
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_stat (&pair->directory, pair->stage_basename,
             "facts.duckdb", &named);
@@ -1435,6 +1485,7 @@ wyl_fact_graph_provisioned_pair_revalidate
       && ((guint64) named.st_dev != pair->expected_device
       || (guint64) named.st_ino != pair->expected_inode))
     rc = WYRELOG_E_POLICY;
+#endif
   return rc;
 }
 
@@ -1461,6 +1512,100 @@ wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair *pair)
   g_free (pair);
 }
 
+#ifdef __APPLE__
+wyrelog_error_t
+wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphDarwinOperationEvidence * expected_evidence,
+    WylFactGraphProvisionedPair ** out_pair)
+{
+  if (out_pair != NULL)
+    *out_pair = NULL;
+  if (directory == NULL || expected_evidence == NULL || out_pair == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_darwin_evidence_decode (
+    expected_evidence->bytes, sizeof expected_evidence->bytes,
+    operation_uuid, &decoded);
+  g_autofree gchar *stage_basename = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (operation_uuid,
+            &stage_basename);
+  struct stat stage;
+  if (rc == WYRELOG_E_OK
+      && fstatat (directory->graph_fd, stage_basename, &stage,
+      AT_SYMLINK_NOFOLLOW) == 0)
+    rc = WYRELOG_E_POLICY;
+  else if (rc == WYRELOG_E_OK && errno != ENOENT)
+    rc = errno_to_resolver_error (errno);
+
+  gint held_fd = -1;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_open_file (directory, "facts.duckdb", FALSE,
+            &held_fd);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_compare (directory->graph_fd, held_fd,
+            operation_uuid, &decoded);
+  struct stat held = { 0 };
+  if (rc == WYRELOG_E_OK
+      && (fstat (held_fd, &held) != 0 || !S_ISREG (held.st_mode)
+      || held.st_nlink != 1 || (held.st_mode & 07777) != 0600
+      || held.st_uid != geteuid ()))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK) {
+    if (held_fd >= 0)
+      close (held_fd);
+    return rc;
+  }
+
+  WylFactGraphProvisionedPair *pair =
+      g_try_new0 (WylFactGraphProvisionedPair, 1);
+  if (pair == NULL) {
+    close (held_fd);
+    return WYRELOG_E_NOMEM;
+  }
+  pair->references = 1;
+  pair->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  pair->held_final_fd = held_fd;
+  pair->writable_final_fd = -1;
+  pair->expected_device = held.st_dev;
+  pair->expected_inode = held.st_ino;
+  pair->expected_owner = held.st_uid;
+  pair->evidence = decoded;
+  pair->operation_uuid = try_strdup (operation_uuid);
+  pair->stage_basename = g_steal_pointer (&stage_basename);
+  if (pair->operation_uuid == NULL || pair->stage_basename == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_clone (directory, &pair->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-pair-pre-writable-open",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc == WYRELOG_E_OK) {
+    pair->writable_final_fd = openat (pair->directory.graph_fd,
+            "facts.duckdb", O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (pair->writable_final_fd < 0)
+      rc = errno_to_resolver_error (errno);
+  }
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-pair-post-writable-open",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_graph_provisioned_pair_free (pair);
+    return rc;
+  }
+  *out_pair = pair;
+  return WYRELOG_E_OK;
+}
+#endif
+
 wyrelog_error_t
 wyl_fact_graph_directory_open_provisioned_pair_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
@@ -1470,6 +1615,10 @@ wyl_fact_graph_directory_open_provisioned_pair_exact
     *out_pair = NULL;
   if (directory == NULL || out_pair == NULL)
     return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  (void) operation_uuid;
+  return WYRELOG_E_POLICY;
+#else
 
   WylFactGraphRegularFile held =
       (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
@@ -1524,6 +1673,7 @@ wyl_fact_graph_directory_open_provisioned_pair_exact
   }
   *out_pair = pair;
   return WYRELOG_E_OK;
+#endif
 }
 
 wyrelog_error_t

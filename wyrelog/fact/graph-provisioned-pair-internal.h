@@ -61,5 +61,8 @@ struct WylFactGraphProvisionedPair
   guint64 expected_owner;
   gint held_final_fd;
   gint writable_final_fd;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence;
+#endif
 };
 #endif
