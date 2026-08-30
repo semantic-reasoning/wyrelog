@@ -1771,18 +1771,34 @@ if get_option('enable_fact_store').allowed()
 
   test('fact-compound', test_fact_compound)
 
+  test_fact_replay_c_args = ['-DWYL_HAS_FACT_STORE'] + fact_test_support_c_args
+  if get_option('enable_secure_duckdb_bridge').enabled()
+    test_fact_replay_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
+  endif
+
   test_fact_replay = executable('test-fact-replay',
     'test-fact-replay.c',
     'fact-test-support.c',
     '../wyrelog/daemon/fact-status.c',
     # Keep this consumer audit-macro-unaware to cover cross-TU layout stability.
-    c_args : ['-DWYL_HAS_FACT_STORE'] + fact_test_support_c_args,
+    c_args : test_fact_replay_c_args,
     include_directories : include_directories('../wyrelog'),
     dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep]
         + fact_test_support_deps,
   )
 
   test('fact-replay', test_fact_replay, timeout : 60)
+
+  test('fact-sealed-provisioned-forget-boundary', python3,
+    args : [files('test-fact-sealed-provisioned-forget-boundary.py'),
+      meson.project_source_root()],
+    env : python_strict_encoding_env,
+  )
+  test('fact-sealed-provisioned-forget-boundary-self-test', python3,
+    args : [files('test-fact-sealed-provisioned-forget-boundary.py'),
+      meson.project_source_root(), '--self-test'],
+    env : python_strict_encoding_env,
+  )
 
   test_fact_runtime = executable('test-fact-runtime',
     'test-fact-runtime.c',

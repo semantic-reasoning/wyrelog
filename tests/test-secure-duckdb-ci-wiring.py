@@ -82,7 +82,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "test-fact-artifact-transition-posix "
         "test-secure-duckdb-bridge "
         "test-secure-duckdb-filesystem "
-        "test-secure-duckdb-recording-filesystem"
+        "test-secure-duckdb-recording-filesystem "
+        "test-fact-replay"
     )
     test_command = (
         "meson test -C build-secure-duckdb --no-rebuild "
@@ -96,7 +97,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "fact-artifact-transition-driver-wiring-self "
         "fact-artifact-transition-posix "
         "secure-duckdb-bridge secure-duckdb-filesystem "
-        "secure-duckdb-recording-filesystem --print-errorlogs"
+        "secure-duckdb-recording-filesystem fact-replay --print-errorlogs"
     )
     if commands.count(setup_command) != 1:
         raise SystemExit(
