@@ -3,6 +3,7 @@
 
 #include <glib.h>
 
+#include "graph-locator-darwin-private.h"
 #include "wyrelog/error.h"
 
 G_BEGIN_DECLS;
@@ -189,6 +190,16 @@ wyrelog_error_t wyl_fact_graph_directory_open_file
     gboolean writable, gint * out_fd);
 wyrelog_error_t wyl_fact_graph_directory_secure_file_mode
   (WylFactGraphDirectory * directory, const gchar * basename);
+#ifdef __APPLE__
+/* Create the absent canonical final directly through the held graph directory,
+ * then sync and capture ADR 0006 evidence from the still-held descriptors.
+ * After O_EXCL succeeds, failure cleanup is close-only and intentionally
+ * leaves the final-created/evidence-absent recovery wedge. */
+wyrelog_error_t wyl_fact_graph_directory_create_darwin_provisioned_final
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphDarwinOperationEvidence * out_evidence,
+    WylFactGraphRegularFile * out_final);
+#endif
 wyrelog_error_t wyl_fact_graph_directory_stage_create
   (WylFactGraphDirectory * directory, const gchar * final_basename,
     WylFactGraphStage * out_stage);

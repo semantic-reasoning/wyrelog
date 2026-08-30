@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-locator-private.h"
+#include "fact/graph-locator-darwin-private.h"
 #ifndef G_OS_WIN32
 #include "fact/graph-provisioned-pair-internal.h"
 #endif
@@ -49,7 +50,7 @@ wyl_fact_graph_component_encode (const gchar *value, gchar **out_component)
   if (out_component != NULL)
     *out_component = NULL;
   if (value == NULL || out_component == NULL || !g_utf8_validate (value, -1,
-          NULL))
+      NULL))
     return WYRELOG_E_INVALID;
 
   gsize len = strlen (value);
@@ -152,10 +153,11 @@ wyl_fact_graph_locator_init (WylFactGraphLocator *locator,
   if (locator == NULL)
     return WYRELOG_E_INVALID;
   *locator = (WylFactGraphLocator) {
-  0};
+    0
+  };
 
   wyrelog_error_t rc = wyl_fact_graph_component_encode (tenant_id,
-      &locator->tenant_component);
+          &locator->tenant_component);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_component_encode (graph_id, &locator->graph_component);
   if (rc != WYRELOG_E_OK) {
@@ -182,16 +184,16 @@ component_is_canonical (const gchar *component)
   g_autofree gchar *decoded = NULL;
   g_autofree gchar *encoded = NULL;
   return wyl_fact_graph_component_decode (component, &decoded) == WYRELOG_E_OK
-      && wyl_fact_graph_component_encode (decoded, &encoded) == WYRELOG_E_OK
-      && g_strcmp0 (component, encoded) == 0;
+         && wyl_fact_graph_component_encode (decoded, &encoded) == WYRELOG_E_OK
+         && g_strcmp0 (component, encoded) == 0;
 }
 
 static gboolean
 locator_is_valid (const WylFactGraphLocator *locator)
 {
   return locator != NULL && locator->version == WYL_FACT_GRAPH_PATH_VERSION
-      && component_is_canonical (locator->tenant_component)
-      && component_is_canonical (locator->graph_component);
+         && component_is_canonical (locator->tenant_component)
+         && component_is_canonical (locator->graph_component);
 }
 
 gchar *
@@ -200,7 +202,7 @@ wyl_fact_graph_locator_relative_dir (const WylFactGraphLocator *locator)
   if (!locator_is_valid (locator))
     return NULL;
   return g_build_path ("/", locator->tenant_component,
-      locator->graph_component, NULL);
+             locator->graph_component, NULL);
 }
 
 gchar *
@@ -210,7 +212,7 @@ wyl_fact_graph_locator_descriptive_path (const gchar *fact_root,
   if (fact_root == NULL || fact_root[0] == '\0' || !locator_is_valid (locator))
     return NULL;
   return g_build_filename (fact_root, locator->tenant_component,
-      locator->graph_component, NULL);
+             locator->graph_component, NULL);
 }
 
 gboolean
@@ -249,8 +251,8 @@ static gboolean
 name_is_safe (const gchar *name)
 {
   return name != NULL && name[0] != '\0' && strcmp (name, ".") != 0
-      && strcmp (name, "..") != 0 && strchr (name, '/') == NULL
-      && strchr (name, '\\') == NULL;
+         && strcmp (name, "..") != 0 && strchr (name, '/') == NULL
+         && strchr (name, '\\') == NULL;
 }
 
 static gboolean
@@ -274,7 +276,7 @@ provisioning_stage_name_is_canonical (const gchar *name)
     return FALSE;
   gchar canonical[WYL_ID_STRING_BUF];
   return wyl_id_format (&id, canonical, sizeof canonical) == WYRELOG_E_OK
-      && memcmp (canonical, uuid, WYL_ID_STRING_LEN) == 0;
+         && memcmp (canonical, uuid, WYL_ID_STRING_LEN) == 0;
 }
 
 static wyrelog_error_t
@@ -312,7 +314,7 @@ validate_fd (gint fd, gboolean directory, mode_t expected_mode,
   if ((directory && !S_ISDIR (st.st_mode))
       || (!directory && !S_ISREG (st.st_mode))
       || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) st.st_mode,
-          (guint64) st.st_uid, (guint64) geteuid (), expected_mode))
+      (guint64) st.st_uid, (guint64) geteuid (), expected_mode))
     return WYRELOG_E_POLICY;
   if (out_device != NULL)
     *out_device = (guint64) st.st_dev;
@@ -330,7 +332,7 @@ validate_regular_fd (gint fd, mode_t expected_mode, guint64 *out_device,
     return WYRELOG_E_IO;
   if (!S_ISREG (st.st_mode) || st.st_nlink != 1
       || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) st.st_mode,
-          (guint64) st.st_uid, (guint64) geteuid (), expected_mode))
+      (guint64) st.st_uid, (guint64) geteuid (), expected_mode))
     return WYRELOG_E_POLICY;
   if (out_device != NULL)
     *out_device = (guint64) st.st_dev;
@@ -346,10 +348,10 @@ stat_matches (const struct stat *st, guint64 device, guint64 inode,
     gboolean directory, mode_t expected_mode)
 {
   return ((directory && S_ISDIR (st->st_mode))
-      || (!directory && S_ISREG (st->st_mode)))
-      && wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) st->st_mode,
-      (guint64) st->st_uid, (guint64) geteuid (), expected_mode)
-      && (guint64) st->st_dev == device && (guint64) st->st_ino == inode;
+         || (!directory && S_ISREG (st->st_mode)))
+         && wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) st->st_mode,
+             (guint64) st->st_uid, (guint64) geteuid (), expected_mode)
+         && (guint64) st->st_dev == device && (guint64) st->st_ino == inode;
 }
 
 static wyrelog_error_t
@@ -359,11 +361,11 @@ validate_fd_exact (gint fd, gboolean directory, mode_t expected_mode,
   guint64 current_device = 0;
   guint64 current_inode = 0;
   wyrelog_error_t rc = validate_fd (fd, directory, expected_mode,
-      &current_device, &current_inode);
+          &current_device, &current_inode);
   if (rc != WYRELOG_E_OK)
     return rc;
   return current_device == device && current_inode == inode ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
+         WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t validate_name_length (gint parent_fd,
@@ -396,7 +398,7 @@ open_relative_regular_at (gint root_fd, const gchar *relative_path,
     if (rc != WYRELOG_E_OK)
       break;
     gint next = openat (current, components[i],
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (next < 0) {
       rc = errno_to_resolver_error (errno);
       break;
@@ -415,12 +417,12 @@ open_relative_regular_at (gint root_fd, const gchar *relative_path,
         rc = errno_to_resolver_error (errno);
       else if (!S_ISREG (before.st_mode) || before.st_nlink != 1
           || !wyl_fact_graph_owner_mode_is_secure_for_test (
-              (guint32) before.st_mode, (guint64) before.st_uid,
-              (guint64) geteuid (), 0600))
+            (guint32) before.st_mode, (guint64) before.st_uid,
+            (guint64) geteuid (), 0600))
         rc = WYRELOG_E_POLICY;
       else {
         gint fd = openat (current, basename,
-            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (fd < 0)
           rc = errno_to_resolver_error (errno);
         else {
@@ -431,9 +433,9 @@ open_relative_regular_at (gint root_fd, const gchar *relative_path,
           struct stat after;
           if (rc == WYRELOG_E_OK
               && (fstatat (current, basename, &after, AT_SYMLINK_NOFOLLOW) != 0
-                  || !stat_matches (&before, device, inode, FALSE, 0600)
-                  || !stat_matches (&after, device, inode, FALSE, 0600)
-                  || (guint64) before.st_size != size_bytes))
+              || !stat_matches (&before, device, inode, FALSE, 0600)
+              || !stat_matches (&after, device, inode, FALSE, 0600)
+              || (guint64) before.st_size != size_bytes))
             rc = WYRELOG_E_POLICY;
           if (rc == WYRELOG_E_OK) {
             out_file->fd = fd;
@@ -460,7 +462,7 @@ open_absolute_directory (const gchar *path, gint *out_fd)
     return WYRELOG_E_INVALID;
 
   gint current = open (G_DIR_SEPARATOR_S,
-      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (current < 0)
     return WYRELOG_E_IO;
   g_auto (GStrv) components = g_strsplit (path, G_DIR_SEPARATOR_S, -1);
@@ -472,7 +474,7 @@ open_absolute_directory (const gchar *path, gint *out_fd)
       return WYRELOG_E_INVALID;
     }
     gint next = openat (current, components[i],
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (next < 0) {
       wyrelog_error_t rc = errno_to_resolver_error (errno);
       close (current);
@@ -521,7 +523,7 @@ wyl_fact_graph_resolver_open (const gchar *fact_root,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = validate_fd (fd, TRUE, 0700, &out_resolver->device,
-      &out_resolver->inode);
+          &out_resolver->inode);
   if (rc != WYRELOG_E_OK) {
     close (fd);
     return rc;
@@ -541,10 +543,10 @@ wyl_fact_graph_resolver_revalidate (WylFactGraphResolver *resolver)
   if (resolver == NULL || resolver->fd < 0 || resolver->path == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = validate_fd_exact (resolver->fd, TRUE, 0700,
-      resolver->device, resolver->inode);
+          resolver->device, resolver->inode);
   if (rc == WYRELOG_E_OK)
     rc = resolver_revalidate (resolver->path, resolver->device,
-        resolver->inode, NULL);
+            resolver->inode, NULL);
   return rc;
 }
 
@@ -580,7 +582,7 @@ wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile *file)
 }
 
 void wyl_fact_graph_resolver_set_checkpoint_for_test
-    (WylFactGraphResolver * resolver,
+  (WylFactGraphResolver * resolver,
     wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data),
     gpointer user_data)
 {
@@ -611,14 +613,14 @@ open_or_create_dir (gint parent_fd, const gchar *name, gboolean create,
   if (rc != WYRELOG_E_OK)
     return rc;
   gint fd = openat (parent_fd, name,
-      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0 && errno == ENOENT && create) {
     if (mkdirat (parent_fd, name, 0700) != 0 && errno != EEXIST)
       return errno_to_resolver_error (errno);
     if (fsync (parent_fd) != 0)
       return WYRELOG_E_IO;
     fd = openat (parent_fd, name,
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   }
   if (fd < 0)
     return errno_to_resolver_error (errno);
@@ -660,7 +662,7 @@ wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
 
   gint current_root = -1;
   wyrelog_error_t rc = resolver_revalidate (resolver->path, resolver->device,
-      resolver->inode, &current_root);
+          resolver->inode, &current_root);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (resolver->checkpoint != NULL) {
@@ -671,7 +673,7 @@ wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
     }
   }
   rc = resolver_revalidate (resolver->path, resolver->device,
-      resolver->inode, NULL);
+          resolver->inode, NULL);
   if (rc != WYRELOG_E_OK) {
     close (current_root);
     return rc;
@@ -680,8 +682,8 @@ wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
   guint64 tenant_device = 0;
   guint64 tenant_inode = 0;
   rc = open_or_create_dir (current_root, locator->tenant_component, create,
-      &tenant_fd, &tenant_device, &tenant_inode, resolver->checkpoint,
-      resolver->checkpoint_data, "tenant-opened");
+          &tenant_fd, &tenant_device, &tenant_inode, resolver->checkpoint,
+          resolver->checkpoint_data, "tenant-opened");
   if (rc != WYRELOG_E_OK) {
     close (current_root);
     return rc;
@@ -690,8 +692,8 @@ wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
   guint64 graph_device = 0;
   guint64 graph_inode = 0;
   rc = open_or_create_dir (tenant_fd, locator->graph_component, create,
-      &graph_fd, &graph_device, &graph_inode, resolver->checkpoint,
-      resolver->checkpoint_data, "graph-opened");
+          &graph_fd, &graph_device, &graph_inode, resolver->checkpoint,
+          resolver->checkpoint_data, "graph-opened");
   if (rc != WYRELOG_E_OK) {
     close (tenant_fd);
     close (current_root);
@@ -770,29 +772,29 @@ directory_revalidate (WylFactGraphDirectory *directory)
       || directory->graph_fd < 0)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = resolver_revalidate (directory->root_path,
-      directory->root_device, directory->root_inode, NULL);
+          directory->root_device, directory->root_inode, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = validate_fd_exact (directory->root_fd, TRUE, 0700,
-      directory->root_device, directory->root_inode);
+          directory->root_device, directory->root_inode);
   if (rc == WYRELOG_E_OK)
     rc = validate_fd_exact (directory->tenant_fd, TRUE, 0700,
-        directory->tenant_device, directory->tenant_inode);
+            directory->tenant_device, directory->tenant_inode);
   if (rc == WYRELOG_E_OK)
     rc = validate_fd_exact (directory->graph_fd, TRUE, 0700,
-        directory->graph_device, directory->graph_inode);
+            directory->graph_device, directory->graph_inode);
   if (rc != WYRELOG_E_OK)
     return rc;
   struct stat named;
   if (fstatat (directory->root_fd, directory->tenant_component, &named,
-          AT_SYMLINK_NOFOLLOW) != 0
+      AT_SYMLINK_NOFOLLOW) != 0
       || !stat_matches (&named, directory->tenant_device,
-          directory->tenant_inode, TRUE, 0700))
+      directory->tenant_inode, TRUE, 0700))
     return WYRELOG_E_POLICY;
   if (fstatat (directory->tenant_fd, directory->graph_component, &named,
-          AT_SYMLINK_NOFOLLOW) != 0
+      AT_SYMLINK_NOFOLLOW) != 0
       || !stat_matches (&named, directory->graph_device,
-          directory->graph_inode, TRUE, 0700))
+      directory->graph_inode, TRUE, 0700))
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
@@ -804,7 +806,7 @@ wyl_fact_graph_directory_descriptive_path (const WylFactGraphDirectory
   if (directory == NULL || directory->root_path == NULL)
     return NULL;
   return g_build_filename (directory->root_path, directory->tenant_component,
-      directory->graph_component, NULL);
+             directory->graph_component, NULL);
 }
 
 gchar *
@@ -834,12 +836,12 @@ wyl_fact_graph_directory_open_file (WylFactGraphDirectory *directory,
 
   struct stat before;
   if (fstatat (directory->graph_fd, basename, &before,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
   if (!S_ISREG (before.st_mode) || before.st_nlink != 1)
     return WYRELOG_E_POLICY;
   gint fd = openat (directory->graph_fd, basename,
-      (writable ? O_RDWR : O_RDONLY) | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+          (writable ? O_RDWR : O_RDONLY) | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0)
     return errno_to_resolver_error (errno);
   if (directory->checkpoint != NULL) {
@@ -855,9 +857,9 @@ wyl_fact_graph_directory_open_file (WylFactGraphDirectory *directory,
   struct stat after;
   if (rc == WYRELOG_E_OK
       && (fstatat (directory->graph_fd, basename, &after,
-              AT_SYMLINK_NOFOLLOW) != 0
-          || !stat_matches (&before, device, inode, FALSE, 0600)
-          || !stat_matches (&after, device, inode, FALSE, 0600)))
+      AT_SYMLINK_NOFOLLOW) != 0
+      || !stat_matches (&before, device, inode, FALSE, 0600)
+      || !stat_matches (&after, device, inode, FALSE, 0600)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
@@ -882,13 +884,13 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
     return rc;
   struct stat before;
   if (fstatat (directory->graph_fd, basename, &before,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
   if (!S_ISREG (before.st_mode) || before.st_uid != geteuid ()
       || before.st_nlink != 1)
     return WYRELOG_E_POLICY;
   gint fd = openat (directory->graph_fd, basename,
-      O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+          O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0)
     return errno_to_resolver_error (errno);
   struct stat opened;
@@ -901,7 +903,7 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   else if (fchmod (fd, 0600) != 0 || fsync (fd) != 0)
     rc = WYRELOG_E_IO;
   else if (fstatat (directory->graph_fd, basename, &after,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     rc = errno == ENOENT ? WYRELOG_E_POLICY : errno_to_resolver_error (errno);
   else if (after.st_dev != opened.st_dev || after.st_ino != opened.st_ino)
     rc = WYRELOG_E_POLICY;
@@ -914,6 +916,116 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
     rc = directory_revalidate (directory);
   return rc;
 }
+
+#ifdef __APPLE__
+static wyrelog_error_t
+darwin_final_name_revalidate (WylFactGraphDirectory *directory, gint fd,
+    guint64 device, guint64 inode)
+{
+  struct stat named;
+  struct stat held;
+  if (fstatat (directory->graph_fd, "facts.duckdb", &named,
+      AT_SYMLINK_NOFOLLOW) != 0)
+    return errno_to_resolver_error (errno);
+  if (fstat (fd, &held) != 0)
+    return WYRELOG_E_IO;
+  if (!stat_matches (&named, device, inode, FALSE, 0600)
+      || !stat_matches (&held, device, inode, FALSE, 0600)
+      || named.st_nlink != 1 || held.st_nlink != 1)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_create_darwin_provisioned_final (
+  WylFactGraphDirectory *directory, const gchar *operation_uuid,
+  WylFactGraphDarwinOperationEvidence *out_evidence,
+  WylFactGraphRegularFile *out_final)
+{
+  if (out_evidence != NULL)
+    memset (out_evidence, 0, sizeof *out_evidence);
+  if (out_final != NULL)
+    *out_final = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  if (directory == NULL || out_evidence == NULL || out_final == NULL
+      || !wyl_fact_graph_darwin_operation_uuid_is_valid (operation_uuid))
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *stage_basename = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+          &stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_volume_preflight (directory->graph_fd);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, "facts.duckdb");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  struct stat legacy_stage;
+  if (fstatat (directory->graph_fd, stage_basename, &legacy_stage,
+      AT_SYMLINK_NOFOLLOW) == 0)
+    return WYRELOG_E_POLICY;
+  if (errno != ENOENT)
+    return errno_to_resolver_error (errno);
+
+  gint fd = openat (directory->graph_fd, "facts.duckdb",
+          O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return errno == EEXIST ? WYRELOG_E_BUSY : errno_to_resolver_error (errno);
+
+  guint64 device = 0;
+  guint64 inode = 0;
+  guint64 size = 0;
+  rc = validate_regular_fd (fd, 0600, &device, &inode, &size);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("darwin-final-created",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK && fsync (fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("darwin-final-synced",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_capture (directory->graph_fd, fd,
+            operation_uuid, out_evidence);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("darwin-evidence-captured",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_final_name_revalidate (directory, fd, device, inode);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_compare (directory->graph_fd, fd,
+            operation_uuid, out_evidence);
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("darwin-directory-synced",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_final_name_revalidate (directory, fd, device, inode);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_compare (directory->graph_fd, fd,
+            operation_uuid, out_evidence);
+  if (rc != WYRELOG_E_OK) {
+    close (fd);
+    memset (out_evidence, 0, sizeof *out_evidence);
+    return rc;
+  }
+
+  out_final->fd = fd;
+  out_final->device = device;
+  out_final->inode = inode;
+  out_final->size_bytes = size;
+  return WYRELOG_E_OK;
+}
+#endif
 
 wyrelog_error_t
 wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
@@ -930,7 +1042,7 @@ wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
 
   g_autofree gchar *uuid = g_uuid_string_random ();
   g_autofree gchar *stage = g_strdup_printf (".%s.stage-%s",
-      final_basename, uuid);
+          final_basename, uuid);
   if (rc == WYRELOG_E_OK)
     rc = validate_name_length (directory->graph_fd, final_basename);
   if (rc == WYRELOG_E_OK)
@@ -938,7 +1050,7 @@ wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
   if (rc != WYRELOG_E_OK)
     return rc;
   gint fd = openat (directory->graph_fd, stage,
-      O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+          O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0)
     return errno_to_resolver_error (errno);
   rc = validate_fd (fd, FALSE, 0600, &out_stage->device, &out_stage->inode);
@@ -966,7 +1078,7 @@ stage_names_validate (WylFactGraphDirectory *directory,
     const gchar *stage_basename, const gchar *final_basename)
 {
   if (directory == NULL || !provisioning_stage_name_is_canonical
-      (stage_basename) || !name_is_safe (final_basename)
+        (stage_basename) || !name_is_safe (final_basename)
       || g_strcmp0 (stage_basename, final_basename) == 0)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = directory_revalidate (directory);
@@ -987,18 +1099,18 @@ stage_populate_exact (WylFactGraphDirectory *directory, gint fd,
   wyrelog_error_t rc = validate_fd (fd, FALSE, 0600, &device, &inode);
   struct stat named;
   if (rc == WYRELOG_E_OK && (fstat (fd, &named) != 0
-          || (named.st_nlink != 1 && (!allow_published_link
-                  || named.st_nlink != 2))))
+      || (named.st_nlink != 1 && (!allow_published_link
+      || named.st_nlink != 2))))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK
       && (fstatat (directory->graph_fd, stage_basename, &named,
-              AT_SYMLINK_NOFOLLOW) != 0
-          || !stat_matches (&named, device, inode, FALSE, 0600)))
+      AT_SYMLINK_NOFOLLOW) != 0
+      || !stat_matches (&named, device, inode, FALSE, 0600)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && named.st_nlink == 2
       && (fstatat (directory->graph_fd, final_basename, &named,
-              AT_SYMLINK_NOFOLLOW) != 0
-          || !stat_matches (&named, device, inode, FALSE, 0600)))
+      AT_SYMLINK_NOFOLLOW) != 0
+      || !stat_matches (&named, device, inode, FALSE, 0600)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
@@ -1030,24 +1142,24 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
   g_autofree gchar *stage_basename = NULL;
   const gchar *final_basename = "facts.duckdb";
   wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
-      &stage_basename);
+          &stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = stage_names_validate (directory, stage_basename, final_basename);
   if (rc != WYRELOG_E_OK)
     return rc;
   gint fd = openat (directory->graph_fd, stage_basename,
-      O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+          O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0)
     return errno == EEXIST ? WYRELOG_E_BUSY : errno_to_resolver_error (errno);
   rc = stage_populate_exact (directory, fd, stage_basename, final_basename,
-      FALSE, out_stage);
+          FALSE, out_stage);
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-created", directory->checkpoint_data);
   if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-create-parent-synced",
-        directory->checkpoint_data);
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   if (rc == WYRELOG_E_OK)
@@ -1071,27 +1183,27 @@ wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
   g_autofree gchar *stage_basename = NULL;
   const gchar *final_basename = "facts.duckdb";
   wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
-      &stage_basename);
+          &stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = stage_names_validate (directory, stage_basename, final_basename);
   if (rc != WYRELOG_E_OK)
     return rc;
   struct stat before;
   if (fstatat (directory->graph_fd, stage_basename, &before,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
   if (!S_ISREG (before.st_mode) || (before.st_nlink != 1
-          && before.st_nlink != 2))
+      && before.st_nlink != 2))
     return WYRELOG_E_POLICY;
   gint fd = openat (directory->graph_fd, stage_basename,
-      O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+          O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0)
     return errno_to_resolver_error (errno);
   if (directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-opened", directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = stage_populate_exact (directory, fd, stage_basename, final_basename,
-        TRUE, out_stage);
+            TRUE, out_stage);
   if (rc != WYRELOG_E_OK)
     close (fd);
   return rc;
@@ -1105,17 +1217,17 @@ provisioned_pair_stat (WylFactGraphDirectory *directory,
   struct stat stage;
   struct stat final;
   if (fstatat (directory->graph_fd, stage_basename, &stage,
-          AT_SYMLINK_NOFOLLOW) != 0
+      AT_SYMLINK_NOFOLLOW) != 0
       || fstatat (directory->graph_fd, final_basename, &final,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     return errno ==
-        ENOENT ? WYRELOG_E_NOT_FOUND : errno_to_resolver_error (errno);
+           ENOENT ? WYRELOG_E_NOT_FOUND : errno_to_resolver_error (errno);
   if (!S_ISREG (stage.st_mode) || !S_ISREG (final.st_mode)
       || stage.st_nlink != 2 || final.st_nlink != 2
       || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) stage.st_mode,
-          (guint64) stage.st_uid, (guint64) geteuid (), 0600)
+      (guint64) stage.st_uid, (guint64) geteuid (), 0600)
       || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) final.st_mode,
-          (guint64) final.st_uid, (guint64) geteuid (), 0600)
+      (guint64) final.st_uid, (guint64) geteuid (), 0600)
       || stage.st_dev != final.st_dev || stage.st_ino != final.st_ino)
     return WYRELOG_E_POLICY;
   if (out_final != NULL)
@@ -1129,19 +1241,19 @@ provisioned_final_revalidate (WylFactGraphDirectory *directory,
 {
   struct stat final;
   if (fstatat (directory->graph_fd, final_basename, &final,
-          AT_SYMLINK_NOFOLLOW) != 0)
+      AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
   if (!S_ISREG (final.st_mode) || final.st_nlink != 2
       || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) final.st_mode,
-          (guint64) final.st_uid, (guint64) geteuid (), 0600)
+      (guint64) final.st_uid, (guint64) geteuid (), 0600)
       || final.st_dev != (dev_t) device || final.st_ino != (ino_t) inode)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-    wyl_fact_graph_directory_open_provisioned_final_exact
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+wyl_fact_graph_directory_open_provisioned_final_exact
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphRegularFile * out_final)
 {
   if (out_final != NULL)
@@ -1151,37 +1263,37 @@ wyrelog_error_t
   g_autofree gchar *stage_basename = NULL;
   const gchar *final_basename = "facts.duckdb";
   wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
-      &stage_basename);
+          &stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = stage_names_validate (directory, stage_basename, final_basename);
   struct stat expected;
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_stat (directory, stage_basename, final_basename,
-        &expected);
+            &expected);
   gint fd = -1;
   if (rc == WYRELOG_E_OK) {
     fd = openat (directory->graph_fd, final_basename,
-        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
       rc = errno_to_resolver_error (errno);
   }
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("provisioned-final-opened",
-        directory->checkpoint_data);
+            directory->checkpoint_data);
   guint64 device = 0;
   guint64 inode = 0;
   guint64 size = 0;
   if (rc == WYRELOG_E_OK)
     rc = validate_fd (fd, FALSE, 0600, &device, &inode);
   if (rc == WYRELOG_E_OK && (device != (guint64) expected.st_dev
-          || inode != (guint64) expected.st_ino))
+      || inode != (guint64) expected.st_ino))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_stat (directory, stage_basename, final_basename,
-        &expected);
+            &expected);
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("provisioned-final-validated",
-        directory->checkpoint_data);
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   /* Do not re-stat the stage here: a retained-stage handoff may replace its
@@ -1189,14 +1301,14 @@ wyrelog_error_t
    * the held descriptor before it is returned. */
   if (rc == WYRELOG_E_OK)
     rc = provisioned_final_revalidate (directory, final_basename, device,
-        inode);
+            inode);
   if (rc == WYRELOG_E_OK) {
     struct stat held;
     if (fstat (fd, &held) != 0)
       rc = errno_to_resolver_error (errno);
     else if (!S_ISREG (held.st_mode) || held.st_nlink != 2
         || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32)
-            held.st_mode, (guint64) held.st_uid, (guint64) geteuid (), 0600)
+        held.st_mode, (guint64) held.st_uid, (guint64) geteuid (), 0600)
         || held.st_dev != (dev_t) device || held.st_ino != (ino_t) inode)
       rc = WYRELOG_E_POLICY;
     else
@@ -1290,14 +1402,14 @@ provisioned_pair_fd_revalidate (WylFactGraphProvisionedPair *pair, gint fd,
 }
 
 wyrelog_error_t
-    wyl_fact_graph_provisioned_pair_revalidate
-    (WylFactGraphProvisionedPair * pair) {
+wyl_fact_graph_provisioned_pair_revalidate
+  (WylFactGraphProvisionedPair * pair) {
   if (pair == NULL || pair->references <= 0 || pair->operation_uuid == NULL
       || pair->stage_basename == NULL || pair->held_final_fd < 0)
     return WYRELOG_E_INVALID;
   g_autofree gchar *derived_stage = NULL;
   wyrelog_error_t rc = provisioning_stage_name_from_operation
-      (pair->operation_uuid, &derived_stage);
+        (pair->operation_uuid, &derived_stage);
   if (rc != WYRELOG_E_OK
       || g_strcmp0 (derived_stage, pair->stage_basename) != 0)
     return WYRELOG_E_POLICY;
@@ -1309,19 +1421,19 @@ wyrelog_error_t
   struct stat named;
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_stat (&pair->directory, pair->stage_basename,
-        "facts.duckdb", &named);
+            "facts.duckdb", &named);
   if (rc == WYRELOG_E_OK
       && ((guint64) named.st_dev != pair->expected_device
-          || (guint64) named.st_ino != pair->expected_inode))
+      || (guint64) named.st_ino != pair->expected_inode))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (&pair->directory);
   if (rc == WYRELOG_E_OK)
     rc = provisioned_pair_stat (&pair->directory, pair->stage_basename,
-        "facts.duckdb", &named);
+            "facts.duckdb", &named);
   if (rc == WYRELOG_E_OK
       && ((guint64) named.st_dev != pair->expected_device
-          || (guint64) named.st_ino != pair->expected_inode))
+      || (guint64) named.st_ino != pair->expected_inode))
     rc = WYRELOG_E_POLICY;
   return rc;
 }
@@ -1350,8 +1462,8 @@ wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair *pair)
 }
 
 wyrelog_error_t
-    wyl_fact_graph_directory_open_provisioned_pair_exact
-    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+wyl_fact_graph_directory_open_provisioned_pair_exact
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphProvisionedPair ** out_pair)
 {
   if (out_pair != NULL)
@@ -1363,7 +1475,7 @@ wyrelog_error_t
       (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
   wyrelog_error_t rc =
       wyl_fact_graph_directory_open_provisioned_final_exact (directory,
-      operation_uuid, &held);
+          operation_uuid, &held);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1383,7 +1495,7 @@ wyrelog_error_t
   pair->expected_owner = (guint64) geteuid ();
   pair->operation_uuid = try_strdup (operation_uuid);
   rc = provisioning_stage_name_from_operation (operation_uuid,
-      &pair->stage_basename);
+          &pair->stage_basename);
   if (pair->operation_uuid == NULL)
     rc = WYRELOG_E_NOMEM;
   if (rc == WYRELOG_E_OK)
@@ -1392,18 +1504,18 @@ wyrelog_error_t
     rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("provisioned-pair-pre-writable-open",
-        directory->checkpoint_data);
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
   if (rc == WYRELOG_E_OK) {
     pair->writable_final_fd = openat (pair->directory.graph_fd,
-        "facts.duckdb", O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+            "facts.duckdb", O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (pair->writable_final_fd < 0)
       rc = errno_to_resolver_error (errno);
   }
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("provisioned-pair-post-writable-open",
-        directory->checkpoint_data);
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
   if (rc != WYRELOG_E_OK) {
@@ -1429,9 +1541,9 @@ static gboolean
 stage_is_bound (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
 {
   return stage != NULL && stage->fd >= 0 && name_is_safe (stage->stage_basename)
-      && name_is_safe (stage->final_basename)
-      && stage->graph_device == directory->graph_device
-      && stage->graph_inode == directory->graph_inode;
+         && name_is_safe (stage->final_basename)
+         && stage->graph_device == directory->graph_device
+         && stage->graph_inode == directory->graph_inode;
 }
 
 static wyrelog_error_t
@@ -1480,7 +1592,7 @@ link_held_stage_no_overwrite (WylFactGraphDirectory *directory,
   if (source == NULL)
     return WYRELOG_E_NOMEM;
   if (linkat (AT_FDCWD, source, directory->graph_fd, stage->final_basename,
-          AT_SYMLINK_FOLLOW) != 0) {
+      AT_SYMLINK_FOLLOW) != 0) {
     switch (errno) {
       case EEXIST:
       case EACCES:
@@ -1515,7 +1627,7 @@ exact_stage_publish (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
   gboolean final_exact = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->stage_basename, stage,
-        &stage_present, &stage_exact);
+            &stage_present, &stage_exact);
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-validated", directory->checkpoint_data);
   /* A lost stage name does not make the held descriptor unsafe, but checking
@@ -1523,10 +1635,10 @@ exact_stage_publish (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
    * mutation.  A later replacement cannot redirect the FD-based link. */
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->stage_basename, stage,
-        &stage_present, &stage_exact);
+            &stage_present, &stage_exact);
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
   if (rc == WYRELOG_E_OK && final_present && !final_exact)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && !final_present)
@@ -1535,17 +1647,17 @@ exact_stage_publish (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
     rc = directory->checkpoint ("stage-linked", directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
   if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-parent-synced",
-        directory->checkpoint_data);
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
   if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
@@ -1574,24 +1686,24 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
   gboolean final_exact = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->stage_basename, stage,
-        &stage_present, &stage_exact);
+            &stage_present, &stage_exact);
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
   if (rc == WYRELOG_E_OK && ((!stage_present && !final_present)
-          || (stage_present && !stage_exact)
-          || (final_present && !final_exact)))
+      || (stage_present && !stage_exact)
+      || (final_present && !final_exact)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && stage_exact && !final_present) {
     if (linkat (directory->graph_fd, stage->stage_basename,
-            directory->graph_fd, stage->final_basename, 0) != 0)
+        directory->graph_fd, stage->final_basename, 0) != 0)
       rc = errno_to_resolver_error (errno);
     else if (directory->checkpoint != NULL)
       rc = directory->checkpoint ("stage-linked", directory->checkpoint_data);
   }
   if (rc == WYRELOG_E_OK) {
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
     if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
       rc = WYRELOG_E_POLICY;
   }
@@ -1607,7 +1719,7 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK) {
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
     if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
       rc = WYRELOG_E_POLICY;
   }
@@ -1636,10 +1748,10 @@ wyl_fact_graph_stage_abort (WylFactGraphDirectory *directory,
   gboolean final_exact = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->stage_basename, stage,
-        &stage_present, &stage_exact);
+            &stage_present, &stage_exact);
   if (rc == WYRELOG_E_OK)
     rc = named_stage_state (directory, stage->final_basename, stage,
-        &final_present, &final_exact);
+            &final_present, &final_exact);
   if (rc == WYRELOG_E_OK && final_present)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && (!stage_present || !stage_exact))

@@ -102,6 +102,15 @@ test('posix-errno-capability-pair-self', python3,
 )
 
 if host_machine.system() != 'windows'
+  test_fact_graph_locator_darwin_evidence = executable(
+    'test-fact-graph-locator-darwin-evidence',
+    'test-fact-graph-locator-darwin-evidence.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+  test('fact-graph-locator-darwin-evidence',
+    test_fact_graph_locator_darwin_evidence)
+
   test_posix_errno_capability = executable('test-posix-errno-capability',
     'test-posix-errno-capability.c',
     include_directories : include_directories('../wyrelog'),
@@ -115,7 +124,8 @@ if host_machine.system() == 'darwin'
   test_fact_graph_locator_macos = executable(
     'test-fact-graph-locator-macos',
     'test-fact-graph-locator-macos.c',
-    dependencies : [glib_dep],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
   )
   test('fact-graph-locator-macos', test_fact_graph_locator_macos)
 endif
