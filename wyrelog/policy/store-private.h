@@ -154,6 +154,15 @@ typedef enum
 
 typedef enum
 {
+  WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_AUTOCOMMIT_CHECK,
+  WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_MUTATION_COMMIT,
+} WylPolicyDarwinEvidenceGateStage;
+
+typedef void (*WylPolicyDarwinEvidenceGateFunc)
+  (gpointer data, WylPolicyDarwinEvidenceGateStage stage);
+
+typedef enum
+{
   WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED,
   WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
   WYL_POLICY_TENANT_LIFECYCLE_SEALING,
@@ -369,6 +378,9 @@ wyrelog_error_t wyl_policy_store_graph_provisioning_set_windows_evidence
   (wyl_policy_store_t * store, const gchar * op_uuid,
     const WylFactGraphWinOperationEvidence * evidence);
 #endif
+wyrelog_error_t wyl_policy_store_graph_provisioning_set_darwin_evidence
+  (wyl_policy_store_t * store, const gchar * op_uuid,
+    GBytes * evidence, WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_graph_provisioning_list
   (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
@@ -1520,6 +1532,9 @@ void wyl_policy_store_rotation_intent_entry_gate
 void wyl_policy_store_graph_authority_mutation_fail_once
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMutationFailStage stage);
+void wyl_policy_store_darwin_evidence_gate
+  (wyl_policy_store_t * store, WylPolicyDarwinEvidenceGateFunc gate,
+    gpointer data);
 wyrelog_error_t wyl_policy_store_validate_service_schema
   (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);

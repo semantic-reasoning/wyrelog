@@ -191,6 +191,8 @@ struct wyl_policy_store_t
   WylPolicyStoreRotationIntentEntryGateFunc rotation_intent_entry_gate;
   gpointer rotation_intent_entry_gate_data;
   WylPolicyGraphAuthorityMutationFailStage mutation_fail_once;
+  WylPolicyDarwinEvidenceGateFunc darwin_evidence_gate;
+  gpointer darwin_evidence_gate_data;
 #ifdef WYL_TEST_HANDLE_SEAMS
   WylPolicySnapshotFinishFailStage snapshot_finish_fail_once;
 #endif
@@ -11336,6 +11338,16 @@ wyl_policy_store_graph_authority_mutation_fail_once (wyl_policy_store_t *store,
   store->mutation_fail_once = stage;
 }
 
+void
+wyl_policy_store_darwin_evidence_gate (wyl_policy_store_t *store,
+    WylPolicyDarwinEvidenceGateFunc gate, gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->darwin_evidence_gate = gate;
+  store->darwin_evidence_gate_data = data;
+}
+
 static wyrelog_error_t
 migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
 {
@@ -15640,6 +15652,132 @@ wyl_policy_store_graph_provisioning_set_windows_evidence (wyl_policy_store_t *st
   return rc;
 }
 #endif
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_set_darwin_evidence (
+  wyl_policy_store_t *store, const gchar *op_uuid, GBytes *evidence,
+  WylPolicyAuthorityMutationResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  gsize evidence_len = 0;
+  const guint8 *evidence_bytes = evidence != NULL ?
+      g_bytes_get_data (evidence, &evidence_len) : NULL;
+  if (store == NULL || store->db == NULL || op_uuid == NULL
+      || evidence_bytes == NULL
+      || evidence_len != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE
+      || out_result == NULL
+      || !graph_provisioning_uuid_is_canonical (op_uuid))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_mutex *connection_mutex = sqlite3_db_mutex (store->db);
+  if (connection_mutex == NULL) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_INTERNAL;
+  }
+  sqlite3_mutex_enter (connection_mutex);
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK) {
+    sqlite3_mutex_leave (connection_mutex);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return terminal;
+  }
+  if (sqlite3_get_autocommit (store->db) == 0) {
+    sqlite3_mutex_leave (connection_mutex);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  if (store->darwin_evidence_gate != NULL)
+    store->darwin_evidence_gate (store->darwin_evidence_gate_data,
+        WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_AUTOCOMMIT_CHECK);
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_graph_provisioning SET darwin_operation_evidence=? "
+            "WHERE op_uuid=? AND phase='reserved' "
+            "AND darwin_operation_evidence IS NULL "
+            "AND windows_operation_evidence_version IS NULL "
+            "AND windows_graph_volume_serial IS NULL "
+            "AND windows_graph_file_id IS NULL "
+            "AND windows_artifact_volume_serial IS NULL "
+            "AND windows_artifact_file_id IS NULL;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_blob (stmt, 1, evidence_bytes, (gint) evidence_len,
+      SQLITE_TRANSIENT) != SQLITE_OK
+      || bind_text (stmt, 2, op_uuid) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  gboolean applied = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, FALSE, &applied);
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  if (rc == WYRELOG_E_OK && applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = prepare_stmt (store->db,
+            "SELECT phase,windows_operation_evidence_version,"
+            "windows_graph_volume_serial,windows_graph_file_id,"
+            "windows_artifact_volume_serial,windows_artifact_file_id,"
+            "darwin_operation_evidence FROM fact_graph_provisioning "
+            "WHERE op_uuid=?;", &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, op_uuid);
+    int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+    if (rc == WYRELOG_E_OK && step == SQLITE_DONE) {
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+      rc = WYRELOG_E_POLICY;
+    } else if (rc == WYRELOG_E_OK && step != SQLITE_ROW) {
+      rc = WYRELOG_E_IO;
+    } else if (rc == WYRELOG_E_OK) {
+      gboolean windows_absent = TRUE;
+      for (gint i = 1; i <= 5; i++)
+        windows_absent = windows_absent
+            && sqlite3_column_type (stmt, i) == SQLITE_NULL;
+      const gchar *phase = (const gchar *) sqlite3_column_text (stmt, 0);
+      gboolean phase_has_evidence_authority =
+          g_strcmp0 (phase, "reserved") == 0
+          || g_strcmp0 (phase, "staged") == 0
+          || g_strcmp0 (phase, "published") == 0
+          || g_strcmp0 (phase, "verified") == 0
+          || g_strcmp0 (phase, "active") == 0;
+      gboolean exact = phase_has_evidence_authority && windows_absent
+          && sqlite3_column_type (stmt, 6) == SQLITE_BLOB
+          && sqlite3_column_bytes (stmt, 6) == (gint) evidence_len
+          && sodium_memcmp (sqlite3_column_blob (stmt, 6), evidence_bytes,
+              evidence_len) == 0;
+      if (exact)
+        *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+      else
+        rc = WYRELOG_E_POLICY;
+    }
+    sqlite3_finalize (stmt);
+    stmt = NULL;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
+  rc = graph_authority_mutation_complete (store, &frame, rc);
+  if (rc == WYRELOG_E_OK && store->darwin_evidence_gate != NULL)
+    store->darwin_evidence_gate (store->darwin_evidence_gate_data,
+        WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_MUTATION_COMMIT);
+  if (rc == WYRELOG_E_OK && store->encrypted) {
+    gboolean publication_pin_valid = TRUE;
+    rc = persist_policy_store_encrypted_checked (store,
+            &publication_pin_valid);
+    if (rc != WYRELOG_E_OK || !publication_pin_valid) {
+      rc = rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
+      graph_provisioning_poison_store (store, rc);
+    }
+  }
+  sqlite3_mutex_leave (connection_mutex);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
 
 wyrelog_error_t
 wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,

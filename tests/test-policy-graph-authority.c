@@ -1229,6 +1229,391 @@ test_darwin_evidence_schema_is_structural_and_immutable (void)
   g_assert_nonnull (insert);
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  gboolean reached[2];
+  gboolean release[2];
+} DarwinEvidencePublicationGate;
+
+typedef struct
+{
+  wyl_policy_store_t *store;
+  const gchar *op_uuid;
+  GBytes *evidence;
+  wyrelog_error_t result;
+  WylPolicyAuthorityMutationResult mutation;
+} DarwinEvidenceSetter;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  gboolean entered;
+  gboolean begun;
+  gboolean release;
+  wyl_policy_store_t *store;
+  wyrelog_error_t result;
+} DarwinEvidenceTransactionWaiter;
+
+static void
+darwin_evidence_publication_gate (gpointer data,
+    WylPolicyDarwinEvidenceGateStage stage)
+{
+  DarwinEvidencePublicationGate *gate = data;
+  g_assert_cmpint (stage, >=,
+      WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_AUTOCOMMIT_CHECK);
+  g_assert_cmpint (stage, <=,
+      WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_MUTATION_COMMIT);
+  g_mutex_lock (&gate->mutex);
+  gate->reached[stage] = TRUE;
+  g_cond_broadcast (&gate->condition);
+  while (!gate->release[stage])
+    g_cond_wait (&gate->condition, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static gpointer
+run_darwin_evidence_setter (gpointer data)
+{
+  DarwinEvidenceSetter *setter = data;
+  setter->result = wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (setter->store, setter->op_uuid, setter->evidence, &setter->mutation);
+  return NULL;
+}
+
+static gpointer
+run_darwin_evidence_transaction_waiter (gpointer data)
+{
+  DarwinEvidenceTransactionWaiter *waiter = data;
+  g_mutex_lock (&waiter->mutex);
+  waiter->entered = TRUE;
+  g_cond_broadcast (&waiter->condition);
+  g_mutex_unlock (&waiter->mutex);
+
+  waiter->result = wyl_policy_store_begin_mutation (waiter->store);
+  if (waiter->result == WYRELOG_E_OK)
+    exec_ok (wyl_policy_store_get_db (waiter->store),
+        "CREATE TABLE darwin_racing_uncommitted(value INTEGER);");
+  g_mutex_lock (&waiter->mutex);
+  waiter->begun = TRUE;
+  g_cond_broadcast (&waiter->condition);
+  while (!waiter->release)
+    g_cond_wait (&waiter->condition, &waiter->mutex);
+  g_mutex_unlock (&waiter->mutex);
+  if (waiter->result == WYRELOG_E_OK)
+    wyl_policy_store_rollback_mutation (waiter->store);
+  return NULL;
+}
+
+static void
+test_darwin_evidence_policy_persistence (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_autofree gchar *op_uuid = prepare_evidence_test_operation (store, db,
+          "darwin-persist", "01890f47-3c4b-7cc2-b8c4-dc0c0c079211");
+  guint8 bytes[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE];
+  memset (bytes, 0xa5, sizeof bytes);
+  g_autoptr (GBytes) evidence = g_bytes_new (bytes, sizeof bytes);
+  WylPolicyAuthorityMutationResult mutation;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, op_uuid, evidence, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, op_uuid, evidence, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==,
+      WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+
+  guint8 foreign_bytes[sizeof bytes];
+  memcpy (foreign_bytes, bytes, sizeof bytes);
+  foreign_bytes[0] ^= 1;
+  g_autoptr (GBytes) foreign = g_bytes_new (foreign_bytes,
+          sizeof foreign_bytes);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, op_uuid, foreign, &mutation), ==, WYRELOG_E_POLICY);
+  const WylPolicyGraphProvisioningPhase advanced_phases[] = {
+    WYL_POLICY_GRAPH_PROVISIONING_RESERVED,
+    WYL_POLICY_GRAPH_PROVISIONING_STAGED,
+    WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED,
+    WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
+    WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+  };
+  for (gsize i = 0; i + 1 < G_N_ELEMENTS (advanced_phases); i++) {
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+        op_uuid, advanced_phases[i], advanced_phases[i + 1], 0,
+        WYL_POLICY_GRAPH_ERROR_NONE, &mutation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+          (store, op_uuid, evidence, &mutation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (mutation, ==,
+        WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+  }
+  g_autoptr (GBytes) short_evidence = g_bytes_new (bytes, sizeof bytes - 1);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, op_uuid, short_evidence, &mutation), ==, WYRELOG_E_INVALID);
+
+  g_autofree gchar *outer_transaction_op = prepare_evidence_test_operation
+        (store, db, "darwin-outer-transaction",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c079218");
+  exec_ok (db, "BEGIN;");
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, outer_transaction_op, evidence, &mutation), ==,
+      WYRELOG_E_BUSY);
+  exec_ok (db, "ROLLBACK;");
+
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+      &record), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (record->darwin_operation_evidence, evidence));
+  wyl_policy_graph_provisioning_record_free (record);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+      &record), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (record->darwin_operation_evidence, evidence));
+  wyl_policy_graph_provisioning_record_free (record);
+
+  db = wyl_policy_store_get_db (store);
+  g_autofree gchar *rollback_op = prepare_evidence_test_operation (store, db,
+          "darwin-rollback", "01890f47-3c4b-7cc2-b8c4-dc0c0c079212");
+  wyl_policy_store_graph_authority_mutation_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, rollback_op, evidence, &mutation), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
+      rollback_op, &record), ==, WYRELOG_E_OK);
+  g_assert_null (record->darwin_operation_evidence);
+  wyl_policy_graph_provisioning_record_free (record);
+
+  g_autofree gchar *finish_rollback_op = prepare_evidence_test_operation
+        (store, db, "darwin-finish-rollback",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c079215");
+  wyl_policy_store_graph_authority_mutation_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, finish_rollback_op, evidence, &mutation), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
+      finish_rollback_op, &record), ==, WYRELOG_E_OK);
+  g_assert_null (record->darwin_operation_evidence);
+  wyl_policy_graph_provisioning_record_free (record);
+
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+      rollback_op, WYL_POLICY_GRAPH_PROVISIONING_RESERVED,
+      WYL_POLICY_GRAPH_PROVISIONING_STAGED, 0, WYL_POLICY_GRAPH_ERROR_NONE,
+      &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, rollback_op, evidence, &mutation), ==, WYRELOG_E_POLICY);
+
+  g_autofree gchar *windows_op = prepare_evidence_test_operation (store, db,
+          "darwin-windows-exclusion",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c079213");
+  g_autofree gchar *windows_sql = g_strdup_printf (
+    "UPDATE fact_graph_provisioning SET "
+    "windows_operation_evidence_version=1,windows_graph_volume_serial=1,"
+    "windows_graph_file_id=x'00000000000000000000000000000001',"
+    "windows_artifact_volume_serial=1,"
+    "windows_artifact_file_id=x'00000000000000000000000000000002' "
+    "WHERE op_uuid='%s';", windows_op);
+  exec_ok (db, windows_sql);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, windows_op, evidence, &mutation), ==, WYRELOG_E_POLICY);
+
+  g_autofree gchar *degraded_op = prepare_evidence_test_operation (store, db,
+          "darwin-degraded", "01890f47-3c4b-7cc2-b8c4-dc0c0c079220");
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, degraded_op, evidence, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+      degraded_op, WYL_POLICY_GRAPH_PROVISIONING_RESERVED,
+      WYL_POLICY_GRAPH_PROVISIONING_DEGRADED, 0, WYL_POLICY_GRAPH_ERROR_OPEN,
+      &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (store, degraded_op, evidence, &mutation), ==, WYRELOG_E_POLICY);
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static void
+test_darwin_evidence_encrypted_immediate_publication (void)
+{
+  static const gchar env_path[] = "WYL_TEST_DARWIN_EVIDENCE_STORE";
+  static const gchar env_key[] = "WYL_TEST_DARWIN_EVIDENCE_KEY";
+  static const gchar env_operation[] = "WYL_TEST_DARWIN_EVIDENCE_OPERATION";
+  static const gchar env_outer[] =
+      "WYL_TEST_DARWIN_EVIDENCE_OUTER_TRANSACTION";
+  guint8 bytes[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE];
+  memset (bytes, 0x5a, sizeof bytes);
+  if (g_test_subprocess ()) {
+    wyl_policy_store_t *store = NULL;
+    if (open_encrypted_policy_store (g_getenv (env_path), g_getenv (env_key),
+        &store) != WYRELOG_E_OK)
+      _Exit (81);
+    gboolean outer_transaction = g_getenv (env_outer) != NULL;
+    if (outer_transaction)
+      exec_ok (wyl_policy_store_get_db (store),
+          "BEGIN;CREATE TABLE darwin_uncommitted(value INTEGER);");
+    GBytes *evidence = g_bytes_new_static (bytes, sizeof bytes);
+    WylPolicyAuthorityMutationResult mutation;
+    wyrelog_error_t rc =
+        wyl_policy_store_graph_provisioning_set_darwin_evidence (store,
+            g_getenv (env_operation), evidence, &mutation);
+    g_bytes_unref (evidence);
+    _Exit (outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :
+        (rc == WYRELOG_E_OK
+        && mutation == WYL_POLICY_AUTHORITY_MUTATION_APPLIED ? 0 : 82));
+  }
+
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autofree gchar *key_path = g_build_filename (root, "policy.key", NULL);
+  g_autofree gchar *lock_path = g_strconcat (path, ".wyrelog-lock", NULL);
+  g_assert_true (write_policy_key (key_path));
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_autofree gchar *op_uuid = prepare_evidence_test_operation (store, db,
+          "darwin-encrypted", "01890f47-3c4b-7cc2-b8c4-dc0c0c079214");
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_setenv (env_path, path, TRUE);
+  g_setenv (env_key, key_path, TRUE);
+  g_setenv (env_operation, op_uuid, TRUE);
+  g_test_trap_subprocess (NULL, 10 * G_TIME_SPAN_SECOND, 0);
+  g_test_trap_assert_passed ();
+  g_unsetenv (env_path);
+  g_unsetenv (env_key);
+  g_unsetenv (env_operation);
+
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store), ==,
+      WYRELOG_E_OK);
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+      &record), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) expected = g_bytes_new_static (bytes, sizeof bytes);
+  g_assert_true (g_bytes_equal (record->darwin_operation_evidence, expected));
+  wyl_policy_graph_provisioning_record_free (record);
+  db = wyl_policy_store_get_db (store);
+  g_autofree gchar *outer_transaction_op = prepare_evidence_test_operation
+        (store, db, "darwin-encrypted-outer-transaction",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c079219");
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_setenv (env_path, path, TRUE);
+  g_setenv (env_key, key_path, TRUE);
+  g_setenv (env_operation, outer_transaction_op, TRUE);
+  g_setenv (env_outer, "1", TRUE);
+  g_test_trap_subprocess (NULL, 10 * G_TIME_SPAN_SECOND, 0);
+  g_test_trap_assert_passed ();
+  g_unsetenv (env_outer);
+  g_unsetenv (env_operation);
+  g_unsetenv (env_key);
+  g_unsetenv (env_path);
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store), ==,
+      WYRELOG_E_OK);
+  record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
+      outer_transaction_op, &record), ==, WYRELOG_E_OK);
+  g_assert_null (record->darwin_operation_evidence);
+  wyl_policy_graph_provisioning_record_free (record);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM sqlite_schema "
+      "WHERE name='darwin_uncommitted';"), ==, 0);
+
+  db = wyl_policy_store_get_db (store);
+  g_autofree gchar *racing_op = prepare_evidence_test_operation (store, db,
+          "darwin-encrypted-racing-transaction",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c079221");
+  DarwinEvidencePublicationGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.condition);
+  wyl_policy_store_darwin_evidence_gate (store,
+      darwin_evidence_publication_gate, &gate);
+  DarwinEvidenceSetter setter = {
+    .store = store,
+    .op_uuid = racing_op,
+    .evidence = expected,
+  };
+  GThread *setter_thread = g_thread_new ("darwin-evidence-setter",
+          run_darwin_evidence_setter, &setter);
+  g_mutex_lock (&gate.mutex);
+  while (!gate.reached
+      [WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_AUTOCOMMIT_CHECK])
+    g_cond_wait (&gate.condition, &gate.mutex);
+  g_mutex_unlock (&gate.mutex);
+
+  DarwinEvidenceTransactionWaiter transaction_waiter = {
+    .store = store,
+  };
+  g_mutex_init (&transaction_waiter.mutex);
+  g_cond_init (&transaction_waiter.condition);
+  GThread *transaction_thread = g_thread_new ("darwin-racing-transaction",
+          run_darwin_evidence_transaction_waiter, &transaction_waiter);
+  g_mutex_lock (&transaction_waiter.mutex);
+  while (!transaction_waiter.entered)
+    g_cond_wait (&transaction_waiter.condition,
+        &transaction_waiter.mutex);
+  g_mutex_unlock (&transaction_waiter.mutex);
+
+  g_mutex_lock (&gate.mutex);
+  gate.release[WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_AUTOCOMMIT_CHECK] = TRUE;
+  g_cond_broadcast (&gate.condition);
+  while (!gate.reached
+      [WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_MUTATION_COMMIT])
+    g_cond_wait (&gate.condition, &gate.mutex);
+  g_mutex_unlock (&gate.mutex);
+  g_mutex_lock (&transaction_waiter.mutex);
+  g_assert_false (transaction_waiter.begun);
+  g_mutex_unlock (&transaction_waiter.mutex);
+
+  g_mutex_lock (&gate.mutex);
+  gate.release[WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_MUTATION_COMMIT] = TRUE;
+  g_cond_broadcast (&gate.condition);
+  g_mutex_unlock (&gate.mutex);
+  g_thread_join (setter_thread);
+  g_assert_cmpint (setter.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (setter.mutation, ==,
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_mutex_lock (&transaction_waiter.mutex);
+  while (!transaction_waiter.begun)
+    g_cond_wait (&transaction_waiter.condition,
+        &transaction_waiter.mutex);
+  transaction_waiter.release = TRUE;
+  g_cond_broadcast (&transaction_waiter.condition);
+  g_mutex_unlock (&transaction_waiter.mutex);
+  g_thread_join (transaction_thread);
+  g_assert_cmpint (transaction_waiter.result, ==, WYRELOG_E_OK);
+  wyl_policy_store_darwin_evidence_gate (store, NULL, NULL);
+  g_cond_clear (&transaction_waiter.condition);
+  g_mutex_clear (&transaction_waiter.mutex);
+  g_cond_clear (&gate.condition);
+  g_mutex_clear (&gate.mutex);
+  g_clear_pointer (&store, wyl_policy_store_close);
+
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store), ==,
+      WYRELOG_E_OK);
+  record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, racing_op,
+      &record), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (record->darwin_operation_evidence, expected));
+  wyl_policy_graph_provisioning_record_free (record);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM sqlite_schema "
+      "WHERE name='darwin_racing_uncommitted';"), ==, 0);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  (void) g_remove (key_path);
+  (void) g_remove (lock_path);
+  cleanup_store_path (root, path);
+}
+
 static void
 open_pre_windows_fixture (wyl_policy_store_t **out_store, sqlite3 **out_db)
 {
@@ -1398,6 +1783,7 @@ typedef struct
   gboolean fact_root_entered;
   gboolean rotation_intent_entered;
   wyl_policy_store_t *store;
+  const gchar *verifier_intrusion_path;
   wyrelog_error_t migration_result;
 } ProvisioningMigrationGate;
 
@@ -1425,11 +1811,32 @@ typedef struct
   wyrelog_error_t result;
 } RotationIntentWaiter;
 
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  gboolean entered;
+  wyl_policy_store_t *store;
+  const gchar *op_uuid;
+  wyrelog_error_t result;
+} DarwinEvidenceWaiter;
+
 static void
 provisioning_migration_gate (gpointer data,
     WylPolicyGraphAuthorityMigrationFailStage stage)
 {
   ProvisioningMigrationGate *gate = data;
+  if (stage == WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER
+      && gate->verifier_intrusion_path != NULL) {
+    sqlite3 *intruder = NULL;
+    g_assert_cmpint (sqlite3_open_v2 (gate->verifier_intrusion_path,
+        &intruder, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL), ==,
+        SQLITE_OK);
+    exec_ok (intruder,
+        "CREATE TABLE verifier_intrusion(value TEXT NOT NULL);");
+    g_assert_cmpint (sqlite3_close (intruder), ==, SQLITE_OK);
+    return;
+  }
   if (stage !=
       WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_FOREIGN_KEYS_OFF)
     return;
@@ -1497,6 +1904,22 @@ run_rotation_intent_waiter (gpointer data)
             (waiter->gate->store, &waiter->status);
       break;
   }
+  return NULL;
+}
+
+static gpointer
+run_darwin_evidence_waiter (gpointer data)
+{
+  DarwinEvidenceWaiter *waiter = data;
+  g_mutex_lock (&waiter->mutex);
+  waiter->entered = TRUE;
+  g_cond_broadcast (&waiter->condition);
+  g_mutex_unlock (&waiter->mutex);
+  guint8 bytes[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE] = { 0 };
+  g_autoptr (GBytes) evidence = g_bytes_new_static (bytes, sizeof bytes);
+  WylPolicyAuthorityMutationResult mutation;
+  waiter->result = wyl_policy_store_graph_provisioning_set_darwin_evidence
+        (waiter->store, waiter->op_uuid, evidence, &mutation);
   return NULL;
 }
 
@@ -1577,6 +2000,18 @@ test_provisioning_terminal_fences_fact_root_waiter (void)
   };
   GThread *fact_root_thread = g_thread_new ("terminal-fact-root",
           run_fact_root_waiter, &waiter);
+  DarwinEvidenceWaiter darwin_waiter = {
+    .store = store,
+    .op_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c079216",
+  };
+  g_mutex_init (&darwin_waiter.mutex);
+  g_cond_init (&darwin_waiter.condition);
+  GThread *darwin_thread = g_thread_new ("terminal-darwin-evidence",
+          run_darwin_evidence_waiter, &darwin_waiter);
+  g_mutex_lock (&darwin_waiter.mutex);
+  while (!darwin_waiter.entered)
+    g_cond_wait (&darwin_waiter.condition, &darwin_waiter.mutex);
+  g_mutex_unlock (&darwin_waiter.mutex);
   g_mutex_lock (&gate.mutex);
   while (!gate.fact_root_entered)
     g_cond_wait (&gate.condition, &gate.mutex);
@@ -1586,13 +2021,17 @@ test_provisioning_terminal_fences_fact_root_waiter (void)
 
   g_thread_join (migration);
   g_thread_join (fact_root_thread);
+  g_thread_join (darwin_thread);
   g_assert_cmpint (gate.migration_result, ==, WYRELOG_E_IO);
   g_assert_cmpint (waiter.result, ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
       WYRELOG_E_IO);
+  g_assert_cmpint (darwin_waiter.result, ==, WYRELOG_E_IO);
   g_assert_cmpint (g_rmdir (fact_root), ==, 0);
   g_cond_clear (&gate.condition);
   g_mutex_clear (&gate.mutex);
+  g_cond_clear (&darwin_waiter.condition);
+  g_mutex_clear (&darwin_waiter.mutex);
 }
 
 static void
@@ -1715,21 +2154,6 @@ test_provisioning_migration_terminalizes_restore_failure (void)
 }
 
 static void
-provisioning_verifier_intrusion_gate (gpointer data,
-    WylPolicyGraphAuthorityMigrationFailStage stage)
-{
-  if (stage != WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_FRESH_VERIFIER)
-    return;
-  const gchar *path = data;
-  sqlite3 *intruder = NULL;
-  g_assert_cmpint (sqlite3_open_v2 (path, &intruder,
-      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL), ==, SQLITE_OK);
-  exec_ok (intruder,
-      "CREATE TABLE verifier_intrusion(value TEXT NOT NULL);");
-  g_assert_cmpint (sqlite3_close (intruder), ==, SQLITE_OK);
-}
-
-static void
 test_provisioning_migration_verifier_snapshot_is_exact (void)
 {
   g_autofree gchar *root = NULL;
@@ -1741,10 +2165,39 @@ test_provisioning_migration_verifier_snapshot_is_exact (void)
   install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
       fixture_pre_windows_table_sql,
       fixture_pre_windows_immutable_trigger_sql);
+  ProvisioningMigrationGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.condition);
+  gate.store = store;
+  gate.verifier_intrusion_path = path;
   wyl_policy_store_graph_authority_migration_gate (store,
-      provisioning_verifier_intrusion_gate, path);
-  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
-      WYRELOG_E_POLICY);
+      provisioning_migration_gate, &gate);
+  GThread *migration = g_thread_new ("policy-terminal-migration",
+          run_gated_provisioning_migration, &gate);
+  g_mutex_lock (&gate.mutex);
+  while (!gate.reached)
+    g_cond_wait (&gate.condition, &gate.mutex);
+  g_mutex_unlock (&gate.mutex);
+  DarwinEvidenceWaiter darwin_waiter = {
+    .store = store,
+    .op_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c079217",
+  };
+  g_mutex_init (&darwin_waiter.mutex);
+  g_cond_init (&darwin_waiter.condition);
+  GThread *darwin_thread = g_thread_new ("policy-terminal-darwin-evidence",
+          run_darwin_evidence_waiter, &darwin_waiter);
+  g_mutex_lock (&darwin_waiter.mutex);
+  while (!darwin_waiter.entered)
+    g_cond_wait (&darwin_waiter.condition, &darwin_waiter.mutex);
+  g_mutex_unlock (&darwin_waiter.mutex);
+  g_mutex_lock (&gate.mutex);
+  gate.release = TRUE;
+  g_cond_broadcast (&gate.condition);
+  g_mutex_unlock (&gate.mutex);
+  g_thread_join (migration);
+  g_thread_join (darwin_thread);
+  g_assert_cmpint (gate.migration_result, ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (darwin_waiter.result, ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
       WYRELOG_E_POLICY);
   g_assert_null (wyl_policy_store_get_db (store));
@@ -1764,6 +2217,10 @@ test_provisioning_migration_verifier_snapshot_is_exact (void)
   g_assert_cmpint (wyl_policy_store_bind_fact_root (store, fact_root), ==,
       WYRELOG_E_POLICY);
   g_clear_pointer (&store, wyl_policy_store_close);
+  g_cond_clear (&darwin_waiter.condition);
+  g_mutex_clear (&darwin_waiter.mutex);
+  g_cond_clear (&gate.condition);
+  g_mutex_clear (&gate.mutex);
 
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
@@ -4090,6 +4547,11 @@ main (int argc, char **argv)
       test_provisioning_migration_preserves_sequence_absence);
   g_test_add_func ("/policy/graph-authority/darwin-evidence-schema",
       test_darwin_evidence_schema_is_structural_and_immutable);
+  g_test_add_func ("/policy/graph-authority/darwin-evidence-persistence",
+      test_darwin_evidence_policy_persistence);
+  g_test_add_func
+    ("/policy/graph-authority/darwin-evidence-encrypted-publication",
+      test_darwin_evidence_encrypted_immediate_publication);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-preflight",
       test_provisioning_migration_preflight_is_fail_closed);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-sql-fence",
