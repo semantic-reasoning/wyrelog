@@ -4,6 +4,7 @@
 #include <glib/gstdio.h>
 
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/wyl-log-private.h"
 
 typedef struct
@@ -22,21 +23,17 @@ typedef struct
 #define PHASE_BIT(phase) (1u << (guint) (phase))
 
 static gboolean
-exec_ok (duckdb_connection conn, const gchar *sql)
+exec_ok (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  gboolean ok = duckdb_query (conn, sql, &result) == DuckDBSuccess;
-  duckdb_destroy_result (&result);
-  return ok;
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK;
 }
 
 static gint64
-count_rows (duckdb_connection conn, const gchar *sql)
+count_rows (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
-  gint64 count = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
+  gint64 count = -1;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store, sql, &count), ==,
+      WYRELOG_E_OK);
   return count;
 }
 
@@ -131,7 +128,7 @@ forget (Fixture *fixture)
 static void
 assert_pending_without_audit (Fixture *fixture)
 {
-  duckdb_connection conn = wyl_fact_store_get_connection (fixture->store);
+  wyl_fact_store_t *conn = fixture->store;
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
       ==, 1);
@@ -147,7 +144,7 @@ assert_pending_without_audit (Fixture *fixture)
 static void
 assert_connection_accepts_new_transaction (Fixture *fixture)
 {
-  duckdb_connection conn = wyl_fact_store_get_connection (fixture->store);
+  wyl_fact_store_t *conn = fixture->store;
   g_assert_true (exec_ok (conn, "SELECT 1;"));
   g_assert_true (exec_ok (conn, "BEGIN TRANSACTION;"));
   g_assert_true (exec_ok (conn, "ROLLBACK;"));
@@ -159,7 +156,7 @@ assert_reconciles (Fixture *fixture)
   wyl_fact_forget_outcome_t outcome = { 0 };
   g_assert_cmpint (wyl_fact_store_forget_reconcile (fixture->store, "tenant-a",
       "orders", NULL, NULL, &outcome), ==, WYRELOG_E_OK);
-  duckdb_connection conn = wyl_fact_store_get_connection (fixture->store);
+  wyl_fact_store_t *conn = fixture->store;
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';"),
       ==, 1);
@@ -272,10 +269,7 @@ test_rollback_failure_is_reported (Fixture *fixture, gconstpointer user_data)
   g_assert_null (g_strstr_len (contents, -1, "transaction-boundary-test"));
 
   wyl_fact_store_set_forget_transaction_test_hook (fixture->store, NULL, NULL);
-  wyl_fact_store_lock (fixture->store);
-  duckdb_connection conn = wyl_fact_store_get_connection (fixture->store);
-  g_assert_true (exec_ok (conn, "ROLLBACK;"));
-  wyl_fact_store_unlock (fixture->store);
+  g_assert_true (exec_ok (fixture->store, "ROLLBACK;"));
   assert_pending_without_audit (fixture);
   assert_reconciles (fixture);
 

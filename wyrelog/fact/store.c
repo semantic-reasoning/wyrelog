@@ -9,6 +9,14 @@
 #include "store-identity-private.h"
 #include "wyrelog/wyl-log-private.h"
 
+#define WYL_FACT_STORE_CONNECTION_ROLE 1
+#include "store-connection-private.h"
+#undef WYL_FACT_STORE_CONNECTION_ROLE
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+#include "store-test-seams-private.h"
+#endif
+
 /* Opaque even in non-secure builds so the store handle can carry the live
  * provisioned-pair bridge as a plain pointer (NULL everywhere but the secure
  * provisioned open). */
@@ -842,30 +850,121 @@ wyl_fact_store_close (wyl_fact_store_t *store)
   g_free (store);
 }
 
+wyrelog_error_t
+wyl_fact_store_connection_session_begin (wyl_fact_store_t *store,
+    WylFactStoreConnectionSession *session)
+{
+  if (session != NULL)
+    memset (session, 0, sizeof (*session));
+  if (store == NULL || session == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&store->lock);
+  session->store = store;
+  session->connection = store->conn;
+  session->held = TRUE;
+  return WYRELOG_E_OK;
+}
+
 duckdb_connection
-wyl_fact_store_get_connection (wyl_fact_store_t *store)
+wyl_fact_store_connection_session_get
+  (const WylFactStoreConnectionSession *session)
 {
-  if (store == NULL) {
-    duckdb_connection zero;
-    memset (&zero, 0, sizeof (zero));
-    return zero;
+  return session != NULL && session->held ? session->connection : NULL;
+}
+
+void
+wyl_fact_store_connection_session_end (WylFactStoreConnectionSession *session)
+{
+  if (session == NULL || !session->held)
+    return;
+  wyl_fact_store_t *store = session->store;
+  memset (session, 0, sizeof (*session));
+  g_mutex_unlock (&store->lock);
+}
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+wyrelog_error_t
+wyl_fact_store_test_exec_sql (wyl_fact_store_t *store, const gchar *sql)
+{
+  if (sql == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (wyl_fact_store_connection_session_get (&session), sql);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_test_query_int64 (wyl_fact_store_t *store, const gchar *sql,
+    gint64 *out_value)
+{
+  if (out_value != NULL)
+    *out_value = 0;
+  if (sql == NULL || out_value == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  duckdb_result result = { 0 };
+  if (rc == WYRELOG_E_OK
+      && duckdb_query (wyl_fact_store_connection_session_get (&session), sql,
+      &result) != DuckDBSuccess)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && duckdb_row_count (&result) != 1)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    *out_value = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_test_query_text (wyl_fact_store_t *store, const gchar *sql,
+    gchar **out_value)
+{
+  if (out_value != NULL)
+    *out_value = NULL;
+  if (sql == NULL || out_value == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  duckdb_result result = { 0 };
+  if (rc == WYRELOG_E_OK
+      && duckdb_query (wyl_fact_store_connection_session_get (&session), sql,
+      &result) != DuckDBSuccess)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && duckdb_row_count (&result) != 1)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    gchar *value = duckdb_value_varchar (&result, 0, 0);
+    *out_value = g_strdup (value);
+    duckdb_free (value);
+    if (*out_value == NULL)
+      rc = WYRELOG_E_NOMEM;
   }
-  return store->conn;
+  duckdb_destroy_result (&result);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
 }
 
-void
-wyl_fact_store_lock (wyl_fact_store_t *store)
+wyrelog_error_t
+wyl_fact_store_test_rename_metadata_value_column_at_checkpoint
+  (wyl_fact_store_t *store)
 {
-  if (store != NULL)
-    g_mutex_lock (&store->lock);
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  /* Reconcile invokes its checkpoint while already holding the store lock.
+   * This deliberately narrow seam must therefore use that admitted connection
+   * directly instead of attempting a nested connection session. */
+  return exec_sql (store->conn,
+      "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
 }
-
-void
-wyl_fact_store_unlock (wyl_fact_store_t *store)
-{
-  if (store != NULL)
-    g_mutex_unlock (&store->lock);
-}
+#endif
 
 wyrelog_error_t
 wyl_fact_store_create_schema (wyl_fact_store_t *store)
@@ -2152,6 +2251,33 @@ count_projection_rows_unlocked (wyl_fact_store_t *store, const gchar *table,
   *out_rows = duckdb_value_int64 (&result, 0, 0);
   duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_store_count_projection_batch_rows (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *batch_id, gint64 *out_rows)
+{
+  if (out_rows != NULL)
+    *out_rows = 0;
+  if (store == NULL || schema == NULL || batch_id == NULL
+      || batch_id[0] == '\0' || out_rows == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
+  if (table == NULL)
+    return WYRELOG_E_NOMEM;
+  g_mutex_lock (&store->lock);
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, schema->tenant_id,
+            schema->graph_id, FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = count_projection_rows_unlocked (store, table, batch_id, out_rows);
+  g_mutex_unlock (&store->lock);
+  return rc;
 }
 
 static wyrelog_error_t

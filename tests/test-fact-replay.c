@@ -2,6 +2,7 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
+#include <string.h>
 
 #include "fact-test-support.h"
 #include "wyrelog/daemon/fact-status.h"
@@ -9,6 +10,7 @@
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
@@ -569,11 +571,9 @@ count_in_graph_store (wyl_policy_store_t *policy, const gchar *tenant_id,
           "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
   g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
-  gint64 value = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
+  gint64 value = 0;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store, sql, &value), ==,
+      WYRELOG_E_OK);
   return value;
 }
 
@@ -999,28 +999,19 @@ provisioned_871_append_one (wyl_fact_store_t *store, const gchar *tenant_id,
 static gint64
 provisioned_871_count (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (wyl_fact_store_get_connection (store), sql,
-      &result), ==, DuckDBSuccess);
-  g_assert_cmpuint (duckdb_row_count (&result), ==, 1);
-  gint64 value = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
+  gint64 value = 0;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store, sql, &value), ==,
+      WYRELOG_E_OK);
   return value;
 }
 
 static gchar *
 provisioned_871_text (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (wyl_fact_store_get_connection (store), sql,
-      &result), ==, DuckDBSuccess);
-  g_assert_cmpuint (duckdb_row_count (&result), ==, 1);
-  gchar *value = duckdb_value_varchar (&result, 0, 0);
-  g_assert_nonnull (value);
-  gchar *copy = g_strdup (value);
-  duckdb_free (value);
-  duckdb_destroy_result (&result);
-  return copy;
+  gchar *value = NULL;
+  g_assert_cmpint (wyl_fact_store_test_query_text (store, sql, &value), ==,
+      WYRELOG_E_OK);
+  return value;
 }
 
 typedef struct
@@ -1319,50 +1310,26 @@ test_boot_converges_forget_on_sealed_provisioned_graph (void)
  * asserted on the return code alone, so a failure showed up as `1 == 0` with
  * nothing saying why. */
 static void
-repair_forget_projection_table (duckdb_connection conn)
+repair_forget_projection_table (wyl_fact_store_t *store)
 {
   static const gchar prefix[] = "missing__";
-  duckdb_result res = { 0 };
-  if (duckdb_query (conn,
+  gchar *faulted = NULL;
+  if (wyl_fact_store_test_query_text (store,
       "SELECT projection_table FROM fact_forget_intent "
-      "WHERE state = 'PENDING';", &res) != DuckDBSuccess) {
-    g_error ("reading the faulted intent failed: %s",
-        duckdb_result_error (&res));
-  }
-  if (duckdb_row_count (&res) != 1) {
-    g_error ("expected one PENDING intent to repair, found %" G_GUINT64_FORMAT,
-        (guint64) duckdb_row_count (&res));
-  }
-  /* duckdb_value_varchar allocates with DuckDB's allocator, so it is freed
-   * with duckdb_free rather than g_free. */
-  gchar *faulted = duckdb_value_varchar (&res, 0, 0);
-  duckdb_destroy_result (&res);
+      "WHERE state = 'PENDING';", &faulted) != WYRELOG_E_OK)
+    g_error ("reading the faulted intent failed");
   g_assert_nonnull (faulted);
   g_assert_true (g_str_has_prefix (faulted, prefix));
   g_autofree gchar *real_name = g_strdup (faulted + sizeof (prefix) - 1);
-  duckdb_free (faulted);
-
-  duckdb_prepared_statement stmt = NULL;
-  if (duckdb_prepare (conn,
-      "UPDATE fact_forget_intent SET projection_table = ? "
-      "WHERE state = 'PENDING';", &stmt) != DuckDBSuccess) {
-    g_autofree gchar *why = g_strdup (duckdb_prepare_error (stmt));
-    duckdb_destroy_prepare (&stmt);
-    g_error ("preparing the repair failed: %s", why != NULL ? why : "(none)");
-  }
-  if (duckdb_bind_varchar (stmt, 1, real_name) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    g_error ("binding the repaired projection name failed");
-  }
-  duckdb_result upd = { 0 };
-  if (duckdb_execute_prepared (stmt, &upd) != DuckDBSuccess) {
-    g_autofree gchar *why = g_strdup (duckdb_result_error (&upd));
-    duckdb_destroy_prepare (&stmt);
-    duckdb_destroy_result (&upd);
-    g_error ("the repair UPDATE failed: %s", why != NULL ? why : "(none)");
-  }
-  duckdb_destroy_prepare (&stmt);
-  duckdb_destroy_result (&upd);
+  g_free (faulted);
+  g_assert_true (real_name[strspn (real_name,
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")] ==
+      '\0');
+  g_autofree gchar *sql = g_strdup_printf
+        ("UPDATE fact_forget_intent SET projection_table = '%s' "
+          "WHERE state = 'PENDING';", real_name);
+  if (wyl_fact_store_test_exec_sql (store, sql) != WYRELOG_E_OK)
+    g_error ("the repair UPDATE failed");
 }
 
 static void
@@ -1401,13 +1368,10 @@ seed_unconverged_erasure (wyl_policy_store_t *policy, const gchar *tenant_id,
    * outstanding erasure left to report.  A retryable failure is what an
    * unconverged erasure looks like now: quarantine is for the permanent
    * conditions, and this is not one of them. */
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (conn,
+  g_assert_cmpint (wyl_fact_store_test_exec_sql (store,
       "UPDATE fact_forget_intent "
       "SET projection_table = 'missing__' || projection_table "
-      "WHERE state = 'PENDING';", &result), ==, DuckDBSuccess);
-  duckdb_destroy_result (&result);
+      "WHERE state = 'PENDING';"), ==, WYRELOG_E_OK);
 }
 
 /* No graph reports the forget axis.  Used where every graph is degraded for a
@@ -1505,7 +1469,7 @@ test_forget_state_clears_on_convergence_but_not_on_refresh (void)
     g_autofree gchar *fp = g_build_filename (sp, "facts.duckdb", NULL);
     g_autoptr (wyl_fact_store_t) st = NULL;
     g_assert_cmpint (wyl_fact_store_open (fp, &st), ==, WYRELOG_E_OK);
-    repair_forget_projection_table (wyl_fact_store_get_connection (st));
+    repair_forget_projection_table (st);
   }
 
   wyl_fact_replay_summary_t summary = { 0 };

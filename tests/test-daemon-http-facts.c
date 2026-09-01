@@ -11,6 +11,7 @@
 #include "fact-test-support.h"
 #include "wyrelog/client.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -204,16 +205,10 @@ graph_state_matches (wyl_policy_store_t *store, const gchar *tenant,
 }
 
 static gboolean
-count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
+count_i64 (wyl_fact_store_t *store, const gchar *sql, gint64 *out_value)
 {
-  duckdb_result result = { 0 };
-  if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return FALSE;
-  }
-  *out_value = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
-  return TRUE;
+  return wyl_fact_store_test_query_int64 (store, sql, out_value)
+         == WYRELOG_E_OK;
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -269,23 +264,12 @@ read_forget_audit_batch_id (const gchar *fact_root, const gchar *graph_id,
   g_autoptr (wyl_fact_store_t) store = NULL;
   if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
     return 105;
-  duckdb_result result;
-  if (duckdb_query (wyl_fact_store_get_connection (store),
+  g_autofree gchar *value = NULL;
+  if (wyl_fact_store_test_query_text (store,
       "SELECT batch_id FROM fact_forget_audit ORDER BY id DESC LIMIT 1;",
-      &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
+      &value) != WYRELOG_E_OK)
     return 106;
-  }
-  if (duckdb_row_count (&result) != 1) {
-    duckdb_destroy_result (&result);
-    return 106;
-  }
-  gchar *value = duckdb_value_varchar (&result, 0, 0);
-  duckdb_destroy_result (&result);
-  if (value == NULL)
-    return 106;
-  *out_batch = g_strdup (value);
-  duckdb_free (value);
+  *out_batch = g_steal_pointer (&value);
   return 0;
 }
 #endif
@@ -302,11 +286,11 @@ read_fact_projection_row_count (const gchar *fact_root,
       wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
   wyl_fact_graph_locator_clear (&locator);
   if (path == NULL)
-    return 300;
+    return 301;
   g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
   if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
-    return 301;
+    return 302;
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
     {"amount", "int64", FALSE, TRUE},
@@ -324,10 +308,9 @@ read_fact_projection_row_count (const gchar *fact_root,
   g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
   if (table == NULL)
     return 302;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
   gint64 count = 0;
   g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;", table);
-  if (!count_i64 (conn, sql, &count))
+  if (!count_i64 (store, sql, &count))
     return 303;
   *out_count = count;
   return 0;
@@ -342,6 +325,44 @@ check_fact_projection_row_count (const gchar *fact_root,
   if (rc != 0)
     return rc;
   return count == expected_rows ? 0 : 304;
+}
+
+static gint
+check_fact_projection_batch_rows (const gchar *fact_root,
+    const gchar *graph_id, const gchar *batch_id, gint64 expected_rows)
+{
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 300;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  if (path == NULL)
+    return 301;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+    return 302;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = graph_id,
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 1,
+    .relation_visible = TRUE,
+    .columns = columns,
+    .n_columns = G_N_ELEMENTS (columns),
+  };
+  gint64 rows = 0;
+  if (wyl_fact_store_count_projection_batch_rows (store, &schema, batch_id,
+      &rows) != WYRELOG_E_OK)
+    return 303;
+  return rows == expected_rows ? 0 : 304;
 }
 
 #ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
@@ -364,14 +385,21 @@ seed_legacy_fact_metadata (const gchar *fact_root, const gchar *graph_id,
     if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
       return 4102;
-    duckdb_result result = { 0 };
-    if (duckdb_query (wyl_fact_store_get_connection (store), sql, &result)
-        != DuckDBSuccess) {
-      duckdb_destroy_result (&result);
-      return 4103;
-    }
-    duckdb_destroy_result (&result);
   }
+  duckdb_database database = NULL;
+  duckdb_connection connection = NULL;
+  duckdb_result result = { 0 };
+  if (duckdb_open (db_path, &database) != DuckDBSuccess
+      || duckdb_connect (database, &connection) != DuckDBSuccess
+      || duckdb_query (connection, sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    duckdb_disconnect (&connection);
+    duckdb_close (&database);
+    return 4103;
+  }
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&connection);
+  duckdb_close (&database);
   g_autoptr (GError) error = NULL;
   if (!wyl_test_secure_regular_file (db_path, &error))
     return 4104;
@@ -392,26 +420,37 @@ check_legacy_metadata_key_count (const gchar *fact_root,
   if (path == NULL)
     return 4111;
   g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
-  g_autoptr (wyl_fact_store_t) store = NULL;
-  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+  duckdb_database database = NULL;
+  duckdb_connection connection = NULL;
+  if (duckdb_open (db_path, &database) != DuckDBSuccess
+      || duckdb_connect (database, &connection) != DuckDBSuccess) {
+    duckdb_disconnect (&connection);
+    duckdb_close (&database);
     return 4112;
+  }
   duckdb_prepared_statement statement = NULL;
   duckdb_result result = { 0 };
-  if (duckdb_prepare (wyl_fact_store_get_connection (store),
+  if (duckdb_prepare (connection,
       "SELECT COUNT(*) FROM fact_store_metadata WHERE key=?;", &statement)
       != DuckDBSuccess) {
     duckdb_destroy_prepare (&statement);
+    duckdb_disconnect (&connection);
+    duckdb_close (&database);
     return 4113;
   }
   if (duckdb_bind_varchar (statement, 1, key) != DuckDBSuccess
       || duckdb_execute_prepared (statement, &result) != DuckDBSuccess) {
     duckdb_destroy_prepare (&statement);
     duckdb_destroy_result (&result);
+    duckdb_disconnect (&connection);
+    duckdb_close (&database);
     return 4114;
   }
   duckdb_destroy_prepare (&statement);
   gint64 count = duckdb_value_int64 (&result, 0, 0);
   duckdb_destroy_result (&result);
+  duckdb_disconnect (&connection);
+  duckdb_close (&database);
   return count == expected ? 0 : 4115;
 }
 #endif
@@ -617,10 +656,9 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         body != NULL ? body : "(null)");
     return 27;
   }
-  rc = check_fact_projection_row_count (fact_root, "orders", 1);
+  rc = check_fact_projection_batch_rows (fact_root, "orders", "batch-1", 1);
   if (rc != 0)
     return rc;
-
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
           "/facts/__wr_default/orders/orders:append", append_query, admin_token,
@@ -629,10 +667,9 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":false") == NULL)
     return 28;
-  rc = check_fact_projection_row_count (fact_root, "orders", 1);
+  rc = check_fact_projection_batch_rows (fact_root, "orders", "batch-1", 1);
   if (rc != 0)
     return rc;
-
   g_clear_pointer (&body, g_free);
   g_autofree gchar *datalog_query = g_strdup_printf ("tenant=%s&%s",
           WYL_TENANT_DEFAULT, FACT_GUARD);
@@ -731,10 +768,9 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
     return 336;
-  rc = check_fact_projection_row_count (fact_root, "orders", 2);
+  rc = check_fact_projection_batch_rows (fact_root, "orders", "batch-7", 1);
   if (rc != 0)
     return rc;
-
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
           "/datalog/__wr_default/orders/query", datalog_query, admin_token,
@@ -993,12 +1029,13 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
     return 29;
-  /* Projection table accumulates assert+retract ops: batch-1 (assert o-1),
-   * batch-7 (assert o-2), batch-r1 (retract o-2) = 3 physical rows. */
-  rc = check_fact_projection_row_count (fact_root, "orders", 3);
-  if (rc != 0)
-    return rc;
-
+  for (const gchar *const *batch = (const gchar *const[]) {
+    "batch-1", "batch-7", "batch-r1", NULL
+  }; *batch != NULL; batch++) {
+    rc = check_fact_projection_batch_rows (fact_root, "orders", *batch, 1);
+    if (rc != 0)
+      return rc;
+  }
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_path_query = g_strdup_printf
         ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-3&"

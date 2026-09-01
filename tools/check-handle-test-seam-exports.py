@@ -22,6 +22,10 @@ PROTECTED = {
     "wyl_handle_engine_session_locked_for_test",
     "wyl_handle_pending_delta_count_for_test",
     "wyl_fact_store_set_batch_fault_once_for_test",
+    "wyl_fact_store_test_exec_sql",
+    "wyl_fact_store_test_query_int64",
+    "wyl_fact_store_test_query_text",
+    "wyl_fact_store_test_rename_metadata_value_column_at_checkpoint",
 }
 SENTINEL = "wyl_init"
 

@@ -8,6 +8,7 @@
 #include "fact/graph-locator-private.h"
 #include "fact/store-open-private.h"
 #include "fact/store-private.h"
+#include "fact/store-test-seams-private.h"
 
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070892";
 static const gchar tenant_id[] = "tenant-provision";
@@ -145,21 +146,17 @@ open_live (wyl_policy_store_t *policy_store, const gchar *root,
 }
 
 static gboolean
-exec_ok (duckdb_connection conn, const gchar *sql)
+exec_ok (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  gboolean ok = duckdb_query (conn, sql, &result) == DuckDBSuccess;
-  duckdb_destroy_result (&result);
-  return ok;
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK;
 }
 
 static gint64
-count_rows (duckdb_connection conn, const gchar *sql)
+count_rows (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
-  gint64 count = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
+  gint64 count = -1;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store, sql, &count), ==,
+      WYRELOG_E_OK);
   return count;
 }
 
@@ -249,7 +246,7 @@ test_provisioned_commit_failure_rolls_back (void)
   g_assert_cmpuint (fault.commit_calls, ==, 1);
   g_assert_cmpuint (fault.rollback_calls, ==, 1);
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   g_assert_true (exec_ok (conn, "SELECT 1;"));
   g_assert_true (exec_ok (conn, "BEGIN TRANSACTION;"));
   g_assert_true (exec_ok (conn, "ROLLBACK;"));
@@ -267,7 +264,7 @@ test_provisioned_commit_failure_rolls_back (void)
 
   g_assert_cmpint (open_live (policy_store, fixture->root, &store), ==,
       WYRELOG_E_OK);
-  conn = wyl_fact_store_get_connection (store);
+  conn = store;
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';"),
       ==, 1);

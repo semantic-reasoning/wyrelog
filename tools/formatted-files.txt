@@ -71,6 +71,7 @@ tests/test-session-username.c
 tests/test-template-tree.c
 tests/test-traits-compile.c
 tests/test-wyctl-basic.c
+tests/test-wyctl-policy-daemon.c
 tests/windows-appverifier-probe-dll.c
 tests/windows-appverifier-probe.c
 tools/format-fixtures/block-comment-alignment.c
@@ -171,11 +172,13 @@ wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
 wyrelog/fact/secure-duckdb-filesystem-test-faults-private.h
+wyrelog/fact/store-connection-private.h
 wyrelog/fact/store-duckdb-config-test-seams-private.h
 wyrelog/fact/store-identity-types-private.h
 wyrelog/fact/store-open-private.c
 wyrelog/fact/store-open-private.h
 wyrelog/fact/store-private.h
+wyrelog/fact/store-test-seams-private.h
 wyrelog/fact/store.c
 wyrelog/handle.h
 wyrelog/perm.h
