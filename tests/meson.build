@@ -53,6 +53,50 @@ python_strict_encoding_env = environment()
 python_strict_encoding_env.set('PYTHONWARNDEFAULTENCODING', '1')
 python_strict_encoding_env.set('PYTHONWARNINGS', 'error::EncodingWarning')
 
+duckdb_linux_link_dependency_wiring_checker = files(
+  'test-duckdb-linux-link-dependency-wiring.py',
+)
+test('duckdb-linux-link-dependency-wiring', python3,
+  args : [
+    duckdb_linux_link_dependency_wiring_checker,
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+)
+test('duckdb-linux-link-dependency-wiring-self-test', python3,
+  args : [
+    duckdb_linux_link_dependency_wiring_checker,
+    '--self-test',
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+)
+
+if host_machine.system() == 'linux' and \
+    get_option('duckdb_source') == 'subproject' and \
+    get_option('enable_fact_store').enabled() and \
+    not enable_secure_duckdb_bridge_opt.enabled()
+  test_duckdb_source_offbridge_c_consumer = executable(
+    'test-duckdb-source-offbridge-c-consumer',
+    'test-duckdb-source-offbridge-c-consumer.c',
+    dependencies : duckdb_dep,
+    link_language : 'c',
+  )
+  test('duckdb-source-offbridge-c-consumer',
+    test_duckdb_source_offbridge_c_consumer)
+  test('duckdb-linux-link-dependency-wiring-generated',
+    python3,
+    args : [
+      duckdb_linux_link_dependency_wiring_checker,
+      '--build-root',
+      meson.project_build_root(),
+      meson.project_source_root(),
+    ],
+    depends : test_duckdb_source_offbridge_c_consumer,
+    env : python_strict_encoding_env,
+  )
+endif
+
 test('wirelog-dependency-boundary', python3,
   args : [
     meson.current_source_dir() / 'test-wirelog-dependency-boundary.py',

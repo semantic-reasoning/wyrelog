@@ -14,6 +14,7 @@ tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
+tests/test-duckdb-source-offbridge-c-consumer.c
 tests/test-engine.c
 tests/test-events.c
 tests/test-fact-artifact-durability-journal-codec.c
