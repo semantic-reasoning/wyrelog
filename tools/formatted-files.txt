@@ -38,6 +38,7 @@ tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
 tests/test-fact-provisioning.c
 tests/test-fact-replay.c
+tests/test-fact-store-duckdb-hardening.c
 tests/test-fact-store-forget-transaction-provision-helper.c
 tests/test-fact-store-forget-transaction-provisioned.c
 tests/test-fact-store-forget-transaction.c
@@ -157,6 +158,7 @@ wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h
 wyrelog/fact/secure-duckdb-filesystem-test-faults-private.h
+wyrelog/fact/store-duckdb-config-test-seams-private.h
 wyrelog/fact/store-identity-types-private.h
 wyrelog/fact/store-open-private.c
 wyrelog/fact/store-open-private.h

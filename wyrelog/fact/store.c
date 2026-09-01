@@ -5,6 +5,7 @@
 
 #include "compound-private.h"
 #include "legacy-store-identity-private.h"
+#include "store-duckdb-config-test-seams-private.h"
 #include "store-identity-private.h"
 #include "wyrelog/wyl-log-private.h"
 
@@ -38,6 +39,8 @@ struct wyl_fact_store_t
 #if defined(WYL_TEST_HANDLE_SEAMS)
   WylFactStoreForgetTransactionTestHook forget_transaction_test_hook;
   gpointer forget_transaction_test_hook_data;
+  guint duckdb_configured_settings;
+  gboolean duckdb_read_only;
 #endif
 };
 
@@ -45,8 +48,140 @@ static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
 static gpointer identity_validation_test_hook_data;
 G_LOCK_DEFINE_STATIC (identity_validation_test_hook);
 
+#if defined(WYL_TEST_HANDLE_SEAMS)
+static WylFactStoreDuckdbConfigSetting duckdb_config_failure =
+    WYL_FACT_STORE_DUCKDB_CONFIG_NONE;
+G_LOCK_DEFINE_STATIC (duckdb_config_failure);
+#endif
+
+static const gchar *
+fact_store_duckdb_setting_name (WylFactStoreDuckdbConfigSetting setting)
+{
+  switch (setting) {
+    case WYL_FACT_STORE_DUCKDB_CONFIG_THREADS:
+      return "threads";
+    case WYL_FACT_STORE_DUCKDB_CONFIG_ENABLE_EXTERNAL_ACCESS:
+      return "enable_external_access";
+    case WYL_FACT_STORE_DUCKDB_CONFIG_ALLOW_COMMUNITY_EXTENSIONS:
+      return "allow_community_extensions";
+    case WYL_FACT_STORE_DUCKDB_CONFIG_AUTOINSTALL_KNOWN_EXTENSIONS:
+      return "autoinstall_known_extensions";
+    case WYL_FACT_STORE_DUCKDB_CONFIG_AUTOLOAD_KNOWN_EXTENSIONS:
+      return "autoload_known_extensions";
+    case WYL_FACT_STORE_DUCKDB_CONFIG_ACCESS_MODE:
+      return "access_mode";
+    case WYL_FACT_STORE_DUCKDB_CONFIG_NONE:
+      break;
+  }
+  return NULL;
+}
+
+static duckdb_state
+fact_store_duckdb_set_config (duckdb_config config,
+    WylFactStoreDuckdbConfigSetting setting, const gchar *value)
+{
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  gboolean fail = FALSE;
+  G_LOCK (duckdb_config_failure);
+  if (duckdb_config_failure == setting) {
+    duckdb_config_failure = WYL_FACT_STORE_DUCKDB_CONFIG_NONE;
+    fail = TRUE;
+  }
+  G_UNLOCK (duckdb_config_failure);
+  if (fail)
+    return DuckDBError;
+#endif
+  return duckdb_set_config (config, fact_store_duckdb_setting_name (setting),
+             value);
+}
+
+static duckdb_state
+fact_store_duckdb_apply_config (duckdb_config config,
+    WylFactStoreDuckdbConfigSetting setting, const gchar *value,
+    guint *configured_settings)
+{
+  duckdb_state state = fact_store_duckdb_set_config (config, setting, value);
+  if (state == DuckDBSuccess && configured_settings != NULL)
+    *configured_settings |= 1u << setting;
+  return state;
+}
+
 static wyrelog_error_t
-open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
+create_hardened_duckdb_config (gboolean read_only, duckdb_config *out_config,
+    guint *out_configured_settings)
+{
+  duckdb_config config = NULL;
+
+  *out_config = NULL;
+  if (out_configured_settings != NULL)
+    *out_configured_settings = 0;
+  if (duckdb_create_config (&config) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (fact_store_duckdb_apply_config (config,
+      WYL_FACT_STORE_DUCKDB_CONFIG_THREADS, "1", out_configured_settings)
+      != DuckDBSuccess
+      || fact_store_duckdb_apply_config (config,
+      WYL_FACT_STORE_DUCKDB_CONFIG_ENABLE_EXTERNAL_ACCESS, "false",
+      out_configured_settings)
+      != DuckDBSuccess
+      || fact_store_duckdb_apply_config (config,
+      WYL_FACT_STORE_DUCKDB_CONFIG_ALLOW_COMMUNITY_EXTENSIONS, "false",
+      out_configured_settings)
+      != DuckDBSuccess
+      || fact_store_duckdb_apply_config (config,
+      WYL_FACT_STORE_DUCKDB_CONFIG_AUTOINSTALL_KNOWN_EXTENSIONS, "false",
+      out_configured_settings)
+      != DuckDBSuccess
+      || fact_store_duckdb_apply_config (config,
+      WYL_FACT_STORE_DUCKDB_CONFIG_AUTOLOAD_KNOWN_EXTENSIONS, "false",
+      out_configured_settings)
+      != DuckDBSuccess
+      || (read_only && fact_store_duckdb_apply_config (config,
+      WYL_FACT_STORE_DUCKDB_CONFIG_ACCESS_MODE, "READ_ONLY",
+      out_configured_settings)
+      != DuckDBSuccess)) {
+    duckdb_destroy_config (&config);
+    return WYRELOG_E_IO;
+  }
+  *out_config = config;
+  return WYRELOG_E_OK;
+}
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+void
+wyl_fact_store_duckdb_config_fail_once_for_test
+  (WylFactStoreDuckdbConfigSetting setting)
+{
+  G_LOCK (duckdb_config_failure);
+  duckdb_config_failure = setting;
+  G_UNLOCK (duckdb_config_failure);
+}
+
+wyrelog_error_t
+wyl_fact_store_duckdb_config_get_for_test (wyl_fact_store_t *store,
+    WylFactStoreDuckdbConfigSetting setting, gchar **out_value)
+{
+  if (out_value != NULL)
+    *out_value = NULL;
+  const gchar *name = fact_store_duckdb_setting_name (setting);
+  if (store == NULL || name == NULL || out_value == NULL)
+    return WYRELOG_E_INVALID;
+
+  if ((store->duckdb_configured_settings & (1u << setting)) == 0)
+    return WYRELOG_E_IO;
+  if (setting == WYL_FACT_STORE_DUCKDB_CONFIG_THREADS)
+    *out_value = g_strdup ("1");
+  else if (setting == WYL_FACT_STORE_DUCKDB_CONFIG_ACCESS_MODE)
+    *out_value = g_strdup (store->duckdb_read_only ? "read_only" : "read_write");
+  else
+    *out_value = g_strdup ("false");
+  return WYRELOG_E_OK;
+}
+#endif
+
+static wyrelog_error_t
+open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db,
+    guint *out_configured_settings)
 {
   duckdb_config config = NULL;
   char *error = NULL;
@@ -57,12 +192,9 @@ open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
   if (path != NULL && g_strcmp0 (path, ":memory:") == 0)
     effective_path = NULL;
 
-  if (duckdb_create_config (&config) != DuckDBSuccess)
+  if (create_hardened_duckdb_config (FALSE, &config, out_configured_settings)
+      != WYRELOG_E_OK)
     return WYRELOG_E_IO;
-  if (duckdb_set_config (config, "threads", "1") != DuckDBSuccess) {
-    duckdb_destroy_config (&config);
-    return WYRELOG_E_IO;
-  }
   if (duckdb_open_ext (effective_path, out_db, config, &error) != DuckDBSuccess) {
     if (out_db != NULL && *out_db != NULL)
       duckdb_close (out_db);
@@ -79,20 +211,15 @@ open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
 
 static wyrelog_error_t
 open_duckdb_identified (const gchar *path, gboolean read_only,
-    duckdb_database *out_db)
+    duckdb_database *out_db, guint *out_configured_settings)
 {
   duckdb_config config = NULL;
   char *error = NULL;
 
   *out_db = NULL;
-  if (duckdb_create_config (&config) != DuckDBSuccess)
+  if (create_hardened_duckdb_config (read_only, &config,
+      out_configured_settings) != WYRELOG_E_OK)
     return WYRELOG_E_IO;
-  if (duckdb_set_config (config, "threads", "1") != DuckDBSuccess
-      || (read_only && duckdb_set_config (config, "access_mode", "READ_ONLY")
-      != DuckDBSuccess)) {
-    duckdb_destroy_config (&config);
-    return WYRELOG_E_IO;
-  }
   if (duckdb_open_ext (path, out_db, config, &error) != DuckDBSuccess) {
     if (*out_db != NULL)
       duckdb_close (out_db);
@@ -527,8 +654,15 @@ wyl_fact_store_open_identified (const gchar *path,
 
   wyl_fact_store_identity_process_guard_lock ();
   wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
+  guint *configured_settings = NULL;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  configured_settings = &self->duckdb_configured_settings;
+  self->duckdb_read_only =
+      mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY;
+#endif
   wyrelog_error_t rc = open_duckdb_identified (path,
-          mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &self->db);
+          mode == WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &self->db,
+          configured_settings);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     g_free (self);
@@ -626,9 +760,15 @@ wyl_fact_store_open (const gchar *path, wyl_fact_store_t **out_store)
 {
   if (out_store == NULL)
     return WYRELOG_E_INVALID;
+  *out_store = NULL;
 
   wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
-  if (open_duckdb_with_thread_budget (path, &self->db) != WYRELOG_E_OK) {
+  guint *configured_settings = NULL;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  configured_settings = &self->duckdb_configured_settings;
+#endif
+  if (open_duckdb_with_thread_budget (path, &self->db, configured_settings)
+      != WYRELOG_E_OK) {
     g_free (self);
     return WYRELOG_E_IO;
   }
