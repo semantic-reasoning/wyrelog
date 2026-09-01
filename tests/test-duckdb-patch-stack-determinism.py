@@ -81,6 +81,9 @@ EXPECTED_STAGE_HASHES = {
 EXPECTED_TRANSACTION_PATCH_SHA256 = (
     "3468aee40e24b223f9cce9a765ce012b7f44d91f47856bd4649d7c933ca10340"
 )
+EXPECTED_LINUX_LINK_JOB_SHA256 = (
+    "8c42943cbd1cc47a960ec6c888e3a5a5fab329d2ec78a286c9c092654f181507"
+)
 INTERFACE_GUARD = "#ifdef interface\n#undef interface\n#endif"
 EXPECTED_MESON_HEADER = """fs = import('fs')
 python3 = find_program('python3')
@@ -697,9 +700,28 @@ def validate_build_patch_tools(workflow: str, path: str) -> None:
         fail("E_CI_TOOL_USE", f"{path}: GNU patch point-of-use proof drifted")
 
 
+def linux_link_job_projection(workflow: str, path: str) -> str:
+    job = extract_top_level_job(workflow, "duckdb-linux-link-closure")
+    if path.endswith("ci-pr.yml"):
+        job = job.replace(
+            "Restore DuckDB source packagecache",
+            "<DuckDB source packagecache>",
+        ).replace("actions/cache/restore@", "actions/cache@")
+    else:
+        job = job.replace(
+            "Cache DuckDB source packagecache",
+            "<DuckDB source packagecache>",
+        )
+    digest = hashlib.sha256(job.encode("utf-8")).hexdigest()
+    if digest != EXPECTED_LINUX_LINK_JOB_SHA256:
+        fail("E_CI_LINK_JOB", f"{path}: DuckDB Linux link closure job drifted")
+    return job
+
+
 def workflow_projection(workflow: str, path: str) -> str:
     validate_workflow_trigger(workflow, path)
     validate_build_patch_tools(workflow, path)
+    linux_link_projection = linux_link_job_projection(workflow, path)
     job = extract_top_level_job(workflow, "duckdb-checkpoint-seam")
     if "os: [ubuntu-latest, macos-latest]" not in job:
         fail("E_CI_MATRIX", f"{path}: Linux/macOS matrix drifted")
@@ -754,7 +776,7 @@ def workflow_projection(workflow: str, path: str) -> str:
     projection = job.replace(cache, "      - name: <packagecache>")
     if projection != EXPECTED_JOB_PROJECTION:
         fail("E_CI_JOB_BLOCK", f"{path}: exact focused job body drifted")
-    return projection
+    return projection + linux_link_projection
 
 
 def validate_meson(snapshot: dict[str, bytes]) -> None:
@@ -1757,6 +1779,19 @@ def run_self_tests(
                     b"      - name: Unexpected pre-gate decoy\n"
                     b"        run: echo decoy\n\n"
                     b"      - name: Test focused checkpoint seam\n",
+                ),
+            ),
+        ),
+        (
+            "E_CI_LINK_JOB",
+            mutated(
+                snapshot,
+                WORKFLOWS[0],
+                lambda data: replace_in_job(
+                    data,
+                    b"duckdb-linux-link-closure",
+                    b"meson test -C build-duckdb-linux-link --print-errorlogs --suite wyrelog",
+                    b"meson compile -C build-duckdb-linux-link",
                 ),
             ),
         ),

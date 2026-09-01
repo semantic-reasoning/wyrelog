@@ -1490,7 +1490,7 @@ def windows_command(step: str, prefix: str, anchor: str) -> tuple[str, ...]:
 
 
 def inventory_commands(workflow: str) -> tuple[tuple[str, ...], ...]:
-    posix = section(workflow, "  build-posix:", "  service-credential-e2e:")
+    posix = section(workflow, "  build-posix:", "  duckdb-linux-link-closure:")
     default_step = named_step(posix, "Verify artifact inventory consumer contract")
     secure_step = named_step(posix, "Build secure DuckDB backend from pinned source")
     sanitizer = section(
@@ -1531,7 +1531,7 @@ def inventory_commands(workflow: str) -> tuple[tuple[str, ...], ...]:
 
 
 def active_inventory_commands(workflow: str) -> tuple[str, ...]:
-    posix = section(workflow, "  build-posix:", "  service-credential-e2e:")
+    posix = section(workflow, "  build-posix:", "  duckdb-linux-link-closure:")
     sanitizer = section(
         workflow,
         "  policy-write-focused-sanitizer:",
@@ -1561,7 +1561,7 @@ def active_inventory_commands(workflow: str) -> tuple[str, ...]:
 
 def validate_workflow(path: str, workflow: str) -> None:
     validate_workflow_mapping_profile(workflow)
-    posix = section(workflow, "  build-posix:", "  service-credential-e2e:")
+    posix = section(workflow, "  build-posix:", "  duckdb-linux-link-closure:")
     sanitizer = section(
         workflow,
         "  policy-write-focused-sanitizer:",
@@ -1818,7 +1818,7 @@ def move_secure_patch_probe_after_setup(workflow: str) -> str:
     without_probe = replace_once_in_named_step(
         workflow,
         "  build-posix:",
-        "  service-credential-e2e:",
+        "  duckdb-linux-link-closure:",
         "Build secure DuckDB backend from pinned source",
         probe,
         "",
@@ -1826,7 +1826,7 @@ def move_secure_patch_probe_after_setup(workflow: str) -> str:
     return replace_once_in_named_step(
         without_probe,
         "  build-posix:",
-        "  service-credential-e2e:",
+        "  duckdb-linux-link-closure:",
         "Build secure DuckDB backend from pinned source",
         "          fi\n          if [ \"$RUNNER_OS\" = Linux ]; then\n"
         "            time_args=(-v)\n",
@@ -3050,7 +3050,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "posix-step-if-false",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Verify artifact inventory consumer contract",
             "        run: |\n",
             "        if: ${{ false }}\n        run: |\n",
@@ -3091,7 +3091,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "posix-job-if-false",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "  build-posix:\n    if: ${{ false }}",
             "E_INVENTORY_CI_POSIX",
         ),
@@ -3148,7 +3148,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "posix-job-if-after-steps",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "    if: ${{ false }}\n\n",
             "E_INVENTORY_CI_POSIX",
         ),
@@ -3185,7 +3185,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
             unusual_job_key[path] = replace_in_workflow_section(
                 unusual_job_key[path],
                 "  build-posix:",
-                "  service-credential-e2e:",
+                "  duckdb-linux-link-closure:",
                 "  build-posix:\n",
                 "  build-posix:\n" + key_text,
             )
@@ -3197,7 +3197,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "posix-ci",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "fact-artifact-namespace-inventory",
             "E_INVENTORY_CI_POSIX",
         ),
@@ -3228,7 +3228,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         secure_compile[path] = replace_in_named_step(
             secure_compile[path],
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "test-fact-artifact-inventory-consumers",
             "removed-fact-artifact-inventory-consumers",
@@ -3240,7 +3240,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         secure_runtime[path] = replace_in_named_step(
             secure_runtime[path],
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "fact-artifact-inventory-consumer-wiring-self",
             "removed-fact-artifact-inventory-consumer-wiring-self",
@@ -3282,7 +3282,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
             probe_mutation[path] = replace_once_in_named_step(
                 probe_mutation[path],
                 "  build-posix:",
-                "  service-credential-e2e:",
+                "  duckdb-linux-link-closure:",
                 "Build secure DuckDB backend from pinned source",
                 old,
                 new,
@@ -3300,7 +3300,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
     probe_parity[CI_PR] = replace_once_in_named_step(
         probe_parity[CI_PR],
         "  build-posix:",
-        "  service-credential-e2e:",
+        "  duckdb-linux-link-closure:",
         "Build secure DuckDB backend from pinned source",
         "            gpatch --version\n",
         "            unapproved-patch --version\n",
@@ -3317,7 +3317,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "comment-default-runtime",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Verify artifact inventory consumer contract",
             "fact-artifact-inventory-contract",
             "# fact-artifact-inventory-contract",
@@ -3326,7 +3326,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "comment-secure-compile",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "test-fact-artifact-inventory-consumers",
             "# test-fact-artifact-inventory-consumers",
@@ -3335,7 +3335,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "comment-secure-runtime",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "fact-artifact-inventory-consumer-wiring-self",
             "# fact-artifact-inventory-consumer-wiring-self",
@@ -3434,7 +3434,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "default-early-success",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Verify artifact inventory consumer contract",
             "          meson test -C builddir",
             "          exit 0\n          meson test -C builddir",
@@ -3443,7 +3443,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "secure-early-success",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "          /usr/bin/time",
             "          exit 0\n          /usr/bin/time",
@@ -3479,7 +3479,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         (
             "secure-wrapped-success-exit",
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "          /usr/bin/time",
             "          if true; then exit 0; fi\n          /usr/bin/time",
@@ -3507,7 +3507,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         secure_false_branch[path] = replace_in_named_step(
             secure_false_branch[path],
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "          /usr/bin/time",
             "          if false; then\n          /usr/bin/time",
@@ -3515,7 +3515,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
         secure_false_branch[path] = replace_in_named_step(
             secure_false_branch[path],
             "  build-posix:",
-            "  service-credential-e2e:",
+            "  duckdb-linux-link-closure:",
             "Build secure DuckDB backend from pinned source",
             "            --print-errorlogs",
             "            --print-errorlogs\n          fi",
@@ -3528,7 +3528,7 @@ def run_self_test(inputs: dict[str, str]) -> None:
     parity[CI_PR] = replace_in_named_step(
         parity[CI_PR],
         "  build-posix:",
-        "  service-credential-e2e:",
+        "  duckdb-linux-link-closure:",
         "Build secure DuckDB backend from pinned source",
         "            --print-errorlogs",
         "            --print-errorlogs\n          echo fact-artifact-inventory-contract parity-probe",
