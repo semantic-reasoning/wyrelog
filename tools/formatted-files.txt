@@ -46,6 +46,7 @@ tests/test-fact-store-duckdb-hardening.c
 tests/test-fact-store-forget-transaction-provision-helper.c
 tests/test-fact-store-forget-transaction-provisioned.c
 tests/test-fact-store-forget-transaction.c
+tests/test-fact-store-poison.c
 tests/test-fact-store-provisioned.c
 tests/test-fact-store.c
 tests/test-fsm-principal.c

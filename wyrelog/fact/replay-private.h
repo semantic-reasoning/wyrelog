@@ -84,6 +84,11 @@ gchar *wyl_fact_replay_wirelog_relation_name (const gchar * namespace_id,
 wyrelog_error_t wyl_fact_replay_open_graph_engine (wyl_policy_store_t * policy,
     const gchar * fact_root, const wyl_policy_fact_graph_info_t * graph_info,
     WylEngine ** out_engine);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+wyrelog_error_t wyl_fact_replay_open_graph_engine_with_store_for_test
+  (wyl_policy_store_t * policy, wyl_fact_store_t * store,
+    const wyl_policy_fact_graph_info_t * graph_info, WylEngine ** out_engine);
+#endif
 
 wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,
     const gchar * fact_root, WylFactGraphRuntimeManager * runtime_manager,

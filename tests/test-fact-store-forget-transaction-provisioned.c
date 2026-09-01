@@ -161,15 +161,17 @@ count_rows (wyl_fact_store_t *store, const gchar *sql)
 }
 
 static wyrelog_error_t
-fail_commit_once (WylFactStoreForgetTransactionTestPhase phase,
-    gpointer user_data)
+fail_commit_once (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
 {
   TransactionFault *fault = user_data;
-  if (phase == WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT) {
+  g_assert_cmpint (kind, ==,
+      WYL_FACT_STORE_TRANSACTION_TEST_FORGET_COMPLETE);
+  if (phase == WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT) {
     fault->commit_calls++;
     if (fault->commit_calls == 1)
       return WYRELOG_E_IO;
-  } else if (phase == WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK) {
+  } else if (phase == WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK) {
     fault->rollback_calls++;
   }
   return WYRELOG_E_OK;
@@ -233,7 +235,7 @@ test_provisioned_commit_failure_rolls_back (void)
   g_assert_true (inserted);
 
   TransactionFault fault = { 0 };
-  wyl_fact_store_set_forget_transaction_test_hook (store, fail_commit_once,
+  wyl_fact_store_test_set_transaction_hook (store, fail_commit_once,
       &fault);
   const wyl_fact_store_forget_options_t opts = {
     .op_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070893",
@@ -256,7 +258,7 @@ test_provisioned_commit_failure_rolls_back (void)
   g_assert_cmpint (count_rows (conn,
       "SELECT COUNT(*) FROM fact_forget_audit;"), ==, 0);
 
-  wyl_fact_store_set_forget_transaction_test_hook (store, NULL, NULL);
+  wyl_fact_store_test_set_transaction_hook (store, NULL, NULL);
   wyl_fact_forget_outcome_t outcome = { 0 };
   g_assert_cmpint (wyl_fact_store_forget_reconcile (store, tenant_id, graph_id,
       NULL, NULL, &outcome), ==, WYRELOG_E_OK);

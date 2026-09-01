@@ -444,16 +444,15 @@ wyl_fact_compound_put (wyl_fact_store_t *store,
     if (rc == WYRELOG_E_OK && !child_exists)
       rc = WYRELOG_E_POLICY;
   }
+  WylFactStoreTransaction transaction = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = exec_sql (conn, "BEGIN TRANSACTION;");
+    rc = wyl_fact_store_transaction_begin (&session,
+            WYL_FACT_STORE_TRANSACTION_COMPOUND_PUT, &transaction);
   if (rc == WYRELOG_E_OK)
     rc = insert_term_unlocked (conn, value, compound_ref, hash);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < value->n_args; i++)
     rc = insert_arg_unlocked (conn, compound_ref, i, &value->args[i]);
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (conn, "COMMIT;");
-  else
-    (void) exec_sql (conn, "ROLLBACK;");
+  rc = wyl_fact_store_transaction_finish (&transaction, rc);
   wyl_fact_store_connection_session_end (&session);
   if (rc == WYRELOG_E_OK)
     *out_compound_ref = compound_ref;
