@@ -220,8 +220,9 @@ def validate(files: dict[str, str]) -> None:
         '"fact forget transaction rollback failed"',
         "g_strv_length (messages), ==, 2",
         "forget (fixture), ==, WYRELOG_E_INTERNAL",
-        "wyl_fact_store_lock (fixture->store)",
-        "wyl_fact_store_get_connection (fixture->store)",
+        "wyl_fact_store_test_exec_sql (store, sql)",
+        "wyl_fact_store_test_query_int64 (store, sql, &count)",
+        'exec_ok (fixture->store, "ROLLBACK;")',
         "wyl_fact_store_forget_reconcile",
     )
     for token in generic_required:
@@ -847,9 +848,17 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/meson.build",
-        "dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, "
+        "'test-fact-store-forget-transaction-provisioned.c',\n"
+        "      c_args : ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE', "
+        "'-DWYL_TEST_HANDLE_SEAMS'],\n"
+        "      include_directories : include_directories('../wyrelog'),\n"
+        "      dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, "
         "duckdb_dep]",
-        "dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]",
+        "'test-fact-store-forget-transaction-provisioned.c',\n"
+        "      c_args : ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE', "
+        "'-DWYL_TEST_HANDLE_SEAMS'],\n"
+        "      include_directories : include_directories('../wyrelog'),\n"
+        "      dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]",
         "production-linked seam parent",
     )
     expect_rejected(

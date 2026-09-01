@@ -82,9 +82,6 @@ void wyl_fact_store_set_forget_transaction_test_hook
 void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 
-duckdb_connection wyl_fact_store_get_connection (wyl_fact_store_t * store);
-void wyl_fact_store_lock (wyl_fact_store_t * store);
-void wyl_fact_store_unlock (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_create_schema (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_table_exists (wyl_fact_store_t * store,
     const gchar * table_name, gboolean * out_exists);
@@ -99,6 +96,12 @@ wyrelog_error_t wyl_fact_store_ensure_projection (wyl_fact_store_t * store,
 wyrelog_error_t wyl_fact_store_validate_projection (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     gboolean * out_exists);
+/* Narrow read-only integrity observation used by production-level callers
+ * that must verify one batch without borrowing the DuckDB connection. */
+wyrelog_error_t wyl_fact_store_count_projection_batch_rows
+  (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const gchar * batch_id, gint64 * out_rows);
 wyrelog_error_t wyl_fact_store_append_batch (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted);
