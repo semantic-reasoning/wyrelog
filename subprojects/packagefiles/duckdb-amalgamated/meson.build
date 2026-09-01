@@ -16,6 +16,56 @@ duckdb_link_args = []
 if host_machine.system() == 'linux'
   duckdb_deps += cpp.find_library('pthread', required : true)
   duckdb_deps += cpp.find_library('dl', required : true)
+
+  # libduckdb is a static C++ archive exported to pure-C targets.  Probe the
+  # configured preprocessing environment instead of inferring its ABI from
+  # the compiler id: Clang can use either libstdc++ or libc++, and native or
+  # cross-file arguments may select a sysroot and standard library.
+  duckdb_cpp_headers_available = cpp.compiles(
+    '''
+#include <cstddef>
+int main(void) { return 0; }
+''',
+    name : 'configured C++ standard-library headers',
+  )
+  if not duckdb_cpp_headers_available
+    error('DuckDB source configured C++ preprocessing environment cannot include <cstddef>')
+  endif
+
+  duckdb_uses_libstdcxx = cpp.compiles(
+    '''
+#include <cstddef>
+#ifndef __GLIBCXX__
+#error configured C++ standard library is not libstdc++
+#endif
+int main(void) { return 0; }
+''',
+    name : 'configured C++ standard library defines __GLIBCXX__',
+  )
+  duckdb_uses_libcxx = cpp.compiles(
+    '''
+#include <cstddef>
+#ifndef _LIBCPP_VERSION
+#error configured C++ standard library is not libc++
+#endif
+int main(void) { return 0; }
+''',
+    name : 'configured C++ standard library defines _LIBCPP_VERSION',
+  )
+
+  if duckdb_uses_libstdcxx and duckdb_uses_libcxx
+    error('DuckDB source on Linux found both __GLIBCXX__ and _LIBCPP_VERSION; the configured C++ standard-library ABI is ambiguous')
+  elif duckdb_uses_libcxx
+    error('DuckDB source on Linux does not support libc++; use GCC/libstdc++ or Clang with -stdlib=libstdc++')
+  elif not duckdb_uses_libstdcxx
+    error('DuckDB source on Linux found neither __GLIBCXX__ nor _LIBCPP_VERSION; configure GCC/libstdc++ or Clang with -stdlib=libstdc++')
+  endif
+
+  # The C linker driver does not add either library implicitly.  Keep these
+  # independent and public so regular and test-seam consumers inherit the
+  # complete closure after the static DuckDB archive.
+  duckdb_deps += cpp.find_library('m', required : true)
+  duckdb_deps += cpp.find_library('stdc++', required : true)
 elif host_machine.system() == 'darwin'
   # libduckdb is a static C++ archive (static_library below) that gets linked
   # into the pure-C wyrelog targets (libwyrelog, wyrelogd, and the fact/audit
