@@ -5,50 +5,30 @@
 
 #include "wyrelog/fact/legacy-store-identity-private.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/policy/store-private.h"
 
 static gboolean
-exec_ok (duckdb_connection conn, const gchar *sql)
+exec_ok (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  gboolean ok = duckdb_query (conn, sql, &result) == DuckDBSuccess;
-  duckdb_destroy_result (&result);
-  return ok;
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK;
 }
 
 static gboolean
-count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
+count_i64 (wyl_fact_store_t *store, const gchar *sql, gint64 *out_value)
 {
-  duckdb_result result = { 0 };
-  if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return FALSE;
-  }
-  *out_value = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
-  return TRUE;
+  return wyl_fact_store_test_query_int64 (store, sql, out_value)
+         == WYRELOG_E_OK;
 }
 
 static gboolean
-query_text (duckdb_connection conn, const gchar *sql, gchar **out_value)
+query_text (wyl_fact_store_t *store, const gchar *sql, gchar **out_value)
 {
-  duckdb_result result = { 0 };
   /* Own the slot: callers reuse a single g_autofree local across queries, and
    * an unconditional overwrite here would leak the previous value. */
   g_clear_pointer (out_value, g_free);
-  if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return FALSE;
-  }
-  if (duckdb_row_count (&result) == 0) {
-    duckdb_destroy_result (&result);
-    return FALSE;
-  }
-  gchar *value = duckdb_value_varchar (&result, 0, 0);
-  *out_value = g_strdup (value);
-  duckdb_free (value);
-  duckdb_destroy_result (&result);
-  return *out_value != NULL;
+  return wyl_fact_store_test_query_text (store, sql, out_value)
+         == WYRELOG_E_OK;
 }
 
 static gboolean
@@ -167,7 +147,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
         != WYRELOG_E_IO)
       return 3002;
     gint64 count = -1;
-    if (!count_i64 (wyl_fact_store_get_connection (store),
+    if (!count_i64 (store,
         "SELECT COUNT(*) FROM fact_store_metadata "
         "WHERE key IN ('tenant_id','graph_id');", &count) || count != 0)
       return 3003;
@@ -179,7 +159,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
         != WYRELOG_E_OK)
       return 3004;
     gint64 count = -1;
-    if (!count_i64 (wyl_fact_store_get_connection (store),
+    if (!count_i64 (store,
         "SELECT COUNT(*) FROM fact_store_metadata "
         "WHERE (key='tenant_id' AND value='tenant-a') "
         "OR (key='graph_id' AND value='orders');", &count) || count != 2)
@@ -194,13 +174,13 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
     g_autoptr (wyl_fact_store_t) store = NULL;
     if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
-        || !exec_ok (wyl_fact_store_get_connection (store),
+        || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');")
         || wyl_fact_store_ensure_projection (store, &schema, NULL)
         != WYRELOG_E_OK)
       return 3006;
     gint64 count = -1;
-    if (!count_i64 (wyl_fact_store_get_connection (store),
+    if (!count_i64 (store,
         "SELECT COUNT(*) FROM fact_store_metadata "
         "WHERE (key='tenant_id' AND value='tenant-a') "
         "OR (key='graph_id' AND value='orders');", &count) || count != 2)
@@ -213,13 +193,13 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
     gboolean exists = TRUE;
     if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
-        || !exec_ok (wyl_fact_store_get_connection (store),
+        || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');")
         || wyl_fact_store_validate_projection (store, &schema, &exists)
         != WYRELOG_E_INTERNAL || exists)
       return 3008;
     gint64 count = -1;
-    if (!count_i64 (wyl_fact_store_get_connection (store),
+    if (!count_i64 (store,
         "SELECT COUNT(*) FROM fact_store_metadata WHERE key='graph_id';",
         &count) || count != 0)
       return 3009;
@@ -231,7 +211,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
     g_autoptr (wyl_fact_store_t) store = NULL;
     if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
-        || !exec_ok (wyl_fact_store_get_connection (store),
+        || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-b');")
         || wyl_fact_store_ensure_projection (store, &schema, NULL)
         != WYRELOG_E_INTERNAL)
@@ -244,7 +224,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
     g_autoptr (wyl_fact_store_t) store = NULL;
     if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
-        || !exec_ok (wyl_fact_store_get_connection (store),
+        || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');"
         "INSERT INTO fact_batches VALUES ('existing','tenant-a','orders',"
         "'shop','order',1,NULL,NULL,'existing:1','assert',0,'hash',1);")
@@ -252,7 +232,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
         != WYRELOG_E_INTERNAL)
       return 3011;
     gint64 count = -1;
-    if (!count_i64 (wyl_fact_store_get_connection (store),
+    if (!count_i64 (store,
         "SELECT COUNT(*) FROM fact_store_metadata WHERE key='graph_id';",
         &count) || count != 0)
       return 3012;
@@ -263,7 +243,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
     g_autoptr (wyl_fact_store_t) store = NULL;
     if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
-        || !exec_ok (wyl_fact_store_get_connection (store),
+        || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES ('graph_id','orders');")
         || wyl_fact_store_ensure_projection (store, &schema, NULL)
         != WYRELOG_E_INTERNAL)
@@ -275,7 +255,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
     g_autoptr (wyl_fact_store_t) store = NULL;
     if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
-        || !exec_ok (wyl_fact_store_get_connection (store),
+        || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES "
         "('tenant_id','tenant-a'),('graph_id','other');")
         || wyl_fact_store_ensure_projection (store, &schema, NULL)
@@ -300,7 +280,7 @@ check_fact_store_thread_budget (void)
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
     return 802;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   g_autofree gchar *threads = NULL;
   if (!query_text (conn,
       "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
@@ -312,7 +292,7 @@ check_fact_store_thread_budget (void)
     return 804;
   if (wyl_fact_store_create_schema (memory_store) != WYRELOG_E_OK)
     return 805;
-  if (!query_text (wyl_fact_store_get_connection (memory_store),
+  if (!query_text (memory_store,
       "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
       &threads) || g_strcmp0 (threads, "1") != 0)
     return 806;
@@ -406,7 +386,7 @@ check_fact_store_appends_idempotently (void)
       != WYRELOG_E_POLICY)
     return 152;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   g_autofree gchar *count_sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;",
           table);
@@ -541,7 +521,7 @@ check_fact_store_retracts_idempotently (void)
       &inserted) != WYRELOG_E_OK || !inserted)
     return 104;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   /* Retraction is append-only: preserve the original valid assert row and
    * append an invalid tombstone. Replay applies both events in sequence to
@@ -723,7 +703,7 @@ check_retract_by_id_normal_three_rows (void)
     return 1020;
   }
 
-  duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
+  wyl_fact_store_t *conn = fix.store;
   gint64 count = 0;
   /* Original assert rows (trigger-1) stay physically in the table with
    * __wyl_valid=TRUE; the retract adds NEW tombstone rows for retract-1
@@ -839,7 +819,7 @@ check_retract_by_id_second_retract_same_trigger (void)
     return 1203;
   }
   /* Two tombstone batches now exist. */
-  duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
+  wyl_fact_store_t *conn = fix.store;
   gint64 count = 0;
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_batches WHERE op = 'retract';",
@@ -1177,7 +1157,7 @@ check_retract_by_id_partial_already_retracted (void)
     retract_by_id_fixture_clear (&fix);
     return 1903;
   }
-  duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
+  wyl_fact_store_t *conn = fix.store;
   gint64 count = 0;
   /* 3 tombstone rows for new-1 must exist with __wyl_valid=FALSE. */
   g_autofree gchar *tombstone_sql = g_strdup_printf
@@ -1270,13 +1250,9 @@ expect_projection_drift_rejected (const wyl_policy_fact_relation_schema_column_t
   g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
   g_autofree gchar *sql = g_strdup_printf
         ("CREATE TABLE %s (%s);", table, projection_columns_sql);
-  duckdb_result drift_result = { 0 };
-  if (duckdb_query (wyl_fact_store_get_connection (store), sql, &drift_result)
-      != DuckDBSuccess) {
-    duckdb_destroy_result (&drift_result);
+  if (!exec_ok (store, sql)) {
     return base_code + 2;
   }
-  duckdb_destroy_result (&drift_result);
   if (wyl_fact_store_ensure_projection (store, &schema, NULL)
       != WYRELOG_E_POLICY)
     return base_code + 3;
@@ -1355,13 +1331,9 @@ check_fact_store_projection_validation (void)
       wyl_fact_store_projection_table_name (&schema);
   g_autofree gchar *drop_sql = g_strdup_printf ("DROP TABLE %s;",
           initial_table);
-  duckdb_result drop_result = { 0 };
-  if (duckdb_query (wyl_fact_store_get_connection (store), drop_sql,
-      &drop_result) != DuckDBSuccess) {
-    duckdb_destroy_result (&drop_result);
+  if (!exec_ok (store, drop_sql)) {
     return 72;
   }
-  duckdb_destroy_result (&drop_result);
   gboolean exists = TRUE;
   if (wyl_fact_store_validate_projection (store, &schema, &exists)
       != WYRELOG_E_OK || exists)
@@ -1384,13 +1356,9 @@ check_fact_store_projection_validation (void)
           "__wyl_seq BIGINT NOT NULL, __wyl_batch_id VARCHAR NOT NULL, "
           "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
           "UNIQUE (__wyl_batch_id, __wyl_row_index));", table);
-  duckdb_result result = { 0 };
-  if (duckdb_query (wyl_fact_store_get_connection (store), sql, &result)
-      != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
+  if (!exec_ok (store, sql)) {
     return 76;
   }
-  duckdb_destroy_result (&result);
   if (wyl_fact_store_validate_projection (store, &malformed, &exists)
       != WYRELOG_E_POLICY || !exists)
     return 77;
@@ -1454,14 +1422,10 @@ check_fact_store_rejects_audit_shape (void)
   if (wyl_fact_store_ensure_projection (live_store, &schema, NULL)
       != WYRELOG_E_OK)
     return 89;
-  duckdb_result audit_result = { 0 };
-  if (duckdb_query (wyl_fact_store_get_connection (live_store),
-      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);",
-      &audit_result) != DuckDBSuccess) {
-    duckdb_destroy_result (&audit_result);
+  if (!exec_ok (live_store,
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);")) {
     return 90;
   }
-  duckdb_destroy_result (&audit_result);
   wyl_fact_value_t values[] = {
     {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
   };
@@ -1550,7 +1514,7 @@ check_fact_forget_basic (void)
       != WYRELOG_E_OK || rows_purged != 2)
     return 2004;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   g_autofree gchar *proj_sql = g_strdup_printf
         ("SELECT COUNT(*) FROM %s;", table);
@@ -1616,7 +1580,7 @@ check_fact_forget_audit_table_exists (void)
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
     return 21;
   gint64 count = -1;
-  if (!count_i64 (wyl_fact_store_get_connection (store),
+  if (!count_i64 (store,
       "SELECT COUNT(*) FROM information_schema.tables "
       "WHERE table_name = 'fact_forget_audit';", &count))
     return 22;
@@ -1708,7 +1672,7 @@ check_fact_forget_crash_convergence (void)
     if (wyl_fact_store_forget (store, &schema, &opts, NULL) == WYRELOG_E_OK)
       return 2204;
 
-    duckdb_connection conn = wyl_fact_store_get_connection (store);
+    wyl_fact_store_t *conn = store;
     gint64 count = 0;
     if (!count_i64 (conn,
         "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
@@ -1787,7 +1751,7 @@ check_fact_forget_rejects_identifier_reuse (void)
   if (wyl_fact_store_forget (store, &schema, &opts, NULL) == WYRELOG_E_OK)
     return 2234;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'dup-id';", &count)
@@ -1867,7 +1831,7 @@ check_fact_forget_reconcile_refuses_wrong_scope (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_pending_intent (&store, &schema, &table) != 0)
     return 2250;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
 
   if (wyl_fact_store_forget_reconcile (store, "tenant-z", "orders", NULL,
@@ -1926,7 +1890,7 @@ check_fact_forget_reconcile_ignores_schema_only_store (void)
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
     return 2291;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   /* The ledger really does exist and really is empty, so the case under test
    * is reached past the ledger check rather than short-circuited by it. */
@@ -1961,14 +1925,11 @@ check_fact_forget_reconcile_skips_out_of_scope_intent (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_pending_intent (&store, &schema, &table) != 0)
     return 2270;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
 
-  duckdb_result result = { 0 };
-  duckdb_state updated = duckdb_query (conn,
-          "UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
-          "WHERE state = 'PENDING';", &result);
-  duckdb_destroy_result (&result);
-  if (updated != DuckDBSuccess)
+  if (!exec_ok (conn,
+      "UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
+      "WHERE state = 'PENDING';"))
     return 2271;
 
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
@@ -2015,7 +1976,7 @@ check_fact_forget_pending_count_reports_without_executing (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_pending_intent (&store, &schema, &table) != 0)
     return 2800;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
 
   gsize pending = 0;
   if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
@@ -2061,7 +2022,7 @@ check_fact_forget_pending_count_ignores_schema_only_store (void)
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
     return 2811;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   /* The ledger exists and is empty, so the case is reached past the ledger
    * check rather than short-circuited by it. */
@@ -2115,7 +2076,7 @@ check_fact_forget_pending_count_refuses_wrong_scope (void)
     return 2330;
 
   /* Refusing is not converging: nothing may have been written. */
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
@@ -2190,12 +2151,9 @@ file_size_or_missing (const gchar *path)
 }
 
 static gboolean
-exec_ok_sql (duckdb_connection conn, const gchar *sql)
+exec_ok_sql (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  duckdb_state state = duckdb_query (conn, sql, &result);
-  duckdb_destroy_result (&result);
-  return state == DuckDBSuccess;
+  return exec_ok (store, sql);
 }
 
 /* Seed |n| pending intents in one store, batch-N / o-N, all in scope.
@@ -2258,9 +2216,9 @@ forget_seed_n_pending (wyl_fact_store_t **out_store,
  * production helper: a fixture that shared the code under test could not
  * disagree with it. */
 static gboolean
-forget_narrow_intent_state_check (duckdb_connection conn)
+forget_narrow_intent_state_check (wyl_fact_store_t *store)
 {
-  return exec_ok_sql (conn,
+  return exec_ok_sql (store,
              "BEGIN TRANSACTION;"
              "CREATE TABLE fact_forget_intent_old ("
              "  op_uuid         VARCHAR PRIMARY KEY,"
@@ -2292,12 +2250,12 @@ forget_narrow_intent_state_check (duckdb_connection conn)
  * STORE's identity is untouched, so the store-level guard still passes and
  * only this intent is out of scope. */
 static gboolean
-forget_mark_intent_foreign (duckdb_connection conn, const gchar *batch_id)
+forget_mark_intent_foreign (wyl_fact_store_t *store, const gchar *batch_id)
 {
   g_autofree gchar *sql = g_strdup_printf
         ("UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
           "WHERE batch_id = '%s';", batch_id);
-  return exec_ok_sql (conn, sql);
+  return exec_ok_sql (store, sql);
 }
 
 /* Fail the Nth execution that reaches |point|, so a multi-intent fixture can
@@ -2342,8 +2300,7 @@ check_fact_forget_reconcile_failure_rc_survives_a_refusal (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_n_pending (&store, &schema, &table, 3) != 0)
     return 2440;
-  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
-      "batch-0"))
+  if (!forget_mark_intent_foreign (store, "batch-0"))
     return 2441;
 
   ForgetNthFault fault = {
@@ -2393,7 +2350,7 @@ check_fact_forget_reconcile_survey_io_failure_keeps_its_rc (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
     return 2450;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
 
   /* The control: two intents really are PENDING before the rename, so a zero
   * count below is the survey failing and not an empty fixture.  This is a
@@ -2444,8 +2401,7 @@ check_fact_forget_reconcile_abandoned_outranks_refused (void)
     return 2460;
   /* Failure first, out-of-scope second: the reverse of
    * check_fact_forget_reconcile_failure_rc_survives_a_refusal. */
-  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
-      "batch-1"))
+  if (!forget_mark_intent_foreign (store, "batch-1"))
     return 2461;
 
   ForgetNthFault fault = {
@@ -2496,7 +2452,7 @@ check_fact_forget_reconcile_counts_executed (void)
  * |renamed| is the fixture's own control -- see the test. */
 typedef struct
 {
-  duckdb_connection conn;
+  wyl_fact_store_t *store;
   guint seen;
   gboolean renamed;
 } ForgetRenameAtNth;
@@ -2510,8 +2466,9 @@ forget_rename_metadata_at_first_completion (const gchar *point,
     return WYRELOG_E_OK;
   if (++fault->seen != 1)
     return WYRELOG_E_OK;
-  fault->renamed = exec_ok_sql (fault->conn,
-          "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
+  fault->renamed =
+      wyl_fact_store_test_rename_metadata_value_column_at_checkpoint
+        (fault->store) == WYRELOG_E_OK;
   return WYRELOG_E_OK;
 }
 
@@ -2537,7 +2494,7 @@ check_fact_forget_reconcile_does_not_quarantine_a_transient_failure (void)
   if (first.failed != 1)
     return 2492;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   gint64 count = 0;
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
@@ -2580,8 +2537,7 @@ check_fact_forget_quarantine_survives_a_restart (void)
     g_autofree gchar *table = NULL;
     if (forget_seed_n_pending_at (path, &store, &schema, &table, 2) != 0)
       return 2511;
-    if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
-        "batch-0"))
+    if (!forget_mark_intent_foreign (store, "batch-0"))
       return 2512;
     wyl_fact_forget_outcome_t out = { 0 };
     if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
@@ -2595,7 +2551,7 @@ check_fact_forget_quarantine_survives_a_restart (void)
   if (wyl_fact_store_open (path, &reopened) != WYRELOG_E_OK)
     return 2515;
   gint64 count = 0;
-  if (!count_i64 (wyl_fact_store_get_connection (reopened),
+  if (!count_i64 (reopened,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
       &count))
     return 2516;
@@ -2625,7 +2581,7 @@ check_fact_forget_intent_state_check_migrates_an_old_store (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
     return 2520;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   if (!forget_narrow_intent_state_check (conn))
     return 2521;
   /* Both foreign, so one pass quarantines twice: the first call migrates and
@@ -2725,7 +2681,7 @@ check_fact_store_forget_survives_a_missing_projection (void)
     return 2028;
 
   g_autofree gchar *drop = g_strdup_printf ("DROP TABLE \"%s\";", table);
-  if (!exec_ok_sql (wyl_fact_store_get_connection (store), drop))
+  if (!exec_ok_sql (store, drop))
     return 2029;
 
   /* The prepare fails, so the forget cannot proceed.  What matters here is
@@ -2754,8 +2710,7 @@ check_fact_forget_reconcile_quarantines_a_foreign_intent (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
     return 2480;
-  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
-      "batch-0"))
+  if (!forget_mark_intent_foreign (store, "batch-0"))
     return 2481;
 
   /* First pass: the foreign intent is refused, exactly as before.  Quarantine
@@ -2783,7 +2738,7 @@ check_fact_forget_reconcile_quarantines_a_foreign_intent (void)
   /* The evidence survives.  A quarantined intent is the record that an erasure
    * was promised and cannot be honoured by this store, so the row stays. */
   gint64 quarantined = 0;
-  if (!count_i64 (wyl_fact_store_get_connection (store),
+  if (!count_i64 (store,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
       &quarantined))
     return 2487;
@@ -2824,7 +2779,7 @@ check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal (void)
     return 2470;
 
   ForgetRenameAtNth fault = {
-    .conn = wyl_fact_store_get_connection (store),
+    .store = store,
     .seen = 0,
     .renamed = FALSE,
   };
@@ -2872,8 +2827,7 @@ check_fact_forget_reconcile_counts_refused_without_abandoning (void)
   g_autofree gchar *table = NULL;
   if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
     return 2410;
-  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
-      "batch-0"))
+  if (!forget_mark_intent_foreign (store, "batch-0"))
     return 2411;
   wyl_fact_forget_outcome_t out = { 0 };
   if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
@@ -3033,7 +2987,7 @@ check_fact_forget_read_only_open_replays_the_wal (void)
         != 0)
       return 2344;
 
-    duckdb_connection conn = wyl_fact_store_get_connection (owned);
+    wyl_fact_store_t *conn = owned;
     /* Step 2: drive schema and data into the base file. */
     if (!exec_ok_sql (conn, "CHECKPOINT;"))
       return 2345;
@@ -3074,7 +3028,7 @@ check_fact_forget_read_only_open_replays_the_wal (void)
      * VALIDATE_ONLY open read-write would leave 2352 and 2357 both passing
      * and the test would silently stop being about read-only replay at all
      * -- which is its entire subject. */
-    if (exec_ok_sql (wyl_fact_store_get_connection (owned),
+    if (exec_ok_sql (owned,
         "CREATE TABLE wal_probe_rw (x INTEGER);"))
       return 2360;
     gsize pending = 0;
@@ -3107,7 +3061,7 @@ check_fact_forget_read_only_open_replays_the_wal (void)
      * returns OK with count 0 for a missing table, which would satisfy 2357
      * for entirely the wrong reason. */
     gint64 ledger_rows = -1;
-    if (!count_i64 (wyl_fact_store_get_connection (owned),
+    if (!count_i64 (owned,
         "SELECT COUNT(*) FROM fact_forget_intent;", &ledger_rows)
         || ledger_rows != 0)
       return 2359;
@@ -3147,7 +3101,7 @@ check_fact_store_identity_basic (void)
       || store == NULL)
     return 2703;
   gint64 count = 0;
-  if (!count_i64 (wyl_fact_store_get_connection (store),
+  if (!count_i64 (store,
       "SELECT COUNT(*) FROM main.fact_store_metadata;", &count)
       || count != 6)
     return 2704;
@@ -3723,7 +3677,7 @@ check_fact_store_batch_commit_fault (void)
     .n_rows = 1,
   };
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  wyl_fact_store_t *conn = store;
   g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
   if (table == NULL)
     return 963;
@@ -3875,6 +3829,37 @@ check_fact_store_reports_commit_delta (void)
   return 0;
 }
 
+static gint
+check_projection_batch_count_validates_scope (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_fact_store_ensure_projection (store, &schema, NULL)
+      != WYRELOG_E_OK)
+    return 3100;
+
+  gint64 rows = 99;
+  wyl_policy_fact_relation_schema_options_t invalid = schema;
+  invalid.columns = NULL;
+  if (wyl_fact_store_count_projection_batch_rows (store, &invalid, "batch-1",
+      &rows) != WYRELOG_E_INVALID || rows != 0)
+    return 3101;
+
+  rows = 99;
+  wyl_policy_fact_relation_schema_options_t foreign = schema;
+  foreign.graph_id = "foreign-graph";
+  if (wyl_fact_store_count_projection_batch_rows (store, &foreign, "batch-1",
+      &rows) != WYRELOG_E_POLICY || rows != 0)
+    return 3102;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -3984,6 +3969,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_batch_commit_fault ();
+  if (rc != 0)
+    return rc;
+  rc = check_projection_batch_count_validates_scope ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_schema_drift ();

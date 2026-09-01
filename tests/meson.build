@@ -733,7 +733,7 @@ if build_client
     ]
     test_daemon_http_facts_c_args += fact_test_support_c_args
     test_daemon_http_facts_deps = [
-      wyrelog_dep,
+      wyrelog_handle_test_seams_dep,
       wyrelog_client_dep,
       libsoup_dep,
       sodium_dep,
@@ -1797,7 +1797,8 @@ if get_option('enable_fact_store').allowed()
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, duckdb_dep,
+      sqlite_dep],
   )
 
   test('fact-compound', test_fact_compound)
@@ -1935,17 +1936,13 @@ if get_option('enable_secure_duckdb_bridge').enabled()
       timeout : 120,
     )
   endif
-  test_fact_provisioning_run_wyrelog_dep = wyrelog_dep
-  if host_machine.system() == 'darwin'
-    test_fact_provisioning_run_wyrelog_dep = wyrelog_handle_test_seams_dep
-  endif
   test_fact_provisioning_run = executable(
     'test-fact-provisioning-run',
     'test-fact-provisioning-run.c',
     'fact-test-support.c',
     c_args : fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [test_fact_provisioning_run_wyrelog_dep, sqlite_dep, duckdb_dep]
+    dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
   # Linux asserts the retained hard-link pair; Darwin asserts a direct final
@@ -1962,7 +1959,7 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     'fact-test-support.c',
     c_args : fact_test_support_c_args + ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE'],
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+    dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
   # Linux retains the stage/final hard-link pair; Darwin opens its direct final
@@ -3420,6 +3417,14 @@ test('fact-store-forget-transaction-boundary', python3,
 
 test('fact-store-forget-transaction-boundary-self', python3,
   args : [files('test-fact-store-forget-transaction-boundary.py'),
+    '--self-test', meson.project_source_root()])
+
+test('fact-store-connection-boundary', python3,
+  args : [files('test-fact-store-connection-boundary.py'),
+    meson.project_source_root()])
+
+test('fact-store-connection-boundary-self', python3,
+  args : [files('test-fact-store-connection-boundary.py'),
     '--self-test', meson.project_source_root()])
 
 test('duckdb-test-seam-wiring', python3,
