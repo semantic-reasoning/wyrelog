@@ -2,6 +2,8 @@ tests/fact-artifact-transition-driver-fixture.c
 tests/fact-artifact-transition-driver-fixture.h
 tests/fact-test-support.h
 tests/test-access-decision.c
+tests/test-audit-conn-duckdb-hardening.c
+tests/test-audit-conn.c
 tests/test-audit-emit.c
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
@@ -74,6 +76,9 @@ wyrelog/access/break-glass.c
 wyrelog/access/decision-private.h
 wyrelog/access/decision.c
 wyrelog/audit.h
+wyrelog/audit/conn-duckdb-config-test-seams-private.h
+wyrelog/audit/conn-private.h
+wyrelog/audit/conn.c
 wyrelog/audit/event-private.h
 wyrelog/audit/iter-private.h
 wyrelog/auth/jwt-private.h

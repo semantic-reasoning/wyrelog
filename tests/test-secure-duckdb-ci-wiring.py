@@ -61,12 +61,14 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     setup_command = (
         "CC=cc CXX=c++ meson setup build-secure-duckdb "
         "-Denable_fact_store=enabled "
+        "-Denable_audit=enabled "
         "-Dduckdb_source=subproject "
         "-Denable_secure_duckdb_bridge=enabled"
     )
     inherited_setup_command = (
         "meson setup build-secure-duckdb "
         "-Denable_fact_store=enabled "
+        "-Denable_audit=enabled "
         "-Dduckdb_source=subproject "
         "-Denable_secure_duckdb_bridge=enabled"
     )

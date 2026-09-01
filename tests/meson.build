@@ -3489,6 +3489,60 @@ if get_option('enable_audit').allowed()
 
   test('audit-conn', test_audit_conn, env : audit_conn_test_env, timeout : 60)
 
+  test_audit_conn_duckdb_hardening = executable(
+    'test-audit-conn-duckdb-hardening',
+    'test-audit-conn-duckdb-hardening.c',
+    c_args : ['-DWYL_TEST_HANDLE_SEAMS'],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
+  )
+
+  test('audit-conn-duckdb-hardening',
+    test_audit_conn_duckdb_hardening,
+    env : audit_conn_test_env,
+    timeout : 60,
+  )
+  test('audit-conn-duckdb-autoload-clean-runtime', python3,
+    args : [
+      files('test-audit-conn-duckdb-autoload-runtime.py'),
+      '--mode', 'clean',
+      test_audit_conn_duckdb_hardening,
+    ],
+    env : audit_conn_test_env,
+    timeout : 60,
+  )
+  test('audit-conn-duckdb-autoload-ambient-runtime', python3,
+    args : [
+      files('test-audit-conn-duckdb-autoload-runtime.py'),
+      '--mode', 'ambient',
+      test_audit_conn_duckdb_hardening,
+    ],
+    env : audit_conn_test_env,
+    timeout : 60,
+  )
+  test('audit-conn-duckdb-autoload-runtime-self-test', python3,
+    args : [
+      files('test-audit-conn-duckdb-autoload-runtime.py'),
+      '--self-test',
+    ],
+    env : audit_conn_test_env,
+  )
+  test('audit-conn-duckdb-hardening-boundary', python3,
+    args : [
+      files('test-audit-conn-duckdb-hardening-boundary.py'),
+      meson.project_source_root(),
+    ],
+    env : audit_conn_test_env,
+  )
+  test('audit-conn-duckdb-hardening-boundary-self-test', python3,
+    args : [
+      files('test-audit-conn-duckdb-hardening-boundary.py'),
+      '--self-test',
+      meson.project_source_root(),
+    ],
+    env : audit_conn_test_env,
+  )
+
   test_service_exchange_projector = executable(
     'test-service-exchange-projector',
     'test-service-exchange-projector.c',
