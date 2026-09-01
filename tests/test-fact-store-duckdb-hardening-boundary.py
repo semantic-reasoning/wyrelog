@@ -133,6 +133,7 @@ def validate_repository(root: Path, overrides: dict[str, str] | None = None) -> 
         errors.append("foreign SQLite probes do not require exact IO failures")
     runtime_requirements = (
         "discover_ambient_extension",
+        "database.close()",
         'sentinel.write_text("must-not-be-observed\\n", encoding="utf-8")',
         "hashlib.sha256(path.read_bytes()).hexdigest()",
         'child.is_symlink()',
@@ -217,6 +218,8 @@ def self_test(root: Path) -> list[str]:
         ("ambient sentinel", "tests/test-fact-store-duckdb-autoload-runtime.py",
          'sentinel.write_text("must-not-be-observed\\n", encoding="utf-8")',
          "pass  # sentinel removed"),
+        ("SQLite handle cleanup", "tests/test-fact-store-duckdb-autoload-runtime.py",
+         "database.close()", "pass  # leaked SQLite handle"),
         ("trace IPv6", "tests/test-fact-store-duckdb-autoload-runtime.py",
          'forbidden = (".duckdb/extensions", "AF_INET", "AF_INET6")',
          'forbidden = (".duckdb/extensions", "AF_INET")'),

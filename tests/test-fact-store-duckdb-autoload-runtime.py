@@ -16,9 +16,13 @@ import tempfile
 
 
 def create_sqlite(path: Path) -> None:
-    with sqlite3.connect(path) as database:
+    database = sqlite3.connect(path)
+    try:
         database.execute("CREATE TABLE foreign_table(value TEXT)")
         database.execute("INSERT INTO foreign_table VALUES('sqlite')")
+        database.commit()
+    finally:
+        database.close()
 
 
 def clean_environment(home: Path) -> dict[str, str]:
