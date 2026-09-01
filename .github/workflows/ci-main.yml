@@ -270,6 +270,171 @@ jobs:
             build-secure-duckdb/meson-logs/
           if-no-files-found: ignore
 
+  duckdb-linux-link-closure:
+    name: duckdb-linux-link-closure-${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            cxxflags: ""
+          - compiler: clang-libstdcxx
+            cc: clang
+            cxx: clang++
+            cxxflags: -stdlib=libstdc++
+    steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
+      - name: Check out source
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Install DuckDB Linux link dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config patch time python3 gcc g++ clang \
+            libc++-dev libc++abi-dev \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
+
+      - name: Cache DuckDB source packagecache
+        # actions/cache v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: subprojects/packagecache
+          key: ${{ runner.os }}-duckdb-source-${{ hashFiles('subprojects/duckdb-amalgamated.wrap') }}
+
+      - name: Configure source-offbridge C-link closure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          CXXFLAGS: ${{ matrix.cxxflags }}
+        run: |
+          meson setup build-duckdb-linux-link \
+            -Denable_fact_store=enabled \
+            -Dduckdb_source=subproject \
+            -Denable_secure_duckdb_bridge=disabled
+
+      - name: Compile Clang/libstdc++ C consumer
+        if: matrix.compiler == 'clang-libstdcxx'
+        run: |
+          meson compile -C build-duckdb-linux-link -j 1 \
+            test-duckdb-source-offbridge-c-consumer
+
+      - name: Run Clang/libstdc++ C consumer proof
+        if: matrix.compiler == 'clang-libstdcxx'
+        run: |
+          meson test -C build-duckdb-linux-link --no-rebuild --print-errorlogs \
+            duckdb-source-offbridge-c-consumer \
+            duckdb-linux-link-dependency-wiring \
+            duckdb-linux-link-dependency-wiring-self-test \
+            duckdb-linux-link-dependency-wiring-generated
+
+      - name: Run GCC source-offbridge full suite
+        if: matrix.compiler == 'gcc'
+        run: |
+          meson test -C build-duckdb-linux-link --print-errorlogs --suite wyrelog
+
+      - name: Reject unsupported C++ ABI configurations
+        if: matrix.compiler == 'clang-libstdcxx'
+        run: |
+          set -euo pipefail
+
+          set +e
+          env CC=clang CXX=clang++ CXXFLAGS=-stdlib=libc++ \
+            meson setup build-duckdb-linux-libcxx \
+              -Denable_tpm=disabled \
+              -Denable_audit=disabled \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=disabled \
+              > duckdb-linux-libcxx.log 2>&1
+          libcxx_status=$?
+          set -e
+          if [ "$libcxx_status" -eq 0 ]; then
+            echo '::error::Clang/libc++ setup unexpectedly succeeded'
+            exit 1
+          fi
+          grep -F 'does not support libc++' duckdb-linux-libcxx.log
+
+          set +e
+          env CC=gcc CXX=g++ CXXFLAGS=-D_LIBCPP_VERSION=1 \
+            meson setup build-duckdb-linux-both \
+              -Denable_tpm=disabled \
+              -Denable_audit=disabled \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=disabled \
+              > duckdb-linux-both.log 2>&1
+          both_status=$?
+          set -e
+          if [ "$both_status" -eq 0 ]; then
+            echo '::error::synthetic both-marker setup unexpectedly succeeded'
+            exit 1
+          fi
+          grep -F 'found both __GLIBCXX__ and _LIBCPP_VERSION' \
+            duckdb-linux-both.log
+
+          empty_include="$RUNNER_TEMP/duckdb-empty-cpp-include"
+          mkdir -p "$empty_include"
+          printf '%s\n' '// intentionally empty' > "$empty_include/cstddef"
+          set +e
+          env CC=gcc CXX=g++ \
+            CXXFLAGS="-nostdinc++ -isystem $empty_include" \
+            meson setup build-duckdb-linux-neither \
+              -Denable_tpm=disabled \
+              -Denable_audit=disabled \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=disabled \
+              > duckdb-linux-neither.log 2>&1
+          neither_status=$?
+          set -e
+          if [ "$neither_status" -eq 0 ]; then
+            echo '::error::neither-marker setup unexpectedly succeeded'
+            exit 1
+          fi
+          grep -F 'found neither __GLIBCXX__ nor _LIBCPP_VERSION' \
+            duckdb-linux-neither.log
+
+          set +e
+          env CC=gcc CXX=g++ CXXFLAGS=-nostdinc++ \
+            meson setup build-duckdb-linux-no-header \
+              -Denable_tpm=disabled \
+              -Denable_audit=disabled \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=subproject \
+              -Denable_secure_duckdb_bridge=disabled \
+              > duckdb-linux-no-header.log 2>&1
+          no_header_status=$?
+          set -e
+          if [ "$no_header_status" -eq 0 ]; then
+            echo '::error::missing-header setup unexpectedly succeeded'
+            exit 1
+          fi
+          grep -F 'cannot include <cstddef>' duckdb-linux-no-header.log
+
+      - name: Upload DuckDB Linux link logs on failure
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: duckdb-linux-link-logs-${{ matrix.compiler }}
+          path: |
+            build-duckdb-linux-*/meson-logs/
+            duckdb-linux-*.log
+          if-no-files-found: ignore
+
   service-credential-e2e:
     name: service-credential-e2e
     # Linux runtime enforcement of the packaged service-credential acceptance

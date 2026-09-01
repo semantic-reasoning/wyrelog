@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 import shlex
@@ -16,8 +17,15 @@ from typing import Callable
 PACKAGE_MESON = "subprojects/packagefiles/duckdb-amalgamated/meson.build"
 TESTS_MESON = "tests/meson.build"
 CONSUMER = "tests/test-duckdb-source-offbridge-c-consumer.c"
+WORKFLOWS = (
+    ".github/workflows/ci-pr.yml",
+    ".github/workflows/ci-main.yml",
+)
 TARGET = "test-duckdb-source-offbridge-c-consumer"
 NINJA_TARGET = f"tests/{TARGET}"
+EXPECTED_CONSUMER_SHA256 = (
+    "d725ec816b06f009c90d16ee95718958eeb9db907fed399105bdddcea721e13a"
+)
 
 
 class ContractError(RuntimeError):
@@ -40,6 +48,23 @@ def require_pattern(text: str, pattern: str, code: str) -> re.Match[str]:
     if match is None:
         reject(code, f"missing pattern {pattern!r}")
     return match
+
+
+def extract_assignment_call(text: str, variable: str, function: str) -> str:
+    marker = f"{variable} = {function}("
+    if text.count(marker) != 1:
+        reject("E_DEPENDENCY_EXPORT", f"expected one {variable} declaration")
+    start = text.index(marker)
+    opening = start + len(marker) - 1
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    reject("E_DEPENDENCY_EXPORT", f"unterminated {variable} declaration")
 
 
 def validate_package(text: str) -> None:
@@ -100,11 +125,24 @@ def validate_package(text: str) -> None:
     if m_index < supported_index or stdcxx_index < supported_index:
         reject("E_LIBRARY_SCOPE", "runtime libraries are outside the supported ABI path")
 
-    if text.count("dependencies : duckdb_deps") != 4:
-        reject(
-            "E_DEPENDENCY_EXPORT",
-            "regular and seam libraries/dependencies must share duckdb_deps",
+    owners = (
+        ("duckdb_lib", "static_library", None),
+        ("duckdb_dep", "declare_dependency", "link_with : duckdb_lib"),
+        ("duckdb_test_seam_lib", "static_library", None),
+        (
+            "duckdb_test_seam_dep",
+            "declare_dependency",
+            "link_with : duckdb_test_seam_lib",
+        ),
+    )
+    for variable, function, link_with in owners:
+        declaration = extract_assignment_call(text, variable, function)
+        declaration = "\n".join(
+            line.split("#", 1)[0] for line in declaration.splitlines()
         )
+        require_once(declaration, "dependencies : duckdb_deps", "E_DEPENDENCY_EXPORT")
+        if link_with is not None:
+            require_once(declaration, link_with, "E_DEPENDENCY_EXPORT")
 
 
 def extract_consumer_target(text: str) -> str:
@@ -159,9 +197,36 @@ def validate_tests_meson(text: str) -> None:
             reject("E_GENERATED_REACHABILITY", f"generated checker lacks {token!r}")
 
 
+def strip_c_comments(text: str) -> str:
+    return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
+
+
 def validate_consumer(text: str) -> None:
-    if "#include <duckdb.h>" not in text:
+    if re.search(
+        r"(?m)^\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b", text
+    ) is not None:
+        reject(
+            "E_CONSUMER_LIFECYCLE",
+            "consumer lifecycle must not be hidden behind preprocessor branches",
+        )
+
+    active = strip_c_comments(text)
+    if "#include <duckdb.h>" not in active:
         reject("E_CONSUMER_LIFECYCLE", "consumer lacks duckdb.h")
+    if len(re.findall(r"\bmain\s*\(", active)) != 1:
+        reject("E_CONSUMER_LIFECYCLE", "consumer must define exactly one main()")
+    main = require_pattern(
+        active,
+        r"\bint\s+main\s*\(\s*void\s*\)\s*\{(?P<body>.*)\}\s*$",
+        "E_CONSUMER_LIFECYCLE",
+    ).group("body")
+    if re.search(r"\b(?:if|while)\s*\(\s*(?:0|false|FALSE)\s*\)", main):
+        reject("E_CONSUMER_LIFECYCLE", "consumer lifecycle contains dead control flow")
+    require_once(main, "int status = 1;", "E_CONSUMER_LIFECYCLE")
+    require_once(main, "status = 0;", "E_CONSUMER_LIFECYCLE")
+    require_once(main, "return status;", "E_CONSUMER_LIFECYCLE")
+    if len(re.findall(r"\breturn\b", main)) != 1:
+        reject("E_CONSUMER_LIFECYCLE", "consumer must have one final status return")
     for function in (
         "duckdb_open",
         "duckdb_connect",
@@ -174,10 +239,243 @@ def validate_consumer(text: str) -> None:
         "duckdb_disconnect",
         "duckdb_close",
     ):
-        if re.search(rf"\b{function}\s*\(", text) is None:
+        if re.search(rf"\b{function}\s*\(", main) is None:
             reject("E_CONSUMER_LIFECYCLE", f"consumer lacks {function}()")
-    if "SELECT 42 AS answer" not in text:
+    if "SELECT 42 AS answer" not in main:
         reject("E_CONSUMER_QUERY", "consumer must execute the sentinel query")
+    require_once(main, "if (duckdb_open (", "E_CONSUMER_LIFECYCLE")
+    pre_open = main[: main.index("if (duckdb_open (")]
+    if re.search(r"\b(?:if|while|for)\s*\(", pre_open):
+        reject(
+            "E_CONSUMER_LIFECYCLE",
+            "consumer open lifecycle must not be control-flow guarded",
+        )
+
+    ordered = (
+        main.index("duckdb_open ("),
+        main.index("duckdb_connect ("),
+        main.index("duckdb_query ("),
+        main.index("duckdb_column_name ("),
+        main.index("duckdb_row_count ("),
+        main.index("duckdb_column_count ("),
+        main.index("duckdb_value_int64 ("),
+        main.rindex("duckdb_destroy_result ("),
+        main.index("status = 0;"),
+        main.index("duckdb_disconnect ("),
+        main.index("duckdb_close ("),
+        main.index("return status;"),
+    )
+    if tuple(sorted(ordered)) != ordered:
+        reject("E_CONSUMER_LIFECYCLE", "consumer lifecycle order drifted")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != EXPECTED_CONSUMER_SHA256:
+        reject("E_CONSUMER_LIFECYCLE", "canonical executable consumer drifted")
+
+
+def extract_ci_job(workflow: str) -> str:
+    marker = "  duckdb-linux-link-closure:\n"
+    if workflow.count(marker) != 1:
+        reject("E_CI_JOB", "DuckDB Linux link closure job must occur once")
+    start = workflow.index(marker)
+    match = re.search(r"(?m)^  [A-Za-z0-9_-]+:\n", workflow[start + len(marker) :])
+    if match is None:
+        return workflow[start:]
+    return workflow[start : start + len(marker) + match.start()]
+
+
+def extract_ci_step(job: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    if job.count(marker) != 1:
+        reject("E_CI_JOB", f"CI step {name!r} must occur once")
+    start = job.index(marker)
+    match = re.search(r"(?m)^      - name: ", job[start + len(marker) :])
+    if match is None:
+        return job[start:]
+    return job[start : start + len(marker) + match.start()]
+
+
+def validate_ci_job(job: str, path: str) -> None:
+    required_once = (
+        "    name: duckdb-linux-link-closure-${{ matrix.compiler }}\n",
+        "    runs-on: ubuntu-latest\n",
+        "    timeout-minutes: 45\n",
+        "      fail-fast: false\n",
+        "          - compiler: gcc\n            cc: gcc\n            cxx: g++\n            cxxflags: \"\"\n",
+        "          - compiler: clang-libstdcxx\n            cc: clang\n            cxx: clang++\n            cxxflags: -stdlib=libstdc++\n",
+        "      - name: Verify GitHub-hosted runner contract\n",
+        "      - name: Configure source-offbridge C-link closure\n",
+        "      - name: Compile Clang/libstdc++ C consumer\n",
+        "      - name: Run Clang/libstdc++ C consumer proof\n",
+        "      - name: Run GCC source-offbridge full suite\n",
+        "      - name: Reject unsupported C++ ABI configurations\n",
+        "      - name: Upload DuckDB Linux link logs on failure\n",
+    )
+    for token in required_once:
+        require_once(job, token, "E_CI_JOB")
+
+    cache_name = (
+        "Restore DuckDB source packagecache"
+        if path.endswith("ci-pr.yml")
+        else "Cache DuckDB source packagecache"
+    )
+    require_once(job, f"      - name: {cache_name}\n", "E_CI_CACHE")
+    cache_action = "actions/cache/restore@" if path.endswith("ci-pr.yml") else "actions/cache@"
+    require_once(job, cache_action, "E_CI_CACHE")
+
+    positive_options = (
+        "-Denable_fact_store=enabled",
+        "-Dduckdb_source=subproject",
+        "-Denable_secure_duckdb_bridge=disabled",
+    )
+    for option in positive_options:
+        if job.count(option) != 5:
+            reject("E_CI_CONFIG", f"{path}: expected five exact {option} setups")
+    for option in ("-Denable_tpm=disabled", "-Denable_audit=disabled"):
+        if job.count(option) != 4:
+            reject("E_CI_CONFIG", f"{path}: expected four negative-only {option} setups")
+
+    if job.count("meson setup build-duckdb-linux-link ") != 1:
+        reject("E_CI_POSITIVE", f"{path}: positive setup inventory drifted")
+    if job.count("meson compile -C build-duckdb-linux-link") != 1:
+        reject("E_CI_COMPILE", f"{path}: focused compile inventory drifted")
+    if job.count("meson test -C build-duckdb-linux-link") != 2:
+        reject("E_CI_TEST", f"{path}: focused/full test inventory drifted")
+    if job.count("--suite wyrelog") != 1:
+        reject("E_CI_FULL_SUITE", f"{path}: full suite must run exactly once")
+    if "--no-rebuild" not in job:
+        reject("E_CI_FOCUSED", f"{path}: focused proof must not rebuild")
+
+    for build_dir, diagnostic in (
+        ("build-duckdb-linux-libcxx", "does not support libc++"),
+        ("build-duckdb-linux-both", "found both __GLIBCXX__ and _LIBCPP_VERSION"),
+        ("build-duckdb-linux-neither", "found neither __GLIBCXX__ nor _LIBCPP_VERSION"),
+        ("build-duckdb-linux-no-header", "cannot include <cstddef>"),
+    ):
+        require_once(job, f"meson setup {build_dir} ", "E_CI_NEGATIVE")
+        require_once(job, diagnostic, "E_CI_NEGATIVE")
+
+    forbidden = (
+        "continue-on-error:",
+        "|| true",
+        "--repeat",
+        "--maxfail",
+        "if: false",
+        "if: ${{ false }}",
+    )
+    for token in forbidden:
+        if token in job:
+            reject("E_CI_MASKING", f"{path}: forbidden token {token!r}")
+    if re.search(r"\b(?:exit|return)(?:\s+0)?\s*(?:;|$)", job, re.MULTILINE):
+        reject("E_CI_MASKING", f"{path}: early successful shell exit is forbidden")
+
+    steps: dict[str, str] = {}
+    for name, compiler in (
+        ("Compile Clang/libstdc++ C consumer", "clang-libstdcxx"),
+        ("Run Clang/libstdc++ C consumer proof", "clang-libstdcxx"),
+        ("Run GCC source-offbridge full suite", "gcc"),
+        ("Reject unsupported C++ ABI configurations", "clang-libstdcxx"),
+    ):
+        step = extract_ci_step(job, name)
+        steps[name] = step
+        condition = f"        if: matrix.compiler == '{compiler}'\n"
+        require_once(step, condition, "E_CI_ROW")
+        if len(re.findall(r"(?m)^        if:", step)) != 1:
+            reject("E_CI_ROW", f"{path}: {name!r} must have one exact row condition")
+
+    configure = extract_ci_step(job, "Configure source-offbridge C-link closure")
+    require_once(
+        configure,
+        "          meson setup build-duckdb-linux-link \\\n",
+        "E_CI_STEP",
+    )
+    for option in positive_options:
+        require_once(configure, option, "E_CI_STEP")
+    for option in ("-Denable_tpm", "-Denable_audit"):
+        if option in configure:
+            reject("E_CI_STEP", f"{path}: positive setup is not the exact reproduction")
+    actual_positive_options = tuple(
+        re.findall(r"(?m)^\s+(-D[^\s\\]+)\s*\\?\s*$", configure)
+    )
+    if actual_positive_options != positive_options:
+        reject("E_CI_STEP", f"{path}: positive setup option inventory drifted")
+
+    compile_step = steps["Compile Clang/libstdc++ C consumer"]
+    require_once(
+        compile_step,
+        "          meson compile -C build-duckdb-linux-link -j 1 \\\n"
+        "            test-duckdb-source-offbridge-c-consumer",
+        "E_CI_STEP",
+    )
+
+    focused_step = steps["Run Clang/libstdc++ C consumer proof"]
+    require_once(
+        focused_step,
+        "          meson test -C build-duckdb-linux-link --no-rebuild "
+        "--print-errorlogs \\\n",
+        "E_CI_STEP",
+    )
+    for test_line in (
+        "            duckdb-source-offbridge-c-consumer \\\n",
+        "            duckdb-linux-link-dependency-wiring \\\n",
+        "            duckdb-linux-link-dependency-wiring-self-test \\\n",
+        "            duckdb-linux-link-dependency-wiring-generated\n",
+    ):
+        require_once(focused_step, test_line, "E_CI_STEP")
+
+    require_once(
+        steps["Run GCC source-offbridge full suite"],
+        "          meson test -C build-duckdb-linux-link --print-errorlogs "
+        "--suite wyrelog\n",
+        "E_CI_STEP",
+    )
+
+    negative_step = steps["Reject unsupported C++ ABI configurations"]
+    for build_dir, diagnostic, log_name in (
+        ("build-duckdb-linux-libcxx", "does not support libc++", "duckdb-linux-libcxx.log"),
+        (
+            "build-duckdb-linux-both",
+            "found both __GLIBCXX__ and _LIBCPP_VERSION",
+            "duckdb-linux-both.log",
+        ),
+        (
+            "build-duckdb-linux-neither",
+            "found neither __GLIBCXX__ nor _LIBCPP_VERSION",
+            "duckdb-linux-neither.log",
+        ),
+        (
+            "build-duckdb-linux-no-header",
+            "cannot include <cstddef>",
+            "duckdb-linux-no-header.log",
+        ),
+    ):
+        require_once(negative_step, f"            meson setup {build_dir} ", "E_CI_STEP")
+        grep_command = f"          grep -F '{diagnostic}' {log_name}\n"
+        if build_dir in {"build-duckdb-linux-both", "build-duckdb-linux-neither"}:
+            grep_command = (
+                f"          grep -F '{diagnostic}' \\\n"
+                f"            {log_name}\n"
+            )
+        require_once(
+            negative_step,
+            grep_command,
+            "E_CI_STEP",
+        )
+
+
+def validate_workflows(sources: dict[str, str]) -> None:
+    jobs = []
+    for path in WORKFLOWS:
+        job = extract_ci_job(sources[path])
+        validate_ci_job(job, path)
+        jobs.append(job)
+    normalized = jobs[0].replace(
+        "Restore DuckDB source packagecache", "<DuckDB source packagecache>"
+    ).replace("actions/cache/restore@", "actions/cache@")
+    main = jobs[1].replace(
+        "Cache DuckDB source packagecache", "<DuckDB source packagecache>"
+    )
+    if normalized != main:
+        reject("E_CI_PARITY", "PR/main DuckDB Linux link jobs diverged")
 
 
 def normalize_link_tokens(command: str) -> list[str]:
@@ -329,7 +627,7 @@ def generated_commands(build_root: Path) -> str:
 
 def load_sources(root: Path) -> dict[str, str]:
     sources: dict[str, str] = {}
-    for relative in (PACKAGE_MESON, TESTS_MESON, CONSUMER):
+    for relative in (PACKAGE_MESON, TESTS_MESON, CONSUMER, *WORKFLOWS):
         path = root / relative
         try:
             sources[relative] = path.read_text(encoding="utf-8")
@@ -342,6 +640,7 @@ def validate_sources(sources: dict[str, str]) -> None:
     validate_package(sources[PACKAGE_MESON])
     validate_tests_meson(sources[TESTS_MESON])
     validate_consumer(sources[CONSUMER])
+    validate_workflows(sources)
 
 
 def replace_once(text: str, old: str, new: str) -> str:
@@ -383,6 +682,51 @@ def run_self_test(root: Path) -> None:
             "E_WEAK_SELECTION",
         ),
         Mutation(
+            "missing libm",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "  duckdb_deps += cpp.find_library('m', required : true)\n",
+                "",
+            ),
+            "E_ABI_PROBE",
+        ),
+        Mutation(
+            "missing libstdc++",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "  duckdb_deps += cpp.find_library('m', required : true)\n"
+                "  duckdb_deps += cpp.find_library('stdc++', required : true)\n",
+                "  duckdb_deps += cpp.find_library('m', required : true)\n",
+            ),
+            "E_ABI_PROBE",
+        ),
+        Mutation(
+            "wrong C++ runtime",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "  duckdb_deps += cpp.find_library('m', required : true)\n"
+                "  duckdb_deps += cpp.find_library('stdc++', required : true)\n",
+                "  duckdb_deps += cpp.find_library('m', required : true)\n"
+                "  duckdb_deps += cpp.find_library('c++', required : true)\n",
+            ),
+            "E_WEAK_SELECTION",
+        ),
+        Mutation(
+            "optional libstdc++",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "  duckdb_deps += cpp.find_library('m', required : true)\n"
+                "  duckdb_deps += cpp.find_library('stdc++', required : true)\n",
+                "  duckdb_deps += cpp.find_library('m', required : true)\n"
+                "  duckdb_deps += cpp.find_library('stdc++', required : false)\n",
+            ),
+            "E_WEAK_SELECTION",
+        ),
+        Mutation(
             "compiler id selection",
             PACKAGE_MESON,
             lambda text: replace_once(
@@ -393,6 +737,36 @@ def run_self_test(root: Path) -> None:
             "E_WEAK_SELECTION",
         ),
         Mutation(
+            "missing header probe include",
+            PACKAGE_MESON,
+            lambda text: text.replace(
+                "#include <cstddef>", "#include <stddef.h>", 1
+            ),
+            "E_HEADER_PROBE",
+        ),
+        Mutation(
+            "late header availability failure",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                replace_once(
+                    text,
+                    "  if not duckdb_cpp_headers_available\n",
+                    "  if true\n",
+                ),
+                "  duckdb_uses_libcxx = cpp.compiles(\n",
+                "  if not duckdb_cpp_headers_available\n"
+                "  endif\n\n"
+                "  duckdb_uses_libcxx = cpp.compiles(\n",
+            ),
+            "E_HEADER_ORDER",
+        ),
+        Mutation(
+            "missing libstdc++ marker",
+            PACKAGE_MESON,
+            lambda text: replace_once(text, "#ifndef __GLIBCXX__\n", "#if 0\n"),
+            "E_ABI_PROBE",
+        ),
+        Mutation(
             "missing libcxx marker",
             PACKAGE_MESON,
             lambda text: replace_once(
@@ -400,14 +774,95 @@ def run_self_test(root: Path) -> None:
             ),
             "E_ABI_PROBE",
         ),
+        *(
+            Mutation(
+                f"diagnostic drift: {diagnostic}",
+                PACKAGE_MESON,
+                lambda text, diagnostic=diagnostic: replace_once(
+                    text, diagnostic, "diagnostic drifted"
+                ),
+                "E_DIAGNOSTIC",
+            )
+            for diagnostic in (
+                "configured C++ preprocessing environment cannot include <cstddef>",
+                "found both __GLIBCXX__ and _LIBCPP_VERSION",
+                "does not support libc++",
+                "found neither __GLIBCXX__ nor _LIBCPP_VERSION",
+            )
+        ),
         Mutation(
-            "lost dependency export",
+            "regular dependency loses closure with decoy",
             PACKAGE_MESON,
             lambda text: replace_once(
                 text,
                 "duckdb_dep = declare_dependency(\n  link_with : duckdb_lib,\n  dependencies : duckdb_deps,",
                 "duckdb_dep = declare_dependency(\n  link_with : duckdb_lib,",
+            )
+            + "\n# dependencies : duckdb_deps\n",
+            "E_DEPENDENCY_EXPORT",
+        ),
+        Mutation(
+            "regular dependency keeps only commented closure",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "duckdb_dep = declare_dependency(\n"
+                "  link_with : duckdb_lib,\n"
+                "  dependencies : duckdb_deps,",
+                "duckdb_dep = declare_dependency(\n"
+                "  link_with : duckdb_lib,\n"
+                "  # dependencies : duckdb_deps,",
             ),
+            "E_DEPENDENCY_EXPORT",
+        ),
+        Mutation(
+            "regular dependency keeps only inline-comment closure",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "duckdb_dep = declare_dependency(\n"
+                "  link_with : duckdb_lib,\n"
+                "  dependencies : duckdb_deps,",
+                "duckdb_dep = declare_dependency(\n"
+                "  link_with : duckdb_lib, # dependencies : duckdb_deps,",
+            ),
+            "E_DEPENDENCY_EXPORT",
+        ),
+        Mutation(
+            "regular library loses closure with decoy",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "  dependencies : duckdb_deps,\n  cpp_args : duckdb_compile_args,",
+                "  cpp_args : duckdb_compile_args,",
+            )
+            + "\n# dependencies : duckdb_deps\n",
+            "E_DEPENDENCY_EXPORT",
+        ),
+        Mutation(
+            "seam library loses closure with decoy",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "    dependencies : duckdb_deps,\n"
+                "    cpp_args : duckdb_test_seam_compile_args,",
+                "    cpp_args : duckdb_test_seam_compile_args,",
+            )
+            + "\n# dependencies : duckdb_deps\n",
+            "E_DEPENDENCY_EXPORT",
+        ),
+        Mutation(
+            "seam dependency loses closure with decoy",
+            PACKAGE_MESON,
+            lambda text: replace_once(
+                text,
+                "  duckdb_test_seam_dep = declare_dependency(\n"
+                "    link_with : duckdb_test_seam_lib,\n"
+                "    dependencies : duckdb_deps,",
+                "  duckdb_test_seam_dep = declare_dependency(\n"
+                "    link_with : duckdb_test_seam_lib,",
+            )
+            + "\n# dependencies : duckdb_deps\n",
             "E_DEPENDENCY_EXPORT",
         ),
         Mutation(
@@ -477,6 +932,291 @@ def run_self_test(root: Path) -> None:
                 "duckdb_destroy_result (", "duckdb_destroy_result_removed ("
             ),
             "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer hidden in disabled preprocessor branch",
+            CONSUMER,
+            lambda text: (
+                "#if 0\n"
+                + text
+                + "\n#endif\n\nint\nmain (void)\n{\n  return 0;\n}\n"
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer hidden in block comment",
+            CONSUMER,
+            lambda text: (
+                "/*\n"
+                + text
+                + "\n*/\n\nint\nmain (void)\n{\n  return 0;\n}\n"
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer lifecycle hidden behind if zero",
+            CONSUMER,
+            lambda text: replace_once(
+                replace_once(
+                    text,
+                    "  duckdb_database database = NULL;",
+                    "  if (0) {\n    duckdb_database database = NULL;",
+                ),
+                "  return status;\n",
+                "  }\n  return 0;\n",
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer lifecycle hidden behind false initial state",
+            CONSUMER,
+            lambda text: replace_once(
+                replace_once(
+                    text,
+                    "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                    "  if (database != NULL) {\n"
+                    "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                ),
+                "  status = 0;\n",
+                "  }\n  status = 0;\n",
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer lifecycle hidden behind constant expression",
+            CONSUMER,
+            lambda text: replace_once(
+                replace_once(
+                    text,
+                    "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                    "  if (1 == 0) {\n"
+                    "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                ),
+                "  status = 0;\n",
+                "  }\n  status = 0;\n",
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer lifecycle skipped by goto",
+            CONSUMER,
+            lambda text: replace_once(
+                replace_once(
+                    text,
+                    "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                    "  goto lifecycle_skipped;\n\n"
+                    "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                ),
+                "  status = 0;\n",
+                "lifecycle_skipped:\n  status = 0;\n",
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "consumer returns success before lifecycle",
+            CONSUMER,
+            lambda text: replace_once(
+                text,
+                "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+                "  return 0;\n\n"
+                "  if (duckdb_open (NULL, &database) != DuckDBSuccess) {",
+            ),
+            "E_CONSUMER_LIFECYCLE",
+        ),
+        Mutation(
+            "CI loses Clang row",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "          - compiler: clang-libstdcxx\n"
+                "            cc: clang\n"
+                "            cxx: clang++\n"
+                "            cxxflags: -stdlib=libstdc++\n",
+                "",
+            ),
+            "E_CI_JOB",
+        ),
+        Mutation(
+            "CI moves Clang compile to GCC row",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "      - name: Compile Clang/libstdc++ C consumer\n"
+                "        if: matrix.compiler == 'clang-libstdcxx'\n",
+                "      - name: Compile Clang/libstdc++ C consumer\n"
+                "        if: matrix.compiler == 'gcc'\n",
+            ),
+            "E_CI_ROW",
+        ),
+        Mutation(
+            "CI moves Clang runtime proof to GCC row",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "      - name: Run Clang/libstdc++ C consumer proof\n"
+                "        if: matrix.compiler == 'clang-libstdcxx'\n",
+                "      - name: Run Clang/libstdc++ C consumer proof\n"
+                "        if: matrix.compiler == 'gcc'\n",
+            ),
+            "E_CI_ROW",
+        ),
+        Mutation(
+            "CI moves GCC full suite to Clang row",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "      - name: Run GCC source-offbridge full suite\n"
+                "        if: matrix.compiler == 'gcc'\n",
+                "      - name: Run GCC source-offbridge full suite\n"
+                "        if: matrix.compiler == 'clang-libstdcxx'\n",
+            ),
+            "E_CI_ROW",
+        ),
+        Mutation(
+            "CI moves negative ABI proof to GCC row",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "      - name: Reject unsupported C++ ABI configurations\n"
+                "        if: matrix.compiler == 'clang-libstdcxx'\n",
+                "      - name: Reject unsupported C++ ABI configurations\n"
+                "        if: matrix.compiler == 'gcc'\n",
+            ),
+            "E_CI_ROW",
+        ),
+        Mutation(
+            "CI moves GCC full-suite command into Clang proof step",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                replace_once(
+                    text,
+                    "      - name: Run GCC source-offbridge full suite\n"
+                    "        if: matrix.compiler == 'gcc'\n"
+                    "        run: |\n"
+                    "          meson test -C build-duckdb-linux-link "
+                    "--print-errorlogs --suite wyrelog",
+                    "      - name: Run GCC source-offbridge full suite\n"
+                    "        if: matrix.compiler == 'gcc'\n"
+                    "        run: |\n"
+                    "          echo 'full suite command moved'",
+                ),
+                "            duckdb-linux-link-dependency-wiring-generated\n",
+                "            duckdb-linux-link-dependency-wiring-generated\n"
+                "          meson test -C build-duckdb-linux-link "
+                "--print-errorlogs --suite wyrelog\n",
+            ),
+            "E_CI_STEP",
+        ),
+        Mutation(
+            "CI comments out GCC full-suite command",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "          meson test -C build-duckdb-linux-link "
+                "--print-errorlogs --suite wyrelog\n",
+                "          echo 'full suite disabled'\n"
+                "          # meson test -C build-duckdb-linux-link "
+                "--print-errorlogs --suite wyrelog\n",
+            ),
+            "E_CI_STEP",
+        ),
+        Mutation(
+            "CI replaces full suite with compile-only evidence",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "meson test -C build-duckdb-linux-link --print-errorlogs --suite wyrelog",
+                "meson compile -C build-duckdb-linux-link",
+            ),
+            "E_CI_COMPILE",
+        ),
+        Mutation(
+            "CI tolerates focused failure",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "      - name: Run Clang/libstdc++ C consumer proof\n",
+                "      - name: Run Clang/libstdc++ C consumer proof\n"
+                "        continue-on-error: true\n",
+            ),
+            "E_CI_MASKING",
+        ),
+        Mutation(
+            "CI skips GCC full suite",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text, "if: matrix.compiler == 'gcc'", "if: false"
+            ),
+            "E_CI_MASKING",
+        ),
+        Mutation(
+            "CI exits successfully before GCC full suite",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "          meson test -C build-duckdb-linux-link "
+                "--print-errorlogs --suite wyrelog\n",
+                "          exit 0\n"
+                "          meson test -C build-duckdb-linux-link "
+                "--print-errorlogs --suite wyrelog\n",
+            ),
+            "E_CI_MASKING",
+        ),
+        Mutation(
+            "CI repeats GCC full suite",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "meson test -C build-duckdb-linux-link --print-errorlogs --suite wyrelog",
+                "meson test -C build-duckdb-linux-link --print-errorlogs "
+                "--suite wyrelog --repeat 2",
+            ),
+            "E_CI_MASKING",
+        ),
+        Mutation(
+            "CI drifts positive configuration",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "meson setup build-duckdb-linux-link \\\n"
+                "            -Denable_fact_store=enabled",
+                "meson setup build-duckdb-linux-link \\\n"
+                "            -Denable_fact_store=disabled",
+            ),
+            "E_CI_CONFIG",
+        ),
+        Mutation(
+            "CI adds a fourth positive option",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "meson setup build-duckdb-linux-link \\\n"
+                "            -Denable_fact_store=enabled \\\n",
+                "meson setup build-duckdb-linux-link \\\n"
+                "            -Denable_fact_store=enabled \\\n"
+                "            -Denable_client=disabled \\\n",
+            ),
+            "E_CI_STEP",
+        ),
+        Mutation(
+            "CI accepts any negative failure",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "grep -F 'does not support libc++' duckdb-linux-libcxx.log",
+                "test -s duckdb-linux-libcxx.log",
+            ),
+            "E_CI_NEGATIVE",
+        ),
+        Mutation(
+            "CI PR/main drift",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "name: duckdb-linux-link-logs-${{ matrix.compiler }}",
+                "name: duckdb-linux-link-pr-${{ matrix.compiler }}",
+            ),
+            "E_CI_PARITY",
         ),
     )
     for mutation in mutations:

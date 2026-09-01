@@ -21,6 +21,7 @@ WORKFLOW_PATHS = (
 CI_JOBS = (
     "format",
     "build-posix",
+    "duckdb-linux-link-closure",
     "service-credential-e2e",
     "duckdb-checkpoint-seam",
     "daemon-http-shared-fact",
@@ -56,6 +57,9 @@ EXPECTED_JOB_KEYS = {
     "build-posix": (
         "name", "runs-on", "timeout-minutes", "env", "strategy", "steps"
     ),
+    "duckdb-linux-link-closure": (
+        "name", "runs-on", "timeout-minutes", "strategy", "steps"
+    ),
     "service-credential-e2e": (
         "name", "runs-on", "timeout-minutes", "steps"
     ),
@@ -81,6 +85,7 @@ EXPECTED_JOB_KEYS = {
 EXPECTED_RUNS_ON = {
     "format": "ubuntu-latest",
     "build-posix": "${{ matrix.os }}",
+    "duckdb-linux-link-closure": "ubuntu-latest",
     "service-credential-e2e": "ubuntu-latest",
     "duckdb-checkpoint-seam": "${{ matrix.os }}",
     "daemon-http-shared-fact": "${{ matrix.os }}",
@@ -177,6 +182,9 @@ COMMON_CI_STATUS_HANDLERS = {
         ("Remove secure DuckDB compile swap", STATUS_ALWAYS_LINUX),
         ("Show sccache statistics", STATUS_ALWAYS),
         ("Upload meson logs on failure", STATUS_FAILURE),
+    ),
+    "duckdb-linux-link-closure": (
+        ("Upload DuckDB Linux link logs on failure", STATUS_FAILURE),
     ),
     "service-credential-e2e": (
         ("Upload meson logs on failure", STATUS_FAILURE),
@@ -284,6 +292,11 @@ PR_ACTIONS = {
         ("Set up sccache", SCCACHE_ACTION),
         ("Upload meson logs on failure", UPLOAD_ACTION),
     ),
+    "duckdb-linux-link-closure": actions(
+        ("Check out source", CHECKOUT_ACTION),
+        ("Restore DuckDB source packagecache", CACHE_RESTORE_ACTION),
+        ("Upload DuckDB Linux link logs on failure", UPLOAD_ACTION),
+    ),
     "duckdb-checkpoint-seam": actions(
         ("Check out source", CHECKOUT_ACTION),
         ("Restore meson packagecache", CACHE_RESTORE_ACTION),
@@ -310,6 +323,11 @@ MAIN_ACTIONS = {
         ("Cache meson packagecache", CACHE_ACTION),
         ("Set up sccache", SCCACHE_ACTION),
         ("Upload meson logs on failure", UPLOAD_ACTION),
+    ),
+    "duckdb-linux-link-closure": actions(
+        ("Check out source", CHECKOUT_ACTION),
+        ("Cache DuckDB source packagecache", CACHE_ACTION),
+        ("Upload DuckDB Linux link logs on failure", UPLOAD_ACTION),
     ),
     "duckdb-checkpoint-seam": actions(
         ("Check out source", CHECKOUT_ACTION),
@@ -691,6 +709,21 @@ def expected_matrix(path: str, name: str) -> tuple[tuple[tuple[str, str], ...], 
                 rows[1] + (("duckdb", "subproject"),),
             )
         return rows
+    if name == "duckdb-linux-link-closure":
+        return (
+            (
+                ("compiler", "gcc"),
+                ("cc", "gcc"),
+                ("cxx", "g++"),
+                ("cxxflags", '""'),
+            ),
+            (
+                ("compiler", "clang-libstdcxx"),
+                ("cc", "clang"),
+                ("cxx", "clang++"),
+                ("cxxflags", "-stdlib=libstdc++"),
+            ),
+        )
     if name in ("duckdb-checkpoint-seam", "daemon-http-shared-fact"):
         return ((("os", "ubuntu-latest"),), (("os", "macos-latest"),))
     if name == "daemon-http-shared-fact-audit-disabled":

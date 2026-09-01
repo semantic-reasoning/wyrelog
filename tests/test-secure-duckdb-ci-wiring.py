@@ -49,7 +49,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     workflow = (
         root / ".github" / "workflows" / workflow_name
     ).read_text(encoding="utf-8")
-    build_posix = job(workflow, "build-posix", "duckdb-checkpoint-seam")
+    build_posix = job(workflow, "build-posix", "duckdb-linux-link-closure")
     checkpoint_seam = job(workflow, "duckdb-checkpoint-seam", "build-windows")
     windows_build = workflow[workflow.index("  build-windows:\n"):]
     if build_posix.count("    timeout-minutes: 45\n") != 1:
