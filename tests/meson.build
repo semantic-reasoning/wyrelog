@@ -3497,11 +3497,22 @@ if get_option('enable_audit').allowed()
     dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
-  test('audit-conn-duckdb-hardening',
-    test_audit_conn_duckdb_hardening,
-    env : audit_conn_test_env,
-    timeout : 60,
-  )
+  # Issue #920: DuckDB 1.5.5 compares 64-bit CountZeros results with
+  # 32-bit unsigned-long builtins under clang-cl/LLP64.  Until #920 fixes
+  # those assertion oracles, positive/effective source-Windows runtime is
+  # temporarily waived.  The retained child and structural gates below are
+  # not equivalent positive-open or effective-settings evidence.
+  audit_duckdb_hardening_source_windows_waived = \
+    host_machine.system() == 'windows' and \
+    cc.get_id() == 'clang-cl' and \
+    get_option('duckdb_source') == 'subproject'
+  if not audit_duckdb_hardening_source_windows_waived
+    test('audit-conn-duckdb-hardening',
+      test_audit_conn_duckdb_hardening,
+      env : audit_conn_test_env,
+      timeout : 60,
+    )
+  endif
   test('audit-conn-duckdb-autoload-clean-runtime', python3,
     args : [
       files('test-audit-conn-duckdb-autoload-runtime.py'),

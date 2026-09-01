@@ -1238,7 +1238,11 @@ jobs:
           if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-audit-conn-duckdb-hardening
-          meson test -C builddir audit-conn-duckdb-hardening audit-conn-duckdb-autoload-clean-runtime audit-conn-duckdb-autoload-ambient-runtime audit-conn-duckdb-autoload-runtime-self-test audit-conn-duckdb-hardening-boundary audit-conn-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
+          if "${{ matrix.duckdb_source }}"=="subproject" (
+            meson test -C builddir audit-conn-duckdb-autoload-clean-runtime audit-conn-duckdb-autoload-ambient-runtime audit-conn-duckdb-autoload-runtime-self-test audit-conn-duckdb-hardening-boundary audit-conn-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
+          ) else (
+            meson test -C builddir audit-conn-duckdb-hardening audit-conn-duckdb-autoload-clean-runtime audit-conn-duckdb-autoload-ambient-runtime audit-conn-duckdb-autoload-runtime-self-test audit-conn-duckdb-hardening-boundary audit-conn-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
+          )
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

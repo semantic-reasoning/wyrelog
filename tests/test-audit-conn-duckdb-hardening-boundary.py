@@ -21,6 +21,52 @@ FILES = (
     ".github/workflows/ci-main.yml",
 )
 
+SOURCE_WINDOWS_WAIVER = """  # Issue #920: DuckDB 1.5.5 compares 64-bit CountZeros results with
+  # 32-bit unsigned-long builtins under clang-cl/LLP64.  Until #920 fixes
+  # those assertion oracles, positive/effective source-Windows runtime is
+  # temporarily waived.  The retained child and structural gates below are
+  # not equivalent positive-open or effective-settings evidence.
+  audit_duckdb_hardening_source_windows_waived = \\
+    host_machine.system() == 'windows' and \\
+    cc.get_id() == 'clang-cl' and \\
+    get_option('duckdb_source') == 'subproject'
+  if not audit_duckdb_hardening_source_windows_waived
+"""
+
+SAFE_WINDOWS_GATES = (
+    "audit-conn-duckdb-autoload-clean-runtime",
+    "audit-conn-duckdb-autoload-ambient-runtime",
+    "audit-conn-duckdb-autoload-runtime-self-test",
+    "audit-conn-duckdb-hardening-boundary",
+    "audit-conn-duckdb-hardening-boundary-self-test",
+)
+
+AGGREGATE_REGISTRATION = """    test('audit-conn-duckdb-hardening',
+      test_audit_conn_duckdb_hardening,
+      env : audit_conn_test_env,
+      timeout : 60,
+    )
+"""
+SOURCE_WINDOWS_WAIVER_BLOCK = (
+    SOURCE_WINDOWS_WAIVER + AGGREGATE_REGISTRATION + "  endif\n"
+)
+AGGREGATE_WORKFLOW_INVOCATION = (
+    "meson test -C builddir audit-conn-duckdb-hardening "
+)
+
+
+def windows_audit_command() -> str:
+    safe = " ".join(SAFE_WINDOWS_GATES)
+    return (
+        '          if "${{ matrix.duckdb_source }}"=="subproject" (\n'
+        f"            meson test -C builddir {safe} --no-rebuild "
+        "--print-errorlogs\n"
+        "          ) else (\n"
+        "            meson test -C builddir audit-conn-duckdb-hardening "
+        f"{safe} --no-rebuild --print-errorlogs\n"
+        "          )"
+    )
+
 
 def function_body(source: str, name: str) -> str:
     marker = source.find(name + " (")
@@ -189,6 +235,29 @@ def validate_repository(root: Path,
         "test_service_exchange_projector")]
     if "wyrelog_dep" in hardening_block or "service_exchange_private_dep" in hardening_block:
         errors.append("focused target dual-links a production implementation")
+    executable_at = hardening_block.find(
+        "test_audit_conn_duckdb_hardening = executable(")
+    waiver_at = hardening_block.find(SOURCE_WINDOWS_WAIVER_BLOCK)
+    aggregate_at = waiver_at + len(SOURCE_WINDOWS_WAIVER)
+    waiver_end_at = aggregate_at + len(AGGREGATE_REGISTRATION)
+    first_safe_at = hardening_block.find(
+        "  test('audit-conn-duckdb-autoload-clean-runtime'", waiver_end_at)
+    if waiver_at < 0:
+        errors.append("source-Windows waiver is not the exact #920 contract")
+    elif not (0 <= executable_at < waiver_at < aggregate_at
+              < waiver_end_at < first_safe_at):
+        errors.append("source-Windows waiver guards more than the aggregate runtime")
+    if hardening_block.count(SOURCE_WINDOWS_WAIVER_BLOCK) != 1:
+        errors.append(
+            "source-Windows waiver must guard only the aggregate runtime")
+    if meson.count(
+            "if not audit_duckdb_hardening_source_windows_waived") != 1:
+        errors.append("focused executable compilation moved under the waiver")
+    if hardening_block.count(AGGREGATE_REGISTRATION) != 1:
+        errors.append("aggregate audit runtime registration or timeout drifted")
+    for forbidden in ("NDEBUG", "b_ndebug", "continue-on-error", "retry"):
+        if forbidden in hardening_block:
+            errors.append(f"source-Windows waiver masks evidence with {forbidden}")
     for target in (
         "audit-conn-duckdb-hardening",
         "audit-conn-duckdb-autoload-clean-runtime",
@@ -243,6 +312,24 @@ def validate_repository(root: Path,
         ):
             if target not in workflow:
                 errors.append(f"{workflow_path} omits CI gate: {target}")
+        if workflow.count(windows_audit_command()) != 1:
+            errors.append(
+                f"{workflow_path} does not preserve the exact source/prebuilt "
+                "Windows audit distinction")
+        if workflow.count(AGGREGATE_WORKFLOW_INVOCATION) != 1:
+            errors.append(
+                f"{workflow_path} must invoke the aggregate runtime exactly "
+                "once in the prebuilt branch")
+        audit_step_at = workflow.find(
+            "      - name: Test audit DuckDB hardening (clang-cl)")
+        audit_step_end = workflow.find("\n      - name:", audit_step_at + 1)
+        audit_step = workflow[audit_step_at:audit_step_end]
+        if "meson compile -C builddir test-audit-conn-duckdb-hardening" not in audit_step:
+            errors.append(f"{workflow_path} does not always compile the focused target")
+        for forbidden in (
+                "NDEBUG", "b_ndebug", "continue-on-error", "retry", "--timeout-multiplier"):
+            if forbidden in audit_step:
+                errors.append(f"{workflow_path} masks the Windows waiver with {forbidden}")
     return errors
 
 
@@ -288,6 +375,33 @@ def self_test(root: Path) -> list[str]:
         ("runtime registration", "tests/meson.build",
          "test('audit-conn-duckdb-autoload-runtime-self-test'",
          "test('removed-runtime-self-test'"),
+        ("waiver Windows predicate", "tests/meson.build",
+         "host_machine.system() == 'windows' and \\",
+         "host_machine.system() == 'linux' and \\",),
+        ("waiver compiler predicate", "tests/meson.build",
+         "cc.get_id() == 'clang-cl' and \\",
+         "cc.get_id() == 'clang' and \\",),
+        ("waiver source predicate", "tests/meson.build",
+         "get_option('duckdb_source') == 'subproject'",
+         "get_option('duckdb_source') == 'prebuilt'"),
+        ("waiver conjunction", "tests/meson.build",
+         "host_machine.system() == 'windows' and \\",
+         "host_machine.system() == 'windows' or \\",),
+        ("waiver retirement issue", "tests/meson.build", "Issue #920",
+         "Issue #000"),
+        ("waiver evidence honesty", "tests/meson.build", "not equivalent",
+         "equivalent"),
+        ("waiver compile boundary", "tests/meson.build",
+         "test_audit_conn_duckdb_hardening = executable(",
+         "if not audit_duckdb_hardening_source_windows_waived\n"
+         "  test_audit_conn_duckdb_hardening = executable("),
+        ("waiver timeout", "tests/meson.build", "timeout : 60,",
+         "timeout : 600,"),
+        ("waiver guarded scope", "tests/meson.build",
+         AGGREGATE_REGISTRATION + "  endif",
+         AGGREGATE_REGISTRATION
+         + "    test('waiver-scope-creep', "
+         "test_audit_conn_duckdb_hardening)\n  endif"),
         ("trace IPv6", "tests/test-audit-conn-duckdb-autoload-runtime.py",
          '"AF_INET6"', '"AF_UNSPEC"'),
         ("tree hash", "tests/test-audit-conn-duckdb-autoload-runtime.py",
@@ -297,6 +411,21 @@ def self_test(root: Path) -> list[str]:
          '"wyl_audit_conn_duckdb_config_fail_once_for_test",', ""),
         ("CI strace", ".github/workflows/ci-pr.yml", "patch strace time",
          "patch time"),
+        ("CI safe source gate", ".github/workflows/ci-pr.yml",
+         "audit-conn-duckdb-autoload-clean-runtime",
+         "removed-audit-clean-runtime"),
+        ("CI prebuilt aggregate", ".github/workflows/ci-pr.yml",
+         "meson test -C builddir audit-conn-duckdb-hardening ",
+         "meson test -C builddir removed-audit-hardening "),
+        ("CI unconditional aggregate", ".github/workflows/ci-pr.yml",
+         windows_audit_command(),
+         windows_audit_command()
+         + "\n          meson test -C builddir "
+         "audit-conn-duckdb-hardening --no-rebuild --print-errorlogs"),
+        ("CI assertion masking", ".github/workflows/ci-pr.yml",
+         "meson compile -C builddir test-audit-conn-duckdb-hardening",
+         "set NDEBUG=1\n          meson compile -C builddir "
+         "test-audit-conn-duckdb-hardening"),
         ("effective row count", "tests/test-audit-conn-duckdb-hardening.c",
          "duckdb_row_count (&result), ==, G_N_ELEMENTS (expected)",
          "duckdb_row_count (&result), >=, 1"),
