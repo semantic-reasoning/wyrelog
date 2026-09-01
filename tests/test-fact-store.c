@@ -2108,9 +2108,22 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
       || wyl_policy_store_create_schema (policy_store) != WYRELOG_E_OK)
     return 2310;
   g_clear_pointer (&policy_store, wyl_policy_store_close);
-  if (!identified_open_is (policy, &test_identity,
-      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
-      WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+  /* An installed sqlite_scanner lets DuckDB open this foreign catalog and
+   * reject its schema.  Without that ambient extension, DuckDB rejects the
+   * storage format at open.  Both paths must fail closed with no store. */
+  wyl_fact_store_t *foreign_store = NULL;
+  WylFactStoreIdentityResult foreign_result =
+      WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+  wyrelog_error_t foreign_rc = wyl_fact_store_open_identified (policy,
+          &test_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+          &foreign_result, &foreign_store);
+  gboolean foreign_rejected = foreign_store == NULL
+      && ((foreign_rc == WYRELOG_E_POLICY
+      && foreign_result == WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA)
+      || (foreign_rc == WYRELOG_E_IO
+      && foreign_result == WYL_FACT_STORE_IDENTITY_RESULT_OPEN));
+  wyl_fact_store_close (foreign_store);
+  if (!foreign_rejected)
     return 2311;
 
   g_remove (partial);
