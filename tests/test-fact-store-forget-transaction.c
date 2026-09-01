@@ -10,7 +10,7 @@
 typedef struct
 {
   guint fail_mask;
-  guint calls[3];
+  guint calls[2];
 } TransactionFault;
 
 typedef struct
@@ -38,10 +38,12 @@ count_rows (wyl_fact_store_t *store, const gchar *sql)
 }
 
 static wyrelog_error_t
-transaction_fault (WylFactStoreForgetTransactionTestPhase phase,
-    gpointer user_data)
+transaction_fault (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
 {
   TransactionFault *fault = user_data;
+  g_assert_cmpint (kind, ==,
+      WYL_FACT_STORE_TRANSACTION_TEST_FORGET_COMPLETE);
   g_assert_cmpuint ((guint) phase, <, G_N_ELEMENTS (fault->calls));
   fault->calls[phase]++;
   guint bit = PHASE_BIT (phase);
@@ -50,6 +52,15 @@ transaction_fault (WylFactStoreForgetTransactionTestPhase phase,
     return WYRELOG_E_IO;
   }
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fail_forget_body (WylFactStoreForgetTransactionTestPhase phase,
+    gpointer user_data)
+{
+  (void) user_data;
+  return phase == WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN ?
+         WYRELOG_E_IO : WYRELOG_E_OK;
 }
 
 static void
@@ -110,6 +121,7 @@ fixture_teardown (Fixture *fixture, gconstpointer user_data)
 {
   (void) user_data;
   wyl_fact_store_set_forget_transaction_test_hook (fixture->store, NULL, NULL);
+  wyl_fact_store_test_set_transaction_hook (fixture->store, NULL, NULL);
   wyl_fact_store_close (fixture->store);
 }
 
@@ -169,15 +181,14 @@ test_unarmed_control_commits (Fixture *fixture, gconstpointer user_data)
 {
   (void) user_data;
   TransactionFault fault = { 0 };
-  wyl_fact_store_set_forget_transaction_test_hook (fixture->store,
+  wyl_fact_store_test_set_transaction_hook (fixture->store,
       transaction_fault, &fault);
   g_assert_cmpint (forget (fixture), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN],
-      ==, 1);
-  g_assert_cmpuint (fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT],
-      ==, 1);
   g_assert_cmpuint (
-    fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK], ==, 0);
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+    ==, 1);
+  g_assert_cmpuint (
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 0);
   assert_connection_accepts_new_transaction (fixture);
 }
 
@@ -186,15 +197,16 @@ test_commit_failure_rolls_back (Fixture *fixture, gconstpointer user_data)
 {
   (void) user_data;
   TransactionFault fault = {
-    .fail_mask = PHASE_BIT (WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT),
+    .fail_mask = PHASE_BIT (WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT),
   };
-  wyl_fact_store_set_forget_transaction_test_hook (fixture->store,
+  wyl_fact_store_test_set_transaction_hook (fixture->store,
       transaction_fault, &fault);
   g_assert_cmpint (forget (fixture), ==, WYRELOG_E_IO);
-  g_assert_cmpuint (fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT],
-      ==, 1);
   g_assert_cmpuint (
-    fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK], ==, 1);
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+    ==, 1);
+  g_assert_cmpuint (
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 1);
   /* Before the state assertions, because every one of them queries this same
    * connection: an unresolved abort makes them fail too, and then the failure
    * names a wrong row count instead of the poisoned connection that caused
@@ -202,7 +214,7 @@ test_commit_failure_rolls_back (Fixture *fixture, gconstpointer user_data)
    * the defect. */
   assert_connection_accepts_new_transaction (fixture);
   assert_pending_without_audit (fixture);
-  wyl_fact_store_set_forget_transaction_test_hook (fixture->store, NULL, NULL);
+  wyl_fact_store_test_set_transaction_hook (fixture->store, NULL, NULL);
   assert_reconciles (fixture);
 }
 
@@ -210,18 +222,17 @@ static void
 test_body_failure_rolls_back (Fixture *fixture, gconstpointer user_data)
 {
   (void) user_data;
-  TransactionFault fault = {
-    .fail_mask = PHASE_BIT (WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN),
-  };
+  TransactionFault fault = { 0 };
   wyl_fact_store_set_forget_transaction_test_hook (fixture->store,
+      fail_forget_body, NULL);
+  wyl_fact_store_test_set_transaction_hook (fixture->store,
       transaction_fault, &fault);
   g_assert_cmpint (forget (fixture), ==, WYRELOG_E_IO);
-  g_assert_cmpuint (fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN],
-      ==, 1);
-  g_assert_cmpuint (fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT],
-      ==, 0);
   g_assert_cmpuint (
-    fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK], ==, 1);
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+    ==, 0);
+  g_assert_cmpuint (
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 1);
   /* Before the state assertions, because every one of them queries this same
    * connection: an unresolved abort makes them fail too, and then the failure
    * names a wrong row count instead of the poisoned connection that caused
@@ -245,14 +256,14 @@ test_rollback_failure_is_reported (Fixture *fixture, gconstpointer user_data)
 
   TransactionFault fault = {
     .fail_mask =
-        PHASE_BIT (WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT)
-        | PHASE_BIT (WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK),
+        PHASE_BIT (WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT)
+        | PHASE_BIT (WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK),
   };
-  wyl_fact_store_set_forget_transaction_test_hook (fixture->store,
+  wyl_fact_store_test_set_transaction_hook (fixture->store,
       transaction_fault, &fault);
   g_assert_cmpint (forget (fixture), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpuint (
-    fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK], ==, 1);
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 1);
 
   g_unsetenv ("WYL_LOG_FILE");
   g_unsetenv ("WYL_LOG");
@@ -268,10 +279,9 @@ test_rollback_failure_is_reported (Fixture *fixture, gconstpointer user_data)
   g_assert_null (g_strstr_len (contents, -1, "transaction-fault"));
   g_assert_null (g_strstr_len (contents, -1, "transaction-boundary-test"));
 
-  wyl_fact_store_set_forget_transaction_test_hook (fixture->store, NULL, NULL);
-  g_assert_true (exec_ok (fixture->store, "ROLLBACK;"));
-  assert_pending_without_audit (fixture);
-  assert_reconciles (fixture);
+  wyl_fact_store_test_set_transaction_hook (fixture->store, NULL, NULL);
+  g_assert_cmpint (wyl_fact_store_create_schema (fixture->store), ==,
+      WYRELOG_E_INTERNAL);
 
   g_assert_cmpint (g_remove (log_path), ==, 0);
   g_assert_cmpint (g_rmdir (log_dir), ==, 0);

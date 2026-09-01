@@ -1759,6 +1759,17 @@ if get_option('enable_fact_store').allowed()
     ],
   )
 
+  test_fact_store_poison = executable('test-fact-store-poison',
+    'test-fact-store-poison.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, duckdb_dep,
+      sqlite_dep],
+  )
+
+  test('fact-store-poison', test_fact_store_poison,
+    timeout : 60,
+  )
+
   test_fact_store_forget_transaction = executable(
     'test-fact-store-forget-transaction',
     'test-fact-store-forget-transaction.c',

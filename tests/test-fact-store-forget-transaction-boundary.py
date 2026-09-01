@@ -9,10 +9,13 @@ import sys
 
 PATHS = (
     "wyrelog/fact/store.c",
+    "wyrelog/fact/store-connection-private.h",
     "wyrelog/fact/store-private.h",
+    "wyrelog/fact/store-test-seams-private.h",
     "tests/test-fact-store-forget-transaction.c",
     "tests/test-fact-store-forget-transaction-provision-helper.c",
     "tests/test-fact-store-forget-transaction-provisioned.c",
+    "tests/test-fact-store-poison.c",
     "tests/meson.build",
     ".github/workflows/ci-pr.yml",
     ".github/workflows/ci-main.yml",
@@ -109,78 +112,74 @@ def validate(files: dict[str, str]) -> None:
     ]
     meson = files["tests/meson.build"]
 
-    helper = function_body(store, "rollback_forget_transaction_unlocked")
+    transaction = function_body(store, "wyl_fact_store_transaction_finish")
     completion = function_body(store, "complete_forget_intent_unlocked")
-    require_once(
-        helper,
-        'rollback_rc = exec_sql (store->conn, "ROLLBACK;");',
-        "checked cleanup must execute one real rollback",
-    )
-    require_once(
-        helper,
-        "WYL_LOG_ERROR (WYL_LOG_SECTION_IO,",
-        "rollback failure must emit one operator-visible error",
-    )
-    require_once(
-        helper,
-        '"fact forget transaction rollback failed"',
-        "rollback diagnostic literal drifted",
-    )
-    require_once(
-        helper,
-        "return WYRELOG_E_INTERNAL;",
-        "rollback failure must take INTERNAL precedence",
-    )
-    require_once(
-        helper,
-        "return primary_rc;",
-        "successful cleanup must preserve the primary error",
-    )
-    if "duckdb_disconnect" in helper or "duckdb_connect" in helper:
+    for token, message in (
+        ('rollback_rc = exec_sql (connection, "ROLLBACK;");',
+         "checked cleanup must execute one real rollback"),
+        ('"fact forget transaction rollback failed"',
+         "rollback diagnostic literal drifted"),
+        ("store->health = WYL_FACT_STORE_POISONED;",
+         "rollback failure must poison before unlock"),
+        ("return WYRELOG_E_INTERNAL;",
+         "rollback failure must take INTERNAL precedence"),
+        ("WYL_FACT_STORE_TRANSACTION_BEFORE_COMMIT",
+         "common commit hook drifted"),
+        ("WYL_FACT_STORE_TRANSACTION_BEFORE_ROLLBACK",
+         "common rollback hook drifted"),
+        ('primary_rc = exec_sql (connection, "COMMIT;");',
+         "checked cleanup must execute one real commit"),
+    ):
+        require_once(transaction, token, message)
+    if transaction.count("WYL_LOG_ERROR (WYL_LOG_SECTION_IO,") != 2:
+        raise AssertionError("rollback failure diagnostics drifted")
+    if "return primary_rc;" not in transaction:
+        raise AssertionError("successful cleanup must preserve the primary error")
+    if "duckdb_disconnect (" in transaction or "duckdb_connect (" in transaction:
         raise AssertionError("checked cleanup must not replace the connection")
 
     body_failures = (
         "if (duckdb_prepare (store->conn, audit_sql, &stmt) "
         "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (ok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (exec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
-        "    goto rollback;\n  }",
+        "    goto finish;\n  }",
         "if (duckdb_prepare (store->conn, update_sql, &ustmt) "
         "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (uok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (uexec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
-        "    goto rollback;\n  }",
+        "    goto finish;\n  }",
     )
     for index, failure in enumerate(body_failures, 1):
         require_once(
             completion,
             failure,
-            f"body failure {index} escaped the common rollback",
+            f"body failure {index} escaped the common transaction finish",
         )
     require_once(
         completion,
-        'rc = exec_sql (store->conn, "COMMIT;");\n'
-        "  if (rc != WYRELOG_E_OK)\n    goto rollback;",
-        "a real COMMIT failure must enter common rollback",
+        "wyl_fact_store_transaction_begin (session,\n"
+        "          WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE, &transaction)",
+        "forget completion must use the common transaction owner",
     )
     require_once(
         completion,
-        "rollback:\n  return rollback_forget_transaction_unlocked (store, rc);",
+        "finish:\n  return wyl_fact_store_transaction_finish (&transaction, rc);",
         "completion must have one checked cleanup exit",
     )
     if "(void) exec_sql" in completion:
         raise AssertionError("completion still discards transaction cleanup")
 
-    seam_tokens = (
+    legacy_seam_tokens = (
         "WylFactStoreForgetTransactionTestPhase",
         "WylFactStoreForgetTransactionTestHook",
         "wyl_fact_store_set_forget_transaction_test_hook",
     )
-    for token in seam_tokens:
+    for token in legacy_seam_tokens:
         if token not in header:
             raise AssertionError(f"private transaction seam drifted: {token}")
     header_seam = header[
@@ -189,7 +188,7 @@ def validate(files: dict[str, str]) -> None:
             "#if defined(WYL_TEST_HANDLE_SEAMS)\ntypedef enum"
         )) + len("#endif")
     ]
-    for token in seam_tokens[:2]:
+    for token in legacy_seam_tokens[:2]:
         if token not in header_seam:
             raise AssertionError(f"test seam escaped its compile guard: {token}")
     require_once(
@@ -199,14 +198,19 @@ def validate(files: dict[str, str]) -> None:
     )
     require_once(
         completion,
-        "WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT",
-        "runtime COMMIT seam drifted",
+        "WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE",
+        "runtime transaction kind drifted",
     )
-    require_once(
-        helper,
-        "WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK",
-        "runtime ROLLBACK seam drifted",
-    )
+
+    generic_seam = files["wyrelog/fact/store-test-seams-private.h"]
+    for token in (
+        "WylFactStoreTransactionTestKind",
+        "WylFactStoreTransactionTestPhase",
+        "WylFactStoreTransactionTestHook",
+        "wyl_fact_store_test_set_transaction_hook",
+    ):
+        if token not in generic_seam:
+            raise AssertionError(f"generic transaction seam drifted: {token}")
 
     generic_required = (
         "test_unarmed_control_commits",
@@ -222,7 +226,8 @@ def validate(files: dict[str, str]) -> None:
         "forget (fixture), ==, WYRELOG_E_INTERNAL",
         "wyl_fact_store_test_exec_sql (store, sql)",
         "wyl_fact_store_test_query_int64 (store, sql, &count)",
-        'exec_ok (fixture->store, "ROLLBACK;")',
+        "wyl_fact_store_create_schema (fixture->store), ==,",
+        "WYRELOG_E_INTERNAL",
         "wyl_fact_store_forget_reconcile",
     )
     for token in generic_required:
@@ -236,6 +241,17 @@ def validate(files: dict[str, str]) -> None:
     ):
         if secret not in generic:
             raise AssertionError(f"diagnostic redaction proof drifted: {secret}")
+
+    poison = files["tests/test-fact-store-poison.c"]
+    for token in (
+        "WYL_FACT_STORE_TRANSACTION_TEST_FORGET_COMPLETE",
+        "test_file_reopen_recovers_forget",
+        "state = 'PENDING'",
+        "state = 'COMPLETED'",
+        "wyl_fact_store_forget_reconcile",
+    ):
+        if token not in poison:
+            raise AssertionError(f"poison recovery proof drifted: {token}")
 
     require_once(
         helper_source,
@@ -652,18 +668,18 @@ def self_test(baseline: dict[str, str]) -> None:
     body_failures = (
         "if (duckdb_prepare (store->conn, audit_sql, &stmt) "
         "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (ok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (exec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
-        "    goto rollback;\n  }",
+        "    goto finish;\n  }",
         "if (duckdb_prepare (store->conn, update_sql, &ustmt) "
         "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (uok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
-        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "    rc = WYRELOG_E_IO;\n    goto finish;\n  }",
         "if (uexec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
-        "    goto rollback;\n  }",
+        "    goto finish;\n  }",
     )
     for index, failure in enumerate(body_failures, 1):
         if failure not in completion:
@@ -672,30 +688,30 @@ def self_test(baseline: dict[str, str]) -> None:
             baseline,
             store_path,
             failure,
-            failure.replace("goto rollback;", "return WYRELOG_E_IO;"),
+            failure.replace("goto finish;", "return WYRELOG_E_IO;"),
             f"body failure {index} bypass",
         )
     expect_rejected(
         baseline,
         store_path,
-        'rc = exec_sql (store->conn, "COMMIT;");\n'
-        "  if (rc != WYRELOG_E_OK)\n    goto rollback;",
-        'rc = exec_sql (store->conn, "COMMIT;");\n'
-        "  if (rc != WYRELOG_E_OK)\n    return rc;",
+        'primary_rc = exec_sql (connection, "COMMIT;");',
+        "primary_rc = WYRELOG_E_IO;",
         "COMMIT bypass",
     )
     expect_rejected(
         baseline,
         store_path,
-        "WYL_LOG_ERROR (WYL_LOG_SECTION_IO,",
-        "WYL_LOG_WARN (WYL_LOG_SECTION_IO,",
+        'WYL_LOG_ERROR (WYL_LOG_SECTION_IO,\n'
+        '          "fact forget transaction rollback failed");',
+        'WYL_LOG_WARN (WYL_LOG_SECTION_IO,\n'
+        '          "fact forget transaction rollback failed");',
         "log downgrade",
     )
     expect_rejected(
         baseline,
         store_path,
-        'rollback_rc = exec_sql (store->conn, "ROLLBACK;");',
-        '(void) exec_sql (store->conn, "ROLLBACK;");',
+        'rollback_rc = exec_sql (connection, "ROLLBACK;");',
+        '(void) exec_sql (connection, "ROLLBACK;");',
         "discarded rollback",
     )
     expect_rejected(

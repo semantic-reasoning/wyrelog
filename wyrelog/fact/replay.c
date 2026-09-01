@@ -721,24 +721,30 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
   return wyl_fact_store_open (fact_db_path, out_store);
 }
 
-wyrelog_error_t
-wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
-    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
-    WylEngine **out_engine)
+static wyrelog_error_t
+open_graph_engine_with_store (wyl_policy_store_t *policy,
+    wyl_fact_store_t *store,
+    const wyl_policy_fact_graph_info_t *graph_info, WylEngine **out_engine)
 {
   if (out_engine != NULL)
     *out_engine = NULL;
-  if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
-      || graph_info == NULL || out_engine == NULL)
+  if (policy == NULL || store == NULL || graph_info == NULL
+      || out_engine == NULL)
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
 
-  g_autoptr (wyl_fact_store_t) store = NULL;
-  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info,
-          FALSE, &store);
+  /* Reject an already poisoned supplied store before policy enumeration.  If
+   * another thread poisons after this admission, each later store session
+   * rechecks health before any DuckDB access and the unpublished engine is
+   * destroyed on failure. */
+  WylFactStoreConnectionSession admission = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &admission);
   if (rc != WYRELOG_E_OK)
     return rc;
+  wyl_fact_store_connection_session_end (&admission);
+
   g_autoptr (GPtrArray) relations = NULL;
   rc = list_replay_relations (policy, store, graph_info, &relations);
   if (rc != WYRELOG_E_OK)
@@ -762,6 +768,38 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
 
   *out_engine = engine;
   return WYRELOG_E_OK;
+}
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+wyrelog_error_t
+wyl_fact_replay_open_graph_engine_with_store_for_test
+  (wyl_policy_store_t *policy, wyl_fact_store_t *store,
+    const wyl_policy_fact_graph_info_t *graph_info, WylEngine **out_engine)
+{
+  return open_graph_engine_with_store (policy, store, graph_info, out_engine);
+}
+#endif
+
+wyrelog_error_t
+wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylEngine **out_engine)
+{
+  if (out_engine != NULL)
+    *out_engine = NULL;
+  if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
+      || graph_info == NULL || out_engine == NULL)
+    return WYRELOG_E_INVALID;
+  if (graph_info->sealed)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info,
+          FALSE, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return open_graph_engine_with_store (policy, store, graph_info,
+             out_engine);
 }
 
 typedef struct
