@@ -225,11 +225,13 @@ EXPECTED_SECURE_SETUP_PREFIX = r"""      - name: Build secure DuckDB backend fro
           if [ "$RUNNER_OS" = Linux ]; then
             CC=cc CXX=c++ meson setup build-secure-duckdb \
               -Denable_fact_store=enabled \
+              -Denable_audit=enabled \
               -Dduckdb_source=subproject \
               -Denable_secure_duckdb_bridge=enabled
           else
             meson setup build-secure-duckdb \
               -Denable_fact_store=enabled \
+              -Denable_audit=enabled \
               -Dduckdb_source=subproject \
               -Denable_secure_duckdb_bridge=enabled
           fi""" + "\n"
@@ -378,6 +380,7 @@ EXPECTED_BUILD_STEP_NAMES = (
     "Provision secure DuckDB compile swap",
     "Build secure DuckDB backend from pinned source",
     "Test fact forget transaction cleanup with secure DuckDB",
+    "Test audit DuckDB hardening with source DuckDB",
     "Remove secure DuckDB compile swap",
     "Show sccache statistics",
     "Upload meson logs on failure",

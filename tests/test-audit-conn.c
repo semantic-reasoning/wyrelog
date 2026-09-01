@@ -22,8 +22,8 @@ check_open_memory_null_path (void)
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   duckdb_result result;
   if (duckdb_query (h,
-          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
-          &result) != DuckDBSuccess) {
+      "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 3;
   }
@@ -74,8 +74,8 @@ check_open_tempfile_and_query (void)
   duckdb_destroy_result (&result);
 
   if (duckdb_query (h,
-          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
-          &result) != DuckDBSuccess) {
+      "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_unlink (path);
     g_rmdir (tmpdir);
@@ -103,16 +103,23 @@ check_open_tempfile_and_query (void)
 static gint
 check_open_bad_path (void)
 {
-  /* An obviously unwritable parent. The sentinel pointer must
-   * survive the call untouched. */
-  wyl_audit_conn_t *sentinel = (wyl_audit_conn_t *) (gpointer) 0xDEADBEEF;
-  wyl_audit_conn_t *conn = sentinel;
-  wyrelog_error_t rc =
-      wyl_audit_conn_open ("/nonexistent-dir-wyrelog-audit/audit.db", &conn);
-  if (rc == WYRELOG_E_OK)
+  g_autoptr (GError) err = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-audit-bad-path-XXXXXX",
+          &err);
+  if (tmpdir == NULL)
     return 30;
-  if (conn != sentinel)
+  g_autofree gchar *parent = g_build_filename (tmpdir, "missing", NULL);
+  g_autofree gchar *path = g_build_filename (parent, "audit.db", NULL);
+  wyl_audit_conn_t *conn = (wyl_audit_conn_t *) (gpointer) 0xDEADBEEF;
+  wyrelog_error_t rc = wyl_audit_conn_open (path, &conn);
+  if (rc != WYRELOG_E_IO)
     return 31;
+  if (conn != NULL)
+    return 32;
+  if (g_file_test (parent, G_FILE_TEST_EXISTS)
+      || g_file_test (path, G_FILE_TEST_EXISTS))
+    return 33;
+  g_rmdir (tmpdir);
   return 0;
 }
 
@@ -185,7 +192,7 @@ check_create_schema (void)
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   duckdb_result result;
   if (duckdb_query (h, "SELECT COUNT(*) FROM audit_events;",
-          &result) != DuckDBSuccess) {
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 73;
   }
@@ -217,7 +224,7 @@ check_template_schema_creates_audit_events (void)
   if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
     return 85;
   if (!g_file_get_contents (WYL_TEST_DUCKDB_SCHEMA_PATH, &schema,
-          &schema_len, &error))
+      &schema_len, &error))
     return 86;
 
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
@@ -302,13 +309,13 @@ check_reserved_stream_guard (void)
       != WYRELOG_E_POLICY)
     return 115;
   if (wyl_audit_conn_rename_user_stream (conn, "tenant.audit",
-          "__wyrelog.audit") != WYRELOG_E_POLICY)
+      "__wyrelog.audit") != WYRELOG_E_POLICY)
     return 116;
   if (wyl_audit_conn_create_user_stream (conn, "tenant.audit")
       != WYRELOG_E_OK)
     return 117;
   if (wyl_audit_conn_rename_user_stream (conn, "tenant.audit",
-          "tenant.audit.v2") != WYRELOG_E_OK)
+      "tenant.audit.v2") != WYRELOG_E_OK)
     return 118;
   if (wyl_audit_conn_drop_user_stream (conn, "tenant.audit.v2")
       != WYRELOG_E_OK)
@@ -322,8 +329,8 @@ insert_chain_event (wyl_audit_conn_t *conn, const gchar *id,
 {
   gboolean inserted = FALSE;
   return wyl_audit_conn_insert_event_full (conn, id, 1000, subject,
-      "read", "resource", NULL, NULL, "req", WYL_DECISION_ALLOW,
-      &inserted) == WYRELOG_E_OK && inserted ? 0 : 1;
+             "read", "resource", NULL, NULL, "req", WYL_DECISION_ALLOW,
+             &inserted) == WYRELOG_E_OK && inserted ? 0 : 1;
 }
 
 static gint
@@ -337,10 +344,10 @@ check_chain_verifies_clean_store (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 121;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000101",
-          "alice") != 0)
+      "alice") != 0)
     return 122;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000102",
-          "bob") != 0)
+      "bob") != 0)
     return 123;
   if (wyl_audit_conn_verify_chain (conn, &error) != WYRELOG_E_OK)
     return 124;
@@ -364,7 +371,7 @@ check_chain_tail_cache_hydrates_after_reopen (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 128;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000103",
-          "alice") != 0)
+      "alice") != 0)
     return 129;
   wyl_audit_conn_close (g_steal_pointer (&conn));
 
@@ -373,15 +380,15 @@ check_chain_tail_cache_hydrates_after_reopen (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 137;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000104",
-          "bob") != 0)
+      "bob") != 0)
     return 138;
 
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   duckdb_result result = { 0 };
   if (duckdb_query (h,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE sequence_no = 2 AND previous_hash != '';",
-          &result) != DuckDBSuccess) {
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE sequence_no = 2 AND previous_hash != '';",
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 139;
   }
@@ -412,12 +419,12 @@ check_chain_detects_record_modification (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 131;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000201",
-          "alice") != 0)
+      "alice") != 0)
     return 132;
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   if (duckdb_query (h,
-          "UPDATE audit_events SET subject_id = 'mallory' "
-          "WHERE sequence_no = 1;", &result) != DuckDBSuccess) {
+      "UPDATE audit_events SET subject_id = 'mallory' "
+      "WHERE sequence_no = 1;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 133;
   }
@@ -441,15 +448,15 @@ check_chain_detects_missing_link_and_reorder (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 141;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000301",
-          "alice") != 0)
+      "alice") != 0)
     return 142;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000302",
-          "bob") != 0)
+      "bob") != 0)
     return 143;
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   if (duckdb_query (h,
-          "UPDATE audit_events SET sequence_no = 3 WHERE sequence_no = 2;",
-          &result) != DuckDBSuccess) {
+      "UPDATE audit_events SET sequence_no = 3 WHERE sequence_no = 2;",
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 144;
   }
@@ -473,14 +480,14 @@ check_chain_detects_deleted_tail_record (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 148;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000401",
-          "alice") != 0)
+      "alice") != 0)
     return 149;
   if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000402",
-          "bob") != 0)
+      "bob") != 0)
     return 156;
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   if (duckdb_query (h, "DELETE FROM audit_events WHERE sequence_no = 2;",
-          &result) != DuckDBSuccess) {
+      &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 157;
   }
@@ -504,13 +511,13 @@ check_duplicate_checkpoint_and_tombstone_flow (void)
   if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
     return 151;
   if (wyl_audit_conn_append_tombstone (conn, "subject-to-erase",
-          "erase-request", &inserted) != WYRELOG_E_OK || !inserted)
+      "erase-request", &inserted) != WYRELOG_E_OK || !inserted)
     return 152;
   duckdb_connection h = wyl_audit_conn_get_connection (conn);
   if (duckdb_query (h,
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'privacy.erase.tombstone' "
-          "AND deny_reason = 'erasure_tombstone';", &result)
+      "SELECT COUNT(*) FROM audit_events "
+      "WHERE action = 'privacy.erase.tombstone' "
+      "AND deny_reason = 'erasure_tombstone';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 153;
@@ -521,9 +528,9 @@ check_duplicate_checkpoint_and_tombstone_flow (void)
   }
   duckdb_destroy_result (&result);
   if (duckdb_query (h,
-          "INSERT INTO audit_checkpoints "
-          "(stream_name, sequence_no, root_hash, created_at_us) "
-          "VALUES ('__wyrelog.audit', 1, 'duplicate', 1);", &result)
+      "INSERT INTO audit_checkpoints "
+      "(stream_name, sequence_no, root_hash, created_at_us) "
+      "VALUES ('__wyrelog.audit', 1, 'duplicate', 1);", &result)
       == DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 155;
@@ -565,9 +572,9 @@ projection_fixture_init (ProjectionFixture *fixture, const gchar *intention)
   g_assert_cmpint (wyl_id_parse (intention, &input.intention_id), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_audit_encode (&input,
-          &fixture->material), ==, WYRELOG_E_OK);
+      &fixture->material), ==, WYRELOG_E_OK);
   fixture->projection = (WylAuditServiceExchangeProjection) {
-  .intention_id = fixture->material.intention_id,.payload_digest =
+    .intention_id = fixture->material.intention_id,.payload_digest =
         fixture->material.payload_digest,.request_id =
         fixture->material.request_id,.credential_id =
         input.credential_id.data,.credential_generation =
@@ -576,11 +583,12 @@ projection_fixture_init (ProjectionFixture *fixture, const gchar *intention)
         input.tenant_id.data,.created_at_us =
         input.created_at_us,.payload_schema_version =
         WYL_SERVICE_EXCHANGE_PAYLOAD_SCHEMA_VERSION,.fingerprint_schema_version
-        =
+      =
         WYL_SERVICE_EXCHANGE_FINGERPRINT_SCHEMA_VERSION,.session_fingerprint =
         fixture->material.session_fingerprint,.jti_fingerprint =
         fixture->material.jti_fingerprint,.canonical_payload =
-        fixture->material.canonical_payload,};
+        fixture->material.canonical_payload,
+  };
 }
 
 static void
@@ -590,7 +598,7 @@ assert_projection_invalid (wyl_audit_conn_t *conn,
   WylAuditServiceExchangeProjectionReadback out;
   memset (&out, 0xa5, sizeof out);
   g_assert_cmpint (wyl_audit_conn_service_exchange_project (conn,
-          &projection, &out), ==, WYRELOG_E_INVALID);
+      &projection, &out), ==, WYRELOG_E_INVALID);
   static const WylAuditServiceExchangeProjectionReadback zero = { 0 };
   g_assert_cmpmem (&out, sizeof out, &zero, sizeof zero);
 }
@@ -603,7 +611,7 @@ check_service_exchange_projection_validates_full_transcript (void)
   WylAuditServiceExchangeProjection base = fixture.projection;
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-projection-canary-XXXXXX",
-      &error);
+          &error);
   g_autofree gchar *path = g_build_filename (dir, "audit.db", NULL);
   g_autoptr (wyl_audit_conn_t) conn = NULL;
   if (dir == NULL || wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK
@@ -611,9 +619,9 @@ check_service_exchange_projection_validates_full_transcript (void)
     return 189;
 
 #define MUTATE(field, value) G_STMT_START { \
-  WylAuditServiceExchangeProjection mutant = base; \
-  mutant.field = (value); \
-  assert_projection_invalid (conn, mutant); \
+    WylAuditServiceExchangeProjection mutant = base; \
+    mutant.field = (value); \
+    assert_projection_invalid (conn, mutant); \
 } G_STMT_END
   MUTATE (intention_id, "01890c10-2e3f-7000-8000-000000000902");
   MUTATE (payload_digest,
@@ -637,19 +645,19 @@ check_service_exchange_projection_validates_full_transcript (void)
 
   gsize payload_len = 0;
   const guint8 *payload = g_bytes_get_data (base.canonical_payload,
-      &payload_len);
+          &payload_len);
   g_autofree guint8 *changed = g_memdup2 (payload, payload_len);
   changed[payload_len / 2] ^= 1;
   g_autoptr (GBytes) changed_payload = g_bytes_new_take
-      (g_steal_pointer (&changed), payload_len);
+        (g_steal_pointer (&changed), payload_len);
   WylAuditServiceExchangeProjection mutant = base;
   mutant.canonical_payload = changed_payload;
   assert_projection_invalid (conn, mutant);
   duckdb_result result = { 0 };
   if (duckdb_query (wyl_audit_conn_get_connection (conn),
-          "SELECT (SELECT count(*) FROM service_exchange_receipt_projections)"
-          "+(SELECT count(*) FROM audit_events WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "');", &result)
+      "SELECT (SELECT count(*) FROM service_exchange_receipt_projections)"
+      "+(SELECT count(*) FROM audit_events WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "');", &result)
       != DuckDBSuccess || duckdb_value_int64 (&result, 0, 0) != 0) {
     duckdb_destroy_result (&result);
     return 196;
@@ -660,11 +668,11 @@ check_service_exchange_projection_validates_full_transcript (void)
   gsize database_len = 0;
   if (!g_file_get_contents (path, &database, &database_len, NULL)
       || g_strstr_len (database, database_len,
-          "RAW_SESSION_CANARY_387_9f4b") != NULL
+      "RAW_SESSION_CANARY_387_9f4b") != NULL
       || g_strstr_len (database, database_len,
-          "JWT_SECRET_CANARY_387_63ac") != NULL
+      "JWT_SECRET_CANARY_387_63ac") != NULL
       || g_strstr_len (database, database_len,
-          "PATH_CANARY_387_/tmp/private.db") != NULL
+      "PATH_CANARY_387_/tmp/private.db") != NULL
       || g_strstr_len (database, database_len, path) != NULL)
     return 197;
   g_unlink (path);
@@ -677,59 +685,59 @@ check_service_exchange_projection_schema_is_exact (void)
 {
   static const gchar *mutations[] = {
     "ALTER TABLE service_exchange_receipt_projections ALTER COLUMN "
-        "event_type DROP NOT NULL;",
+    "event_type DROP NOT NULL;",
     "ALTER TABLE service_exchange_receipt_projections ALTER COLUMN "
-        "tenant_id SET DEFAULT 'tenant-default';",
+    "tenant_id SET DEFAULT 'tenant-default';",
     "DROP TABLE audit_sink_metadata;"
-        "CREATE TABLE audit_sink_metadata(logical_sink_name VARCHAR NOT NULL,"
-        "sink_uuid VARCHAR NOT NULL,schema_version INTEGER NOT NULL);"
-        "INSERT INTO audit_sink_metadata VALUES"
-        "('__wyrelog.service-exchange',"
-        "'01890c10-2e3f-7000-8000-000000000911',1),"
-        "('__wyrelog.service-exchange',"
-        "'01890c10-2e3f-7000-8000-000000000912',1);",
+    "CREATE TABLE audit_sink_metadata(logical_sink_name VARCHAR NOT NULL,"
+    "sink_uuid VARCHAR NOT NULL,schema_version INTEGER NOT NULL);"
+    "INSERT INTO audit_sink_metadata VALUES"
+    "('__wyrelog.service-exchange',"
+    "'01890c10-2e3f-7000-8000-000000000911',1),"
+    "('__wyrelog.service-exchange',"
+    "'01890c10-2e3f-7000-8000-000000000912',1);",
     "ALTER TABLE audit_sink_metadata RENAME TO old_metadata;"
-        "CREATE TABLE audit_sink_metadata("
-        "logical_sink_name VARCHAR PRIMARY KEY,"
-        "sink_uuid VARCHAR NOT NULL UNIQUE,schema_version INTEGER NOT NULL,"
-        "CHECK(schema_version=1));"
-        "INSERT INTO audit_sink_metadata SELECT * FROM old_metadata;"
-        "DROP TABLE old_metadata;",
+    "CREATE TABLE audit_sink_metadata("
+    "logical_sink_name VARCHAR PRIMARY KEY,"
+    "sink_uuid VARCHAR NOT NULL UNIQUE,schema_version INTEGER NOT NULL,"
+    "CHECK(schema_version=1));"
+    "INSERT INTO audit_sink_metadata SELECT * FROM old_metadata;"
+    "DROP TABLE old_metadata;",
     "CREATE TABLE sink_uuid_references(sink_uuid VARCHAR PRIMARY KEY);"
-        "INSERT INTO sink_uuid_references SELECT sink_uuid "
-        "FROM audit_sink_metadata;"
-        "ALTER TABLE audit_sink_metadata RENAME TO old_metadata;"
-        "CREATE TABLE audit_sink_metadata("
-        "logical_sink_name VARCHAR PRIMARY KEY,"
-        "sink_uuid VARCHAR NOT NULL UNIQUE,schema_version INTEGER NOT NULL,"
-        "FOREIGN KEY(sink_uuid) REFERENCES sink_uuid_references(sink_uuid));"
-        "INSERT INTO audit_sink_metadata SELECT * FROM old_metadata;"
-        "DROP TABLE old_metadata;",
+    "INSERT INTO sink_uuid_references SELECT sink_uuid "
+    "FROM audit_sink_metadata;"
+    "ALTER TABLE audit_sink_metadata RENAME TO old_metadata;"
+    "CREATE TABLE audit_sink_metadata("
+    "logical_sink_name VARCHAR PRIMARY KEY,"
+    "sink_uuid VARCHAR NOT NULL UNIQUE,schema_version INTEGER NOT NULL,"
+    "FOREIGN KEY(sink_uuid) REFERENCES sink_uuid_references(sink_uuid));"
+    "INSERT INTO audit_sink_metadata SELECT * FROM old_metadata;"
+    "DROP TABLE old_metadata;",
     "CREATE UNIQUE INDEX extra_projection_unique ON "
-        "service_exchange_receipt_projections(sink_uuid,tenant_id);",
+    "service_exchange_receipt_projections(sink_uuid,tenant_id);",
     "ALTER TABLE service_exchange_receipt_projections RENAME TO old_p;"
-        "CREATE TABLE service_exchange_receipt_projections("
-        "sink_uuid VARCHAR NOT NULL,intention_id VARCHAR NOT NULL,"
-        "payload_digest VARCHAR NOT NULL,event_type VARCHAR NOT NULL,"
-        "outcome VARCHAR NOT NULL,created_at_us BIGINT NOT NULL,"
-        "request_id VARCHAR NOT NULL,credential_id VARCHAR NOT NULL,"
-        "credential_generation BLOB NOT NULL,"
-        "service_principal VARCHAR NOT NULL,tenant_id VARCHAR NOT NULL,"
-        "payload_schema_version INTEGER NOT NULL,"
-        "fingerprint_schema_version INTEGER NOT NULL,"
-        "session_fingerprint VARCHAR NOT NULL,jti_fingerprint VARCHAR NOT NULL,"
-        "canonical_payload BLOB NOT NULL,PRIMARY KEY(sink_uuid,intention_id),"
-        "UNIQUE(sink_uuid,payload_digest),"
-        "CHECK(event_type='service.credential.exchange'),"
-        "CHECK(outcome='allowed'),CHECK(payload_schema_version=1),"
-        "CHECK(fingerprint_schema_version=1),"
-        "CHECK(octet_length(credential_generation)=8),"
-        "CHECK(octet_length(canonical_payload) BETWEEN 1 AND 4096),"
-        "CHECK(created_at_us>0));DROP TABLE old_p;",
+    "CREATE TABLE service_exchange_receipt_projections("
+    "sink_uuid VARCHAR NOT NULL,intention_id VARCHAR NOT NULL,"
+    "payload_digest VARCHAR NOT NULL,event_type VARCHAR NOT NULL,"
+    "outcome VARCHAR NOT NULL,created_at_us BIGINT NOT NULL,"
+    "request_id VARCHAR NOT NULL,credential_id VARCHAR NOT NULL,"
+    "credential_generation BLOB NOT NULL,"
+    "service_principal VARCHAR NOT NULL,tenant_id VARCHAR NOT NULL,"
+    "payload_schema_version INTEGER NOT NULL,"
+    "fingerprint_schema_version INTEGER NOT NULL,"
+    "session_fingerprint VARCHAR NOT NULL,jti_fingerprint VARCHAR NOT NULL,"
+    "canonical_payload BLOB NOT NULL,PRIMARY KEY(sink_uuid,intention_id),"
+    "UNIQUE(sink_uuid,payload_digest),"
+    "CHECK(event_type='service.credential.exchange'),"
+    "CHECK(outcome='allowed'),CHECK(payload_schema_version=1),"
+    "CHECK(fingerprint_schema_version=1),"
+    "CHECK(octet_length(credential_generation)=8),"
+    "CHECK(octet_length(canonical_payload) BETWEEN 1 AND 4096),"
+    "CHECK(created_at_us>0));DROP TABLE old_p;",
   };
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-projection-schema-XXXXXX",
-      &error);
+          &error);
   g_autofree gchar *path = g_build_filename (dir, "audit.db", NULL);
   for (guint i = 0; i < G_N_ELEMENTS (mutations); i++) {
     g_unlink (path);
@@ -739,7 +747,7 @@ check_service_exchange_projection_schema_is_exact (void)
       return 193;
     duckdb_result result = { 0 };
     if (duckdb_query (wyl_audit_conn_get_connection (conn), mutations[i],
-            &result) != DuckDBSuccess) {
+        &result) != DuckDBSuccess) {
       duckdb_destroy_result (&result);
       return 194;
     }
@@ -757,7 +765,7 @@ check_service_exchange_metadata_transaction_readback (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-metadata-readback-XXXXXX",
-      &error);
+          &error);
   g_autofree gchar *path = g_build_filename (dir, "audit.db", NULL);
   g_autoptr (wyl_audit_conn_t) conn = NULL;
   if (dir == NULL || wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK)
@@ -781,14 +789,14 @@ check_service_exchange_metadata_transaction_readback (void)
       != 1)
     return 204;
   if (duckdb_query (raw,
-          "SELECT logical_sink_name,sink_uuid,schema_version "
-          "FROM audit_sink_metadata;", &result) != DuckDBSuccess
+      "SELECT logical_sink_name,sink_uuid,schema_version "
+      "FROM audit_sink_metadata;", &result) != DuckDBSuccess
       || duckdb_row_count (&result) != 1)
     return 205;
   gchar *logical_name = duckdb_value_varchar (&result, 0, 0);
   gchar *uuid = duckdb_value_varchar (&result, 1, 0);
   gboolean exact = g_strcmp0 (logical_name,
-      WYL_AUDIT_SERVICE_EXCHANGE_STREAM) == 0
+          WYL_AUDIT_SERVICE_EXCHANGE_STREAM) == 0
       && uuid != NULL && strlen (uuid) == 36
       && duckdb_value_int64 (&result, 2, 0) == 1;
   g_autofree gchar *first_uuid = g_strdup (uuid);
@@ -857,7 +865,7 @@ check_service_exchange_projection_durable_exact (void)
   if (project_rc != WYRELOG_E_OK || first.sequence_no != 1
       || strcmp (first.intention_id, p.intention_id) != 0
       || strcmp (first.record_hash,
-          "060e74f0177ea5d3ac5962f31665162ae24f9142bd296e73ba023835f5bc0cfc")
+      "060e74f0177ea5d3ac5962f31665162ae24f9142bd296e73ba023835f5bc0cfc")
       != 0 || strcmp (first.checkpoint_root, first.record_hash) != 0)
     return 162;
   if (wyl_audit_conn_service_exchange_project (conn, &p, &replay)
@@ -867,11 +875,11 @@ check_service_exchange_projection_durable_exact (void)
     return 163;
   duckdb_result result = { 0 };
   if (duckdb_query (wyl_audit_conn_get_connection (conn),
-          "SELECT (SELECT count(*) FROM service_exchange_receipt_projections),"
-          "(SELECT count(*) FROM audit_events WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "'),"
-          "(SELECT count(*) FROM audit_checkpoints WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "');", &result) != DuckDBSuccess)
+      "SELECT (SELECT count(*) FROM service_exchange_receipt_projections),"
+      "(SELECT count(*) FROM audit_events WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "'),"
+      "(SELECT count(*) FROM audit_checkpoints WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "');", &result) != DuckDBSuccess)
     return 164;
   gboolean one_each = duckdb_value_int64 (&result, 0, 0) == 1
       && duckdb_value_int64 (&result, 1, 0) == 1
@@ -905,15 +913,15 @@ check_service_exchange_projection_durable_exact (void)
     {"checkpoint_root=NULL", NULL},
     {"record_hash='short'", NULL},
     {"record_hash='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'",
-        NULL},
+     NULL},
     {"previous_hash='a'", "previous_hash=''"},
     {"subject_id=NULL", "subject_id='svc:billing:reader'"},
   };
   duckdb_connection raw = wyl_audit_conn_get_connection (conn);
   for (guint i = 0; i < G_N_ELEMENTS (anchor_corruption); i++) {
     g_autofree gchar *sql = g_strdup_printf
-        ("UPDATE audit_events SET %s WHERE id='%s';",
-        anchor_corruption[i].mutation, p.intention_id);
+          ("UPDATE audit_events SET %s WHERE id='%s';",
+            anchor_corruption[i].mutation, p.intention_id);
     duckdb_result mutation_result = { 0 };
     if (duckdb_query (raw, sql, &mutation_result) != DuckDBSuccess)
       return 190;
@@ -925,13 +933,13 @@ check_service_exchange_projection_durable_exact (void)
     g_autofree gchar *dynamic_restore = NULL;
     if (restore == NULL) {
       const gchar *column = g_str_has_prefix (anchor_corruption[i].mutation,
-          "checkpoint_root") ? "checkpoint_root" : "record_hash";
+              "checkpoint_root") ? "checkpoint_root" : "record_hash";
       dynamic_restore = g_strdup_printf ("%s='%s'", column, first.record_hash);
       restore = dynamic_restore;
     }
     g_clear_pointer (&sql, g_free);
     sql = g_strdup_printf ("UPDATE audit_events SET %s WHERE id='%s';",
-        restore, p.intention_id);
+            restore, p.intention_id);
     if (duckdb_query (raw, sql, &mutation_result) != DuckDBSuccess)
       return 192;
     duckdb_destroy_result (&mutation_result);
@@ -940,54 +948,54 @@ check_service_exchange_projection_durable_exact (void)
   /* The checkpoint is the third authoritative record. Database corruption
    * must be observed even after the chain-tail cache has been populated. */
   g_autofree gchar *checkpoint_insert = g_strdup_printf
-      ("INSERT INTO audit_checkpoints VALUES ('%s',1,'%s',%" G_GINT64_FORMAT
-      ");", WYL_AUDIT_SERVICE_EXCHANGE_STREAM, first.record_hash,
-      p.created_at_us);
+        ("INSERT INTO audit_checkpoints VALUES ('%s',1,'%s',%" G_GINT64_FORMAT
+          ");", WYL_AUDIT_SERVICE_EXCHANGE_STREAM, first.record_hash,
+          p.created_at_us);
   g_autofree gchar *restore_root = g_strdup_printf
-      ("UPDATE audit_checkpoints SET root_hash='%s' WHERE stream_name='%s' "
-      "AND sequence_no=1;", first.record_hash,
-      WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
+        ("UPDATE audit_checkpoints SET root_hash='%s' WHERE stream_name='%s' "
+          "AND sequence_no=1;", first.record_hash,
+          WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
   g_autofree gchar *restore_time = g_strdup_printf
-      ("UPDATE audit_checkpoints SET created_at_us=%" G_GINT64_FORMAT
-      " WHERE stream_name='%s' AND sequence_no=1;", p.created_at_us,
-      WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
+        ("UPDATE audit_checkpoints SET created_at_us=%" G_GINT64_FORMAT
+          " WHERE stream_name='%s' AND sequence_no=1;", p.created_at_us,
+          WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
   if (!checkpoint_corruption_is_denied (raw, conn, &p,
-          "DELETE FROM audit_checkpoints WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
-          checkpoint_insert)
+      "DELETE FROM audit_checkpoints WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
+      checkpoint_insert)
       || !checkpoint_corruption_is_denied (raw, conn, &p,
-          "UPDATE audit_checkpoints SET root_hash='short' WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
-          restore_root)
+      "UPDATE audit_checkpoints SET root_hash='short' WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
+      restore_root)
       || !checkpoint_corruption_is_denied (raw, conn, &p,
-          "UPDATE audit_checkpoints SET "
-          "root_hash='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-          "AAAAAAAA' WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
-          restore_root)
+      "UPDATE audit_checkpoints SET "
+      "root_hash='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      "AAAAAAAA' WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
+      restore_root)
       || !checkpoint_corruption_is_denied (raw, conn, &p,
-          "UPDATE audit_checkpoints SET created_at_us=1 WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
-          restore_time)
+      "UPDATE audit_checkpoints SET created_at_us=1 WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
+      restore_time)
       || !checkpoint_corruption_is_denied (raw, conn, &p,
-          "UPDATE audit_checkpoints SET sequence_no=2 WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
-          "UPDATE audit_checkpoints SET sequence_no=1 WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=2;")
+      "UPDATE audit_checkpoints SET sequence_no=2 WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;",
+      "UPDATE audit_checkpoints SET sequence_no=1 WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=2;")
       || !checkpoint_corruption_is_denied (raw, conn, &p,
-          "UPDATE audit_checkpoints SET stream_name='corrupt' WHERE "
-          "stream_name='" WYL_AUDIT_SERVICE_EXCHANGE_STREAM
-          "' AND sequence_no=1;",
-          "UPDATE audit_checkpoints SET stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM
-          "' WHERE stream_name='corrupt' AND sequence_no=1;"))
+      "UPDATE audit_checkpoints SET stream_name='corrupt' WHERE "
+      "stream_name='" WYL_AUDIT_SERVICE_EXCHANGE_STREAM
+      "' AND sequence_no=1;",
+      "UPDATE audit_checkpoints SET stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM
+      "' WHERE stream_name='corrupt' AND sequence_no=1;"))
     return 193;
 
   /* NOT NULL and the primary key make NULL and duplicate states
    * unrepresentable; prove those mutations are rejected by DuckDB. */
   if (duckdb_query (raw,
-          "UPDATE audit_checkpoints SET root_hash=NULL WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;", &result)
+      "UPDATE audit_checkpoints SET root_hash=NULL WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND sequence_no=1;", &result)
       == DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return 194;
@@ -1017,15 +1025,15 @@ check_service_exchange_projection_durable_exact (void)
       != WYRELOG_E_INVALID)
     return 182;
   if (duckdb_query (raw,
-          "UPDATE service_exchange_receipt_projections SET tenant_id='corrupt';",
-          &result) != DuckDBSuccess)
+      "UPDATE service_exchange_receipt_projections SET tenant_id='corrupt';",
+      &result) != DuckDBSuccess)
     return 169;
   duckdb_destroy_result (&result);
   if (wyl_audit_conn_service_exchange_project (conn, &p, &reopened)
       != WYRELOG_E_POLICY)
     return 170;
   if (duckdb_query (raw,
-          "DELETE FROM service_exchange_receipt_projections;", &result)
+      "DELETE FROM service_exchange_receipt_projections;", &result)
       != DuckDBSuccess)
     return 196;
   duckdb_destroy_result (&result);
@@ -1037,9 +1045,9 @@ check_service_exchange_projection_durable_exact (void)
   gsize database_len = 0;
   if (!g_file_get_contents (path, &database_bytes, &database_len, NULL)
       || g_strstr_len (database_bytes, database_len,
-          "RAW_SESSION_CANARY_387_9f4b") != NULL
+      "RAW_SESSION_CANARY_387_9f4b") != NULL
       || g_strstr_len (database_bytes, database_len,
-          "JWT_SECRET_CANARY_387_63ac") != NULL
+      "JWT_SECRET_CANARY_387_63ac") != NULL
       || g_strstr_len (database_bytes, database_len, path) != NULL)
     return 188;
   g_unlink (path);
@@ -1063,7 +1071,7 @@ check_service_exchange_projection_guards (void)
 
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-projection-guard-XXXXXX",
-      &error);
+          &error);
   g_autofree gchar *path = g_build_filename (dir, "audit.db", NULL);
   g_autoptr (wyl_audit_conn_t) conn = NULL;
   if (wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK
@@ -1073,8 +1081,8 @@ check_service_exchange_projection_guards (void)
     return 172;
   duckdb_result result = { 0 };
   if (duckdb_query (wyl_audit_conn_get_connection (conn),
-          "DELETE FROM audit_events WHERE stream_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "';", &result) != DuckDBSuccess)
+      "DELETE FROM audit_events WHERE stream_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "';", &result) != DuckDBSuccess)
     return 173;
   duckdb_destroy_result (&result);
   if (wyl_audit_conn_service_exchange_project (conn, &p, &out)
@@ -1102,7 +1110,7 @@ check_service_exchange_projection_fault_stages (void)
   WylAuditServiceExchangeProjection p = fixture.projection;
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-projection-fault-XXXXXX",
-      &error);
+          &error);
   g_autofree gchar *path = g_build_filename (dir, "audit.db", NULL);
   for (guint i = 0; i < G_N_ELEMENTS (precommit); i++) {
     g_unlink (path);
@@ -1119,11 +1127,11 @@ check_service_exchange_projection_fault_stages (void)
       return 176;
     duckdb_result result = { 0 };
     if (duckdb_query (wyl_audit_conn_get_connection (conn),
-            "SELECT (SELECT count(*) FROM service_exchange_receipt_projections)"
-            "+(SELECT count(*) FROM audit_events WHERE stream_name='"
-            WYL_AUDIT_SERVICE_EXCHANGE_STREAM "')"
-            "+(SELECT count(*) FROM audit_checkpoints WHERE stream_name='"
-            WYL_AUDIT_SERVICE_EXCHANGE_STREAM "');", &result)
+        "SELECT (SELECT count(*) FROM service_exchange_receipt_projections)"
+        "+(SELECT count(*) FROM audit_events WHERE stream_name='"
+        WYL_AUDIT_SERVICE_EXCHANGE_STREAM "')"
+        "+(SELECT count(*) FROM audit_checkpoints WHERE stream_name='"
+        WYL_AUDIT_SERVICE_EXCHANGE_STREAM "');", &result)
         != DuckDBSuccess || duckdb_value_int64 (&result, 0, 0) != 0) {
       duckdb_destroy_result (&result);
       return 177;
@@ -1175,7 +1183,7 @@ check_service_exchange_sink_uuid_lifecycle (void)
   WylAuditServiceExchangeProjection p = fixture.projection;
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-projection-uuid-XXXXXX",
-      &error);
+          &error);
   g_autofree gchar *path_a = g_build_filename (dir, "a.db", NULL);
   g_autofree gchar *path_b = g_build_filename (dir, "moved.db", NULL);
   g_autofree gchar *path_new = g_build_filename (dir, "new.db", NULL);
@@ -1203,8 +1211,8 @@ check_service_exchange_sink_uuid_lifecycle (void)
     return 185;
   duckdb_result result = { 0 };
   if (duckdb_query (wyl_audit_conn_get_connection (conn),
-          "DELETE FROM audit_sink_metadata WHERE logical_sink_name='"
-          WYL_AUDIT_SERVICE_EXCHANGE_STREAM "';", &result) != DuckDBSuccess)
+      "DELETE FROM audit_sink_metadata WHERE logical_sink_name='"
+      WYL_AUDIT_SERVICE_EXCHANGE_STREAM "';", &result) != DuckDBSuccess)
     return 186;
   duckdb_destroy_result (&result);
   if (wyl_audit_conn_service_exchange_project (conn, &p, &fresh)

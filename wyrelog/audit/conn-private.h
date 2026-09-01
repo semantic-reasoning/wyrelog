@@ -67,21 +67,21 @@ typedef enum
 } WylAuditServiceExchangeFailStage;
 
 void wyl_audit_conn_service_exchange_fail_once
-    (wyl_audit_conn_t * conn, WylAuditServiceExchangeFailStage stage);
+  (wyl_audit_conn_t * conn, WylAuditServiceExchangeFailStage stage);
 guint wyl_audit_conn_service_exchange_get_rollback_count_for_test
-    (wyl_audit_conn_t * conn);
+  (wyl_audit_conn_t * conn);
 /* WYL_TEST-only observation: number of entries into Atom A projection. */
 guint64 wyl_audit_conn_service_exchange_get_entry_count_for_test
-    (wyl_audit_conn_t * conn);
+  (wyl_audit_conn_t * conn);
 void wyl_audit_conn_service_exchange_reset_entry_count_for_test
-    (wyl_audit_conn_t * conn);
+  (wyl_audit_conn_t * conn);
 void wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
-    (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data),
+  (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data),
     gpointer data);
 
 /* Exact identity of the durable service-exchange sink. */
 wyrelog_error_t wyl_audit_conn_service_exchange_get_sink_identity
-    (wyl_audit_conn_t * conn,
+  (wyl_audit_conn_t * conn,
     gchar out_logical_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM],
     gchar out_sink_uuid[WYL_SERVICE_EXCHANGE_UUID_BUF]);
 
@@ -89,14 +89,13 @@ wyrelog_error_t wyl_audit_conn_service_exchange_get_sink_identity
  * material rather than a receipt; receipt validation and acknowledgement are
  * owned by the later projector layer. */
 wyrelog_error_t wyl_audit_conn_service_exchange_project
-    (wyl_audit_conn_t * conn,
+  (wyl_audit_conn_t * conn,
     const WylAuditServiceExchangeProjection * projection,
     WylAuditServiceExchangeProjectionReadback * out_readback);
 
 /*
  * Opens an audit log at `path`. On WYRELOG_E_OK *out_conn owns
- * the new handle pair; on any non-OK return *out_conn is left
- * untouched.
+ * the new handle pair; on any non-OK return *out_conn is NULL.
  *
  *   WYRELOG_E_OK       database opened and connected.
  *   WYRELOG_E_INVALID  out_conn == NULL.
@@ -185,7 +184,7 @@ wyrelog_error_t wyl_audit_conn_delete_event (wyl_audit_conn_t * conn,
  */
 gboolean wyl_audit_conn_stream_name_is_reserved (const gchar * stream_name);
 wyrelog_error_t wyl_audit_conn_validate_user_stream_name
-    (const gchar * stream_name);
+  (const gchar * stream_name);
 wyrelog_error_t wyl_audit_conn_create_user_stream (wyl_audit_conn_t * conn,
     const gchar * stream_name);
 wyrelog_error_t wyl_audit_conn_drop_user_stream (wyl_audit_conn_t * conn,

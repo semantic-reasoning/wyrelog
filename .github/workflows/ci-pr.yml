@@ -175,11 +175,13 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             CC=cc CXX=c++ meson setup build-secure-duckdb \
               -Denable_fact_store=enabled \
+              -Denable_audit=enabled \
               -Dduckdb_source=subproject \
               -Denable_secure_duckdb_bridge=enabled
           else
             meson setup build-secure-duckdb \
               -Denable_fact_store=enabled \
+              -Denable_audit=enabled \
               -Dduckdb_source=subproject \
               -Denable_secure_duckdb_bridge=enabled
           fi
@@ -245,6 +247,19 @@ jobs:
             fact-store-duckdb-autoload-runtime-self-test \
             fact-store-duckdb-hardening-boundary \
             fact-store-duckdb-hardening-boundary-self-test \
+            --print-errorlogs
+
+      - name: Test audit DuckDB hardening with source DuckDB
+        run: |
+          meson compile -C build-secure-duckdb -j 1 \
+            test-audit-conn-duckdb-hardening
+          meson test -C build-secure-duckdb --no-rebuild \
+            audit-conn-duckdb-hardening \
+            audit-conn-duckdb-autoload-clean-runtime \
+            audit-conn-duckdb-autoload-ambient-runtime \
+            audit-conn-duckdb-autoload-runtime-self-test \
+            audit-conn-duckdb-hardening-boundary \
+            audit-conn-duckdb-hardening-boundary-self-test \
             --print-errorlogs
 
       - name: Remove secure DuckDB compile swap
@@ -1231,6 +1246,22 @@ jobs:
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-fact-store-duckdb-hardening
           meson test -C builddir fact-store-duckdb-hardening fact-store-duckdb-autoload-runtime fact-store-duckdb-autoload-runtime-self-test fact-store-duckdb-hardening-boundary fact-store-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test audit DuckDB hardening (clang-cl)
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%PATH%
+          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
+          set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          meson compile -C builddir test-audit-conn-duckdb-hardening
+          meson test -C builddir audit-conn-duckdb-hardening audit-conn-duckdb-autoload-clean-runtime audit-conn-duckdb-autoload-ambient-runtime audit-conn-duckdb-autoload-runtime-self-test audit-conn-duckdb-hardening-boundary audit-conn-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

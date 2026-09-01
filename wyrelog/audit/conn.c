@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "conn-private.h"
+#include "conn-duckdb-config-test-seams-private.h"
 
 #include <string.h>
 
@@ -12,7 +13,7 @@
 #define WYL_SERVICE_EXCHANGE_EVENT_KIND "service.credential.exchange"
 
 static wyrelog_error_t ensure_service_exchange_schema
-    (wyl_audit_conn_t * conn, gboolean allow_create_metadata);
+  (wyl_audit_conn_t * conn, gboolean allow_create_metadata);
 
 typedef struct
 {
@@ -37,10 +38,132 @@ struct wyl_audit_conn_t
   gboolean sink_metadata_initialization_pending;
 };
 
+#if defined(WYL_TEST_HANDLE_SEAMS)
+static WylAuditDuckdbConfigOperation duckdb_config_failure =
+    WYL_AUDIT_DUCKDB_CONFIG_NONE;
+static gint duckdb_config_creations;
+static gint duckdb_config_destroys;
+static gint duckdb_open_attempts;
+G_LOCK_DEFINE_STATIC (duckdb_config_failure);
+#endif
+
+static const gchar *
+audit_duckdb_config_name (WylAuditDuckdbConfigOperation operation)
+{
+  switch (operation) {
+    case WYL_AUDIT_DUCKDB_CONFIG_THREADS:
+      return "threads";
+    case WYL_AUDIT_DUCKDB_CONFIG_ENABLE_EXTERNAL_ACCESS:
+      return "enable_external_access";
+    case WYL_AUDIT_DUCKDB_CONFIG_ALLOW_COMMUNITY_EXTENSIONS:
+      return "allow_community_extensions";
+    case WYL_AUDIT_DUCKDB_CONFIG_AUTOINSTALL_KNOWN_EXTENSIONS:
+      return "autoinstall_known_extensions";
+    case WYL_AUDIT_DUCKDB_CONFIG_AUTOLOAD_KNOWN_EXTENSIONS:
+      return "autoload_known_extensions";
+    case WYL_AUDIT_DUCKDB_CONFIG_NONE:
+    case WYL_AUDIT_DUCKDB_CONFIG_CREATE:
+      break;
+  }
+  return NULL;
+}
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+static gboolean
+audit_duckdb_config_consume_failure (WylAuditDuckdbConfigOperation operation)
+{
+  gboolean fail = FALSE;
+  G_LOCK (duckdb_config_failure);
+  if (duckdb_config_failure == operation) {
+    duckdb_config_failure = WYL_AUDIT_DUCKDB_CONFIG_NONE;
+    fail = TRUE;
+  }
+  G_UNLOCK (duckdb_config_failure);
+  return fail;
+}
+#endif
+
+static duckdb_state
+audit_duckdb_create_config (duckdb_config *out_config)
+{
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (audit_duckdb_config_consume_failure (WYL_AUDIT_DUCKDB_CONFIG_CREATE))
+    return DuckDBError;
+#endif
+  duckdb_state state = duckdb_create_config (out_config);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (state == DuckDBSuccess)
+    g_atomic_int_inc (&duckdb_config_creations);
+#endif
+  return state;
+}
+
+static duckdb_state
+audit_duckdb_set_config (duckdb_config config,
+    WylAuditDuckdbConfigOperation operation, const gchar *value)
+{
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (audit_duckdb_config_consume_failure (operation))
+    return DuckDBError;
+#endif
+  return duckdb_set_config (config, audit_duckdb_config_name (operation),
+             value);
+}
+
+static void
+audit_duckdb_destroy_config (duckdb_config *config)
+{
+  if (config == NULL || *config == NULL)
+    return;
+  duckdb_destroy_config (config);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  g_atomic_int_inc (&duckdb_config_destroys);
+#endif
+}
+
+static duckdb_state
+audit_duckdb_apply_config (duckdb_config config,
+    WylAuditDuckdbConfigOperation operation, const gchar *value)
+{
+  return audit_duckdb_set_config (config, operation, value);
+}
+
+static wyrelog_error_t
+create_hardened_duckdb_config (duckdb_config *out_config)
+{
+  duckdb_config config = NULL;
+
+  *out_config = NULL;
+  if (audit_duckdb_create_config (&config) != DuckDBSuccess) {
+    audit_duckdb_destroy_config (&config);
+    return WYRELOG_E_IO;
+  }
+  if (audit_duckdb_apply_config (config, WYL_AUDIT_DUCKDB_CONFIG_THREADS, "1")
+      != DuckDBSuccess
+      || audit_duckdb_apply_config (config,
+      WYL_AUDIT_DUCKDB_CONFIG_ENABLE_EXTERNAL_ACCESS, "false")
+      != DuckDBSuccess
+      || audit_duckdb_apply_config (config,
+      WYL_AUDIT_DUCKDB_CONFIG_ALLOW_COMMUNITY_EXTENSIONS, "false")
+      != DuckDBSuccess
+      || audit_duckdb_apply_config (config,
+      WYL_AUDIT_DUCKDB_CONFIG_AUTOINSTALL_KNOWN_EXTENSIONS, "false")
+      != DuckDBSuccess
+      || audit_duckdb_apply_config (config,
+      WYL_AUDIT_DUCKDB_CONFIG_AUTOLOAD_KNOWN_EXTENSIONS, "false")
+      != DuckDBSuccess) {
+    audit_duckdb_destroy_config (&config);
+    return WYRELOG_E_IO;
+  }
+  *out_config = config;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
 {
   duckdb_config config = NULL;
+  duckdb_database db = NULL;
   char *error = NULL;
   const gchar *effective_path = path;
 
@@ -49,32 +172,58 @@ open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
   if (path != NULL && g_strcmp0 (path, ":memory:") == 0)
     effective_path = NULL;
 
-  if (duckdb_create_config (&config) != DuckDBSuccess)
+  if (create_hardened_duckdb_config (&config) != WYRELOG_E_OK)
     return WYRELOG_E_IO;
-  if (duckdb_set_config (config, "threads", "1") != DuckDBSuccess) {
-    duckdb_destroy_config (&config);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_open_ext (effective_path, out_db, config, &error) != DuckDBSuccess) {
-    if (out_db != NULL && *out_db != NULL)
-      duckdb_close (out_db);
-    duckdb_destroy_config (&config);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  g_atomic_int_inc (&duckdb_open_attempts);
+#endif
+  if (duckdb_open_ext (effective_path, &db, config, &error) != DuckDBSuccess) {
+    if (db != NULL)
+      duckdb_close (&db);
+    audit_duckdb_destroy_config (&config);
     if (error != NULL)
       duckdb_free (error);
     return WYRELOG_E_IO;
   }
-  duckdb_destroy_config (&config);
+  audit_duckdb_destroy_config (&config);
   if (error != NULL)
     duckdb_free (error);
+  *out_db = db;
   return WYRELOG_E_OK;
 }
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+void
+wyl_audit_conn_duckdb_config_fail_once_for_test
+  (WylAuditDuckdbConfigOperation operation)
+{
+  G_LOCK (duckdb_config_failure);
+  duckdb_config_failure = operation;
+  G_UNLOCK (duckdb_config_failure);
+}
+
+void
+wyl_audit_conn_duckdb_config_snapshot_for_test
+  (WylAuditDuckdbConfigSnapshot *out_snapshot)
+{
+  if (out_snapshot == NULL)
+    return;
+  out_snapshot->config_creations =
+      (guint) g_atomic_int_get (&duckdb_config_creations);
+  out_snapshot->config_destroys =
+      (guint) g_atomic_int_get (&duckdb_config_destroys);
+  out_snapshot->open_attempts =
+      (guint) g_atomic_int_get (&duckdb_open_attempts);
+}
+
+#endif
 
 guint64
 wyl_audit_conn_service_exchange_get_entry_count_for_test (wyl_audit_conn_t
     *conn)
 {
   return conn != NULL ? (guint64) g_atomic_int_get
-      (&conn->service_exchange_entry_count) : 0;
+           (&conn->service_exchange_entry_count) : 0;
 }
 
 void
@@ -86,7 +235,7 @@ wyl_audit_conn_service_exchange_reset_entry_count_for_test (wyl_audit_conn_t
 }
 
 void wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
-    (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data), gpointer data)
+  (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data), gpointer data)
 {
   if (conn == NULL)
     return;
@@ -118,8 +267,8 @@ wyl_audit_conn_service_exchange_fail_once (wyl_audit_conn_t *conn,
 }
 
 guint
-    wyl_audit_conn_service_exchange_get_rollback_count_for_test
-    (wyl_audit_conn_t * conn) {
+wyl_audit_conn_service_exchange_get_rollback_count_for_test
+  (wyl_audit_conn_t * conn) {
   if (conn == NULL)
     return 0;
   g_mutex_lock (&conn->lock);
@@ -134,7 +283,7 @@ audit_chain_tail_new (gint64 last_sequence_no, const gchar *last_record_hash)
   WylAuditChainTail *tail = g_new0 (WylAuditChainTail, 1);
   tail->last_sequence_no = last_sequence_no;
   tail->last_record_hash = g_strdup (last_record_hash != NULL ?
-      last_record_hash : "");
+          last_record_hash : "");
   return tail;
 }
 
@@ -151,7 +300,7 @@ gboolean
 wyl_audit_conn_stream_name_is_reserved (const gchar *stream_name)
 {
   return stream_name != NULL &&
-      g_str_has_prefix (stream_name, WYL_AUDIT_RESERVED_PREFIX);
+         g_str_has_prefix (stream_name, WYL_AUDIT_RESERVED_PREFIX);
 }
 
 wyrelog_error_t
@@ -160,7 +309,7 @@ wyl_audit_conn_validate_user_stream_name (const gchar *stream_name)
   if (stream_name == NULL || stream_name[0] == '\0')
     return WYRELOG_E_INVALID;
   return wyl_audit_conn_stream_name_is_reserved (stream_name) ?
-      WYRELOG_E_POLICY : WYRELOG_E_OK;
+         WYRELOG_E_POLICY : WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -203,6 +352,7 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
 {
   if (out_conn == NULL)
     return WYRELOG_E_INVALID;
+  *out_conn = NULL;
 
   wyl_audit_conn_t *self = g_new0 (wyl_audit_conn_t, 1);
   if (open_duckdb_with_thread_budget (path, &self->db) != WYRELOG_E_OK) {
@@ -217,7 +367,7 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
   g_mutex_init (&self->lock);
   g_mutex_init (&self->service_exchange_checkpoint_lock);
   self->chain_tail_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
-      g_free, (GDestroyNotify) audit_chain_tail_free);
+          g_free, (GDestroyNotify) audit_chain_tail_free);
   self->persistent = path != NULL && path[0] != '\0'
       && g_strcmp0 (path, ":memory:") != 0;
 
@@ -269,9 +419,9 @@ bind_nullable_varchar (duckdb_prepared_statement stmt, idx_t index,
 {
   if (value == NULL)
     return duckdb_bind_null (stmt, index) == DuckDBSuccess ?
-        WYRELOG_E_OK : WYRELOG_E_IO;
+           WYRELOG_E_OK : WYRELOG_E_IO;
   return duckdb_bind_varchar (stmt, index, value) == DuckDBSuccess ?
-      WYRELOG_E_OK : WYRELOG_E_IO;
+         WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
 static gboolean
@@ -366,7 +516,7 @@ ensure_audit_events_request_id_column (wyl_audit_conn_t *conn)
     return WYRELOG_E_OK;
 
   if (duckdb_query (conn->conn,
-          "ALTER TABLE audit_events ADD COLUMN request_id VARCHAR;", &result)
+      "ALTER TABLE audit_events ADD COLUMN request_id VARCHAR;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -382,8 +532,8 @@ ensure_column (wyl_audit_conn_t *conn, const gchar *table_name,
   duckdb_result result = { 0 };
   g_autofree gchar *probe_sql =
       g_strdup_printf
-      ("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = '%s';",
-      table_name, column_name);
+        ("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = '%s';",
+          table_name, column_name);
 
   if (duckdb_query (conn->conn, probe_sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -396,7 +546,7 @@ ensure_column (wyl_audit_conn_t *conn, const gchar *table_name,
 
   g_autofree gchar *alter_sql =
       g_strdup_printf ("ALTER TABLE %s ADD COLUMN %s %s;", table_name,
-      column_name, column_def);
+          column_name, column_def);
   if (duckdb_query (conn->conn, alter_sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -519,14 +669,14 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (chain_columns); i++) {
     rc = ensure_column (conn, "audit_events", chain_columns[i].name,
-        chain_columns[i].def);
+            chain_columns[i].def);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
 
   if (duckdb_query (conn->conn,
-          "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id "
-          "ON audit_events (request_id);", &result) != DuckDBSuccess) {
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id "
+      "ON audit_events (request_id);", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
   }
@@ -535,7 +685,7 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
   if (!had_sink_metadata)
     conn->sink_metadata_initialization_pending = TRUE;
   rc = ensure_service_exchange_schema (conn,
-      conn->sink_metadata_initialization_pending);
+          conn->sink_metadata_initialization_pending);
   if (rc == WYRELOG_E_OK)
     conn->sink_metadata_initialization_pending = FALSE;
   if (rc != WYRELOG_E_OK)
@@ -562,13 +712,13 @@ compute_audit_record_hash (const gchar *stream_name, gint64 sequence_no,
 {
   g_autofree gchar *payload =
       g_strdup_printf ("v1|%s|%" G_GINT64_FORMAT "|%s|%s|%" G_GINT64_FORMAT
-      "|%s|%s|%s|%s|%s|%s|%d|%s",
-      stream_name, sequence_no, previous_hash, id, created_at_us,
-      subject_id != NULL ? subject_id : "", action != NULL ? action : "",
-      resource_id != NULL ? resource_id : "",
-      deny_reason != NULL ? deny_reason : "",
-      deny_origin != NULL ? deny_origin : "",
-      request_id != NULL ? request_id : "", (gint) decision, event_kind);
+          "|%s|%s|%s|%s|%s|%s|%d|%s",
+          stream_name, sequence_no, previous_hash, id, created_at_us,
+          subject_id != NULL ? subject_id : "", action != NULL ? action : "",
+          resource_id != NULL ? resource_id : "",
+          deny_reason != NULL ? deny_reason : "",
+          deny_origin != NULL ? deny_origin : "",
+          request_id != NULL ? request_id : "", (gint) decision, event_kind);
   return g_compute_checksum_for_string (G_CHECKSUM_SHA256, payload, -1);
 }
 
@@ -626,7 +776,7 @@ get_next_chain_state_cached (wyl_audit_conn_t *conn, const gchar *stream_name,
     gint64 sequence_no = 0;
     g_autofree gchar *previous_hash = NULL;
     wyrelog_error_t rc = get_next_chain_state (conn, stream_name,
-        &sequence_no, &previous_hash);
+            &sequence_no, &previous_hash);
     if (rc != WYRELOG_E_OK)
       return rc;
 
@@ -677,13 +827,13 @@ static wyrelog_error_t
 commit_transaction_unlocked (wyl_audit_conn_t *conn)
 {
   if (service_exchange_fail (conn,
-          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_QUERY)) {
+      WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_QUERY)) {
     /* Exercise DuckDB's query execution boundary with a syntactically invalid
      * COMMIT. DuckDB returns failure and leaves the active transaction valid
      * for the exactly-once rollback below. */
     duckdb_result result = { 0 };
     duckdb_state state = duckdb_query (conn->conn,
-        "COMMIT __wyrelog_injected_failure__;", &result);
+            "COMMIT __wyrelog_injected_failure__;", &result);
     duckdb_destroy_result (&result);
     return state == DuckDBSuccess ? WYRELOG_E_INTERNAL : WYRELOG_E_IO;
   }
@@ -696,10 +846,10 @@ canonical_uuidv7 (const gchar *value)
   wyl_id_t id;
   gchar formatted[WYL_ID_STRING_BUF];
   return value != NULL && strlen (value) == WYL_ID_STRING_LEN
-      && value[14] == '7' && strchr ("89ab", value[19]) != NULL
-      && wyl_id_parse (value, &id) == WYRELOG_E_OK
-      && wyl_id_format (&id, formatted, sizeof formatted) == WYRELOG_E_OK
-      && strcmp (value, formatted) == 0;
+         && value[14] == '7' && strchr ("89ab", value[19]) != NULL
+         && wyl_id_parse (value, &id) == WYRELOG_E_OK
+         && wyl_id_format (&id, formatted, sizeof formatted) == WYRELOG_E_OK
+         && strcmp (value, formatted) == 0;
 }
 
 static gboolean
@@ -721,8 +871,8 @@ validate_table_columns (wyl_audit_conn_t *conn, const gchar *table,
 {
   duckdb_result result = { 0 };
   g_autofree gchar *sql = g_strdup_printf
-      ("SELECT name,type,\"notnull\",dflt_value,pk "
-      "FROM pragma_table_info('%s') " "ORDER BY cid;", table);
+        ("SELECT name,type,\"notnull\",dflt_value,pk "
+          "FROM pragma_table_info('%s') " "ORDER BY cid;", table);
   if (duckdb_query (conn->conn, sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -880,28 +1030,28 @@ ensure_service_exchange_schema (wyl_audit_conn_t *conn,
     FALSE, FALSE, FALSE, FALSE, FALSE, FALSE
   };
   wyrelog_error_t rc = validate_table_columns (conn, "audit_sink_metadata",
-      metadata_names, metadata_types, metadata_pk,
-      G_N_ELEMENTS (metadata_names));
+          metadata_names, metadata_types, metadata_pk,
+          G_N_ELEMENTS (metadata_names));
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = validate_table_columns (conn, "service_exchange_receipt_projections",
-      projection_names, projection_types, projection_pk,
-      G_N_ELEMENTS (projection_names));
+          projection_names, projection_types, projection_pk,
+          G_N_ELEMENTS (projection_names));
   if (rc == WYRELOG_E_OK)
     rc = require_constraint (conn, "audit_sink_metadata", "PRIMARY KEY",
-        "[logical_sink_name]");
+            "[logical_sink_name]");
   if (rc == WYRELOG_E_OK)
     rc = require_constraint (conn, "audit_sink_metadata", "UNIQUE",
-        "[sink_uuid]");
+            "[sink_uuid]");
   if (rc == WYRELOG_E_OK)
     rc = require_constraint (conn, "service_exchange_receipt_projections",
-        "PRIMARY KEY", "[sink_uuid, intention_id]");
+            "PRIMARY KEY", "[sink_uuid, intention_id]");
   if (rc == WYRELOG_E_OK)
     rc = require_constraint (conn, "service_exchange_receipt_projections",
-        "UNIQUE", "[sink_uuid, payload_digest]");
+            "UNIQUE", "[sink_uuid, payload_digest]");
   if (rc == WYRELOG_E_OK)
     rc = require_constraint_count (conn, "audit_sink_metadata", "PRIMARY KEY",
-        1);
+            1);
   if (rc == WYRELOG_E_OK)
     rc = require_constraint_count (conn, "audit_sink_metadata", "UNIQUE", 1);
   if (rc == WYRELOG_E_OK)
@@ -910,16 +1060,16 @@ ensure_service_exchange_schema (wyl_audit_conn_t *conn,
     rc = require_constraint_count (conn, "audit_sink_metadata", "CHECK", 0);
   if (rc == WYRELOG_E_OK)
     rc = require_constraint_count (conn,
-        "service_exchange_receipt_projections", "PRIMARY KEY", 1);
+            "service_exchange_receipt_projections", "PRIMARY KEY", 1);
   if (rc == WYRELOG_E_OK)
     rc = require_constraint_count (conn,
-        "service_exchange_receipt_projections", "UNIQUE", 1);
+            "service_exchange_receipt_projections", "UNIQUE", 1);
   if (rc == WYRELOG_E_OK)
     rc = require_constraint_count (conn,
-        "service_exchange_receipt_projections", "NOT NULL", 16);
+            "service_exchange_receipt_projections", "NOT NULL", 16);
   if (rc == WYRELOG_E_OK)
     rc = require_constraint_count (conn,
-        "service_exchange_receipt_projections", "CHECK", 6);
+            "service_exchange_receipt_projections", "CHECK", 6);
   if (rc == WYRELOG_E_OK) {
     duckdb_result constraints = { 0 };
     static const gchar *constraint_sql =
@@ -943,12 +1093,12 @@ ensure_service_exchange_schema (wyl_audit_conn_t *conn,
     rc = require_total_constraint_count (conn, "audit_sink_metadata", 5);
   if (rc == WYRELOG_E_OK)
     rc = require_total_constraint_count (conn,
-        "service_exchange_receipt_projections", 24);
+            "service_exchange_receipt_projections", 24);
   if (rc == WYRELOG_E_OK)
     rc = require_no_extra_indexes (conn, "audit_sink_metadata");
   if (rc == WYRELOG_E_OK)
     rc = require_no_extra_indexes (conn,
-        "service_exchange_receipt_projections");
+            "service_exchange_receipt_projections");
   if (rc != WYRELOG_E_OK || !conn->persistent)
     return rc;
 
@@ -1008,7 +1158,7 @@ ensure_service_exchange_schema (wyl_audit_conn_t *conn,
   wyrelog_error_t metadata_rc = state == DuckDBSuccess ? WYRELOG_E_OK :
       WYRELOG_E_IO;
   if (metadata_rc == WYRELOG_E_OK && service_exchange_fail (conn,
-          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_METADATA_IN_TXN_READBACK))
+      WYL_AUDIT_SERVICE_EXCHANGE_FAIL_METADATA_IN_TXN_READBACK))
     metadata_rc = WYRELOG_E_IO;
   if (metadata_rc == WYRELOG_E_OK) {
     static const gchar *readback_sql =
@@ -1085,8 +1235,8 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
     return WYRELOG_E_INVALID;
 
   wyrelog_error_t rc = audit_event_matches_existing (conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
-      decision, &exists);
+          subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+          decision, &exists);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (exists)
@@ -1095,14 +1245,14 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
   g_autofree gchar *previous_hash = NULL;
   gint64 sequence_no = 0;
   rc = get_next_chain_state_cached (conn, WYL_AUDIT_STREAM_AUDIT,
-      &sequence_no, &previous_hash);
+          &sequence_no, &previous_hash);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autofree gchar *record_hash =
       compute_audit_record_hash (WYL_AUDIT_STREAM_AUDIT, sequence_no,
-      previous_hash, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
-      decision, "audit.decision");
+          previous_hash, id, created_at_us,
+          subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+          decision, "audit.decision");
 
   static const gchar *sql =
       "INSERT INTO audit_events "
@@ -1185,8 +1335,8 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
 
   g_mutex_lock (&conn->lock);
   wyrelog_error_t rc = insert_event_full_unlocked (conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
-      decision, out_inserted);
+          subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+          decision, out_inserted);
   g_mutex_unlock (&conn->lock);
   return rc;
 }
@@ -1200,15 +1350,15 @@ wyl_audit_conn_insert_event (wyl_audit_conn_t *conn, const gchar *id,
   gboolean inserted = FALSE;
 
   return wyl_audit_conn_insert_event_full (conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, NULL, decision,
-      &inserted);
+             subject_id, action, resource_id, deny_reason, deny_origin, NULL, decision,
+             &inserted);
 }
 
 static gboolean
 projection_input_valid (const WylAuditServiceExchangeProjection *p)
 {
   return wyl_service_exchange_audit_projection_validate (p)
-      == WYRELOG_E_OK;
+         == WYRELOG_E_OK;
 }
 
 static void
@@ -1387,9 +1537,9 @@ checkpoint_matches (duckdb_result *result, gint64 sequence_no,
     if (duckdb_value_is_null (result, col, 0))
       return FALSE;
   return result_text_equal (result, 0, 0, WYL_AUDIT_SERVICE_EXCHANGE_STREAM)
-      && duckdb_value_int64 (result, 1, 0) == sequence_no
-      && result_text_equal (result, 2, 0, record_hash)
-      && duckdb_value_int64 (result, 3, 0) == created_at_us;
+         && duckdb_value_int64 (result, 1, 0) == sequence_no
+         && result_text_equal (result, 2, 0, record_hash)
+         && duckdb_value_int64 (result, 3, 0) == created_at_us;
 }
 
 static gboolean
@@ -1411,10 +1561,10 @@ anchor_matches (duckdb_result *result,
     return FALSE;
   }
   g_autofree gchar *expected_hash = compute_audit_record_hash
-      (WYL_AUDIT_SERVICE_EXCHANGE_STREAM, sequence, previous, p->intention_id,
-      p->created_at_us, p->service_principal, WYL_SERVICE_EXCHANGE_EVENT_KIND,
-      p->credential_id, p->payload_digest, p->tenant_id, p->request_id,
-      WYL_DECISION_ALLOW, WYL_SERVICE_EXCHANGE_EVENT_KIND);
+        (WYL_AUDIT_SERVICE_EXCHANGE_STREAM, sequence, previous, p->intention_id,
+          p->created_at_us, p->service_principal, WYL_SERVICE_EXCHANGE_EVENT_KIND,
+          p->credential_id, p->payload_digest, p->tenant_id, p->request_id,
+          WYL_DECISION_ALLOW, WYL_SERVICE_EXCHANGE_EVENT_KIND);
   gboolean equal = sequence > 0
       && duckdb_value_int64 (result, 0, 0) == p->created_at_us
       && result_text_equal (result, 1, 0, p->service_principal)
@@ -1487,14 +1637,14 @@ insert_projection_anchor_unlocked (wyl_audit_conn_t *conn,
   gint64 sequence = 0;
   g_autofree gchar *previous = NULL;
   wyrelog_error_t rc = get_next_chain_state_cached (conn,
-      WYL_AUDIT_SERVICE_EXCHANGE_STREAM, &sequence, &previous);
+          WYL_AUDIT_SERVICE_EXCHANGE_STREAM, &sequence, &previous);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autofree gchar *record_hash = compute_audit_record_hash
-      (WYL_AUDIT_SERVICE_EXCHANGE_STREAM, sequence, previous, p->intention_id,
-      p->created_at_us, p->service_principal, WYL_SERVICE_EXCHANGE_EVENT_KIND,
-      p->credential_id, p->payload_digest, p->tenant_id, p->request_id,
-      WYL_DECISION_ALLOW, WYL_SERVICE_EXCHANGE_EVENT_KIND);
+        (WYL_AUDIT_SERVICE_EXCHANGE_STREAM, sequence, previous, p->intention_id,
+          p->created_at_us, p->service_principal, WYL_SERVICE_EXCHANGE_EVENT_KIND,
+          p->credential_id, p->payload_digest, p->tenant_id, p->request_id,
+          WYL_DECISION_ALLOW, WYL_SERVICE_EXCHANGE_EVENT_KIND);
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
   static const gchar *sql =
@@ -1539,7 +1689,7 @@ insert_projection_anchor_unlocked (wyl_audit_conn_t *conn,
   if (duckdb_prepare (conn->conn, checkpoint_sql, &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   bound = duckdb_bind_varchar (stmt, 1,
-      WYL_AUDIT_SERVICE_EXCHANGE_STREAM) == DuckDBSuccess
+          WYL_AUDIT_SERVICE_EXCHANGE_STREAM) == DuckDBSuccess
       && duckdb_bind_int64 (stmt, 2, sequence) == DuckDBSuccess
       && duckdb_bind_varchar (stmt, 3, record_hash) == DuckDBSuccess
       && duckdb_bind_int64 (stmt, 4, p->created_at_us) == DuckDBSuccess;
@@ -1594,7 +1744,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     rc = query_ok (conn->conn, "BEGIN TRANSACTION;");
     in_transaction = rc == WYRELOG_E_OK;
     if (rc == WYRELOG_E_OK && service_exchange_fail (conn,
-            WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_BEGIN))
+        WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_BEGIN))
       rc = WYRELOG_E_IO;
   }
   duckdb_result side = { 0 }, anchor = { 0 }, checkpoint = { 0 };
@@ -1609,13 +1759,13 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     else {
       g_autofree gchar *ignored_previous = NULL;
       rc = get_next_chain_state (conn, WYL_AUDIT_SERVICE_EXCHANGE_STREAM,
-          &sequence, &ignored_previous);
+              &sequence, &ignored_previous);
     }
   }
   if (rc == WYRELOG_E_OK && sequence > 0)
     rc = load_projection_checkpoint (conn, sequence, &checkpoint);
   if (rc == WYRELOG_E_OK && service_exchange_fail (conn,
-          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_PREFLIGHT))
+      WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_PREFLIGHT))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK) {
     idx_t side_rows = duckdb_row_count (&side);
@@ -1624,20 +1774,20 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     if (side_rows == 0 && anchor_rows == 0 && checkpoint_rows == 0) {
       rc = insert_projection_unlocked (conn, sink_uuid, p);
       if (rc == WYRELOG_E_OK && service_exchange_fail (conn,
-              WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_SIDECAR))
+          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_SIDECAR))
         rc = WYRELOG_E_IO;
       if (rc == WYRELOG_E_OK)
         rc = insert_projection_anchor_unlocked (conn, p, &sequence,
-            &record_hash);
+                &record_hash);
       if (rc == WYRELOG_E_OK && service_exchange_fail (conn,
-              WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_ANCHOR))
+          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_ANCHOR))
         rc = WYRELOG_E_IO;
     } else if (side_rows == 1 && anchor_rows == 1 && checkpoint_rows == 1
         && result_text_equal (&side, 0, 0, sink_uuid)
         && projection_row_matches (&side, 0, p) && anchor_matches (&anchor, p)) {
       gchar *stored_hash = duckdb_value_varchar (&anchor, 10, 0);
       gboolean checkpoint_exact = checkpoint_matches (&checkpoint, sequence,
-          stored_hash, p->created_at_us);
+              stored_hash, p->created_at_us);
       duckdb_free (stored_hash);
       if (!checkpoint_exact) {
         rc = WYRELOG_E_POLICY;
@@ -1663,9 +1813,9 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
       rc = load_anchor (conn, p, &anchor);
     if (rc == WYRELOG_E_OK
         && (duckdb_row_count (&side) != 1
-            || !result_text_equal (&side, 0, 0, sink_uuid)
-            || !projection_row_matches (&side, 0, p)
-            || !anchor_matches (&anchor, p)))
+        || !result_text_equal (&side, 0, 0, sink_uuid)
+        || !projection_row_matches (&side, 0, p)
+        || !anchor_matches (&anchor, p)))
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK) {
       sequence = duckdb_value_int64 (&anchor, 8, 0);
@@ -1673,7 +1823,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
       rc = load_projection_checkpoint (conn, sequence, &checkpoint);
       if (rc == WYRELOG_E_OK
           && !checkpoint_matches (&checkpoint, sequence, stored_hash,
-              p->created_at_us))
+          p->created_at_us))
         rc = WYRELOG_E_POLICY;
       duckdb_free (stored_hash);
     }
@@ -1684,7 +1834,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     memset (&anchor, 0, sizeof anchor);
     memset (&checkpoint, 0, sizeof checkpoint);
     if (rc == WYRELOG_E_OK && service_exchange_fail (conn,
-            WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_IN_TXN_READBACK))
+        WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_IN_TXN_READBACK))
       rc = WYRELOG_E_IO;
   }
   if (rc == WYRELOG_E_OK) {
@@ -1692,7 +1842,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     if (rc == WYRELOG_E_OK) {
       in_transaction = FALSE;
       if (service_exchange_fail (conn,
-              WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_RESPONSE_LOST))
+          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_RESPONSE_LOST))
         rc = WYRELOG_E_IO;
     }
   }
@@ -1714,7 +1864,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
   if (rc == WYRELOG_E_OK)
     rc = load_sink_uuid_unlocked (conn, sink_uuid);
   if (rc == WYRELOG_E_OK && service_exchange_fail (conn,
-          WYL_AUDIT_SERVICE_EXCHANGE_FAIL_POST_COMMIT_READBACK))
+      WYL_AUDIT_SERVICE_EXCHANGE_FAIL_POST_COMMIT_READBACK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = load_projection_candidates (conn, sink_uuid, p, &side);
@@ -1722,9 +1872,9 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     rc = load_anchor (conn, p, &anchor);
   if (rc == WYRELOG_E_OK
       && (duckdb_row_count (&side) != 1
-          || !result_text_equal (&side, 0, 0, sink_uuid)
-          || !projection_row_matches (&side, 0, p)
-          || !anchor_matches (&anchor, p)))
+      || !result_text_equal (&side, 0, 0, sink_uuid)
+      || !projection_row_matches (&side, 0, p)
+      || !anchor_matches (&anchor, p)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
     sequence = duckdb_value_int64 (&anchor, 8, 0);
@@ -1732,7 +1882,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     rc = load_projection_checkpoint (conn, sequence, &checkpoint);
     if (rc == WYRELOG_E_OK
         && !checkpoint_matches (&checkpoint, sequence, stored_hash,
-            p->created_at_us))
+        p->created_at_us))
       rc = WYRELOG_E_POLICY;
     duckdb_free (stored_hash);
   }
@@ -1871,8 +2021,8 @@ wyl_audit_conn_append_tombstone (wyl_audit_conn_t *conn,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_audit_conn_insert_event_full (conn, id_buf, g_get_real_time (),
-      subject_id, "privacy.erase.tombstone", "subject", "erasure_tombstone",
-      "system", request_id, WYL_DECISION_ALLOW, out_inserted);
+             subject_id, "privacy.erase.tombstone", "subject", "erasure_tombstone",
+             "system", request_id, WYL_DECISION_ALLOW, out_inserted);
 }
 
 static gchar *
@@ -1944,9 +2094,9 @@ wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
     }
 
     g_autofree gchar *expected_hash = compute_audit_record_hash (stream_name,
-        sequence_no, stored_previous, id, created_at_us, subject_id, action,
-        resource_id, deny_reason, deny_origin, request_id, decision,
-        event_kind);
+            sequence_no, stored_previous, id, created_at_us, subject_id, action,
+            resource_id, deny_reason, deny_origin, request_id, decision,
+            event_kind);
     if (g_strcmp0 (stored_hash, expected_hash) != 0
         || g_strcmp0 (checkpoint_root, expected_hash) != 0) {
       if (out_error != NULL)
@@ -1961,12 +2111,12 @@ wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
   duckdb_destroy_result (&result);
 
   if (duckdb_query (conn->conn,
-          "SELECT COUNT(*) FROM audit_checkpoints c "
-          "LEFT JOIN audit_events e "
-          "ON c.stream_name = e.stream_name "
-          "AND c.sequence_no = e.sequence_no "
-          "WHERE c.stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
-          "AND e.id IS NULL;", &result) != DuckDBSuccess) {
+      "SELECT COUNT(*) FROM audit_checkpoints c "
+      "LEFT JOIN audit_events e "
+      "ON c.stream_name = e.stream_name "
+      "AND c.sequence_no = e.sequence_no "
+      "WHERE c.stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
+      "AND e.id IS NULL;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
   }
@@ -1979,12 +2129,12 @@ wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
   duckdb_destroy_result (&result);
 
   if (duckdb_query (conn->conn,
-          "SELECT COUNT(*) FROM audit_checkpoints c "
-          "JOIN audit_events e "
-          "ON c.stream_name = e.stream_name "
-          "AND c.sequence_no = e.sequence_no "
-          "WHERE c.stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
-          "AND c.root_hash != e.checkpoint_root;", &result)
+      "SELECT COUNT(*) FROM audit_checkpoints c "
+      "JOIN audit_events e "
+      "ON c.stream_name = e.stream_name "
+      "AND c.sequence_no = e.sequence_no "
+      "WHERE c.stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
+      "AND c.root_hash != e.checkpoint_root;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -1998,8 +2148,8 @@ wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
   duckdb_destroy_result (&result);
 
   if (duckdb_query (conn->conn,
-          "SELECT stream_name, sequence_no, COUNT(*) FROM audit_checkpoints "
-          "GROUP BY stream_name, sequence_no HAVING COUNT(*) > 1;", &result)
+      "SELECT stream_name, sequence_no, COUNT(*) FROM audit_checkpoints "
+      "GROUP BY stream_name, sequence_no HAVING COUNT(*) > 1;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -2200,15 +2350,15 @@ wyl_audit_conn_query_events_json (wyl_audit_conn_t *conn,
   if (column == NULL) {
     sql =
         g_strdup ("SELECT id, created_at_us, subject_id, action, resource_id, "
-        "deny_reason, deny_origin, request_id, decision " "FROM audit_events "
-        "ORDER BY created_at_us DESC, id DESC " "LIMIT 100;");
+            "deny_reason, deny_origin, request_id, decision " "FROM audit_events "
+            "ORDER BY created_at_us DESC, id DESC " "LIMIT 100;");
   } else {
     sql =
         g_strdup_printf
-        ("SELECT id, created_at_us, subject_id, action, resource_id, "
-        "deny_reason, deny_origin, request_id, decision " "FROM audit_events "
-        "WHERE %s = ? " "ORDER BY created_at_us DESC, id DESC " "LIMIT 100;",
-        column);
+          ("SELECT id, created_at_us, subject_id, action, resource_id, "
+            "deny_reason, deny_origin, request_id, decision " "FROM audit_events "
+            "WHERE %s = ? " "ORDER BY created_at_us DESC, id DESC " "LIMIT 100;",
+            column);
   }
 
   if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {

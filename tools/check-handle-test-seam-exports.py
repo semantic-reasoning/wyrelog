@@ -9,6 +9,8 @@ import sys
 
 
 PROTECTED = {
+    "wyl_audit_conn_duckdb_config_fail_once_for_test",
+    "wyl_audit_conn_duckdb_config_snapshot_for_test",
     "wyl_handle_set_engine_session_checkpoint_for_test",
     "wyl_handle_set_reload_decision_checkpoint_for_test",
     "wyl_handle_set_engine_operation_checkpoint_for_test",
@@ -106,6 +108,9 @@ def self_test():
     allowed = "000 T wyl_handle_engine_session_locked_for_testing\n"
     if protected_symbols(allowed):
         raise AssertionError("protected export parser accepted a substring")
+    audit_near_match = "000 T wyl_audit_conn_duckdb_config_fail_once_for_testing\n"
+    if protected_symbols(audit_near_match):
+        raise AssertionError("protected export parser accepted an audit near-match")
     pe_shared = command_candidates("pe", "shared", Path("library.dll"))
     if pe_shared[0][0:2] != ("llvm-readobj", "--coff-exports"):
         raise AssertionError("PE shared inspection must prefer export directory")
