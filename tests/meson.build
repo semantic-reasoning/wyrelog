@@ -1696,6 +1696,44 @@ if get_option('enable_fact_store').allowed()
     timeout : 60,
   )
 
+  test_fact_store_duckdb_hardening = executable(
+    'test-fact-store-duckdb-hardening',
+    'test-fact-store-duckdb-hardening.c',
+    c_args : ['-DWYL_TEST_HANDLE_SEAMS'],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
+  )
+
+  test('fact-store-duckdb-hardening', test_fact_store_duckdb_hardening,
+    timeout : 60,
+  )
+  test('fact-store-duckdb-autoload-runtime', python3,
+    args : [
+      files('test-fact-store-duckdb-autoload-runtime.py'),
+      test_fact_store_duckdb_hardening,
+    ],
+    timeout : 60,
+  )
+  test('fact-store-duckdb-autoload-runtime-self-test', python3,
+    args : [
+      files('test-fact-store-duckdb-autoload-runtime.py'),
+      '--self-test',
+    ],
+  )
+  test('fact-store-duckdb-hardening-boundary', python3,
+    args : [
+      files('test-fact-store-duckdb-hardening-boundary.py'),
+      meson.project_source_root(),
+    ],
+  )
+  test('fact-store-duckdb-hardening-boundary-self-test', python3,
+    args : [
+      files('test-fact-store-duckdb-hardening-boundary.py'),
+      '--self-test',
+      meson.project_source_root(),
+    ],
+  )
+
   test_fact_store_forget_transaction = executable(
     'test-fact-store-forget-transaction',
     'test-fact-store-forget-transaction.c',

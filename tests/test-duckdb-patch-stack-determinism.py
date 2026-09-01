@@ -195,7 +195,7 @@ EXPECTED_BUILD_LINUX_STEP = r"""      - name: Install build dependencies (Linux)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config patch time \
+            meson ninja-build pkg-config patch strace time \
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
             libtss2-dev""" + "\n"
 EXPECTED_LINUX_STEP = r"""      - name: Install build dependencies (Linux)
@@ -386,7 +386,7 @@ EXPECTED_PRE_PROOF_HASHES = {
     ".github/workflows/ci-pr.yml": (
         "a945595bc728d01a7a89cef07ff88356044a146c93e947eae94ec2fb71a4617f",
         "d014532fa5ad5a4d0d75b22ebd36a4b6e51843ab043724ed6b34ef9a5a157ea3",
-        "c5df0cedcf83eeafa9d16421a3ff5ceb36726ac586d3a7f419d7b1f2e0561839",
+        "29daf0b4ff319241c6072840f7447185a3d680528c1a9f88e39ef2462123ddcb",
         "dce3707c773f8a2ba95c87148804d6e2b3a5162379d099eab66d31b533b40e42",
         "b120f087067e39749c1fb91bb9cfae68964d8778ff9b97d11374bb13ad009318",
         "c825456336a448175b02a0338e5888c8c0d53099d2aaa9f8c6a6df7e7e82431e",
@@ -400,7 +400,7 @@ EXPECTED_PRE_PROOF_HASHES = {
     ".github/workflows/ci-main.yml": (
         "a945595bc728d01a7a89cef07ff88356044a146c93e947eae94ec2fb71a4617f",
         "d014532fa5ad5a4d0d75b22ebd36a4b6e51843ab043724ed6b34ef9a5a157ea3",
-        "c5df0cedcf83eeafa9d16421a3ff5ceb36726ac586d3a7f419d7b1f2e0561839",
+        "29daf0b4ff319241c6072840f7447185a3d680528c1a9f88e39ef2462123ddcb",
         "dce3707c773f8a2ba95c87148804d6e2b3a5162379d099eab66d31b533b40e42",
         "ae43fd8a04136ea2f10a22885f3d7f703059d739257ad39e6682c07d217ae974",
         "c825456336a448175b02a0338e5888c8c0d53099d2aaa9f8c6a6df7e7e82431e",
@@ -1628,8 +1628,8 @@ def run_self_tests(
                 lambda data: replace_in_job(
                     data,
                     b"build-posix",
-                    b"meson ninja-build pkg-config patch time",
-                    b"meson ninja-build pkg-config time",
+                    b"meson ninja-build pkg-config patch strace time",
+                    b"meson ninja-build pkg-config strace time",
                 ),
             ),
         ),

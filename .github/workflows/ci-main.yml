@@ -90,7 +90,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config patch time \
+            meson ninja-build pkg-config patch strace time \
             libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
             libtss2-dev
 
@@ -243,6 +243,15 @@ jobs:
             fact-store-provisioned \
             fact-store-forget-transaction \
             fact-store-forget-transaction-provisioned \
+            --print-errorlogs
+          meson compile -C build-secure-duckdb -j 1 \
+            test-fact-store-duckdb-hardening
+          meson test -C build-secure-duckdb --no-rebuild \
+            fact-store-duckdb-hardening \
+            fact-store-duckdb-autoload-runtime \
+            fact-store-duckdb-autoload-runtime-self-test \
+            fact-store-duckdb-hardening-boundary \
+            fact-store-duckdb-hardening-boundary-self-test \
             --print-errorlogs
 
       - name: Remove secure DuckDB compile swap
@@ -1182,6 +1191,23 @@ jobs:
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-fact-store-forget-transaction
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test fact-store DuckDB hardening (clang-cl)
+        if: matrix.fact_store != 'disabled'
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%PATH%
+          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
+          set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          meson compile -C builddir test-fact-store-duckdb-hardening
+          meson test -C builddir fact-store-duckdb-hardening fact-store-duckdb-autoload-runtime fact-store-duckdb-autoload-runtime-self-test fact-store-duckdb-hardening-boundary fact-store-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
