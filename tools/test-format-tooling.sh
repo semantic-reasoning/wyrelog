@@ -155,6 +155,7 @@ fi
 # ---------------------------------------------------------------------------
 for authority_path in \
   tools/format-c \
+  tools/check-comment-alignment.sh \
   tools/check-format.sh \
   tools/install-uncrustify.sh \
   tools/setup-git-hooks.sh \
@@ -178,6 +179,7 @@ git -C "$TEST_REPO" config user.email "format-test@example.invalid"
 mkdir -p "$TEST_REPO/tools" "$TEST_REPO/hooks"
 for copied in \
   tools/format-c \
+  tools/check-comment-alignment.sh \
   tools/check-format.sh \
   tools/install-uncrustify.sh \
   tools/setup-git-hooks.sh \
@@ -190,6 +192,7 @@ done
 
 for copied_authority in \
   "$TEST_REPO/tools/format-c" \
+  "$TEST_REPO/tools/check-comment-alignment.sh" \
   "$TEST_REPO/tools/check-format.sh" \
   "$TEST_REPO/tools/install-uncrustify.sh" \
   "$TEST_REPO/tools/setup-git-hooks.sh" \
@@ -232,6 +235,7 @@ git -C "$TEST_REPO" add sample.c tools hooks
 # directly so the fixture is identical on every platform.
 git -C "$TEST_REPO" update-index --chmod=+x \
   tools/format-c \
+  tools/check-comment-alignment.sh \
   tools/check-format.sh \
   tools/install-uncrustify.sh \
   tools/setup-git-hooks.sh \
