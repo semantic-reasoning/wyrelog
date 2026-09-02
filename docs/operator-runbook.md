@@ -1306,6 +1306,47 @@ collecting.
   and uses the configured event spool directory as the bounded recovery
   surface.
 
+## Which Endpoint Reports What
+
+`/readyz` reports whether **this process** can serve a correct query. It does
+**not** reflect fact-subsystem health, and that is deliberate — see #874 for the
+decision and its reasons.
+
+`/facts/status` is the surface that reports fact health, and it is the endpoint
+to watch for an outstanding erasure.
+
+| you want to know | endpoint | what it tells you |
+| --- | --- | --- |
+| is the process serving | `GET /readyz` | `200` and `ready\n`, or `503` with a reason |
+| is any graph degraded | `GET /readyz?format=json` | `subsystems.facts` carries `graphs_total`, `graphs_ready`, `graphs_degraded` |
+| which graph, and why | `GET /facts/status` | per-graph `state` and the aggregate |
+
+Three consequences worth knowing before you wire an alert.
+
+**A Kubernetes readiness probe cannot see fact health.** An `httpGet` probe
+reads the status code and discards the body, and no fact state changes that
+code. A graph carrying an unconverged erasure is reported `degraded` by
+`/facts/status` while `/readyz` stays `200`. That is not an oversight: a
+readiness failure removes the pod from Service endpoints without running the
+boot pass that converges the erasure, so it would withdraw a working query
+surface without fixing anything.
+
+**A single poll can still cover both.** `/readyz?format=json` carries the fact
+aggregate under `subsystems.facts`, including `graphs_degraded`, regardless of
+whether per-graph detail was requested. A body-matching probe can alert on a
+non-zero count from that one request. Only `/facts/status` names the per-graph
+state.
+
+**The plain-text `/readyz` carries no fact information at all.** The body is
+exactly `ready\n` on success. Do not parse it for anything else, and note that
+the failure path returns JSON rather than plain text.
+
+A degraded graph may still be answering queries. `/facts/status` reports
+`"queryable": true` for a graph whose engine is complete and correct for the
+data that is present, even while that graph is counted in `graphs_degraded`.
+Read the per-graph `state` rather than inferring a cause from the aggregate,
+and read the `BOOT` log lines, which name the graph and the reason directly.
+
 ## Backup And Restore
 
 1. Stop the daemon:
