@@ -1301,6 +1301,12 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
     return 1906;
   if (status != 200 || strstr (body, "ready") == NULL)
     return 1907;
+  /* Byte-exact, not a substring.  "ready" also matches "not ready", so the
+   * check above passes on the very body it is meant to exclude.  #874 records
+   * that this response carries no fact information by design, which a
+   * substring test cannot express. */
+  if (g_strcmp0 (body, "ready\n") != 0)
+    return 1992;
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
@@ -1312,6 +1318,13 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
       || strstr (body, "\"facts\"") == NULL
       || strstr (body, "\"graphs_total\"") == NULL)
     return 1929;
+  /* #874 D2: a 200 carries no "reason".  wyctl status --readiness requires
+   * status == "ready" AND reason == NULL for exit 0, so a "ready but
+   * fact-degraded" shape -- a 200 with a reason attached -- would turn a
+   * healthy daemon into a wyctl failure.  This makes that regression fail
+   * here rather than in wyctl. */
+  if (strstr (body, "\"reason\"") != NULL)
+    return 1993;
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/facts/status", &status,
