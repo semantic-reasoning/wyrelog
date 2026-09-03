@@ -863,6 +863,302 @@ forget_state_via_get (WylFactGraphRuntimeManager *manager,
   return state;
 }
 
+static WylFactGraphAdmission
+admission_via_get (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key)
+{
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, key,
+      &status), ==, WYRELOG_E_OK);
+  WylFactGraphAdmission admission = status.admission;
+  wyl_fact_graph_runtime_status_clear (&status);
+  return admission;
+}
+
+/* Closing admission denies new work on exactly one graph, leaves every other
+ * axis alone, and is reversible. */
+static void
+test_admission_denies_new_work (void)
+{
+  WylFactGraphKey a = { 0 }, b = { 0 }, absent = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&b, "tenant-b", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&absent, "tenant-a", "absent"),
+      ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec_a = {.marker = 11 };
+  BuildSpec spec_b = {.marker = 12 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec_a, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &b,
+      build_marker_engine, &spec_b, NULL), ==, WYRELOG_E_OK);
+
+  /* A graph nothing has closed admits. */
+  g_assert_cmpint (admission_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+
+  /* Neither setter mints an entry. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &absent), ==, WYRELOG_E_NOT_FOUND);
+  WylFactGraphRuntimeStatus absent_status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager,
+      &absent, &absent_status), ==, WYRELOG_E_NOT_FOUND);
+
+  WylFactGraphRuntimeStatus before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &before), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (admission_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+
+  /* Refused, and the refusal is distinguishable from shutdown: BUSY with a
+   * filled status naming a CLOSED graph, where shutdown clears it. */
+  BuildSpec denied = {.marker = 13 };
+  WylFactGraphRuntimeStatus refused = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &denied, &refused), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (refused.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_cmpstr (refused.key.graph_id, ==, "orders");
+  wyl_fact_graph_runtime_status_clear (&refused);
+
+  WylFactGraphSnapshot *denied_snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &denied_snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (denied_snapshot);
+
+  /* The refusal consumed no generation and disturbed no other axis. */
+  WylFactGraphRuntimeStatus after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.operation_generation, ==,
+      before.operation_generation);
+  g_assert_cmpuint (after.engine_generation, ==, before.engine_generation);
+  g_assert_cmpint (after.state, ==, before.state);
+  g_assert_cmpint (after.last_replay_class, ==, before.last_replay_class);
+  g_assert_cmpint (after.forget_state, ==, before.forget_state);
+  g_assert_true (after.queryable);
+  wyl_fact_graph_runtime_status_clear (&after);
+
+  /* One graph only.  A barrier that closed the manager would pass every
+   * assertion above. */
+  BuildSpec other = {.marker = 14 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &b,
+      build_marker_engine, &other, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (admission_via_get (manager, &b), ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+
+  /* Reversible, and the graph resumes from where it left off. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  BuildSpec resumed = {.marker = 15 };
+  WylFactGraphRuntimeStatus reopened = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &resumed, &reopened), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (reopened.operation_generation, ==,
+      before.operation_generation + 1);
+  g_assert_cmpuint (reopened.engine_generation, ==,
+      before.engine_generation + 1);
+  wyl_fact_graph_runtime_status_clear (&reopened);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &snapshot), ==, WYRELOG_E_OK);
+  wyl_fact_graph_snapshot_unref (snapshot);
+
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_key_clear (&a);
+  wyl_fact_graph_key_clear (&b);
+  wyl_fact_graph_key_clear (&absent);
+}
+
+/* Repeating either transition is a no-op, and retirement does not reopen a
+ * closed graph -- which it would if admission lived in the state enum. */
+static void
+test_admission_is_idempotent_and_survives_retirement (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 21 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  WylFactGraphRuntimeStatus before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &before), ==, WYRELOG_E_OK);
+
+  for (int i = 0; i < 3; i++) {
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+        &a), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (admission_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+
+  /* Eviction is exempt: a caller that closed admission in order to evict must
+   * not have locked itself out. */
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+
+  /* The tombstone is still closed, and a refresh that would republish it is
+   * still refused. */
+  g_assert_cmpint (admission_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  BuildSpec republish = {.marker = 22 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &republish, NULL), ==, WYRELOG_E_BUSY);
+
+  /* Retirement likewise leaves the axis alone. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen (manager,
+      NULL, 0), ==, WYRELOG_E_OK);
+  g_assert_cmpint (admission_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+
+  for (int i = 0; i < 2; i++) {
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+        &a), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (admission_via_get (manager, &a), ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+
+  /* Counters resume, proving the whole cycle consumed none of them. */
+  BuildSpec resumed = {.marker = 23 };
+  WylFactGraphRuntimeStatus after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &resumed, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.operation_generation, ==,
+      before.operation_generation + 1);
+  g_assert_cmpuint (after.engine_generation, ==, before.engine_generation + 1);
+  wyl_fact_graph_runtime_status_clear (&after);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* Closing admission mid-build is prompt and does not disturb the build: the
+ * admitted refresh runs to completion and publishes, and a snapshot pinned
+ * before the close stays usable.  Without this the barrier could be
+ * implemented by taking writer_lock (which would block for the whole build)
+ * or by discarding the build result (which would not stop the builder, still
+ * inside the store holding its handles) and nothing would notice. */
+static void
+test_admission_close_does_not_disturb_admitted_work (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+
+  /* Publish once so there is a snapshot to pin across the close. */
+  BuildSpec first = {.marker = 51 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &first, NULL), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) pinned = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &pinned), ==, WYRELOG_E_OK);
+
+  Gate gate = { 0 };
+  gate_init (&gate);
+  BuildSpec slow = {.marker = 52,.gate = &gate };
+  RefreshThread worker_spec = {
+    .manager = manager,
+    .key = &a,
+    .spec = &slow,
+    .result = WYRELOG_E_INTERNAL,
+  };
+  Completion done = { 0 };
+  completion_init (&done);
+  worker_spec.completion = &done;
+  GThread *worker = g_thread_new ("admitted-build", refresh_thread,
+          &worker_spec);
+  gate_wait_entered (&gate);
+
+  /* Prompt: this returns while the build still owns writer_lock.  Taking
+   * writer_lock here would hang until gate_release below. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  /* The already-pinned snapshot is unaffected -- admission gates admission,
+   * not possession. */
+  g_assert_cmpint (snapshot_marker (pinned), ==, 51);
+
+  gate_release (&gate);
+  g_thread_join (worker);
+
+  /* The admitted build published rather than being discarded. */
+  g_assert_cmpint (worker_spec.result, ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_cmpuint (status.engine_generation, ==, 2);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  /* But the next one is refused, so the barrier really did close. */
+  BuildSpec after = {.marker = 53 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &after, NULL), ==, WYRELOG_E_BUSY);
+
+  completion_clear (&done);
+  gate_clear (&gate);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* The barrier outranks NOT_FOUND, and both setters refuse a shut-down
+ * manager. */
+static void
+test_admission_precedence_and_shutdown (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 61 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  /* A closed tombstone has no published engine, so this is the case where
+   * admission and NOT_FOUND disagree.  BUSY wins: a closed graph will not be
+   * rebuilt either, and NOT_FOUND would invite a refresh that is refused. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+  WylFactGraphSnapshot *none = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &none), ==, WYRELOG_E_BUSY);
+  g_assert_null (none);
+
+  /* Reopening the tombstone restores NOT_FOUND, which is what proves the
+   * BUSY above came from admission and not from the eviction. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &none), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (none);
+
+  /* Shutdown refuses both setters.  This BUSY comes from the lookup, which
+   * refuses a shut-down manager before set_admission runs -- not from the
+   * abandoned guard inside it, which covers only the window between the
+   * lookup releasing map_lock and the write taking state_lock and is
+   * unreachable from one thread. */
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_key_clear (&a);
+}
+
 static void
 test_forget_state_is_orthogonal_and_total (void)
 {
@@ -1033,6 +1329,14 @@ main (int argc, char **argv)
       test_bounded_query_swap_evict_stress);
   g_test_add_func ("/fact-runtime/forget-state-orthogonal-and-total",
       test_forget_state_is_orthogonal_and_total);
+  g_test_add_func ("/fact-runtime/admission-denies-new-work",
+      test_admission_denies_new_work);
+  g_test_add_func ("/fact-runtime/admission-idempotent-survives-retirement",
+      test_admission_is_idempotent_and_survives_retirement);
+  g_test_add_func ("/fact-runtime/admission-close-preserves-admitted-work",
+      test_admission_close_does_not_disturb_admitted_work);
+  g_test_add_func ("/fact-runtime/admission-precedence-and-shutdown",
+      test_admission_precedence_and_shutdown);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();
