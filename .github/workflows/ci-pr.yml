@@ -1181,7 +1181,9 @@ jobs:
 
       - name: Verify Windows CI timeout boundary
         shell: bash
-        run: python3 tests/test-windows-ci-timeout-boundary.py "$GITHUB_WORKSPACE"
+        run: |
+          python3 tests/test-windows-ci-timeout-boundary.py "$GITHUB_WORKSPACE"
+          python3 tests/test-windows-ci-timeout-boundary.py --self-test "$GITHUB_WORKSPACE"
 
       - name: Save meson packagecache
         if: steps.meson-packagecache.outputs.cache-hit != 'true'
