@@ -463,8 +463,13 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
  *
  * It blocks on writer_lock where try_evict tries.  A seal that has committed
  * durably cannot retry, so a spurious BUSY would strand the graph with its
- * engine still published; and the wait is bounded because a closed graph
- * admits no new refresh and the caller has drained.
+ * engine still published.  What bounds the wait is that only refresh holds
+ * writer_lock across a build, and both production callers of refresh run
+ * under the handle's fact_replay_coordinator_lock -- draining first also
+ * bounds it, but a drain is a sufficient condition, not the reason.  A caller
+ * that has NOT drained may wait for a whole in-flight build; a caller inside
+ * a build callback for this same entry deadlocks outright, and unlike drain
+ * there is no guard against that.
  *
  * It preserves both generation counters and the admission axis, and clears
  * last_replay_class, exactly as the two sweepers do.  It PRESERVES
