@@ -901,6 +901,57 @@ wyl_fact_graph_runtime_manager_try_evict
   return rc;
 }
 
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_evict_closed
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    gboolean * out_evicted)
+{
+  if (out_evicted == NULL)
+    return WYRELOG_E_INVALID;
+  *out_evicted = FALSE;
+  WylFactGraphRuntimeEntry *entry = NULL;
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Blocking, where try_evict uses a trylock.  Safe because a closed graph
+   * admits no new refresh and the caller has drained, so nothing holds the
+   * writer lock for long; necessary because a seal that has already committed
+   * durably cannot retry, and a spurious BUSY there would strand the graph
+   * with its engine still published. */
+  g_mutex_lock (&entry->writer_lock);
+  WylFactGraphEngineGeneration *old = NULL;
+  g_mutex_lock (&entry->state_lock);
+  if (entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN) {
+    /* An eviction that is not part of a barrier is try_evict's job.  Refusing
+     * here keeps the two primitives from being interchangeable: this one
+     * detaches an engine that readers may still be pinning, which is only
+     * defensible once nothing new can be admitted. */
+    rc = WYRELOG_E_INVALID;
+  } else if (entry->abandoned) {
+    rc = WYRELOG_E_BUSY;
+  } else {
+    old = entry->current;
+    entry->current = NULL;
+    entry->state = WYL_FACT_GRAPH_RUNTIME_EVICTED;
+    entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+    /* forget_state is PRESERVED, and this is the one place it survives a
+     * tombstone.  try_evict and retire_unseen clear it because something
+     * re-probes: retirement runs at the tail of the boot loop that also
+     * reconciles, and anything republishing an evicted entry must re-probe
+     * first.  A seal destroys the engine and not the ledger, and nothing
+     * re-probes a sealed graph until an unseal or a restart -- so clearing
+     * here would drop a live verdict about an erasure that is still owed,
+     * which is the over-report #547 removed in the other direction. */
+    *out_evicted = TRUE;
+  }
+  g_mutex_unlock (&entry->state_lock);
+  engine_generation_unref (old);
+  g_mutex_unlock (&entry->writer_lock);
+  runtime_entry_unref (entry);
+  return rc;
+}
+
 static gboolean
 key_is_seen (const WylFactGraphKey *key,
     const WylFactGraphKey *const *seen_keys, gsize n_seen_keys)

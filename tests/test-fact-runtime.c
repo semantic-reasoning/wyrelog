@@ -1850,6 +1850,125 @@ test_abandoned_outranks_closed_in_a_filled_status (void)
   wyl_fact_graph_key_clear (&a);
 }
 
+/* evict_closed is the seal's eviction, and it differs from try_evict in three
+ * ways that all have to hold at once: it refuses an open graph, it succeeds
+ * while snapshots are pinned, and it keeps the erasure verdict. */
+static void
+test_evict_closed_is_the_seal_eviction (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 161 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  /* An erasure is owed on this graph.  A seal must not lose that. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphSnapshot) pinned = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &pinned), ==, WYRELOG_E_OK);
+
+  WylFactGraphRuntimeStatus before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &before), ==, WYRELOG_E_OK);
+
+  /* Refused while open: an eviction outside a barrier is try_evict's job. */
+  gboolean evicted = TRUE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager, &a,
+      &evicted), ==, WYRELOG_E_INVALID);
+  g_assert_false (evicted);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  /* try_evict would refuse here, which is why it cannot be the seal's. */
+  gboolean tried = TRUE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &a,
+      &tried), ==, WYRELOG_E_BUSY);
+  g_assert_false (tried);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+
+  /* The pinned snapshot keeps its generation alive and still reads.  That is
+   * the residue unit 1c owns, and it is stated rather than hidden. */
+  g_assert_cmpint (snapshot_marker (pinned), ==, 161);
+
+  WylFactGraphRuntimeStatus after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (after.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
+  g_assert_cmpint (after.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_false (after.queryable);
+  g_assert_cmpuint (after.operation_generation, ==,
+      before.operation_generation);
+  g_assert_cmpuint (after.engine_generation, ==, before.engine_generation);
+  /* The one field that separates this from both sweepers. */
+  g_assert_cmpint (after.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  wyl_fact_graph_runtime_status_clear (&after);
+
+  /* Still closed, so a refresh that would republish the tombstone is still
+   * refused, and re-evicting an already-evicted closed entry is legal. */
+  BuildSpec republish = {.marker = 162 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &republish, NULL), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+
+  /* Reopening and refreshing continues both counters monotonically, which is
+   * what makes a seal invisible to the generation sequence. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus resumed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &republish, &resumed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (resumed.operation_generation, ==,
+      before.operation_generation + 1);
+  g_assert_cmpuint (resumed.engine_generation, ==,
+      before.engine_generation + 1);
+  wyl_fact_graph_runtime_status_clear (&resumed);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* Shutdown refuses it, and an unknown key is not fabricated. */
+static void
+test_evict_closed_refuses_shutdown_and_absent_keys (void)
+{
+  WylFactGraphKey a = { 0 }, absent = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&absent, "tenant-a", "absent"),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 171 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  gboolean evicted = TRUE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager,
+      &absent, &evicted), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_false (evicted);
+  WylFactGraphRuntimeStatus absent_status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager,
+      &absent, &absent_status), ==, WYRELOG_E_NOT_FOUND);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager, &a,
+      &evicted), ==, WYRELOG_E_BUSY);
+  g_assert_false (evicted);
+
+  wyl_fact_graph_key_clear (&a);
+  wyl_fact_graph_key_clear (&absent);
+}
+
 static void
 test_forget_state_is_orthogonal_and_total (void)
 {
@@ -2046,6 +2165,10 @@ main (int argc, char **argv)
       test_drain_clamps_a_huge_deadline);
   g_test_add_func ("/fact-runtime/abandoned-outranks-closed",
       test_abandoned_outranks_closed_in_a_filled_status);
+  g_test_add_func ("/fact-runtime/evict-closed-is-the-seal-eviction",
+      test_evict_closed_is_the_seal_eviction);
+  g_test_add_func ("/fact-runtime/evict-closed-refuses-shutdown-and-absent",
+      test_evict_closed_refuses_shutdown_and_absent_keys);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();
