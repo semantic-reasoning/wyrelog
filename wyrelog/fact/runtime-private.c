@@ -32,6 +32,7 @@ struct _WylFactGraphRuntimeEntry
   gboolean abandoned;
   gint64 last_replay_at_us;
   WylFactGraphForgetState forget_state;
+  WylFactGraphAdmission admission;
 };
 
 struct _WylFactGraphRuntimeManager
@@ -186,6 +187,19 @@ wyl_fact_graph_replay_class_name (WylFactGraphReplayClass replay_class)
   }
 }
 
+const gchar *
+wyl_fact_graph_admission_name (WylFactGraphAdmission admission)
+{
+  switch (admission) {
+    case WYL_FACT_GRAPH_ADMISSION_OPEN:
+      return "open";
+    case WYL_FACT_GRAPH_ADMISSION_CLOSED:
+      return "closed";
+    default:
+      return "unknown";
+  }
+}
+
 void
 wyl_fact_graph_runtime_status_clear (WylFactGraphRuntimeStatus *status)
 {
@@ -305,6 +319,7 @@ status_fill_locked (WylFactGraphRuntimeEntry *entry,
   out_status->waiting_engine_calls = entry->waiting_engine_calls;
   out_status->last_replay_at_us = entry->last_replay_at_us;
   out_status->forget_state = entry->forget_state;
+  out_status->admission = entry->admission;
   return WYRELOG_E_OK;
 }
 
@@ -474,6 +489,24 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
     runtime_entry_unref (entry);
     return WYRELOG_E_BUSY;
   }
+  /* Fill out_status rather than clearing it, so a caller can tell a barrier
+   * from a manager going away.  The rule has a precedence and it is not
+   * "filled means barrier": the post-build shutdown race below also fills,
+   * and a graph closed mid-build then shut down fills a status that is
+   * ABANDONED and CLOSED at once.  Read state first, admission second.
+   *
+   * Refused here, before the generation ceiling, so that a closed graph is
+   * never stamped with a health verdict.  The ceiling path consumes no
+   * generation either, so that is not the distinction -- what this ordering
+   * buys is that a refusal writes neither state nor last_replay_class. */
+  if (entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+    if (out_status != NULL)
+      status_fill_locked (entry, out_status);
+    g_mutex_unlock (&entry->state_lock);
+    g_mutex_unlock (&entry->writer_lock);
+    runtime_entry_unref (entry);
+    return WYRELOG_E_BUSY;
+  }
   /* Argued, not proved: like the post-build failure path below, this must not
    * touch forget_state, because a generation ceiling says nothing about
    * whether an erasure converged.  No test falsifies it -- nothing reaches
@@ -580,6 +613,56 @@ wyl_fact_graph_runtime_manager_set_forget_state
   g_mutex_unlock (&entry->state_lock);
   runtime_entry_unref (entry);
   return rc;
+}
+
+static wyrelog_error_t
+set_admission (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, WylFactGraphAdmission admission)
+{
+  WylFactGraphRuntimeEntry *entry = NULL;
+  /* create = FALSE for the same reason set_forget_state uses it: this acts on
+   * a graph the runtime already holds and must never fabricate one.  A key
+   * the runtime has never seen is NOT_FOUND, not a closed graph -- closing
+   * something that does not exist would report a barrier nothing enforces. */
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&entry->state_lock);
+  /* Argued, not proved: abandoned closes the window between the lookup
+   * releasing map_lock and this taking state_lock, exactly as in
+   * set_forget_state.  No test falsifies it -- the lookup already refuses a
+   * shut-down manager, so reaching this branch needs an interleaving no
+   * single-threaded test can produce, and deleting the branch leaves the
+   * suite green.  A seam to force it is not worth its own production code
+   * path; the guard stays because the window is real, not because a test
+   * says so.
+   *
+   * A tombstone is NOT refused here, unlike in set_forget_state.  That
+   * asymmetry is deliberate and load-bearing: an EVICTED entry can be
+   * republished by a later refresh, and a caller closing admission wants that
+   * republication refused too.  Refusing EVICTED would let a close that raced
+   * a retirement sweep silently lose its barrier. */
+  if (entry->abandoned)
+    rc = WYRELOG_E_BUSY;
+  else
+    entry->admission = admission;
+  g_mutex_unlock (&entry->state_lock);
+  runtime_entry_unref (entry);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_close_admission
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key)
+{
+  return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_open_admission
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key)
+{
+  return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_OPEN);
 }
 
 wyrelog_error_t
@@ -763,7 +846,8 @@ wyl_fact_graph_runtime_manager_acquire_snapshot
     return rc;
   }
   g_mutex_lock (&entry->state_lock);
-  if (entry->abandoned) {
+  if (entry->abandoned
+      || entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
     rc = WYRELOG_E_BUSY;
   } else if (entry->current == NULL) {
     rc = WYRELOG_E_NOT_FOUND;

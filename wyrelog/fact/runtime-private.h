@@ -96,6 +96,42 @@ typedef enum
   WYL_FACT_GRAPH_FORGET_INCOMPLETE,
 } WylFactGraphForgetState;
 
+/*
+ * Whether the graph admits new runtime operations.
+ *
+ * A third axis, orthogonal to both of the above.  It is not a
+ * WylFactGraphRuntimeState value on purpose: retire_unseen and try_evict
+ * overwrite state with EVICTED, so an admission stored there would be
+ * silently reopened by a retirement sweep.  Keeping it separate also lets a
+ * closed graph keep its health verdict and both generation counters, which is
+ * what makes closing reversible.
+ *
+ * OPEN is the zero value, so an entry nothing has closed admits.
+ *
+ * This closes the entry to NEW operations only.  A snapshot pinned before the
+ * close stays usable, because snapshot_use() does not consult this axis, so a
+ * closed graph is not yet a total read barrier.  Do not read the refusals
+ * below as one: they stop a graph being rebuilt and stop new pins being
+ * taken, which is what "admission" means here and is all it means.  Revoking
+ * an already-pinned snapshot would narrow the standing promise that a
+ * snapshot outlives even the manager, and that is a separate decision.
+ *
+ * This is the runtime axis and it is not the durable one.  A graph is sealed
+ * durably in the policy store (WYL_POLICY_GRAPH_LIFECYCLE_SEALED), and that
+ * axis means something narrower: sealing blocks admission of new data at the
+ * request boundary while the store stays readable and forgettable, which is
+ * why the boot forget sweep opens a sealed graph on purpose.  Nothing here
+ * reads the policy store -- the runtime manager holds no pointer to one -- so
+ * the two are set independently and a caller that wants them to agree must
+ * drive both.  Admission is also runtime-only: a restart reopens every graph
+ * regardless of the durable bit.
+ */
+typedef enum
+{
+  WYL_FACT_GRAPH_ADMISSION_OPEN = 0,
+  WYL_FACT_GRAPH_ADMISSION_CLOSED,
+} WylFactGraphAdmission;
+
 typedef struct
 {
   WylFactGraphKey key;
@@ -110,6 +146,7 @@ typedef struct
   guint waiting_engine_calls;
   gint64 last_replay_at_us;
   WylFactGraphForgetState forget_state;
+  WylFactGraphAdmission admission;
 } WylFactGraphRuntimeStatus;
 
 typedef struct _WylFactGraphRuntimeManager WylFactGraphRuntimeManager;
@@ -133,6 +170,8 @@ gboolean wyl_fact_graph_key_equal (gconstpointer left, gconstpointer right);
 const gchar *wyl_fact_graph_runtime_state_name (WylFactGraphRuntimeState state);
 const gchar *wyl_fact_graph_replay_class_name
   (WylFactGraphReplayClass replay_class);
+const gchar *wyl_fact_graph_admission_name
+  (WylFactGraphAdmission admission);
 void wyl_fact_graph_runtime_status_clear (WylFactGraphRuntimeStatus * status);
 
 /*
@@ -229,6 +268,78 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
 wyrelog_error_t wyl_fact_graph_runtime_manager_set_forget_state
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphForgetState forget_state);
+
+/*
+ * Admission contract
+ * ------------------
+ * close_admission() denies new operations on one entry; open_admission()
+ * restores them.  Both take state_lock alone and never writer_lock, so
+ * closing returns immediately even while a build owns the entry.  That is
+ * deliberate: denying new work and waiting for admitted work are separate
+ * steps, and only the first can be made prompt.
+ *
+ * Neither touches state, last_replay_class, forget_state, either generation
+ * counter, or the published engine.  Closing is therefore reversible with no
+ * observable trace beyond the axis itself, which is what lets a close/open
+ * cycle be idempotent under the generation rules: closing a CLOSED entry and
+ * opening an OPEN one both succeed and leave the entry unchanged.
+ *
+ * refresh() and acquire_snapshot() return WYRELOG_E_BUSY on a closed entry,
+ * alongside their existing abandoned checks.  In acquire_snapshot() admission
+ * outranks WYRELOG_E_NOT_FOUND: a closed entry with no published engine
+ * answers BUSY, because a closed graph will not be rebuilt either and
+ * NOT_FOUND would invite a refresh that is refused too.
+ *
+ * Discriminating a barrier from a dying manager is refresh's job alone, and
+ * the rule has a precedence.  Read out_status->state first: ABANDONED means
+ * the manager is going away, whatever the admission field says.  Only then
+ * does admission == CLOSED mean a barrier.  Both facts can be true at once --
+ * close the admission of a graph mid-build, then shut the manager down, and
+ * the post-build path fills a status that is ABANDONED and CLOSED together --
+ * so a caller that tests admission first will retry forever against a dead
+ * manager.  The status is not wrong there; it is complete, and the order is
+ * what disambiguates it.
+ *
+ * acquire_snapshot() has no out_status and therefore cannot discriminate at
+ * all, and neither can a refresh() called with out_status NULL.  A caller
+ * that needs the distinction must follow up with get_status(), which is
+ * exempt from the barrier for exactly this reason.
+ *
+ * queryable in the status describes the published engine, not admission.  A
+ * closed graph with a published engine still reports queryable TRUE while
+ * every read of it is refused; a reporting surface that wants to show a
+ * closed graph as unavailable must read admission itself.
+ *
+ * try_evict(), retire_unseen(), get_status(), foreach_status() and
+ * set_forget_state() are exempt.
+ * Eviction must work on a closed graph, because a caller that closes
+ * admission in order to evict would otherwise have locked itself out; and a
+ * closed graph must stay reportable, or it would be indistinguishable from a
+ * missing one.  Both sweepers leave the axis alone, so a retired entry that
+ * is later republished by refresh comes back still closed.  set_forget_state
+ * is exempt because a sealed graph stays forgettable: that is the durable
+ * axis's own rule, and the boot sweep that converges an interrupted erasure
+ * must be able to record its verdict on a closed graph.
+ *
+ * Admission is a property of the graph, not a lease held by a thread: any
+ * thread may close or open, and the closer need not be whoever eventually
+ * reopens.  Both return WYRELOG_E_NOT_FOUND for a key the runtime has never
+ * held -- neither mints an entry -- and WYRELOG_E_BUSY once the manager is
+ * shut down or the entry abandoned.
+ *
+ * Closing admission does not stop an operation that has already been
+ * admitted.  A refresh mid-build keeps its writer lock, runs its callback to
+ * completion, and publishes.  This differs from shutdown, which makes an
+ * in-flight refresh discard its result, and the difference is deliberate:
+ * shutdown is terminal so nothing will read the result, while a closed graph
+ * is expected to reopen.  Discarding the result would also not stop the
+ * builder, which is still inside the store holding its handles -- so it would
+ * buy no barrier and cost a rebuild.
+ */
+wyrelog_error_t wyl_fact_graph_runtime_manager_close_admission
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key);
+wyrelog_error_t wyl_fact_graph_runtime_manager_open_admission
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key);
 
 /*
  * try_evict() is non-blocking with respect to an entry refresh.  It returns
