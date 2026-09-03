@@ -2678,6 +2678,36 @@ wyl_handle_foreach_fact_graph_status (WylHandle *self,
   return wyl_fact_graph_runtime_manager_foreach_status
            (self->fact_graph_runtime, fact_graph_runtime_status_cb, &ctx);
 }
+
+wyrelog_error_t
+wyl_handle_seal_fact_graph (WylHandle *self,
+    const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,
+    WylFactGraphSealOutcome *out_outcome)
+{
+  if (out_outcome != NULL)
+    memset (out_outcome, 0, sizeof (*out_outcome));
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->fact_graph_runtime == NULL || graph_info == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* The pin-and-lock preamble is duplicated from wyl_handle_refresh_fact_graph
+   * rather than factored out.  That function sits inside an open pull
+   * request's hunk, and a refactor there would collide; dedupe once it
+   * lands. */
+  wyl_policy_store_t *policy = NULL;
+  g_mutex_lock (&self->fact_replay_coordinator_lock);
+  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&self->fact_replay_coordinator_lock);
+    return rc;
+  }
+  rc = wyl_fact_graph_seal (policy, graph_info, self->fact_graph_runtime,
+          drain_timeout_us, out_outcome);
+  wyl_handle_policy_store_unpin (self, policy);
+  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  return rc;
+}
 #endif
 
 void

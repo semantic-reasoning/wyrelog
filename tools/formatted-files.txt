@@ -146,6 +146,8 @@ wyrelog/fact/graph-locator-private.c
 wyrelog/fact/graph-locator-private.h
 wyrelog/fact/graph-locator-windows-private.c
 wyrelog/fact/graph-provisioned-pair-internal.h
+wyrelog/fact/graph-seal-private.c
+wyrelog/fact/graph-seal-private.h
 wyrelog/fact/legacy-store-identity-private.c
 wyrelog/fact/legacy-store-identity-private.h
 wyrelog/fact/mutation-outcome-private.h
