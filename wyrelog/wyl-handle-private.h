@@ -11,6 +11,7 @@
 #include "auth/service-auth-coordination-private.h"
 
 #ifdef WYL_HAS_FACT_STORE
+#include "fact/graph-seal-private.h"
 #include "fact/replay-private.h"
 #endif
 
@@ -272,6 +273,34 @@ typedef wyrelog_error_t (*wyl_fact_graph_status_cb) (const
     wyl_fact_graph_status_t * status, gpointer user_data);
 wyrelog_error_t wyl_handle_foreach_fact_graph_status (WylHandle * self,
     wyl_fact_graph_status_cb cb, gpointer user_data);
+
+#ifdef WYL_HAS_FACT_STORE
+/*
+ * Seal a graph as a runtime barrier and a durable bit, in that order.  Takes
+ * the replay coordinator lock and a policy-store pin, the same way
+ * wyl_handle_refresh_fact_graph does, so a seal cannot interleave with a
+ * targeted refresh or with the boot replay pass.
+ *
+ * This performs a policy write while holding only the replay coordinator
+ * lock and a store pin.  The CALLER must hold the daemon policy write lease
+ * -- the sequencer's header states that precondition and this wrapper does
+ * not acquire it, so a caller that skips it races the existing graph seal
+ * route, which does take it.
+ *
+ * drain_timeout_us bounds the wait for work admitted before the close, and
+ * must be finite.  This holds fact_replay_coordinator_lock for the whole
+ * call -- the same lock every append and retract takes for its targeted
+ * refresh -- so an indefinite drain here stalls every fact mutation in the
+ * process, whatever locks the caller does or does not hold above it.
+ *
+ * No audit event is emitted here.  A useful one carries the actor and the
+ * request id, which live in the HTTP context and not on the handle; the route
+ * that gains those emits it.
+ */
+wyrelog_error_t wyl_handle_seal_fact_graph (WylHandle * self,
+    const wyl_policy_fact_graph_info_t * graph_info, gint64 drain_timeout_us,
+    WylFactGraphSealOutcome * out_outcome);
+#endif
 #endif
 
 /*
