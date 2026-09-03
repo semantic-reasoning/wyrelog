@@ -1339,8 +1339,15 @@ test_policy_graph_authority = executable('test-policy-graph-authority',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
 )
 
+# Serialized on Windows only.  Both aggregates are long enough that a
+# neighbour holding the machine pushes them past their deadline: the one
+# recoverable full-suite sample from a failing Windows run had a concurrent
+# test occupying 1404 seconds while this one took 50.  is_parallel drains the
+# in-flight set and runs the test alone, so the deadline measures the test
+# rather than the queue.  POSIX parallelism is untouched.
 test('policy-graph-authority', test_policy_graph_authority,
   timeout : 90,
+  is_parallel : host_machine.system() != 'windows',
 )
 
 test_fact_graph_locator = executable('test-fact-graph-locator',
@@ -1705,8 +1712,13 @@ if get_option('enable_fact_store').allowed()
       sqlite_dep],
   )
 
+  # Serialized on Windows for the reason given above the policy aggregate.
+  # This runner shows no growth regression -- 32 to 39 seconds before and
+  # after the policy test's step change -- so its one recorded overrun is a
+  # contention sample, which is precisely what serialization addresses.
   test('fact-store', test_fact_store,
     timeout : 60,
+    is_parallel : host_machine.system() != 'windows',
   )
 
   test_fact_store_duckdb_hardening = executable(
