@@ -25,7 +25,8 @@ REQUIRED_STEPS = (
     "fact-artifact-namespace-windows",
     "fact-provisioning-construct",
     "            meson test -C builddir secure-duckdb-bridge",
-    "            meson test -C builddir --print-errorlogs --suite wyrelog",
+    "            meson test -C builddir --print-errorlogs --suite wyrelog"
+    " --logbase testlog-fullsuite",
 )
 MATRIX_ENTRIES = (
     "fact_store: disabled\n            secure_bridge: disabled\n"
@@ -113,6 +114,8 @@ def self_test(root: Path) -> list[str]:
       ("secure bridge tests removed", ".github/workflows/ci-main.yml",
        "            meson test -C builddir secure-duckdb-bridge",
        "            meson test -C builddir other-bridge"),
+      ("full suite log base removed", ".github/workflows/ci-pr.yml",
+       " --logbase testlog-fullsuite", ""),
   )
   for label, rel, old, new in mutations:
     mutated = mutate_in_windows_job(texts[rel], old, new)
