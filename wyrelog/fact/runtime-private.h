@@ -144,6 +144,7 @@ typedef struct
   guint active_snapshots;
   guint active_engine_calls;
   guint waiting_engine_calls;
+  guint waiting_drains;
   gint64 last_replay_at_us;
   WylFactGraphForgetState forget_state;
   WylFactGraphAdmission admission;
@@ -342,6 +343,77 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_open_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key);
 
 /*
+ * Drain contract
+ * --------------
+ * drain() waits until every operation admitted before the close has retired.
+ * "Admitted" is exactly three counters: operation_active,
+ * active_engine_calls, and waiting_engine_calls.  A thread queued on
+ * engine_call_lock has already passed the admission check and will run, so it
+ * is waited for.
+ *
+ * active_snapshots is deliberately NOT a term.  A caller may hold a snapshot
+ * indefinitely -- the contract above says a snapshot outlives even the
+ * manager -- so waiting on it would let one idle reader stall a drain
+ * forever.  A pinned snapshot is possession, not work in flight, and it
+ * follows that a drained graph can still be read through a snapshot taken
+ * before the close.  That residue is 1c's to decide, not something drain can
+ * close.
+ *
+ * timeout_us < 0 waits indefinitely, 0 polls once, > 0 is a monotonic
+ * deadline, clamped so a large value cannot overflow into a deadline already
+ * in the past.  WYRELOG_E_BUSY on timeout with work outstanding, and out_status
+ * then names what is still running.  WYRELOG_E_BUSY also once the manager is
+ * shut down or the entry abandoned; shutdown broadcasts, so a blocked drain
+ * wakes rather than running to its deadline.
+ *
+ * WYRELOG_E_INVALID when admission is OPEN.  Draining an open graph is
+ * meaningless rather than merely slow, because new work can be admitted while
+ * the wait runs and the answer would be stale the instant it was produced.
+ * Close first.  The test is repeated on every wakeup, not taken once: a graph
+ * reopened while a drain is parked is admitting again, so that drain is
+ * refused rather than allowed to report a quiet graph that is not.  Because
+ * admission is tested before the drained predicate, a reopen racing the last
+ * retirement turns what would have been OK into INVALID: the refusal makes no
+ * claim either way about whether the admitted work had finished, and a caller
+ * that needs to know can read the counters in out_status.  The bias is
+ * deliberate -- a refusal is always safe, a false OK never is.
+ *
+ * WYRELOG_E_INVALID also for a drain issued from inside this entry's own
+ * engine callback OR its own build callback.  Either waits on a term the
+ * calling frame is itself holding -- active_engine_calls in the first case,
+ * operation_active in the second -- and no other thread will clear it, so the
+ * wait cannot end.  Both are refused for that reason: an error beats a hang.
+ * Draining a different entry from either callback is legal, as the status
+ * readers already are.  It is legal, not safe in every arrangement: two
+ * callbacks that drain each other's entry indefinitely deadlock, and nothing
+ * here detects it because each wait is individually well-formed.  A caller
+ * draining across entries from inside a callback must impose its own order or
+ * bound the wait.  This mirrors the recursive snapshot_use() rule.
+ *
+ * drain() returning OK is a point-in-time answer, not a latch.  Because
+ * snapshot_use() is ungated, a snapshot pinned before the close can enter an
+ * engine call the instant the drain returns.  A caller that needs the graph
+ * to stay quiet must hold that property some other way; drain only reports
+ * that the work admitted before the close has finished.
+ *
+ * A timeout and a shutdown both answer WYRELOG_E_BUSY with a filled status,
+ * and are told apart the same way refresh's are: read state first, and
+ * ABANDONED means the manager is going away whatever else the status says.
+ *
+ * The wait holds state_lock and releases it in g_cond_wait, so an engine
+ * callback -- which runs with no entry lock held -- can still reach the
+ * status readers while a drain is blocked.  drain() never takes writer_lock,
+ * so it introduces no lock-order inversion against a refresh and does not
+ * starve try_evict's trylock.  That is a statement about lock ordering only:
+ * a drain issued from inside a refresh's own build callback still cannot
+ * terminate, which is why that case is refused above rather than left to the
+ * ordering argument.
+ */
+wyrelog_error_t wyl_fact_graph_runtime_manager_drain
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    gint64 timeout_us, WylFactGraphRuntimeStatus * out_status);
+
+/*
  * try_evict() is non-blocking with respect to an entry refresh.  It returns
  * WYRELOG_E_BUSY, leaves out_evicted FALSE, and changes nothing when the
  * writer lock is owned/contended, the entry is abandoned, or any snapshot is
@@ -387,7 +459,8 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
  *
  * shutdown() is idempotent and linearizes when it marks the manager shut down
  * under the map lock.  A refresh(), get_status(), foreach_status(),
- * try_evict(), retire_unseen(), set_forget_state(), or acquire_snapshot()
+ * try_evict(), retire_unseen(), set_forget_state(), acquire_snapshot(),
+ * close_admission(), open_admission(), or drain()
  * lookup/enumeration that observes the manager after that point returns
  * WYRELOG_E_BUSY.  Operations
  * admitted before that point may finish according to their entry-local race;
