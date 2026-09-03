@@ -28,8 +28,12 @@ metadata_value_unlocked (duckdb_connection conn, const gchar *key,
   *out_value = NULL;
   if (duckdb_prepare (conn,
       "SELECT value FROM main.fact_store_metadata WHERE key = ?;",
-      &statement) != DuckDBSuccess)
+      &statement) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the object
+     * carries the error text.  duckdb.h:1892 requires destroying it anyway. */
+    duckdb_destroy_prepare (&statement);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (statement, 1, key) != DuckDBSuccess) {
     duckdb_destroy_prepare (&statement);
     return WYRELOG_E_IO;
