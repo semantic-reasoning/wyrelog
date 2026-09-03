@@ -16,6 +16,12 @@ typedef struct
   guint graphs_seen;
   guint graphs_loaded;
   guint graphs_degraded;
+  /* Graphs the policy store reports sealed.  Counted apart from
+   * graphs_degraded because sealing is a decision, not a fault: the engine
+   * build refuses a sealed graph with WYRELOG_E_POLICY, which classify_replay_
+   * error maps to SCHEMA_MISMATCH, so before this counter existed every sealed
+   * graph told an operator it had a schema problem. */
+  guint graphs_sealed;
   /* Graphs whose forget ledger was read and whose pending intents could not
    * be converged at startup.  Counted, never returned: a graph that cannot
    * reconcile must not stop the daemon from opening. */

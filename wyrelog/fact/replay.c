@@ -921,6 +921,14 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
           (runtime_manager, &spec->key, build_graph_engine, &build, NULL);
     if (graph_rc == WYRELOG_E_OK)
       summary.graphs_loaded++;
+    else if (spec->info.sealed)
+      /* The refusal is the point, not a failure.  build_graph_engine declines
+       * a sealed graph before it opens anything, so this arm costs a hash
+       * lookup and no file open -- and the refresh still runs because it is
+       * the only thing that materializes the entry, which the admission write
+       * below needs and which foreach_status needs to report the graph at
+       * all. */
+      summary.graphs_sealed++;
     else
       summary.graphs_degraded++;
     /* The forget probe and the engine builder open the same store with
@@ -1007,6 +1015,55 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
       (void) wyl_fact_graph_runtime_manager_set_forget_state (runtime_manager,
           &spec->key, forget_incomplete ? WYL_FACT_GRAPH_FORGET_INCOMPLETE
           : WYL_FACT_GRAPH_FORGET_CONVERGED);
+    /* Re-establish the runtime barrier from the durable bit.  Admission is
+     * runtime-only state, so without this a restart reopens every graph the
+     * policy store still calls sealed -- a seal survives a crash in policy and
+     * not in the runtime.
+     *
+     * Written in BOTH directions on purpose.  Closing the sealed ones and
+     * leaving the rest alone would strand, as permanently closed, any graph
+     * unsealed out of band while the daemon was down; the axis has to be a
+     * function of the durable bit, not a latch.
+     *
+         * One ordering is forced and proved: this must follow the refresh,
+     * because close_admission deliberately mints no entry and would answer
+     * NOT_FOUND for every graph on a fresh manager.  Deleting the refresh
+     * fails the suite.
+     *
+     * A second is argued, not proved.  It must also follow set_forget_state,
+     * which refuses an EVICTED entry -- so once the live seal evicts here, an
+     * admission write placed ahead of it would leave the axis at its default
+     * CONVERGED over an erasure that is still owed.  This loop does not evict,
+     * so swapping the two blocks today changes nothing and the suite stays
+     * green; verified by doing it.  Whoever adds the eviction owns making
+     * that ordering falsifiable.
+     *
+     * A third an earlier draft claimed is not an ordering at all.  Being
+     * before retire_unseen buys nothing: every key here is added to
+     * seen_keys, so retirement skips it.
+     *
+     * The rc is discarded the way set_forget_state's is: NOT_FOUND cannot
+     * happen because the refresh above created the entry, and BUSY means
+     * shutdown raced the boot pass, which the caller learns from
+     * retire_unseen. */
+    if (spec->info.sealed) {
+      (void) wyl_fact_graph_runtime_manager_close_admission (runtime_manager,
+          &spec->key);
+      /* Deliberately NOT evicted here.  At boot the sealed graph's refresh
+       * already failed, so there is no engine to detach and the only thing an
+       * eviction would change is DEGRADED -> EVICTED -- and EVICTED is the
+       * one state fact_graph_runtime_status_cb skips, so the graph would
+       * disappear from an operator's listing entirely and a query against it
+       * would answer NOT_FOUND where it used to answer POLICY.  Trading a
+       * wrong entry for a missing one is not an improvement.
+       *
+       * Eviction belongs to the live seal, where a published engine actually
+       * exists to take away, and the sealed state has to arrive on the
+       * reporting surface in the same change that starts producing it. */
+    } else {
+      (void) wyl_fact_graph_runtime_manager_open_admission (runtime_manager,
+          &spec->key);
+    }
     g_ptr_array_add (seen_keys, &spec->key);
   }
   rc = wyl_fact_graph_runtime_manager_retire_unseen (runtime_manager,

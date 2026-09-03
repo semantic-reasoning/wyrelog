@@ -1760,6 +1760,17 @@ if get_option('enable_fact_store').allowed()
     )
   endif
 
+  test_fact_graph_seal = executable('test-fact-graph-seal',
+    'test-fact-graph-seal.c',
+    'fact-test-support.c',
+    c_args : ['-DWYL_HAS_FACT_STORE'] + fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep]
+        + fact_test_support_deps,
+  )
+
+  test('fact-graph-seal', test_fact_graph_seal, timeout : 60)
+
   test_fact_compound = executable('test-fact-compound',
     'test-fact-compound.c',
     c_args : [

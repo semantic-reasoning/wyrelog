@@ -929,6 +929,11 @@ wyl_fact_graph_runtime_manager_evict_closed
      * defensible once nothing new can be admitted. */
     rc = WYRELOG_E_INVALID;
   } else if (entry->abandoned) {
+    /* Argued, not proved: the lookup already refuses a shut-down manager, so
+     * reaching this needs an interleaving no single-threaded test produces,
+     * and deleting the branch leaves the suite green.  It stays because
+     * without it an abandoned entry's state would be overwritten with
+     * EVICTED, losing the ABANDONED-outranks-CLOSED precedence. */
     rc = WYRELOG_E_BUSY;
   } else {
     old = entry->current;
