@@ -1215,7 +1215,7 @@ jobs:
             meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-valid-commit-failure duckdb-valid-rollback-failure duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition --print-errorlogs
             meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"
           ) else (
-            meson test -C builddir --print-errorlogs --suite wyrelog
+            meson test -C builddir --print-errorlogs --suite wyrelog --logbase testlog-fullsuite
           )
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
