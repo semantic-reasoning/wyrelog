@@ -1159,6 +1159,629 @@ test_admission_precedence_and_shutdown (void)
   wyl_fact_graph_key_clear (&a);
 }
 
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  wyrelog_error_t drain_rc;
+  Gate *gate;
+  gint64 marker;
+} DrainFromBuild;
+
+static wyrelog_error_t
+build_then_drain_own_key (const WylFactGraphKey *key, WylEngine **out_engine,
+    gpointer user_data)
+{
+  DrainFromBuild *probe = user_data;
+  /* Announce that the build is in flight and wait until the main thread has
+   * closed admission.  The drain must run against a CLOSED graph, or it is
+   * refused for being open and the self-wait guard is never reached -- which
+   * is exactly how an earlier version of this test passed while proving
+   * nothing. */
+  g_mutex_lock (&probe->gate->mutex);
+  probe->gate->entered = TRUE;
+  g_cond_broadcast (&probe->gate->changed);
+  while (!probe->gate->released)
+    g_cond_wait (&probe->gate->changed, &probe->gate->mutex);
+  g_mutex_unlock (&probe->gate->mutex);
+
+  /* Draining this entry now would wait on operation_active, which this very
+   * frame set and only this frame will clear.  Refused, not parked. */
+  probe->drain_rc = wyl_fact_graph_runtime_manager_drain (probe->manager,
+          probe->key, -1, NULL);
+  BuildSpec spec = {.marker = probe->marker };
+  return build_marker_engine (key, out_engine, &spec);
+}
+
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  DrainFromBuild *probe;
+  wyrelog_error_t result;
+} ProbeRefreshThread;
+
+static gpointer
+probe_refresh_thread (gpointer user_data)
+{
+  ProbeRefreshThread *thread = user_data;
+  thread->result = wyl_fact_graph_runtime_manager_refresh (thread->manager,
+          thread->key, build_then_drain_own_key, thread->probe, NULL);
+  return NULL;
+}
+
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *same;
+  const WylFactGraphKey *other;
+  wyrelog_error_t same_entry;
+  wyrelog_error_t other_entry;
+} DrainFromCallback;
+
+static wyrelog_error_t
+drain_from_engine_callback (WylEngine *engine, gpointer user_data)
+{
+  DrainFromCallback *probe = user_data;
+  (void) engine;
+  /* Draining this entry from inside its own engine callback would wait for
+   * active_engine_calls to reach zero while being one of them.  Refused, not
+   * answered slowly. */
+  probe->same_entry = wyl_fact_graph_runtime_manager_drain (probe->manager,
+          probe->same, -1, NULL);
+  /* A different entry is not this thread's problem and stays legal, as the
+   * status readers already are. */
+  probe->other_entry = wyl_fact_graph_runtime_manager_drain (probe->manager,
+          probe->other, 0, NULL);
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+completion_peek (Completion *completion)
+{
+  g_mutex_lock (&completion->mutex);
+  gboolean done = completion->completed;
+  g_mutex_unlock (&completion->mutex);
+  return done;
+}
+
+static void
+wait_for_queued_engine_call (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key)
+{
+  gint64 ceiling = g_get_monotonic_time () + DEADLOCK_CEILING_US;
+  for (;;) {
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, key,
+        &status), ==, WYRELOG_E_OK);
+    guint queued = status.waiting_engine_calls;
+    wyl_fact_graph_runtime_status_clear (&status);
+    if (queued > 0)
+      return;
+    g_assert_cmpint (g_get_monotonic_time (), <, ceiling);
+    g_usleep (1000);
+  }
+}
+
+static void
+wait_for_parked_drain (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key)
+{
+  /* Spawning a drain thread does not mean it has reached the wait.  Without
+   * this the gate could be released first, the drain would find the entry
+   * already quiet, and the test would pass without ever exercising the
+   * broadcast it exists to prove. */
+  gint64 ceiling = g_get_monotonic_time () + DEADLOCK_CEILING_US;
+  for (;;) {
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, key,
+        &status), ==, WYRELOG_E_OK);
+    guint parked = status.waiting_drains;
+    wyl_fact_graph_runtime_status_clear (&status);
+    if (parked > 0)
+      return;
+    g_assert_cmpint (g_get_monotonic_time (), <, ceiling);
+    g_usleep (1000);
+  }
+}
+
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  gint64 timeout_us;
+  wyrelog_error_t result;
+  Completion *completion;
+} DrainThread;
+
+static gpointer
+drain_thread (gpointer user_data)
+{
+  DrainThread *thread = user_data;
+  thread->result = wyl_fact_graph_runtime_manager_drain (thread->manager,
+          thread->key, thread->timeout_us, NULL);
+  completion_signal (thread->completion);
+  return NULL;
+}
+
+/* A drain waits out an admitted engine call and does not wait on a snapshot
+ * that is merely pinned.  The distinction is the whole design: admitted work
+ * is bounded by callbacks that must return, while a pinned snapshot may be
+ * held forever, so draining on it could never terminate. */
+static void
+test_drain_waits_for_admitted_engine_call (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 71 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphSnapshot) busy = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &busy), ==, WYRELOG_E_OK);
+  /* A second snapshot that nobody uses.  It must not hold the drain open. */
+  g_autoptr (WylFactGraphSnapshot) idle = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &idle), ==, WYRELOG_E_OK);
+
+  UseGate use_gate = { 0 };
+  g_mutex_init (&use_gate.mutex);
+  g_cond_init (&use_gate.changed);
+  UseThread user = {.snapshot = busy,.gate = &use_gate,
+                    .result = WYRELOG_E_INTERNAL };
+  GThread *worker = g_thread_new ("engine-call", use_thread, &user);
+  use_gate_wait_entered (&use_gate);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  /* Polling says not drained, and names what is outstanding. */
+  WylFactGraphRuntimeStatus polled = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_drain (manager, &a, 0,
+      &polled), ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (polled.active_engine_calls, ==, 1);
+  g_assert_cmpuint (polled.active_snapshots, ==, 2);
+  wyl_fact_graph_runtime_status_clear (&polled);
+
+  /* A short deadline expires while the call is still inside its callback,
+   * and the status names what is still running.  That promise is the reason
+   * the timeout answers from the predicate rather than from the wait's
+   * return value. */
+  WylFactGraphRuntimeStatus expired = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_drain (manager, &a,
+      50 * 1000, &expired), ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (expired.active_engine_calls, ==, 1);
+  wyl_fact_graph_runtime_status_clear (&expired);
+
+  Completion drained = { 0 };
+  completion_init (&drained);
+  DrainThread blocker = {.manager = manager,.key = &a,.timeout_us = -1,
+                         .result = WYRELOG_E_INTERNAL,
+                         .completion = &drained };
+  GThread *drainer = g_thread_new ("drain", drain_thread, &blocker);
+  wait_for_parked_drain (manager, &a);
+  use_gate_release (&use_gate);
+  g_thread_join (worker);
+  completion_wait (&drained);
+  g_thread_join (drainer);
+
+  g_assert_cmpint (user.result, ==, WYRELOG_E_OK);
+  /* Drained even though two snapshots are still pinned. */
+  g_assert_cmpint (blocker.result, ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.active_snapshots, ==, 2);
+  g_assert_cmpuint (after.active_engine_calls, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&after);
+
+  completion_clear (&drained);
+  g_cond_clear (&use_gate.changed);
+  g_mutex_clear (&use_gate.mutex);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* Draining an open graph is refused rather than answered, a blocked drain
+ * wakes on shutdown instead of running to its deadline, and a drain issued
+ * from inside the entry's own engine callback is refused rather than
+ * self-deadlocking. */
+static void
+test_drain_refusals_and_shutdown_wake (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 81 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  /* Open: refused, because new work could be admitted while we waited. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_drain (manager, &a, -1,
+      NULL), ==, WYRELOG_E_INVALID);
+
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  /* Nothing admitted is outstanding, so this returns at once. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_drain (manager, &a, -1,
+      NULL), ==, WYRELOG_E_OK);
+
+  UseGate use_gate = { 0 };
+  g_mutex_init (&use_gate.mutex);
+  g_cond_init (&use_gate.changed);
+  UseThread user = {.snapshot = snapshot,.gate = &use_gate,
+                    .result = WYRELOG_E_INTERNAL };
+  GThread *worker = g_thread_new ("engine-call", use_thread, &user);
+  use_gate_wait_entered (&use_gate);
+
+  Completion woke = { 0 };
+  completion_init (&woke);
+  DrainThread blocker = {.manager = manager,.key = &a,.timeout_us = -1,
+                         .result = WYRELOG_E_INTERNAL,.completion = &woke };
+  GThread *drainer = g_thread_new ("drain", drain_thread, &blocker);
+  wait_for_parked_drain (manager, &a);
+
+  /* An indefinite drain is blocked on the gated call.  Shutdown must wake it
+   * rather than leaving it parked, which is the reason shutdown broadcasts. */
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  completion_wait (&woke);
+  g_thread_join (drainer);
+  g_assert_cmpint (blocker.result, ==, WYRELOG_E_BUSY);
+
+  use_gate_release (&use_gate);
+  g_thread_join (worker);
+  completion_clear (&woke);
+  g_cond_clear (&use_gate.changed);
+  g_mutex_clear (&use_gate.mutex);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* The self-wait refusal.  Without it this test does not fail -- it hangs,
+ * which is the point: the guard turns a deadlock into an error. */
+static void
+test_drain_refuses_its_own_engine_callback (void)
+{
+  WylFactGraphKey a = { 0 }, b = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&b, "tenant-b", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec_a = {.marker = 91 };
+  BuildSpec spec_b = {.marker = 92 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec_a, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &b,
+      build_marker_engine, &spec_b, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &b), ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+
+  /* Reopen just long enough to take the pin, then close again: the callback
+   * must run on a closed graph for the refusal to be the thing under test. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  DrainFromCallback probe = { manager, &a, &b, WYRELOG_E_INTERNAL,
+                              WYRELOG_E_INTERNAL };
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot,
+      drain_from_engine_callback, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpint (probe.same_entry, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (probe.other_entry, ==, WYRELOG_E_OK);
+
+  wyl_fact_graph_key_clear (&a);
+  wyl_fact_graph_key_clear (&b);
+}
+
+/* The drain's other term.  Every test above drives engine calls; this one
+ * drives a build, which is the counter the primitive exists for -- a seal
+ * that returned while a builder was still inside the store would assert its
+ * postcondition falsely. */
+static void
+test_drain_waits_for_admitted_build (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec first = {.marker = 101 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &first, NULL), ==, WYRELOG_E_OK);
+
+  Gate gate = { 0 };
+  gate_init (&gate);
+  BuildSpec slow = {.marker = 102,.gate = &gate };
+  RefreshThread builder = {
+    .manager = manager,
+    .key = &a,
+    .spec = &slow,
+    .result = WYRELOG_E_INTERNAL,
+  };
+  GThread *worker = g_thread_new ("admitted-build", refresh_thread, &builder);
+  gate_wait_entered (&gate);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  /* Polling names the build as what is outstanding. */
+  WylFactGraphRuntimeStatus polled = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_drain (manager, &a, 0,
+      &polled), ==, WYRELOG_E_BUSY);
+  g_assert_true (polled.operation_active);
+  g_assert_cmpuint (polled.active_engine_calls, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&polled);
+
+  Completion drained = { 0 };
+  completion_init (&drained);
+  DrainThread blocker = {.manager = manager,.key = &a,.timeout_us = -1,
+                         .result = WYRELOG_E_INTERNAL,
+                         .completion = &drained };
+  GThread *drainer = g_thread_new ("drain", drain_thread, &blocker);
+  wait_for_parked_drain (manager, &a);
+
+  gate_release (&gate);
+  g_thread_join (worker);
+  completion_wait (&drained);
+  g_thread_join (drainer);
+
+  g_assert_cmpint (builder.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (blocker.result, ==, WYRELOG_E_OK);
+  /* The drain returned only after the build published. */
+  WylFactGraphRuntimeStatus after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &after), ==, WYRELOG_E_OK);
+  g_assert_false (after.operation_active);
+  g_assert_cmpuint (after.engine_generation, ==, 2);
+  wyl_fact_graph_runtime_status_clear (&after);
+
+  completion_clear (&drained);
+  gate_clear (&gate);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* A drain issued from inside the entry's own build callback is refused, not
+ * parked.  Nothing else could clear the term it would wait on. */
+static void
+test_drain_refuses_its_own_build_callback (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec seed = {.marker = 111 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+  Gate gate = { 0 };
+  gate_init (&gate);
+  DrainFromBuild probe = { manager, &a, WYRELOG_E_INTERNAL, &gate, 112 };
+  ProbeRefreshThread builder = { manager, &a, &probe, WYRELOG_E_INTERNAL };
+  GThread *worker = g_thread_new ("probe-build", probe_refresh_thread,
+          &builder);
+  gate_wait_entered (&gate);
+  /* Close while the build owns the entry, so the drain inside it meets a
+   * closed graph and must be refused by the self-wait guard rather than by
+   * the open-graph check. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  gate_release (&gate);
+  g_thread_join (worker);
+
+  g_assert_cmpint (builder.result, ==, WYRELOG_E_OK);
+  /* INVALID for the self-wait, not BUSY from a timeout and not a hang. */
+  g_assert_cmpint (probe.drain_rc, ==, WYRELOG_E_INVALID);
+  gate_clear (&gate);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* The queued term.  A thread blocked on engine_call_lock has already passed
+ * the admission check and will run, so the drain must wait for it too.  That
+ * state -- no active call, one queued -- exists only in the instant between
+ * one caller leaving the lock and the next taking it, so it cannot be
+ * observed directly.  Gating the SECOND callback makes the claim testable:
+ * with the term present the drain is still parked while that call runs, and
+ * without it the drain has already returned. */
+static void
+drain_waits_for_queued_engine_call_once (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 121 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphSnapshot) first = NULL;
+  g_autoptr (WylFactGraphSnapshot) second = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &first), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &second), ==, WYRELOG_E_OK);
+
+  UseGate gate_one = { 0 }, gate_two = { 0 };
+  g_mutex_init (&gate_one.mutex);
+  g_cond_init (&gate_one.changed);
+  g_mutex_init (&gate_two.mutex);
+  g_cond_init (&gate_two.changed);
+  UseThread running = {.snapshot = first,.gate = &gate_one,
+                       .result = WYRELOG_E_INTERNAL };
+  GThread *worker_one = g_thread_new ("engine-one", use_thread, &running);
+  use_gate_wait_entered (&gate_one);
+
+  UseThread queued = {.snapshot = second,.gate = &gate_two,
+                      .result = WYRELOG_E_INTERNAL };
+  GThread *worker_two = g_thread_new ("engine-two", use_thread, &queued);
+  wait_for_queued_engine_call (manager, &a);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  Completion drained = { 0 };
+  completion_init (&drained);
+  DrainThread blocker = {.manager = manager,.key = &a,.timeout_us = -1,
+                         .result = WYRELOG_E_INTERNAL,
+                         .completion = &drained };
+  GThread *drainer = g_thread_new ("drain", drain_thread, &blocker);
+  wait_for_parked_drain (manager, &a);
+
+  /* Let the first call finish.  The second now owns engine_call_lock and is
+   * inside its callback. */
+  use_gate_release (&gate_one);
+  g_thread_join (worker_one);
+  g_assert_cmpint (running.result, ==, WYRELOG_E_OK);
+  use_gate_wait_entered (&gate_two);
+
+  /* The discriminating assertion: the queued call was admitted before the
+   * close, so the drain must still be waiting for it. */
+  g_assert_false (completion_peek (&drained));
+
+  use_gate_release (&gate_two);
+  g_thread_join (worker_two);
+  completion_wait (&drained);
+  g_thread_join (drainer);
+  g_assert_cmpint (queued.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (blocker.result, ==, WYRELOG_E_OK);
+
+  completion_clear (&drained);
+  g_cond_clear (&gate_two.changed);
+  g_mutex_clear (&gate_two.mutex);
+  g_cond_clear (&gate_one.changed);
+  g_mutex_clear (&gate_one.mutex);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* Repeated, because the discriminating assertion is racy by construction.
+ * The broadcast that retires the first call and the moment the second takes
+ * engine_call_lock are ordered, but state_lock is not FIFO: when the second
+ * caller barges ahead of the woken drain, active_engine_calls is already back
+ * to one and a predicate missing the queued term is false too, so the mutant
+ * re-parks and escapes.  Measured at roughly one run in five for a single
+ * pass.  Five passes put that near a thousandth, which is the difference
+ * between a test that pins the term and one that manufactures confidence. */
+static void
+test_drain_waits_for_queued_engine_call (void)
+{
+  for (int i = 0; i < 5; i++)
+    drain_waits_for_queued_engine_call_once ();
+}
+
+/* Reopening a graph while a drain is parked makes that drain's answer
+ * meaningless, so it is refused rather than left waiting -- and the reopen
+ * has to wake it, or the refusal would arrive only when something unrelated
+ * happened to signal. */
+static void
+test_drain_refused_when_reopened_while_parked (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 131 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  UseGate use_gate = { 0 };
+  g_mutex_init (&use_gate.mutex);
+  g_cond_init (&use_gate.changed);
+  UseThread user = {.snapshot = snapshot,.gate = &use_gate,
+                    .result = WYRELOG_E_INTERNAL };
+  GThread *worker = g_thread_new ("engine-call", use_thread, &user);
+  use_gate_wait_entered (&use_gate);
+
+  Completion refused = { 0 };
+  completion_init (&refused);
+  DrainThread blocker = {.manager = manager,.key = &a,.timeout_us = -1,
+                         .result = WYRELOG_E_INTERNAL,
+                         .completion = &refused };
+  GThread *drainer = g_thread_new ("drain", drain_thread, &blocker);
+  wait_for_parked_drain (manager, &a);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  completion_wait (&refused);
+  g_thread_join (drainer);
+  g_assert_cmpint (blocker.result, ==, WYRELOG_E_INVALID);
+
+  use_gate_release (&use_gate);
+  g_thread_join (worker);
+  completion_clear (&refused);
+  g_cond_clear (&use_gate.changed);
+  g_mutex_clear (&use_gate.mutex);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* A very large timeout must still park.  Adding it to the monotonic clock
+ * blind overflows to a deadline already in the past, which makes
+ * g_cond_wait_until return at once -- so a caller asking for a long bounded
+ * wait would get an instant BUSY, the opposite of the request. */
+static void
+test_drain_clamps_a_huge_deadline (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 141 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+
+  UseGate use_gate = { 0 };
+  g_mutex_init (&use_gate.mutex);
+  g_cond_init (&use_gate.changed);
+  UseThread user = {.snapshot = snapshot,.gate = &use_gate,
+                    .result = WYRELOG_E_INTERNAL };
+  GThread *worker = g_thread_new ("engine-call", use_thread, &user);
+  use_gate_wait_entered (&use_gate);
+
+  Completion drained = { 0 };
+  completion_init (&drained);
+  DrainThread blocker = {.manager = manager,.key = &a,
+                         .timeout_us = G_MAXINT64,
+                         .result = WYRELOG_E_INTERNAL,
+                         .completion = &drained };
+  GThread *drainer = g_thread_new ("drain", drain_thread, &blocker);
+  /* Without the clamp the deadline has already passed and the drain never
+   * parks at all, so this is the assertion that fails. */
+  wait_for_parked_drain (manager, &a);
+
+  use_gate_release (&use_gate);
+  g_thread_join (worker);
+  completion_wait (&drained);
+  g_thread_join (drainer);
+  g_assert_cmpint (blocker.result, ==, WYRELOG_E_OK);
+
+  completion_clear (&drained);
+  g_cond_clear (&use_gate.changed);
+  g_mutex_clear (&use_gate.mutex);
+  wyl_fact_graph_key_clear (&a);
+}
+
 static void
 test_forget_state_is_orthogonal_and_total (void)
 {
@@ -1337,6 +1960,22 @@ main (int argc, char **argv)
       test_admission_close_does_not_disturb_admitted_work);
   g_test_add_func ("/fact-runtime/admission-precedence-and-shutdown",
       test_admission_precedence_and_shutdown);
+  g_test_add_func ("/fact-runtime/drain-waits-for-admitted-engine-call",
+      test_drain_waits_for_admitted_engine_call);
+  g_test_add_func ("/fact-runtime/drain-refusals-and-shutdown-wake",
+      test_drain_refusals_and_shutdown_wake);
+  g_test_add_func ("/fact-runtime/drain-refuses-own-engine-callback",
+      test_drain_refuses_its_own_engine_callback);
+  g_test_add_func ("/fact-runtime/drain-waits-for-admitted-build",
+      test_drain_waits_for_admitted_build);
+  g_test_add_func ("/fact-runtime/drain-refuses-own-build-callback",
+      test_drain_refuses_its_own_build_callback);
+  g_test_add_func ("/fact-runtime/drain-waits-for-queued-engine-call",
+      test_drain_waits_for_queued_engine_call);
+  g_test_add_func ("/fact-runtime/drain-refused-when-reopened-while-parked",
+      test_drain_refused_when_reopened_while_parked);
+  g_test_add_func ("/fact-runtime/drain-clamps-a-huge-deadline",
+      test_drain_clamps_a_huge_deadline);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();

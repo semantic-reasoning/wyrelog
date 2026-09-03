@@ -19,7 +19,9 @@ struct _WylFactGraphRuntimeEntry
   GMutex writer_lock;
   GMutex state_lock;
   GMutex engine_call_lock;
+  GCond drain_cond;
   GThread *engine_call_owner;
+  GThread *operation_owner;
   WylFactGraphEngineGeneration *current;
   WylFactGraphRuntimeState state;
   WylFactGraphReplayClass last_replay_class;
@@ -28,6 +30,7 @@ struct _WylFactGraphRuntimeEntry
   guint active_snapshots;
   guint active_engine_calls;
   guint waiting_engine_calls;
+  guint waiting_drains;
   gboolean operation_active;
   gboolean abandoned;
   gint64 last_replay_at_us;
@@ -276,6 +279,7 @@ runtime_entry_new (const WylFactGraphKey *key,
   g_mutex_init (&entry->writer_lock);
   g_mutex_init (&entry->state_lock);
   g_mutex_init (&entry->engine_call_lock);
+  g_cond_init (&entry->drain_cond);
   wyrelog_error_t rc = wyl_fact_graph_key_copy (key, &entry->key);
   if (rc != WYRELOG_E_OK) {
     runtime_entry_unref (entry);
@@ -294,10 +298,13 @@ runtime_entry_unref (WylFactGraphRuntimeEntry *entry)
   g_assert_cmpuint (entry->active_snapshots, ==, 0);
   g_assert_cmpuint (entry->active_engine_calls, ==, 0);
   g_assert_cmpuint (entry->waiting_engine_calls, ==, 0);
+  g_assert_cmpuint (entry->waiting_drains, ==, 0);
   g_assert_false (entry->operation_active);
   g_assert_null (entry->engine_call_owner);
+  g_assert_null (entry->operation_owner);
   engine_generation_unref (entry->current);
   wyl_fact_graph_key_clear (&entry->key);
+  g_cond_clear (&entry->drain_cond);
   g_mutex_clear (&entry->engine_call_lock);
   g_mutex_clear (&entry->state_lock);
   g_mutex_clear (&entry->writer_lock);
@@ -317,6 +324,7 @@ status_fill_locked (WylFactGraphRuntimeEntry *entry,
   out_status->active_snapshots = entry->active_snapshots;
   out_status->active_engine_calls = entry->active_engine_calls;
   out_status->waiting_engine_calls = entry->waiting_engine_calls;
+  out_status->waiting_drains = entry->waiting_drains;
   out_status->last_replay_at_us = entry->last_replay_at_us;
   out_status->forget_state = entry->forget_state;
   out_status->admission = entry->admission;
@@ -401,6 +409,7 @@ wyl_fact_graph_runtime_manager_shutdown (WylFactGraphRuntimeManager *manager)
     g_mutex_lock (&entry->state_lock);
     entry->abandoned = TRUE;
     entry->state = WYL_FACT_GRAPH_RUNTIME_ABANDONED;
+    g_cond_broadcast (&entry->drain_cond);
     g_mutex_unlock (&entry->state_lock);
   }
   g_hash_table_destroy (old_entries);
@@ -528,6 +537,7 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
   }
   entry->operation_generation++;
   entry->operation_active = TRUE;
+  entry->operation_owner = g_thread_self ();
   entry->state = WYL_FACT_GRAPH_RUNTIME_BUILDING;
   g_mutex_unlock (&entry->state_lock);
 
@@ -547,6 +557,8 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
   WylFactGraphEngineGeneration *old = NULL;
   g_mutex_lock (&entry->state_lock);
   entry->operation_active = FALSE;
+  entry->operation_owner = NULL;
+  g_cond_broadcast (&entry->drain_cond);
   entry->last_replay_at_us = g_get_real_time ();
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown)) {
     entry->abandoned = TRUE;
@@ -642,10 +654,18 @@ set_admission (WylFactGraphRuntimeManager *manager,
    * republished by a later refresh, and a caller closing admission wants that
    * republication refused too.  Refusing EVICTED would let a close that raced
    * a retirement sweep silently lose its barrier. */
-  if (entry->abandoned)
+  if (entry->abandoned) {
     rc = WYRELOG_E_BUSY;
-  else
+  } else {
     entry->admission = admission;
+    /* Wake any parked drain.  Reopening makes a drain's answer meaningless --
+     * the graph is admitting again -- and the drain re-tests admission on
+     * every wakeup, so without this broadcast it would keep waiting for a
+     * graph it can no longer report on until something else happened to
+     * signal.  Closing broadcasts too, harmlessly: a drain already parked is
+     * on a closed graph by construction. */
+    g_cond_broadcast (&entry->drain_cond);
+  }
   g_mutex_unlock (&entry->state_lock);
   runtime_entry_unref (entry);
   return rc;
@@ -663,6 +683,120 @@ wyl_fact_graph_runtime_manager_open_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key)
 {
   return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_OPEN);
+}
+
+/* Admitted work is exactly the three bounded counters.  active_snapshots is
+ * NOT among them and must never be: a caller may hold a snapshot for as long
+ * as it likes -- the contract says a snapshot outlives even the manager -- so
+ * waiting on it would let one idle reader stall a drain forever.  A pinned
+ * snapshot is possession, not an operation in flight. */
+static gboolean
+entry_drained_locked (const WylFactGraphRuntimeEntry *entry)
+{
+  return !entry->operation_active && entry->active_engine_calls == 0
+         && entry->waiting_engine_calls == 0;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_drain
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    gint64 timeout_us, WylFactGraphRuntimeStatus * out_status)
+{
+  if (out_status != NULL)
+    memset (out_status, 0, sizeof *out_status);
+  WylFactGraphRuntimeEntry *entry = NULL;
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (out_status != NULL) {
+    rc = wyl_fact_graph_key_copy (&entry->key, &out_status->key);
+    if (rc != WYRELOG_E_OK) {
+      runtime_entry_unref (entry);
+      return rc;
+    }
+  }
+
+  gboolean timed_out = FALSE;
+  /* Clamped rather than added blind: g_get_monotonic_time () + timeout_us
+   * overflows for a large timeout, and a negative deadline makes
+   * g_cond_wait_until return immediately -- so a caller asking for a very
+   * long bounded wait would get an instant BUSY, the opposite of the
+   * request. */
+  gint64 now = g_get_monotonic_time ();
+  gint64 deadline = 0;
+  if (timeout_us > 0) {
+    deadline = timeout_us > G_MAXINT64 - now ? G_MAXINT64 : now + timeout_us;
+  }
+  g_mutex_lock (&entry->state_lock);
+  /* Refuse a drain issued from inside this entry's own engine callback or its
+   * own build callback.  Either would wait on a term the calling frame is
+   * itself holding -- active_engine_calls in the first case, operation_active
+   * in the second -- and nothing else can clear it, so the wait is a
+   * self-deadlock rather than a slow answer.  Both are turned into an error
+   * for that reason.  The same thread draining a DIFFERENT entry is legal, as
+   * the status readers already are. */
+  GThread *self = g_thread_self ();
+  if (entry->engine_call_owner == self || entry->operation_owner == self)
+    rc = WYRELOG_E_INVALID;
+  while (rc == WYRELOG_E_OK) {
+    /* entry->abandoned is tested FIRST on purpose, and the order is
+     * load-bearing rather than stylistic.  A parked drain holds no manager
+     * reference; shutdown sets abandoned under this same state_lock before it
+     * broadcasts, so a woken drain that reads abandoned never evaluates the
+     * right-hand side and never touches a manager that may already be freed.
+     * Swapping these introduces a use-after-free.
+     *
+     * Testing it before admission also moved the first-iteration answer for
+     * an abandoned entry from INVALID to BUSY.  No caller can observe that:
+     * abandoned is only ever set under shutdown, and the lookup already
+     * refuses a shut-down manager.  It is also the order the contract's own
+     * "read state first" precedence implies. */
+    if (entry->abandoned || g_atomic_int_get (&manager->shutdown)) {
+      rc = WYRELOG_E_BUSY;
+      break;
+    }
+    /* Re-tested every wakeup, not once before the loop.  A graph reopened
+     * while the drain was parked is admitting new work again, so returning OK
+     * for it would be exactly the stale answer the refusal below exists to
+     * prevent. */
+    if (entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN) {
+      rc = WYRELOG_E_INVALID;
+      break;
+    }
+    if (entry_drained_locked (entry))
+      break;
+    if (timeout_us == 0 || timed_out) {
+      rc = WYRELOG_E_BUSY;
+      break;
+    }
+    /* Counted so a caller -- and a test -- can see that a drain is parked
+     * rather than merely slow.  waiting_engine_calls sets the precedent: this
+     * runtime reports what it is waiting on, not just that it is waiting. */
+    entry->waiting_drains++;
+    if (timeout_us < 0) {
+      g_cond_wait (&entry->drain_cond, &entry->state_lock);
+      entry->waiting_drains--;
+      continue;
+    }
+    gboolean signalled = g_cond_wait_until (&entry->drain_cond,
+            &entry->state_lock, deadline);
+    entry->waiting_drains--;
+    /* Argued, not proved: do not answer from the wait's return value.  A
+     * broadcast landing just before the deadline, or the lock being
+     * reacquired after it, would otherwise report BUSY with a status showing
+     * nothing outstanding -- contradicting the promise that a timeout names
+     * what is still running.  Reverting this leaves the suite green, because
+     * that window is not deterministically reachable from a test; the old
+     * form was sound too, since BUSY never falsely claimed drained.  Kept
+     * because the loop top is the only place that can answer correctly. */
+    if (!signalled)
+      timed_out = TRUE;
+  }
+  if (out_status != NULL)
+    status_fill_locked (entry, out_status);
+  g_mutex_unlock (&entry->state_lock);
+  runtime_entry_unref (entry);
+  return rc;
 }
 
 wyrelog_error_t
@@ -929,6 +1063,7 @@ wyl_fact_graph_snapshot_use (WylFactGraphSnapshot *snapshot,
   g_assert_cmpuint (entry->active_engine_calls, ==, 1);
   entry->active_engine_calls--;
   entry->engine_call_owner = NULL;
+  g_cond_broadcast (&entry->drain_cond);
   g_mutex_unlock (&entry->state_lock);
   g_mutex_unlock (&entry->engine_call_lock);
   wyl_fact_graph_snapshot_unref (snapshot);
