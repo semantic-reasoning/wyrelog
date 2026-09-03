@@ -234,8 +234,12 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
  * than a newly minted entry.
  *
  * state_lock covers every read and every write of the field.  There are
- * three writers -- this setter, try_evict and retire_unseen -- and engine
- * refresh is not among them: refresh never reads or writes forget_state on
+ * four writers -- this setter, try_evict, retire_unseen and evict_closed --
+ * and only the first three change the value: evict_closed tombstones the
+ * entry while deliberately preserving this axis, because nothing re-probes a
+ * sealed graph until an unseal or a restart, so clearing it there would drop
+ * a verdict about an erasure that is still owed.  Engine refresh is not a
+ * writer either: refresh never reads or writes forget_state on
  * any path, which is what makes the axis orthogonal to replay health in code
  * rather than only in a comment.  Writes are last-writer-wins, so a caller
  * whose write must reflect a complete ledger read may not run concurrently
@@ -440,6 +444,36 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_try_evict
 wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
   (WylFactGraphRuntimeManager * manager,
     const WylFactGraphKey * const *seen_keys, gsize n_seen_keys);
+
+/*
+ * evict_closed() detaches a closed graph's engine.  It is the eviction a seal
+ * uses, and it is deliberately not try_evict():
+ *
+ * WYRELOG_E_INVALID when admission is OPEN.  An eviction outside a barrier is
+ * try_evict's job.  The two are not interchangeable, because this one
+ * detaches a generation that readers may still be pinning, which is only
+ * defensible once nothing new can be admitted.
+ *
+ * It SUCCEEDS with snapshots pinned, where try_evict refuses.  A seal that one
+ * idle reader could hold off indefinitely would be no barrier at all -- the
+ * same reason active_snapshots is not a term of drain.  Those snapshots keep
+ * their generation alive and stay usable; what they cannot do is be joined by
+ * new ones, because acquire_snapshot is refused on a closed graph and there is
+ * no current generation to hand out either way.
+ *
+ * It blocks on writer_lock where try_evict tries.  A seal that has committed
+ * durably cannot retry, so a spurious BUSY would strand the graph with its
+ * engine still published; and the wait is bounded because a closed graph
+ * admits no new refresh and the caller has drained.
+ *
+ * It preserves both generation counters and the admission axis, and clears
+ * last_replay_class, exactly as the two sweepers do.  It PRESERVES
+ * forget_state, which they do not -- see the forget axis contract above for
+ * why the sweepers clear it, and why a seal must not.
+ */
+wyrelog_error_t wyl_fact_graph_runtime_manager_evict_closed
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    gboolean * out_evicted);
 
 /*
  * Snapshot and shutdown contract
