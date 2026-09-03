@@ -335,6 +335,24 @@ refresh_thread (gpointer user_data)
   return NULL;
 }
 
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  BuildSpec *spec;
+  wyrelog_error_t result;
+  WylFactGraphRuntimeStatus status;
+} StatusRefreshThread;
+
+static gpointer
+status_refresh_thread (gpointer user_data)
+{
+  StatusRefreshThread *thread = user_data;
+  thread->result = wyl_fact_graph_runtime_manager_refresh (thread->manager,
+          thread->key, build_marker_engine, thread->spec, &thread->status);
+  return NULL;
+}
+
 static void
 test_slow_build_is_graph_local (void)
 {
@@ -1782,6 +1800,56 @@ test_drain_clamps_a_huge_deadline (void)
   wyl_fact_graph_key_clear (&a);
 }
 
+/* Both facts can be true at once, and the contract says to read state first.
+ * refresh's post-build shutdown race fills a status that is ABANDONED and
+ * CLOSED together, so a caller testing admission first would read a barrier
+ * and retry forever against a manager that is gone.  Nothing asserted this
+ * before; a later change that cleared admission on the abandoned branch would
+ * have made the documented precedence quietly false. */
+static void
+test_abandoned_outranks_closed_in_a_filled_status (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec seed = {.marker = 151 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+
+  Gate gate = { 0 };
+  gate_init (&gate);
+  BuildSpec slow = {.marker = 152,.gate = &gate };
+  StatusRefreshThread builder = {
+    .manager = manager,
+    .key = &a,
+    .spec = &slow,
+    .result = WYRELOG_E_INTERNAL,
+  };
+  GThread *worker = g_thread_new ("racing-build", status_refresh_thread,
+          &builder);
+  gate_wait_entered (&gate);
+
+  /* Close while the build owns the entry, then shut the manager down.  The
+   * build is already admitted, so it runs to completion and its post-build
+   * path is what fills the status. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  gate_release (&gate);
+  g_thread_join (worker);
+
+  g_assert_cmpint (builder.result, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (builder.status.state, ==,
+      WYL_FACT_GRAPH_RUNTIME_ABANDONED);
+  g_assert_cmpint (builder.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&builder.status);
+
+  gate_clear (&gate);
+  wyl_fact_graph_key_clear (&a);
+}
+
 static void
 test_forget_state_is_orthogonal_and_total (void)
 {
@@ -1976,6 +2044,8 @@ main (int argc, char **argv)
       test_drain_refused_when_reopened_while_parked);
   g_test_add_func ("/fact-runtime/drain-clamps-a-huge-deadline",
       test_drain_clamps_a_huge_deadline);
+  g_test_add_func ("/fact-runtime/abandoned-outranks-closed",
+      test_abandoned_outranks_closed_in_a_filled_status);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();
