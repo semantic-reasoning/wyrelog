@@ -3424,6 +3424,17 @@ test('windows-ci-timeout-boundary', python3,
   args : [files('test-windows-ci-timeout-boundary.py'),
     meson.project_source_root()])
 
+# The boundary checker is only worth what its own mutations prove.  Each
+# mutation is applied inside the build-windows job, because one applied to the
+# first match anywhere in the file can land in a job the checker is not
+# supposed to guard and would then survive for the wrong reason.
+test('windows-ci-timeout-boundary-self-test', python3,
+  args : [
+    files('test-windows-ci-timeout-boundary.py'),
+    '--self-test',
+    meson.project_source_root(),
+  ])
+
 test('windows-appverifier-wiring', python3,
   args : [files('test-windows-appverifier-wiring.py'),
     meson.project_source_root()])
