@@ -92,6 +92,54 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
   return schema;
 }
 
+/*
+ * Failure-code allocation.  main() hands these to the shell as the exit
+ * status, so two functions sharing one are indistinguishable in a failing
+ * run.  tests/test-fact-store-failure-codes.py enforces uniqueness; this
+ * table is here so the next author can pick a free range without reading
+ * the whole file.  Ranges are inclusive of what is used, not reserved.
+ *
+ *   100-130      check_fact_store_retracts_idempotently
+ *   131-201      check_fact_store_appends_idempotently
+ *   800-806      check_fact_store_thread_budget
+ *   900-909      check_fact_store_reports_commit_delta
+ *   960-973      check_fact_store_batch_commit_fault
+ *   1010-1050    check_retract_by_id_normal_three_rows
+ *   1100-1103    check_retract_by_id_idempotent_replay
+ *   1200-1204    check_retract_by_id_second_retract_same_trigger
+ *   1300-1301    check_retract_by_id_not_found
+ *   1400-1403    check_retract_by_id_trigger_is_retract_batch
+ *   1500-1503    check_retract_by_id_scope_mismatch
+ *   1600         check_retract_by_id_exceeds_max_rows
+ *   1700-1702    check_retract_by_id_schema_version_mismatch
+ *   1800-1808    check_retract_by_id_invalid_args
+ *   1900-1904    check_retract_by_id_partial_already_retracted
+ *   2000-2007    check_fact_forget_basic
+ *   2100-2103    check_fact_forget_not_found
+ *   2200-2214    check_fact_forget_crash_convergence
+ *   2230-2240    check_fact_forget_rejects_identifier_reuse
+ *   2250-2260    check_fact_forget_reconcile_refuses_wrong_scope
+ *   2270-2276    check_fact_forget_reconcile_skips_out_of_scope_intent
+ *   2290-2294    check_fact_forget_reconcile_ignores_schema_only_store
+ *   2300-2313    check_fact_store_identity_rejects_foreign_catalogs
+ *   2320-2332    check_fact_forget_pending_count_refuses_wrong_scope
+ *   2340-2360    check_fact_forget_read_only_open_replays_the_wal
+ *   2400-2404    check_fact_forget_reconcile_counts_executed
+ *   2410-2414    check_fact_forget_reconcile_counts_refused_without_abandoning
+ *   2420-2423    check_fact_forget_reconcile_counts_a_store_scope_refusal
+ *   2430-2437    check_fact_forget_reconcile_zeroes_outcome_on_invalid
+ *   2440-2448    check_fact_forget_reconcile_failure_rc_survives_a_refusal
+ *   2450-2457    check_fact_forget_reconcile_survey_io_failure_keeps_its_rc
+ *   2460-2465    check_fact_forget_reconcile_abandoned_outranks_refused
+ *   2470-2477
+ *       check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal
+ *   2500-2504    check_fact_store_identity_concurrency
+ *   2600-2604    check_fact_store_identity_validation_snapshot
+ *   2700-2723    check_fact_store_identity_basic
+ *   2800-2806    check_fact_forget_pending_count_reports_without_executing
+ *   2810-2815    check_fact_forget_pending_count_ignores_schema_only_store
+ *   3000-3014    check_legacy_identity_binding_is_atomic_and_recoverable
+ */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
 {
@@ -244,30 +292,30 @@ check_fact_store_thread_budget (void)
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-store-threads-XXXXXX",
           &error);
   if (dir == NULL)
-    return 100;
+    return 800;
   g_autofree gchar *path = g_build_filename (dir, "fact.db", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
   if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
-    return 101;
+    return 801;
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
-    return 102;
+    return 802;
 
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   g_autofree gchar *threads = NULL;
   if (!query_text (conn,
       "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
       &threads) || g_strcmp0 (threads, "1") != 0)
-    return 103;
+    return 803;
 
   g_autoptr (wyl_fact_store_t) memory_store = NULL;
   if (wyl_fact_store_open (NULL, &memory_store) != WYRELOG_E_OK)
-    return 104;
+    return 804;
   if (wyl_fact_store_create_schema (memory_store) != WYRELOG_E_OK)
-    return 105;
+    return 805;
   if (!query_text (wyl_fact_store_get_connection (memory_store),
       "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
       &threads) || g_strcmp0 (threads, "1") != 0)
-    return 106;
+    return 806;
   return 0;
 }
 
@@ -1958,36 +2006,36 @@ check_fact_forget_pending_count_reports_without_executing (void)
   wyl_policy_fact_relation_schema_options_t schema;
   g_autofree gchar *table = NULL;
   if (forget_seed_pending_intent (&store, &schema, &table) != 0)
-    return 2300;
+    return 2800;
   duckdb_connection conn = wyl_fact_store_get_connection (store);
 
   gsize pending = 0;
   if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
       &pending) != WYRELOG_E_OK)
-    return 2301;
+    return 2801;
   if (pending != 1)
-    return 2302;
+    return 2802;
 
   gint64 count = 0;
   /* Still pending: the survey did not converge it. */
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
       &count) || count != 1)
-    return 2303;
+    return 2803;
   /* And nothing was deleted through. */
   g_autofree gchar *proj_sql = g_strdup_printf
         ("SELECT COUNT(*) FROM %s;", table);
   if (!count_i64 (conn, proj_sql, &count) || count != 1)
-    return 2304;
+    return 2804;
   if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
       || count != 0)
-    return 2305;
+    return 2805;
 
   /* Asking twice is the boot-over-boot case and must be stable. */
   pending = 0;
   if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
       &pending) != WYRELOG_E_OK || pending != 1)
-    return 2306;
+    return 2806;
   return 0;
 }
 
@@ -2001,9 +2049,9 @@ check_fact_forget_pending_count_ignores_schema_only_store (void)
 {
   g_autoptr (wyl_fact_store_t) store = NULL;
   if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
-    return 2310;
+    return 2810;
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
-    return 2311;
+    return 2811;
 
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   gint64 count = 0;
@@ -2011,21 +2059,21 @@ check_fact_forget_pending_count_ignores_schema_only_store (void)
    * check rather than short-circuited by it. */
   if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_intent;", &count)
       || count != 0)
-    return 2312;
+    return 2812;
   /* And the identity really is unbound, which is what a scope check placed
    * before the count would refuse. */
   g_autofree gchar *bound = NULL;
   if (query_text (conn,
       "SELECT value FROM fact_store_metadata WHERE key = 'tenant_id';",
       &bound) || bound != NULL)
-    return 2313;
+    return 2813;
 
   gsize pending = 1;
   if (wyl_fact_store_forget_pending_count (store, "tenant-a", "orders",
       &pending) != WYRELOG_E_OK)
-    return 2314;
+    return 2814;
   if (pending != 0)
-    return 2315;
+    return 2815;
   return 0;
 }
 
@@ -2752,15 +2800,15 @@ check_fact_store_identity_basic (void)
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-identity-XXXXXX", &error);
   if (dir == NULL)
-    return 2200;
+    return 2700;
   g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
 
   if (!identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_IO,
       WYL_FACT_STORE_IDENTITY_RESULT_OPEN))
-    return 2201;
+    return 2701;
   if (g_file_test (path, G_FILE_TEST_EXISTS))
-    return 2202;
+    return 2702;
 
   wyl_fact_store_t *store = NULL;
   WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
@@ -2768,21 +2816,21 @@ check_fact_store_identity_basic (void)
       WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result, &store)
       != WYRELOG_E_OK || result != WYL_FACT_STORE_IDENTITY_RESULT_NONE
       || store == NULL)
-    return 2203;
+    return 2703;
   gint64 count = 0;
   if (!count_i64 (wyl_fact_store_get_connection (store),
       "SELECT COUNT(*) FROM main.fact_store_metadata;", &count)
       || count != 6)
-    return 2204;
+    return 2704;
   if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
-    return 2205;
+    return 2705;
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
   };
   wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
           G_N_ELEMENTS (columns));
   if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
-    return 2213;
+    return 2713;
   const wyl_fact_value_t value = {
     .type = WYL_FACT_VALUE_SYMBOL,
     .as.text = "o-1",
@@ -2804,11 +2852,11 @@ check_fact_store_identity_basic (void)
   gboolean inserted = FALSE;
   if (wyl_fact_store_append_batch (store, &schema, &batch, &inserted)
       != WYRELOG_E_OK || !inserted)
-    return 2218;
+    return 2718;
   schema.tenant_id = "tenant-b";
   if (wyl_fact_store_ensure_projection (store, &schema, NULL)
       != WYRELOG_E_POLICY)
-    return 2214;
+    return 2714;
   wyl_fact_store_close (store);
 
   if (!identified_open_is (path, &test_identity,
@@ -2817,39 +2865,39 @@ check_fact_store_identity_basic (void)
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
       WYL_FACT_STORE_IDENTITY_RESULT_NONE))
-    return 2206;
+    return 2706;
 
   WylFactStoreIdentity foreign = test_identity;
   foreign.tenant_id = "tenant-b";
   if (!identified_open_is (path, &foreign,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
-    return 2207;
+    return 2707;
   foreign = test_identity;
   foreign.graph_id = "other";
   if (!identified_open_is (path, &foreign,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
-    return 2208;
+    return 2708;
   foreign = test_identity;
   foreign.store_uuid = "01890f47-3c4b-6cc2-b8c4-dc0c0c073988";
   if (!identified_open_is (path, &foreign,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
-    return 2209;
+    return 2709;
 
   foreign = test_identity;
   foreign.path_encoding_version = 2;
   if (!identified_open_is (path, &foreign,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
-    return 2210;
+    return 2710;
   foreign = test_identity;
   foreign.format_version = 2;
   if (!identified_open_is (path, &foreign,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
-    return 2211;
+    return 2711;
   foreign = test_identity;
   foreign.store_uuid = "01890F47-3c4b-6cc2-b8c4-dc0c0c073989";
   store = (wyl_fact_store_t *) 0x1;
@@ -2857,7 +2905,7 @@ check_fact_store_identity_basic (void)
   if (wyl_fact_store_open_identified (path, &foreign,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result, &store)
       != WYRELOG_E_INVALID || store != NULL)
-    return 2212;
+    return 2712;
 
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='2' "
@@ -2865,21 +2913,21 @@ check_fact_store_identity_basic (void)
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
-    return 2215;
+    return 2715;
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='01' "
       "WHERE key='path_encoding_version';")
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
-    return 2219;
+    return 2719;
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='0' "
       "WHERE key='path_encoding_version';")
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING))
-    return 2220;
+    return 2720;
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='1' "
       "WHERE key='path_encoding_version';"
@@ -2888,14 +2936,14 @@ check_fact_store_identity_basic (void)
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
-    return 2216;
+    return 2716;
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='0' "
       "WHERE key='format_version';")
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
-    return 2221;
+    return 2721;
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='1' "
       "WHERE key='format_version';"
@@ -2904,7 +2952,7 @@ check_fact_store_identity_basic (void)
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
-    return 2222;
+    return 2722;
   if (!create_duckdb_with_sql (path,
       "UPDATE fact_store_metadata SET value='wyrelog.fact' "
       "WHERE key='store_kind';"
@@ -2912,7 +2960,7 @@ check_fact_store_identity_basic (void)
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
-    return 2223;
+    return 2723;
   if (!create_duckdb_with_sql (path,
       "DELETE FROM fact_store_metadata WHERE key='unknown';"
       "UPDATE fact_store_metadata SET value="
@@ -2920,7 +2968,7 @@ check_fact_store_identity_basic (void)
       || !identified_open_is (path, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
-    return 2217;
+    return 2717;
 
   g_remove (path);
   g_rmdir (dir);
