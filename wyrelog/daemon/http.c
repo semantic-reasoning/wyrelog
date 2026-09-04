@@ -12502,9 +12502,19 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
    * what wyl_audit_emit returned -- all three of which claim the mutation did
    * not happen. */
   wyrelog_error_t audit_rc = WYRELOG_E_OK;
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
     audit_rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
             relation, batch_id, store_op, inserted, request_id);
+    /* The response already tells this one client the audit was lost.  Tell
+     * the operator too: the mutation is durable and its audit record is not,
+     * which is the condition readiness reports.  Fact append and retract were
+     * the only mutation paths leaving it unreported -- the decide path fails
+     * closed on an audit failure, and forget writes its evidence inside the
+     * deletion transaction. */
+#ifdef WYL_HAS_AUDIT
+    mark_runtime_audit_degraded (ctx->runtime, audit_rc);
+#endif
+  }
 
   graph_lookup_clear (&lookup);
   wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
