@@ -418,8 +418,13 @@ table_exists_unlocked (wyl_fact_store_t *store, const gchar *table_name,
   *out_exists = FALSE;
   static const gchar *sql =
       "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?;";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, table_name) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -623,6 +628,29 @@ fact_identity_execute (gpointer context, const gchar *sql,
   duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
 }
+
+/* The column list of fact_forget_intent, shared by CREATE TABLE and by the
+ * rebuild that widens its state CHECK.  One definition: a rebuild that
+ * restated the columns could silently drop the primary key or a constraint,
+ * which is exactly what CREATE TABLE AS SELECT does. */
+#define FACT_FORGET_INTENT_COLUMNS \
+  "  op_uuid         VARCHAR PRIMARY KEY," \
+  "  batch_id        VARCHAR NOT NULL," \
+  "  tenant_id       VARCHAR NOT NULL," \
+  "  graph_id        VARCHAR NOT NULL," \
+  "  namespace_id    VARCHAR NOT NULL," \
+  "  relation_name   VARCHAR NOT NULL," \
+  "  schema_version  BIGINT NOT NULL," \
+  "  projection_table VARCHAR NOT NULL," \
+  "  content_hash    VARCHAR NOT NULL," \
+  "  idempotency_key VARCHAR NOT NULL," \
+  "  operator        VARCHAR NOT NULL," \
+  "  reason          VARCHAR NOT NULL," \
+  "  rows_purged     BIGINT NOT NULL," \
+  "  state           VARCHAR NOT NULL " \
+  "    CHECK (state IN ('PENDING', 'COMPLETED', 'QUARANTINED'))," \
+  "  created_at_us   BIGINT NOT NULL," \
+  "  completed_at_us BIGINT"
 
 static void
 fact_identity_validation_barrier (gpointer context)
@@ -899,23 +927,7 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
              * stores only identifiers and the fingerprint, never fact content.
              */
             "CREATE TABLE IF NOT EXISTS fact_forget_intent ("
-            "  op_uuid         VARCHAR PRIMARY KEY,"
-            "  batch_id        VARCHAR NOT NULL,"
-            "  tenant_id       VARCHAR NOT NULL,"
-            "  graph_id        VARCHAR NOT NULL,"
-            "  namespace_id    VARCHAR NOT NULL,"
-            "  relation_name   VARCHAR NOT NULL,"
-            "  schema_version  BIGINT NOT NULL,"
-            "  projection_table VARCHAR NOT NULL,"
-            "  content_hash    VARCHAR NOT NULL,"
-            "  idempotency_key VARCHAR NOT NULL,"
-            "  operator        VARCHAR NOT NULL,"
-            "  reason          VARCHAR NOT NULL,"
-            "  rows_purged     BIGINT NOT NULL,"
-            "  state           VARCHAR NOT NULL "
-            "    CHECK (state IN ('PENDING', 'COMPLETED')),"
-            "  created_at_us   BIGINT NOT NULL,"
-            "  completed_at_us BIGINT" ");");
+            FACT_FORGET_INTENT_COLUMNS ");");
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   g_mutex_unlock (&store->lock);
@@ -1154,8 +1166,13 @@ existing_batch_matches_unlocked (wyl_fact_store_t *store,
       "schema_version, source, request_id, idempotency_key, op, row_count, "
       "content_hash FROM fact_batches "
       "WHERE batch_id = ? OR idempotency_key = ?;";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, batch->batch_id) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, batch->idempotency_key)
       != DuckDBSuccess) {
@@ -1242,8 +1259,13 @@ insert_batch_unlocked (wyl_fact_store_t *store,
       " schema_version, source, request_id, idempotency_key, op, row_count, "
       " content_hash, created_at_us) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, batch->batch_id)
       | duckdb_bind_varchar (stmt, 2, batch->tenant_id)
       | duckdb_bind_varchar (stmt, 3, batch->graph_id)
@@ -1279,8 +1301,13 @@ insert_event_unlocked (wyl_fact_store_t *store,
       "(seq, batch_id, tenant_id, graph_id, namespace_id, relation_name, "
       " schema_version, op, created_at_us, valid) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   const gchar *op = batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" :
       "assert";
   gboolean valid = batch->op != WYL_FACT_STORE_OP_RETRACT;
@@ -1595,8 +1622,13 @@ lookup_batch_scope_unlocked (wyl_fact_store_t *store,
   static const gchar *sql =
       "SELECT tenant_id, graph_id, namespace_id, relation_name, "
       "schema_version, op FROM fact_batches WHERE batch_id = ?;";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, trigger_batch_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -2046,8 +2078,13 @@ load_batch_forget_fingerprint_unlocked (wyl_fact_store_t *store,
   static const gchar *sql =
       "SELECT content_hash, idempotency_key FROM fact_batches "
       "WHERE batch_id = ?;";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, batch_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -2122,8 +2159,13 @@ insert_forget_intent_unlocked (wyl_fact_store_t *store,
       " schema_version, projection_table, content_hash, idempotency_key, "
       " operator, reason, rows_purged, state, created_at_us, completed_at_us) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NULL);";
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, intent->op_uuid)
       | duckdb_bind_varchar (stmt, 2, intent->batch_id)
       | duckdb_bind_varchar (stmt, 3, intent->tenant_id)
@@ -2152,8 +2194,13 @@ prepared_delete_batch_unlocked (wyl_fact_store_t *store, const gchar *sql,
     const gchar *batch_id)
 {
   duckdb_prepared_statement stmt = NULL;
-  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    /* duckdb_prepare allocates the statement even when it fails: the
+     * object carries the error text.  duckdb.h:1892 requires destroying
+     * it anyway. */
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, batch_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -2206,6 +2253,7 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
       "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit), "
       "?, ?, ?, ?, ?, ?, ?);";
   if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
     goto rollback;
   }
@@ -2232,6 +2280,7 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
       "UPDATE fact_forget_intent SET state = 'COMPLETED', "
       "completed_at_us = ? WHERE op_uuid = ?;";
   if (duckdb_prepare (store->conn, update_sql, &ustmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&ustmt);
     rc = WYRELOG_E_IO;
     goto rollback;
   }
@@ -2484,6 +2533,114 @@ forget_unlock:
   return rc;
 }
 
+/* Widening a CHECK means rebuilding the table: every ALTER TABLE in this tree
+ * is ADD COLUMN, and DuckDB has no ADD/DROP CONSTRAINT.
+ *
+ * Version is read from the constraint text rather than from a metadata key,
+ * because fact_store_metadata is pinned to exactly six rows by
+ * validate_identity_values and a seventh fails every provisioned open.  Reading
+ * the stored constraint is what the policy store already does for its own
+ * predecessor migration.
+ *
+ * Unrecognised text fails closed.  A store whose constraint we cannot identify
+ * is not one to rewrite. */
+static wyrelog_error_t
+forget_intent_state_check_is_current (wyl_fact_store_t *store,
+    gboolean *out_current)
+{
+  *out_current = FALSE;
+  duckdb_prepared_statement stmt = NULL;
+  static const gchar *sql =
+      "SELECT constraint_text FROM duckdb_constraints() "
+      "WHERE table_name = 'fact_forget_intent' "
+      "AND constraint_text LIKE '%QUARANTINED%';";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_result result;
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  *out_current = duckdb_row_count (&result) > 0;
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
+/* Rebuild fact_forget_intent with the widened CHECK.
+ *
+ * One covering transaction is enough: DuckDB DDL participates in it, measured
+ * against the pinned library -- a rollback after CREATE/copy/DROP/RENAME
+ * restores the original table with its original constraint and leaves no
+ * orphan.  The head drop is therefore defensive rather than the recovery
+ * mechanism.
+ *
+ * Deliberately far smaller than the policy store's equivalent rebuild, which
+ * carries a checkpoint ladder, an authorizer fence and a fresh-image
+ * re-verifier.  There is no DuckDB authorizer, and this is one CHECK on one
+ * table with no triggers, no views and no foreign-key children.  What is kept
+ * from it: the single transaction, the orphan drop, and an equality proof
+ * before commit. */
+static wyrelog_error_t
+migrate_forget_intent_state_check_unlocked (wyl_fact_store_t *store)
+{
+  gboolean current = FALSE;
+  wyrelog_error_t rc = forget_intent_state_check_is_current (store, &current);
+  if (rc != WYRELOG_E_OK || current)
+    return rc;
+
+  rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (store->conn,
+          "DROP TABLE IF EXISTS fact_forget_intent_rebuild;"
+          "CREATE TABLE fact_forget_intent_rebuild ("
+          FACT_FORGET_INTENT_COLUMNS ");"
+          "INSERT INTO fact_forget_intent_rebuild"
+          "  SELECT * FROM fact_forget_intent;");
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (store->conn,
+            "SELECT CASE WHEN ("
+            "  (SELECT COUNT(*) FROM ("
+            "     SELECT * FROM fact_forget_intent"
+            "     EXCEPT SELECT * FROM fact_forget_intent_rebuild)) = 0"
+            "  AND (SELECT COUNT(*) FROM ("
+            "     SELECT * FROM fact_forget_intent_rebuild"
+            "     EXCEPT SELECT * FROM fact_forget_intent)) = 0"
+            ") THEN 1 ELSE error('forget intent rebuild lost rows') END;");
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return rc;
+  }
+  rc = exec_sql (store->conn,
+          "DROP TABLE fact_forget_intent;"
+          "ALTER TABLE fact_forget_intent_rebuild "
+          "  RENAME TO fact_forget_intent;");
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->conn, "ROLLBACK;");
+    return rc;
+  }
+  return exec_sql (store->conn, "COMMIT;");
+}
+
+/* Retire an intent that can never converge.  The row stays: it is the record
+ * that an erasure was promised and cannot be honoured by this store, and the
+ * issue that asked for this put deleting it explicitly out of scope. */
+static wyrelog_error_t
+quarantine_forget_intent_unlocked (wyl_fact_store_t *store,
+    const gchar *batch_id)
+{
+  wyrelog_error_t rc = migrate_forget_intent_state_check_unlocked (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return prepared_delete_batch_unlocked (store,
+             "UPDATE fact_forget_intent SET state = 'QUARANTINED' "
+             "WHERE batch_id = ?;", batch_id);
+}
+
 /* The read-only prefix of the reconciler: everything above its first write.
  * The boot probe stops here and the reconciler continues past it, so the
  * predicate that decides whether to take a write lease and the predicate that
@@ -2658,6 +2815,22 @@ wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
     if (scope_rc == WYRELOG_E_POLICY) {
       outcome.refused++;
       out_of_scope = TRUE;
+      /* Retire it.  E_POLICY here is never a transient failure -- the branch
+       * below takes E_IO, and every path that produces E_POLICY does so only
+       * after a successful read reported an identity mismatch, which cannot
+       * become a match later on this store.  So this row would otherwise be
+       * loaded and refused on every boot forever, and the ERROR line that
+       * reports loaded > executed would fire for it every time, burying a
+       * genuinely new stuck erasure in permanent noise.
+       *
+       * Counted refused exactly once, on the pass that quarantines it, and
+       * neither loaded nor refused afterwards.  The outcome equality holds on
+       * both passes without a new term.
+       *
+       * A failure to quarantine is not fatal to the pass: the intent was
+       * correctly refused either way, and the next boot retries the retirement
+       * rather than losing the refusal. */
+      (void) quarantine_forget_intent_unlocked (store, intent->batch_id);
       continue;
     }
     if (scope_rc != WYRELOG_E_OK) {

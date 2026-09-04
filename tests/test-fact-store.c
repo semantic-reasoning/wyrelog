@@ -1987,11 +1987,19 @@ check_fact_forget_reconcile_skips_out_of_scope_intent (void)
   if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_audit;", &count)
       || count != 0)
     return 2275;
-  /* Skipping is not completing: the intent must not be recorded as done. */
+  /* Skipping is not completing: the intent must not be recorded as done.  It
+   * is now QUARANTINED rather than PENDING -- retired, because the refusal is
+   * an identity mismatch that cannot become a match later -- and the point of
+   * this assertion is unchanged: it is not COMPLETED, so the erasure is not
+   * claimed to have happened. */
   if (!count_i64 (conn,
-      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
-      &count) || count != 1)
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';",
+      &count) || count != 0)
     return 2276;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
+      &count) || count != 1)
+    return 2277;
   return 0;
 }
 
@@ -2461,6 +2469,58 @@ forget_rename_metadata_at_first_completion (const gchar *point,
   fault->renamed = exec_ok_sql (fault->conn,
           "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
   return WYRELOG_E_OK;
+}
+
+/* An intent naming a tenant this store does not own can never converge: the
+ * refusal is an identity mismatch, and identity does not change under a store
+ * once bound.  Before quarantine such a row stayed PENDING forever -- loaded,
+ * refused, and reported by the boot ERROR line on every restart, so the signal
+ * meaning "something needs attention" became permanent noise and a genuinely
+ * new stuck erasure was indistinguishable from it. */
+static gint
+check_fact_forget_reconcile_quarantines_a_foreign_intent (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
+    return 2480;
+  if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
+      "batch-0"))
+    return 2481;
+
+  /* First pass: the foreign intent is refused, exactly as before.  Quarantine
+   * happens during the pass that refuses it, so it is counted once and the
+   * outcome equality holds unchanged. */
+  wyl_fact_forget_outcome_t first = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL, NULL,
+      &first) != WYRELOG_E_POLICY)
+    return 2482;
+  if (first.loaded != 2 || first.refused != 1 || first.executed != 1)
+    return 2483;
+
+  /* Second pass: the quarantined row is neither loaded nor refused.  This is
+   * the assertion the whole change exists for -- without it the row returns
+   * every boot forever. */
+  wyl_fact_forget_outcome_t second = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL, NULL,
+      &second) != WYRELOG_E_OK)
+    return 2484;
+  if (second.loaded != 0)
+    return 2485;
+  if (second.refused != 0)
+    return 2486;
+
+  /* The evidence survives.  A quarantined intent is the record that an erasure
+   * was promised and cannot be honoured by this store, so the row stays. */
+  gint64 quarantined = 0;
+  if (!count_i64 (wyl_fact_store_get_connection (store),
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
+      &quarantined))
+    return 2487;
+  if (quarantined != 1)
+    return 2488;
+  return 0;
 }
 
 /* The loop-level scope check must report an unreadable store as a FAILURE, not
@@ -3565,6 +3625,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_quarantines_a_foreign_intent ();
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_counts_executed ();
