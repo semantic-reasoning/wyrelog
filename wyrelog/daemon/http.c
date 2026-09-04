@@ -11009,6 +11009,55 @@ graph_create_handler (SoupServer *server, SoupServerMessage *msg,
 #endif
 }
 
+/* Control-plane record for a fact lifecycle operation -- one that changes what
+ * a graph is rather than what it contains.  A sibling of emit_fact_op_audit
+ * rather than a generalisation of it: that one is shaped around an append's op
+ * and inserted flag, and passing sentinels through it would label a hard
+ * delete "fact_retract"/"duplicate", which is a false record rather than a
+ * missing one.
+ *
+ * The audit event offers six string slots and no free field, so batch_id rides
+ * in deny_reason and the outcome in deny_origin, exactly as emit_fact_op_audit
+ * and emit_datalog_query_audit already do.  The names do not describe what they
+ * carry; that is a schema problem shared by every emitter here and not one this
+ * change can fix. */
+static wyrelog_error_t
+emit_fact_lifecycle_audit (WylDaemonHttpContext *ctx, const gchar *actor,
+    const gchar *tenant, const gchar *graph, const gchar *action,
+    const gchar *batch_id, const gchar *outcome, const gchar *request_id)
+{
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  gboolean fail_once = ctx->fail_next_fact_op_audit;
+  ctx->fail_next_fact_op_audit = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  if (fail_once)
+    return WYRELOG_E_INTERNAL;
+#endif
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  g_autofree gchar *resource = g_strdup_printf ("%s/%s", tenant, graph);
+  wyl_audit_event_set_subject_id (ev, actor);
+  wyl_audit_event_set_action (ev, action);
+  wyl_audit_event_set_resource_id (ev, resource);
+  wyl_audit_event_set_deny_reason (ev, batch_id);
+  wyl_audit_event_set_deny_origin (ev, outcome);
+  wyl_audit_event_set_request_id (ev, request_id);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  return wyl_audit_emit (ctx->handle, ev);
+#else
+  (void) ctx;
+  (void) actor;
+  (void) tenant;
+  (void) graph;
+  (void) action;
+  (void) batch_id;
+  (void) outcome;
+  (void) request_id;
+  return WYRELOG_E_OK;
+#endif
+}
+
 static void
 graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -11034,9 +11083,10 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
   if (!authorize_guarded_session_action (server, msg, query, ctx,
       "wr.graph.manage", tenant, "graph_auth_required",
-      "invalid_graph_auth", "graph_denied", "graph_auth_failed", NULL))
+      "invalid_graph_auth", "graph_denied", "graph_auth_failed", &actor))
     return;
 
   g_auto (WylDaemonPolicyWrite) write = { 0 };
@@ -11056,6 +11106,18 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 500, "graph_mutation_failed");
     return;
   }
+  /* Sealing is irreversible and closes the graph to append, retract and
+   * forget, and it left no control-plane record.  wyl_decide audits the
+   * authorization, but with the tenant as the resource -- so its record is
+   * identical for every graph in that tenant and for a list call on the same
+   * permission, and it says nothing about whether the seal completed.  This
+   * names the graph and the outcome.
+   *
+   * Discarded like the refusal on the forget path: the seal is durable by
+   * now, and an audit-store fault must not turn a completed seal into a
+   * 500. */
+  (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "", tenant,
+      graph, "graph_seal", "", "sealed", ensure_request_id_header (msg));
   set_graph_mutation_json (msg, tenant, graph, "sealed", TRUE);
 }
 
@@ -11951,55 +12013,6 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
       SOUP_MEMORY_COPY, json, strlen (json));
 }
 
-/* Control-plane record for a fact lifecycle operation -- one that changes what
- * a graph is rather than what it contains.  A sibling of emit_fact_op_audit
- * rather than a generalisation of it: that one is shaped around an append's op
- * and inserted flag, and passing sentinels through it would label a hard
- * delete "fact_retract"/"duplicate", which is a false record rather than a
- * missing one.
- *
- * The audit event offers six string slots and no free field, so batch_id rides
- * in deny_reason and the outcome in deny_origin, exactly as emit_fact_op_audit
- * and emit_datalog_query_audit already do.  The names do not describe what they
- * carry; that is a schema problem shared by every emitter here and not one this
- * change can fix. */
-static wyrelog_error_t
-emit_fact_lifecycle_audit (WylDaemonHttpContext *ctx, const gchar *actor,
-    const gchar *tenant, const gchar *graph, const gchar *action,
-    const gchar *batch_id, const gchar *outcome, const gchar *request_id)
-{
-#ifdef WYL_TEST_DAEMON_HTTP
-  g_mutex_lock (&ctx->lock);
-  gboolean fail_once = ctx->fail_next_fact_op_audit;
-  ctx->fail_next_fact_op_audit = FALSE;
-  g_mutex_unlock (&ctx->lock);
-  if (fail_once)
-    return WYRELOG_E_INTERNAL;
-#endif
-#ifdef WYL_HAS_AUDIT
-  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  g_autofree gchar *resource = g_strdup_printf ("%s/%s", tenant, graph);
-  wyl_audit_event_set_subject_id (ev, actor);
-  wyl_audit_event_set_action (ev, action);
-  wyl_audit_event_set_resource_id (ev, resource);
-  wyl_audit_event_set_deny_reason (ev, batch_id);
-  wyl_audit_event_set_deny_origin (ev, outcome);
-  wyl_audit_event_set_request_id (ev, request_id);
-  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  return wyl_audit_emit (ctx->handle, ev);
-#else
-  (void) ctx;
-  (void) actor;
-  (void) tenant;
-  (void) graph;
-  (void) action;
-  (void) batch_id;
-  (void) outcome;
-  (void) request_id;
-  return WYRELOG_E_OK;
-#endif
-}
-
 static wyrelog_error_t
 emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
     const gchar *tenant, const gchar *graph, const gchar *namespace_id,
@@ -12333,6 +12346,19 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
      * before any destructive step, so a sealed graph is never opened for
      * forget. */
     if (lookup.info.sealed) {
+      /* Record the refusal.  An authorized principal attempting a hard delete
+       * on a sealed graph is security-relevant, and this is the only refusal
+       * on this route worth emitting: it is the one reachable solely after
+       * authentication and a passing authorization, so it cannot be driven by
+       * an unauthenticated caller the way the 400s and 405s ahead of it can.
+       *
+       * The result is discarded deliberately.  Folding it in would let an
+       * audit-store fault turn a correct 409 into a 500 -- the same shape of
+       * mistake as reporting a committed batch failed, one refusal class
+       * over. */
+      (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "",
+          tenant, graph, "fact_forget", batch_id, "refused_sealed",
+          ensure_request_id_header (msg));
       graph_lookup_clear (&lookup);
       set_json_error (msg, 409, "graph_sealed");
       return;
