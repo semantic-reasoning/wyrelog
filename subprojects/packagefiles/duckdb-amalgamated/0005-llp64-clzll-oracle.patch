@@ -1,0 +1,44 @@
+diff --git a/duckdb.hpp b/duckdb.hpp
+index 05f0c62..9c6150a 100644
+--- a/duckdb.hpp
++++ b/duckdb.hpp
+@@ -48321,13 +48321,23 @@ struct CountZeros<uint64_t> {
+ 		value |= value >> 4;
+ 		value |= value >> 8;
+ 		value |= value >> 16;
+ 		value |= value >> 32;
+ 		auto result = 63 - index64msb[(value * debruijn64msb) >> 58];
+ #ifdef __clang__
+-		D_ASSERT(result == static_cast<uint64_t>(__builtin_clzl(value_in)));
++		// __builtin_clzl and __builtin_ctzl take unsigned long: 64-bit under
++		// LP64, but 32-bit under LLP64 (clang-cl on Windows).  There the
++		// argument is truncated, so neither is a valid oracle for a uint64_t
++		// and both fire on a correct de Bruijn result -- Leading for any value
++		// with a bit set above 32, Trailing for any whose low 32 bits are all
++		// zero, where the truncated argument is zero and tzcnt answers 32.
++		//
++		// The ll forms take unsigned long long, 64-bit under both data models,
++		// so they oracle what these functions actually compute.  The
++		// computations are unchanged; only the debug cross-checks move.
++		D_ASSERT(result == static_cast<uint64_t>(__builtin_clzll(value_in)));
+ #endif
+ 		return result;
+ 	}
+ 	inline static idx_t Trailing(uint64_t value_in) {
+ 		if (!value_in) {
+ 			return 64;
+@@ -48338,13 +48348,13 @@ struct CountZeros<uint64_t> {
+ 		                                   61, 51, 37, 40, 49, 18, 28, 20, 55, 30, 34, 11, 43, 14, 22, 4,
+ 		                                   62, 57, 46, 52, 38, 26, 32, 41, 50, 36, 17, 19, 29, 10, 13, 21,
+ 		                                   56, 45, 25, 31, 35, 16, 9,  12, 44, 24, 15, 8,  23, 7,  6,  5};
+ 		constexpr uint64_t debruijn64lsb = 0x07EDD5E59A4E28C2ULL;
+ 		auto result = index64lsb[((value & -value) * debruijn64lsb) >> 58];
+ #ifdef __clang__
+-		D_ASSERT(result == static_cast<uint64_t>(__builtin_ctzl(value_in)));
++		D_ASSERT(result == static_cast<uint64_t>(__builtin_ctzll(value_in)));
+ #endif
+ 		return result;
+ 	}
+ };
+ 
+ template <>
