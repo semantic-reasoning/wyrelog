@@ -3136,6 +3136,79 @@ test_closed_graph_reports_sealed_not_ready (void)
   }
 }
 
+/* A successful seal evicts, and evict_closed detaches the engine without
+ * reopening admission -- so a sealed-and-evicted entry is EVICTED *and*
+ * CLOSED at once.  That is the only state where the EVICTED/ABANDONED early
+ * return and the SEALED branch disagree, which makes it the state that pins
+ * their order.  The sequencer has no production caller yet, but it is
+ * callable here, and the ordering it settles is what an operator sees the
+ * moment the seal route is wired to it. */
+static void
+test_evicted_and_closed_reports_evicted_not_sealed (void)
+{
+  TEST ("a graph both evicted and closed keeps the evicted verdict");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-evicted-closed-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  /* Nothing holds an engine call open, so the drain completes and the seal
+   * evicts.  That is the whole difference between this fixture and the
+   * closed-and-published one above, and it is what makes the two orderings
+   * distinguishable. */
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_handle_seal_fact_graph (handle, &info, -1, &outcome),
+      ==, WYRELOG_E_OK);
+  /* The fixture really is both.  Without the eviction the assertion below
+   * would hold for the ordinary sealed reason; without the closed admission
+   * it would hold whatever the order is. */
+  g_assert_true (outcome.engine_evicted);
+  g_assert_cmpint (outcome.status.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+
+  /* EVICTED outranks CLOSED: a tombstone stays off the surface rather than
+   * being reported sealed.  Moving the SEALED branch ahead of the
+   * EVICTED/ABANDONED early return reports it sealed and fails here. */
+  SealedStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      sealed_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 0);
+  g_assert_cmpuint (probe.sealed, ==, 0);
+
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"graphs_total\":0"));
+  g_assert_null (strstr (json, "\"state\":\"sealed\""));
+
+  remove_tree (root);
+}
+
 /* The other half of the closed-graph surface: a mutation the barrier refuses.
  * The durable append lands, then the post-commit refresh is refused by
  * admission -- not by a replay failure -- and the two must not be rendered
@@ -3709,5 +3782,7 @@ main (int argc, char **argv)
       test_closed_graph_reports_sealed_not_ready);
   g_test_add_func ("/fact-replay/barrier-refusal-is-not-degraded",
       test_mutation_refused_by_a_barrier_is_not_degraded);
+  g_test_add_func ("/fact-replay/evicted-closed-outranks-sealed",
+      test_evicted_and_closed_reports_evicted_not_sealed);
   return g_test_run ();
 }
