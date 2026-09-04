@@ -37,6 +37,34 @@ capture_seal_state_cb (const wyl_policy_fact_graph_info_t *info,
  * is_active.  That helper folds three conditions into one boolean -- the
  * graph does not exist, its tenant is sealed, or it is sealed -- and both
  * reads in this file need them apart. */
+#if defined(WYL_TEST_HANDLE_SEAMS)
+static WylFactGraphSealTestHook seal_test_hook;
+static gpointer seal_test_hook_data;
+
+void
+wyl_fact_graph_seal_set_test_hook (WylFactGraphSealTestHook hook,
+    gpointer user_data)
+{
+  seal_test_hook = hook;
+  seal_test_hook_data = user_data;
+}
+#endif
+
+/* Non-OK from the hook means the step fails *without running*.  See the
+ * header: a hook that ran the step and then replaced its result would not
+ * reach the branch it claims to test. */
+static wyrelog_error_t
+seal_step_fault (const gchar *phase)
+{
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (seal_test_hook != NULL)
+    return seal_test_hook (phase, seal_test_hook_data);
+#else
+  (void) phase;
+#endif
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 read_seal_state (wyl_policy_store_t *policy, const gchar *tenant_id,
     const gchar *graph_id, gboolean *out_found, gboolean *out_sealed)
@@ -155,29 +183,32 @@ wyl_fact_graph_seal (wyl_policy_store_t *policy,
   /* S4.  The linearization point.  Everything above is reversible and
    * everything below is not. */
   if (!already_sealed) {
-    rc = wyl_policy_store_seal_fact_graph (policy, graph_info->tenant_id,
-            graph_info->graph_id);
+    rc = seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_seal_fact_graph (policy, graph_info->tenant_id,
+              graph_info->graph_id);
     if (rc != WYRELOG_E_OK) {
-      /* Argued, not proved, and that now covers the predicate as well as the
-       * branch.  Asking whether the graph's own bit is set -- rather than
-       * whether it is "active" -- is what keeps a sealed TENANT from making a
-       * failed write look committed, which is the same conflation the read at
-       * the top of this function exists to avoid.  Dropping the sealed test
-       * here leaves the suite green, because reaching this needs a policy
-       * write that fails and there is no seam for one.
+      /* A write that failed after committing is indistinguishable from one
+       * that never committed, and the two need opposite compensations, so the
+       * store is asked which it was.
        *
-       * A write that failed after committing is
-       * indistinguishable from one that never committed, and the two need
-       * opposite compensations, so the store is asked which it was.  There is
-       * no fault seam on the policy write, so no test reaches this branch and
-       * removing the probe guard -- reopening even when the durable state is
-       * unknown -- leaves the suite green.  It stays because the unknown case
-       * must fail closed: reopening a possibly-sealed graph is the one
-       * direction that produces "durably sealed and admitting". */
+       * Asking whether the graph's own bit is set -- rather than whether it is
+       * "active" -- is what keeps a sealed TENANT from making a failed write
+       * look committed, the same conflation the read at the top of this
+       * function exists to avoid.
+       *
+       * The probe guard below stays because the unknown case must fail
+       * closed: reopening a possibly-sealed graph is the one direction that
+       * produces "durably sealed and admitting".  Both the branch and that
+       * guard are now driven -- see
+       * /fact-graph-seal/ambiguous-write-{rolls-back,stands}, which fail when
+       * the guard is dropped. */
       gboolean recheck_found = FALSE, recheck_sealed = FALSE;
-      wyrelog_error_t probe_rc = read_seal_state (policy,
-              graph_info->tenant_id, graph_info->graph_id, &recheck_found,
-              &recheck_sealed);
+      wyrelog_error_t probe_rc =
+          seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE);
+      if (probe_rc == WYRELOG_E_OK)
+        probe_rc = read_seal_state (policy, graph_info->tenant_id,
+                graph_info->graph_id, &recheck_found, &recheck_sealed);
       if (probe_rc == WYRELOG_E_OK && recheck_found && recheck_sealed) {
         rc = WYRELOG_E_OK;              /* it committed after all */
       } else {
@@ -202,7 +233,15 @@ wyl_fact_graph_seal (wyl_policy_store_t *policy,
            * reopen_after_abort discards its rc and open_admission refuses a
            * shut-down or abandoned entry, so an intended reopen can leave the
            * graph closed; deriving the field makes both outcomes right
-           * without a second rule to keep in step. */
+           * without a second rule to keep in step.
+           *
+           * Argued, not proved, and it is worth recording why this one keeps
+           * that marker while the branch around it lost it.  Intent and
+           * outcome agree whenever the reopen takes effect, and the only way
+           * to make an intended reopen fail is to shut the manager down --
+           * which also makes the status read fail, so the derived form
+           * degrades to FALSE and the case proves nothing either way.  No
+           * reachable test separates the two forms today. */
           out_outcome->runtime_barrier_established =
               out_outcome->status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED;
         }
