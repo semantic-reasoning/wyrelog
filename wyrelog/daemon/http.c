@@ -11995,12 +11995,16 @@ set_fact_audit_failed_json (SoupServerMessage *msg, const gchar *batch_id,
   /* A degraded mutation whose audit ALSO failed must not lose the reconcile
    * signal: mirror the fields set_fact_op_json emits so a compound failure
    * tells the client no less than either failure alone would. */
+  /* degraded gates the degradation reason only.  Whether the engine needs to
+   * catch up is a different question with a different answer for a barrier
+   * refusal, so reconcile follows the field that actually means it. */
   gboolean degraded =
       outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+  gboolean reconcile = outcome->needs_runtime_reconcile;
   g_string_append (body, ",\"queryable\":");
   g_string_append (body, outcome->engine_queryable ? "true" : "false");
   g_string_append (body, ",\"reconcile\":");
-  g_string_append (body, degraded ? "true" : "false");
+  g_string_append (body, reconcile ? "true" : "false");
   if (degraded) {
     g_string_append (body, ",\"degraded_class\":");
     append_json_string (body,
@@ -12031,8 +12035,12 @@ set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
 {
   if (!wyl_daemon_policy_write_prepare_success_response (msg))
     return;
+  /* degraded gates the degradation reason only.  Whether the engine needs to
+   * catch up is a different question with a different answer for a barrier
+   * refusal, so reconcile follows the field that actually means it. */
   gboolean degraded =
       outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+  gboolean reconcile = outcome->needs_runtime_reconcile;
   const gchar *class_name =
       wyl_fact_mutation_class_name (outcome->mutation_class);
   g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"inserted\":");
@@ -12048,7 +12056,7 @@ set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
   g_string_append (body, ",\"queryable\":");
   g_string_append (body, outcome->engine_queryable ? "true" : "false");
   g_string_append (body, ",\"reconcile\":");
-  g_string_append (body, degraded ? "true" : "false");
+  g_string_append (body, reconcile ? "true" : "false");
   if (degraded) {
     g_string_append (body, ",\"degraded_class\":");
     append_json_string (body,
@@ -12079,8 +12087,12 @@ set_fact_forget_json (SoupServerMessage *msg, gsize rows_purged,
 {
   if (!wyl_daemon_policy_write_prepare_success_response (msg))
     return;
+  /* degraded gates the degradation reason only.  Whether the engine needs to
+   * catch up is a different question with a different answer for a barrier
+   * refusal, so reconcile follows the field that actually means it. */
   gboolean degraded =
       outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+  gboolean reconcile = outcome->needs_runtime_reconcile;
   const gchar *class_name =
       wyl_fact_mutation_class_name (outcome->mutation_class);
   g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"rows_purged\":");
@@ -12090,7 +12102,7 @@ set_fact_forget_json (SoupServerMessage *msg, gsize rows_purged,
   g_string_append (body, ",\"queryable\":");
   g_string_append (body, outcome->engine_queryable ? "true" : "false");
   g_string_append (body, ",\"reconcile\":");
-  g_string_append (body, degraded ? "true" : "false");
+  g_string_append (body, reconcile ? "true" : "false");
   if (degraded) {
     g_string_append (body, ",\"degraded_class\":");
     append_json_string (body,
@@ -12263,6 +12275,11 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       outcome.engine_generation = status.engine_generation;
       if (refresh_rc == WYRELOG_E_OK) {
         outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+      } else if (status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+        /* Refused by the barrier.  Mirrors the append and retract path in
+         * wyl_handle_commit_fact_mutation; see the outcome contract. */
+        outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_BARRIER;
+        outcome.needs_runtime_reconcile = TRUE;
       } else {
         outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
         outcome.degraded_class = status.last_replay_class;

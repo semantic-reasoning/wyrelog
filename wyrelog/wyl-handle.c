@@ -2507,6 +2507,14 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
   out_outcome->engine_generation = status.engine_generation;
   if (refresh_rc == WYRELOG_E_OK) {
     out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+  } else if (status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+    /* Refused by the barrier, not failed.  The runtime fills the status on an
+     * admission refusal and clears it on a shutdown or abandoned one, so a
+     * closed admission here is a positive signal rather than a leftover.
+     * Nothing durable needs repair, and naming a degradation class would
+     * invent a replay failure that did not happen. */
+    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_BARRIER;
+    out_outcome->needs_runtime_reconcile = TRUE;
   } else {
     out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
     out_outcome->degraded_class = status.last_replay_class;

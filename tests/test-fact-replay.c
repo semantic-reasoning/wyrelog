@@ -3136,6 +3136,101 @@ test_closed_graph_reports_sealed_not_ready (void)
   }
 }
 
+/* The other half of the closed-graph surface: a mutation the barrier refuses.
+ * The durable append lands, then the post-commit refresh is refused by
+ * admission -- not by a replay failure -- and the two must not be rendered
+ * alike.  Driven at the handle entry point, which is where the classification
+ * lives; the HTTP route in front of it gates a durably sealed graph earlier,
+ * so a test there would assert against a 409 and prove nothing about this. */
+static void
+test_mutation_refused_by_a_barrier_is_not_degraded (void)
+{
+  TEST ("a mutation the seal barrier refuses is not committed-degraded");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-barrier-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
+      "orders"), ==, WYRELOG_E_OK);
+
+  SealBarrierHold hold = { handle, };
+  g_mutex_init (&hold.mutex);
+  g_cond_init (&hold.changed);
+  hold.result = WYRELOG_E_INTERNAL;
+  GThread *holder = g_thread_new ("barrier-hold", seal_barrier_holder, &hold);
+  g_mutex_lock (&hold.mutex);
+  while (!hold.inside)
+    g_cond_wait (&hold.changed, &hold.mutex);
+  g_mutex_unlock (&hold.mutex);
+
+  {
+    wyl_policy_fact_graph_info_t info = {
+      .tenant_id = "tenant-a",
+      .graph_id = "orders",
+    };
+    WylFactGraphSealOutcome sealed = { 0 };
+    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, &info, 50 * 1000,
+        &sealed), ==, WYRELOG_E_BUSY);
+    g_assert_true (sealed.runtime_barrier_established);
+    wyl_fact_graph_seal_outcome_clear (&sealed);
+  }
+
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome = { 0 };
+  g_assert_cmpint (commit_one_mutation_op (handle, policy, "tenant-a",
+      "orders", "batch-barrier", "key-barrier", WYL_FACT_STORE_OP_ASSERT,
+      "order-c", WYL_FACT_STORE_BATCH_FAULT_NONE, NULL, &inserted, &outcome),
+      ==, WYRELOG_E_OK);
+
+  /* The append really committed.  Without this the assertions below cannot
+   * tell a barrier refusal from a precommit failure, which also carries no
+   * durable reconcile. */
+  g_assert_true (inserted);
+  g_assert_true (outcome.delta.inserted);
+  g_assert_cmpint (outcome.delta.committed_row_delta, ==, 1);
+
+  g_assert_cmpint (outcome.mutation_class, ==,
+      WYL_FACT_MUTATION_COMMITTED_BARRIER);
+  /* The engine lacks the batch, so a reconcile is genuinely owed -- but the
+   * durable state is intact and asking an operator to repair it is wrong. */
+  g_assert_true (outcome.needs_runtime_reconcile);
+  g_assert_false (outcome.needs_durable_reconcile);
+  /* No replay failed, so naming a degradation reason would invent one. */
+  g_assert_cmpint (outcome.degraded_class, ==, WYL_FACT_GRAPH_REPLAY_NONE);
+
+  g_mutex_lock (&hold.mutex);
+  hold.release = TRUE;
+  g_cond_broadcast (&hold.changed);
+  g_mutex_unlock (&hold.mutex);
+  g_thread_join (holder);
+  g_mutex_clear (&hold.mutex);
+  g_cond_clear (&hold.changed);
+}
+
 static void
 test_commit_fact_mutation_reports_committed_degraded (void)
 {
@@ -3612,5 +3707,7 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_races_with_queries);
   g_test_add_func ("/fact-replay/closed-graph-reports-sealed",
       test_closed_graph_reports_sealed_not_ready);
+  g_test_add_func ("/fact-replay/barrier-refusal-is-not-degraded",
+      test_mutation_refused_by_a_barrier_is_not_degraded);
   return g_test_run ();
 }
