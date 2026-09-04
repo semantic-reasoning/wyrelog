@@ -3395,6 +3395,13 @@ test('duckdb-source-codegen-boundary', python3,
   args : [files('test-duckdb-source-codegen-boundary.py'),
     meson.project_source_root()])
 
+duckdb_prepare_destroy_guard = find_program(
+  '../tools/check-duckdb-prepare-destroy.py')
+test('duckdb-prepare-destroy', duckdb_prepare_destroy_guard,
+  args : [meson.project_source_root()])
+test('duckdb-prepare-destroy-self-test', duckdb_prepare_destroy_guard,
+  args : ['--self-test', meson.project_source_root()])
+
 test('duckdb-after-walstart-boundary', python3,
   args : [files('test-duckdb-after-walstart-boundary.py'),
     meson.project_source_root()])

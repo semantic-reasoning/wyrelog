@@ -560,8 +560,10 @@ fact_identity_execute (gpointer context, const gchar *sql,
     *out_rows = 0;
   if (store == NULL || sql == NULL || out_rows == NULL
       || (n_params != 0 && params == NULL)
-      || duckdb_prepare (store->conn, sql, &statement) != DuckDBSuccess)
+      || duckdb_prepare (store->conn, sql, &statement) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&statement);
     return WYRELOG_E_IO;
+  }
   for (gsize i = 0; i < n_params; i++)
     if (!fact_identity_bind_param (statement, i + 1, &params[i])) {
       duckdb_destroy_prepare (&statement);
@@ -1744,8 +1746,10 @@ select_valid_rows_for_batch_unlocked (wyl_fact_store_t *store,
 
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
-  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, trigger_batch_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -2131,8 +2135,10 @@ count_projection_rows_unlocked (wyl_fact_store_t *store, const gchar *table,
   g_autoptr (GString) sql = g_string_new ("SELECT COUNT(*) FROM ");
   append_duckdb_identifier (sql, table);
   g_string_append (sql, " WHERE __wyl_batch_id = ?;");
-  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, batch_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;

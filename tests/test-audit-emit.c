@@ -881,8 +881,10 @@ runtime_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
 
   if (duckdb_prepare (conn,
       "SELECT COUNT(*) FROM audit_events WHERE id = ?;", &stmt)
-      != DuckDBSuccess)
+      != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return FALSE;
+  }
   if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return FALSE;
@@ -1042,8 +1044,10 @@ check_live_audit_projection_for_action (WylHandle *handle, const gchar *action,
 
   static const gchar *sql =
       "SELECT id, created_at_us FROM audit_events WHERE action = ?;";
-  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return base_code;
+  }
   if (duckdb_bind_varchar (stmt, 1, action) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return base_code + 1;
@@ -1827,6 +1831,7 @@ check_duplicate_emit_keeps_runtime_row (void)
 
   static const gchar *sql = "SELECT COUNT(*) FROM audit_events WHERE id = ?;";
   if (duckdb_prepare (duck_conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     g_object_unref (handle);
     return 195;
   }
