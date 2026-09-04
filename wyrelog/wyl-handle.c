@@ -2611,6 +2611,16 @@ typedef struct
 static wyl_fact_graph_state_t
 legacy_fact_graph_state (const WylFactGraphRuntimeStatus *status)
 {
+  /* Closed admission outranks replay health, because it is the stronger
+   * statement about now: acquire_snapshot refuses on admission before it
+   * looks at the published engine, so the query fails whatever
+   * last_replay_class says.  Nothing is lost -- the seal never writes the
+   * replay fields, so an unseal restores the health verdict from them.
+   *
+   * This sits downstream of the EVICTED/ABANDONED early return in the caller,
+   * which keeps ABANDONED outranking CLOSED.  Do not move it ahead of that. */
+  if (status->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED)
+    return WYL_FACT_GRAPH_STATE_SEALED;
   if (status->state == WYL_FACT_GRAPH_RUNTIME_READY
       || (status->state == WYL_FACT_GRAPH_RUNTIME_BUILDING
       && status->queryable
@@ -2659,9 +2669,19 @@ fact_graph_runtime_status_cb (const WylFactGraphRuntimeStatus *runtime_status,
     .tenant_id = runtime_status->key.tenant_id,
     .graph_id = runtime_status->key.graph_id,
     .state = state,
-    .last_error_class = state == WYL_FACT_GRAPH_STATE_READY ? NULL
+    /* Sealed is a lifecycle state, not a failure, so it does not name an
+     * error class any more than ready does. */
+    .last_error_class = (state == WYL_FACT_GRAPH_STATE_READY
+        || state == WYL_FACT_GRAPH_STATE_SEALED) ? NULL
         : (gchar *) wyl_fact_graph_state_name (state),
-    .queryable = runtime_status->queryable,
+    /* Narrowed here rather than in the runtime status, which deliberately
+     * keeps queryable describing the published engine so a close stays
+     * reversible.  The operator-facing field has to mean what the runbook
+     * promises it means -- that the graph is serving queries -- and a closed
+     * graph is not.  Only the closed case is narrowed; every other state
+     * reports exactly what the runtime said. */
+    .queryable = runtime_status->queryable
+        && runtime_status->admission == WYL_FACT_GRAPH_ADMISSION_OPEN,
     .last_replay_at_us = runtime_status->last_replay_at_us,
   };
   return ctx->callback (&status, ctx->user_data);

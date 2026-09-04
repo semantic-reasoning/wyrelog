@@ -2905,6 +2905,222 @@ test_commit_fact_mutation_idempotent_retry (void)
  * creation ever starts populating that registry, this arrangement stops
  * degrading and this test will FAIL with COMMITTED_READY.  The fix is a new
  * lever, not a relaxed assertion. */
+/* A graph closed to admission but still holding a published engine.  It is
+ * the state a seal leaves behind when its drain expires against a graph that
+ * was already durably sealed: the compensation rule declines to reopen a
+ * durably sealed graph, and the eviction never runs because the drain did not
+ * finish.  Nothing clears it short of a restart, so it is the state an
+ * operator is most likely to poll -- and the one the status surface has
+ * described incorrectly. */
+typedef struct
+{
+  WylHandle *handle;
+  GMutex mutex;
+  GCond changed;
+  gboolean inside;
+  gboolean release;
+  wyrelog_error_t result;
+} SealBarrierHold;
+
+static void
+seal_barrier_hold_cb (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  SealBarrierHold *hold = user_data;
+  (void) engine;
+  (void) relation;
+  (void) row;
+  (void) ncols;
+  /* The engine call is counted while this callback runs, and the drain waits
+   * on exactly that counter.  Holding here is what makes the timeout
+   * deterministic instead of a race. */
+  g_mutex_lock (&hold->mutex);
+  hold->inside = TRUE;
+  g_cond_broadcast (&hold->changed);
+  while (!hold->release)
+    g_cond_wait (&hold->changed, &hold->mutex);
+  g_mutex_unlock (&hold->mutex);
+}
+
+static gpointer
+seal_barrier_holder (gpointer user_data)
+{
+  SealBarrierHold *hold = user_data;
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+  hold->result = wyl_handle_snapshot_fact_graph_relation (hold->handle,
+          "tenant-a", "orders", observed, seal_barrier_hold_cb, hold);
+  return NULL;
+}
+
+typedef struct
+{
+  guint total;
+  guint sealed;
+  guint ready;
+  gboolean sealed_is_queryable;
+  gboolean saw_sealed_error_class;
+} SealedStatusProbe;
+
+static wyrelog_error_t
+sealed_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
+{
+  SealedStatusProbe *probe = user_data;
+  probe->total++;
+  if (status->state == WYL_FACT_GRAPH_STATE_READY)
+    probe->ready++;
+  if (g_strcmp0 (status->graph_id, "orders") == 0
+      && g_strcmp0 (status->tenant_id, "tenant-a") == 0
+      && status->state == WYL_FACT_GRAPH_STATE_SEALED) {
+    probe->sealed++;
+    probe->sealed_is_queryable = status->queryable;
+    probe->saw_sealed_error_class = status->last_error_class != NULL;
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+test_closed_graph_reports_sealed_not_ready (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-sealed-status-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  /* Durably seal behind the runtime's back, so the seal below takes the
+   * already_sealed branch and declines to reopen when its drain expires.
+   * Sealing through the handle instead would evict, which is the state this
+   * test is NOT about. */
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
+        "orders"), ==, WYRELOG_E_OK);
+  }
+
+  SealBarrierHold hold = { handle, };
+  g_mutex_init (&hold.mutex);
+  g_cond_init (&hold.changed);
+  hold.result = WYRELOG_E_INTERNAL;
+  GThread *holder = g_thread_new ("seal-barrier-hold", seal_barrier_holder,
+          &hold);
+  g_mutex_lock (&hold.mutex);
+  while (!hold.inside)
+    g_cond_wait (&hold.changed, &hold.mutex);
+  g_mutex_unlock (&hold.mutex);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    wyl_policy_fact_graph_info_t info = {
+      .tenant_id = "tenant-a",
+      .graph_id = "orders",
+    };
+    WylFactGraphSealOutcome outcome = { 0 };
+    /* BUSY, because the held engine call outlives the drain. */
+    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, &info, 50 * 1000,
+        &outcome), ==, WYRELOG_E_BUSY);
+    g_assert_true (outcome.runtime_barrier_established);
+    g_assert_false (outcome.engine_evicted);
+    wyl_fact_graph_seal_outcome_clear (&outcome);
+  }
+
+  /* The state under test really is closed-and-published, not evicted: a query
+   * is refused while the engine is still there.  Without this the assertions
+   * below would pass just as well against a graph that never had an engine,
+   * which is the vacuous version of this test. */
+  {
+    g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+          ("shop.ns", "orders-rel");
+    g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+    SnapshotProbe probe = { observed, 0, FALSE };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+        "tenant-a", "orders", observed, handle_snapshot_cb, &probe), ==,
+        WYRELOG_E_BUSY);
+  }
+
+  SealedStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      sealed_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 1);
+  g_assert_cmpuint (probe.sealed, ==, 1);
+  g_assert_cmpuint (probe.ready, ==, 0);
+  /* The barrier is what the surface must describe.  Reporting queryable here
+   * would repeat the runbook's promise that a queryable graph serves queries,
+   * against a graph that just refused one. */
+  g_assert_false (probe.sealed_is_queryable);
+  /* Sealed is a lifecycle state, not a failure: it must not surface as an
+   * error class. */
+  g_assert_false (probe.saw_sealed_error_class);
+
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"state\":\"sealed\""));
+  /* The negative is the load-bearing half: a body carrying both would satisfy
+   * the positive alone. */
+  g_assert_null (strstr (json, "\"state\":\"ready\""));
+  g_assert_null (strstr (json, "\"queryable\":true"));
+
+  g_mutex_lock (&hold.mutex);
+  hold.release = TRUE;
+  g_cond_broadcast (&hold.changed);
+  g_mutex_unlock (&hold.mutex);
+  g_thread_join (holder);
+  g_assert_cmpint (hold.result, ==, WYRELOG_E_OK);
+  g_mutex_clear (&hold.mutex);
+  g_cond_clear (&hold.changed);
+  g_clear_object (&handle);
+
+  /* The same verdict on the path production actually takes.  Nothing calls
+   * the runtime seal sequencer yet; what closes admission in a shipped daemon
+   * is the boot pass, reading the durable bit.  That graph gets no engine, so
+   * it arrives here from the other direction -- state DEGRADED with admission
+   * closed rather than READY with an engine published -- and must still
+   * report sealed rather than a replay reason it never earned. */
+  {
+    g_autoptr (WylHandle) rebooted = NULL;
+    g_assert_cmpint (wyl_handle_open_with_options (&opts, &rebooted), ==,
+        WYRELOG_E_OK);
+    SealedStatusProbe booted = { 0 };
+    g_assert_cmpint (wyl_handle_foreach_fact_graph_status (rebooted,
+        sealed_status_cb, &booted), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (booted.sealed, ==, 1);
+    g_assert_cmpuint (booted.ready, ==, 0);
+    g_assert_false (booted.saw_sealed_error_class);
+
+    g_autofree gchar *booted_json = wyl_daemon_fact_status_json (rebooted,
+            TRUE);
+    g_assert_nonnull (booted_json);
+    g_assert_nonnull (strstr (booted_json, "\"state\":\"sealed\""));
+    /* The reason the runbook currently names for this graph, and the one it
+     * must stop naming. */
+    g_assert_null (strstr (booted_json, "schema_mismatch"));
+  }
+}
+
 static void
 test_commit_fact_mutation_reports_committed_degraded (void)
 {
@@ -3379,5 +3595,7 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
       test_handle_refresh_fact_graph_races_with_queries);
+  g_test_add_func ("/fact-replay/closed-graph-reports-sealed",
+      test_closed_graph_reports_sealed_not_ready);
   return g_test_run ();
 }
