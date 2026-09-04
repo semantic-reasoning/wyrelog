@@ -9,6 +9,7 @@ typedef struct
   guint total;
   guint ready;
   guint degraded;
+  guint sealed;
 } FactStatusJsonCtx;
 
 static void
@@ -56,7 +57,13 @@ append_graph_status_json (const wyl_fact_graph_status_t *status,
 {
   FactStatusJsonCtx *ctx = user_data;
   ctx->total++;
-  if (status->state == WYL_FACT_GRAPH_STATE_READY)
+  /* Sealed is neither bucket.  It is an operator's own decision, so counting
+   * it as degraded raises an alert for an intended state, and counting it as
+   * ready hides a graph that answers nothing.  It leaves the aggregate
+   * verdict alone for the same reason. */
+  if (status->state == WYL_FACT_GRAPH_STATE_SEALED)
+    ctx->sealed++;
+  else if (status->state == WYL_FACT_GRAPH_STATE_READY)
     ctx->ready++;
   else
     ctx->degraded++;
@@ -103,8 +110,9 @@ wyl_daemon_fact_status_json (WylHandle *handle, gboolean include_graphs)
   g_autoptr (GString) body = g_string_new ("{\"status\":");
   append_json_string (body, status);
   g_string_append_printf (body,
-      ",\"graphs_total\":%u,\"graphs_ready\":%u,\"graphs_degraded\":%u",
-      ctx.total, ctx.ready, ctx.degraded);
+      ",\"graphs_total\":%u,\"graphs_ready\":%u,\"graphs_degraded\":%u"
+      ",\"graphs_sealed\":%u",
+      ctx.total, ctx.ready, ctx.degraded, ctx.sealed);
   if (include_graphs) {
     g_string_append (body, ",\"graphs\":[");
     if (graphs != NULL)
