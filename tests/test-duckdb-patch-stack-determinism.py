@@ -31,6 +31,7 @@ PATCHES = (
     "0002-windows-amalgamation-compat.patch",
     "0003-test-after-walstart-rendezvous.patch",
     "0004-windows-posix-rename.patch",
+    "0005-llp64-clzll-oracle.patch",
 )
 PATCH_PATHS = tuple(f"{PATCH_DIR}/{name}" for name in PATCHES)
 WORKFLOWS = (
@@ -76,6 +77,10 @@ EXPECTED_STAGE_HASHES = {
     PATCHES[3]: (
         "7ee8f12117b56ea55831d37488981bc1f3fa5b68300286ac131fd4557e6bd765",
         "b84c3242dde1409d7c2303d8a4dfc2f178b609a58438e3ff9f3ded7aa09406d4",
+    ),
+    PATCHES[4]: (
+        "7ee8f12117b56ea55831d37488981bc1f3fa5b68300286ac131fd4557e6bd765",
+        "0a84a87c382de711e86a4f2d100816644bd57e13613eabeee126e886d366606d",
     ),
 }
 EXPECTED_TRANSACTION_PATCH_SHA256 = (
@@ -486,7 +491,7 @@ def validate_attributes(snapshot: dict[str, bytes]) -> None:
     logical = [line for line in attributes.splitlines() if line.strip()]
     expected = (
         "subprojects/packagefiles/duckdb-amalgamated/"
-        "000[1-4]-*.patch text eol=lf"
+        "000[1-5]-*.patch text eol=lf"
     )
     if logical != [expected]:
         fail("E_ATTR_RULE", "historical DuckDB patches need the exact LF rule")
@@ -497,8 +502,10 @@ def validate_patch_bytes(snapshot: dict[str, bytes]) -> None:
         data = snapshot[relative]
         if b"\r" in data:
             fail("E_PATCH_CRLF", f"CR byte in {relative}")
-    for relative in PATCH_PATHS[1:3]:
+    for relative in (*PATCH_PATHS[1:3], PATCH_PATHS[4]):
         for line_number, line in enumerate(snapshot[relative].splitlines(), 1):
+            if line == b" ":
+                continue
             if line.endswith((b" ", b"\t")):
                 fail(
                     "E_PATCH_TRAILING_WS",
@@ -615,6 +622,31 @@ def validate_patch_semantics(snapshot: dict[str, bytes]) -> None:
         fail("E_TRANSACTION_BRANCH", "transaction callbacks left branch-local boundaries")
     if patch3.count("+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL") != 3:
         fail("E_TRANSACTION_SCOPE", "transaction seam must have exactly three guards")
+
+    patch5 = decode_utf8(snapshot[PATCH_PATHS[4]], PATCH_PATHS[4])
+    for narrow in ("clzl", "ctzl"):
+        retired = (
+            f"-\t\tD_ASSERT(result == static_cast<uint64_t>"
+            f"(__builtin_{narrow}(value_in)));"
+        )
+        if patch5.count(retired) != 1:
+            fail(
+                "E_CLZ_ORACLE_SOURCE",
+                f"0005 must retire exactly one __builtin_{narrow} oracle",
+            )
+        installed = (
+            f"+\t\tD_ASSERT(result == static_cast<uint64_t>"
+            f"(__builtin_{narrow}l(value_in)));"
+        )
+        if patch5.count(installed) != 1:
+            fail(
+                "E_CLZ_ORACLE_TARGET",
+                f"0005 must install exactly one __builtin_{narrow}l oracle",
+            )
+    for token in ("-\t\tauto result =", "-\t\treturn result;", "-\t\tvalue |=",
+                  "-\t\tconstexpr uint64_t"):
+        if token in patch5:
+            fail("E_CLZ_COMPUTATION", "0005 may only move the debug cross-checks")
 
 
 def validate_seam_build_boundary(snapshot: dict[str, bytes]) -> None:
@@ -952,6 +984,31 @@ def check_stage_hashes(directory: Path, stage: str) -> None:
         )
 
 
+def check_clz_oracle(hpp: str) -> None:
+    """Reject a 64-bit leading-zero oracle that truncates under LLP64.
+
+    __builtin_clzl takes unsigned long, which is 32-bit under clang-cl, so it
+    cannot cross-check a uint64_t result.  __builtin_clzll is 64-bit under both
+    data models.
+    """
+    for wide in ("clzll", "ctzll"):
+        oracle = (
+            f"D_ASSERT(result == static_cast<uint64_t>"
+            f"(__builtin_{wide}(value_in)));"
+        )
+        if hpp.count(oracle) != 1:
+            fail(
+                "E_COMPOSED_CLZ_ORACLE",
+                f"composed 64-bit oracle is not __builtin_{wide}",
+            )
+    for narrow in ("__builtin_clzl(", "__builtin_ctzl("):
+        if narrow in hpp:
+            fail(
+                "E_COMPOSED_CLZ_ORACLE",
+                f"composed header still narrows {narrow} to unsigned long",
+            )
+
+
 def validate_composed_semantics(directory: Path) -> None:
     cpp = (directory / "duckdb.cpp").read_text(encoding="utf-8")
     hpp = (directory / "duckdb.hpp").read_text(encoding="utf-8")
@@ -1029,6 +1086,7 @@ def validate_composed_semantics(directory: Path) -> None:
         fail("E_COMPOSED_TRANSACTION", "composed transaction fields drifted")
     if cpp.count(commit_callback) != 1 or cpp.count(rollback_callback) != 1:
         fail("E_COMPOSED_TRANSACTION", "composed transaction callbacks drifted")
+    check_clz_oracle(hpp)
 
 
 def strict_replay(root: Path, archive: Path, tool: Path) -> None:
@@ -1212,7 +1270,11 @@ def run_self_tests(
     cases: tuple[tuple[str, dict[str, bytes]], ...] = (
         (
             "E_ATTR_RULE",
-            mutated(snapshot, ".gitattributes", lambda data: data.replace(b"000[1-4]", b"*")),
+            mutated(
+                snapshot,
+                ".gitattributes",
+                lambda data: replace_once(data, b"000[1-5]", b"*"),
+            ),
         ),
         (
             "E_PATCH_ORDER",
@@ -1229,6 +1291,41 @@ def run_self_tests(
         (
             "E_PATCH_TRAILING_WS",
             mutated(snapshot, PATCH_PATHS[1], lambda data: data.replace(b"\n", b" \n", 1)),
+        ),
+        (
+            "E_PATCH_TRAILING_WS",
+            mutated(snapshot, PATCH_PATHS[4], lambda data: data.replace(b"\n", b" \n", 1)),
+        ),
+        (
+            "E_CLZ_ORACLE_SOURCE",
+            mutated(
+                snapshot,
+                PATCH_PATHS[4],
+                lambda data: replace_once(
+                    data, b"__builtin_ctzl(value_in)));", b"__builtin_ctzq(value_in)));"
+                ),
+            ),
+        ),
+        (
+            "E_CLZ_ORACLE_TARGET",
+            mutated(
+                snapshot,
+                PATCH_PATHS[4],
+                lambda data: replace_once(
+                    data, b"__builtin_ctzll(value_in)));", b"__builtin_ctzq(value_in)));"
+                ),
+            ),
+        ),
+        (
+            "E_CLZ_COMPUTATION",
+            mutated(
+                snapshot,
+                PATCH_PATHS[4],
+                lambda data: replace_once(
+                    data, b" \t\tconstexpr uint64_t debruijn64lsb",
+                    b"-\t\tconstexpr uint64_t debruijn64lsb"
+                ),
+            ),
         ),
         (
             "E_INTERFACE_GUARD_COUNT",
@@ -1863,6 +1960,34 @@ def run_self_tests(
         lambda: classify_patch_result(PatchRun(0, "Hunk #1 succeeded (offset 2 lines)"), "probe"),
         "E_PATCH_OFFSET",
     )
+    good_oracle = "".join(
+        f"\t\tD_ASSERT(result == static_cast<uint64_t>"
+        f"(__builtin_{wide}(value_in)));\n"
+        for wide in ("clzll", "ctzll")
+    )
+    check_clz_oracle(good_oracle)
+    for wide in ("clzll", "ctzll"):
+        expect_error(
+            lambda wide=wide: check_clz_oracle(
+                good_oracle.replace(wide, wide[:-1])
+            ),
+            "E_COMPOSED_CLZ_ORACLE",
+        )
+        expect_error(
+            lambda wide=wide: check_clz_oracle(
+                good_oracle
+                + f"\t\tD_ASSERT(result == static_cast<uint64_t>"
+                f"(__builtin_{wide}(value_in)));\n"
+            ),
+            "E_COMPOSED_CLZ_ORACLE",
+        )
+    for narrow in ("clzl", "ctzl"):
+        expect_error(
+            lambda narrow=narrow: check_clz_oracle(
+                good_oracle + f"\t\treturn __builtin_{narrow}(v);\n"
+            ),
+            "E_COMPOSED_CLZ_ORACLE",
+        )
     for suffix in (".orig", ".rej"):
         with tempfile.TemporaryDirectory(prefix="wyrelog-artifact-probe-") as temporary:
             artifact = Path(temporary) / f"duckdb.cpp{suffix}"
