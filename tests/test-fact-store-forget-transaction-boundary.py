@@ -96,13 +96,15 @@ def validate(files: dict[str, str]) -> None:
 
     body_failures = (
         "if (duckdb_prepare (store->conn, audit_sql, &stmt) "
-        "!= DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
+        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (ok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
         "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (exec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
         "    goto rollback;\n  }",
         "if (duckdb_prepare (store->conn, update_sql, &ustmt) "
-        "!= DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
+        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (uok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
         "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (uexec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
@@ -577,13 +579,15 @@ def self_test(baseline: dict[str, str]) -> None:
     )
     body_failures = (
         "if (duckdb_prepare (store->conn, audit_sql, &stmt) "
-        "!= DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
+        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (ok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&stmt);\n"
         "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (exec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"
         "    goto rollback;\n  }",
         "if (duckdb_prepare (store->conn, update_sql, &ustmt) "
-        "!= DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
+        "!= DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
+        "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (uok != DuckDBSuccess) {\n    duckdb_destroy_prepare (&ustmt);\n"
         "    rc = WYRELOG_E_IO;\n    goto rollback;\n  }",
         "if (uexec != DuckDBSuccess) {\n    rc = WYRELOG_E_IO;\n"

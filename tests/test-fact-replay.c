@@ -1306,6 +1306,65 @@ test_boot_converges_forget_on_sealed_provisioned_graph (void)
  * then makes the reconciler's per-intent scope check skip it -- POLICY, with
  * the store open, which is the ledger-was-read class rather than the
  * could-not-open class. */
+/* Undo seed_unconverged_erasure's fault: strip the `missing__` prefix so the
+ * intent names its real projection again and the next pass converges it.
+ *
+ * The strip happens in C rather than in SQL.  A `replace()` in the UPDATE
+ * read more naturally, but it was the only DuckDB-side use of that function
+ * in the tree -- every other one runs against SQLite -- and it failed on the
+ * macOS row while passing everywhere else.  A bound parameter needs nothing
+ * from the SQL dialect, so it cannot differ between rows.
+ *
+ * Every DuckDB failure here reports its own error text.  The previous form
+ * asserted on the return code alone, so a failure showed up as `1 == 0` with
+ * nothing saying why. */
+static void
+repair_forget_projection_table (duckdb_connection conn)
+{
+  static const gchar prefix[] = "missing__";
+  duckdb_result res = { 0 };
+  if (duckdb_query (conn,
+      "SELECT projection_table FROM fact_forget_intent "
+      "WHERE state = 'PENDING';", &res) != DuckDBSuccess) {
+    g_error ("reading the faulted intent failed: %s",
+        duckdb_result_error (&res));
+  }
+  if (duckdb_row_count (&res) != 1) {
+    g_error ("expected one PENDING intent to repair, found %" G_GUINT64_FORMAT,
+        (guint64) duckdb_row_count (&res));
+  }
+  /* duckdb_value_varchar allocates with DuckDB's allocator, so it is freed
+   * with duckdb_free rather than g_free. */
+  gchar *faulted = duckdb_value_varchar (&res, 0, 0);
+  duckdb_destroy_result (&res);
+  g_assert_nonnull (faulted);
+  g_assert_true (g_str_has_prefix (faulted, prefix));
+  g_autofree gchar *real_name = g_strdup (faulted + sizeof (prefix) - 1);
+  duckdb_free (faulted);
+
+  duckdb_prepared_statement stmt = NULL;
+  if (duckdb_prepare (conn,
+      "UPDATE fact_forget_intent SET projection_table = ? "
+      "WHERE state = 'PENDING';", &stmt) != DuckDBSuccess) {
+    g_autofree gchar *why = g_strdup (duckdb_prepare_error (stmt));
+    duckdb_destroy_prepare (&stmt);
+    g_error ("preparing the repair failed: %s", why != NULL ? why : "(none)");
+  }
+  if (duckdb_bind_varchar (stmt, 1, real_name) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    g_error ("binding the repaired projection name failed");
+  }
+  duckdb_result upd = { 0 };
+  if (duckdb_execute_prepared (stmt, &upd) != DuckDBSuccess) {
+    g_autofree gchar *why = g_strdup (duckdb_result_error (&upd));
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&upd);
+    g_error ("the repair UPDATE failed: %s", why != NULL ? why : "(none)");
+  }
+  duckdb_destroy_prepare (&stmt);
+  duckdb_destroy_result (&upd);
+}
+
 static void
 seed_unconverged_erasure (wyl_policy_store_t *policy, const gchar *tenant_id,
     const gchar *graph_id)
@@ -1334,10 +1393,19 @@ seed_unconverged_erasure (wyl_policy_store_t *policy, const gchar *tenant_id,
   g_assert_cmpint (wyl_fact_store_forget (store, &schema, &opts, NULL), !=,
       WYRELOG_E_OK);
 
+  /* Point the intent at a projection table that does not exist, so executing
+   * it fails and it stays PENDING.  This used to rewrite the tenant to
+   * `tenant-z` instead, which the reconciler refuses -- but since #941 an
+   * identity mismatch is quarantined on the first pass that sees it, and
+   * handle-open runs such a pass, so by replay time there would be no
+   * outstanding erasure left to report.  A retryable failure is what an
+   * unconverged erasure looks like now: quarantine is for the permanent
+   * conditions, and this is not one of them. */
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   duckdb_result result = { 0 };
   g_assert_cmpint (duckdb_query (conn,
-      "UPDATE fact_forget_intent SET tenant_id = 'tenant-z' "
+      "UPDATE fact_forget_intent "
+      "SET projection_table = 'missing__' || projection_table "
       "WHERE state = 'PENDING';", &result), ==, DuckDBSuccess);
   duckdb_destroy_result (&result);
 }
@@ -1428,7 +1496,8 @@ test_forget_state_clears_on_convergence_but_not_on_refresh (void)
   g_assert_cmpint (assert_single_graph_state (handle), ==,
       WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
 
-  /* Repair the intent's scope so the next full replay converges it. */
+  /* Repair the intent so the next full replay converges it -- the inverse of
+   * the fixture's fault, so the two cannot drift apart. */
   {
     g_autofree gchar *sp = lookup_graph_storage_path (policy, "tenant-a",
             "orders");
@@ -1436,11 +1505,7 @@ test_forget_state_clears_on_convergence_but_not_on_refresh (void)
     g_autofree gchar *fp = g_build_filename (sp, "facts.duckdb", NULL);
     g_autoptr (wyl_fact_store_t) st = NULL;
     g_assert_cmpint (wyl_fact_store_open (fp, &st), ==, WYRELOG_E_OK);
-    duckdb_result res = { 0 };
-    g_assert_cmpint (duckdb_query (wyl_fact_store_get_connection (st),
-        "UPDATE fact_forget_intent SET tenant_id = 'tenant-a' "
-        "WHERE state = 'PENDING';", &res), ==, DuckDBSuccess);
-    duckdb_destroy_result (&res);
+    repair_forget_projection_table (wyl_fact_store_get_connection (st));
   }
 
   wyl_fact_replay_summary_t summary = { 0 };
@@ -1728,15 +1793,16 @@ test_status_is_not_ready_while_an_erasure_is_outstanding (void)
   /* Redaction is unchanged.  The last two are the ones a compliance state
    * would be tempted to carry -- the operator who requested the erasure and
    * the reason they gave -- and the fixture really does set both, so they can
-   * fail.  `tenant-z` is the rewritten intent scope; it has no path to this
-   * JSON today, so treat it as a cheap tripwire rather than as coverage. */
+   * fail.  `missing__` is the fixture's broken projection name; it has no
+   * path to this JSON today, so treat it as a cheap tripwire rather than as
+   * coverage. */
   g_assert_null (strstr (json, "facts.duckdb"));
   g_assert_null (strstr (json, "storage_path"));
   g_assert_null (strstr (json, root));
   g_assert_null (strstr (json, "admin"));
   g_assert_null (strstr (json, "gdpr-erasure"));
   g_assert_null (strstr (json, "batch-1"));
-  g_assert_null (strstr (json, "tenant-z"));
+  g_assert_null (strstr (json, "missing__"));
 
   remove_tree (root);
 }
