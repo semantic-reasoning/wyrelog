@@ -1350,6 +1350,30 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"sealed\":true") == NULL)
     return 31;
+#ifdef WYL_HAS_AUDIT
+  /* Sealing is irreversible and closes the graph to every mutation, and it
+   * emitted nothing.  wyl_decide does audit the authorization, but its record
+   * names the tenant as the resource -- byte-identical for every graph in that
+   * tenant, and for a list call using the same permission -- so the existing
+   * stream cannot say which graph was sealed, or whether the seal completed.
+   * There is no batch here, so deny_reason is empty. */
+  {
+    LifecycleAuditProbe seal_audit = {
+      .subject_id = "facts-admin",
+      .action = "graph_seal",
+      .resource_id = "__wr_default/orders",
+      .deny_reason = "",
+    };
+    if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), lifecycle_audit_probe_cb, &seal_audit) != WYRELOG_E_OK)
+      return 106;
+    if (seal_audit.matches != 1) {
+      g_printerr ("graph seal left no control-plane record (matches=%u)\n",
+          seal_audit.matches);
+      return 107;
+    }
+  }
+#endif
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *sealed_append_query = g_strdup_printf
@@ -1398,6 +1422,30 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         body != NULL ? body : "(null)");
     return 409;
   }
+#ifdef WYL_HAS_AUDIT
+  /* A refused hard delete against a sealed graph is a security-relevant
+   * occurrence and left no trace.  It is emitted, unlike the other refusals
+   * on this route, because it is the only one reachable solely by a caller
+   * who already authenticated and passed authorization -- the 400s and 405s
+   * ahead of it are pre-auth, and emitting there would let an unauthenticated
+   * client drive audit writes. */
+  {
+    LifecycleAuditProbe refused_audit = {
+      .subject_id = "facts-admin",
+      .action = "fact_forget",
+      .resource_id = "__wr_default/orders",
+      .deny_reason = "batch-7",
+    };
+    if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), lifecycle_audit_probe_cb, &refused_audit) != WYRELOG_E_OK)
+      return 104;
+    if (refused_audit.matches != 1) {
+      g_printerr ("a refused sealed forget left no record (matches=%u)\n",
+          refused_audit.matches);
+      return 105;
+    }
+  }
+#endif
   /* The refusal destroyed nothing.  Only 304 means the count moved; the
    * helper's other codes are fixture failures and must not be reported as a
    * gate regression. */
