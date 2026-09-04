@@ -216,6 +216,80 @@ count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
   return TRUE;
 }
 
+#ifdef WYL_HAS_AUDIT
+/* The control-plane record for a fact lifecycle operation.  Matched on the
+ * four fields the emitter fills; deny_origin and request_id are checked
+ * separately where they matter. */
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *action;
+  const gchar *resource_id;
+  const gchar *deny_reason;
+  guint matches;
+} LifecycleAuditProbe;
+
+static wyrelog_error_t
+lifecycle_audit_probe_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) deny_origin;
+  (void) request_id;
+  (void) decision;
+  LifecycleAuditProbe *probe = user_data;
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (action, probe->action) == 0
+      && g_strcmp0 (resource_id, probe->resource_id) == 0
+      && g_strcmp0 (deny_reason, probe->deny_reason) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+/* Read the batch id the durable forget row recorded, so the control-plane
+ * probe can be built from it rather than from a literal. */
+static gint
+read_forget_audit_batch_id (const gchar *fact_root, const gchar *graph_id,
+    gchar **out_batch)
+{
+  *out_batch = NULL;
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 104;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  if (path == NULL)
+    return 104;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+    return 105;
+  duckdb_result result;
+  if (duckdb_query (wyl_fact_store_get_connection (store),
+      "SELECT batch_id FROM fact_forget_audit ORDER BY id DESC LIMIT 1;",
+      &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 106;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    return 106;
+  }
+  gchar *value = duckdb_value_varchar (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  if (value == NULL)
+    return 106;
+  *out_batch = g_strdup (value);
+  duckdb_free (value);
+  return 0;
+}
+#endif
+
 static gint
 read_fact_projection_row_count (const gchar *fact_root,
     const gchar *graph_id, gint64 *out_count)
@@ -1234,6 +1308,40 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = check_fact_projection_row_count (fact_root, "orders", 3);
   if (rc != 0)
     return rc;
+
+#ifdef WYL_HAS_AUDIT
+  /* A hard delete is the largest-blast-radius operation in this API and was
+   * the only one leaving no control-plane record: append and retract emit,
+   * forget did not.  The durable fact_forget_audit row is a different stream
+   * and does not reach an auditor reading this one.
+   *
+   * The probe's batch id comes from the durable row rather than from the
+   * literal above, so the assertion is that the two records agree about which
+   * batch was erased.  They cannot be reconciled on more than that here: the
+   * durable row has no request-id column and its operator is the client's own
+   * body field rather than the verified principal, which is #547's schema
+   * change and not this one's. */
+  {
+    g_autofree gchar *durable_batch = NULL;
+    rc = read_forget_audit_batch_id (fact_root, "orders", &durable_batch);
+    if (rc != 0)
+      return rc;
+    LifecycleAuditProbe forget_audit = {
+      .subject_id = "facts-admin",
+      .action = "fact_forget",
+      .resource_id = "__wr_default/orders",
+      .deny_reason = durable_batch,
+    };
+    if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), lifecycle_audit_probe_cb, &forget_audit) != WYRELOG_E_OK)
+      return 102;
+    if (forget_audit.matches != 1) {
+      g_printerr ("forget emitted no control-plane record for batch %s "
+          "(matches=%u)\n", durable_batch, forget_audit.matches);
+      return 103;
+    }
+  }
+#endif
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url, "/graphs/seal", seal_query,
