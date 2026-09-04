@@ -100,6 +100,7 @@ wyrelog/auth/service-exchange-projector-private.c
 wyrelog/auth/service-session-private.c
 wyrelog/auth/totp.h
 wyrelog/break-glass.h
+wyrelog/daemon/delta.c
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c
 wyrelog/daemon/fact-status.h
