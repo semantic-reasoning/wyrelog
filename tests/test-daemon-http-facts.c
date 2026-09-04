@@ -1065,6 +1065,22 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *audit_query = g_strdup_printf
         ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-audit-1&"
           "idempotency_key=key-audit-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  /* Readiness is clean before the fault: without this the assertion after it
+   * would pass against a daemon that was already degraded for some other
+   * reason, which is the vacuous version of this check. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/readyz", "format=json",
+          admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || (body != NULL && strstr (body, "audit_degraded")
+      != NULL)) {
+    g_printerr ("readiness was not clean before the audit fault: status=%u "
+        "body=%s\n", status, body != NULL ? body : "(null)");
+    return 340;
+  }
+
+  g_clear_pointer (&body, g_free);
   wyl_daemon_http_fail_next_fact_op_audit_for_test (server);
   rc = send_raw (session, "POST", base_url,
           "/facts/__wr_default/orders/orders:append", audit_query, admin_token,
@@ -1101,6 +1117,54 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         " after=%" G_GINT64_FORMAT "\n", rows_before_audit, rows_after_audit);
     return 294;
   }
+
+#ifdef WYL_HAS_AUDIT
+  /* The count only moves where the audit subsystem is compiled in.  Without
+   * it mark_runtime_audit_degraded does not exist, so the injected emission
+   * failure still answers 500 -- the seam runs ahead of the audit guard --
+   * but nothing increments audit_errors and these assertions would be
+   * asserting the absence of a subsystem rather than its behaviour. */
+  /* The client was told the audit was lost.  The operator must be told too --
+   * but not by the status, because a one-shot emission failure self-heals and
+   * the very next probe finds a healthy store and clears the flag.  What
+   * carries a one-shot loss is the count, which is monotonic and never
+   * cleared.  Asserting a 503 here would be asserting that the daemon stays
+   * withdrawn after losing a single record, which is not the contract and
+   * would be a worse one. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/readyz", "format=json",
+          admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (body == NULL || strstr (body, "\"audit_errors\":0") != NULL
+      || strstr (body, "\"audit_errors\":") == NULL) {
+    g_printerr ("a lost fact audit was not counted: status=%u body=%s\n",
+        status, body != NULL ? body : "(null)");
+    return 341;
+  }
+
+  /* And it converges.  With the fault disarmed and the store healthy, the
+   * next readiness probe clears the flag -- but audit_errors stays non-zero,
+   * because a repaired store does not un-lose the record.  This is the
+   * degrade-repair-recover sequence end to end, on the one path where the
+   * count is genuinely non-zero: the fixtures that set the flag by hand can
+   * only ever report it as zero. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/readyz", "format=json",
+          admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || body == NULL
+      || strstr (body, "\"status\":\"ready\"") == NULL) {
+    g_printerr ("readiness did not converge after the audit store recovered: "
+        "status=%u body=%s\n", status, body != NULL ? body : "(null)");
+    return 342;
+  }
+  if (strstr (body, "\"audit_errors\":0") != NULL) {
+    g_printerr ("recovery erased the record of the loss: body=%s\n", body);
+    return 343;
+  }
+#endif
 
   /* Retrying the same idempotency key cannot double-apply, and with the fault
    * disarmed the retry records the audit and reports success. */

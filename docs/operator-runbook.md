@@ -1339,6 +1339,7 @@ to watch for an outstanding erasure.
 | --- | --- | --- |
 | is the process serving | `GET /readyz` | `200` and `ready\n`, or `503` with a reason |
 | is any graph degraded | `GET /readyz?format=json` | `subsystems.facts` carries `graphs_total`, `graphs_ready`, `graphs_degraded`, `graphs_sealed` |
+| did an audit record go missing | `GET /readyz?format=json` | `audit_errors`, monotonic; non-zero means at least one emission failed |
 | which graph, and why | `GET /facts/status` | per-graph `state` and the aggregate |
 
 Three consequences worth knowing before you wire an alert.
@@ -1362,6 +1363,29 @@ a probe watching only the degraded count will not see a sealed graph. That is
 the intended default -- a seal is your own decision -- but it means a sealed
 graph that also owes an unconverged erasure raises nothing here. The `BOOT`
 line is what names that.
+
+### A lost audit record shows up as a count, not as a status
+
+`audit_degraded` on `/readyz` means the audit store rejected a read or a write.
+It converges: the endpoint re-probes the store on every request and returns to
+`ready` once the store is healthy again, with no restart. If it reports
+`audit_degraded` while you believe the store is healthy, the store is not
+healthy *from this process* -- check the file's permissions and its WAL, then
+poll again.
+
+**Recovery is not amnesia, and for a single lost record it is the only signal
+you get.** `audit_errors` in the `/readyz?format=json` body is monotonic and
+never cleared. A one-shot emission failure -- one mutation whose audit row
+could not be written, against a store that is fine a moment later -- never
+shows a 503 at all, because the next probe finds the store healthy and clears
+the flag. That is deliberate: losing one record should not withdraw the
+process from service. It does mean **a probe watching only `status` will not
+see it.** Alert on `audit_errors` being non-zero if you want to know.
+
+Whatever the status says, a non-zero `audit_errors` means at least one audit
+emission failed and its record is gone. Investigate that from the `AUDIT` log
+lines, which name the error, and from the 5xx responses the affected clients
+received -- not from `/readyz`, which by then reports `ready` truthfully.
 
 **The plain-text `/readyz` carries no fact information at all.** The body is
 exactly `ready\n` on success. Do not parse it for anything else, and note that
