@@ -6895,7 +6895,7 @@ set_status_json (SoupServerMessage *msg, guint status, const gchar *state,
 
 static void
 set_readyz_json (SoupServerMessage *msg, guint status, const gchar *state,
-    const gchar *reason, WylHandle *handle)
+    const gchar *reason, WylHandle *handle, WylDaemonRuntime *runtime)
 {
   attach_request_id_header (msg);
 
@@ -6908,7 +6908,15 @@ set_readyz_json (SoupServerMessage *msg, guint status, const gchar *state,
   }
   g_string_append (body, ",\"subsystems\":{\"facts\":");
   g_string_append (body, facts != NULL ? facts : "{\"status\":\"disabled\"}");
-  g_string_append (body, "}}");
+  g_string_append (body, "}");
+  /* Monotonic, and never cleared.  Recovering from a degradation says this
+   * process can record what it does again -- it does not say nothing was
+   * lost, and without this count on the surface that distinction would exist
+   * only in memory nothing reads. */
+  if (runtime != NULL)
+    g_string_append_printf (body, ",\"audit_errors\":%" G_GUINT64_FORMAT,
+        runtime->audit_errors);
+  g_string_append (body, "}");
 
   soup_server_message_set_status (msg, status, NULL);
   soup_server_message_set_response (msg, "application/json",
@@ -6960,6 +6968,12 @@ mark_runtime_audit_degraded (WylDaemonRuntime *runtime, wyrelog_error_t rc)
   if (runtime == NULL || rc == WYRELOG_E_OK)
     return;
 
+  /* Say it once, where an operator can find it later.  The flag is a boolean
+   * with no room for what was lost, and the counter beside it is not on any
+   * surface, so without this line a failed audit emission leaves nothing
+   * behind but a 5xx to the one client that made the request. */
+  WYL_LOG_ERROR (WYL_LOG_SECTION_AUDIT,
+      "audit degraded: an audit record could not be written (rc=%d)", rc);
   g_atomic_int_set (&runtime->audit_degraded, TRUE);
   runtime->audit_errors++;
   runtime->last_audit_error = rc;
@@ -7043,9 +7057,10 @@ check_runtime_liveness_ready (WylDaemonRuntime *runtime)
     return "delta_not_ready";
   if (runtime->last_delta_error != WYRELOG_E_OK)
     return "delta_not_ready";
-  if (g_atomic_int_get (&runtime->audit_degraded))
-    return "audit_degraded";
-
+  /* audit_degraded is deliberately NOT checked here.  Returning early on it
+   * is what made the latch permanent: check_runtime_ready below probes the
+   * audit store on every request and is the only thing that can observe the
+   * condition being repaired, and this short-circuit meant it never ran. */
   return NULL;
 }
 
@@ -7064,24 +7079,48 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *liveness_error = check_runtime_liveness_ready (ctx->runtime);
   if (liveness_error != NULL) {
     if (json)
-      set_readyz_json (msg, 503, "not_ready", liveness_error, ctx->handle);
+      set_readyz_json (msg, 503, "not_ready", liveness_error, ctx->handle,
+          ctx->runtime);
     else
       set_json_error (msg, 503, liveness_error);
     return;
   }
 
+  /* Snapshot before probing.  A failure landing on another thread while the
+   * probe runs must not be erased by a clear that decided the store was
+   * healthy a moment earlier. */
+  gboolean was_degraded = ctx->runtime != NULL
+      && g_atomic_int_get (&ctx->runtime->audit_degraded);
+  guint64 errors_before = ctx->runtime != NULL ? ctx->runtime->audit_errors : 0;
+
   const gchar *readiness_error = "not_ready";
   wyrelog_error_t rc = check_runtime_ready (ctx->handle, &readiness_error);
   if (rc != WYRELOG_E_OK) {
+    /* Keep the more specific reason.  A latched process failing readiness for
+     * an unrelated cause reported audit_degraded before this change, and
+     * degrading that to not_ready would lose information outside the recovery
+     * this is for. */
+    if (was_degraded)
+      readiness_error = "audit_degraded";
     if (json)
-      set_readyz_json (msg, 503, "not_ready", readiness_error, ctx->handle);
+      set_readyz_json (msg, 503, "not_ready", readiness_error, ctx->handle,
+          ctx->runtime);
     else
       set_json_error (msg, 503, readiness_error);
     return;
   }
 
+  /* The store answered every probe, so the condition that set the flag is
+   * gone.  Compare-and-exchange rather than a blind set, and only when the
+   * error count has not moved: either means a failure raced this probe, and
+   * the next request will re-probe anyway. */
+  if (was_degraded && ctx->runtime != NULL
+      && ctx->runtime->audit_errors == errors_before)
+    (void) g_atomic_int_compare_and_exchange (&ctx->runtime->audit_degraded,
+        TRUE, FALSE);
+
   if (json) {
-    set_readyz_json (msg, 200, "ready", NULL, ctx->handle);
+    set_readyz_json (msg, 200, "ready", NULL, ctx->handle, ctx->runtime);
     return;
   }
 
