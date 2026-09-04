@@ -57,6 +57,8 @@ wyl_fact_graph_state_name (wyl_fact_graph_state_t state)
       return "store_unavailable";
     case WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE:
       return "forget_incomplete";
+    case WYL_FACT_GRAPH_STATE_SEALED:
+      return "sealed";
   }
   /* No default arm: -Wswitch then names a state added without a string.  It
    * is a warning rather than an error here (werror is off), so it does not

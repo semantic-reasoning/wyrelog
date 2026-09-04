@@ -57,6 +57,12 @@ typedef enum
    * existing values keep their numbers across the test binaries that compile
    * daemon/fact-status.c separately. */
   WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE,
+  /* Admission is closed: the graph refuses every new query and mutation
+   * while its engine may still be published.  A lifecycle state, not a
+   * failure -- it says nothing about replay health, which an unseal
+   * restores from fields the seal never wrote.  Appended for the reason
+   * above. */
+  WYL_FACT_GRAPH_STATE_SEALED,
 } wyl_fact_graph_state_t;
 
 typedef struct
