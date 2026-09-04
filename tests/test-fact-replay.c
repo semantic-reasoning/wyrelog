@@ -3084,6 +3084,16 @@ test_closed_graph_reports_sealed_not_ready (void)
   g_assert_null (strstr (json, "\"state\":\"ready\""));
   g_assert_null (strstr (json, "\"queryable\":true"));
 
+  /* A seal is an operator's own decision, so it is neither a health problem
+   * nor evidence of health.  Counting it as degraded would raise an alert for
+   * an intended state; counting it as ready would hide a graph that answers
+   * nothing.  It gets its own bucket and leaves the aggregate alone. */
+  g_assert_nonnull (strstr (json, "\"graphs_total\":1"));
+  g_assert_nonnull (strstr (json, "\"graphs_sealed\":1"));
+  g_assert_nonnull (strstr (json, "\"graphs_ready\":0"));
+  g_assert_nonnull (strstr (json, "\"graphs_degraded\":0"));
+  g_assert_nonnull (strstr (json, "\"status\":\"ready\""));
+
   g_mutex_lock (&hold.mutex);
   hold.release = TRUE;
   g_cond_broadcast (&hold.changed);
@@ -3118,6 +3128,11 @@ test_closed_graph_reports_sealed_not_ready (void)
     /* The reason the runbook currently names for this graph, and the one it
      * must stop naming. */
     g_assert_null (strstr (booted_json, "schema_mismatch"));
+    /* The buckets on the reachable path too, not only on the drain-expiry
+     * fixture above: this is the graph an operator's aggregate actually
+     * counts. */
+    g_assert_nonnull (strstr (booted_json, "\"graphs_sealed\":1"));
+    g_assert_nonnull (strstr (booted_json, "\"graphs_degraded\":0"));
   }
 }
 
