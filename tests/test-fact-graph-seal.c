@@ -356,6 +356,213 @@ test_boot_admission_write_does_not_clobber_the_forget_verdict (void)
 
 /* A live seal denies new work, waits for admitted work, commits the durable
  * bit, and only then takes the engine away.  Success means all four. */
+/* Fail a named phase of the seal, and count every phase reached.
+ *
+ * The counts are what make the two tests below evidence rather than
+ * description.  A seam that never fires leaves the seal succeeding, and the
+ * assertions would then be pinning the ordinary path while claiming to pin the
+ * ambiguous one.  #945 records exactly that mistake being made once already:
+ * the first version of this seam let the write run and replaced its result
+ * afterwards, so the compensating re-read found the graph genuinely sealed and
+ * control took the recovery arm -- measuring identically to the unhooked code,
+ * which reads as "no difference" rather than "the branch was never reached". */
+typedef struct
+{
+  gboolean fail_write;
+  gboolean fail_probe;
+  gboolean shutdown_at_write;
+  WylFactGraphRuntimeManager *manager;
+  guint write_seen;
+  guint probe_seen;
+} SealPhaseFault;
+
+static wyrelog_error_t
+seal_phase_fault (const gchar *phase, gpointer user_data)
+{
+  SealPhaseFault *fault = user_data;
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE) == 0) {
+    fault->write_seen++;
+    /* Shutting the manager down here is what makes the compensating reopen
+     * intended but ineffective: open_admission refuses a shut-down manager.
+     * It happens at the write phase because that is the last point before
+     * the branch under test decides what to report. */
+    if (fault->shutdown_at_write)
+      wyl_fact_graph_runtime_manager_shutdown (fault->manager);
+    return fault->fail_write ? WYRELOG_E_IO : WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE) == 0) {
+    fault->probe_seen++;
+    return fault->fail_probe ? WYRELOG_E_IO : WYRELOG_E_OK;
+  }
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  gboolean found;
+  gboolean sealed;
+} SealedBitProbe;
+
+static wyrelog_error_t
+capture_sealed_bit_cb (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
+{
+  SealedBitProbe *probe = user_data;
+  if (g_strcmp0 (probe->tenant_id, info->tenant_id) == 0
+      && g_strcmp0 (probe->graph_id, info->graph_id) == 0) {
+    probe->found = TRUE;
+    probe->sealed = info->sealed;
+  }
+  return WYRELOG_E_OK;
+}
+
+/* A live, replayed, sealable graph: the same fixture the barrier test builds,
+ * factored out because the two ambiguous-write cases need it twice more. */
+typedef struct
+{
+  gchar *root;
+  wyl_policy_store_t *policy;
+  WylFactGraphRuntimeManager *manager;
+} SealFixture;
+
+static void
+seal_fixture_init (SealFixture *fixture, const gchar *template_name)
+{
+  g_autoptr (GError) error = NULL;
+  fixture->root = wyl_test_make_secure_fact_root (template_name, &error);
+  g_assert_nonnull (fixture->root);
+  g_autofree gchar *policy_path = g_build_filename (fixture->root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture->policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==,
+      WYRELOG_E_OK);
+  create_graph_with_schema (fixture->policy, fixture->root, "tenant-a",
+      "orders");
+  materialize_graph_engine (fixture->policy, "tenant-a", "orders");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (fixture->policy, fixture->root,
+      fixture->manager, &summary);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+}
+
+static void
+seal_fixture_clear (SealFixture *fixture)
+{
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_clear_pointer (&fixture->manager, wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&fixture->policy, wyl_policy_store_close);
+  g_clear_pointer (&fixture->root, g_free);
+}
+
+/* S4's ambiguous durable write, sub-case one: the write fails and the
+ * compensating re-read succeeds, reporting the graph unsealed.
+ *
+ * The write never committed, so the close is rolled back and there is no
+ * barrier left to report.
+ *
+ * Kills: `reopened = FALSE` (the close is never rolled back, so admission
+ * stays CLOSED) and `runtime_barrier_established = TRUE`.  No pre-existing
+ * test in this file kills either -- both survive the whole suite without
+ * these two cases. */
+static void
+test_seal_ambiguous_write_rolls_back_when_the_reread_says_unsealed (void)
+{
+  SealFixture fixture = { 0 };
+  seal_fixture_init (&fixture, "wyl-graph-seal-ambig-a-XXXXXX");
+
+  SealPhaseFault fault = {TRUE, FALSE, 0, 0};
+  wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
+
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info,
+      fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
+
+  /* The seam fired and the probe ran, so this really is the ambiguous-write
+   * branch and really is its re-read-succeeded arm. */
+  g_assert_cmpuint (fault.write_seen, ==, 1);
+  g_assert_cmpuint (fault.probe_seen, ==, 1);
+
+  g_assert_false (outcome.sealed_committed);
+  g_assert_false (outcome.runtime_barrier_established);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+
+  /* The durable bit really is clear: the write was skipped, not run and
+   * relabelled.  Without this the seam could be masking a committed seal,
+   * which is the failure mode #945 warns about. */
+  SealedBitProbe probe = {"tenant-a", "orders", FALSE, TRUE};
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
+      "tenant-a", capture_sealed_bit_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_true (probe.found);
+  g_assert_false (probe.sealed);
+
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+  seal_fixture_clear (&fixture);
+}
+
+/* Sub-case two: the write fails and the re-read fails too, so the durable
+ * state is unknown.
+ *
+ * The close deliberately stands -- leaving a possibly-sealed graph admitting
+ * is the one unsafe direction -- and the barrier is reported TRUE because the
+ * graph really is offline.
+ *
+ * Kills: dropping the `probe_rc == WYRELOG_E_OK` term from the reopen guard,
+ * `reopened = TRUE`, and `runtime_barrier_established = FALSE`.
+ *
+ * Two mutations of these lines survive both cases, and saying so is the point
+ * of listing the ones that do not:
+ *
+ *   - dropping `&& barrier` from the reopen guard.  Both fixtures replay the
+ *     graph first, so S2 always establishes a barrier and the term is never
+ *     the deciding one.  A fixture without an entry would make it FALSE, but
+ *     reopening a graph that was never closed is a no-op, so the reported
+ *     values would not move either.  The term guards a pointless call rather
+ *     than a wrong report.
+ *   - deriving the barrier from the intent (`= !reopened`) instead of from
+ *     the admission observed afterwards.  The two agree whenever the reopen
+ *     takes effect, and the only way to make an intended reopen fail is to
+ *     shut the manager down -- which also makes the status read fail, so the
+ *     derived form degrades to FALSE and the case proves nothing.  That line
+ *     keeps its "argued, not proved" marker for this reason. */
+static void
+test_seal_ambiguous_write_stands_when_the_reread_fails (void)
+{
+  SealFixture fixture = { 0 };
+  seal_fixture_init (&fixture, "wyl-graph-seal-ambig-b-XXXXXX");
+
+  SealPhaseFault fault = {TRUE, TRUE, 0, 0};
+  wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
+
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info,
+      fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
+
+  g_assert_cmpuint (fault.write_seen, ==, 1);
+  g_assert_cmpuint (fault.probe_seen, ==, 1);
+
+  g_assert_false (outcome.sealed_committed);
+  g_assert_true (outcome.runtime_barrier_established);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+  seal_fixture_clear (&fixture);
+}
+
 static void
 test_seal_establishes_the_barrier_and_the_durable_bit (void)
 {
@@ -791,6 +998,10 @@ main (int argc, char **argv)
       test_boot_reestablishes_admission_from_the_durable_seal);
   g_test_add_func ("/fact-graph-seal/boot-preserves-forget-verdict",
       test_boot_admission_write_does_not_clobber_the_forget_verdict);
+  g_test_add_func ("/fact-graph-seal/ambiguous-write-rolls-back",
+      test_seal_ambiguous_write_rolls_back_when_the_reread_says_unsealed);
+  g_test_add_func ("/fact-graph-seal/ambiguous-write-stands",
+      test_seal_ambiguous_write_stands_when_the_reread_fails);
   g_test_add_func ("/fact-graph-seal/seal-establishes-barrier",
       test_seal_establishes_the_barrier_and_the_durable_bit);
   g_test_add_func ("/fact-graph-seal/seal-abort-reopens",

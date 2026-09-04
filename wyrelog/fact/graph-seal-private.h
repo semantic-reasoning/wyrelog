@@ -79,4 +79,38 @@ wyrelog_error_t wyl_fact_graph_seal (wyl_policy_store_t * policy,
 
 void wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome * outcome);
 
+#if defined(WYL_TEST_HANDLE_SEAMS)
+/*
+ * Fail one step of the seal for a test, so the ambiguous-write branch can be
+ * driven at all.  Returning non-OK makes that step fail *without running*:
+ * a hook that let the step run and then overwrote its result would leave the
+ * durable bit set, the compensating re-read would find the graph genuinely
+ * sealed, and control would take the recovery arm instead -- measuring
+ * identically to the unhooked code and reading as "no difference" rather than
+ * "the probe never reached the branch".
+ *
+ * Phases:
+ *   WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE  the S4 policy-store write
+ *   WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE   the compensating re-read
+ *
+ * Process-global because the seal is a free function over a policy store and
+ * a runtime manager, with no object to hang the hook on.  A shipped library
+ * carries neither this declaration nor any way to set the hook -- verified by
+ * checking the built libwyrelog for the setter symbol -- so the fault check
+ * in seal_step_fault compiles to nothing there.
+ */
+typedef wyrelog_error_t (*WylFactGraphSealTestHook) (const gchar * phase,
+    gpointer user_data);
+
+void wyl_fact_graph_seal_set_test_hook (WylFactGraphSealTestHook hook,
+    gpointer user_data);
+#endif
+
+/* The phase names are plain string constants and are declared unconditionally,
+ * because the call sites naming them are unconditional -- only the hook that
+ * can act on them is test-only.  A shipped build compiles the names and no
+ * way to reach them. */
+#define WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE "durable_write"
+#define WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE  "reseal_probe"
+
 G_END_DECLS;
