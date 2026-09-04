@@ -386,7 +386,7 @@ check_fact_store_appends_idempotently (void)
         ("SELECT COUNT(*) FROM %s WHERE __wyl_tenant_id = 'tenant-a' "
           "AND __wyl_graph_id = 'orders';", table);
   if (!count_i64 (conn, scope_sql, &count) || count != (gint64) n_rows)
-    return 201;
+    return 2532;
 
   wyl_fact_value_t bad_values[] = {
     {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-00000"},
@@ -2157,7 +2157,7 @@ exec_ok_sql (duckdb_connection conn, const gchar *sql)
  * SQL with a literal created_at_us WOULD need pinning, via
  * UPDATE fact_forget_intent SET created_at_us = <n> WHERE op_uuid = '<..>'. */
 static gint
-forget_seed_n_pending (wyl_fact_store_t **out_store,
+forget_seed_n_pending_at (const gchar *path, wyl_fact_store_t **out_store,
     wyl_policy_fact_relation_schema_options_t *out_schema, gchar **out_table,
     guint n)
 {
@@ -2167,7 +2167,7 @@ forget_seed_n_pending (wyl_fact_store_t **out_store,
   };
   *out_store = NULL;
   *out_table = NULL;
-  if (wyl_fact_store_open (NULL, out_store) != WYRELOG_E_OK)
+  if (wyl_fact_store_open (path, out_store) != WYRELOG_E_OK)
     return -1;
   if (wyl_fact_store_create_schema (*out_store) != WYRELOG_E_OK)
     return -2;
@@ -2194,6 +2194,50 @@ forget_seed_n_pending (wyl_fact_store_t **out_store,
       return -5;
   }
   return 0;
+}
+
+static gint
+forget_seed_n_pending (wyl_fact_store_t **out_store,
+    wyl_policy_fact_relation_schema_options_t *out_schema, gchar **out_table,
+    guint n)
+{
+  return forget_seed_n_pending_at (NULL, out_store, out_schema, out_table, n);
+}
+
+/* Rewrite the state CHECK back to its pre-change text, so the migration runs
+ * against a table this code produced rather than a hand-written imitation of
+ * an old one.  The rebuild is spelled out here rather than reusing the
+ * production helper: a fixture that shared the code under test could not
+ * disagree with it. */
+static gboolean
+forget_narrow_intent_state_check (duckdb_connection conn)
+{
+  return exec_ok_sql (conn,
+             "BEGIN TRANSACTION;"
+             "CREATE TABLE fact_forget_intent_old ("
+             "  op_uuid         VARCHAR PRIMARY KEY,"
+             "  batch_id        VARCHAR NOT NULL,"
+             "  tenant_id       VARCHAR NOT NULL,"
+             "  graph_id        VARCHAR NOT NULL,"
+             "  namespace_id    VARCHAR NOT NULL,"
+             "  relation_name   VARCHAR NOT NULL,"
+             "  schema_version  BIGINT NOT NULL,"
+             "  projection_table VARCHAR NOT NULL,"
+             "  content_hash    VARCHAR NOT NULL,"
+             "  idempotency_key VARCHAR NOT NULL,"
+             "  operator        VARCHAR NOT NULL,"
+             "  reason          VARCHAR NOT NULL,"
+             "  rows_purged     BIGINT NOT NULL,"
+             "  state           VARCHAR NOT NULL "
+             "    CHECK (state IN ('PENDING', 'COMPLETED')),"
+             "  created_at_us   BIGINT NOT NULL,"
+             "  completed_at_us BIGINT);"
+             "INSERT INTO fact_forget_intent_old"
+             "  SELECT * FROM fact_forget_intent;"
+             "DROP TABLE fact_forget_intent;"
+             "ALTER TABLE fact_forget_intent_old"
+             "  RENAME TO fact_forget_intent;"
+             "COMMIT;");
 }
 
 /* Rewrite one intent's tenant so the per-intent scope check refuses it.  The
@@ -2421,6 +2465,179 @@ forget_rename_metadata_at_first_completion (const gchar *point,
   fault->renamed = exec_ok_sql (fault->conn,
           "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
   return WYRELOG_E_OK;
+}
+
+/* Quarantine is for permanent conditions only.  A transient failure -- an I/O
+ * fault mid-erasure -- must stay PENDING and be retried, because the condition
+ * that produced it can be gone by the next boot.  Retiring one would turn a
+ * recoverable erasure into a permanent refusal, which is the failure mode the
+ * quarantine path exists to avoid rather than to create. */
+static gint
+check_fact_forget_reconcile_does_not_quarantine_a_transient_failure (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
+    return 2490;
+
+  ForgetNthFault fault = {"before_delete_projection", 1, 0};
+  wyl_fact_forget_outcome_t first = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders",
+      forget_fault_nth, &fault, &first) != WYRELOG_E_IO)
+    return 2491;
+  if (first.failed != 1)
+    return 2492;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
+      &count))
+    return 2493;
+  if (count != 0)
+    return 2494;
+
+  /* And it converges: with the fault gone the intent is loaded again and
+   * executes, which is what "retryable" has to mean to be worth anything. */
+  wyl_fact_forget_outcome_t second = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL, NULL,
+      &second) != WYRELOG_E_OK)
+    return 2495;
+  if (second.executed == 0)
+    return 2496;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+      &count))
+    return 2497;
+  if (count != 0)
+    return 2498;
+  return 0;
+}
+
+/* The terminal state has to be durable, or the next boot loads the row again
+ * and nothing was retired.  Same store on disk, closed and reopened. */
+static gint
+check_fact_forget_quarantine_survives_a_restart (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-quarantine-XXXXXX", &error);
+  if (dir == NULL)
+    return 2510;
+  g_autofree gchar *path = g_build_filename (dir, "fact.db", NULL);
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    wyl_policy_fact_relation_schema_options_t schema;
+    g_autofree gchar *table = NULL;
+    if (forget_seed_n_pending_at (path, &store, &schema, &table, 2) != 0)
+      return 2511;
+    if (!forget_mark_intent_foreign (wyl_fact_store_get_connection (store),
+        "batch-0"))
+      return 2512;
+    wyl_fact_forget_outcome_t out = { 0 };
+    if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL,
+        NULL, &out) != WYRELOG_E_POLICY)
+      return 2513;
+    if (out.refused != 1)
+      return 2514;
+  }
+
+  g_autoptr (wyl_fact_store_t) reopened = NULL;
+  if (wyl_fact_store_open (path, &reopened) != WYRELOG_E_OK)
+    return 2515;
+  gint64 count = 0;
+  if (!count_i64 (wyl_fact_store_get_connection (reopened),
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
+      &count))
+    return 2516;
+  if (count != 1)
+    return 2517;
+
+  /* The operator surface is the reconcile outcome itself, and after a restart
+   * it reports the retired row as neither loaded nor refused. */
+  wyl_fact_forget_outcome_t after = { 0 };
+  if (wyl_fact_store_forget_reconcile (reopened, "tenant-a", "orders", NULL,
+      NULL, &after) != WYRELOG_E_OK)
+    return 2518;
+  if (after.loaded != 0 || after.refused != 0)
+    return 2519;
+  return 0;
+}
+
+/* A store written before the state CHECK was widened has to open, migrate and
+ * reconcile.  The fixture is a store created by the current code whose CHECK
+ * is then rewritten to the pre-change text, so the migration is exercised
+ * against a real table rather than a hand-written approximation of one. */
+static gint
+check_fact_forget_intent_state_check_migrates_an_old_store (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyl_policy_fact_relation_schema_options_t schema;
+  g_autofree gchar *table = NULL;
+  if (forget_seed_n_pending (&store, &schema, &table, 2) != 0)
+    return 2520;
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  if (!forget_narrow_intent_state_check (conn))
+    return 2521;
+  /* Both foreign, so one pass quarantines twice: the first call migrates and
+   * the second finds the widened constraint already in place.  Idempotence
+   * matters here rather than across passes, because that is where a rebuild
+   * that dropped the constraint would rebuild again and again. */
+  if (!forget_mark_intent_foreign (conn, "batch-0"))
+    return 2522;
+  if (!forget_mark_intent_foreign (conn, "batch-1"))
+    return 2523;
+
+  gint64 before = 0;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_intent;", &before))
+    return 2524;
+
+  wyl_fact_forget_outcome_t out = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL, NULL,
+      &out) != WYRELOG_E_POLICY)
+    return 2525;
+  if (out.loaded != 2 || out.refused != 2 || out.executed != 0)
+    return 2526;
+
+  /* Every row survived the rebuild. */
+  gint64 after = 0;
+  if (!count_i64 (conn, "SELECT COUNT(*) FROM fact_forget_intent;", &after))
+    return 2527;
+  if (after != before)
+    return 2528;
+  gint64 quarantined = 0;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'QUARANTINED';",
+      &quarantined))
+    return 2529;
+  if (quarantined != 2)
+    return 2530;
+
+  /* The migrated table carries the widened constraint rather than none at
+   * all: CREATE TABLE AS SELECT would have dropped both it and the primary
+   * key, leaving a store that accepts any state string. */
+  gint64 constrained = 0;
+  if (!count_i64 (conn,
+      "SELECT COUNT(*) FROM duckdb_constraints() "
+      "WHERE table_name = 'fact_forget_intent' "
+      "AND constraint_text LIKE '%QUARANTINED%';", &constrained))
+    return 2531;
+  if (constrained != 1)
+    return 2536;
+  if (exec_ok_sql (conn,
+      "UPDATE fact_forget_intent SET state = 'NONSENSE' "
+      "WHERE batch_id = 'batch-0';"))
+    return 2533;
+
+  /* And it reconciles: the next pass loads nothing. */
+  wyl_fact_forget_outcome_t second = { 0 };
+  if (wyl_fact_store_forget_reconcile (store, "tenant-a", "orders", NULL, NULL,
+      &second) != WYRELOG_E_OK)
+    return 2534;
+  if (second.loaded != 0)
+    return 2535;
+  return 0;
 }
 
 /* An intent naming a tenant this store does not own can never converge: the
@@ -3580,6 +3797,15 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_quarantines_a_foreign_intent ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_reconcile_does_not_quarantine_a_transient_failure ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_quarantine_survives_a_restart ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_intent_state_check_migrates_an_old_store ();
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_counts_executed ();
