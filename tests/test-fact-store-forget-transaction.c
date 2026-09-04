@@ -139,6 +139,11 @@ assert_pending_without_audit (Fixture *fixture)
       "SELECT COUNT(*) FROM fact_forget_audit;"), ==, 0);
 }
 
+/* An aborted DuckDB transaction that nobody resolved does not merely lose the
+ * forget: it fails every later statement on the connection, a later BEGIN
+ * included, until something issues a ROLLBACK.  All three statements below
+ * fail in that state, which is why the check is all three rather than a
+ * SELECT alone. */
 static void
 assert_connection_accepts_new_transaction (Fixture *fixture)
 {
@@ -193,8 +198,13 @@ test_commit_failure_rolls_back (Fixture *fixture, gconstpointer user_data)
       ==, 1);
   g_assert_cmpuint (
     fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK], ==, 1);
-  assert_pending_without_audit (fixture);
+  /* Before the state assertions, because every one of them queries this same
+   * connection: an unresolved abort makes them fail too, and then the failure
+   * names a wrong row count instead of the poisoned connection that caused
+   * it.  Asking the connection first is what makes the diagnostic point at
+   * the defect. */
   assert_connection_accepts_new_transaction (fixture);
+  assert_pending_without_audit (fixture);
   wyl_fact_store_set_forget_transaction_test_hook (fixture->store, NULL, NULL);
   assert_reconciles (fixture);
 }
@@ -215,8 +225,13 @@ test_body_failure_rolls_back (Fixture *fixture, gconstpointer user_data)
       ==, 0);
   g_assert_cmpuint (
     fault.calls[WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK], ==, 1);
-  assert_pending_without_audit (fixture);
+  /* Before the state assertions, because every one of them queries this same
+   * connection: an unresolved abort makes them fail too, and then the failure
+   * names a wrong row count instead of the poisoned connection that caused
+   * it.  Asking the connection first is what makes the diagnostic point at
+   * the defect. */
   assert_connection_accepts_new_transaction (fixture);
+  assert_pending_without_audit (fixture);
 }
 
 static void
