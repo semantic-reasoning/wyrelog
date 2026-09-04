@@ -453,8 +453,10 @@ audit_event_matches_existing (wyl_audit_conn_t *conn, const gchar *id,
       "SELECT created_at_us, subject_id, action, resource_id, "
       "deny_reason, deny_origin, request_id, decision "
       "FROM audit_events WHERE id = ?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -734,8 +736,10 @@ get_next_chain_state (wyl_audit_conn_t *conn, const gchar *stream_name,
   static const gchar *sql =
       "SELECT sequence_no, record_hash FROM audit_events "
       "WHERE stream_name = ? ORDER BY sequence_no DESC LIMIT 1;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, stream_name) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -909,8 +913,10 @@ require_constraint (wyl_audit_conn_t *conn, const gchar *table,
   static const gchar *sql =
       "SELECT COUNT(*) FROM duckdb_constraints() WHERE table_name=? "
       "AND constraint_type=? AND constraint_column_names::VARCHAR=?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, table) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, type) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 3, columns) != DuckDBSuccess) {
@@ -937,8 +943,10 @@ require_constraint_count (wyl_audit_conn_t *conn, const gchar *table,
   static const gchar *sql =
       "SELECT COUNT(*) FROM duckdb_constraints() WHERE table_name=? "
       "AND constraint_type=?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, table) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, type) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
@@ -963,8 +971,10 @@ require_total_constraint_count (wyl_audit_conn_t *conn, const gchar *table,
   duckdb_result result = { 0 };
   static const gchar *sql =
       "SELECT COUNT(*) FROM duckdb_constraints() WHERE table_name=?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, table) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -987,8 +997,10 @@ require_no_extra_indexes (wyl_audit_conn_t *conn, const gchar *table)
   duckdb_result result = { 0 };
   static const gchar *sql =
       "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name=?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, table) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -1107,8 +1119,10 @@ ensure_service_exchange_schema (wyl_audit_conn_t *conn,
   static const gchar *select_sql =
       "SELECT sink_uuid, schema_version FROM audit_sink_metadata "
       "WHERE logical_sink_name = ?;";
-  if (duckdb_prepare (conn->conn, select_sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, select_sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, WYL_AUDIT_SERVICE_EXCHANGE_STREAM)
       != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
@@ -1298,8 +1312,10 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
         "INSERT INTO audit_checkpoints "
         "(stream_name, sequence_no, root_hash, created_at_us) "
         "VALUES (?, ?, ?, ?);";
-    if (duckdb_prepare (conn->conn, checkpoint_sql, &stmt) != DuckDBSuccess)
+    if (duckdb_prepare (conn->conn, checkpoint_sql, &stmt) != DuckDBSuccess) {
+      duckdb_destroy_prepare (&stmt);
       return WYRELOG_E_IO;
+    }
     if (duckdb_bind_varchar (stmt, 1, WYL_AUDIT_STREAM_AUDIT)
         != DuckDBSuccess
         || duckdb_bind_int64 (stmt, 2, sequence_no) != DuckDBSuccess
@@ -1471,8 +1487,10 @@ load_projection_candidates (wyl_audit_conn_t *conn, const gchar *sink_uuid,
       "fingerprint_schema_version,session_fingerprint,jti_fingerprint,"
       "canonical_payload FROM service_exchange_receipt_projections "
       "WHERE sink_uuid=? AND (intention_id=? OR payload_digest=?);";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, sink_uuid) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, p->intention_id) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 3, p->payload_digest) != DuckDBSuccess) {
@@ -1494,8 +1512,10 @@ load_anchor (wyl_audit_conn_t *conn,
       "deny_origin,request_id,decision,sequence_no,previous_hash,record_hash,"
       "checkpoint_root,event_kind FROM audit_events WHERE stream_name='"
       WYL_AUDIT_SERVICE_EXCHANGE_STREAM "' AND id=?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, p->intention_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -1513,8 +1533,10 @@ load_projection_checkpoint (wyl_audit_conn_t *conn, gint64 sequence_no,
   static const gchar *sql =
       "SELECT stream_name,sequence_no,root_hash,created_at_us "
       "FROM audit_checkpoints WHERE stream_name=? AND sequence_no=?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, WYL_AUDIT_SERVICE_EXCHANGE_STREAM)
       != DuckDBSuccess
       || duckdb_bind_int64 (stmt, 2, sequence_no) != DuckDBSuccess) {
@@ -1595,8 +1617,10 @@ insert_projection_unlocked (wyl_audit_conn_t *conn, const gchar *sink_uuid,
   static const gchar *sql =
       "INSERT INTO service_exchange_receipt_projections VALUES "
       "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
 #define BIND_OK(expr) ((expr) == DuckDBSuccess)
   gboolean bound = BIND_OK (duckdb_bind_varchar (stmt, 1, sink_uuid))
       && BIND_OK (duckdb_bind_varchar (stmt, 2, p->intention_id))
@@ -1652,8 +1676,10 @@ insert_projection_anchor_unlocked (wyl_audit_conn_t *conn,
       "deny_reason,deny_origin,request_id,decision,stream_name,event_kind,"
       "sequence_no,previous_hash,record_hash,checkpoint_root) "
       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
 #define BIND_OK(expr) ((expr) == DuckDBSuccess)
   gboolean bound = BIND_OK (duckdb_bind_varchar (stmt, 1, p->intention_id))
       && BIND_OK (duckdb_bind_int64 (stmt, 2, p->created_at_us))
@@ -1686,8 +1712,10 @@ insert_projection_anchor_unlocked (wyl_audit_conn_t *conn,
 
   static const gchar *checkpoint_sql =
       "INSERT INTO audit_checkpoints VALUES (?,?,?,?);";
-  if (duckdb_prepare (conn->conn, checkpoint_sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, checkpoint_sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   bound = duckdb_bind_varchar (stmt, 1,
           WYL_AUDIT_SERVICE_EXCHANGE_STREAM) == DuckDBSuccess
       && duckdb_bind_int64 (stmt, 2, sequence) == DuckDBSuccess
@@ -1937,8 +1965,10 @@ wyl_audit_conn_create_user_stream (wyl_audit_conn_t *conn,
 
   static const gchar *sql =
       "INSERT INTO user_audit_streams (name, created_at_us) VALUES (?, ?);";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, stream_name) != DuckDBSuccess
       || duckdb_bind_int64 (stmt, 2, g_get_real_time ()) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
@@ -1964,8 +1994,10 @@ wyl_audit_conn_drop_user_stream (wyl_audit_conn_t *conn,
     return rc;
 
   static const gchar *sql = "DELETE FROM user_audit_streams WHERE name = ?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, stream_name) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -1994,8 +2026,10 @@ wyl_audit_conn_rename_user_stream (wyl_audit_conn_t *conn,
 
   static const gchar *sql =
       "UPDATE user_audit_streams SET name = ? WHERE name = ?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   if (duckdb_bind_varchar (stmt, 1, new_name) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, old_name) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);

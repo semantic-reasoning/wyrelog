@@ -325,8 +325,10 @@ check_legacy_metadata_key_count (const gchar *fact_root,
   duckdb_result result = { 0 };
   if (duckdb_prepare (wyl_fact_store_get_connection (store),
       "SELECT COUNT(*) FROM fact_store_metadata WHERE key=?;", &statement)
-      != DuckDBSuccess)
+      != DuckDBSuccess) {
+    duckdb_destroy_prepare (&statement);
     return 4113;
+  }
   if (duckdb_bind_varchar (statement, 1, key) != DuckDBSuccess
       || duckdb_execute_prepared (statement, &result) != DuckDBSuccess) {
     duckdb_destroy_prepare (&statement);

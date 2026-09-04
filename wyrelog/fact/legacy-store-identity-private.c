@@ -80,8 +80,10 @@ insert_complete_identity_unlocked (duckdb_connection conn,
   static const gchar *sql =
       "INSERT INTO main.fact_store_metadata(key,value) "
       "VALUES ('tenant_id', ?), (?, ?);";
-  if (duckdb_prepare (conn, sql, &statement) != DuckDBSuccess)
+  if (duckdb_prepare (conn, sql, &statement) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&statement);
     return WYRELOG_E_IO;
+  }
 
   const gchar *second_key = consume_test_fault (fault_for_entry (entry)) ?
       "tenant_id" : "graph_id";
@@ -106,8 +108,10 @@ repair_missing_graph_unlocked (duckdb_connection conn, const gchar *graph_id)
       "INSERT INTO main.fact_store_metadata(key,value) "
       "SELECT 'graph_id', ? "
       "WHERE NOT EXISTS (SELECT 1 FROM main.fact_batches);";
-  if (duckdb_prepare (conn, sql, &statement) != DuckDBSuccess)
+  if (duckdb_prepare (conn, sql, &statement) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&statement);
     return WYRELOG_E_INTERNAL;
+  }
   if (duckdb_bind_varchar (statement, 1, graph_id) != DuckDBSuccess) {
     duckdb_destroy_prepare (&statement);
     return WYRELOG_E_IO;

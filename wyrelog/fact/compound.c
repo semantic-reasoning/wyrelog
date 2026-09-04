@@ -224,8 +224,10 @@ compound_exists_unlocked (duckdb_connection conn, const gchar *tenant_id,
   if (duckdb_prepare (conn,
       "SELECT COUNT(*) FROM compound_terms WHERE tenant_id = ? "
       "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-      &stmt) != DuckDBSuccess)
+      &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
       | duckdb_bind_varchar (stmt, 2, graph_id)
       | duckdb_bind_varchar (stmt, 3, namespace_id)
@@ -256,8 +258,10 @@ compound_hash_matches_unlocked (duckdb_connection conn, const gchar *tenant_id,
   if (duckdb_prepare (conn,
       "SELECT content_hash FROM compound_terms WHERE tenant_id = ? "
       "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-      &stmt) != DuckDBSuccess)
+      &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
       | duckdb_bind_varchar (stmt, 2, graph_id)
       | duckdb_bind_varchar (stmt, 3, namespace_id)
@@ -316,8 +320,10 @@ insert_term_unlocked (duckdb_connection conn,
       "INSERT INTO compound_terms "
       "(compound_ref, tenant_id, graph_id, namespace_id, functor, arity, "
       " content_hash, created_at_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
-      &stmt) != DuckDBSuccess)
+      &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   duckdb_state ok = duckdb_bind_int64 (stmt, 1, compound_ref)
       | duckdb_bind_varchar (stmt, 2, value->tenant_id)
       | duckdb_bind_varchar (stmt, 3, value->graph_id)
@@ -344,8 +350,10 @@ insert_arg_unlocked (duckdb_connection conn, gint64 compound_ref, gsize index,
       "INSERT INTO compound_args "
       "(compound_ref, arg_index, arg_type, symbol_value, string_value, "
       " int64_value, bool_value, child_compound_ref) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);", &stmt) != DuckDBSuccess)
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);", &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   const gchar *type_name = arg_type_name (arg->type);
   duckdb_state ok = duckdb_bind_int64 (stmt, 1, compound_ref)
       | duckdb_bind_int64 (stmt, 2, (gint64) index)
@@ -473,8 +481,10 @@ load_term_unlocked (duckdb_connection conn, const gchar *tenant_id,
       "SELECT functor, arity, content_hash FROM compound_terms "
       "WHERE tenant_id = ? "
       "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-      &stmt) != DuckDBSuccess)
+      &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
+  }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
       | duckdb_bind_varchar (stmt, 2, graph_id)
       | duckdb_bind_varchar (stmt, 3, namespace_id)
@@ -682,6 +692,7 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
       "int64_value, bool_value, child_compound_ref FROM compound_args "
       "WHERE compound_ref = ? ORDER BY arg_index;", &stmt)
       != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     loaded_term_clear (&term);
     g_hash_table_remove (seen, &compound_ref);
     return WYRELOG_E_IO;

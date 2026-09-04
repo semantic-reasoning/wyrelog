@@ -2688,6 +2688,58 @@ check_fact_forget_intent_state_check_migrates_an_old_store (void)
   return 0;
 }
 
+/* Drive a real duckdb_prepare failure, so the destroy on that branch is
+ * exercised rather than merely present.
+ *
+ * Issue #944 is explicit that a sweep with no forced failure is unverified by
+ * construction: if nothing drives the branch, reverting the fix fails nothing.
+ * Dropping the projection table under an existing batch makes
+ * count_projection_rows_unlocked prepare against a missing relation, which is
+ * a genuine binder error rather than an injected one -- so under ASan the leak
+ * that appears when the destroy is removed is the product's, not the
+ * fixture's.
+ *
+ * The forget path reads fact_batches before it touches the projection, so the
+ * fingerprint lookup still succeeds and the failure lands where it is
+ * wanted. */
+static gint
+check_fact_store_forget_survives_a_missing_projection (void)
+{
+  static const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 2025;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2026;
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK)
+    return 2027;
+  if (forget_append_sample (store, &schema, "batch-missing", "idem-missing",
+      "o-missing", 41) != 0)
+    return 2028;
+
+  g_autofree gchar *drop = g_strdup_printf ("DROP TABLE \"%s\";", table);
+  if (!exec_ok_sql (wyl_fact_store_get_connection (store), drop))
+    return 2029;
+
+  /* The prepare fails, so the forget cannot proceed.  What matters here is
+   * not the code -- it is that the branch ran at all, under a sanitizer. */
+  wyl_fact_store_forget_options_t opts = {
+    .batch_id = "batch-missing",
+    .operator_id = "admin",
+    .reason = "gdpr-erasure",
+  };
+  if (wyl_fact_store_forget (store, &schema, &opts, NULL) == WYRELOG_E_OK)
+    return 2030;
+  return 0;
+}
+
 /* An intent naming a tenant this store does not own can never converge: the
  * refusal is an identity mismatch, and identity does not change under a store
  * once bound.  Before quarantine such a row stayed PENDING forever -- loaded,
@@ -3842,6 +3894,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_forget_survives_a_missing_projection ();
   if (rc != 0)
     return rc;
   rc = check_fact_forget_reconcile_quarantines_a_foreign_intent ();
