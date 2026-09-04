@@ -61,6 +61,12 @@ typedef enum
   WYL_FACT_MUTATION_PRECOMMIT_FAILED = 0,
   WYL_FACT_MUTATION_COMMITTED_READY,
   WYL_FACT_MUTATION_COMMITTED_DEGRADED,
+  /* The commit is durable and the post-commit refresh was refused by the
+   * graph's admission barrier rather than failing.  Distinct from DEGRADED
+   * because nothing is broken: no replay failed, the durable state is intact,
+   * and the engine catches up when the graph is unsealed.  Appended so the
+   * existing values keep their numbers. */
+  WYL_FACT_MUTATION_COMMITTED_BARRIER,
 } wyl_fact_mutation_class_t;
 
 /*
@@ -74,6 +80,11 @@ typedef enum
  *     projection of the graph's WylFactGraphRuntimeStatus and are meaningful
  *     only when mutation_class == COMMITTED_DEGRADED (degraded_class) or when
  *     a refresh published a generation (engine_generation);
+ *   - mutation_class == COMMITTED_BARRIER implies degraded_class is NONE and
+ *     needs_durable_reconcile is FALSE: the refusal is a lifecycle decision,
+ *     not a fault, and the durable state it was refused against is intact.
+ *     needs_runtime_reconcile stays TRUE, because the engine really does lack
+ *     the batch until the graph is unsealed;
  *   - needs_durable_reconcile is an in-memory hint only.  A durable
  *     reconciliation queue is deliberately out of scope for #546 (startup
  *     replay plus durable idempotency already close the crash window); it is
@@ -135,6 +146,8 @@ wyl_fact_mutation_class_name (wyl_fact_mutation_class_t mutation_class)
       return "committed_ready";
     case WYL_FACT_MUTATION_COMMITTED_DEGRADED:
       return "committed_degraded";
+    case WYL_FACT_MUTATION_COMMITTED_BARRIER:
+      return "committed_barrier";
   }
   return "unknown";
 }
