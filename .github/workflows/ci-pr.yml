@@ -1353,7 +1353,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build fact forget transaction cleanup seam (clang-cl)
+      - name: Test fact forget transaction cleanup seam (clang-cl)
         if: matrix.secure_bridge == 'enabled'
         shell: powershell
         run: |
@@ -1363,6 +1363,7 @@ jobs:
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-fact-store-forget-transaction
+          meson test -C builddir fact-store-forget-transaction --no-rebuild --print-errorlogs
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

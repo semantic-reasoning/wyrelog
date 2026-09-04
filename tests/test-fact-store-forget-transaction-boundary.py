@@ -47,6 +47,51 @@ def call_body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated call: {signature}")
 
 
+def strip_comments(source: str) -> str:
+    """Blank out Meson comments, preserving every byte offset."""
+    out = []
+    for line in source.splitlines(keepends=True):
+        hash_at = line.find("#")
+        if hash_at == -1:
+            out.append(line)
+            continue
+        keep = line[:hash_at]
+        out.append(keep + " " * (len(line.rstrip("\n")) - len(keep))
+                   + line[len(line.rstrip("\n")):])
+    return "".join(out)
+
+
+def registration_offset(meson: str, token: str) -> int:
+    """Offset of a live registration -- a commented-out one does not count."""
+    live = strip_comments(meson)
+    if live.count(token) != 1:
+        raise AssertionError(f"registration is not live exactly once: {token}")
+    return live.index(token)
+
+
+def enclosing_conditions(meson: str, offset: int) -> list[str]:
+    """Conditions of every Meson if-block open at offset, outermost first."""
+    stack: list[str] = []
+    position = 0
+    for line in strip_comments(meson).splitlines(keepends=True):
+        if position >= offset:
+            break
+        stripped = line.strip()
+        if stripped.startswith("if "):
+            stack.append(stripped[3:].strip())
+        elif stripped.startswith("elif "):
+            if stack:
+                stack[-1] = stripped[5:].strip()
+        elif stripped == "else":
+            if stack:
+                stack[-1] = "not (" + stack[-1] + ")"
+        elif stripped == "endif":
+            if stack:
+                stack.pop()
+        position += len(line)
+    return stack
+
+
 def require_once(text: str, token: str, message: str) -> None:
     if text.count(token) != 1:
         raise AssertionError(message)
@@ -383,18 +428,25 @@ def validate(files: dict[str, str]) -> None:
         "test('fact-store-forget-transaction-boundary-self',",
         "boundary checker self-test must be registered once",
     )
-    generic_registration = meson.index("test('fact-store-forget-transaction',")
-    generic_guard = meson.rfind(
-        "if host_machine.system() != 'windows'", 0, generic_registration
+    generic_registration = registration_offset(
+        meson, "test('fact-store-forget-transaction',"
     )
-    generic_guard_end = meson.find("\n  endif", generic_guard)
-    if generic_guard == -1 or generic_guard_end < generic_registration:
-        raise AssertionError("generic runtime must stay disabled on Windows")
+    for condition in enclosing_conditions(meson, generic_registration):
+        if "host_machine.system()" in condition:
+            raise AssertionError(
+                "generic runtime must stay registered on Windows, but it is "
+                f"under: {condition}"
+            )
+    generic_body = call_body(
+        meson[generic_registration:], "test('fact-store-forget-transaction',"
+    )
+    if "should_fail" in generic_body:
+        raise AssertionError("generic runtime was registered as should_fail")
     if (
         meson.index("test_fact_store_forget_transaction = executable(")
-        > generic_guard
+        > generic_registration
     ):
-        raise AssertionError("generic executable must still compile on Windows")
+        raise AssertionError("generic executable must precede its registration")
 
     control_registration = meson.index("test('fact-store-provisioned',")
     control_guard = meson.rfind(
@@ -454,10 +506,12 @@ def validate(files: dict[str, str]) -> None:
         "            --print-errorlogs"
     )
     windows_step_name = (
-        "      - name: Build fact forget transaction cleanup seam (clang-cl)"
+        "      - name: Test fact forget transaction cleanup seam (clang-cl)"
     )
     windows_commands = (
-        "meson compile -C builddir test-fact-store-forget-transaction"
+        "meson compile -C builddir test-fact-store-forget-transaction\n"
+        "          meson test -C builddir fact-store-forget-transaction "
+        "--no-rebuild --print-errorlogs"
     )
     for workflow_path in (
         ".github/workflows/ci-pr.yml",
@@ -529,17 +583,25 @@ def validate(files: dict[str, str]) -> None:
                 f"{workflow_path} ran the POSIX provisioned case on Windows"
             )
         for forbidden in (
-            "meson test",
             "NDEBUG",
             "b_ndebug",
             "continue-on-error",
+            "|| true",
+            "exit /b",
+            "-ErrorAction SilentlyContinue",
+            "$ErrorActionPreference = 'Continue'",
             "retry",
+            "--no-suite",
         ):
             if forbidden in windows_step:
                 raise AssertionError(
-                    f"{workflow_path} Windows compile-only boundary drifted: "
+                    f"{workflow_path} tolerated a Windows cleanup failure: "
                     f"{forbidden}"
                 )
+        if "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" not in windows_step:
+            raise AssertionError(
+                f"{workflow_path} Windows cleanup result is not propagated"
+            )
         if not (
             workflow.index("      - name: Build and test (clang-cl)")
             < windows_step_start
@@ -559,13 +621,22 @@ def mutate_once(files: dict[str, str], path: str, old: str, new: str) -> None:
 
 
 def expect_rejected(
-    baseline: dict[str, str], path: str, old: str, new: str, name: str
+    baseline: dict[str, str],
+    path: str,
+    old: str,
+    new: str,
+    name: str,
+    expect: str | None = None,
 ) -> None:
     mutated = dict(baseline)
     mutate_once(mutated, path, old, new)
     try:
         validate(mutated)
-    except (AssertionError, ValueError):
+    except (AssertionError, ValueError) as error:
+        if expect is not None and expect not in str(error):
+            raise AssertionError(
+                f"mutation {name} died on the wrong assertion: {error}"
+            ) from error
         return
     raise AssertionError(f"self-test accepted mutation: {name}")
 
@@ -792,13 +863,47 @@ def self_test(baseline: dict[str, str]) -> None:
         "depends : test_fact_store_forget_transaction_provisioned,",
         "missing provision helper build dependency",
     )
+    generic_registration = (
+        "  test('fact-store-forget-transaction',\n"
+        "    test_fact_store_forget_transaction,\n"
+        "    timeout : 60,\n"
+        "  )"
+    )
+    indented = "  " + generic_registration.replace("\n", "\n  ")
     expect_rejected(
         baseline,
         "tests/meson.build",
-        "if host_machine.system() != 'windows'\n"
-        "    test('fact-store-forget-transaction',",
-        "if true\n    test('fact-store-forget-transaction',",
-        "Windows runtime registration",
+        generic_registration,
+        "  if host_machine.system() != 'windows'\n" + indented + "\n  endif",
+        "Windows runtime registration withdrawn",
+        expect="generic runtime must stay registered on Windows",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        generic_registration,
+        "  if host_machine.system() == 'windows'\n  else\n"
+        + indented + "\n  endif",
+        "Windows runtime registration withdrawn by an inverted guard",
+        expect="generic runtime must stay registered on Windows",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        generic_registration,
+        generic_registration.replace(
+            "    timeout : 60,\n", "    timeout : 60,\n    should_fail : true,\n"
+        ),
+        "Windows runtime registered as should_fail",
+        expect="registered as should_fail",
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        generic_registration,
+        "\n".join("#" + line for line in generic_registration.splitlines()),
+        "Windows runtime registration commented out",
+        expect="registration is not live exactly once",
     )
     expect_rejected(
         baseline,
@@ -926,18 +1031,47 @@ def self_test(baseline: dict[str, str]) -> None:
         expect_rejected(
             baseline,
             workflow_path,
-            "      - name: Build fact forget transaction cleanup seam (clang-cl)",
+            "      - name: Test fact forget transaction cleanup seam (clang-cl)",
             "      - name: Removed fact forget transaction cleanup seam (clang-cl)",
             f"missing Windows cleanup step in {workflow_path}",
+            expect="must have one Windows secure cleanup step",
+        )
+        windows_runtime_line = (
+            "\n          meson test -C builddir fact-store-forget-transaction "
+            "--no-rebuild --print-errorlogs"
         )
         expect_rejected(
             baseline,
             workflow_path,
-            "meson compile -C builddir test-fact-store-forget-transaction",
-            "meson compile -C builddir test-fact-store-forget-transaction\n"
-            "          meson test -C builddir --no-rebuild "
-            "fact-store-forget-transaction",
-            f"Windows runtime exception bypass in {workflow_path}",
+            windows_runtime_line,
+            "",
+            f"return to compile-only Windows evidence in {workflow_path}",
+            expect="Windows secure cleanup commands drifted",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            windows_runtime_line,
+            windows_runtime_line + " || true",
+            f"tolerated Windows cleanup failure in {workflow_path}",
+            expect="tolerated a Windows cleanup failure",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            windows_runtime_line,
+            windows_runtime_line + "\n          exit /b 0",
+            f"batch-masked Windows cleanup failure in {workflow_path}",
+            expect="tolerated a Windows cleanup failure: exit /b",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n\n"
+            "      - name: Test fact-store DuckDB hardening (clang-cl)",
+            "\n      - name: Test fact-store DuckDB hardening (clang-cl)",
+            f"discarded Windows cleanup exit code in {workflow_path}",
+            expect="Windows cleanup result is not propagated",
         )
 
 
