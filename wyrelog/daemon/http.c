@@ -11951,6 +11951,55 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
       SOUP_MEMORY_COPY, json, strlen (json));
 }
 
+/* Control-plane record for a fact lifecycle operation -- one that changes what
+ * a graph is rather than what it contains.  A sibling of emit_fact_op_audit
+ * rather than a generalisation of it: that one is shaped around an append's op
+ * and inserted flag, and passing sentinels through it would label a hard
+ * delete "fact_retract"/"duplicate", which is a false record rather than a
+ * missing one.
+ *
+ * The audit event offers six string slots and no free field, so batch_id rides
+ * in deny_reason and the outcome in deny_origin, exactly as emit_fact_op_audit
+ * and emit_datalog_query_audit already do.  The names do not describe what they
+ * carry; that is a schema problem shared by every emitter here and not one this
+ * change can fix. */
+static wyrelog_error_t
+emit_fact_lifecycle_audit (WylDaemonHttpContext *ctx, const gchar *actor,
+    const gchar *tenant, const gchar *graph, const gchar *action,
+    const gchar *batch_id, const gchar *outcome, const gchar *request_id)
+{
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  gboolean fail_once = ctx->fail_next_fact_op_audit;
+  ctx->fail_next_fact_op_audit = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  if (fail_once)
+    return WYRELOG_E_INTERNAL;
+#endif
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  g_autofree gchar *resource = g_strdup_printf ("%s/%s", tenant, graph);
+  wyl_audit_event_set_subject_id (ev, actor);
+  wyl_audit_event_set_action (ev, action);
+  wyl_audit_event_set_resource_id (ev, resource);
+  wyl_audit_event_set_deny_reason (ev, batch_id);
+  wyl_audit_event_set_deny_origin (ev, outcome);
+  wyl_audit_event_set_request_id (ev, request_id);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  return wyl_audit_emit (ctx->handle, ev);
+#else
+  (void) ctx;
+  (void) actor;
+  (void) tenant;
+  (void) graph;
+  (void) action;
+  (void) batch_id;
+  (void) outcome;
+  (void) request_id;
+  return WYRELOG_E_OK;
+#endif
+}
+
 static wyrelog_error_t
 emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
     const gchar *tenant, const gchar *graph, const gchar *namespace_id,
@@ -12120,6 +12169,38 @@ set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
  * returns; a post-commit refresh failure is committed-but-degraded, reported
  * as HTTP 200 with the same X-Wyrelog-Mutation header and body fields (plus
  * rows_purged) so a client can tell ready from degraded. */
+/* A forget whose control-plane audit could not be written.  The deletion
+ * happened and is durable, so the body says so; only the answer changes.  Uses
+ * the finalize path rather than the success preparer, because this is a 500 and
+ * the write-authority lock has to reach its error terminal state -- the same
+ * distinction set_fact_audit_failed_json makes on the append branch. */
+static void
+set_fact_forget_audit_failed_json (SoupServerMessage *msg, gsize rows_purged,
+    const wyl_fact_mutation_outcome_t *outcome)
+{
+  wyrelog_error_t cleanup_rc = wyl_daemon_policy_write_finalize_for_response
+        (msg, 500, "fact_forget_audit_failed");
+  if (cleanup_rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  attach_request_id_header (msg);
+  const gchar *class_name =
+      wyl_fact_mutation_class_name (outcome->mutation_class);
+  g_autoptr (GString) body = g_string_new ("{\"ok\":false,\"error\":");
+  append_json_string (body, "fact_forget_audit_failed");
+  /* The rows really are gone.  A client told otherwise would retry a hard
+   * delete that already succeeded. */
+  g_string_append (body, ",\"purged\":true,\"rows_purged\":");
+  g_string_append_printf (body, "%" G_GSIZE_FORMAT, rows_purged);
+  g_string_append (body, ",\"mutation_class\":");
+  append_json_string (body, class_name);
+  g_string_append_c (body, '}');
+  soup_server_message_set_status (msg, 500, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      body->str, body->len);
+}
+
 static void
 set_fact_forget_json (SoupServerMessage *msg, gsize rows_purged,
     const wyl_fact_mutation_outcome_t *outcome)
@@ -12339,7 +12420,19 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       set_json_error (msg, 500, "fact_forget_failed");
       return;
     }
-    (void) ensure_request_id_header (msg);
+    const gchar *forget_request_id = ensure_request_id_header (msg);
+    /* Emitted after every rc-derived return above, and into its own local.
+     * Folding an audit result into the operation result is what let a durably
+     * committed batch be reported as a failed append on the other branch; the
+     * same mistake here would report a completed hard delete as failed, which
+     * is worse -- the rows are gone either way and only the answer changes. */
+    wyrelog_error_t forget_audit_rc = emit_fact_lifecycle_audit (ctx,
+            actor != NULL ? actor : "", tenant, graph, "fact_forget",
+            batch_id, "purged", forget_request_id);
+    if (forget_audit_rc != WYRELOG_E_OK) {
+      set_fact_forget_audit_failed_json (msg, rows_purged, &outcome);
+      return;
+    }
     set_fact_forget_json (msg, rows_purged, &outcome);
     return;
   }
