@@ -3,6 +3,7 @@
 
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-log-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #ifdef WYL_HAS_AUDIT
 #include "wyrelog/audit/event-private.h"
@@ -13,6 +14,11 @@ record_daemon_audit_result (WylDaemonRuntime *runtime, wyrelog_error_t rc)
   if (runtime == NULL || rc == WYRELOG_E_OK)
     return;
 
+  /* Say it once, where an operator can find it later.  The flag is a boolean
+   * with no room for what was lost, so without this line a failed audit
+   * emission leaves nothing behind but a 5xx to one client. */
+  WYL_LOG_ERROR (WYL_LOG_SECTION_AUDIT,
+      "audit degraded: an audit record could not be written (rc=%d)", rc);
   /* Say it once, where an operator can find it later.  The flag is a boolean
    * with no room for what was lost, so without this line a failed audit
    * emission leaves nothing behind but a 5xx to one client. */

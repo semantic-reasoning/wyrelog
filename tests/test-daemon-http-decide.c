@@ -1350,29 +1350,56 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
       strstr (body, "\"reason\":\"delta_not_ready\"") == NULL)
     return 1926;
 
+  /* The latch no longer survives a healthy store.  Setting it by hand here
+   * and getting 200 back is the convergence contract: the probe ran, the
+   * store answered, and the flag was cleared without a restart.  Before this
+   * it stayed 503 forever.  The 503 shape is still covered, by the fixture
+   * that breaks the store for real rather than setting the flag by hand --
+   * setting a flag proves nothing about a condition. */
   g_atomic_int_set (&runtime->delta_session_live, TRUE);
   g_atomic_int_set (&runtime->audit_degraded, TRUE);
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
       != 0)
     return 1910;
-  if (status != 503 || strstr (body, "\"audit_degraded\"") == NULL)
+  if (status != 200)
     return 1911;
+  if (g_atomic_int_get (&runtime->audit_degraded))
+    return 1932;
 
+  g_atomic_int_set (&runtime->audit_degraded, TRUE);
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
       &body) != 0)
     return 1927;
-  if (status != 503 || strstr (body, "\"status\":\"not_ready\"") == NULL ||
-      strstr (body, "\"reason\":\"audit_degraded\"") == NULL)
+  if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
     return 1928;
 
-  g_atomic_int_set (&runtime->audit_degraded, FALSE);
+  /* Convergence: the latch is set and the audit store is healthy, so the live
+   * probe must clear it.  Nothing is cleared by hand here -- clearing it by
+   * hand is what the assertions above do, and that proves nothing about
+   * whether the daemon can recover on its own. */
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
       != 0)
     return 1912;
-  return status == 200 ? 0 : 1913;
+  if (status != 200)
+    return 1913;
+
+  /* The count is on the surface at all -- that is what makes "ready" with a
+   * non-zero count a truthful statement rather than amnesia.  This fixture
+   * sets the flag by hand and so never incremented it, so it asserts the key
+   * exists and reads zero; the non-zero case belongs where a real emission
+   * actually failed. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
+      &body) != 0)
+    return 1929;
+  if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
+    return 1930;
+  if (strstr (body, "\"audit_errors\":0") == NULL)
+    return 1931;
+  return 0;
 }
 
 static gint
