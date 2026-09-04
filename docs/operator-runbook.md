@@ -1213,23 +1213,43 @@ must be cleared first; the erasure state reappears once the graph replays.
 A **sealed** graph is the exception, and it is the one that matters most. Boot
 reconciliation deliberately converges a sealed graph's pending forget -- sealing
 blocks admission of new data, not erasure of data already stored, and after the
-seal there is no request path left, so startup is the only remedy. But a sealed
-graph is never given an engine, so it is permanently degraded for a replay
-reason and its `forget_incomplete` is permanently masked. The population most
-likely to strand an erasure is therefore the one that cannot display the state.
+seal there is no request path left, so startup is the only remedy. A sealed
+graph is never given an engine, so its `forget_incomplete` is masked -- the
+population most likely to strand an erasure is the one that cannot display the
+state.
 
-Worse, the state it does show is wrong. Refusing an engine to a sealed graph
-returns a policy error, and the replay classifier maps policy errors to
-`schema_mismatch` -- so a sealed graph reports `"state":"schema_mismatch"`
-whether or not its schema is fine. Do not go looking for a schema problem on a
-sealed graph. Read the `BOOT` error line instead of `/facts/status`; it names
-the graph and the reason code directly. This misreport predates the
-`forget_incomplete` state and is expected to disappear when sealing becomes a
-first-class inactive state rather than a replay failure, which is #548. Note
-that classifying sealed separately does not by itself reveal an outstanding
-erasure on a sealed graph: the status mapping consults the erasure axis only
-where replay health would report ready, so #548 also has to decide how sealed
-composes with it.
+A sealed graph reports `"state":"sealed"`, `"queryable":false`, and a null
+`last_error_class`. It is counted in `graphs_sealed`, in neither
+`graphs_ready` nor `graphs_degraded`, and it does not move the aggregate
+`"status"`. Sealing is your own decision, so it is neither a fault to alert on
+nor evidence of health. **If you alert on `graphs_degraded`, that alert does
+not cover sealed graphs; add `graphs_sealed` if you want to see them.**
+
+Earlier releases reported `"state":"schema_mismatch"` here, because refusing an
+engine to a sealed graph returns a policy error and the replay classifier maps
+policy errors to a schema mismatch. If you are reading a daemon that still does
+that, the schema is not the problem -- read the `BOOT` error line, which names
+the graph and the reason directly.
+
+Two consequences of the sealed state are worth knowing before you act on it.
+
+- **A stranded erasure on a sealed graph is not visible in the aggregate.** The
+  status mapping consults the erasure axis only where replay health would
+  report ready, and sealed outranks both, so a graph that is sealed *and* owes
+  an unconverged forget reports `sealed` and nothing else. It no longer flips
+  the aggregate to `degraded` the way the old `schema_mismatch` misreport
+  happened to. The `BOOT` line still names it; alert on that, not on the
+  aggregate.
+- **`queryable` means different things in two places, deliberately.** On
+  `/facts/status` it answers "can I read this graph", so a sealed graph reports
+  `false`. In a mutation response body it answers "did my write's engine
+  survive", which the barrier does not change. The first describes the
+  barrier; the second describes the engine behind it. Today the two cannot
+  disagree in practice, because every mutation route refuses a sealed graph
+  before it gets that far. They will once a graph can be closed to admission
+  without being durably sealed -- either graph unseal, or the seal route
+  driving the runtime sequencer, which closes admission before it commits the
+  durable bit. Whichever arrives first is enough.
 
 The state is a startup snapshot. It is written by the full replay that runs when
 the daemon opens its handle, and in a running daemon that happens exactly once
@@ -1318,7 +1338,7 @@ to watch for an outstanding erasure.
 | you want to know | endpoint | what it tells you |
 | --- | --- | --- |
 | is the process serving | `GET /readyz` | `200` and `ready\n`, or `503` with a reason |
-| is any graph degraded | `GET /readyz?format=json` | `subsystems.facts` carries `graphs_total`, `graphs_ready`, `graphs_degraded` |
+| is any graph degraded | `GET /readyz?format=json` | `subsystems.facts` carries `graphs_total`, `graphs_ready`, `graphs_degraded`, `graphs_sealed` |
 | which graph, and why | `GET /facts/status` | per-graph `state` and the aggregate |
 
 Three consequences worth knowing before you wire an alert.
@@ -1337,13 +1357,22 @@ whether per-graph detail was requested. A body-matching probe can alert on a
 non-zero count from that one request. Only `/facts/status` names the per-graph
 state.
 
+`graphs_sealed` is counted separately and is not part of `graphs_degraded`, so
+a probe watching only the degraded count will not see a sealed graph. That is
+the intended default -- a seal is your own decision -- but it means a sealed
+graph that also owes an unconverged erasure raises nothing here. The `BOOT`
+line is what names that.
+
 **The plain-text `/readyz` carries no fact information at all.** The body is
 exactly `ready\n` on success. Do not parse it for anything else, and note that
 the failure path returns JSON rather than plain text.
 
 A degraded graph may still be answering queries. `/facts/status` reports
 `"queryable": true` for a graph whose engine is complete and correct for the
-data that is present, even while that graph is counted in `graphs_degraded`.
+data that is present, even while that graph is counted in `graphs_degraded`. A
+**sealed** graph is the one case where that does not follow: it reports
+`"queryable": false`, because the barrier refuses reads whatever the engine
+behind it looks like.
 Read the per-graph `state` rather than inferring a cause from the aggregate,
 and read the `BOOT` log lines, which name the graph and the reason directly.
 
