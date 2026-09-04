@@ -1767,12 +1767,14 @@ if get_option('enable_fact_store').allowed()
     dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep],
   )
 
-  if host_machine.system() != 'windows'
-    test('fact-store-forget-transaction',
-      test_fact_store_forget_transaction,
-      timeout : 60,
-    )
-  endif
+  # Registered on Windows again.  It was compile-only because pinned DuckDB
+  # 1.5.5 cross-checks a de Bruijn result against __builtin_clzl, whose
+  # argument is 32-bit under clang-cl's LLP64 -- so the oracle was wrong, not
+  # the result.  Patch 0005 moves that check to __builtin_clzll.
+  test('fact-store-forget-transaction',
+    test_fact_store_forget_transaction,
+    timeout : 60,
+  )
 
   test_fact_graph_seal = executable('test-fact-graph-seal',
     'test-fact-graph-seal.c',
