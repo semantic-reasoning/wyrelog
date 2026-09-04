@@ -3432,6 +3432,19 @@ test('secure-duckdb-ci-wiring', python3,
   args : [files('test-secure-duckdb-ci-wiring.py'),
     meson.project_source_root()])
 
+# The exit status is the only thing a failing run of test-fact-store reports,
+# so two checks sharing a code cost the first question triage asks.
+test('fact-store-failure-codes', python3,
+  args : [files('test-fact-store-failure-codes.py'),
+    meson.project_source_root()])
+
+test('fact-store-failure-codes-self-test', python3,
+  args : [
+    files('test-fact-store-failure-codes.py'),
+    '--self-test',
+    meson.project_source_root(),
+  ])
+
 test('windows-ci-timeout-boundary', python3,
   args : [files('test-windows-ci-timeout-boundary.py'),
     meson.project_source_root()])
