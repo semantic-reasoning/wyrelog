@@ -13421,6 +13421,174 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+/* The inverse of wyl_policy_store_seal_fact_graph for the one population that
+ * has an inverse.
+ *
+ * The seal accepts two: a legacy graph, whose seal sets the flag alone, and an
+ * authority-managed one, whose seal is an active -> sealed transition.  Only
+ * the second can be undone.  The schema refuses the first outright --
+ * `SELECT CASE WHEN OLD.lifecycle_state='legacy_unclassified' AND OLD.sealed=1
+ * AND NEW.sealed=0 THEN RAISE(ABORT,'sealed legacy graph cannot be
+ * unsealed')` -- so a sealed legacy graph is terminal by design, not by
+ * omission.  This function reports that as WYRELOG_E_POLICY rather than
+ * letting the UPDATE fail and surface as WYRELOG_E_IO, which would read to a
+ * caller as a storage fault rather than a rule.
+ *
+ * That asymmetry is the product's, not this function's: a legacy row has no
+ * verified store identity, so there is nothing for an unseal to validate
+ * before it publishes an engine again.  The trigger is where that decision
+ * lives; ADR 0002 covers reservation of a sealed legacy graph rather than
+ * unsealing one, so it is not the citation for this.
+ *
+ * Not routed through wyl_policy_store_transition_graph_authority, which also
+ * performs sealed -> active.  That one is a compare-and-swap taking both
+ * expected generations, which an operator-driven unseal does not hold, and its
+ * UPDATE leaves sealed_at set.  The sibling seal is likewise a direct writer,
+ * so this mirrors the operation it inverts rather than a different mechanism.
+ *
+ * A provisioning or degraded graph never reaches the dispatch below: the
+ * schema permits sealed = 1 only for 'sealed' and 'legacy_unclassified', so
+ * every other state takes the not-sealed early return above and reports OK.
+ * That holds because the flag and the state come from one read -- it was false
+ * of the two-read form, where a rival could degrade the row between them and
+ * the dispatch then answered POLICY for a graph that was merely racing.
+ * This function gates on "is it still durably sealed", not "is it fit to
+ * reopen"; the caller that needs the second question reads the lifecycle.
+ *
+ * sealed_at is cleared with the flag.  It records when a graph was sealed, and
+ * leaving it set on an active graph states something untrue to every operator
+ * surface that reads the row.
+ *
+ * The generation advances here as it does on the seal.  A seal followed by an
+ * unseal is two transitions, not a round trip that cancels out, and a watcher
+ * that missed both must still see that something happened.
+ *
+ * One UPDATE, guarded by the same graph_authority_mutex the seal takes, so the
+ * read that classifies the row and the write that moves it cannot interleave
+ * with another lifecycle write in this process.
+ *
+ * The WHERE clause is a compare-and-swap on the state, the flag and the
+ * lifecycle generation.  graph_authority_mutex does not make it redundant:
+ * the mutex is a member of the store handle, so two handles on one database
+ * file each hold their own and neither excludes the other.  A second writer
+ * can move the row between the classification above and this write.
+ *
+ * The generation is the term that matters, and it is there because the state
+ * alone admits an ABA.  A rival that degrades the row, recovers it and
+ * re-seals it leaves a row that reads 'sealed' again -- a different row, at a
+ * later generation -- and a state-only match reopens a graph somebody
+ * deliberately re-sealed after a failed identity check.  This matches the
+ * lifecycle generation only, not the reconciliation generation ADR 0002 also
+ * asks of an authority mutation -- it is a direct writer rather than one of
+ * those.  Matching one is not weaker than matching both: the update guard
+ * aborts any reconciliation_generation change except on a degraded -> active
+ * edge, and that edge is itself a state change, so it bumps the lifecycle
+ * generation too.  A reconciliation bump without a lifecycle bump cannot
+ * happen, which makes the lifecycle generation a complete discriminator here.
+ * check_store_unseal_loses_a_race_without_writing drives both interleavings
+ * from a second connection through an authorizer, and removing the generation
+ * term fails its ABA case.
+ *
+ * The state and flag terms are redundant while the schema couples generation
+ * to state -- the update guard forces every state change to bump the
+ * generation by exactly one, so generations never repeat and a generation
+ * match implies the state did not move either.
+ * Removing them is a surviving mutation for that reason.  They stay because
+ * they do not depend on that coupling holding.
+ *
+ * The mutex itself is not pinned by anything: dropping the locker leaves the
+ * suite green, because every test here is single-threaded.  Recorded, not
+ * dressed up -- the cross-connection case the CAS covers is the one a test can
+ * reach.
+ *
+ * The tenant predicate is pinned too, and not by the assertions that came
+ * first: each of those reaches at most one row carrying its graph_id, so a
+ * WHERE scoped to graph_id alone selects the same row the tenant-scoped one
+ * would and the mutation lives.  Two tenants holding the same graph name,
+ * both sealed at the moment of the call, is what makes it die.
+ *
+ * Like the seal, this reports OK without consulting sqlite3_changes, so a CAS
+ * that matched nothing is indistinguishable from one that moved the row.  A
+ * miss no longer implies the graph ended up unsealed: in the ABA case above
+ * the row is durably sealed again, at a generation this call never saw, and
+ * the caller still gets OK.  So a caller must not read OK as proof of
+ * anything about the row.  No sequencer takes this as a linearization point
+ * yet -- there is no caller outside the tests -- and the one that does will
+ * have to re-read rather than assume.  authority_update_step consults
+ * sqlite3_changes; the seal does not, and closing the gap belongs to a commit
+ * that closes it for both.
+ *
+ * One more survivor, for the same reason the others are named: restoring the
+ * two-read classification leaves the suite green.  The single-read shape is
+ * argued from the schema above, not pinned by a test -- the race it closes
+ * needs a rival that moves the row between two reads inside one call, which
+ * no test here can schedule. */
+wyrelog_error_t
+wyl_policy_store_unseal_fact_graph (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+
+  /* One read, not two.  The flag and the lifecycle state have to come from the
+   * same row version: read separately, a rival can move the row in between and
+   * the classification then describes a row that no longer exists.  Measured
+   * on the two-read form -- a graph degraded between the reads reached the
+   * dispatch and was reported WYRELOG_E_POLICY, which a caller reads as "the
+   * schema refuses this at all, stop" when the truth was "you lost a race".
+   * read_graph_authority already selects sealed alongside lifecycle_state, so
+   * one call answers existence, the flag, the state and the generation. */
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_graph_authority (store, tenant_id,
+          graph_id, &authority);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean sealed = authority->sealed_compatibility;
+  WylPolicyGraphLifecycleState state = authority->lifecycle_state;
+  guint64 seen_generation = authority->lifecycle_generation;
+  wyl_policy_graph_authority_record_free (authority);
+
+  if (!sealed)
+    return WYRELOG_E_OK;
+
+  const gchar *sql;
+  if (state == WYL_POLICY_GRAPH_LIFECYCLE_SEALED) {
+    sql = "UPDATE fact_graphs "
+        "SET lifecycle_state = 'active', sealed = 0, "
+        "lifecycle_generation = lifecycle_generation + 1, "
+        "sealed_at = NULL, updated_at = unixepoch() "
+        "WHERE tenant_id = ? AND graph_id = ? "
+        "AND lifecycle_state = 'sealed' AND sealed = 1 "
+        "AND lifecycle_generation = ?;";
+  } else {
+    return WYRELOG_E_POLICY;
+  }
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  if (sqlite3_bind_int64 (stmt, 3, (sqlite3_int64) seen_generation)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
 wyrelog_error_t
 wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *graph_id, gboolean *out_active)
