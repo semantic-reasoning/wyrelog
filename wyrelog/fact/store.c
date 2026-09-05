@@ -9,6 +9,14 @@
 #include "store-identity-private.h"
 #include "wyrelog/wyl-log-private.h"
 
+#define WYL_FACT_STORE_CONNECTION_ROLE 1
+#include "store-connection-private.h"
+#undef WYL_FACT_STORE_CONNECTION_ROLE
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+#include "store-test-seams-private.h"
+#endif
+
 /* Opaque even in non-secure builds so the store handle can carry the live
  * provisioned-pair bridge as a plain pointer (NULL everywhere but the secure
  * provisioned open). */
@@ -30,6 +38,7 @@ struct wyl_fact_store_t
   duckdb_database db;
   duckdb_connection conn;
   GMutex lock;
+  GThread *session_owner;
 #ifdef WYL_TEST_HANDLE_SEAMS
   WylFactStoreBatchFault batch_fault;
 #endif
@@ -39,17 +48,29 @@ struct wyl_fact_store_t
   guint64 identity_format_version;
   guint64 identity_path_encoding_version;
   WylSecureDuckdbBridge *provisioned_bridge;
+  enum
+  {
+    WYL_FACT_STORE_HEALTHY = 0,
+    WYL_FACT_STORE_POISONED,
+  } health;
 #if defined(WYL_TEST_HANDLE_SEAMS)
   WylFactStoreForgetTransactionTestHook forget_transaction_test_hook;
   gpointer forget_transaction_test_hook_data;
   guint duckdb_configured_settings;
   gboolean duckdb_read_only;
+  WylFactStoreTransactionTestHook transaction_test_hook;
+  gpointer transaction_test_hook_data;
+  WylFactStoreSessionAdmissionTestHook session_admission_test_hook;
+  gpointer session_admission_test_hook_data;
+  guint test_session_admission_count;
+  guint test_duckdb_call_count;
 #endif
 };
 
 static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
 static gpointer identity_validation_test_hook_data;
 G_LOCK_DEFINE_STATIC (identity_validation_test_hook);
+static GPrivate active_connection_session = G_PRIVATE_INIT (NULL);
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
 static WylFactStoreDuckdbConfigSetting duckdb_config_failure =
@@ -842,38 +863,306 @@ wyl_fact_store_close (wyl_fact_store_t *store)
   g_free (store);
 }
 
-duckdb_connection
-wyl_fact_store_get_connection (wyl_fact_store_t *store)
+wyrelog_error_t
+wyl_fact_store_connection_session_begin (wyl_fact_store_t *store,
+    WylFactStoreConnectionSession *session)
 {
-  if (store == NULL) {
-    duckdb_connection zero;
-    memset (&zero, 0, sizeof (zero));
-    return zero;
-  }
-  return store->conn;
-}
-
-void
-wyl_fact_store_lock (wyl_fact_store_t *store)
-{
-  if (store != NULL)
+  if (session != NULL)
+    memset (session, 0, sizeof (*session));
+  if (store == NULL || session == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession *active =
+      g_private_get (&active_connection_session);
+  if (active != NULL)
+    return WYRELOG_E_INTERNAL;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (!g_mutex_trylock (&store->lock)) {
+    if (store->session_admission_test_hook != NULL)
+      store->session_admission_test_hook
+        (store->session_admission_test_hook_data);
     g_mutex_lock (&store->lock);
+  }
+#else
+  g_mutex_lock (&store->lock);
+#endif
+  if (store->health == WYL_FACT_STORE_POISONED) {
+    g_mutex_unlock (&store->lock);
+    return WYRELOG_E_INTERNAL;
+  }
+  if (store->session_owner != NULL) {
+    g_mutex_unlock (&store->lock);
+    return WYRELOG_E_INTERNAL;
+  }
+  session->store = store;
+  session->connection = store->conn;
+  session->owner = g_thread_self ();
+  session->held = TRUE;
+  store->session_owner = session->owner;
+  g_private_set (&active_connection_session, session);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  store->test_session_admission_count++;
+#endif
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+connection_session_is_current (const WylFactStoreConnectionSession *session)
+{
+  return session != NULL && session->held && session->store != NULL
+         && session->owner == g_thread_self ()
+         && session->store->session_owner == session->owner
+         && g_private_get (&active_connection_session) == session;
+}
+
+duckdb_connection
+wyl_fact_store_connection_session_get
+  (const WylFactStoreConnectionSession *session)
+{
+  return connection_session_is_current (session) ? session->connection : NULL;
 }
 
 void
-wyl_fact_store_unlock (wyl_fact_store_t *store)
+wyl_fact_store_connection_session_end (WylFactStoreConnectionSession *session)
 {
-  if (store != NULL)
-    g_mutex_unlock (&store->lock);
+  if (session == NULL || !session->held)
+    return;
+  wyl_fact_store_t *store = session->store;
+  g_return_if_fail (connection_session_is_current (session));
+  store->session_owner = NULL;
+  memset (session, 0, sizeof (*session));
+  g_private_set (&active_connection_session, NULL);
+  g_mutex_unlock (&store->lock);
 }
+
+static wyrelog_error_t
+transaction_test_hook_unlocked (wyl_fact_store_t *store,
+    WylFactStoreTransactionKind kind, WylFactStoreTransactionPhase phase)
+{
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (store->transaction_test_hook != NULL)
+    return store->transaction_test_hook ((WylFactStoreTransactionTestKind) kind,
+               (WylFactStoreTransactionTestPhase) phase,
+               store->transaction_test_hook_data);
+#else
+  (void) store;
+  (void) kind;
+  (void) phase;
+#endif
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_store_transaction_begin (WylFactStoreConnectionSession *session,
+    WylFactStoreTransactionKind kind, WylFactStoreTransaction *transaction)
+{
+  if (transaction != NULL)
+    memset (transaction, 0, sizeof (*transaction));
+  if (!connection_session_is_current (session) || transaction == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = exec_sql (session->connection,
+          "BEGIN TRANSACTION;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  transaction->session = session;
+  transaction->kind = kind;
+  transaction->open = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_store_transaction_finish (WylFactStoreTransaction *transaction,
+    wyrelog_error_t primary_rc)
+{
+  if (transaction == NULL || !transaction->open
+      || !connection_session_is_current (transaction->session))
+    return primary_rc;
+  wyl_fact_store_t *store = transaction->session->store;
+  duckdb_connection connection = transaction->session->connection;
+  if (primary_rc == WYRELOG_E_OK) {
+    primary_rc = transaction_test_hook_unlocked (store, transaction->kind,
+            WYL_FACT_STORE_TRANSACTION_BEFORE_COMMIT);
+    if (primary_rc == WYRELOG_E_OK)
+      primary_rc = exec_sql (connection, "COMMIT;");
+    if (primary_rc == WYRELOG_E_OK) {
+      transaction->open = FALSE;
+      return WYRELOG_E_OK;
+    }
+  }
+
+  wyrelog_error_t rollback_rc = transaction_test_hook_unlocked (store,
+          transaction->kind, WYL_FACT_STORE_TRANSACTION_BEFORE_ROLLBACK);
+  if (rollback_rc == WYRELOG_E_OK)
+    rollback_rc = exec_sql (connection, "ROLLBACK;");
+  transaction->open = FALSE;
+  if (rollback_rc != WYRELOG_E_OK) {
+    store->health = WYL_FACT_STORE_POISONED;
+    if (transaction->kind == WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE)
+      WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+          "fact forget transaction rollback failed");
+    else
+      WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+          "fact store transaction rollback failed");
+    return WYRELOG_E_INTERNAL;
+  }
+  return primary_rc;
+}
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+void
+wyl_fact_store_test_set_transaction_hook (wyl_fact_store_t *store,
+    WylFactStoreTransactionTestHook hook, gpointer user_data)
+{
+  if (store == NULL)
+    return;
+  g_mutex_lock (&store->lock);
+  store->transaction_test_hook = hook;
+  store->transaction_test_hook_data = user_data;
+  g_mutex_unlock (&store->lock);
+}
+
+void
+wyl_fact_store_test_set_session_admission_hook (wyl_fact_store_t *store,
+    WylFactStoreSessionAdmissionTestHook hook, gpointer user_data)
+{
+  if (store == NULL)
+    return;
+  g_mutex_lock (&store->lock);
+  store->session_admission_test_hook = hook;
+  store->session_admission_test_hook_data = user_data;
+  g_mutex_unlock (&store->lock);
+}
+
+gboolean
+wyl_fact_store_test_try_lock (wyl_fact_store_t *store)
+{
+  if (store == NULL || !g_mutex_trylock (&store->lock))
+    return FALSE;
+  g_mutex_unlock (&store->lock);
+  return TRUE;
+}
+
+guint
+wyl_fact_store_test_session_admission_count (wyl_fact_store_t *store)
+{
+  if (store == NULL)
+    return 0;
+  g_mutex_lock (&store->lock);
+  guint count = store->test_session_admission_count;
+  g_mutex_unlock (&store->lock);
+  return count;
+}
+
+guint
+wyl_fact_store_test_duckdb_call_count (wyl_fact_store_t *store)
+{
+  if (store == NULL)
+    return 0;
+  g_mutex_lock (&store->lock);
+  guint count = store->test_duckdb_call_count;
+  g_mutex_unlock (&store->lock);
+  return count;
+}
+
+wyrelog_error_t
+wyl_fact_store_test_exec_sql (wyl_fact_store_t *store, const gchar *sql)
+{
+  if (sql == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc == WYRELOG_E_OK) {
+    store->test_duckdb_call_count++;
+    rc = exec_sql (wyl_fact_store_connection_session_get (&session), sql);
+  }
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_test_query_int64 (wyl_fact_store_t *store, const gchar *sql,
+    gint64 *out_value)
+{
+  if (out_value != NULL)
+    *out_value = 0;
+  if (sql == NULL || out_value == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  duckdb_result result = { 0 };
+  if (rc == WYRELOG_E_OK) {
+    store->test_duckdb_call_count++;
+    if (duckdb_query (wyl_fact_store_connection_session_get (&session), sql,
+        &result) != DuckDBSuccess)
+      rc = WYRELOG_E_IO;
+  }
+  if (rc == WYRELOG_E_OK && duckdb_row_count (&result) != 1)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    *out_value = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_test_query_text (wyl_fact_store_t *store, const gchar *sql,
+    gchar **out_value)
+{
+  if (out_value != NULL)
+    *out_value = NULL;
+  if (sql == NULL || out_value == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  duckdb_result result = { 0 };
+  if (rc == WYRELOG_E_OK) {
+    store->test_duckdb_call_count++;
+    if (duckdb_query (wyl_fact_store_connection_session_get (&session), sql,
+        &result) != DuckDBSuccess)
+      rc = WYRELOG_E_IO;
+  }
+  if (rc == WYRELOG_E_OK && duckdb_row_count (&result) != 1)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    gchar *value = duckdb_value_varchar (&result, 0, 0);
+    *out_value = g_strdup (value);
+    duckdb_free (value);
+    if (*out_value == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  duckdb_destroy_result (&result);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_test_rename_metadata_value_column_at_checkpoint
+  (wyl_fact_store_t *store)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  /* Reconcile invokes its checkpoint while already holding the store lock.
+   * This deliberately narrow seam must therefore use that admitted connection
+   * directly instead of attempting a nested connection session. */
+  return exec_sql (store->conn,
+      "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
+}
+#endif
 
 wyrelog_error_t
 wyl_fact_store_create_schema (wyl_fact_store_t *store)
 {
   if (store == NULL)
     return WYRELOG_E_INVALID;
-  g_mutex_lock (&store->lock);
-  wyrelog_error_t rc = reject_audit_database_unlocked (store);
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (store->conn,
             "CREATE TABLE IF NOT EXISTS fact_store_metadata ("
@@ -932,7 +1221,7 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
             FACT_FORGET_INTENT_COLUMNS ");");
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -965,11 +1254,16 @@ wyrelog_error_t
 wyl_fact_store_table_exists (wyl_fact_store_t *store, const gchar *table_name,
     gboolean *out_exists)
 {
-  if (store == NULL)
+  if (out_exists != NULL)
+    *out_exists = FALSE;
+  if (store == NULL || table_name == NULL || out_exists == NULL)
     return WYRELOG_E_INVALID;
-  g_mutex_lock (&store->lock);
-  wyrelog_error_t rc = table_exists_unlocked (store, table_name, out_exists);
-  g_mutex_unlock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc == WYRELOG_E_OK)
+    rc = table_exists_unlocked (store, table_name, out_exists);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -1106,7 +1400,10 @@ wyl_fact_store_ensure_projection (wyl_fact_store_t *store,
       "__wyl_row_index BIGINT NOT NULL, __wyl_valid BOOLEAN NOT NULL, "
       "UNIQUE (__wyl_batch_id, __wyl_row_index));");
 
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
     rc = validate_store_scope_unlocked (store, schema->tenant_id,
@@ -1115,7 +1412,7 @@ wyl_fact_store_ensure_projection (wyl_fact_store_t *store,
     rc = exec_sql (store->conn, ddl->str);
   if (rc == WYRELOG_E_OK)
     rc = validate_projection_shape_unlocked (store, schema, table);
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (out_table_name != NULL)
@@ -1139,7 +1436,10 @@ wyl_fact_store_validate_projection (wyl_fact_store_t *store,
   if (table == NULL)
     return WYRELOG_E_INVALID;
 
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
     rc = validate_store_scope_unlocked (store, schema->tenant_id,
@@ -1151,7 +1451,7 @@ wyl_fact_store_validate_projection (wyl_fact_store_t *store,
     *out_exists = exists;
   if (rc == WYRELOG_E_OK && exists)
     rc = validate_projection_shape_unlocked (store, schema, table);
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -1450,7 +1750,10 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   if (content_hash == NULL)
     return WYRELOG_E_NOMEM;
 
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   gboolean exists = FALSE;
   rc = reject_audit_database_unlocked (store);
   if (rc == WYRELOG_E_OK)
@@ -1461,15 +1764,17 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   if (rc == WYRELOG_E_OK && exists) {
     if (out_inserted != NULL)
       *out_inserted = FALSE;
-    g_mutex_unlock (&store->lock);
+    wyl_fact_store_connection_session_end (&session);
     return WYRELOG_E_OK;
   }
   if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&store->lock);
+    wyl_fact_store_connection_session_end (&session);
     return rc;
   }
 
-  rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  WylFactStoreTransaction transaction = { 0 };
+  rc = wyl_fact_store_transaction_begin (&session,
+          WYL_FACT_STORE_TRANSACTION_APPEND_CORE, &transaction);
 #ifdef WYL_TEST_HANDLE_SEAMS
   WylFactStoreBatchFault batch_fault = take_batch_fault_unlocked (store);
   if (rc == WYRELOG_E_OK
@@ -1529,11 +1834,8 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
       && batch_fault == WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT)
     rc = WYRELOG_E_IO;
 #endif
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (store->conn, "COMMIT;");
-  else
-    (void) exec_sql (store->conn, "ROLLBACK;");
-  g_mutex_unlock (&store->lock);
+  rc = wyl_fact_store_transaction_finish (&transaction, rc);
+  wyl_fact_store_connection_session_end (&session);
   if (rc == WYRELOG_E_OK) {
     if (out_inserted != NULL)
       *out_inserted = TRUE;
@@ -1836,7 +2138,8 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
   gint64 created_at_us = 0;
   wyl_fact_store_batch_t batch_meta;
   gboolean existing = FALSE;
-  gboolean tx_open = FALSE;
+  gboolean attempted_insert = FALSE;
+  WylFactStoreTransaction transaction = { 0 };
 
   if (out_inserted != NULL)
     *out_inserted = FALSE;
@@ -1866,7 +2169,10 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
   batch_meta.idempotency_key = idempotency_key;
   batch_meta.op = WYL_FACT_STORE_OP_RETRACT;
 
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   rc = reject_audit_database_unlocked (store);
   if (rc != WYRELOG_E_OK)
@@ -1924,10 +2230,11 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
     goto unlock_return;
   }
 
-  rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  rc = wyl_fact_store_transaction_begin (&session,
+          WYL_FACT_STORE_TRANSACTION_RETRACT_BY_BATCH, &transaction);
   if (rc != WYRELOG_E_OK)
     goto unlock_return;
-  tx_open = TRUE;
+  attempted_insert = TRUE;
   created_at_us = g_get_real_time ();
   rc = insert_batch_unlocked (store, &batch_meta, content_hash, created_at_us);
   if (rc == WYRELOG_E_OK && n_select_rows > 0)
@@ -1974,27 +2281,22 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
       rc = WYRELOG_E_IO;
     appender = NULL;
   }
-  if (rc == WYRELOG_E_OK) {
-    rc = exec_sql (store->conn, "COMMIT;");
-    tx_open = FALSE;
-  }
-
-  if (rc == WYRELOG_E_OK) {
+unlock_return:
+  if (appender != NULL
+      && duckdb_appender_destroy (&appender) != DuckDBSuccess
+      && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  rc = wyl_fact_store_transaction_finish (&transaction, rc);
+  if (rc == WYRELOG_E_OK && attempted_insert) {
     if (out_inserted != NULL)
       *out_inserted = TRUE;
     if (out_row_count != NULL)
       *out_row_count = (gint64) n_select_rows;
   }
-
-unlock_return:
-  if (tx_open)
-    (void) exec_sql (store->conn, "ROLLBACK;");
-  if (appender != NULL)
-    duckdb_appender_destroy (&appender);
   trigger_batch_scope_clear (&scope);
   free_projection_rows (select_values, owned_strings, select_rows,
       n_select_rows, schema->n_columns);
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -2154,6 +2456,36 @@ count_projection_rows_unlocked (wyl_fact_store_t *store, const gchar *table,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_store_count_projection_batch_rows (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *batch_id, gint64 *out_rows)
+{
+  if (out_rows != NULL)
+    *out_rows = 0;
+  if (store == NULL || schema == NULL || batch_id == NULL
+      || batch_id[0] == '\0' || out_rows == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
+  if (table == NULL)
+    return WYRELOG_E_NOMEM;
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, schema->tenant_id,
+            schema->graph_id, FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = count_projection_rows_unlocked (store, table, batch_id, out_rows);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
 static wyrelog_error_t
 insert_forget_intent_unlocked (wyl_fact_store_t *store,
     const ForgetIntent *intent, gint64 created_at_us)
@@ -2216,39 +2548,22 @@ prepared_delete_batch_unlocked (wyl_fact_store_t *store, const gchar *sql,
   return rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
-static wyrelog_error_t
-rollback_forget_transaction_unlocked (wyl_fact_store_t *store,
-    wyrelog_error_t primary_rc)
-{
-  wyrelog_error_t rollback_rc = WYRELOG_E_OK;
-#if defined(WYL_TEST_HANDLE_SEAMS)
-  rollback_rc = forget_transaction_test_hook_unlocked (store,
-          WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_ROLLBACK);
-#endif
-  if (rollback_rc == WYRELOG_E_OK)
-    rollback_rc = exec_sql (store->conn, "ROLLBACK;");
-  if (rollback_rc != WYRELOG_E_OK) {
-    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
-        "fact forget transaction rollback failed");
-    return WYRELOG_E_INTERNAL;
-  }
-  return primary_rc;
-}
-
 /* Final step: record the audit row and flip the intent COMPLETED in one
  * transaction (no FK-delete, so DuckDB commits it atomically). */
 static wyrelog_error_t
 complete_forget_intent_unlocked (wyl_fact_store_t *store,
-    const ForgetIntent *intent)
+    const ForgetIntent *intent, WylFactStoreConnectionSession *session)
 {
-  wyrelog_error_t rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  WylFactStoreTransaction transaction = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_transaction_begin (session,
+          WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE, &transaction);
   if (rc != WYRELOG_E_OK)
     return rc;
 #if defined(WYL_TEST_HANDLE_SEAMS)
   rc = forget_transaction_test_hook_unlocked (store,
           WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN);
   if (rc != WYRELOG_E_OK)
-    goto rollback;
+    goto finish;
 #endif
   gint64 now_us = g_get_real_time ();
   duckdb_prepared_statement stmt = NULL;
@@ -2261,7 +2576,7 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
   if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
-    goto rollback;
+    goto finish;
   }
   duckdb_state ok = duckdb_bind_varchar (stmt, 1, intent->batch_id)
       | duckdb_bind_varchar (stmt, 2, intent->tenant_id)
@@ -2273,13 +2588,13 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
   if (ok != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
-    goto rollback;
+    goto finish;
   }
   duckdb_state exec = duckdb_execute_prepared (stmt, NULL);
   duckdb_destroy_prepare (&stmt);
   if (exec != DuckDBSuccess) {
     rc = WYRELOG_E_IO;
-    goto rollback;
+    goto finish;
   }
   duckdb_prepared_statement ustmt = NULL;
   static const gchar *update_sql =
@@ -2288,34 +2603,23 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
   if (duckdb_prepare (store->conn, update_sql, &ustmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&ustmt);
     rc = WYRELOG_E_IO;
-    goto rollback;
+    goto finish;
   }
   duckdb_state uok = duckdb_bind_int64 (ustmt, 1, now_us)
       | duckdb_bind_varchar (ustmt, 2, intent->op_uuid);
   if (uok != DuckDBSuccess) {
     duckdb_destroy_prepare (&ustmt);
     rc = WYRELOG_E_IO;
-    goto rollback;
+    goto finish;
   }
   duckdb_state uexec = duckdb_execute_prepared (ustmt, NULL);
   duckdb_destroy_prepare (&ustmt);
   if (uexec != DuckDBSuccess) {
     rc = WYRELOG_E_IO;
-    goto rollback;
+    goto finish;
   }
-#if defined(WYL_TEST_HANDLE_SEAMS)
-  rc = forget_transaction_test_hook_unlocked (store,
-          WYL_FACT_STORE_FORGET_TRANSACTION_BEFORE_COMMIT);
-  if (rc != WYRELOG_E_OK)
-    goto rollback;
-#endif
-  rc = exec_sql (store->conn, "COMMIT;");
-  if (rc != WYRELOG_E_OK)
-    goto rollback;
-  return WYRELOG_E_OK;
-
-rollback:
-  return rollback_forget_transaction_unlocked (store, rc);
+finish:
+  return wyl_fact_store_transaction_finish (&transaction, rc);
 }
 
 /* Drive one intent to its terminal COMPLETED record.  Idempotent: an already
@@ -2326,7 +2630,8 @@ static wyrelog_error_t
 execute_forget_intent_unlocked (wyl_fact_store_t *store,
     const ForgetIntent *intent,
     wyrelog_error_t (*checkpoint) (const gchar *, gpointer),
-    gpointer checkpoint_data, gint64 *out_rows_purged)
+    gpointer checkpoint_data, gint64 *out_rows_purged,
+    WylFactStoreConnectionSession *session)
 {
   if (g_strcmp0 (intent->state, "COMPLETED") == 0) {
     if (out_rows_purged != NULL)
@@ -2380,7 +2685,7 @@ execute_forget_intent_unlocked (wyl_fact_store_t *store,
   rc = forget_run_checkpoint (checkpoint, checkpoint_data, "before_completion");
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = complete_forget_intent_unlocked (store, intent);
+  rc = complete_forget_intent_unlocked (store, intent, session);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (out_rows_purged != NULL)
@@ -2478,12 +2783,21 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
     op_uuid = minted_uuid;
   }
 
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   ForgetIntent intent = { 0 };
   gboolean found = FALSE;
   g_autofree gchar *content_hash = NULL;
   g_autofree gchar *idempotency_key = NULL;
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, schema->tenant_id,
+            schema->graph_id, FALSE);
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
   rc = load_batch_forget_fingerprint_unlocked (store, opts->batch_id, &found,
           &content_hash, &idempotency_key);
   if (rc != WYRELOG_E_OK)
@@ -2529,13 +2843,13 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
 
   gint64 purged = 0;
   rc = execute_forget_intent_unlocked (store, &intent, opts->checkpoint,
-          opts->checkpoint_data, &purged);
+          opts->checkpoint_data, &purged, &session);
   if (rc == WYRELOG_E_OK && out_rows_purged != NULL)
     *out_rows_purged = (gsize) purged;
 
 forget_unlock:
   forget_intent_clear (&intent);
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -2716,14 +3030,18 @@ wyl_fact_store_forget_pending_count (wyl_fact_store_t *store,
   *out_pending = 0;
   if (store == NULL || expected_tenant_id == NULL || expected_graph_id == NULL)
     return WYRELOG_E_INVALID;
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   g_autoptr (GPtrArray) pending =
       g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
-  wyrelog_error_t rc = forget_survey_unlocked (store, expected_tenant_id,
+  rc = forget_survey_unlocked (store, expected_tenant_id,
           expected_graph_id, pending);
   if (rc == WYRELOG_E_OK)
     *out_pending = pending->len;
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -2740,10 +3058,14 @@ wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
   memset (out_outcome, 0, sizeof (*out_outcome));
   if (store == NULL || expected_tenant_id == NULL || expected_graph_id == NULL)
     return WYRELOG_E_INVALID;
-  g_mutex_lock (&store->lock);
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   g_autoptr (GPtrArray) pending =
       g_ptr_array_new_with_free_func ((GDestroyNotify) forget_intent_free);
-  wyrelog_error_t rc = forget_survey_unlocked (store, expected_tenant_id,
+  rc = forget_survey_unlocked (store, expected_tenant_id,
           expected_graph_id, pending);
   /* Unconditionally, whatever the survey returned.  The survey materializes
    * the rows BEFORE it runs the store-scope guard, so a POLICY refusal comes
@@ -2846,7 +3168,7 @@ wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
       continue;
     }
     rc = execute_forget_intent_unlocked (store, intent, checkpoint,
-            checkpoint_data, NULL);
+            checkpoint_data, NULL, &session);
     if (rc != WYRELOG_E_OK) {
       outcome.failed++;
       broke = TRUE;
@@ -2891,6 +3213,6 @@ done:
   if (rc == WYRELOG_E_OK && out_of_scope)
     rc = WYRELOG_E_POLICY;
   *out_outcome = outcome;
-  g_mutex_unlock (&store->lock);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }

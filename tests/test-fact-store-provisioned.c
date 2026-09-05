@@ -10,6 +10,7 @@
 #include "fact/provisioning-run-private.h"
 #include "fact/store-open-private.h"
 #include "fact/store-private.h"
+#include "fact/store-test-seams-private.h"
 
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070545";
 static const gchar tenant_id[] = "tenant-provision";
@@ -68,12 +69,9 @@ open_live (wyl_policy_store_t *policy_store, const gchar *root,
 }
 
 static gboolean
-exec_ok (duckdb_connection conn, const gchar *sql)
+exec_ok (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  duckdb_state state = duckdb_query (conn, sql, &result);
-  duckdb_destroy_result (&result);
-  return state == DuckDBSuccess;
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK;
 }
 
 static gint64
@@ -82,13 +80,9 @@ probe_count (wyl_policy_store_t *policy_store, const gchar *root)
   wyl_fact_store_t *store = NULL;
   if (open_live (policy_store, root, FALSE, &store) != WYRELOG_E_OK)
     return -1;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-  duckdb_result result = { 0 };
   gint64 value = -1;
-  if (duckdb_query (conn, "SELECT COUNT(*) FROM probe;", &result)
-      == DuckDBSuccess)
-    value = duckdb_value_int64 (&result, 0, 0);
-  duckdb_destroy_result (&result);
+  (void) wyl_fact_store_test_query_int64 (store,
+      "SELECT COUNT(*) FROM probe;", &value);
   wyl_fact_store_close (store);
   return value;
 }
@@ -131,9 +125,8 @@ test_open_provisioned_pair_persists_across_reopen (void)
       WYRELOG_E_OK);
   g_assert_nonnull (store);
   g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-  g_assert_true (exec_ok (conn, "CREATE TABLE probe (x INTEGER);"));
-  g_assert_true (exec_ok (conn, "INSERT INTO probe VALUES (42), (7);"));
+  g_assert_true (exec_ok (store, "CREATE TABLE probe (x INTEGER);"));
+  g_assert_true (exec_ok (store, "INSERT INTO probe VALUES (42), (7);"));
   wyl_fact_store_close (store);
 
   /* Reopen a fresh live handle on the same pair: the writes are durable. */

@@ -22,6 +22,16 @@ PROTECTED = {
     "wyl_handle_engine_session_locked_for_test",
     "wyl_handle_pending_delta_count_for_test",
     "wyl_fact_store_set_batch_fault_once_for_test",
+    "wyl_fact_store_test_exec_sql",
+    "wyl_fact_store_test_query_int64",
+    "wyl_fact_store_test_query_text",
+    "wyl_fact_store_test_rename_metadata_value_column_at_checkpoint",
+    "wyl_fact_store_test_set_transaction_hook",
+    "wyl_fact_store_test_set_session_admission_hook",
+    "wyl_fact_store_test_try_lock",
+    "wyl_fact_store_test_session_admission_count",
+    "wyl_fact_store_test_duckdb_call_count",
+    "wyl_fact_replay_open_graph_engine_with_store_for_test",
 }
 SENTINEL = "wyl_init"
 

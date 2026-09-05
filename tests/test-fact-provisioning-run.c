@@ -15,6 +15,7 @@
 #include "fact/store-identity-private.h"
 #include "fact/store-open-private.h"
 #include "fact/store-private.h"
+#include "fact/store-test-seams-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070545";
@@ -1303,12 +1304,9 @@ test_recover_from_verified (void)
 }
 
 static gboolean
-run_exec (duckdb_connection conn, const gchar *sql)
+run_exec (wyl_fact_store_t *store, const gchar *sql)
 {
-  duckdb_result result = { 0 };
-  duckdb_state state = duckdb_query (conn, sql, &result);
-  duckdb_destroy_result (&result);
-  return state == DuckDBSuccess;
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK;
 }
 
 /* The dispatch opens an active graph through the provisioned pair: writes via
@@ -1333,20 +1331,18 @@ test_open_for_graph_serves_active_graph (void)
       "tenant-run", "graph-run", TRUE, &fact_store), ==, WYRELOG_E_OK);
   g_assert_nonnull (fact_store);
   g_assert_cmpint (wyl_fact_store_create_schema (fact_store), ==, WYRELOG_E_OK);
-  duckdb_connection conn = wyl_fact_store_get_connection (fact_store);
-  g_assert_true (run_exec (conn, "CREATE TABLE probe (x INTEGER);"));
-  g_assert_true (run_exec (conn, "INSERT INTO probe VALUES (1), (2), (3);"));
+  g_assert_true (run_exec (fact_store, "CREATE TABLE probe (x INTEGER);"));
+  g_assert_true (run_exec (fact_store,
+      "INSERT INTO probe VALUES (1), (2), (3);"));
   wyl_fact_store_close (fact_store);
 
   fact_store = NULL;
   g_assert_cmpint (wyl_fact_store_open_provisioned_graph (store, root,
       "tenant-run", "graph-run", FALSE, &fact_store), ==, WYRELOG_E_OK);
-  conn = wyl_fact_store_get_connection (fact_store);
-  duckdb_result result = { 0 };
-  g_assert_cmpint (duckdb_query (conn, "SELECT COUNT(*) FROM probe;", &result),
-      ==, DuckDBSuccess);
-  g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, 3);
-  duckdb_destroy_result (&result);
+  gint64 count = -1;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (fact_store,
+      "SELECT COUNT(*) FROM probe;", &count), ==, WYRELOG_E_OK);
+  g_assert_cmpint (count, ==, 3);
   wyl_fact_store_close (fact_store);
 
   remove_root (root);

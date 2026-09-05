@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "compound-private.h"
 
+#define WYL_FACT_STORE_CONNECTION_ROLE 1
+#include "store-connection-private.h"
+#undef WYL_FACT_STORE_CONNECTION_ROLE
+
 #include <duckdb.h>
 #include <string.h>
 
@@ -183,9 +187,11 @@ wyl_fact_compound_create_schema (wyl_fact_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-  wyl_fact_store_lock (store);
-  rc = exec_sql (conn,
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (wyl_fact_store_connection_session_get (&session),
           "CREATE TABLE IF NOT EXISTS compound_terms ("
           "  compound_ref BIGINT PRIMARY KEY,"
           "  tenant_id VARCHAR NOT NULL,"
@@ -209,7 +215,7 @@ wyl_fact_compound_create_schema (wyl_fact_store_t *store)
           "  PRIMARY KEY (compound_ref, arg_index),"
           "  FOREIGN KEY (compound_ref) REFERENCES compound_terms (compound_ref)"
           ");");
-  wyl_fact_store_unlock (store);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -300,13 +306,16 @@ wyl_fact_compound_ref_exists (wyl_fact_store_t *store, const gchar *tenant_id,
   wyrelog_error_t rc = wyl_fact_compound_create_schema (store);
   if (rc != WYRELOG_E_OK)
     return rc;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-  wyl_fact_store_lock (store);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
   rc = validate_scope_unlocked (conn, tenant_id, graph_id, FALSE);
   if (rc == WYRELOG_E_OK)
     rc = compound_exists_unlocked (conn, tenant_id, graph_id, namespace_id,
             compound_ref, out_exists);
-  wyl_fact_store_unlock (store);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -403,9 +412,11 @@ wyl_fact_compound_put (wyl_fact_store_t *store,
   if (hash == NULL)
     return WYRELOG_E_NOMEM;
   gint64 compound_ref = compound_ref_from_hash (hash);
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
-
-  wyl_fact_store_lock (store);
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
   rc = validate_scope_unlocked (conn, value->tenant_id, value->graph_id, TRUE);
   gboolean exists = FALSE;
   if (rc == WYRELOG_E_OK)
@@ -417,11 +428,11 @@ wyl_fact_compound_put (wyl_fact_store_t *store,
             value->graph_id, value->namespace_id, compound_ref, hash,
             &hash_matches);
     if (rc != WYRELOG_E_OK || !hash_matches) {
-      wyl_fact_store_unlock (store);
+      wyl_fact_store_connection_session_end (&session);
       return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
     }
     *out_compound_ref = compound_ref;
-    wyl_fact_store_unlock (store);
+    wyl_fact_store_connection_session_end (&session);
     return WYRELOG_E_OK;
   }
   for (gsize i = 0; rc == WYRELOG_E_OK && i < value->n_args; i++) {
@@ -433,17 +444,16 @@ wyl_fact_compound_put (wyl_fact_store_t *store,
     if (rc == WYRELOG_E_OK && !child_exists)
       rc = WYRELOG_E_POLICY;
   }
+  WylFactStoreTransaction transaction = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = exec_sql (conn, "BEGIN TRANSACTION;");
+    rc = wyl_fact_store_transaction_begin (&session,
+            WYL_FACT_STORE_TRANSACTION_COMPOUND_PUT, &transaction);
   if (rc == WYRELOG_E_OK)
     rc = insert_term_unlocked (conn, value, compound_ref, hash);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < value->n_args; i++)
     rc = insert_arg_unlocked (conn, compound_ref, i, &value->args[i]);
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (conn, "COMMIT;");
-  else
-    (void) exec_sql (conn, "ROLLBACK;");
-  wyl_fact_store_unlock (store);
+  rc = wyl_fact_store_transaction_finish (&transaction, rc);
+  wyl_fact_store_connection_session_end (&session);
   if (rc == WYRELOG_E_OK)
     *out_compound_ref = compound_ref;
   return rc;
@@ -769,16 +779,20 @@ wyl_fact_compound_replay (wyl_fact_store_t *store, WylEngine *engine,
   if (store == NULL || engine == NULL || tenant_id == NULL || graph_id == NULL
       || namespace_id == NULL || compound_ref <= 0 || out_handle == NULL)
     return WYRELOG_E_INVALID;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
   g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
           g_int64_equal, g_free, NULL);
-  wyl_fact_store_lock (store);
-  wyrelog_error_t rc = validate_scope_unlocked (conn, tenant_id, graph_id,
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
+  rc = validate_scope_unlocked (conn, tenant_id, graph_id,
           FALSE);
   if (rc == WYRELOG_E_OK)
     rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
             compound_ref, 0, seen, NULL, out_handle);
-  wyl_fact_store_unlock (store);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
 
@@ -793,15 +807,19 @@ wyl_fact_compound_replay_cached (wyl_fact_store_t *store, WylEngine *engine,
       || namespace_id == NULL || compound_ref <= 0 || handles == NULL
       || out_handle == NULL)
     return WYRELOG_E_INVALID;
-  duckdb_connection conn = wyl_fact_store_get_connection (store);
   g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
           g_int64_equal, g_free, NULL);
-  wyl_fact_store_lock (store);
-  wyrelog_error_t rc = validate_scope_unlocked (conn, tenant_id, graph_id,
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
+  rc = validate_scope_unlocked (conn, tenant_id, graph_id,
           FALSE);
   if (rc == WYRELOG_E_OK)
     rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
             compound_ref, 0, seen, handles, out_handle);
-  wyl_fact_store_unlock (store);
+  wyl_fact_store_connection_session_end (&session);
   return rc;
 }
