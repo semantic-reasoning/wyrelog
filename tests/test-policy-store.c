@@ -762,6 +762,12 @@ cleanup_fact_graph_root (const gchar *root)
     {"tenant-a", "graph-main"},
     {"tenant-a", "graph-sealed"},
     {"tenant-b", "graph-main"},
+    {"tenant-a", "graph-legacy"},
+    {"tenant-a", "graph-prov"},
+    {"tenant-a", "graph-race"},
+    {"tenant-a", "graph-shared"},
+    {"tenant-b", "graph-shared"},
+    {"tenant-a", "graph-aba"},
   };
   gboolean removed = TRUE;
   for (gsize i = 0; i < G_N_ELEMENTS (graph_ids); i++) {
@@ -904,6 +910,453 @@ check_store_manages_fact_graph_registry (void)
   g_clear_pointer (&store, wyl_policy_store_close);
   if (!cleanup_fact_graph_root (root))
     return 419;
+  return 0;
+}
+
+/* Unseal is the inverse of wyl_policy_store_seal_fact_graph for the one
+ * population that has an inverse, and this pins the asymmetry rather than
+ * assuming it away.
+ *
+ * The seal accepts two populations.  Only the authority-managed one can be
+ * undone: the schema refuses to clear the flag on a sealed legacy graph
+ * outright ('sealed legacy graph cannot be unsealed'), so that row is terminal
+ * by design.  Reporting that as WYRELOG_E_POLICY rather than letting the
+ * UPDATE fail is the difference between a rule and a storage fault, and a
+ * caller acts on those differently.
+ *
+ * sealed_at is cleared with the flag.  A timestamp saying when a now-active
+ * graph was sealed is an operator-visible lie, and nothing else clears it. */
+static gint
+check_store_unseals_only_the_reversible_population (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-facts-unseal-XXXXXX", &error);
+  if (root == NULL)
+    return 9700;
+
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  gboolean active = FALSE;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 9701;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9702;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 9703;
+
+  const wyl_policy_fact_graph_column_t columns[] = {
+    {"subject", "symbol"},
+  };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    {"site.node", columns, G_N_ELEMENTS (columns)},
+  };
+
+  /* create_fact_graph leaves lifecycle_state at its default,
+   * legacy_unclassified, so this is the terminal population. */
+  wyl_policy_fact_graph_create_options_t opts =
+      make_fact_graph_options ("tenant-a", "graph-legacy", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &opts, NULL) != WYRELOG_E_OK)
+    return 9704;
+  if (wyl_policy_store_seal_fact_graph (store, "tenant-a", "graph-legacy")
+      != WYRELOG_E_OK)
+    return 9705;
+
+  gint count = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-legacy' AND lifecycle_state='legacy_unclassified' "
+      "AND sealed=1 AND sealed_at IS NOT NULL;", &count) != 0 || count != 1)
+    return 9706;
+
+  /* Refused as a rule, not as an I/O failure.  Getting E_IO here would tell a
+   * caller the store is broken when it is working exactly as designed. */
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-legacy")
+      != WYRELOG_E_POLICY)
+    return 9707;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-legacy' AND sealed=1;", &count) != 0 || count != 1)
+    return 9708;
+
+  /* The authority-managed population, which does have an inverse. */
+  wyl_policy_fact_graph_create_options_t prov_opts =
+      make_fact_graph_options ("tenant-a", "graph-prov", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &prov_opts, NULL,
+      op_uuid) != WYRELOG_E_OK)
+    return 9709;
+  /* Straight to active through the authority transition rather than a full
+   * provisioning run: this test is about the seal edge, not about how a graph
+   * reaches active. */
+  WylPolicyAuthorityMutationResult mutation =
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  if (wyl_policy_store_transition_graph_authority (store, "tenant-a",
+      "graph-prov", WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &mutation) != WYRELOG_E_OK)
+    return 9710;
+  if (wyl_policy_store_seal_fact_graph (store, "tenant-a", "graph-prov")
+      != WYRELOG_E_OK)
+    return 9711;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov' AND lifecycle_state='sealed' AND sealed=1 "
+      "AND sealed_at IS NOT NULL;", &count) != 0 || count != 1)
+    return 9712;
+
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-prov")
+      != WYRELOG_E_OK)
+    return 9713;
+
+  /* Back to active, the flag clear, and the timestamp gone with it.  The
+   * lifecycle generation advances on both edges: a seal and an unseal are two
+   * transitions, not one round trip that cancels out. */
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov' AND lifecycle_state='active' AND sealed=0 "
+      "AND sealed_at IS NULL AND lifecycle_generation=4;", &count) != 0
+      || count != 1)
+    return 9714;
+  if (wyl_policy_store_fact_graph_is_active (store, "tenant-a", "graph-prov",
+      &active) != WYRELOG_E_OK || !active)
+    return 9715;
+
+  /* Idempotent, like seal: unsealing an unsealed graph is not an error, and it
+   * writes nothing -- the generation does not move again. */
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-prov")
+      != WYRELOG_E_OK)
+    return 9716;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov' AND lifecycle_generation=4;", &count) != 0
+      || count != 1)
+    return 9717;
+
+  /* A degraded graph reports OK, not POLICY, and that is pinned rather than
+   * reasoned: the schema permits sealed = 1 only for 'sealed' and
+   * 'legacy_unclassified', so a degraded graph is never durably sealed and
+   * takes the not-sealed early return.  A comment claiming this refuses
+   * degraded would send the next caller looking for a branch that cannot
+   * fire, instead of reading the lifecycle themselves. */
+  if (wyl_policy_store_transition_graph_authority (store, "tenant-a",
+      "graph-prov", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_IDENTITY,
+      4, 0, &mutation) != WYRELOG_E_OK)
+    return 9722;
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-prov")
+      != WYRELOG_E_OK)
+    return 9723;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-prov' AND lifecycle_state='degraded';",
+      &count) != 0 || count != 1)
+    return 9724;
+
+  /* Two tenants, one graph name, both sealed, and only one is asked to
+   * unseal.  Placement matters: each assertion above reaches at most one row
+   * carrying its graph_id, so an UPDATE scoped to graph_id alone selects the
+   * same row the tenant-scoped one would and the mutation survives.  Two
+   * tenants holding one graph name, both sealed at the moment of the call, is
+   * what separates them. */
+  gboolean tenant_b = FALSE;
+  if (wyl_policy_store_create_tenant (store, "tenant-b", &tenant_b)
+      != WYRELOG_E_OK || !tenant_b)
+    return 9725;
+  for (gsize i = 0; i < 2; i++) {
+    const gchar *owner = (i == 0) ? "tenant-a" : "tenant-b";
+    wyl_policy_fact_graph_create_options_t pair_opts =
+        make_fact_graph_options (owner, "graph-shared", root, relations,
+            G_N_ELEMENTS (relations), NULL, 0);
+    gchar pair_uuid[WYL_ID_STRING_BUF] = { 0 };
+    if (wyl_policy_store_create_fact_graph_provisioning (store, &pair_opts,
+        NULL, pair_uuid) != WYRELOG_E_OK)
+      return 9726;
+    if (wyl_policy_store_transition_graph_authority (store, owner,
+        "graph-shared", WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+        &mutation) != WYRELOG_E_OK)
+      return 9727;
+    if (wyl_policy_store_seal_fact_graph (store, owner, "graph-shared")
+        != WYRELOG_E_OK)
+      return 9729;
+  }
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-shared")
+      != WYRELOG_E_OK)
+    return 9730;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE graph_id='graph-shared' "
+      "AND lifecycle_state='sealed' AND sealed=1;", &count) != 0 || count != 1)
+    return 9731;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-b' "
+      "AND graph_id='graph-shared' AND lifecycle_state='sealed';",
+      &count) != 0 || count != 1)
+    return 9732;
+
+  /* Refusals.  A graph that does not exist is NOT_FOUND rather than a silent
+   * success, and a malformed name is INVALID rather than a lookup. */
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-missing")
+      != WYRELOG_E_NOT_FOUND)
+    return 9718;
+  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "../escape")
+      != WYRELOG_E_INVALID)
+    return 9719;
+  if (wyl_policy_store_unseal_fact_graph (store, "../escape", "graph-prov")
+      != WYRELOG_E_INVALID)
+    return 9733;
+  /* 9719 and 9733 pin the contract, not this function's own guards.
+   * read_graph_authority is the first thing the unseal calls and it revalidates
+   * both names, so neither of those two dies when this function's guards go:
+   * measured with the NULL-store check as the only guard left, both still pass
+   * and exactly one assertion goes red -- 9734 below.  They stay as contract
+   * guards; they are not coverage.
+   *
+   * 9734 is the one that pins a guard of this function's own.  The callee
+   * repeats wyl_policy_store_tenant_id_is_valid but not
+   * fact_graph_component_is_valid, and the two disagree: "a+b" carries no
+   * space, control byte or '/' so the tenant check accepts it, while the
+   * component check admits only alphanumerics and '.', '_', ':', '-'.  Delete
+   * fact_graph_component_is_valid and the call reaches a lookup that misses,
+   * so NOT_FOUND arrives here instead of INVALID.  Deleting
+   * wyl_policy_store_tenant_id_is_valid alone still survives, and that one is
+   * genuinely subsumed by the callee rather than merely untested. */
+  if (wyl_policy_store_unseal_fact_graph (store, "a+b", "graph-prov")
+      != WYRELOG_E_INVALID)
+    return 9734;
+  if (wyl_policy_store_unseal_fact_graph (NULL, "tenant-a", "graph-prov")
+      != WYRELOG_E_INVALID)
+    return 9720;
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (!cleanup_fact_graph_root (root))
+    return 9721;
+  return 0;
+}
+
+typedef struct
+{
+  sqlite3 *rival;
+  const gchar *graph_id;
+  gboolean aba;
+  gboolean fired;
+} UnsealRaceProbe;
+
+/* Move the row out from under the unseal, from a second connection on the same
+ * file, in the window between the read that classifies it and the write that
+ * moves it.  The authorizer fires while the UPDATE is being prepared -- after
+ * the classification, before the step, with no write lock held -- which is the
+ * one place a racing writer can land. */
+static int
+unseal_race_authorizer (void *user_data, int action, const char *arg0,
+    const char *arg1, const char *arg2, const char *arg3)
+{
+  UnsealRaceProbe *probe = user_data;
+
+  (void) arg1;
+  (void) arg2;
+  (void) arg3;
+  if (probe->fired || action != SQLITE_UPDATE
+      || g_strcmp0 (arg0, "fact_graphs") != 0)
+    return SQLITE_OK;
+  probe->fired = TRUE;
+  {
+    g_autofree gchar *degrade = g_strdup_printf (
+      "UPDATE fact_graphs SET lifecycle_state='degraded', sealed=0, "
+      "sealed_at=NULL, last_error_class='identity', "
+      "lifecycle_generation=lifecycle_generation+1, "
+      "updated_at=unixepoch() WHERE tenant_id='tenant-a' "
+      "AND graph_id='%s';", probe->graph_id);
+    (void) sqlite3_exec (probe->rival, degrade, NULL, NULL, NULL);
+  }
+  if (!probe->aba)
+    return SQLITE_OK;
+
+  /* Recover and re-seal, so the row reads 'sealed' again by the time the stale
+   * UPDATE runs.  A compare-and-swap on the state alone matches this new
+   * sealed row and reopens a graph somebody deliberately re-sealed after
+   * recovery; only the generation tells the two sealed rows apart. */
+  {
+    g_autofree gchar *recover = g_strdup_printf (
+      "UPDATE fact_graphs SET lifecycle_state='active', "
+      "last_error_class='none', "
+      "lifecycle_generation=lifecycle_generation+1, "
+      "reconciliation_generation=reconciliation_generation+1, "
+      "updated_at=unixepoch() WHERE tenant_id='tenant-a' "
+      "AND graph_id='%s';", probe->graph_id);
+    (void) sqlite3_exec (probe->rival, recover, NULL, NULL, NULL);
+    g_autofree gchar *reseal = g_strdup_printf (
+      "UPDATE fact_graphs SET lifecycle_state='sealed', sealed=1, "
+      "sealed_at=unixepoch(), "
+      "lifecycle_generation=lifecycle_generation+1, "
+      "updated_at=unixepoch() WHERE tenant_id='tenant-a' "
+      "AND graph_id='%s';", probe->graph_id);
+    (void) sqlite3_exec (probe->rival, reseal, NULL, NULL, NULL);
+  }
+  return SQLITE_OK;
+}
+
+/* The UPDATE repeats the state and the flag it already read and matches the
+ * lifecycle generation it read with them.  The generation is the term that
+ * stands between a lost race and a wrong write: deleting the state and flag
+ * repeat alone leaves this test green, and deleting the generation term alone
+ * is what fails it, at the ABA case below.
+ *
+ * graph_authority_mutex does not cover this: it is a member of the store
+ * handle, so two handles on one database file each hold their own.  A second
+ * writer -- another process, or another handle here -- can move the row after
+ * this function classifies it.
+ *
+ * With the compare-and-swap the stale UPDATE matches nothing and the unseal is
+ * a no-op over a row somebody else owns now.  With all three terms gone the
+ * UPDATE matches, and the schema catches what the code did not: measured, the
+ * abort is
+ * 'graph transition requires reconciliation' -- degraded reaches active only
+ * with a reconciliation-generation bump, and this write does not make one.
+ * The caller is then told the store failed rather than that it lost a
+ * race.  Either way the row must stay
+ * degraded -- a graph whose identity check failed must not come back active. */
+static gint
+check_store_unseal_loses_a_race_without_writing (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-unseal-race-XXXXXX", &error);
+  if (dir == NULL)
+    return 9740;
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  if (wyl_policy_store_open (path, &store) != WYRELOG_E_OK)
+    return 9741;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9742;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 9743;
+
+  const wyl_policy_fact_graph_column_t columns[] = {
+    {"subject", "symbol"},
+  };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    {"site.node", columns, G_N_ELEMENTS (columns)},
+  };
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-unseal-race-root-XXXXXX", &error);
+  if (root == NULL)
+    return 9744;
+  wyl_policy_fact_graph_create_options_t opts =
+      make_fact_graph_options ("tenant-a", "graph-race", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &opts, NULL,
+      op_uuid) != WYRELOG_E_OK)
+    return 9745;
+  WylPolicyAuthorityMutationResult mutation =
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  if (wyl_policy_store_transition_graph_authority (store, "tenant-a",
+      "graph-race", WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &mutation) != WYRELOG_E_OK)
+    return 9746;
+  if (wyl_policy_store_seal_fact_graph (store, "tenant-a", "graph-race")
+      != WYRELOG_E_OK)
+    return 9747;
+
+  /* sqlite3_open hands back a connection even when it fails, and documents
+   * that it must be closed regardless; sqlite3_close (NULL) is a no-op. */
+  sqlite3 *rival = NULL;
+  if (sqlite3_open (path, &rival) != SQLITE_OK) {
+    sqlite3_close (rival);
+    return 9748;
+  }
+  UnsealRaceProbe probe = { rival, "graph-race", FALSE, FALSE };
+  sqlite3_set_authorizer (wyl_policy_store_get_db (store),
+      unseal_race_authorizer, &probe);
+  wyrelog_error_t race_rc = wyl_policy_store_unseal_fact_graph (store,
+          "tenant-a", "graph-race");
+  sqlite3_set_authorizer (wyl_policy_store_get_db (store), NULL, NULL);
+  sqlite3_close (rival);
+
+  /* The seam has to have fired, or this test proves nothing about a race. */
+  if (!probe.fired)
+    return 9749;
+  if (race_rc != WYRELOG_E_OK)
+    return 9750;
+
+  gint count = 0;
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-race' AND lifecycle_state='degraded' "
+      "AND sealed=0 AND last_error_class='identity';", &count) != 0
+      || count != 1)
+    return 9751;
+
+  /* Second case: ABA.  The rival degrades the row, recovers it, and re-seals
+   * it, so the stale UPDATE meets a row that reads 'sealed' again -- a
+   * different row, at a later generation.  A compare-and-swap on the state
+   * alone matches it and reopens a graph somebody deliberately re-sealed after
+   * a failed identity check; the generation is what tells the two apart.
+   *
+   * This needs its own invocation and its own assertion.  Sharing the first
+   * case's assertion would be worse than useless: it expects the row to end
+   * degraded, which is the non-ABA outcome, so an ABA run would fail on
+   * correct code. */
+  wyl_policy_fact_graph_create_options_t aba_opts =
+      make_fact_graph_options ("tenant-a", "graph-aba", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  gchar aba_uuid[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &aba_opts, NULL,
+      aba_uuid) != WYRELOG_E_OK)
+    return 9753;
+  if (wyl_policy_store_transition_graph_authority (store, "tenant-a",
+      "graph-aba", WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &mutation) != WYRELOG_E_OK)
+    return 9754;
+  if (wyl_policy_store_seal_fact_graph (store, "tenant-a", "graph-aba")
+      != WYRELOG_E_OK)
+    return 9755;
+
+  sqlite3 *aba_rival = NULL;
+  if (sqlite3_open (path, &aba_rival) != SQLITE_OK) {
+    sqlite3_close (aba_rival);
+    return 9756;
+  }
+  UnsealRaceProbe aba_probe = { aba_rival, "graph-aba", TRUE, FALSE };
+  sqlite3_set_authorizer (wyl_policy_store_get_db (store),
+      unseal_race_authorizer, &aba_probe);
+  wyrelog_error_t aba_rc = wyl_policy_store_unseal_fact_graph (store,
+          "tenant-a", "graph-aba");
+  sqlite3_set_authorizer (wyl_policy_store_get_db (store), NULL, NULL);
+  sqlite3_close (aba_rival);
+
+  if (!aba_probe.fired)
+    return 9757;
+  if (aba_rc != WYRELOG_E_OK)
+    return 9758;
+  /* Still sealed.  The generation CAS refused the stale update; without it the
+   * state CAS matches the re-sealed row and this comes back active. */
+  if (count_rows (store,
+      "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-aba' AND lifecycle_state='sealed' AND sealed=1;",
+      &count) != 0 || count != 1)
+    return 9759;
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (!cleanup_fact_graph_root (root))
+    return 9752;
+  /* The database this test makes lives outside the fact root, so the root
+   * cleanup above does not reach it.  Leaving 768K behind on each passing run
+   * fills a tmpfs builder and surfaces as an unrelated test running out of
+   * space.  Most other g_dir_make_tmp callers here do strand their directory,
+   * because a *.wyrelog-lock file survives and g_rmdir then fails; that is not
+   * a reason to add another. */
+  (void) g_unlink (path);
+  (void) g_rmdir (dir);
   return 0;
 }
 
@@ -6012,6 +6465,10 @@ main (void)
   if ((rc = check_store_provisions_fact_graph ()) != 0)
     return rc;
   if ((rc = check_store_seals_fact_graph_registry ()) != 0)
+    return rc;
+  if ((rc = check_store_unseals_only_the_reversible_population ()) != 0)
+    return rc;
+  if ((rc = check_store_unseal_loses_a_race_without_writing ()) != 0)
     return rc;
   if ((rc = check_store_rejects_fact_graph_registry_escapes ()) != 0)
     return rc;
