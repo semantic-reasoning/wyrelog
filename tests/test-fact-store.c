@@ -2446,32 +2446,6 @@ check_fact_forget_reconcile_counts_executed (void)
   return 0;
 }
 
-/* Rename the metadata column the store-scope check reads, at the first
- * before_completion seam, so its ANSWER changes between the survey and a later
- * iteration.  Shaped like ForgetNthFault above; no new fault machinery.
- * |renamed| is the fixture's own control -- see the test. */
-typedef struct
-{
-  wyl_fact_store_t *store;
-  guint seen;
-  gboolean renamed;
-} ForgetRenameAtNth;
-
-static wyrelog_error_t
-forget_rename_metadata_at_first_completion (const gchar *point,
-    gpointer user_data)
-{
-  ForgetRenameAtNth *fault = user_data;
-  if (g_strcmp0 (point, "before_completion") != 0)
-    return WYRELOG_E_OK;
-  if (++fault->seen != 1)
-    return WYRELOG_E_OK;
-  fault->renamed =
-      wyl_fact_store_test_rename_metadata_value_column_at_checkpoint
-        (fault->store) == WYRELOG_E_OK;
-  return WYRELOG_E_OK;
-}
-
 /* Quarantine is for permanent conditions only.  A transient failure -- an I/O
  * fault mid-erasure -- must stay PENDING and be retried, because the condition
  * that produced it can be gone by the next boot.  Retiring one would turn a
@@ -2759,8 +2733,9 @@ check_fact_forget_reconcile_quarantines_a_foreign_intent (void)
  * seam then renames the column the scope check reads; intent 2's check returns
  * E_IO; intent 3 is abandoned.  complete_forget_intent_unlocked touches only
  * fact_forget_audit and fact_forget_intent, so intent 1 still completes after
- * the rename, and there is no open transaction at that seam -- the only BEGIN
- * in this path is inside that function, after it.
+ * the rename.  The seam is consumed immediately after that function opens its
+ * transaction, keeping all injected DuckDB work inside the ordinary finish
+ * path while the committed rename changes the next loop iteration's answer.
  *
  * This is a test seam that is NULL in production; it shows the branch is
  * reachable, not that DDL races are a supported configuration.  See the
@@ -2778,20 +2753,20 @@ check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal (void)
   if (forget_seed_n_pending (&store, &schema, &table, 3) != 0)
     return 2470;
 
-  ForgetRenameAtNth fault = {
-    .store = store,
-    .seen = 0,
-    .renamed = FALSE,
-  };
+  wyl_fact_store_test_arm_metadata_value_column_rename_once (store);
   wyl_fact_forget_outcome_t out = { 0 };
   wyrelog_error_t rc = wyl_fact_store_forget_reconcile (store, "tenant-a",
-          "orders", forget_rename_metadata_at_first_completion, &fault, &out);
+          "orders", NULL, NULL, &out);
 
   /* The fixture's control.  A silently no-opped ALTER would let all three
    * intents converge, failing the assertions below for a reason that has
    * nothing to do with the loop -- and the failure would point at the code
    * rather than at the fixture. */
-  if (!fault.renamed)
+  gint64 renamed = 0;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_store_metadata' "
+      "AND column_name = 'value_x';", &renamed) || renamed != 1)
     return 2471;
 
   /* The shape the mutation breaks: it reports refused=2, failed=0. */

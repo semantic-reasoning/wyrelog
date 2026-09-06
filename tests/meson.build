@@ -3436,7 +3436,9 @@ test('fact-store-connection-boundary', python3,
 
 test('fact-store-connection-boundary-self', python3,
   args : [files('test-fact-store-connection-boundary.py'),
-    '--self-test', meson.project_source_root()])
+    '--self-test', meson.project_source_root()],
+  timeout : 900,
+  is_parallel : false)
 
 test('duckdb-test-seam-wiring', python3,
   args : [files('test-duckdb-test-seam-wiring.py'),

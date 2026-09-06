@@ -25,7 +25,7 @@ PROTECTED = {
     "wyl_fact_store_test_exec_sql",
     "wyl_fact_store_test_query_int64",
     "wyl_fact_store_test_query_text",
-    "wyl_fact_store_test_rename_metadata_value_column_at_checkpoint",
+    "wyl_fact_store_test_arm_metadata_value_column_rename_once",
     "wyl_fact_store_test_set_transaction_hook",
     "wyl_fact_store_test_set_session_admission_hook",
     "wyl_fact_store_test_try_lock",
