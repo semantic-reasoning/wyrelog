@@ -170,6 +170,19 @@ fail_commit_and_rollback(WylFactStoreTransactionTestKind kind,
   return WYRELOG_E_IO;
 }
 
+static wyrelog_error_t fail_commit_rollback_succeeds(
+  WylFactStoreTransactionTestKind kind,
+  WylFactStoreTransactionTestPhase phase,
+  gpointer user_data) {
+  TransactionFault *fault = user_data;
+  if (kind != fault->target)
+    return WYRELOG_E_OK;
+  g_assert_cmpuint((guint)phase, <, G_N_ELEMENTS(fault->calls));
+  fault->calls[phase]++;
+  return phase == WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT ?
+         WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
 static gpointer append_worker(gpointer user_data) {
   AppendWorker *worker = user_data;
   worker->rc = wyl_fact_store_append_batch(worker->store, worker->schema,
@@ -206,6 +219,13 @@ static wyrelog_error_t probe_reentry(const gchar *point, gpointer user_data) {
       probe->store, "fact_batches", &probe->exists);
   }
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t fail_after_intent(const gchar *point,
+    gpointer user_data) {
+  (void)user_data;
+  return g_strcmp0(point, "after_intent") == 0 ? WYRELOG_E_IO :
+         WYRELOG_E_OK;
 }
 
 static void engine_marker_row(const gchar *relation, const gint64 *row,
@@ -742,6 +762,163 @@ static gint64 projection_count_for_batch(wyl_fact_store_t *store,
   return count;
 }
 
+static void narrow_forget_intent_state_check(wyl_fact_store_t *store) {
+  g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+      "BEGIN TRANSACTION;"
+      "CREATE TABLE fact_forget_intent_old ("
+      "op_uuid VARCHAR PRIMARY KEY, batch_id VARCHAR NOT NULL, "
+      "tenant_id VARCHAR NOT NULL, graph_id VARCHAR NOT NULL, "
+      "namespace_id VARCHAR NOT NULL, relation_name VARCHAR NOT NULL, "
+      "schema_version BIGINT NOT NULL, projection_table VARCHAR NOT NULL, "
+      "content_hash VARCHAR NOT NULL, idempotency_key VARCHAR NOT NULL, "
+      "operator VARCHAR NOT NULL, reason VARCHAR NOT NULL, "
+      "rows_purged BIGINT NOT NULL, state VARCHAR NOT NULL "
+      "CHECK (state IN ('PENDING', 'COMPLETED')), "
+      "created_at_us BIGINT NOT NULL, completed_at_us BIGINT);"
+      "INSERT INTO fact_forget_intent_old SELECT * FROM fact_forget_intent;"
+      "DROP TABLE fact_forget_intent;"
+      "ALTER TABLE fact_forget_intent_old RENAME TO fact_forget_intent;"
+      "COMMIT;"), ==, WYRELOG_E_OK);
+}
+
+static void seed_pending_forget(wyl_fact_store_t *store,
+    const TestSchema *schema, const TestBatch *batch, const gchar *op_uuid) {
+  gboolean inserted = FALSE;
+  g_assert_cmpint(wyl_fact_store_append_batch(store, &schema->schema,
+      &batch->batch, &inserted), ==, WYRELOG_E_OK);
+  g_assert_true(inserted);
+  const wyl_fact_store_forget_options_t opts = {
+    .op_uuid = op_uuid,
+    .batch_id = batch->batch.batch_id,
+    .operator_id = "admin",
+    .reason = "migration-poison",
+    .checkpoint = fail_after_intent,
+  };
+  gsize purged = G_MAXSIZE;
+  g_assert_cmpint(wyl_fact_store_forget(store, &schema->schema, &opts,
+      &purged), ==, WYRELOG_E_IO);
+  g_assert_cmpuint(purged, ==, 0);
+}
+
+static void test_migration_commit_failure_rolls_back(void) {
+  TestSchema schema;
+  TestBatch first;
+  TestBatch second;
+  test_schema_init(&schema);
+  test_batch_init(&first, "migration-io-first", "migration-io-first:1");
+  test_batch_init(&second, "migration-io-second", "migration-io-second:1");
+  g_autoptr(wyl_fact_store_t) store = open_initialized_store(NULL, &schema);
+  seed_pending_forget(store, &schema, &first,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070922");
+  seed_pending_forget(store, &schema, &second,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070923");
+  narrow_forget_intent_state_check(store);
+  g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+      "UPDATE fact_forget_intent SET tenant_id = 'tenant-z';"), ==,
+      WYRELOG_E_OK);
+
+  TransactionFault fault;
+  transaction_fault_init(&fault,
+      WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION, FALSE);
+  wyl_fact_store_test_set_transaction_hook(store,
+      fail_commit_rollback_succeeds, &fault);
+  wyl_fact_forget_outcome_t failed = {0};
+  g_assert_cmpint(wyl_fact_store_forget_reconcile(store, "tenant-a", "orders",
+      NULL, NULL, &failed), ==, WYRELOG_E_IO);
+  g_assert_cmpuint(failed.loaded, ==, 2);
+  g_assert_cmpuint(failed.refused, ==, 1);
+  g_assert_cmpuint(failed.abandoned, ==, 1);
+  g_assert_cmpuint(failed.executed, ==, 0);
+  g_assert_cmpuint(failed.failed, ==, 0);
+  g_assert_cmpuint(fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+      ==, 1);
+  g_assert_cmpuint(
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 1);
+  wyl_fact_store_test_set_transaction_hook(store, NULL, NULL);
+  transaction_fault_clear(&fault);
+
+  g_assert_cmpint(wyl_fact_store_create_schema(store), ==, WYRELOG_E_OK);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"), ==,
+      2);
+  wyl_fact_forget_outcome_t recovered = {0};
+  g_assert_cmpint(wyl_fact_store_forget_reconcile(store, "tenant-a", "orders",
+      NULL, NULL, &recovered), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint(recovered.loaded, ==, 2);
+  g_assert_cmpuint(recovered.refused, ==, 2);
+  g_assert_cmpuint(recovered.abandoned, ==, 0);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM fact_forget_intent "
+      "WHERE state = 'QUARANTINED';"), ==, 2);
+}
+
+static void test_migration_rollback_failure_poison_reopen(void) {
+  g_autoptr(GError) error = NULL;
+  g_autofree gchar *dir =
+      g_dir_make_tmp("wyl-fact-migration-poison-XXXXXX", &error);
+  g_assert_no_error(error);
+  g_autofree gchar *path = g_build_filename(dir, "facts.duckdb", NULL);
+  TestSchema schema;
+  TestBatch first;
+  TestBatch second;
+  test_schema_init(&schema);
+  test_batch_init(&first, "migration-first", "migration-first:1");
+  test_batch_init(&second, "migration-second", "migration-second:1");
+  wyl_fact_store_t *store = open_initialized_store(path, &schema);
+  seed_pending_forget(store, &schema, &first,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070920");
+  seed_pending_forget(store, &schema, &second,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070921");
+  narrow_forget_intent_state_check(store);
+  g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+      "UPDATE fact_forget_intent SET tenant_id = 'tenant-z';"), ==,
+      WYRELOG_E_OK);
+
+  TransactionFault fault;
+  transaction_fault_init(&fault,
+      WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION, FALSE);
+  wyl_fact_store_test_set_transaction_hook(store, fail_commit_and_rollback,
+      &fault);
+  wyl_fact_forget_outcome_t poisoned = {0};
+  g_assert_cmpint(wyl_fact_store_forget_reconcile(store, "tenant-a", "orders",
+      NULL, NULL, &poisoned), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpuint(poisoned.loaded, ==, 2);
+  g_assert_cmpuint(poisoned.refused, ==, 1);
+  g_assert_cmpuint(poisoned.abandoned, ==, 1);
+  g_assert_cmpuint(poisoned.executed, ==, 0);
+  g_assert_cmpuint(poisoned.failed, ==, 0);
+  g_assert_cmpuint(fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+      ==, 1);
+  g_assert_cmpuint(
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 1);
+  wyl_fact_store_test_set_transaction_hook(store, NULL, NULL);
+  g_assert_cmpint(wyl_fact_store_create_schema(store), ==,
+      WYRELOG_E_INTERNAL);
+  wyl_fact_store_close(store);
+  transaction_fault_clear(&fault);
+
+  store = NULL;
+  g_assert_cmpint(wyl_fact_store_open(path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"), ==,
+      2);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM fact_forget_audit;"), ==, 0);
+  wyl_fact_forget_outcome_t recovered = {0};
+  g_assert_cmpint(wyl_fact_store_forget_reconcile(store, "tenant-a", "orders",
+      NULL, NULL, &recovered), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint(recovered.loaded, ==, 2);
+  g_assert_cmpuint(recovered.refused, ==, 2);
+  g_assert_cmpuint(recovered.abandoned, ==, 0);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM fact_forget_intent "
+      "WHERE state = 'QUARANTINED';"), ==, 2);
+  wyl_fact_store_close(store);
+
+  g_assert_cmpint(g_remove(path), ==, 0);
+  g_assert_cmpint(g_rmdir(dir), ==, 0);
+}
+
 static void test_file_reopen_recovers_forget(void) {
   g_autoptr(GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp("wyl-fact-poison-XXXXXX", &error);
@@ -822,5 +999,9 @@ int main(int argc, char **argv) {
       test_compound_owner_poison);
   g_test_add_func("/fact-store/poison/file-reopen-forget",
       test_file_reopen_recovers_forget);
+  g_test_add_func("/fact-store/poison/migration-rollback-failure",
+      test_migration_rollback_failure_poison_reopen);
+  g_test_add_func("/fact-store/poison/migration-commit-failure",
+      test_migration_commit_failure_rolls_back);
   return g_test_run();
 }

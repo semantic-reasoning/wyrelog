@@ -676,6 +676,16 @@ fact_identity_execute (gpointer context, const gchar *sql,
   "  created_at_us   BIGINT NOT NULL," \
   "  completed_at_us BIGINT"
 
+/* Keep macro expansion outside the migration transaction's lexical scope.
+ * The boundary tests also pin FACT_FORGET_INTENT_COLUMNS to string literals,
+ * so changing the shared schema cannot introduce transaction-owner code. */
+static const gchar fact_forget_intent_rebuild_sql[] =
+    "DROP TABLE IF EXISTS fact_forget_intent_rebuild;"
+    "CREATE TABLE fact_forget_intent_rebuild ("
+    FACT_FORGET_INTENT_COLUMNS ");"
+    "INSERT INTO fact_forget_intent_rebuild"
+    "  SELECT * FROM fact_forget_intent;";
+
 static void
 fact_identity_validation_barrier (gpointer context)
 {
@@ -2917,22 +2927,20 @@ forget_intent_state_check_is_current (wyl_fact_store_t *store,
  * from it: the single transaction, the orphan drop, and an equality proof
  * before commit. */
 static wyrelog_error_t
-migrate_forget_intent_state_check_unlocked (wyl_fact_store_t *store)
+migrate_forget_intent_state_check_unlocked (wyl_fact_store_t *store,
+    WylFactStoreConnectionSession *session)
 {
   gboolean current = FALSE;
   wyrelog_error_t rc = forget_intent_state_check_is_current (store, &current);
   if (rc != WYRELOG_E_OK || current)
     return rc;
 
-  rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  WylFactStoreTransaction transaction = { 0 };
+  rc = wyl_fact_store_transaction_begin (session,
+          WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, &transaction);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = exec_sql (store->conn,
-          "DROP TABLE IF EXISTS fact_forget_intent_rebuild;"
-          "CREATE TABLE fact_forget_intent_rebuild ("
-          FACT_FORGET_INTENT_COLUMNS ");"
-          "INSERT INTO fact_forget_intent_rebuild"
-          "  SELECT * FROM fact_forget_intent;");
+  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (store->conn,
             "SELECT CASE WHEN ("
@@ -2943,19 +2951,14 @@ migrate_forget_intent_state_check_unlocked (wyl_fact_store_t *store)
             "     SELECT * FROM fact_forget_intent_rebuild"
             "     EXCEPT SELECT * FROM fact_forget_intent)) = 0"
             ") THEN 1 ELSE error('forget intent rebuild lost rows') END;");
-  if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    goto finish;
   rc = exec_sql (store->conn,
           "DROP TABLE fact_forget_intent;"
           "ALTER TABLE fact_forget_intent_rebuild "
           "  RENAME TO fact_forget_intent;");
-  if (rc != WYRELOG_E_OK) {
-    (void) exec_sql (store->conn, "ROLLBACK;");
-    return rc;
-  }
-  return exec_sql (store->conn, "COMMIT;");
+finish:
+  return wyl_fact_store_transaction_finish (&transaction, rc);
 }
 
 /* Retire an intent that can never converge.  The row stays: it is the record
@@ -2963,9 +2966,10 @@ migrate_forget_intent_state_check_unlocked (wyl_fact_store_t *store)
  * issue that asked for this put deleting it explicitly out of scope. */
 static wyrelog_error_t
 quarantine_forget_intent_unlocked (wyl_fact_store_t *store,
-    const gchar *batch_id)
+    const gchar *batch_id, WylFactStoreConnectionSession *session)
 {
-  wyrelog_error_t rc = migrate_forget_intent_state_check_unlocked (store);
+  wyrelog_error_t rc = migrate_forget_intent_state_check_unlocked (store,
+          session);
   if (rc != WYRELOG_E_OK)
     return rc;
   return prepared_delete_batch_unlocked (store,
@@ -3167,10 +3171,17 @@ wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
        * neither loaded nor refused afterwards.  The outcome equality holds on
        * both passes without a new term.
        *
-       * A failure to quarantine is not fatal to the pass: the intent was
-       * correctly refused either way, and the next boot retries the retirement
-       * rather than losing the refusal. */
-      (void) quarantine_forget_intent_unlocked (store, intent->batch_id);
+       * The refusal remains a valid disposition if retirement fails, but the
+       * pass must stop: a migration cleanup failure can poison the shared
+       * connection, and even an ordinary I/O failure must not be hidden behind
+       * the eventual POLICY result.  Later loaded intents are accounted as
+       * abandoned without issuing more DuckDB work. */
+      wyrelog_error_t quarantine_rc = quarantine_forget_intent_unlocked (store,
+              intent->batch_id, &session);
+      if (quarantine_rc != WYRELOG_E_OK) {
+        rc = quarantine_rc;
+        broke = TRUE;
+      }
       continue;
     }
     if (scope_rc != WYRELOG_E_OK) {
