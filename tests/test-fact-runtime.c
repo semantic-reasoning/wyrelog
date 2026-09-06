@@ -2123,6 +2123,243 @@ test_forget_state_is_orthogonal_and_total (void)
 }
 
 
+/* Publish into a closed entry without reopening it.  The seal evicted the
+ * engine and left admission closed; this puts an engine back while the
+ * barrier still holds, which is the step an unseal needs between its durable
+ * write and reopening admission. */
+static void
+test_refresh_closed_publishes_without_reopening (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 171 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  /* An erasure is owed.  The seal preserved it and the republish must too. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+
+  g_autoptr (WylFactGraphSnapshot) pinned = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &pinned), ==, WYRELOG_E_OK);
+
+  WylFactGraphRuntimeStatus before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &before), ==, WYRELOG_E_OK);
+
+  /* Refused while open: republishing an admitting graph is refresh's job.
+   * Refusing keeps the two from being interchangeable, exactly as
+   * evict_closed refuses what try_evict owns. */
+  BuildSpec early = {.marker = 172 };
+  WylFactGraphRuntimeStatus refused = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager, &a,
+      build_marker_engine, &early, &refused), ==, WYRELOG_E_INVALID);
+  wyl_fact_graph_runtime_status_clear (&refused);
+  WylFactGraphRuntimeStatus unmoved = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &unmoved), ==, WYRELOG_E_OK);
+  /* A refusal writes neither counter, so it cannot be mistaken for a build
+   * that ran and failed. */
+  g_assert_cmpuint (unmoved.operation_generation, ==,
+      before.operation_generation);
+  g_assert_cmpuint (unmoved.engine_generation, ==, before.engine_generation);
+  wyl_fact_graph_runtime_status_clear (&unmoved);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+
+  BuildSpec rebuilt = {.marker = 173 };
+  WylFactGraphRuntimeStatus published = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager, &a,
+      build_marker_engine, &rebuilt, &published), ==, WYRELOG_E_OK);
+  g_assert_cmpint (published.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  /* The whole point: an engine is published and the barrier still holds. */
+  g_assert_cmpint (published.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (published.queryable);
+  g_assert_cmpuint (published.engine_generation, ==,
+      before.engine_generation + 1);
+  g_assert_cmpuint (published.operation_generation, ==,
+      before.operation_generation + 1);
+  g_assert_cmpint (published.last_replay_class, ==,
+      WYL_FACT_GRAPH_REPLAY_NONE);
+  /* The erasure verdict survives the republish.  evict_closed kept it across
+   * the seal so that this call would find it still owed. */
+  g_assert_cmpint (published.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  wyl_fact_graph_runtime_status_clear (&published);
+
+  /* Published, and still barred.  Reads stay refused until admission
+   * reopens, which is what makes publication unobservable. */
+  g_autoptr (WylFactGraphSnapshot) barred = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &barred), ==, WYRELOG_E_BUSY);
+  g_assert_null (barred);
+  BuildSpec plain = {.marker = 174 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &plain, NULL), ==, WYRELOG_E_BUSY);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) reopened = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &reopened), ==, WYRELOG_E_OK);
+  g_assert_cmpint (snapshot_marker (reopened), ==, 173);
+  /* The snapshot pinned before the seal still reads its own generation. */
+  g_assert_cmpint (snapshot_marker (pinned), ==, 171);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* A failed republish publishes nothing and does not reopen.  This is the
+ * acceptance criterion that a failed unseal leaves an explicit sealed or
+ * degraded state rather than a partial engine. */
+static void
+test_refresh_closed_failure_leaves_the_graph_sealed (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 181 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state (manager,
+      &a, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager, &a,
+      &evicted), ==, WYRELOG_E_OK);
+
+  WylFactGraphRuntimeStatus before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &before), ==, WYRELOG_E_OK);
+
+  BuildSpec broken = {.marker = 182,.failure = WYRELOG_E_IO };
+  WylFactGraphRuntimeStatus failed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager, &a,
+      build_marker_engine, &broken, &failed), ==, WYRELOG_E_IO);
+  /* No engine survived the seal, so the failure is degraded rather than
+   * stale: there is nothing left to serve. */
+  g_assert_cmpint (failed.state, ==, WYL_FACT_GRAPH_RUNTIME_DEGRADED);
+  g_assert_cmpint (failed.last_replay_class, ==,
+      WYL_FACT_GRAPH_REPLAY_STORE_UNAVAILABLE);
+  g_assert_false (failed.queryable);
+  /* Nothing was published. */
+  g_assert_cmpuint (failed.engine_generation, ==, before.engine_generation);
+  /* But the attempt is counted, so a caller can tell a build that ran and
+   * failed from one that was refused before it started. */
+  g_assert_cmpuint (failed.operation_generation, ==,
+      before.operation_generation + 1);
+  /* Still sealed.  A failed unseal does not reopen. */
+  g_assert_cmpint (failed.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_cmpint (failed.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  wyl_fact_graph_runtime_status_clear (&failed);
+
+  g_autoptr (WylFactGraphSnapshot) barred = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &a, &barred), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* A graph sealed after boot has no runtime entry at all: the seal treats a
+ * runtime NOT_FOUND as success because the durable bit carries the barrier
+ * alone until the next boot materializes one.  Minting the entry OPEN and
+ * then publishing into it would expose the graph before it was reopened, so
+ * this mints it CLOSED. */
+static void
+test_refresh_closed_mints_a_closed_entry (void)
+{
+  WylFactGraphKey fresh = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&fresh, "tenant-a", "unheld"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+
+  BuildSpec spec = {.marker = 191 };
+  WylFactGraphRuntimeStatus minted = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager,
+      &fresh, build_marker_engine, &spec, &minted), ==, WYRELOG_E_OK);
+  g_assert_cmpint (minted.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (minted.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&minted);
+
+  /* Minted closed, so the graph is not exposed by having been published. */
+  g_autoptr (WylFactGraphSnapshot) barred = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &fresh, &barred), ==, WYRELOG_E_BUSY);
+  BuildSpec plain = {.marker = 192 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &fresh,
+      build_marker_engine, &plain, NULL), ==, WYRELOG_E_BUSY);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &fresh), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) opened = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &fresh, &opened), ==, WYRELOG_E_OK);
+  g_assert_cmpint (snapshot_marker (opened), ==, 191);
+
+  /* Mint-closed is only ever a mint.  An entry that already exists keeps the
+   * admission it has, so this can never silently re-close a graph somebody
+   * reopened -- that is close_admission's job. */
+  WylFactGraphKey held = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&held, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  BuildSpec seed = {.marker = 193 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &held,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+  BuildSpec intruder = {.marker = 194 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager,
+      &held, build_marker_engine, &intruder, NULL), ==, WYRELOG_E_INVALID);
+  WylFactGraphRuntimeStatus still_open = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &held,
+      &still_open), ==, WYRELOG_E_OK);
+  g_assert_cmpint (still_open.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&still_open);
+  wyl_fact_graph_key_clear (&held);
+  wyl_fact_graph_key_clear (&fresh);
+}
+
+/* Refusals that precede any build. */
+static void
+test_refresh_closed_refusals (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager, &a,
+      NULL, NULL, NULL), ==, WYRELOG_E_INVALID);
+
+  BuildSpec spec = {.marker = 201 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+
+  /* A dying manager answers BUSY.  This does NOT demonstrate the gate order:
+   * manager_lookup_entry refuses a shut-down manager before either gate runs,
+   * and this graph is CLOSED, which refresh_closed accepts -- so swapping the
+   * two gates, or deleting the abandoned one outright, both leave this test
+   * green.  Measured.  What separates them is an entry abandoned while the
+   * manager is not shutting down, which nothing single-threaded can produce,
+   * because shutdown is the only writer of abandoned and it sets the manager
+   * flag first.  The order is argued in the header, not pinned here. */
+  BuildSpec late = {.marker = 202 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager, &a,
+      build_marker_engine, &late, NULL), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_key_clear (&a);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2169,6 +2406,14 @@ main (int argc, char **argv)
       test_evict_closed_is_the_seal_eviction);
   g_test_add_func ("/fact-runtime/evict-closed-refuses-shutdown-and-absent",
       test_evict_closed_refuses_shutdown_and_absent_keys);
+  g_test_add_func ("/fact-runtime/refresh-closed-publishes-without-reopening",
+      test_refresh_closed_publishes_without_reopening);
+  g_test_add_func ("/fact-runtime/refresh-closed-failure-leaves-graph-sealed",
+      test_refresh_closed_failure_leaves_the_graph_sealed);
+  g_test_add_func ("/fact-runtime/refresh-closed-mints-a-closed-entry",
+      test_refresh_closed_mints_a_closed_entry);
+  g_test_add_func ("/fact-runtime/refresh-closed-refusals",
+      test_refresh_closed_refusals);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();

@@ -426,9 +426,13 @@ wyl_fact_graph_runtime_manager_unref (WylFactGraphRuntimeManager *manager)
   g_free (manager);
 }
 
+/* mint_as is the admission a newly minted entry gets, or NULL to refuse a key
+ * the runtime has never held.  It is consulted only when a mint actually
+ * happens: an entry already in the map keeps the admission it has, so no
+ * caller can re-close a graph somebody reopened by passing CLOSED here. */
 static wyrelog_error_t
 manager_lookup_entry (WylFactGraphRuntimeManager *manager,
-    const WylFactGraphKey *key, gboolean create,
+    const WylFactGraphKey *key, const WylFactGraphAdmission *mint_as,
     WylFactGraphRuntimeEntry **out_entry)
 {
   *out_entry = NULL;
@@ -438,10 +442,11 @@ manager_lookup_entry (WylFactGraphRuntimeManager *manager,
     return WYRELOG_E_INVALID;
 
   WylFactGraphRuntimeEntry *candidate = NULL;
-  if (create) {
+  if (mint_as != NULL) {
     wyrelog_error_t rc = runtime_entry_new (key, &candidate);
     if (rc != WYRELOG_E_OK)
       return rc;
+    candidate->admission = *mint_as;
   }
 
   g_mutex_lock (&manager->map_lock);
@@ -467,17 +472,26 @@ manager_lookup_entry (WylFactGraphRuntimeManager *manager,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
+/* The body both refresh entrypoints share.  refuse_when names the admission
+ * this caller will not build under, refuse_rc the answer it gives, and mint_as
+ * the admission a newly minted entry gets: refresh refuses CLOSED with BUSY
+ * and mints OPEN, refresh_closed refuses OPEN with INVALID and mints CLOSED.
+ * Sharing it is not extra coverage -- it stops a second copy of the
+ * generation, ceiling, shutdown and classification arms from drifting away
+ * from the ones the suite pins. */
+static wyrelog_error_t
+manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     const WylFactGraphKey *key, WylFactGraphBuildFunc build,
-    gpointer user_data, WylFactGraphRuntimeStatus *out_status)
+    gpointer user_data, WylFactGraphRuntimeStatus *out_status,
+    WylFactGraphAdmission refuse_when, wyrelog_error_t refuse_rc,
+    WylFactGraphAdmission mint_as)
 {
   if (out_status != NULL)
     memset (out_status, 0, sizeof *out_status);
   if (build == NULL)
     return WYRELOG_E_INVALID;
   WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, TRUE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, &mint_as, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (out_status != NULL) {
@@ -508,13 +522,13 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
    * never stamped with a health verdict.  The ceiling path consumes no
    * generation either, so that is not the distinction -- what this ordering
    * buys is that a refusal writes neither state nor last_replay_class. */
-  if (entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+  if (entry->admission == refuse_when) {
     if (out_status != NULL)
       status_fill_locked (entry, out_status);
     g_mutex_unlock (&entry->state_lock);
     g_mutex_unlock (&entry->writer_lock);
     runtime_entry_unref (entry);
-    return WYRELOG_E_BUSY;
+    return refuse_rc;
   }
   /* Argued, not proved: like the post-build failure path below, this must not
    * touch forget_state, because a generation ceiling says nothing about
@@ -587,16 +601,37 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
 }
 
 wyrelog_error_t
+wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, WylFactGraphBuildFunc build,
+    gpointer user_data, WylFactGraphRuntimeStatus *out_status)
+{
+  return manager_refresh_gated (manager, key, build, user_data, out_status,
+             WYL_FACT_GRAPH_ADMISSION_CLOSED, WYRELOG_E_BUSY,
+             WYL_FACT_GRAPH_ADMISSION_OPEN);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_refresh_closed
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphRuntimeStatus * out_status)
+{
+  return manager_refresh_gated (manager, key, build, user_data, out_status,
+             WYL_FACT_GRAPH_ADMISSION_OPEN, WYRELOG_E_INVALID,
+             WYL_FACT_GRAPH_ADMISSION_CLOSED);
+}
+
+wyrelog_error_t
 wyl_fact_graph_runtime_manager_set_forget_state
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphForgetState forget_state) {
   WylFactGraphRuntimeEntry *entry = NULL;
-  /* create = FALSE: this reports on a graph the runtime already holds and must
+  /* mint_as = NULL: this reports on a graph the runtime already holds and must
    * never fabricate an entry for a key it does not.  NOT_FOUND therefore means
    * only that no entry has ever existed for this key -- a retired or evicted
    * entry stays mapped as a tombstone, and is refused below rather than
    * here. */
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_mutex_lock (&entry->state_lock);
@@ -632,11 +667,11 @@ set_admission (WylFactGraphRuntimeManager *manager,
     const WylFactGraphKey *key, WylFactGraphAdmission admission)
 {
   WylFactGraphRuntimeEntry *entry = NULL;
-  /* create = FALSE for the same reason set_forget_state uses it: this acts on
+  /* mint_as = NULL for the same reason set_forget_state uses it: this acts on
    * a graph the runtime already holds and must never fabricate one.  A key
    * the runtime has never seen is NOT_FOUND, not a closed graph -- closing
    * something that does not exist would report a barrier nothing enforces. */
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_mutex_lock (&entry->state_lock);
@@ -705,7 +740,7 @@ wyl_fact_graph_runtime_manager_drain
   if (out_status != NULL)
     memset (out_status, 0, sizeof *out_status);
   WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (out_status != NULL) {
@@ -806,7 +841,7 @@ wyl_fact_graph_runtime_manager_get_status (WylFactGraphRuntimeManager *manager,
   if (out_status == NULL)
     return WYRELOG_E_INVALID;
   WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc == WYRELOG_E_OK) {
     rc = status_copy (entry, out_status);
     runtime_entry_unref (entry);
@@ -872,7 +907,7 @@ wyl_fact_graph_runtime_manager_try_evict
     return WYRELOG_E_INVALID;
   *out_evicted = FALSE;
   WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -910,7 +945,7 @@ wyl_fact_graph_runtime_manager_evict_closed
     return WYRELOG_E_INVALID;
   *out_evicted = FALSE;
   WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1030,7 +1065,7 @@ wyl_fact_graph_runtime_manager_acquire_snapshot
   g_atomic_ref_count_init (&snapshot->ref_count);
 
   WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, FALSE, &entry);
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK) {
     g_free (snapshot);
     return rc;
