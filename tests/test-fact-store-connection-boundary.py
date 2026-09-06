@@ -23,7 +23,7 @@ ROLE_OWNERS = {
 EXPECTED_RAW_INVENTORY = {
     "wyrelog/fact/store.c": (48, 355, 4, 3),
     "wyrelog/fact/compound.c": (0, 123, 14, 0),
-    "wyrelog/fact/replay.c": (0, 30, 2, 0),
+    "wyrelog/fact/replay.c": (0, 32, 2, 0),
 }
 EXPECTED_RAW_MEMBER_FUNCTIONS = {
     "wyrelog/fact/store.c": {
@@ -75,8 +75,8 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "replay_unlocked": 12,
     },
     "wyrelog/fact/replay.c": {
-        "list_replay_relations": 15,
-        "replay_relation_into_engine": 15,
+        "list_replay_relations": 16,
+        "replay_relation_into_engine": 16,
     },
     "wyrelog/fact/store.c": {
         "append_value": 5,
