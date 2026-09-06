@@ -335,8 +335,10 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
       "SELECT DISTINCT namespace_id, relation_name, schema_version "
       "FROM fact_batches WHERE tenant_id = ? AND graph_id = ? "
       "ORDER BY namespace_id, relation_name, schema_version;";
-  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
+  }
   if (rc == WYRELOG_E_OK
       && (duckdb_bind_varchar (stmt, 1, graph->tenant_id) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, graph->graph_id) != DuckDBSuccess)) {
@@ -540,8 +542,10 @@ replay_relation_into_engine (wyl_fact_store_t *store,
   duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
-  if (duckdb_prepare (conn, sql->str, &stmt) != DuckDBSuccess)
+  if (duckdb_prepare (conn, sql->str, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
+  }
   if (rc == WYRELOG_E_OK
       && (duckdb_bind_varchar (stmt, 1, graph->tenant_id) != DuckDBSuccess
       || duckdb_bind_varchar (stmt, 2, graph->graph_id) != DuckDBSuccess))
