@@ -36,6 +36,9 @@ void wyl_fact_store_test_set_session_admission_hook (wyl_fact_store_t * store,
     WylFactStoreSessionAdmissionTestHook hook, gpointer user_data);
 gboolean wyl_fact_store_test_try_lock (wyl_fact_store_t * store);
 guint wyl_fact_store_test_session_admission_count (wyl_fact_store_t * store);
+/* Supplemental runtime evidence: this counts only calls issued by the three
+ * SQL test helpers below.  Production DuckDB-call dominance is enforced by
+ * test-fact-store-connection-boundary.py, not by this counter. */
 guint wyl_fact_store_test_duckdb_call_count (wyl_fact_store_t * store);
 
 wyrelog_error_t wyl_fact_store_test_exec_sql (wyl_fact_store_t * store,
@@ -44,6 +47,6 @@ wyrelog_error_t wyl_fact_store_test_query_int64 (wyl_fact_store_t * store,
     const gchar * sql, gint64 * out_value);
 wyrelog_error_t wyl_fact_store_test_query_text (wyl_fact_store_t * store,
     const gchar * sql, gchar ** out_value);
-wyrelog_error_t
-wyl_fact_store_test_rename_metadata_value_column_at_checkpoint
+void
+wyl_fact_store_test_arm_metadata_value_column_rename_once
   (wyl_fact_store_t * store);

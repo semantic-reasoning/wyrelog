@@ -62,6 +62,7 @@ struct wyl_fact_store_t
   gpointer transaction_test_hook_data;
   WylFactStoreSessionAdmissionTestHook session_admission_test_hook;
   gpointer session_admission_test_hook_data;
+  gboolean rename_metadata_value_column_once;
   guint test_session_admission_count;
   guint test_duckdb_call_count;
 #endif
@@ -1138,17 +1139,25 @@ wyl_fact_store_test_query_text (wyl_fact_store_t *store, const gchar *sql,
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_store_test_rename_metadata_value_column_at_checkpoint
+void
+wyl_fact_store_test_arm_metadata_value_column_rename_once
   (wyl_fact_store_t *store)
 {
   if (store == NULL)
-    return WYRELOG_E_INVALID;
-  /* Reconcile invokes its checkpoint while already holding the store lock.
-   * This deliberately narrow seam must therefore use that admitted connection
-   * directly instead of attempting a nested connection session. */
+    return;
+  g_mutex_lock (&store->lock);
+  store->rename_metadata_value_column_once = TRUE;
+  g_mutex_unlock (&store->lock);
+}
+
+static wyrelog_error_t
+rename_metadata_value_column_once_unlocked (wyl_fact_store_t *store)
+{
+  if (!store->rename_metadata_value_column_once)
+    return WYRELOG_E_OK;
+  store->rename_metadata_value_column_once = FALSE;
   return exec_sql (store->conn,
-      "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
+             "ALTER TABLE fact_store_metadata RENAME COLUMN value TO value_x;");
 }
 #endif
 
@@ -2562,6 +2571,9 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
 #if defined(WYL_TEST_HANDLE_SEAMS)
   rc = forget_transaction_test_hook_unlocked (store,
           WYL_FACT_STORE_FORGET_TRANSACTION_AFTER_BEGIN);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = rename_metadata_value_column_once_unlocked (store);
   if (rc != WYRELOG_E_OK)
     goto finish;
 #endif
