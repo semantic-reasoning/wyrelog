@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 
 
@@ -174,6 +175,206 @@ def validate(files: dict[str, str]) -> None:
     if "(void) exec_sql" in completion:
         raise AssertionError("completion still discards transaction cleanup")
 
+    migration = function_body(
+        store, "migrate_forget_intent_state_check_unlocked"
+    )
+    if re.search(r"(?m)^[ \t]*#", migration):
+        raise AssertionError(
+            "forget state migration must remain unconditional source"
+        )
+    production_macro_sources = "\n".join(
+        source for path, source in files.items() if path.startswith("wyrelog/")
+    )
+    production_macro_sources = production_macro_sources.replace(
+        "??/", "\\"
+    ).replace("??=", "#")
+    production_macro_sources = re.sub(
+        r"\\\r?\n", "", production_macro_sources
+    )
+    production_macro_sources = re.sub(
+        r"/\*.*?\*/",
+        lambda match: "\n" * match.group(0).count("\n") or " ",
+        production_macro_sources,
+        flags=re.DOTALL,
+    )
+    production_macro_sources = re.sub(
+        r"//[^\r\n]*", "", production_macro_sources
+    ).replace("%:", "#")
+    repository_macros = set(re.findall(
+        r"(?m)^[^\S\r\n]*#[^\S\r\n]*define[^\S\r\n]+([A-Za-z_]\w*)\b",
+        production_macro_sources,
+    ))
+    migration_code = migration.replace("??/", "\\").replace("??=", "#")
+    migration_code = re.sub(r"\\\r?\n", "", migration_code)
+    migration_code = re.sub(
+        r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+        " ",
+        migration,
+        flags=re.DOTALL,
+    )
+    used_repository_macros = set(
+        re.findall(r"\b[A-Za-z_]\w*\b", migration_code)
+    ) & repository_macros
+    unexpected_macros = used_repository_macros
+    if unexpected_macros:
+        raise AssertionError(
+            "forget state migration uses unaudited repository macro: "
+            + ", ".join(sorted(unexpected_macros))
+        )
+    if "fact_forget_intent_rebuild_sql" not in migration:
+        raise AssertionError(
+            "forget state migration must use the audited rebuild SQL constant"
+        )
+    macro_definitions = list(re.finditer(
+        r"(?m)^[^\S\r\n]*#[^\S\r\n]*define[^\S\r\n]+"
+        r"FACT_FORGET_INTENT_COLUMNS\b.*$",
+        production_macro_sources,
+    ))
+    if len(macro_definitions) != 1 or re.search(
+        r"(?m)^[^\S\r\n]*#[^\S\r\n]*undef[^\S\r\n]+"
+        r"FACT_FORGET_INTENT_COLUMNS\b",
+        production_macro_sources,
+    ):
+        raise AssertionError(
+            "forget intent columns macro must have one active definition"
+        )
+    macro_lines = production_macro_sources[
+        macro_definitions[0].start():
+    ].splitlines()
+    logical_definition = []
+    for line in macro_lines:
+        logical_definition.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    replacement = re.sub(
+        r"^[ \t]*#[ \t]*define[ \t]+FACT_FORGET_INTENT_COLUMNS\b",
+        "",
+        "\n".join(logical_definition),
+        count=1,
+    )
+    replacement = re.sub(r"\\[ \t]*\n", "\n", replacement)
+    replacement = re.sub(r'"(?:\\.|[^"\\])*"', "", replacement)
+    if replacement.strip():
+        raise AssertionError(
+            "forget intent columns macro must contain only string literals"
+        )
+    if re.search(
+        r"(?m)^(?:static[ \t]+)?WylFactStoreTransaction\b",
+        production_macro_sources,
+    ):
+        raise AssertionError("fact store transaction owner must not have file scope")
+    require_once(
+        migration,
+        "wyl_fact_store_transaction_begin (session,\n"
+        "          WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, "
+        "&transaction)",
+        "forget state migration must use the common transaction owner",
+    )
+    require_once(
+        migration,
+        "finish:\n  return wyl_fact_store_transaction_finish (&transaction, rc);",
+        "forget state migration must have one checked cleanup exit",
+    )
+    begin_guard = (
+        "wyl_fact_store_transaction_begin (session,\n"
+        "          WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, "
+        "&transaction);\n"
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    return rc;"
+    )
+    owner_sites = (
+        "WylFactStoreTransaction transaction = { 0 };",
+        "rc = wyl_fact_store_transaction_begin (session,\n"
+        "          WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, "
+        "&transaction);",
+        "return wyl_fact_store_transaction_finish (&transaction, rc);",
+    )
+    owner_remainder = migration
+    for site in owner_sites:
+        require_once(
+            owner_remainder,
+            site,
+            "forget state migration transaction owner site drifted",
+        )
+        owner_remainder = owner_remainder.replace(site, "", 1)
+    if re.search(r"\btransaction\b", owner_remainder):
+        raise AssertionError(
+            "forget state migration references transaction outside owner calls"
+        )
+    admitted_at = migration.index(begin_guard) + len(begin_guard)
+    finish_at = migration.index("finish:", admitted_at)
+    post_admission = migration[admitted_at:finish_at]
+    body_failure_edge = (
+        "if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;"
+    )
+    require_once(
+        post_admission,
+        body_failure_edge,
+        "forget state migration must preserve its body-failure cleanup edge",
+    )
+    if re.search(r"\breturn\b", post_admission):
+        raise AssertionError(
+            "forget state migration bypasses common transaction cleanup"
+        )
+    if re.search(r"\btransaction\b", post_admission):
+        raise AssertionError(
+            "forget state migration mutates transaction ownership after admission"
+        )
+    for target in re.findall(r"\bgoto\s+([A-Za-z_]\w*)\s*;", post_admission):
+        if target != "finish":
+            raise AssertionError(
+                f"forget state migration escaped common cleanup: goto {target}"
+            )
+    terminal_cleanup = (
+        "finish:\n"
+        "  return wyl_fact_store_transaction_finish (&transaction, rc);\n"
+        "}"
+    )
+    if not migration.rstrip().endswith(terminal_cleanup):
+        raise AssertionError(
+            "forget state migration cleanup is not the terminal exit"
+        )
+    for escaped in ('"BEGIN TRANSACTION;"', '"COMMIT;"', '"ROLLBACK;"'):
+        if escaped in migration:
+            raise AssertionError(
+                f"forget state migration escaped common cleanup: {escaped}"
+            )
+    migration_body = (
+        "rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = exec_sql (store->conn,\n"
+        '            "SELECT CASE WHEN ("\n'
+        '            "  (SELECT COUNT(*) FROM ("\n'
+        '            "     SELECT * FROM fact_forget_intent"\n'
+        '            "     EXCEPT SELECT * FROM fact_forget_intent_rebuild)) = 0"\n'
+        '            "  AND (SELECT COUNT(*) FROM ("\n'
+        '            "     SELECT * FROM fact_forget_intent_rebuild"\n'
+        '            "     EXCEPT SELECT * FROM fact_forget_intent)) = 0"\n'
+        '            ") THEN 1 ELSE error(\'forget intent rebuild lost rows\') END;");\n'
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"\n'
+        '          "ALTER TABLE fact_forget_intent_rebuild "\n'
+        '          "  RENAME TO fact_forget_intent;");'
+    )
+    if post_admission.strip() != migration_body:
+        raise AssertionError("forget state migration body sequence drifted")
+
+    reconcile = function_body(
+        store, "wyrelog_error_t\nwyl_fact_store_forget_reconcile ("
+    )
+    quarantine_stop = (
+        "if (quarantine_rc != WYRELOG_E_OK) {\n"
+        "        rc = quarantine_rc;\n"
+        "        broke = TRUE;\n"
+        "      }"
+    )
+    if "quarantine_rc = quarantine_forget_intent_unlocked (store," \
+            not in reconcile or quarantine_stop not in reconcile:
+        raise AssertionError("quarantine failure propagation drifted")
+
     legacy_seam_tokens = (
         "WylFactStoreForgetTransactionTestPhase",
         "WylFactStoreForgetTransactionTestHook",
@@ -208,6 +409,7 @@ def validate(files: dict[str, str]) -> None:
         "WylFactStoreTransactionTestPhase",
         "WylFactStoreTransactionTestHook",
         "wyl_fact_store_test_set_transaction_hook",
+        "WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION",
     ):
         if token not in generic_seam:
             raise AssertionError(f"generic transaction seam drifted: {token}")
@@ -245,7 +447,12 @@ def validate(files: dict[str, str]) -> None:
     poison = files["tests/test-fact-store-poison.c"]
     for token in (
         "WYL_FACT_STORE_TRANSACTION_TEST_FORGET_COMPLETE",
+        "WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION",
         "test_file_reopen_recovers_forget",
+        "test_migration_commit_failure_rolls_back",
+        "test_migration_rollback_failure_poison_reopen",
+        "fail_commit_rollback_succeeds",
+        "failed), ==, WYRELOG_E_IO",
         "state = 'PENDING'",
         "state = 'COMPLETED'",
         "wyl_fact_store_forget_reconcile",
@@ -691,6 +898,320 @@ def self_test(baseline: dict[str, str]) -> None:
             failure.replace("goto finish;", "return WYRELOG_E_IO;"),
             f"body failure {index} bypass",
         )
+    expect_rejected(
+        baseline,
+        store_path,
+        "WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, &transaction",
+        "WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE, &transaction",
+        "migration transaction kind removed",
+        expect="forget state migration must use the common transaction owner",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "finish:\n"
+        "  return wyl_fact_store_transaction_finish (&transaction, rc);\n"
+        "}\n\n"
+        "/* Retire an intent",
+        "finish:\n  return rc;\n}\n\n/* Retire an intent",
+        "migration common finish bypass",
+        expect="forget state migration must have one checked cleanup exit",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    return rc;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "migration body direct return",
+        expect="must preserve its body-failure cleanup edge",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "migration body failure edge removed",
+        expect="must preserve its body-failure cleanup edge",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "  rc = WYRELOG_E_OK;\n"
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "migration body result overwritten",
+        expect="body sequence drifted",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "  if (rc != WYRELOG_E_OK) {\n"
+        "    transaction.open = FALSE;\n"
+        "    goto finish;\n"
+        "  }\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "migration transaction disarmed",
+        expect="references transaction outside owner calls",
+    )
+    alias_disarm = dict(baseline)
+    mutate_once(
+        alias_disarm,
+        store_path,
+        "  WylFactStoreTransaction transaction = { 0 };\n"
+        "  rc = wyl_fact_store_transaction_begin (session,\n"
+        "          WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION,",
+        "  WylFactStoreTransaction transaction = { 0 };\n"
+        "  WylFactStoreTransaction *owner_alias = &transaction;\n"
+        "  rc = wyl_fact_store_transaction_begin (session,\n"
+        "          WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION,",
+    )
+    mutate_once(
+        alias_disarm,
+        store_path,
+        "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+        "  if (rc == WYRELOG_E_OK)",
+        "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+        "  owner_alias->open = FALSE;\n"
+        "  if (rc == WYRELOG_E_OK)",
+    )
+    try:
+        validate(alias_disarm)
+    except (AssertionError, ValueError) as error:
+        if "references transaction outside owner calls" not in str(error):
+            raise AssertionError(
+                f"mutation migration alias disarm died on the wrong assertion: "
+                f"{error}"
+            ) from error
+    else:
+        raise AssertionError("self-test accepted mutation: migration alias disarm")
+    expect_rejected(
+        baseline,
+        store_path,
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "#if 0\n"
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "#endif\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "conditional migration body failure edge",
+        expect="must remain unconditional source",
+    )
+    macro_disarm = dict(baseline)
+    mutate_once(
+        macro_disarm,
+        store_path,
+        "static wyrelog_error_t\n"
+        "migrate_forget_intent_state_check_unlocked (",
+        "#define WYL_DISARM_MIGRATION transaction.open = FALSE\n\n"
+        "static wyrelog_error_t\n"
+        "migrate_forget_intent_state_check_unlocked (",
+    )
+    mutate_once(
+        macro_disarm,
+        store_path,
+        "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+        "  if (rc == WYRELOG_E_OK)",
+        "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+        "  WYL_DISARM_MIGRATION;\n"
+        "  if (rc == WYRELOG_E_OK)",
+    )
+    try:
+        validate(macro_disarm)
+    except (AssertionError, ValueError) as error:
+        if "uses unaudited repository macro" not in str(error):
+            raise AssertionError(
+                f"mutation migration macro disarm died on the wrong assertion: "
+                f"{error}"
+            ) from error
+    else:
+        raise AssertionError("self-test accepted mutation: migration macro disarm")
+    header_macro_disarm = dict(baseline)
+    mutate_once(
+        header_macro_disarm,
+        "wyrelog/fact/store-connection-private.h",
+        "#pragma once\n",
+        "#pragma once\n\n"
+        "#define WYL_DISARM_MIGRATION_ON_FAILURE() \\\n"
+        "  do { if (rc != WYRELOG_E_OK) transaction.open = FALSE; } while (0)\n",
+    )
+    mutate_once(
+        header_macro_disarm,
+        store_path,
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+        "  WYL_DISARM_MIGRATION_ON_FAILURE ();\n"
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"',
+    )
+    try:
+        validate(header_macro_disarm)
+    except (AssertionError, ValueError) as error:
+        if "uses unaudited repository macro" not in str(error):
+            raise AssertionError(
+                f"mutation migration header macro disarm died on the wrong "
+                f"assertion: {error}"
+            ) from error
+    else:
+        raise AssertionError(
+            "self-test accepted mutation: migration header macro disarm"
+        )
+    for directive, label in (
+        ("%:define", "digraph"),
+        ("#/**/define", "comment-separated"),
+        ("#\\\ndefine", "line-spliced"),
+        ("#\vdefine", "vertical-tab"),
+        ("#\fdefine", "form-feed"),
+    ):
+        translated_header_macro = dict(baseline)
+        mutate_once(
+            translated_header_macro,
+            "wyrelog/fact/store-connection-private.h",
+            "#pragma once\n",
+            "#pragma once\n\n"
+            f"{directive} WYL_TRANSLATED_DISARM transaction.open = FALSE\n",
+        )
+        mutate_once(
+            translated_header_macro,
+            store_path,
+            "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+            "  if (rc == WYRELOG_E_OK)",
+            "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n"
+            "  WYL_TRANSLATED_DISARM;\n"
+            "  if (rc == WYRELOG_E_OK)",
+        )
+        try:
+            validate(translated_header_macro)
+        except (AssertionError, ValueError) as error:
+            if "uses unaudited repository macro" not in str(error):
+                raise AssertionError(
+                    f"mutation migration {label} header macro died on the "
+                    f"wrong assertion: {error}"
+                ) from error
+        else:
+            raise AssertionError(
+                f"self-test accepted mutation: migration {label} header macro"
+            )
+    split_macro_use = dict(baseline)
+    mutate_once(
+        split_macro_use,
+        "wyrelog/fact/store-connection-private.h",
+        "#pragma once\n",
+        "#pragma once\n\n"
+        "#define WYL_SPLICE_DISARM transaction.open = FALSE\n",
+    )
+    mutate_once(
+        split_macro_use,
+        store_path,
+        "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n",
+        "  WYL_SPLICE_\\\nDISARM;\n"
+        "  rc = exec_sql (store->conn, fact_forget_intent_rebuild_sql);\n",
+    )
+    try:
+        validate(split_macro_use)
+    except (AssertionError, ValueError) as error:
+        if "body sequence drifted" not in str(error):
+            raise AssertionError(
+                f"mutation migration split macro use died on the wrong "
+                f"assertion: {error}"
+            ) from error
+    else:
+        raise AssertionError(
+            "self-test accepted mutation: migration split macro use"
+        )
+    expect_rejected(
+        baseline,
+        store_path,
+        "#define FACT_FORGET_INTENT_COLUMNS \\\n"
+        '  "  op_uuid         VARCHAR PRIMARY KEY,"',
+        "#define FACT_FORGET_INTENT_COLUMNS \\\n"
+        '  "existing columns"; transaction.open = FALSE; \\\n'
+        '  "  op_uuid         VARCHAR PRIMARY KEY,"',
+        "trusted columns macro code injection",
+        expect="must contain only string literals",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "#define FACT_FORGET_INTENT_COLUMNS \\\n",
+        "static WylFactStoreTransaction transaction;\n"
+        "#define FACT_FORGET_INTENT_COLUMNS \\\n",
+        "file-scope transaction owner",
+        expect="transaction owner must not have file scope",
+    )
+    migration_tail = (
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    goto finish;\n"
+        "  rc = exec_sql (store->conn,\n"
+        '          "DROP TABLE fact_forget_intent;"\n'
+        '          "ALTER TABLE fact_forget_intent_rebuild "\n'
+        '          "  RENAME TO fact_forget_intent;");\n'
+        "finish:\n"
+        "  return wyl_fact_store_transaction_finish (&transaction, rc);\n"
+        "}"
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        migration_tail,
+        migration_tail.replace("goto finish;", "goto bypass_finish;").replace(
+            "\n}", "\nbypass_finish:\n  return rc;\n}", 1
+        ),
+        "migration goto bypass",
+        expect="must preserve its body-failure cleanup edge",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "        rc = quarantine_rc;\n        broke = TRUE;",
+        "        (void) quarantine_rc;\n        broke = TRUE;",
+        "ignored quarantine failure",
+        expect="quarantine failure propagation drifted",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "if (quarantine_rc != WYRELOG_E_OK) {",
+        "if (quarantine_rc == WYRELOG_E_INTERNAL) {",
+        "internal-only quarantine failure",
+        expect="quarantine failure propagation drifted",
+    )
+    expect_rejected(
+        baseline,
+        store_path,
+        "if (quarantine_rc != WYRELOG_E_OK) {",
+        "if (FALSE && quarantine_rc != WYRELOG_E_OK) {",
+        "disabled quarantine failure",
+        expect="quarantine failure propagation drifted",
+    )
     expect_rejected(
         baseline,
         store_path,
