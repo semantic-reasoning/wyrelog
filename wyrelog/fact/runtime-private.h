@@ -481,6 +481,104 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_evict_closed
     gboolean * out_evicted);
 
 /*
+ * Publish an engine into a CLOSED entry, without reopening it.
+ *
+ * The inverse of evict_closed, and the step an unseal needs between its
+ * durable write and open_admission: the engine is rebuilt and published while
+ * the barrier still holds, so nothing observes it until admission reopens.
+ * That is what makes publication atomic from a reader's side -- open_admission
+ * is the visible edge, not the pointer swap.
+ *
+ * It shares refresh's body and differs by two things: the gate -- refresh
+ * refuses a CLOSED graph with BUSY, this refuses an OPEN one with INVALID
+ * -- and the admission a mint gets, described below.  Republishing
+ * an admitting graph is refresh's job, and refusing keeps the two from being
+ * interchangeable the way evict_closed refuses what try_evict owns.  Sharing
+ * the body is not extra coverage; it keeps the generation, ceiling, shutdown
+ * and classification arms from drifting into a second copy.  The G_MAXUINT64
+ * ceiling arm remains as unproved here as it is for refresh -- see the comment
+ * on it -- because sharing a body does not test it.
+ *
+ * A key the runtime has never held is MINTED CLOSED rather than refused.  A
+ * graph created after boot and sealed live may have none: a mutation would
+ * have minted one, but nothing else does, and seal S2 treats that NOT_FOUND
+ * as success because the durable bit carries the barrier alone until the next
+ * boot materializes an entry.  Refusing here would leave an unseal with only
+ * plain refresh, which mints OPEN and would expose the graph before anyone
+ * reopened it.  Minting is the only time this call writes admission --
+ * set_admission is the axis's real writer -- so an entry already in the map
+ * keeps what it has and this can never re-close a graph somebody reopened.
+ *
+ * Gate order follows drain, the other status-filling primitive: abandoned is
+ * tested before admission, because a filled status is read state first and a
+ * dying manager must answer BUSY rather than INVALID.  evict_closed orders
+ * them the other way and has no out_status; the divergence is deliberate.
+ * Argued, not proved, exactly like evict_closed's own abandoned branch:
+ * swapping the two gates leaves the suite green, and so does deleting the
+ * abandoned one, because manager_lookup_entry already refuses a shut-down
+ * manager before either runs.  Separating them needs an entry abandoned while
+ * the manager is not shutting down, and shutdown is the only writer of
+ * abandoned and sets the manager flag first -- so no single-threaded test
+ * reaches it.  Measured, and recorded rather than dressed up.
+ *
+ * The admission gate is consumed once, before the build, and NOT re-tested
+ * after it.  A concurrent seal whose drain times out reopens admission when
+ * the graph was not already durably sealed, so a build in flight publishes
+ * into a now-OPEN graph: the publication is still atomic and the counters
+ * still correct, but the barrier is gone.  Callers must not run a seal and
+ * an unseal on one graph concurrently.
+ * Conversely operation_active re-arms for the whole build, so a concurrent
+ * seal's drain waits on it -- which is why that drain takes a timeout.
+ *
+ * On failure nothing is published and admission stays CLOSED: the entry goes
+ * DEGRADED, or READY_STALE if a generation somehow survived.  If the call also
+ * minted, that DEGRADED entry is left where the runtime held none, so a later
+ * get_status answers DEGRADED rather than NOT_FOUND and a later plain refresh
+ * answers BUSY.  For a graph that is genuinely sealed that is the more honest
+ * answer, but what becomes of it depends on whether the policy store lists the
+ * key.  admission has exactly two writers -- the mint above and set_admission
+ * -- and retire_unseen is not one of them: it rewrites the state to EVICTED
+ * and leaves the entry mapped with admission untouched.  So for a key the
+ * store does NOT list, retirement moves the state to EVICTED, which the status
+ * reader skips, so the phantom leaves an operator listing entirely while
+ * staying CLOSED to a refresh for the life of the manager.  For a key it DOES
+ * list, one boot pass fixes the axis: replay.c writes admission in both
+ * directions keyed on the durable bit alone, so a stale CLOSED is lifted on an
+ * unsealed graph -- and re-asserted on a sealed one -- even though the refresh
+ * just above it hit the phantom and answered BUSY.  That refresh's rc is not
+ * consulted for the admission decision, though it does feed the boot
+ * counters.  Only the axis, though: that refusal returns before it writes
+ * state, so the entry stays DEGRADED with no engine until a later refresh
+ * builds one.
+ *
+ * A caller that fails AFTER a successful publish must compensate with
+ * evict_closed, which is legal because admission is still CLOSED.  The harm is
+ * not what the entry reports meanwhile -- READY behind a closed barrier is
+ * exactly what a successful publish leaves, and the handle reports it SEALED
+ * and not queryable because it reads admission itself.  The harm is the engine:
+ * an unseal that publishes and then fails leaves that engine attached, and the
+ * next open_admission serves it, whether or not the rest of the unseal ever
+ * completed.
+ *
+ * forget_state is untouched, as it is in refresh.  evict_closed preserved an
+ * owed erasure across the seal precisely so this call republishes with the
+ * verdict intact.  Nothing here re-probes it, so the sequencer above still
+ * owes a re-probe and a set_forget_state after this returns.
+ *
+ * It blocks on writer_lock across the build, for evict_closed's reason: a
+ * durable unseal that has already committed cannot retry a spurious BUSY.
+ * Calling it from inside a build callback for the same entry deadlocks
+ * outright, with no guard.  That is the pre-existing recursive-refresh hazard,
+ * not a new one: writer_lock is taken before the admission gate, so a nested
+ * plain refresh on a closed graph already deadlocked.  What is new is only
+ * that this entrypoint reaches it too.
+ */
+wyrelog_error_t wyl_fact_graph_runtime_manager_refresh_closed
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphRuntimeStatus * out_status);
+
+/*
  * Snapshot and shutdown contract
  * ------------------------------
  * A snapshot pins one immutable, complete engine generation independently of
