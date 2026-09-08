@@ -57,13 +57,17 @@ must exercise each cross-domain edge and prove bounded join/cleanup.
 
 `tests/test-fact-publication-lock-order-boundary.py` is intentionally a
 call-order smoke check: it guards the two production unseal call sites and
-does not claim to prove every concurrent schedule.  Runtime build callbacks
-also refuse same-entry recursive refresh with `WYRELOG_E_BUSY`; the focused
+does not claim to prove every concurrent schedule.  The runtime test-only
+lock event seam now records actual `writer_lock` and `state_lock` acquisition
+and release, and `fact-runtime/lock-events-writer-before-state` proves the
+runtime sub-order and cleanup.  Runtime build callbacks also refuse
+same-entry recursive refresh with `WYRELOG_E_BUSY`; the focused
 `fact-runtime/refresh-refuses-own-build-callback` test proves that this known
 self-deadlock is bounded.
 
-A future runtime test must additionally force the opposing thread at each
-cross-domain acquisition barrier, assert that no cycle is entered, join all
-threads within a bounded deadline, and verify that a subsequent unseal
-succeeds after every failure path.  Until that test exists, this ADR and the
-#987 lock-order acceptance criterion remain incomplete.
+A future cross-domain test-only seam must additionally force the opposing
+thread at each artifact/coordinator/policy acquisition barrier, assert that
+no cycle is entered, join all threads within a bounded deadline, and verify
+that a subsequent unseal succeeds after every failure path.  Until that test
+exists, this ADR and the #987 lock-order acceptance criterion remain
+incomplete.
