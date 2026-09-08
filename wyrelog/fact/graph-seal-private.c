@@ -437,6 +437,7 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
   WylFactGraphRegularFile main_file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  gboolean artifact_opened = FALSE;
   g_autofree gchar *relative_dir = NULL;
   g_autofree gchar *relative_file = NULL;
   rc = wyl_fact_graph_locator_init (&locator, graph_info->tenant_id,
@@ -458,6 +459,8 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
     rc = wyl_fact_graph_resolver_open_relative_regular (&resolver,
             relative_file, &main_file);
   if (rc == WYRELOG_E_OK)
+    artifact_opened = TRUE;
+  if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_namespace_open (&directory, &main_file,
             out_namespace);
   if (rc == WYRELOG_E_OK)
@@ -465,8 +468,9 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
             out_lease);
   /* Some lifecycle fixtures intentionally have an authority row before the
    * physical graph directory is provisioned. Preserve their existing
-   * unseal/compensation path; a present artifact is still fail-closed below. */
-  if (rc == WYRELOG_E_NOT_FOUND)
+   * unseal/compensation path only in that absence case; a present artifact
+   * with a missing/invalid namespace must remain fail-closed. */
+  if (rc == WYRELOG_E_NOT_FOUND && !artifact_opened)
     rc = WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK) {
     wyl_fact_artifact_namespace_free (*out_namespace);
