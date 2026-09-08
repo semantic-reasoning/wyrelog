@@ -2316,11 +2316,10 @@ wyrelog_error_t wyl_policy_store_seal_fact_graph (wyl_policy_store_t * store,
 /* Clear an authority-managed graph's durable seal: sealed -> active, clearing
  * sealed_at with the flag and advancing the lifecycle generation.
  *
- * WYRELOG_E_OK for any graph this call did not move: one that was already
- * unsealed, and one whose row changed under it -- the update is a
- * compare-and-swap on state, flag and lifecycle generation, and a miss is
- * reported as OK because sqlite3_changes is not consulted.  Read the row back
- * if the outcome matters.  Not-durably-sealed covers the first case, which
+ * WYRELOG_E_OK for an already-unsealed graph and for a successful transition.
+ * The result-bearing form below reports a zero-row compare-and-swap as STALE;
+ * a miss is never treated as proof of this caller's success.  Read the row
+ * back if the outcome matters.  Not-durably-sealed covers the first case, which
  * by the schema's state/flag rule includes every provisioning and degraded
  * one -- sealed = 1 is permitted only for 'sealed' and 'legacy_unclassified',
  * so those two states are the whole sealed population and this returns early
@@ -2336,8 +2335,9 @@ wyrelog_error_t wyl_policy_store_seal_fact_graph (wyl_policy_store_t * store,
  * unchanged, so POLICY alone does not identify a legacy graph.
  *
  * WYRELOG_E_INVALID for a NULL store or a malformed tenant or graph name, and
- * WYRELOG_E_IO if the store refuses the read or the write.  The list above is
- * the whole of it.
+ * WYRELOG_E_POLICY if a sealed graph is at the maximum representable lifecycle
+ * generation or is an irreversible legacy graph, and WYRELOG_E_IO if the
+ * store refuses the read or write.  The list above is the whole of it.
  *
  * This does not gate on lifecycle beyond that.  A caller that must refuse to
  * reopen a graph for a lifecycle reason reads the authority record itself; do
@@ -2346,6 +2346,12 @@ wyrelog_error_t wyl_policy_store_seal_fact_graph (wyl_policy_store_t * store,
  * row sealed at a generation this call never saw.  Read the row back. */
 wyrelog_error_t wyl_policy_store_unseal_fact_graph (wyl_policy_store_t * store,
     const gchar * tenant_id, const gchar * graph_id);
+/* The result-bearing form is used by lifecycle sequencers.  An OK return
+ * alone is insufficient: a compare-and-swap can complete with SQLITE_DONE
+ * while matching no row after a competing lifecycle write. */
+wyrelog_error_t wyl_policy_store_unseal_fact_graph_with_result
+  (wyl_policy_store_t * store, const gchar * tenant_id, const gchar * graph_id,
+    WylPolicyAuthorityMutationResult * out_result);
 wyrelog_error_t wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *
     store, const gchar * tenant_id, const gchar * graph_id,
     gboolean * out_active);
