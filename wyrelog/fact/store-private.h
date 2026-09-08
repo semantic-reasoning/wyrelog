@@ -168,6 +168,11 @@ typedef struct
    */
   const gchar *op_uuid;
   const gchar *batch_id;
+  /* Authenticated subject and request correlation supplied by the daemon
+   * after authorization.  These are never populated from request JSON. */
+  const gchar *authenticated_actor_subject_id;
+  const gchar *request_id;
+  const gchar *operator_annotation;
   const gchar *operator_id;
   const gchar *reason;
   /*

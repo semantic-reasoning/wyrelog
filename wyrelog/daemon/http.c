@@ -12326,6 +12326,14 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
         "wr.fact.write", tenant, "fact_auth_required", "invalid_fact_auth",
         "fact_denied", "fact_auth_failed", &actor))
       return;
+    /* Mint one request identity after authorization and before any durable
+     * work.  Every branch of this operation, including sealed refusal and the
+     * durable fact-store ledger, must use this exact value. */
+    const gchar *request_id = ensure_request_id_header (msg);
+    if (request_id == NULL || request_id[0] == '\0') {
+      set_json_error (msg, 500, "request_id_unavailable");
+      return;
+    }
 
     g_auto (WylDaemonPolicyWrite) write = { 0 };
     wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
@@ -12379,7 +12387,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
        * over. */
       (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "",
           tenant, graph, "fact_forget", batch_id, "refused_sealed",
-          ensure_request_id_header (msg));
+          request_id);
       graph_lookup_clear (&lookup);
       set_json_error (msg, 409, "graph_sealed");
       return;
@@ -12422,6 +12430,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     if (rc == WYRELOG_E_OK) {
       const wyl_fact_store_forget_options_t fopts = {
         .batch_id = batch_id,
+        .authenticated_actor_subject_id = actor,
+        .request_id = request_id,
+        .operator_annotation = operator_id,
         .operator_id = operator_id,
         .reason = reason,
       };
@@ -12467,7 +12478,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       set_json_error (msg, 500, "fact_forget_failed");
       return;
     }
-    const gchar *forget_request_id = ensure_request_id_header (msg);
+    const gchar *forget_request_id = request_id;
     /* Emitted after every rc-derived return above, and into its own local.
      * Folding an audit result into the operation result is what let a durably
      * committed batch be reported as a failed append on the other branch; the
