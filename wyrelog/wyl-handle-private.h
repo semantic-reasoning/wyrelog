@@ -346,11 +346,9 @@ wyrelog_error_t wyl_handle_foreach_fact_graph_status (WylHandle * self,
  * wyl_handle_refresh_fact_graph does, so a seal cannot interleave with a
  * targeted refresh or with the boot replay pass.
  *
- * This performs a policy write while holding only the replay coordinator
- * lock and a store pin.  The CALLER must hold the daemon policy write lease
- * -- the sequencer's header states that precondition and this wrapper does
- * not acquire it, so a caller that skips it races the existing graph seal
- * route, which does take it.
+ * The caller supplies the daemon policy write lease.  The wrapper validates
+ * its ownership and that its pinned store is this handle's current store
+ * before taking a temporary lifecycle pin and entering the graph seal.
  *
  * drain_timeout_us bounds the wait for work admitted before the close, and
  * must be finite.  This holds fact_replay_coordinator_lock for the whole
@@ -363,6 +361,7 @@ wyrelog_error_t wyl_handle_foreach_fact_graph_status (WylHandle * self,
  * that gains those emits it.
  */
 wyrelog_error_t wyl_handle_seal_fact_graph (WylHandle * self,
+    WylServiceAuthWriteLease * write_lease,
     const wyl_policy_fact_graph_info_t * graph_info, gint64 drain_timeout_us,
     WylFactGraphSealOutcome * out_outcome);
 #endif
