@@ -1855,7 +1855,7 @@ if get_option('enable_fact_store').allowed()
   test_fact_runtime = executable('test-fact-runtime',
     'test-fact-runtime.c',
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, wirelog_dep],
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep],
   )
 
   test('fact-runtime', test_fact_runtime, timeout : 60)

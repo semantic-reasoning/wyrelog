@@ -669,6 +669,24 @@ void wyl_fact_graph_runtime_publication_abort
   (WylFactGraphRuntimePublication *publication);
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
+typedef enum
+{
+  WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER = 0,
+  WYL_FACT_GRAPH_RUNTIME_LOCK_STATE,
+} WylFactGraphRuntimeLockKind;
+
+typedef enum
+{
+  WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED = 0,
+  WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED,
+} WylFactGraphRuntimeLockEvent;
+
+typedef void (*WylFactGraphRuntimeLockEventFunc)
+  (const WylFactGraphKey *key, WylFactGraphRuntimeLockKind lock_kind,
+    WylFactGraphRuntimeLockEvent event, gpointer user_data);
+void wyl_fact_graph_runtime_set_lock_event_hook
+  (WylFactGraphRuntimeLockEventFunc hook, gpointer user_data);
+
 typedef void (*WylFactGraphRuntimePublicationTestHook)
   (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
     gpointer user_data);

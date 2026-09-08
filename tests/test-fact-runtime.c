@@ -215,6 +215,125 @@ new_manager (void)
 
 typedef struct
 {
+  WylFactGraphRuntimeLockKind lock_kind;
+  WylFactGraphRuntimeLockEvent event;
+} RuntimeLockObservation;
+
+typedef struct
+{
+  GMutex mutex;
+  GArray *observations;
+} RuntimeLockTrace;
+
+static void
+runtime_lock_trace_init (RuntimeLockTrace *trace)
+{
+  g_mutex_init (&trace->mutex);
+  trace->observations = g_array_new (FALSE, FALSE,
+          sizeof (RuntimeLockObservation));
+}
+
+static void
+runtime_lock_trace_clear (RuntimeLockTrace *trace)
+{
+  g_array_unref (trace->observations);
+  g_mutex_clear (&trace->mutex);
+}
+
+static void
+runtime_lock_trace_event (const WylFactGraphKey *key,
+    WylFactGraphRuntimeLockKind lock_kind,
+    WylFactGraphRuntimeLockEvent event, gpointer user_data)
+{
+  RuntimeLockTrace *trace = user_data;
+  g_assert_nonnull (key);
+  g_mutex_lock (&trace->mutex);
+  RuntimeLockObservation observation = {lock_kind, event};
+  g_array_append_val (trace->observations, observation);
+  g_mutex_unlock (&trace->mutex);
+}
+
+static void
+runtime_lock_trace_assert_writer_before_state (RuntimeLockTrace *trace)
+{
+  gboolean writer_held = FALSE;
+  gboolean state_held = FALSE;
+  gboolean state_under_writer = FALSE;
+  guint writer_acquires = 0;
+  guint writer_releases = 0;
+  guint state_acquires = 0;
+  guint state_releases = 0;
+
+  g_mutex_lock (&trace->mutex);
+  for (guint i = 0; i < trace->observations->len; i++) {
+    RuntimeLockObservation observation =
+        g_array_index (trace->observations, RuntimeLockObservation, i);
+    if (observation.lock_kind == WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER) {
+      if (observation.event == WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED) {
+        g_assert_false (writer_held);
+        writer_held = TRUE;
+        writer_acquires++;
+      } else {
+        g_assert_cmpint (observation.event, ==,
+            WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED);
+        g_assert_true (writer_held);
+        g_assert_false (state_held);
+        writer_held = FALSE;
+        writer_releases++;
+      }
+    } else {
+      g_assert_cmpint (observation.lock_kind, ==,
+          WYL_FACT_GRAPH_RUNTIME_LOCK_STATE);
+      if (observation.event == WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED) {
+        g_assert_false (state_held);
+        state_held = TRUE;
+        state_under_writer = writer_held;
+        state_acquires++;
+      } else {
+        g_assert_cmpint (observation.event, ==,
+            WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED);
+        g_assert_true (state_held);
+        state_held = FALSE;
+        if (state_under_writer)
+          g_assert_true (writer_held);
+        state_under_writer = FALSE;
+        state_releases++;
+      }
+    }
+  }
+  g_mutex_unlock (&trace->mutex);
+
+  g_assert_false (writer_held);
+  g_assert_false (state_held);
+  g_assert_cmpuint (writer_acquires, ==, writer_releases);
+  g_assert_cmpuint (state_acquires, ==, state_releases);
+  g_assert_cmpuint (writer_acquires, >, 0);
+  g_assert_cmpuint (state_acquires, >, 0);
+}
+
+static void
+test_runtime_lock_events_preserve_writer_state_order (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  RuntimeLockTrace trace = { 0 };
+  runtime_lock_trace_init (&trace);
+  wyl_fact_graph_runtime_set_lock_event_hook (runtime_lock_trace_event, &trace);
+
+  BuildSpec spec = {.marker = 303};
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  wyl_fact_graph_runtime_set_lock_event_hook (NULL, NULL);
+  runtime_lock_trace_assert_writer_before_state (&trace);
+  runtime_lock_trace_clear (&trace);
+  wyl_fact_graph_key_clear (&key);
+}
+
+typedef struct
+{
   WylFactGraphRuntimeManager *manager;
   guint count;
 } StatusProbe;
@@ -2521,6 +2640,8 @@ main (int argc, char **argv)
       test_drain_waits_for_admitted_build);
   g_test_add_func ("/fact-runtime/drain-refuses-own-build-callback",
       test_drain_refuses_its_own_build_callback);
+  g_test_add_func ("/fact-runtime/lock-events-writer-before-state",
+      test_runtime_lock_events_preserve_writer_state_order);
   g_test_add_func ("/fact-runtime/refresh-refuses-own-build-callback",
       test_refresh_refuses_its_own_build_callback);
   g_test_add_func ("/fact-runtime/drain-waits-for-queued-engine-call",
