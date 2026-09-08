@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <errno.h>
+#include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -6,6 +8,7 @@
 #include "wyrelog/fact/graph-seal-private.h"
 #include "wyrelog/fact/provisioning-run-private.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
@@ -431,9 +434,11 @@ typedef struct
   gboolean fail_unseal_reseal;
   const gchar *replace_path;
   const gchar *replacement_path;
+  const gchar *foreign_path;
   gboolean replacement_attempted;
   gboolean replacement_blocked;
   gboolean replacement_setup_failed;
+  gint replacement_errno;
 } SealPhaseFault;
 
 static wyrelog_error_t
@@ -460,15 +465,14 @@ seal_phase_fault (const gchar *phase, gpointer user_data)
       WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION) == 0) {
     fault->replacement_attempted = TRUE;
     if (g_rename (fault->replace_path, fault->replacement_path) != 0) {
+      fault->replacement_errno = errno;
       if (!g_file_test (fault->replace_path, G_FILE_TEST_IS_REGULAR))
         fault->replacement_setup_failed = TRUE;
       else
         fault->replacement_blocked = TRUE;
       return fault->replacement_setup_failed ? WYRELOG_E_IO : WYRELOG_E_OK;
     }
-    g_autoptr (GError) error = NULL;
-    if (!g_file_set_contents (fault->replace_path, "foreign-artifact", -1,
-        &error)) {
+    if (g_rename (fault->foreign_path, fault->replace_path) != 0) {
       (void) g_remove (fault->replace_path);
       (void) g_rename (fault->replacement_path, fault->replace_path);
       fault->replacement_setup_failed = TRUE;
@@ -1077,12 +1081,73 @@ test_unseal_replacement_after_validation_and_retry (void)
           "facts.duckdb", NULL);
   g_autofree gchar *replacement_path = g_build_filename (path.storage_path,
           "facts.duckdb.validated", NULL);
+  g_autofree gchar *foreign_path = g_build_filename (path.storage_path,
+          "facts.duckdb.foreign", NULL);
   GStatBuf original_stat = { 0 };
   g_assert_cmpint (g_stat (fact_path, &original_stat), ==, 0);
+  WylPolicyGraphAuthorityRecord *original_authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &original_authority), ==, WYRELOG_E_OK);
+  g_assert_nonnull (original_authority);
+  g_assert_nonnull (original_authority->store_uuid);
+  g_autofree gchar *original_uuid = g_strdup (original_authority->store_uuid);
+  wyl_policy_graph_authority_record_free (original_authority);
+  g_autofree gchar *foreign_bytes = NULL;
+  gsize foreign_length = 0;
+  g_autoptr (GError) error = NULL;
+  g_assert_true (g_file_get_contents (fact_path, &foreign_bytes,
+      &foreign_length, &error));
+  g_assert_true (g_file_set_contents (foreign_path, foreign_bytes,
+      (gssize) foreign_length, &error));
+  GStatBuf foreign_stat = { 0 };
+  g_assert_cmpint (g_stat (foreign_path, &foreign_stat), ==, 0);
+  g_assert_cmpuint (foreign_stat.st_dev, ==, original_stat.st_dev);
+  g_assert_cmpuint (foreign_stat.st_ino, !=, original_stat.st_ino);
+  duckdb_database foreign_db = NULL;
+  duckdb_connection foreign_connection = NULL;
+  duckdb_result foreign_result = { 0 };
+  g_assert_cmpint (duckdb_open (foreign_path, &foreign_db), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_connect (foreign_db, &foreign_connection), ==,
+      DuckDBSuccess);
+  g_assert_cmpint (duckdb_query (foreign_connection,
+      "DELETE FROM fact_store_metadata WHERE key='store_uuid';"
+      "INSERT INTO fact_store_metadata(key,value) VALUES "
+      "('store_uuid','01890f47-3c4b-6cc2-b8c4-dc0c0c073988');",
+      &foreign_result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&foreign_result);
+  g_assert_cmpint (duckdb_query (foreign_connection,
+      "SELECT value FROM fact_store_metadata WHERE key='store_uuid';",
+      &foreign_result), ==, DuckDBSuccess);
+  g_assert_cmpuint (duckdb_row_count (&foreign_result), ==, 1);
+  gchar *foreign_uuid = duckdb_value_varchar (&foreign_result, 0, 0);
+  g_assert_cmpstr (foreign_uuid, ==,
+      "01890f47-3c4b-6cc2-b8c4-dc0c0c073988");
+  g_assert_cmpstr (foreign_uuid, !=, original_uuid);
+  duckdb_free (foreign_uuid);
+  duckdb_destroy_result (&foreign_result);
+  duckdb_disconnect (&foreign_connection);
+  duckdb_close (&foreign_db);
+  foreign_db = NULL;
+  foreign_connection = NULL;
+  g_assert_cmpint (duckdb_open (foreign_path, &foreign_db), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_connect (foreign_db, &foreign_connection), ==,
+      DuckDBSuccess);
+  g_assert_cmpint (duckdb_query (foreign_connection,
+      "SELECT value FROM fact_store_metadata WHERE key='store_uuid';",
+      &foreign_result), ==, DuckDBSuccess);
+  g_assert_cmpuint (duckdb_row_count (&foreign_result), ==, 1);
+  foreign_uuid = duckdb_value_varchar (&foreign_result, 0, 0);
+  g_assert_cmpstr (foreign_uuid, ==,
+      "01890f47-3c4b-6cc2-b8c4-dc0c0c073988");
+  duckdb_free (foreign_uuid);
+  duckdb_destroy_result (&foreign_result);
+  duckdb_disconnect (&foreign_connection);
+  duckdb_close (&foreign_db);
 
   SealPhaseFault fault = {
     .replace_path = fact_path,
     .replacement_path = replacement_path,
+    .foreign_path = foreign_path,
   };
   wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
   WylFactGraphUnsealOutcome outcome = { 0 };
@@ -1091,14 +1156,8 @@ test_unseal_replacement_after_validation_and_retry (void)
   wyl_fact_graph_seal_set_test_hook (NULL, NULL);
   g_assert_true (fault.replacement_attempted);
 
-  if (fault.replacement_setup_failed) {
-    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
-    g_assert_true (g_file_test (fact_path, G_FILE_TEST_IS_REGULAR));
-    g_assert_false (outcome.engine_published);
-    g_assert_false (outcome.runtime_admission_open);
-    g_assert_cmpint (outcome.status.admission, ==,
-        WYL_FACT_GRAPH_ADMISSION_CLOSED);
-  } else if (fault.replacement_blocked) {
+  g_assert_false (fault.replacement_setup_failed);
+  if (fault.replacement_blocked) {
     /* A blocked replacement is only valid evidence when the original target
      * is still present, the substitute was not created, and its physical
      * identity is unchanged. */
@@ -1108,6 +1167,9 @@ test_unseal_replacement_after_validation_and_retry (void)
     g_assert_cmpint (g_stat (fact_path, &blocked_stat), ==, 0);
     g_assert_cmpuint (blocked_stat.st_dev, ==, original_stat.st_dev);
     g_assert_cmpuint (blocked_stat.st_ino, ==, original_stat.st_ino);
+    g_assert_true (fault.replacement_errno == EACCES
+        || fault.replacement_errno == EBUSY
+        || fault.replacement_errno == EPERM);
     g_assert_cmpint (rc, ==, WYRELOG_E_OK);
     g_assert_true (outcome.engine_published);
     g_assert_true (outcome.runtime_admission_open);
@@ -1116,10 +1178,15 @@ test_unseal_replacement_after_validation_and_retry (void)
         ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   } else {
     g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
     g_assert_true (outcome.durable_unseal_applied);
     g_assert_true (outcome.durable_reseal_applied);
     g_assert_false (outcome.engine_published);
     g_assert_false (outcome.runtime_admission_open);
+    g_assert_false (outcome.status.queryable);
+    g_assert_false (outcome.status.operation_active);
+    g_assert_cmpuint (outcome.status.active_engine_calls, ==, 0);
+    g_assert_cmpuint (outcome.status.waiting_engine_calls, ==, 0);
     g_assert_cmpint (outcome.status.admission, ==,
         WYL_FACT_GRAPH_ADMISSION_CLOSED);
     WylPolicyGraphAuthorityRecord *authority = NULL;
@@ -1128,6 +1195,7 @@ test_unseal_replacement_after_validation_and_retry (void)
     g_assert_nonnull (authority);
     g_assert_cmpint (authority->lifecycle_state, ==,
         WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_cmpstr (authority->store_uuid, ==, original_uuid);
     wyl_policy_graph_authority_record_free (authority);
     g_assert_cmpint (g_remove (fact_path), ==, 0);
     g_assert_cmpint (g_rename (replacement_path, fact_path), ==, 0);
