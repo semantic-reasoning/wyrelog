@@ -122,4 +122,16 @@ wyrelog_error_t wyl_fact_replay_refresh_graph_closed
     WylFactGraphRuntimeManager * runtime_manager,
     WylFactGraphRuntimeStatus * out_status);
 
+wyrelog_error_t wyl_fact_replay_publish_graph_closed_and_open
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * runtime_manager,
+    WylFactGraphRuntimeStatus * out_status);
+
+wyrelog_error_t wyl_fact_replay_refresh_graph_publication
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimePublication * publication,
+    WylFactGraphRuntimeStatus * out_status);
+
 G_END_DECLS;

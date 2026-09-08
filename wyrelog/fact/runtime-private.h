@@ -604,6 +604,48 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_refresh_closed
     WylFactGraphBuildFunc build, gpointer user_data,
     WylFactGraphRuntimeStatus * out_status);
 
+/* Rebuild a graph while CLOSED and publish/open it as one entry-local
+ * operation.  The publication marker makes ordinary open_admission callers
+ * fail closed while the writer owns the entry; the operation itself is the
+ * only caller allowed to cross the CLOSED -> OPEN edge. */
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_publish_closed_and_open
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphRuntimeStatus * out_status);
+
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  gpointer entry;
+  GThread *owner;
+  gboolean active;
+  gboolean writer_held;
+} WylFactGraphRuntimePublication;
+
+wyrelog_error_t wyl_fact_graph_runtime_publication_begin_closed
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphRuntimePublication *out_publication);
+wyrelog_error_t wyl_fact_graph_runtime_publication_refresh
+  (WylFactGraphRuntimePublication *publication, WylFactGraphBuildFunc build,
+    gpointer user_data, WylFactGraphRuntimeStatus *out_status);
+wyrelog_error_t wyl_fact_graph_runtime_publication_open
+  (WylFactGraphRuntimePublication *publication);
+void wyl_fact_graph_runtime_publication_release_writer
+  (WylFactGraphRuntimePublication *publication);
+void wyl_fact_graph_runtime_publication_fail_closed
+  (WylFactGraphRuntimePublication *publication);
+void wyl_fact_graph_runtime_publication_abort
+  (WylFactGraphRuntimePublication *publication);
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+typedef void (*WylFactGraphRuntimePublicationTestHook)
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    gpointer user_data);
+void wyl_fact_graph_runtime_set_publication_test_hook
+  (WylFactGraphRuntimePublicationTestHook hook, gpointer user_data);
+#endif
+
 /*
  * Snapshot and shutdown contract
  * ------------------------------

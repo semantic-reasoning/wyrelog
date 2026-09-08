@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "wyrelog/error.h"
+#include "wyrelog/handle.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
 
@@ -103,10 +104,22 @@ void wyl_fact_graph_unseal_outcome_clear
  * with other graph lifecycle writers; handle callers use the replay
  * coordinator lock for the latter. */
 wyrelog_error_t wyl_fact_graph_unseal
+  (wyl_policy_store_t * policy, WylHandle * handle,
+    WylServiceAuthWriteLease * write_lease, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome * out_outcome);
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+/* Direct graph fixtures use an isolated policy store rather than a handle.
+ * This test-only adapter is deliberately absent from shipped private headers;
+ * production callers must use the lease-checked entrypoint above. */
+wyrelog_error_t wyl_fact_graph_unseal_for_test
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeManager * manager, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome * out_outcome);
+#endif
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
 /*
