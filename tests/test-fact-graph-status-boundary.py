@@ -8,6 +8,28 @@ import sys
 
 
 SOURCE = "wyrelog/wyl-handle.c"
+MAP = "docs/fact-admission-enum-evolution.md"
+
+ADMISSION_INVENTORY = (
+    ("A1", "wyrelog/fact/runtime-private.c",
+     "entry->admission == refuse_when"),
+    ("A2", "wyrelog/fact/runtime-private.c",
+     "entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN"),
+    ("A3", "wyrelog/fact/runtime-private.c",
+     "entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN"),
+    ("A4", "wyrelog/fact/runtime-private.c",
+     "entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED"),
+    ("A5", "wyrelog/wyl-handle.c",
+     "status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED"),
+    ("A6", "wyrelog/wyl-handle.c",
+     "status->admission != WYL_FACT_GRAPH_ADMISSION_OPEN"),
+    ("A7", "wyrelog/wyl-handle.c",
+     "runtime_status->admission == WYL_FACT_GRAPH_ADMISSION_OPEN"),
+    ("A8", "wyrelog/daemon/http.c",
+     "status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED"),
+    ("A9", "wyrelog/fact/graph-seal-private.c",
+     "out_outcome->status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED"),
+)
 
 
 def function_body(source: str, name: str) -> str:
@@ -25,6 +47,15 @@ def function_body(source: str, name: str) -> str:
 
 
 def validate(root: Path, source: str | None = None) -> None:
+    admission_map = (root / MAP).read_text(encoding="utf-8")
+    for identifier, path, anchor in ADMISSION_INVENTORY:
+        if f"| {identifier} |" not in admission_map:
+            raise AssertionError(f"admission map is missing {identifier}")
+        code = (root / path).read_text(encoding="utf-8")
+        if anchor not in code:
+            raise AssertionError(
+                f"admission anchor for {identifier} is missing from {path}"
+            )
     code = source if source is not None else (root / SOURCE).read_text(
         encoding="utf-8"
     )
