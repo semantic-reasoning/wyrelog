@@ -562,8 +562,33 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_evict_closed
  *
  * forget_state is untouched, as it is in refresh.  evict_closed preserved an
  * owed erasure across the seal precisely so this call republishes with the
- * verdict intact.  Nothing here re-probes it, so the sequencer above still
- * owes a re-probe and a set_forget_state after this returns.
+ * verdict intact.  Nothing here re-probes it.
+ *
+ * The sequencer above -- wyl_fact_graph_unseal, in fact/graph-seal-private.c
+ * -- does not re-probe it either.  The re-probe and the set_forget_state a
+ * republish would otherwise owe are therefore DEFERRED, recorded here rather
+ * than left reading as discharged.
+ *
+ * What holds it: the verdict survives seal and unseal instead of being reset,
+ * so it is still there to report once admission reopens -- while sealed the
+ * entry is EVICTED, which the status reader skips, so nothing is reported at
+ * all; no route can record a NEW intent while the graph is sealed, because
+ * the daemon's forget handler refuses a sealed graph before any destructive
+ * step; and the boot loop reconciles before it refreshes, so every restart
+ * re-attempts the erasure.  Re-attempts, not converges: reconcile can fail
+ * again, and the graphs carrying a standing INCOMPLETE are exactly the ones
+ * where it already did.
+ *
+ * What is NOT covered, stated carefully because the obvious repair does not
+ * fix it: an unseal republishes without reconciling, so the rebuilt engine
+ * serves rows an owed erasure was meant to remove.  Adding the re-probe here
+ * would refresh the VERDICT, not stop the SERVING -- boot leaves that same
+ * state whenever its own reconcile fails, since it refreshes and opens
+ * admission regardless and FORGET_INCOMPLETE gates no query.  Making an owed
+ * erasure close admission is a separate and larger decision (#547, #550).
+ * Latent for now only because wyl_handle_unseal_fact_graph has no caller,
+ * production or test; whoever wires a graph unseal route owns deciding
+ * whether the window is acceptable.
  *
  * It blocks on writer_lock across the build, for evict_closed's reason: a
  * durable unseal that has already committed cannot retry a spurious BUSY.

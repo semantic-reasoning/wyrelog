@@ -980,8 +980,10 @@ wyl_fact_graph_runtime_manager_evict_closed
      * re-probes: retirement runs at the tail of the boot loop that also
      * reconciles, and anything republishing an evicted entry must re-probe
      * first.  A seal destroys the engine and not the ledger, and nothing
-     * re-probes a sealed graph until an unseal or a restart -- so clearing
-     * here would drop a live verdict about an erasure that is still owed,
+     * re-probes a sealed graph until a restart -- the unseal path does not
+     * re-probe either; see the deferral on refresh_closed in
+     * runtime-private.h -- so clearing here would drop a live verdict about
+     * an erasure that is still owed,
      * which is the over-report #547 removed in the other direction. */
     *out_evicted = TRUE;
   }
