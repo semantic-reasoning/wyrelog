@@ -92,6 +92,11 @@ wyrelog_error_t wyl_fact_replay_open_graph_engine (wyl_policy_store_t * policy,
 wyrelog_error_t wyl_fact_replay_validate_graph
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info);
+wyrelog_error_t wyl_fact_replay_validate_graph_with_artifact_lease
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactArtifactNamespace * artifact_namespace,
+    WylFactArtifactMutationLease * artifact_lease);
 #if defined(WYL_TEST_HANDLE_SEAMS)
 typedef enum
 {

@@ -226,6 +226,9 @@ WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
     require_ok (wyl_fact_artifact_mutation_lease_revalidate (adopted_lease),
         "revalidate adopted storage lease");
     lease_ = adopted_lease;
+    /* The caller retains ownership of an adopted lease.  The filesystem may
+     * use it, but must not transfer or free it when DuckDB closes. */
+    owns_lease_ = false;
   } else {
     const auto lease_result = read_only_
         ? wyl_fact_artifact_namespace_acquire_reader_guard (namespace_,

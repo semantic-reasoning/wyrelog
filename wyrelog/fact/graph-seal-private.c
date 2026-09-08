@@ -7,6 +7,10 @@
 #include "../wyl-handle-private.h"
 #include "graph-artifact-namespace-private.h"
 #include "graph-locator-private.h"
+
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
 #ifdef G_OS_WIN32
 #include "graph-artifact-windows-namespace-private.h"
 #endif
@@ -425,6 +429,7 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   *out_namespace = NULL;
   *out_lease = NULL;
   WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_autofree gchar *operation_uuid = NULL;
   wyrelog_error_t rc = wyl_policy_store_read_graph_authority (policy,
           graph_info->tenant_id, graph_info->graph_id, &authority);
   if (rc != WYRELOG_E_OK)
@@ -433,6 +438,27 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
       && authority->lifecycle_state
       != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED
       && authority->has_store_identity;
+  if (provisioned) {
+    GPtrArray *records = NULL;
+    rc = wyl_policy_store_graph_provisioning_list (policy,
+            graph_info->tenant_id, &records);
+    if (rc != WYRELOG_E_OK) {
+      wyl_policy_graph_authority_record_free (authority);
+      return rc;
+    }
+    provisioned = FALSE;
+    for (guint i = 0; i < records->len; i++) {
+      WylPolicyGraphProvisioningRecord *record =
+          g_ptr_array_index (records, i);
+      if (g_strcmp0 (record->graph_id, graph_info->graph_id) == 0
+          && record->phase == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE) {
+        provisioned = TRUE;
+        operation_uuid = g_strdup (record->op_uuid);
+        break;
+      }
+    }
+    g_ptr_array_unref (records);
+  }
   wyl_policy_graph_authority_record_free (authority);
   if (!provisioned)
     return WYRELOG_E_OK;
@@ -440,19 +466,26 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
+#ifndef G_OS_WIN32
+  WylFactGraphProvisionedPair *pair = NULL;
+#else
   WylFactGraphRegularFile main_file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
-  gboolean artifact_opened = FALSE;
   g_autofree gchar *relative_dir = NULL;
   g_autofree gchar *relative_file = NULL;
+#endif
+  gboolean artifact_opened = FALSE;
   rc = wyl_fact_graph_locator_init (&locator, graph_info->tenant_id,
           graph_info->graph_id);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
             graph_info->tenant_id, graph_info->graph_id, FALSE, &directory);
+#ifdef G_OS_WIN32
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
-  if (rc == WYRELOG_E_OK)
-    relative_dir = wyl_fact_graph_locator_relative_dir (&locator);
+  if (rc == WYRELOG_E_OK && directory.tenant_component != NULL
+      && directory.graph_component != NULL)
+    relative_dir = g_strdup_printf ("%s/%s", directory.tenant_component,
+            directory.graph_component);
   if (rc == WYRELOG_E_OK && relative_dir == NULL)
     rc = WYRELOG_E_NOMEM;
   if (rc == WYRELOG_E_OK)
@@ -462,15 +495,22 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open_relative_regular (&resolver,
             relative_file, &main_file);
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
     artifact_opened = TRUE;
-  if (rc == WYRELOG_E_OK)
-#ifdef G_OS_WIN32
     rc = wyl_fact_artifact_win_namespace_new_with_main (&directory, &main_file,
             out_namespace);
+  }
 #else
-    rc = wyl_fact_artifact_namespace_open (&directory, &main_file,
+  if (rc == WYRELOG_E_OK && operation_uuid == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
+            operation_uuid, &pair);
+  if (rc == WYRELOG_E_OK) {
+    artifact_opened = TRUE;
+    rc = wyl_fact_artifact_namespace_open_provisioned_pair_internal (pair,
             out_namespace);
+  }
 #endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_namespace_acquire_mutation_lease (*out_namespace,
@@ -486,7 +526,11 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
     *out_namespace = NULL;
     *out_lease = NULL;
   }
+#ifndef G_OS_WIN32
+  wyl_fact_graph_provisioned_pair_free (pair);
+#else
   wyl_fact_graph_regular_file_clear (&main_file);
+#endif
   wyl_fact_graph_locator_clear (&locator);
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_directory_clear (&directory);
@@ -607,7 +651,11 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * builder repeats these checks, but making the sequencer's gate explicit
    * prevents a future publication path from treating a mere authority
    * readback as sufficient validation. */
-  rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
+  if (artifact_lease != NULL)
+    rc = wyl_fact_replay_validate_graph_with_artifact_lease (policy, fact_root,
+            &current, artifact_namespace, artifact_lease);
+  else
+    rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
   if (rc != WYRELOG_E_OK) {
     clear_unseal_graph_info (&current);
     goto compensate;

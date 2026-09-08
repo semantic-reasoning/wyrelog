@@ -739,7 +739,8 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
       identity.path_encoding_version = authority->path_encoding_version;
       wyrelog_error_t lease_rc =
           wyl_fact_store_open_provisioned_namespace_with_lease (
-        artifact_namespace, artifact_lease, &identity, writable,
+        artifact_namespace, artifact_lease, &identity,
+        writable || artifact_lease != NULL,
         out_store);
       wyl_policy_graph_authority_record_free (authority);
       return lease_rc;
@@ -833,9 +834,11 @@ open_graph_engine_with_artifact_lease (wyl_policy_store_t *policy,
   return open_graph_engine_with_store (policy, store, graph_info, out_engine);
 }
 
-wyrelog_error_t
-wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
-    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info)
+static wyrelog_error_t
+validate_graph_internal (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease)
 {
   if (policy == NULL || graph_info == NULL || graph_info->tenant_id == NULL
       || graph_info->graph_id == NULL)
@@ -843,7 +846,7 @@ wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
 
   g_autoptr (wyl_fact_store_t) store = NULL;
   wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
-          NULL, NULL, &store);
+          artifact_namespace, artifact_lease, &store);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -853,6 +856,26 @@ wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
    * caller asks the runtime to publish anything. */
   g_autoptr (GPtrArray) relations = NULL;
   return list_replay_relations (policy, store, graph_info, &relations);
+}
+
+wyrelog_error_t
+wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info)
+{
+  return validate_graph_internal (policy, fact_root, graph_info, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_replay_validate_graph_with_artifact_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease)
+{
+  if (artifact_namespace == NULL || artifact_lease == NULL)
+    return WYRELOG_E_INVALID;
+  return validate_graph_internal (policy, fact_root, graph_info,
+             artifact_namespace, artifact_lease);
 }
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
