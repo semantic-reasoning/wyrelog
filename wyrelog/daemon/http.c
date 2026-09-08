@@ -11058,6 +11058,24 @@ emit_fact_lifecycle_audit (WylDaemonHttpContext *ctx, const gchar *actor,
 #endif
 }
 
+#ifdef WYL_HAS_FACT_STORE
+typedef struct
+{
+  const gchar *graph_id;
+  gboolean found;
+  wyl_policy_fact_graph_info_t info;
+  gchar *tenant_id;
+  gchar *graph_id_copy;
+  gchar *storage_uri;
+  gchar *storage_path;
+  gchar *owner_scope;
+} GraphLookupCtx;
+
+static void graph_lookup_clear (GraphLookupCtx *ctx);
+static wyrelog_error_t lookup_fact_graph (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *graph, GraphLookupCtx *out);
+#endif
+
 static void
 graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -11092,8 +11110,23 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_SEAL, &write);
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
+#ifdef WYL_HAS_FACT_STORE
+    GraphLookupCtx lookup = { 0 };
+    rc = lookup_fact_graph (write.store, tenant, graph, &lookup);
+    if (rc == WYRELOG_E_OK && !lookup.found)
+      rc = WYRELOG_E_NOT_FOUND;
+    if (rc == WYRELOG_E_OK) {
+      WylFactGraphSealOutcome outcome = { 0 };
+      rc = wyl_handle_seal_fact_graph (ctx->handle, write.lease,
+              &lookup.info, 50 * 1000, &outcome);
+      wyl_fact_graph_seal_outcome_clear (&outcome);
+    }
+    graph_lookup_clear (&lookup);
+#else
     rc = wyl_policy_store_seal_fact_graph (write.store, tenant, graph);
+#endif
+  }
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -11122,18 +11155,6 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 #ifdef WYL_HAS_FACT_STORE
-typedef struct
-{
-  const gchar *graph_id;
-  gboolean found;
-  wyl_policy_fact_graph_info_t info;
-  gchar *tenant_id;
-  gchar *graph_id_copy;
-  gchar *storage_uri;
-  gchar *storage_path;
-  gchar *owner_scope;
-} GraphLookupCtx;
-
 static void
 graph_lookup_clear (GraphLookupCtx *ctx)
 {

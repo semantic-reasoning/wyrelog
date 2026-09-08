@@ -3071,8 +3071,12 @@ test_closed_graph_reports_sealed_not_ready (void)
     };
     WylFactGraphSealOutcome outcome = { 0 };
     /* BUSY, because the held engine call outlives the drain. */
-    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, &info, 50 * 1000,
-        &outcome), ==, WYRELOG_E_BUSY);
+    g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+        &lease), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info,
+        50 * 1000, &outcome), ==, WYRELOG_E_BUSY);
     g_assert_true (outcome.runtime_barrier_established);
     g_assert_false (outcome.engine_evicted);
     wyl_fact_graph_seal_outcome_clear (&outcome);
@@ -3211,8 +3215,12 @@ test_evicted_and_closed_reports_evicted_not_sealed (void)
     .graph_id = "orders",
   };
   WylFactGraphSealOutcome outcome = { 0 };
-  g_assert_cmpint (wyl_handle_seal_fact_graph (handle, &info, -1, &outcome),
+  g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info, -1,
+      &outcome), ==, WYRELOG_E_OK);
   /* The fixture really is both.  Without the eviction the assertion below
    * would hold for the ordinary sealed reason; without the closed admission
    * it would hold whatever the order is. */
@@ -3296,8 +3304,12 @@ test_mutation_refused_by_a_barrier_is_not_degraded (void)
       .graph_id = "orders",
     };
     WylFactGraphSealOutcome sealed = { 0 };
-    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, &info, 50 * 1000,
-        &sealed), ==, WYRELOG_E_BUSY);
+    g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+        &lease), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info,
+        50 * 1000, &sealed), ==, WYRELOG_E_BUSY);
     g_assert_true (sealed.runtime_barrier_established);
     wyl_fact_graph_seal_outcome_clear (&sealed);
   }
@@ -3755,6 +3767,67 @@ test_no_fact_root_is_not_a_probe_disagreement (void)
   remove_tree (root);
 }
 
+static void
+test_handle_seal_requires_matching_write_lease (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-seal-lease-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_handle_seal_fact_graph (handle, NULL, &info, -1,
+      &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_false (outcome.runtime_barrier_established);
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+
+  g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  g_autoptr (wyl_policy_store_t) other_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &other_store), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *original_store =
+      wyl_service_auth_write_lease_test_swap_pinned_store (lease,
+          other_store);
+  g_assert_nonnull (original_store);
+  g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info, -1,
+      &outcome), ==, WYRELOG_E_POLICY);
+  g_assert_false (outcome.runtime_barrier_established);
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+  g_assert_true (wyl_service_auth_write_lease_test_swap_pinned_store (lease,
+      original_store) == other_store);
+
+  g_clear_pointer (&lease, wyl_service_auth_write_lease_free);
+  g_clear_pointer (&other_store, wyl_policy_store_close);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3778,6 +3851,8 @@ main (int argc, char **argv)
       test_boot_converges_forget_on_sealed_provisioned_graph);
   g_test_add_func ("/fact-replay/no-fact-root-is-not-a-probe-disagreement",
       test_no_fact_root_is_not_a_probe_disagreement);
+  g_test_add_func ("/fact-replay/seal-requires-matching-write-lease",
+      test_handle_seal_requires_matching_write_lease);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
   g_test_add_func ("/fact-replay/compound-shared",
