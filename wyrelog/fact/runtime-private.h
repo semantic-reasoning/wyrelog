@@ -123,8 +123,9 @@ typedef enum
  * why the boot forget sweep opens a sealed graph on purpose.  Nothing here
  * reads the policy store -- the runtime manager holds no pointer to one -- so
  * the two are set independently and a caller that wants them to agree must
- * drive both.  Admission is also runtime-only: a restart reopens every graph
- * regardless of the durable bit.
+ * drive both.  At boot, admission is reconstructed from the durable seal bit
+ * in both directions: durably sealed graphs remain closed, while all other
+ * graphs reopen.
  */
 typedef enum
 {
