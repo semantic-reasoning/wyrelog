@@ -29,6 +29,13 @@ typedef struct
 
 typedef struct
 {
+  WylFactGraphRuntimePublication *publication;
+  wyrelog_error_t nested_rc;
+  gint64 marker;
+} PublicationRefreshFromBuild;
+
+typedef struct
+{
   GMutex mutex;
   GCond changed;
   gboolean completed;
@@ -154,6 +161,17 @@ build_refuses_recursive_refresh (const WylFactGraphKey *key,
   return build_marker_engine (key, out_engine, &nested);
 }
 
+static wyrelog_error_t
+build_refuses_recursive_publication_refresh (const WylFactGraphKey *key,
+    WylEngine **out_engine, gpointer user_data)
+{
+  PublicationRefreshFromBuild *probe = user_data;
+  BuildSpec nested = {.marker = probe->marker};
+  probe->nested_rc = wyl_fact_graph_runtime_publication_refresh
+        (probe->publication, build_marker_engine, &nested, NULL);
+  return build_marker_engine (key, out_engine, &nested);
+}
+
 typedef struct
 {
   guint rows;
@@ -273,6 +291,10 @@ runtime_lock_trace_assert_writer_before_state (RuntimeLockTrace *trace)
         g_assert_false (writer_held);
         writer_held = TRUE;
         writer_acquires++;
+      } else if (observation.event ==
+          WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASE_BEGIN) {
+        g_assert_true (writer_held);
+        g_assert_false (state_held);
       } else {
         g_assert_cmpint (observation.event, ==,
             WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED);
@@ -289,6 +311,9 @@ runtime_lock_trace_assert_writer_before_state (RuntimeLockTrace *trace)
         state_held = TRUE;
         state_under_writer = writer_held;
         state_acquires++;
+      } else if (observation.event ==
+          WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASE_BEGIN) {
+        g_assert_true (state_held);
       } else {
         g_assert_cmpint (observation.event, ==,
             WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED);
@@ -1768,6 +1793,36 @@ test_refresh_refuses_its_own_build_callback (void)
   wyl_fact_graph_key_clear (&key);
 }
 
+static void
+test_publication_refresh_refuses_its_own_build_callback (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec seed = {.marker = 311};
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
+      &key, &publication), ==, WYRELOG_E_OK);
+  PublicationRefreshFromBuild probe = {
+    .publication = &publication,
+    .nested_rc = WYRELOG_E_INTERNAL,
+    .marker = 312,
+  };
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_refresh (&publication,
+      build_refuses_recursive_publication_refresh, &probe, NULL), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (probe.nested_rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_open (&publication), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&key);
+}
+
 /* The queued term.  A thread blocked on engine_call_lock has already passed
  * the admission check and will run, so the drain must wait for it too.  That
  * state -- no active call, one queued -- exists only in the instant between
@@ -2644,6 +2699,8 @@ main (int argc, char **argv)
       test_runtime_lock_events_preserve_writer_state_order);
   g_test_add_func ("/fact-runtime/refresh-refuses-own-build-callback",
       test_refresh_refuses_its_own_build_callback);
+  g_test_add_func ("/fact-runtime/publication-refresh-refuses-own-build-callback",
+      test_publication_refresh_refuses_its_own_build_callback);
   g_test_add_func ("/fact-runtime/drain-waits-for-queued-engine-call",
       test_drain_waits_for_queued_engine_call);
   g_test_add_func ("/fact-runtime/drain-refused-when-reopened-while-parked",

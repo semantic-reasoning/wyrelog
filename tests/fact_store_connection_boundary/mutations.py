@@ -3948,7 +3948,9 @@ def self_test(files: dict[str, str]) -> None:
                 mutation_delta(files, case.files)
                 for case in cases
             ),
-            chunksize=32,
+            # Keep each mutation independently scheduled; large batches can
+            # strand the serialized self-test behind one worker failure.
+            chunksize=1,
         )
         for case, error in zip(cases, errors):
             if error is None:
