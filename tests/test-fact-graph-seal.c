@@ -4,6 +4,7 @@
 
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-seal-private.h"
+#include "wyrelog/fact/provisioning-run-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
@@ -94,6 +95,13 @@ create_authority_graph_with_schema (wyl_policy_store_t *store,
   gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
   g_assert_cmpint (wyl_policy_store_create_fact_graph_provisioning (store,
       &graph_opts, NULL, op_uuid), ==, WYRELOG_E_OK);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* Complete both sides of the provisioning state machine.  Moving only the
+   * authority row to ACTIVE leaves the operation RESERVED, which is an
+   * invalid production state and is rejected by the secure store opener. */
+  g_assert_cmpint (wyl_fact_graph_provisioning_recover (store, op_uuid, root,
+      NULL), ==, WYRELOG_E_OK);
+#else
   WylPolicyAuthorityMutationResult mutation =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
@@ -101,6 +109,7 @@ create_authority_graph_with_schema (wyl_policy_store_t *store,
       WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
       &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+#endif
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
     {"amount", "int64", FALSE, TRUE},
