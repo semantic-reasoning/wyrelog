@@ -49,6 +49,7 @@ tests/test-fact-store-forget-transaction.c
 tests/test-fact-store-poison.c
 tests/test-fact-store-provisioned.c
 tests/test-fact-store.c
+tests/test-fact-tenant-admission.c
 tests/test-fsm-principal.c
 tests/test-grant-req.c
 tests/test-handle-id.c
@@ -181,6 +182,8 @@ wyrelog/fact/store-open-private.h
 wyrelog/fact/store-private.h
 wyrelog/fact/store-test-seams-private.h
 wyrelog/fact/store.c
+wyrelog/fact/tenant-admission-private.c
+wyrelog/fact/tenant-admission-private.h
 wyrelog/handle.h
 wyrelog/perm.h
 wyrelog/policy/service-permission-maintenance-private.c

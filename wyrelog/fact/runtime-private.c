@@ -33,6 +33,7 @@ struct _WylFactGraphRuntimeEntry
   guint waiting_drains;
   gboolean operation_active;
   gboolean publication_active;
+  GThread *ordered_writer_owner;
   gboolean abandoned;
   gint64 last_replay_at_us;
   WylFactGraphForgetState forget_state;
@@ -66,6 +67,14 @@ struct _WylFactGraphSnapshot
   gatomicrefcount ref_count;
   WylFactGraphRuntimeEntry *entry;
   WylFactGraphEngineGeneration *generation;
+};
+
+struct _WylFactGraphLockSet
+{
+  gatomicrefcount ref_count;
+  WylFactGraphRuntimeManager *manager;
+  GPtrArray *entries;
+  GThread *owner;
 };
 
 static gchar *
@@ -161,6 +170,16 @@ wyl_fact_graph_key_equal (gconstpointer left_data, gconstpointer right_data)
   const WylFactGraphKey *right = right_data;
   return g_str_equal (left->tenant_id, right->tenant_id)
          && g_str_equal (left->graph_id, right->graph_id);
+}
+
+gint
+wyl_fact_graph_key_compare (const WylFactGraphKey *left,
+    const WylFactGraphKey *right)
+{
+  if (left == NULL || right == NULL)
+    return left == right ? 0 : (left == NULL ? -1 : 1);
+  gint tenant = g_strcmp0 (left->tenant_id, right->tenant_id);
+  return tenant != 0 ? tenant : g_strcmp0 (left->graph_id, right->graph_id);
 }
 
 const gchar *
@@ -487,6 +506,126 @@ manager_lookup_entry (WylFactGraphRuntimeManager *manager,
   return WYRELOG_E_OK;
 }
 
+static gint
+ordered_entry_compare (gconstpointer left, gconstpointer right)
+{
+  const WylFactGraphRuntimeEntry *a = *(WylFactGraphRuntimeEntry *const *) left;
+  const WylFactGraphRuntimeEntry *b = *(WylFactGraphRuntimeEntry *const *) right;
+  return wyl_fact_graph_key_compare (&a->key, &b->key);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_acquire_ordered_locks
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *keys,
+    gsize n_keys, GCancellable *cancellable, WylFactGraphLockSet **out_locks)
+{
+  if (out_locks != NULL)
+    *out_locks = NULL;
+  if (manager == NULL || keys == NULL || n_keys == 0 || out_locks == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactGraphLockSet *locks = g_try_new0 (WylFactGraphLockSet, 1);
+  if (locks == NULL)
+    return WYRELOG_E_NOMEM;
+  g_atomic_ref_count_init (&locks->ref_count);
+  locks->owner = g_thread_self ();
+  locks->manager = wyl_fact_graph_runtime_manager_ref (manager);
+  locks->entries = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) runtime_entry_unref);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (gsize i = 0; i < n_keys; i++) {
+    WylFactGraphRuntimeEntry *entry = NULL;
+    rc = manager_lookup_entry (manager, &keys[i], NULL, &entry);
+    if (rc != WYRELOG_E_OK)
+      break;
+    g_ptr_array_add (locks->entries, entry);
+  }
+  if (rc == WYRELOG_E_OK)
+    g_ptr_array_sort (locks->entries, ordered_entry_compare);
+  for (guint i = 1; rc == WYRELOG_E_OK && i < locks->entries->len; i++) {
+    WylFactGraphRuntimeEntry *a = g_ptr_array_index (locks->entries, i - 1);
+    WylFactGraphRuntimeEntry *b = g_ptr_array_index (locks->entries, i);
+    if (wyl_fact_graph_key_compare (&a->key, &b->key) == 0)
+      rc = WYRELOG_E_INVALID;
+  }
+  if (rc == WYRELOG_E_OK && g_atomic_int_get (&manager->shutdown))
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK && cancellable != NULL
+      && g_cancellable_is_cancelled (cancellable))
+    rc = WYRELOG_E_CANCELLED;
+  guint acquired = 0;
+  while (rc == WYRELOG_E_OK && acquired < locks->entries->len) {
+    WylFactGraphRuntimeEntry *entry = g_ptr_array_index (locks->entries,
+            acquired);
+    while (!g_mutex_trylock (&entry->writer_lock)) {
+      if (g_atomic_int_get (&manager->shutdown)) {
+        rc = WYRELOG_E_BUSY;
+        break;
+      }
+      if (cancellable != NULL && g_cancellable_is_cancelled (cancellable)) {
+        rc = WYRELOG_E_CANCELLED;
+        break;
+      }
+      g_usleep (1000);
+    }
+    if (rc != WYRELOG_E_OK)
+      break;
+    /* Serialize the final shutdown check and owner publication with manager
+     * shutdown's map-lock linearization. Without this short critical section,
+     * shutdown can mark the manager abandoned between the check and the
+     * publication, returning a lock set that was dead on arrival. */
+    g_mutex_lock (&manager->map_lock);
+    if (g_atomic_int_get (&manager->shutdown)) {
+      g_mutex_unlock (&entry->writer_lock);
+      g_mutex_unlock (&manager->map_lock);
+      rc = WYRELOG_E_BUSY;
+      break;
+    }
+    g_mutex_lock (&entry->state_lock);
+    entry->ordered_writer_owner = g_thread_self ();
+    g_mutex_unlock (&entry->state_lock);
+    g_mutex_unlock (&manager->map_lock);
+    acquired++;
+  }
+  if (rc != WYRELOG_E_OK) {
+    while (acquired > 0) {
+      WylFactGraphRuntimeEntry *entry = g_ptr_array_index (locks->entries,
+              --acquired);
+      g_mutex_lock (&entry->state_lock);
+      entry->ordered_writer_owner = NULL;
+      g_mutex_unlock (&entry->state_lock);
+      g_mutex_unlock (&entry->writer_lock);
+    }
+    g_ptr_array_unref (locks->entries);
+    wyl_fact_graph_runtime_manager_unref (locks->manager);
+    g_free (locks);
+    return rc;
+  }
+  *out_locks = locks;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_lock_set_unref (WylFactGraphLockSet *locks)
+{
+  if (locks == NULL)
+    return WYRELOG_E_INVALID;
+  if (locks->owner != g_thread_self ())
+    return WYRELOG_E_BUSY;
+  if (!g_atomic_ref_count_dec (&locks->ref_count))
+    return WYRELOG_E_INVALID;
+  for (gint i = (gint) locks->entries->len - 1; i >= 0; i--) {
+    WylFactGraphRuntimeEntry *entry = g_ptr_array_index (locks->entries, i);
+    g_mutex_lock (&entry->state_lock);
+    entry->ordered_writer_owner = NULL;
+    g_mutex_unlock (&entry->state_lock);
+    g_mutex_unlock (&entry->writer_lock);
+  }
+  g_ptr_array_unref (locks->entries);
+  wyl_fact_graph_runtime_manager_unref (locks->manager);
+  g_free (locks);
+  return WYRELOG_E_OK;
+}
+
 /* The body both refresh entrypoints share.  refuse_when names the admission
  * this caller will not build under, refuse_rc the answer it gives, and mint_as
  * the admission a newly minted entry gets: refresh refuses CLOSED with BUSY
@@ -517,6 +656,15 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     }
   }
 
+  g_mutex_lock (&entry->state_lock);
+  gboolean ordered_self_lock = entry->ordered_writer_owner == g_thread_self ();
+  g_mutex_unlock (&entry->state_lock);
+  if (ordered_self_lock) {
+    if (out_status != NULL)
+      wyl_fact_graph_runtime_status_clear (out_status);
+    runtime_entry_unref (entry);
+    return WYRELOG_E_INVALID;
+  }
   g_mutex_lock (&entry->writer_lock);
   g_mutex_lock (&entry->state_lock);
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown)) {

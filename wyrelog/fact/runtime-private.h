@@ -2,6 +2,7 @@
 #pragma once
 
 #include <glib.h>
+#include <gio/gio.h>
 
 #include "wyrelog/engine.h"
 #include "wyrelog/error.h"
@@ -153,6 +154,7 @@ typedef struct
 
 typedef struct _WylFactGraphRuntimeManager WylFactGraphRuntimeManager;
 typedef struct _WylFactGraphSnapshot WylFactGraphSnapshot;
+typedef struct _WylFactGraphLockSet WylFactGraphLockSet;
 
 typedef wyrelog_error_t (*WylFactGraphBuildFunc) (const WylFactGraphKey * key,
     WylEngine ** out_engine, gpointer user_data);
@@ -168,6 +170,24 @@ wyrelog_error_t wyl_fact_graph_key_copy (const WylFactGraphKey * source,
 void wyl_fact_graph_key_clear (WylFactGraphKey * key);
 guint wyl_fact_graph_key_hash (gconstpointer key);
 gboolean wyl_fact_graph_key_equal (gconstpointer left, gconstpointer right);
+gint wyl_fact_graph_key_compare (const WylFactGraphKey *left,
+    const WylFactGraphKey *right);
+wyrelog_error_t wyl_fact_graph_runtime_manager_acquire_ordered_locks
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *keys,
+    gsize n_keys, GCancellable *cancellable, WylFactGraphLockSet **out_locks);
+wyrelog_error_t wyl_fact_graph_lock_set_unref (WylFactGraphLockSet *locks);
+static inline void
+wyl_fact_graph_lock_set_cleanup (WylFactGraphLockSet *locks)
+{
+  (void) wyl_fact_graph_lock_set_unref (locks);
+}
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphLockSet,
+    wyl_fact_graph_lock_set_cleanup)
+
+/* A live lock set owns each entry writer lock. Callers must not invoke
+ * refresh, eviction, drain, or sealing APIs while holding it; those APIs
+ * acquire the same writer lock. The runtime records ownership to reject the
+ * direct recursive refresh case instead of self-deadlocking. */
 
 const gchar *wyl_fact_graph_runtime_state_name (WylFactGraphRuntimeState state);
 const gchar *wyl_fact_graph_replay_class_name

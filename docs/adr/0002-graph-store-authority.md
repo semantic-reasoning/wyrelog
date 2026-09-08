@@ -332,6 +332,17 @@ alter production result classification.
 
 ## Consequences
 
+Tenant admission is a runtime-only coordination layer. Its read/write lease
+state is linearized under the manager monitor and follows
+`OPEN -> CLOSING -> CLOSED`; a closing tenant cannot be reopened until active
+leases have drained. Fact lifecycle callers acquire service-auth WRITE authority
+before tenant admission, and acquire the replay coordinator and canonical graph
+writer locks only in that order. Multiple graph keys sort by bytewise
+`(tenant_id, graph_id)`, acquire forward, and release in reverse. The ordered
+lock set owns manager and entry references for its entire lifetime and rolls
+back partial acquisition in reverse. It does not change durable lifecycle
+state or the graph barrier owned by #548.
+
 The control plane now has one typed, durable source of truth and deterministic
 CAS outcomes suitable for later per-graph physical storage work. Concurrency,
 lost responses, crashes, and unsupported formats fail closed without identity
