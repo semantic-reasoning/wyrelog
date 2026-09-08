@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import contextlib
 import io
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -237,6 +238,53 @@ def main() -> int:
         in fixture_allowance_result.stderr
 
     direct_output = "WYL_BOUNDARY_CALIBRATION_TEST — direct\n"
+    # Compare the optimized scan against the original per-token rules,
+    # including their error ordering and Unicode word-boundary semantics.
+    calibration = "WYL_BOUNDARY_CALIBRATION_TEST"
+    sentinels = ["WYL_BOUNDARY_LITERAL_TEST_0_0",
+                 "WYL_BOUNDARY_LITERAL_TEST_0_1"]
+    rels = ("scan-a.c", "scan-b.c")
+    location = ", ".join(guard_module.render_source_identity(r) for r in rels)
+
+    def original_error(expanded, marker=calibration, literals=sentinels):
+        if len(re.findall(rf"\b{marker}\b", expanded)) != 1:
+            return "preprocessor calibration marker did not survive: " + location
+        for sentinel in literals:
+            if len(re.findall(rf"\b{re.escape(sentinel)}\b", expanded)) > 1:
+                return ("preprocessor multiplied protected reference: "
+                        + location + ": " + sentinel)
+        for symbol in PROTECTED:
+            if re.search(rf"\b{re.escape(symbol)}\b", expanded):
+                return ("preprocessor synthesized protected reference: "
+                        + location + ": " + symbol)
+        return None
+
+    scan_cases = ["", calibration, calibration + " " + calibration,
+                  calibration + " " + " ".join(sentinels),
+                  calibration + " " + " ".join(sentinels * 2),
+                  calibration + " " + " ".join(reversed(PROTECTED))]
+    for token in [calibration, *sentinels, *PROTECTED]:
+        for edge in ("x", "_", "1", "é", "한", "\u0301", ".", '"', " "):
+            for fragment in (edge + token, token + edge):
+                scan_cases.append(calibration + " " + fragment + " " + fragment)
+    for expanded in scan_cases:
+        expected = original_error(expanded)
+        try:
+            guard_module.validate_expanded(
+                rels, expanded, PROTECTED, calibration, sentinels)
+        except guard_module.BoundaryError as error:
+            assert str(error) == expected, (expanded, str(error), expected)
+        else:
+            assert expected is None, (expanded, expected)
+
+    # Growing the number of literals must not trigger a whole-output scan
+    # for every literal; this deterministic guard does not depend on wall time.
+    with mock.patch.object(guard_module.re, "findall", side_effect=AssertionError(
+            "per-token full-output scan")):
+        guard_module.validate_expanded(
+            rels, calibration + " " + " ".join(sentinels), PROTECTED,
+            calibration, sentinels)
+
     direct_result = subprocess.CompletedProcess(
         ["cc"], 0, stdout=direct_output.encode("utf-8"), stderr=b"")
     with mock.patch.object(guard_module.subprocess, "run",
@@ -292,6 +340,40 @@ def main() -> int:
     assert batch_validation
     assert all(entry == (("batch-a.c", "batch-b.c"), batch_output)
                for entry in batch_validation)
+
+    # Exercise actual validation of combined output, including later-TU
+    # failures and first-TU synthesis taking precedence over those failures.
+    markers = ["WYL_BOUNDARY_CALIBRATION_FIRST",
+               "WYL_BOUNDARY_CALIBRATION_SECOND"]
+    literals = ["WYL_BOUNDARY_LITERAL_FIRST_0_0",
+                "WYL_BOUNDARY_LITERAL_SECOND_0_0"]
+    for suffix in ("", markers[1], literals[1], PROTECTED[0]):
+        for omit_second in (False, True):
+            prepared = [(markers[i] + "\n" + literals[i], markers[i],
+                         [literals[i]]) for i in range(2)]
+            output = " ".join([markers[0], *([] if omit_second else [markers[1]]),
+                               *literals, suffix])
+            expected = next((error for i in range(2)
+                             if (error := original_error(
+                                 output, markers[i], [literals[i]]))), None)
+            result = subprocess.CompletedProcess(
+                ["clang-cl"], 0, stdout=output.encode("utf-8"), stderr=b"")
+            with mock.patch.object(guard_module, "prepare_probe",
+                                   side_effect=prepared), \
+                    mock.patch.object(guard_module.subprocess, "run",
+                                      return_value=result), \
+                    mock.patch.object(guard_module, "count_expanded_tokens",
+                                      wraps=guard_module.count_expanded_tokens) as count:
+                try:
+                    guard_module.inspect_probe_batch(
+                        [(rels[0], batch_probe, PROTECTED),
+                         (rels[1], batch_probe, PROTECTED)],
+                        ["clang-cl"], "clang-cl", [])
+                except guard_module.BoundaryError as error:
+                    assert str(error) == expected, (str(error), expected)
+                else:
+                    assert expected is None, expected
+                assert count.call_count == 1
 
     for invalid_stdout in (b"invalid-\xff", None, "already decoded"):
         invalid_result = subprocess.CompletedProcess(

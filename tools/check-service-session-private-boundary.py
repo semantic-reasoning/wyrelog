@@ -11,6 +11,7 @@ files absent from the current binary configuration remain raw-manifest-only.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -1322,22 +1323,37 @@ def prepare_probe(rel: str, probe: str, protected: tuple[str, ...]):
             return calibration + "\n" + masked_probe, calibration, sentinels
 
 
+def count_expanded_tokens(expanded: str,
+                          protected: tuple[str, ...]) -> Counter[str]:
+    """Scan decoded output once, retaining only boundary-relevant tokens.
+
+    Scanning the full compiler output separately for every literal sentinel
+    makes validation quadratic as translation units and includes grow.
+    Keep the original Unicode word boundaries, including inside strings.
+    """
+    alternatives = [r"WYL_BOUNDARY_(?:LITERAL|CALIBRATION)_[A-Za-z0-9_]*"]
+    alternatives.extend(re.escape(symbol) for symbol in protected)
+    pattern = r"\b(?:" + "|".join(alternatives) + r")\b"
+    return Counter(match.group(0) for match in re.finditer(pattern, expanded))
+
+
 def validate_expanded(rels: tuple[str, ...], expanded: str,
                       protected: tuple[str, ...], calibration: str,
-                      sentinels: list[str]) -> None:
+                      sentinels: list[str],
+                      counts: Counter[str] | None = None) -> None:
+            if counts is None:
+                counts = count_expanded_tokens(expanded, protected)
             location = ", ".join(render_source_identity(r) for r in rels)
-            if len(re.findall(rf"\b{calibration}\b", expanded)) != 1:
+            if counts[calibration] != 1:
                 raise BoundaryError(
                     f"preprocessor calibration marker did not survive: {location}")
             for sentinel in sentinels:
-                if len(re.findall(rf"\b{re.escape(sentinel)}\b", expanded)) > 1:
+                if counts[sentinel] > 1:
                     raise BoundaryError(
                         f"preprocessor multiplied protected reference: "
                         f"{location}: {sentinel}")
             for symbol in protected:
-                expanded_count = len(re.findall(
-                    rf"\b{re.escape(symbol)}\b", expanded))
-                if expanded_count:
+                if counts[symbol]:
                     raise BoundaryError(
                         f"preprocessor synthesized protected reference: "
                         f"{location}: {symbol}")
@@ -1375,9 +1391,10 @@ def inspect_probe_batch(items, compiler: list[str], compiler_id: str,
                                 + ": " + " ".join(argv)
                                 + "\n" + diagnostic_text(result.stderr))
     expanded = decode_preprocessor_stdout(result.stdout, rels)
+    counts = count_expanded_tokens(expanded, items[0][2])
     for _, _, calibration, sentinels in prepared:
         validate_expanded(rels, expanded, items[0][2], calibration,
-                          sentinels)
+                          sentinels, counts)
 
 def main() -> int:
     argv = sys.argv[1:]
