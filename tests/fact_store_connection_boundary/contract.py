@@ -128,10 +128,12 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "probe_graph_forgets",
     "quarantine_forget_intent_unlocked",
     "reconcile_graph_forgets",
+    "refresh_one_graph",
     "wyl_fact_replay_open_graph_engine",
     "wyl_fact_replay_open_graph_engine_with_store_for_test",
     "wyl_fact_replay_policy_graphs",
     "wyl_fact_replay_refresh_graph",
+    "wyl_fact_replay_refresh_graph_closed",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
     "wyrelog/fact/compound.c": {"materialize_arg_unlocked"},
@@ -141,10 +143,25 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "open_graph_store",
         "probe_graph_forgets",
         "reconcile_graph_forgets",
+        # Two additions, and they are not the same kind of thing.
+        # refresh_one_graph is a RENAME: it is the body
+        # wyl_fact_replay_refresh_graph used to hold inline, reaching the raw
+        # authority through the same single edge to build_graph_engine, so
+        # nothing here is newly exposed.
+        # wyl_fact_replay_refresh_graph_closed is a NEW EXTERNAL ENTRYPOINT
+        # into that same reach -- which is what issue #548 unit 3b exists to
+        # add, so it is declared rather than hidden.  Neither adds an edge
+        # inside this checker's scope: its fixpoint iterates ROLE_OWNERS only
+        # -- fact/store.c, fact/compound.c, fact/replay.c -- and it flagged
+        # exactly these two.  fact/graph-seal-private.c also newly reaches the
+        # authority, through replay.c, and is invisible here because it is not
+        # a role owner; it opens no connection of its own.
+        "refresh_one_graph",
         "wyl_fact_replay_open_graph_engine",
         "wyl_fact_replay_open_graph_engine_with_store_for_test",
         "wyl_fact_replay_policy_graphs",
         "wyl_fact_replay_refresh_graph",
+        "wyl_fact_replay_refresh_graph_closed",
     },
     "wyrelog/fact/store.c": {
         "execute_forget_intent_unlocked",

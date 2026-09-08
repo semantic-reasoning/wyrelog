@@ -3,8 +3,19 @@
 
 #include <string.h>
 
+#include "replay-private.h"
+
 void
 wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome *outcome)
+{
+  if (outcome == NULL)
+    return;
+  wyl_fact_graph_runtime_status_clear (&outcome->status);
+  memset (outcome, 0, sizeof *outcome);
+}
+
+void
+wyl_fact_graph_unseal_outcome_clear (WylFactGraphUnsealOutcome *outcome)
 {
   if (outcome == NULL)
     return;
@@ -293,4 +304,208 @@ wyl_fact_graph_seal (wyl_policy_store_t *policy,
   }
   wyl_fact_graph_key_clear (&key);
   return WYRELOG_E_OK;
+}
+
+/* Report the graph as it actually is, on every return that got far enough to
+ * have touched it.  Deriving the two booleans from a status that could not be
+ * read would report ADMISSION_OPEN, which is 0 -- exactly backwards for a
+ * shut-down manager -- so a failed read leaves them FALSE. */
+static void
+fill_unseal_outcome (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, WylFactGraphUnsealOutcome *outcome)
+{
+  if (outcome == NULL)
+    return;
+  wyl_fact_graph_runtime_status_clear (&outcome->status);
+  if (wyl_fact_graph_runtime_manager_get_status (manager, key,
+      &outcome->status) != WYRELOG_E_OK)
+    return;
+  outcome->engine_published = outcome->status.queryable;
+  outcome->admission_open =
+      outcome->status.admission == WYL_FACT_GRAPH_ADMISSION_OPEN;
+}
+
+wyrelog_error_t
+wyl_fact_graph_unseal (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, WylFactGraphUnsealOutcome *out)
+{
+  if (out != NULL)
+    memset (out, 0, sizeof *out);
+  if (policy == NULL || graph_info == NULL || manager == NULL)
+    return WYRELOG_E_INVALID;
+  if (graph_info->tenant_id == NULL || graph_info->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  /* fact_root is checked HERE and not left to the builder, which is the one
+   * argument where that distinction matters.  refresh_one_graph tolerates a
+   * NULL or empty root -- it just skips the bind -- so the refusal comes from
+   * open_graph_engine at U5, which is past U3.
+   *
+   * Measured rather than reasoned: deleting this guard and driving a sealed
+   * graph with a NULL root returns WYRELOG_E_INVALID with unseal_committed
+   * TRUE, the durable seal bit CLEARED and the graph left barred.  The caller
+   * is told its arguments were bad about a graph this call just unsealed.
+   * The argument test cannot show that on its own -- its graph is unsealed
+   * and takes the fast path -- so the guard is pinned there and the harm is
+   * recorded here.  The seal takes no root and needs no such check. */
+  if (fact_root == NULL || fact_root[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphKey key = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
+          graph_info->graph_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* U1.  The graph's own bit, for the reason the seal's S1 gives. */
+  gboolean found = FALSE, sealed = FALSE;
+  rc = read_seal_state (policy, graph_info->tenant_id, graph_info->graph_id,
+          &found, &sealed);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_graph_key_clear (&key);
+    return rc;
+  }
+  if (!found) {
+    wyl_fact_graph_key_clear (&key);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (out != NULL)
+    out->already_unsealed = !sealed;
+
+  if (sealed) {
+    /* U2.  Rebuild behind a barrier.  NOT_FOUND is success: no entry means
+     * nothing can be admitted through one, and U5 mints it CLOSED. */
+    rc = wyl_fact_graph_runtime_manager_close_admission (manager, &key);
+    if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND) {
+      fill_unseal_outcome (manager, &key, out);
+      wyl_fact_graph_key_clear (&key);
+      return rc;
+    }
+  } else {
+    /* Durably unsealed already.  Two very different states hide behind that,
+     * and only one of them is finished: a graph that is also admitting needs
+     * nothing, while one left barred by a call that died between U3 and U6
+     * needs exactly the republish below.  So the fast path tests the runtime
+     * rather than assuming, and every other case falls through -- including
+     * a key the runtime has never held, which U5 mints CLOSED and U6 opens.
+     *
+     * Skipping the republish here is not an optimisation.  Closing a healthy
+     * admitting graph in order to rebuild it would take it offline for the
+     * duration and, if the rebuild then failed, leave it barred -- turning
+     * an idempotent request into an outage. */
+    WylFactGraphRuntimeStatus current = { 0 };
+    wyrelog_error_t status_rc = wyl_fact_graph_runtime_manager_get_status
+          (manager, &key, &current);
+    gboolean admitting = status_rc == WYRELOG_E_OK
+        && current.admission == WYL_FACT_GRAPH_ADMISSION_OPEN;
+    wyl_fact_graph_runtime_status_clear (&current);
+    if (admitting) {
+      fill_unseal_outcome (manager, &key, out);
+      wyl_fact_graph_key_clear (&key);
+      return WYRELOG_E_OK;
+    }
+  }
+
+  /* U3.  The durable clear.  No compensating re-seal exists: re-sealing would
+   * have to drain, and a caller that reached here asked for the graph back. */
+  if (sealed) {
+    rc = seal_step_fault (WYL_FACT_GRAPH_UNSEAL_PHASE_DURABLE_WRITE);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_unseal_fact_graph (policy, graph_info->tenant_id,
+              graph_info->graph_id);
+    if (rc != WYRELOG_E_OK) {
+      fill_unseal_outcome (manager, &key, out);
+      wyl_fact_graph_key_clear (&key);
+      return rc;
+    }
+  }
+
+  /* U4.  Mandatory.  wyl_policy_store_unseal_fact_graph reports OK for a
+   * compare-and-swap that matched nothing, so this read is the only thing
+   * that establishes the bit is actually clear.
+   *
+   * What it protects is U6, not U5.  open_graph_engine does refuse a sealed
+   * info, but that guard cannot fire here -- the info built below carries
+   * sealed FALSE unconditionally -- so it is this read, and nothing else,
+   * that keeps a reopen from landing on a graph the store still calls
+   * sealed. */
+  gboolean back_found = FALSE, back_sealed = FALSE;
+  rc = seal_step_fault (WYL_FACT_GRAPH_UNSEAL_PHASE_READBACK_PROBE);
+  if (rc == WYRELOG_E_OK)
+    rc = read_seal_state (policy, graph_info->tenant_id, graph_info->graph_id,
+            &back_found, &back_sealed);
+  if (rc != WYRELOG_E_OK || !back_found || back_sealed) {
+    /* The !back_found arm is argued, not proved: reaching it needs the row to
+     * disappear between U3 and U4, and the policy store exposes no delete for
+     * a fact graph at all -- grep for one -- so no test can drive it.  It is
+     * kept because U1's own NOT_FOUND has the same shape and a caller should
+     * not have to distinguish which read found nothing. */
+    if (rc == WYRELOG_E_OK)
+      rc = back_found ? WYRELOG_E_BUSY : WYRELOG_E_NOT_FOUND;
+    if (out != NULL)
+      out->readback_still_sealed = back_found && back_sealed;
+    fill_unseal_outcome (manager, &key, out);
+    wyl_fact_graph_key_clear (&key);
+    return rc;
+  }
+  /* Past the readback, deliberately: the field means "confirmed unsealed",
+   * so a probe that could not run leaves it FALSE even though the write
+   * landed.  Setting it at U3 would make it mean "the write returned OK",
+   * which the store also reports for a compare-and-swap that matched
+   * nothing. */
+  if (out != NULL)
+    out->unseal_committed = sealed;
+
+  /* U5.  Publish into the still-closed entry.
+   *
+   * The info handed to the builder is constructed here rather than forwarded
+   * from the caller, and the field that forces it is |sealed|: a caller holds
+   * the row it read BEFORE the durable clear, and open_graph_engine refuses a
+   * sealed info outright.  The builder consults exactly three fields -- the
+   * two names and that one; storage_uri, storage_path, schema_version and
+   * owner_scope are never read on this path, so copying them back from the
+   * store would imply a dependency that does not exist. */
+  wyl_policy_fact_graph_info_t fresh = {
+    .tenant_id = graph_info->tenant_id,
+    .graph_id = graph_info->graph_id,
+    .sealed = FALSE,
+  };
+  WylFactGraphRuntimeStatus published = { 0 };
+  rc = wyl_fact_replay_refresh_graph_closed (policy, fact_root, &fresh,
+          manager, &published);
+  wyl_fact_graph_runtime_status_clear (&published);
+  if (rc != WYRELOG_E_OK) {
+    /* Durably unsealed and still barred.  A retry of this call converges it,
+     * and so does the next boot pass, which writes the axis from the durable
+     * bit in both directions. */
+    fill_unseal_outcome (manager, &key, out);
+    wyl_fact_graph_key_clear (&key);
+    return rc;
+  }
+
+  /* U6.  The observable edge.  Everything a reader can see about this unseal
+   * happens here, which is why the engine is already attached. */
+  rc = seal_step_fault (WYL_FACT_GRAPH_UNSEAL_PHASE_OPEN_ADMISSION);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_open_admission (manager, &key);
+  if (rc != WYRELOG_E_OK) {
+    /* The engine is attached behind a barrier nothing will lift, and the next
+     * open_admission would serve it whether or not this unseal ever finished
+     * -- so detach it.
+     *
+     * Argued, not proved, and measured rather than assumed: deleting this
+     * eviction leaves the whole suite green.  The refusals reachable HERE are
+     * a shut-down manager and an abandoned entry -- open_admission also
+     * answers NOT_FOUND for a key the runtime never held, but U5 has just
+     * minted and published one -- and a shut-down manager fails this eviction
+     * too, so no single-threaded test can separate the two.  The
+     * outcome is read off the graph afterwards rather than off this call, so
+     * the report is right either way. */
+    gboolean evicted = FALSE;
+    (void) wyl_fact_graph_runtime_manager_evict_closed (manager, &key,
+        &evicted);
+  }
+  fill_unseal_outcome (manager, &key, out);
+  wyl_fact_graph_key_clear (&key);
+  return rc;
 }

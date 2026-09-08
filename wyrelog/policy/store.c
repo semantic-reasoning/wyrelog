@@ -13512,9 +13512,11 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
  * miss no longer implies the graph ended up unsealed: in the ABA case above
  * the row is durably sealed again, at a generation this call never saw, and
  * the caller still gets OK.  So a caller must not read OK as proof of
- * anything about the row.  No sequencer takes this as a linearization point
- * yet -- there is no caller outside the tests -- and the one that does will
- * have to re-read rather than assume.  authority_update_step consults
+ * anything about the row.  wyl_fact_graph_unseal (fact/graph-seal-private.c)
+ * is the first sequencer to call this, and it does NOT take the OK as its
+ * linearization point: it re-reads the seal bit afterwards and refuses to
+ * reopen admission unless that read says the graph is unsealed.  Whoever adds
+ * the second caller owes the same re-read.  authority_update_step consults
  * sqlite3_changes; the seal does not, and closing the gap belongs to a commit
  * that closes it for both.
  *

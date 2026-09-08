@@ -1218,11 +1218,19 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_replay_refresh_graph (wyl_policy_store_t *policy,
-    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+/* refresh and refresh_closed have the same signature, so the two entrypoints
+ * below differ by this pointer alone.  Sharing the body keeps the fact-root
+ * bind, the key lifetime and the one-key rule from drifting into a second
+ * copy -- the same reason the manager's two primitives share theirs. */
+typedef wyrelog_error_t (*GraphRefreshFunc) (WylFactGraphRuntimeManager *
+    manager, const WylFactGraphKey * key, WylFactGraphBuildFunc build,
+    gpointer user_data, WylFactGraphRuntimeStatus * out_status);
+
+static wyrelog_error_t
+refresh_one_graph (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *runtime_manager,
-    WylFactGraphRuntimeStatus *out_status)
+    WylFactGraphRuntimeStatus *out_status, GraphRefreshFunc refresh)
 {
   if (out_status != NULL)
     memset (out_status, 0, sizeof (*out_status));
@@ -1248,8 +1256,27 @@ wyl_fact_replay_refresh_graph (wyl_policy_store_t *policy,
    * (issue #546 isolation), and retiring on a one-element seen set would
    * detach all other entries. */
   GraphBuildCtx build = { policy, fact_root, graph_info };
-  rc = wyl_fact_graph_runtime_manager_refresh (runtime_manager, &key,
-          build_graph_engine, &build, out_status);
+  rc = refresh (runtime_manager, &key, build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_replay_refresh_graph (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  return refresh_one_graph (policy, fact_root, graph_info, runtime_manager,
+             out_status, wyl_fact_graph_runtime_manager_refresh);
+}
+
+wyrelog_error_t
+wyl_fact_replay_refresh_graph_closed (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  return refresh_one_graph (policy, fact_root, graph_info, runtime_manager,
+             out_status, wyl_fact_graph_runtime_manager_refresh_closed);
 }

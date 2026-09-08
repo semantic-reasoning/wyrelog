@@ -237,8 +237,10 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
  * four writers -- this setter, try_evict, retire_unseen and evict_closed --
  * and only the first three change the value: evict_closed tombstones the
  * entry while deliberately preserving this axis, because nothing re-probes a
- * sealed graph until an unseal or a restart, so clearing it there would drop
- * a verdict about an erasure that is still owed.  Engine refresh is not a
+ * sealed graph until an unseal or a restart -- and wyl_fact_graph_unseal,
+ * which now exists, does not re-probe either; see the deferral recorded on
+ * refresh_closed below -- so clearing it there would drop a verdict about an
+ * erasure that is still owed.  Engine refresh is not a
  * writer either: refresh never reads or writes forget_state on
  * any path, which is what makes the axis orthogonal to replay health in code
  * rather than only in a comment.  Writes are last-writer-wins, so a caller
@@ -562,8 +564,19 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_evict_closed
  *
  * forget_state is untouched, as it is in refresh.  evict_closed preserved an
  * owed erasure across the seal precisely so this call republishes with the
- * verdict intact.  Nothing here re-probes it, so the sequencer above still
- * owes a re-probe and a set_forget_state after this returns.
+ * verdict intact.  Nothing here re-probes it.
+ *
+ * The sequencer above -- wyl_fact_graph_unseal -- deliberately does not
+ * re-probe either, and this records that as DEFERRED rather than leaving the
+ * obligation looking discharged.  The argument for deferring it: the
+ * verdict survives seal and unseal instead of being reset, so the graph keeps
+ * reporting FORGET_INCOMPLETE; no route can record a NEW intent while the
+ * graph is sealed, because the daemon's forget handler refuses a sealed graph
+ * before any destructive step; and the boot loop reconciles before it
+ * refreshes, so a restart converges it.  What is NOT covered is a republish
+ * that serves rows an owed erasure was meant to remove, in the window between
+ * an unseal and the next boot.  See the unseal ordering block in
+ * fact/graph-seal-private.h; the endpoint unit owns closing it.
  *
  * It blocks on writer_lock across the build, for evict_closed's reason: a
  * durable unseal that has already committed cannot retry a spurious BUSY.

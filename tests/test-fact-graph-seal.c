@@ -9,6 +9,12 @@
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "wyrelog/fact/provisioning-run-private.h"
+#include "wyrelog/fact/store-open-private.h"
+#endif
+#include "wyrelog/wyl-id-private.h"
+
 /* The graph fixture is duplicated from tests/test-fact-replay.c rather than
  * shared.  Extracting it would mean deleting it there, and two open pull
  * requests rewrite that file; a third conflict in it would cost more than
@@ -96,6 +102,46 @@ capture_graph_path_cb (const wyl_policy_fact_graph_info_t *info,
   return WYRELOG_E_OK;
 }
 
+/* One row, so the replayed engine has something in it.  Shared by both
+ * materialize helpers below: they differ only in how the store handle is
+ * obtained, which is the part the graph's lifecycle decides. */
+static void
+append_seed_batch (wyl_fact_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-a"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 11},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+  };
+  wyl_fact_row_t rows[] = { {values, 3} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "batch-1",
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = 1,
+    .source = "test",
+    .idempotency_key = "key-1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+      &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+}
+
 /* Give the graph a real store so its engine builds and a seal has something
  * to evict.  Three of these four steps are obvious; the fourth is not, and it
  * is the one that blocks: open_graph_store refuses facts.duckdb unless it is
@@ -117,37 +163,7 @@ materialize_graph_engine (wyl_policy_store_t *policy, const gchar *tenant_id,
     g_autoptr (wyl_fact_store_t) store = NULL;
     g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
         WYRELOG_E_OK);
-    g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
-    const wyl_policy_fact_relation_schema_column_t columns[] = {
-      {"order_id", "symbol", FALSE, TRUE},
-      {"amount", "int64", FALSE, TRUE},
-      {"expedited", "bool", FALSE, TRUE},
-    };
-    wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
-            graph_id, columns, G_N_ELEMENTS (columns));
-    wyl_fact_value_t values[] = {
-      {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-a"},
-      {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 11},
-      {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
-    };
-    wyl_fact_row_t rows[] = { {values, 3} };
-    const wyl_fact_store_batch_t batch = {
-      .batch_id = "batch-1",
-      .tenant_id = tenant_id,
-      .graph_id = graph_id,
-      .namespace_id = "shop.ns",
-      .relation_name = "orders-rel",
-      .schema_version = 1,
-      .source = "test",
-      .idempotency_key = "key-1",
-      .op = WYL_FACT_STORE_OP_ASSERT,
-      .rows = rows,
-      .n_rows = G_N_ELEMENTS (rows),
-    };
-    gboolean inserted = FALSE;
-    g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
-        &inserted), ==, WYRELOG_E_OK);
-    g_assert_true (inserted);
+    append_seed_batch (store, tenant_id, graph_id);
   }
 
   g_autoptr (GError) error = NULL;
@@ -456,6 +472,12 @@ seal_fixture_clear (SealFixture *fixture)
   wyl_fact_graph_seal_set_test_hook (NULL, NULL);
   g_clear_pointer (&fixture->manager, wyl_fact_graph_runtime_manager_unref);
   g_clear_pointer (&fixture->policy, wyl_policy_store_close);
+  /* wyl_test_make_secure_fact_root registers no cleanup of its own, so
+   * without this every fixture abandons a tree holding a policy.db and a
+   * DuckDB store.  Harmless when this file had two of them and not when it
+   * has seventeen; ASan stays silent either way, because a directory is not
+   * a leak. */
+  remove_tree (fixture->root);
   g_clear_pointer (&fixture->root, g_free);
 }
 
@@ -990,6 +1012,867 @@ test_seal_writes_durably_inside_a_sealed_tenant (void)
   remove_tree (root);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Unseal (issue #548, unit 3b).  No production caller yet: the handle and
+ * daemon routes land in the units above this one, and wiring them has a
+ * precondition the sequencer's header names -- the two seal routes do not
+ * exclude each other, so neither excludes an unseal.
+ *
+ * These fixtures build an AUTHORITY-MANAGED graph, where the seal fixture
+ * above builds a legacy_unclassified one, and the difference is forced rather
+ * than stylistic: wyl_policy_store_unseal_fact_graph refuses a sealed
+ * legacy_unclassified graph outright, because the schema permits sealed = 1
+ * for that state and offers no transition out of it.  A seal accepts that
+ * population and an unseal does not.  The refusal is pinned by its own case
+ * at the end of this group. */
+
+static void
+register_orders_schema (wyl_policy_store_t *policy, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &schema), ==, WYRELOG_E_OK);
+}
+
+/* Reserve the graph through the authority, and optionally finish it.
+ *
+ * |construct| is what separates a graph whose engine can be built from one
+ * whose cannot, and it has to be a parameter rather than two fixtures
+ * because the two configurations disagree about what "finished" means.  Under
+ * the bridge the provisioning run creates the retained pair that
+ * open_provisioned_graph later opens; off-bridge nothing constructs anything
+ * and the engine builder resolves facts.duckdb through the fact-root
+ * directory instead -- on the tenant and graph names, never on the row's
+ * storage_path -- so the caller writes that file itself.  materialize_graph_
+ * engine does address it by storage_path, which is fine because the two
+ * resolve to the same file; the distinction matters only for what the
+ * BUILDER depends on.  What both
+ * configurations share is that an authority-managed graph left un-constructed
+ * cannot be opened, which is exactly the state the U5-failure case needs. */
+static void
+create_authority_graph (wyl_policy_store_t *policy, const gchar *root,
+    const gchar *tenant_id, const gchar *graph_id, gboolean construct)
+{
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
+      &created), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_graph_column_t graph_columns[] = {
+    {"order_id", "symbol"},
+    {"amount", "int64"},
+    {"expedited", "bool"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"orders-rel", graph_columns, G_N_ELEMENTS (graph_columns)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph_opts = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .fact_root = root,
+    .schema_version = 1,
+    .owner_scope = tenant_id,
+    .relations = graph_relations,
+    .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_provisioning (policy,
+      &graph_opts, NULL, op_uuid), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (op_uuid, !=, "");
+
+  gboolean constructed = FALSE;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  if (construct) {
+    /* The provisioning run is the only thing that builds the retained pair
+     * open_provisioned_graph later opens. */
+    g_assert_cmpint (wyl_fact_graph_provisioning_recover (policy, op_uuid,
+        root, NULL), ==, WYRELOG_E_OK);
+    constructed = TRUE;
+  }
+#else
+  (void) construct;
+#endif
+  if (!constructed) {
+    /* Straight to active through the authority, constructing nothing.  For
+     * |construct| off-bridge that is the whole job -- the caller then writes
+     * facts.duckdb itself.  For !construct it is the point: the engine
+     * builder finds no facts.duckdb off-bridge, and no retained pair under
+     * the bridge, so the build fails for a reason that is the graph's state
+     * rather than a corrupted file. */
+    WylPolicyAuthorityMutationResult mutation =
+        WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+    g_assert_cmpint (wyl_policy_store_transition_graph_authority (policy,
+        tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+        &mutation), ==, WYRELOG_E_OK);
+  }
+  register_orders_schema (policy, tenant_id, graph_id);
+}
+
+/* Seed the constructed graph's store, through whichever open the runtime will
+ * use to read it back. */
+static void
+materialize_authority_graph_engine (wyl_policy_store_t *policy,
+    const gchar *root, const gchar *tenant_id, const gchar *graph_id)
+{
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+      tenant_id, graph_id, TRUE, &store), ==, WYRELOG_E_OK);
+  append_seed_batch (store, tenant_id, graph_id);
+#else
+  (void) root;
+  materialize_graph_engine (policy, tenant_id, graph_id);
+#endif
+}
+
+/* The seal fixture's shape, over an authority-managed graph. */
+static void
+unseal_fixture_init (SealFixture *fixture, const gchar *template_name,
+    gboolean construct)
+{
+  g_autoptr (GError) error = NULL;
+  fixture->root = wyl_test_make_secure_fact_root (template_name, &error);
+  g_assert_nonnull (fixture->root);
+  g_autofree gchar *policy_path = g_build_filename (fixture->root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture->policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==,
+      WYRELOG_E_OK);
+  create_authority_graph (fixture->policy, fixture->root, "tenant-a", "orders",
+      construct);
+  if (construct)
+    materialize_authority_graph_engine (fixture->policy, fixture->root,
+        "tenant-a", "orders");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (fixture->policy, fixture->root,
+      fixture->manager, &summary);
+  if (construct)
+    g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+  else
+    g_assert_cmpuint (summary.graphs_degraded, ==, 1);
+}
+
+/* The unseal's three seams.  Two of them fail a step; the third only watches,
+ * because the claim it exists to prove is an ordering: the engine is already
+ * published when admission reopens.  A seam that merely substituted a result
+ * there would prove nothing about that order. */
+typedef struct
+{
+  gboolean fail_write;
+  gboolean fail_probe;
+  gboolean reseal_at_probe;
+  gboolean shutdown_at_open;
+  wyl_policy_store_t *policy;
+  WylFactGraphRuntimeManager *manager;
+  guint write_seen;
+  guint probe_seen;
+  guint open_seen;
+  gboolean open_saw_engine;
+  WylFactGraphAdmission open_saw_admission;
+} UnsealPhaseFault;
+
+static wyrelog_error_t
+unseal_phase_fault (const gchar *phase, gpointer user_data)
+{
+  UnsealPhaseFault *fault = user_data;
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_UNSEAL_PHASE_DURABLE_WRITE) == 0) {
+    fault->write_seen++;
+    return fault->fail_write ? WYRELOG_E_IO : WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_UNSEAL_PHASE_READBACK_PROBE) == 0) {
+    fault->probe_seen++;
+    /* Re-seal from inside the seam rather than substituting the readback's
+     * answer.  The branch under test is "the row really does read back
+     * sealed", and a concurrent re-seal is how that happens for real; a faked
+     * answer would leave the durable bit clear, and the assertions below
+     * could not tell the two apart. */
+    if (fault->reseal_at_probe)
+      g_assert_cmpint (wyl_policy_store_seal_fact_graph (fault->policy,
+          "tenant-a", "orders"), ==, WYRELOG_E_OK);
+    return fault->fail_probe ? WYRELOG_E_IO : WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_UNSEAL_PHASE_OPEN_ADMISSION) == 0) {
+    fault->open_seen++;
+    WylFactGraphRuntimeStatus at_open = status_of (fault->manager, "tenant-a",
+            "orders");
+    fault->open_saw_engine = at_open.queryable;
+    fault->open_saw_admission = at_open.admission;
+    wyl_fact_graph_runtime_status_clear (&at_open);
+    /* Shut the manager down so the reopen fails for the manager's own
+     * reason.  Returning non-OK here would fail the step without running it,
+     * which does not put an engine behind an unliftable barrier. */
+    if (fault->shutdown_at_open)
+      wyl_fact_graph_runtime_manager_shutdown (fault->manager);
+    return WYRELOG_E_OK;
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+seal_the_orders_graph (SealFixture *fixture)
+{
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture->policy, &info,
+      fixture->manager, -1, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.sealed_committed);
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+}
+
+static gboolean
+durable_seal_bit (wyl_policy_store_t *policy, const gchar *graph_id)
+{
+  SealedBitProbe probe = {"tenant-a", graph_id, FALSE, FALSE};
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
+      capture_sealed_bit_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_true (probe.found);
+  return probe.sealed;
+}
+
+/* sealed = TRUE on purpose, in every case including the ones where the graph
+ * is not sealed at all.  A real caller holds the row it read before the
+ * durable clear, so this is the shape the sequencer will actually be handed
+ * -- and passing it proves two things at once: U1 reads the store rather than
+ * trusting the argument, and U5 builds from an info it constructed rather
+ * than forwarding this one, which open_graph_engine would refuse. */
+static wyrelog_error_t
+unseal_orders (SealFixture *fixture, WylFactGraphUnsealOutcome *outcome)
+{
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .sealed = TRUE,
+  };
+  return wyl_fact_graph_unseal (fixture->policy, fixture->root, &info,
+             fixture->manager, outcome);
+}
+
+/* The whole point of the unit: a sealed graph comes back, durably and in the
+ * runtime, and a reader can pin it again. */
+static void
+test_unseal_restores_a_sealed_graph (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-ok-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+  g_assert_true (durable_seal_bit (fixture.policy, "orders"));
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.unseal_committed);
+  g_assert_false (outcome.already_unsealed);
+  g_assert_false (outcome.readback_still_sealed);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.admission_open);
+  g_assert_cmpint (outcome.status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  g_assert_false (durable_seal_bit (fixture.policy, "orders"));
+
+  /* The durable bit and the axis are both restored; this is the third thing,
+   * and the only one a reader would notice.  acquire_snapshot answers BUSY
+   * behind a barrier, so its success here is the barrier being gone. */
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_nonnull (snapshot);
+  gboolean reached = FALSE;
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot,
+      engine_is_reachable, &reached), ==, WYRELOG_E_OK);
+  g_assert_true (reached);
+  wyl_fact_graph_snapshot_unref (snapshot);
+  wyl_fact_graph_key_clear (&key);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* A graph the policy store does not hold is NOT_FOUND, and nothing is
+ * touched: U1 runs before the close. */
+static void
+test_unseal_refuses_an_absent_graph (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-absent-XXXXXX", TRUE);
+
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "no-such-graph",
+  };
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+      fixture.manager, &outcome), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_false (outcome.already_unsealed);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  /* The real graph beside it is untouched. */
+  WylFactGraphRuntimeStatus orders = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_cmpint (orders.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&orders);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* Both new entrypoints reject their own missing arguments.  The replay
+ * wrapper is thin enough that this, plus the gate it inherits, is all of it
+ * that is worth pinning apart from the paths the unseal drives.
+ *
+ * fact_root is the case that earns its place.  refresh_one_graph tolerates a
+ * NULL or empty root, so without the sequencer's own check the refusal would
+ * arrive from the builder at U5 -- past the durable clear -- and the graph
+ * would be left unsealed and barred by a call reporting an argument error. */
+static void
+test_unseal_rejects_missing_arguments (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-args-XXXXXX", TRUE);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  wyl_policy_fact_graph_info_t no_tenant = {.graph_id = "orders" };
+  wyl_policy_fact_graph_info_t no_graph = {.tenant_id = "tenant-a" };
+  WylFactGraphUnsealOutcome outcome = { 0 };
+
+  g_assert_cmpint (wyl_fact_graph_unseal (NULL, fixture.root, &info,
+      fixture.manager, &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, NULL,
+      fixture.manager, &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+      NULL, &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root,
+      &no_tenant, fixture.manager, &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root,
+      &no_graph, fixture.manager, &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, NULL, &info,
+      fixture.manager, &outcome), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, "", &info,
+      fixture.manager, &outcome), ==, WYRELOG_E_INVALID);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  /* The graph is untouched by all of the above: an argument refusal must not
+   * have closed anything on its way out. */
+  WylFactGraphRuntimeStatus untouched = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_cmpint (untouched.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&untouched);
+
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_replay_refresh_graph_closed (NULL, fixture.root,
+      &info, fixture.manager, &status), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_replay_refresh_graph_closed (fixture.policy,
+      fixture.root, NULL, fixture.manager, &status), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_replay_refresh_graph_closed (fixture.policy,
+      fixture.root, &info, NULL, &status), ==, WYRELOG_E_INVALID);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  /* And the gate the wrapper inherits from refresh_closed: republishing an
+   * admitting graph is plain refresh's job.  This graph was never sealed. */
+  g_assert_cmpint (wyl_fact_replay_refresh_graph_closed (fixture.policy,
+      fixture.root, &info, fixture.manager, &status), ==, WYRELOG_E_INVALID);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* A graph that is durably unsealed AND admitting is finished.  Rebuilding it
+ * would take a healthy graph offline for the duration and, on a failed
+ * rebuild, leave it barred -- so the fast path is a correctness choice, and
+ * the unchanged engine generation is what proves it was taken. */
+static void
+test_unseal_of_an_admitting_graph_changes_nothing (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-noop-XXXXXX", TRUE);
+
+  WylFactGraphRuntimeStatus before = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_cmpint (before.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (before.queryable);
+  guint64 generation = before.engine_generation;
+  wyl_fact_graph_runtime_status_clear (&before);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.already_unsealed);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.admission_open);
+  g_assert_cmpuint (outcome.status.engine_generation, ==, generation);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* Durably unsealed but barred is the state a call that died between U3 and U6
+ * leaves behind, and it is reachable on any U5 or U6 failure.  A retry has to
+ * converge it; returning OK on already_unsealed alone would report success
+ * over a graph nobody can reach until the next boot. */
+static void
+test_unseal_converges_a_barred_but_unsealed_graph (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-converge-XXXXXX", TRUE);
+
+  /* Stand in for the mid-failure state by hand: close the axis and detach
+   * the engine, without ever setting the durable bit. */
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+        (fixture.manager, &key), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed
+        (fixture.manager, &key, &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+  wyl_fact_graph_key_clear (&key);
+  g_assert_false (durable_seal_bit (fixture.policy, "orders"));
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.already_unsealed);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* The ordering claim, and the reason U6 is last rather than first: at the
+ * instant admission reopens, the engine is already attached.
+ *
+ * The order is not held by this case alone -- refresh_closed refuses an
+ * admitting graph, so reversing U5 and U6 makes the build fail outright and
+ * the restore case catches it, measured.  What this one adds is the state at
+ * the seam itself: a rebuild that published nothing, or one that reopened
+ * early and republished afterwards, would still reach U6 and would fail
+ * here. */
+static void
+test_unseal_publishes_the_engine_before_it_reopens (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-order-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+
+  UnsealPhaseFault fault = { 0 };
+  fault.policy = fixture.policy;
+  fault.manager = fixture.manager;
+  wyl_fact_graph_seal_set_test_hook (unseal_phase_fault, &fault);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (fault.open_seen, ==, 1);
+  g_assert_true (fault.open_saw_engine);
+  g_assert_cmpint (fault.open_saw_admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (outcome.admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* U3 fails: the graph stays sealed in both places, and U4 is never reached --
+ * so nothing downstream can mistake a failed write for a lost race. */
+static void
+test_unseal_durable_write_failure_leaves_the_graph_sealed (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-write-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+
+  UnsealPhaseFault fault = { 0 };
+  fault.fail_write = TRUE;
+  fault.policy = fixture.policy;
+  fault.manager = fixture.manager;
+  wyl_fact_graph_seal_set_test_hook (unseal_phase_fault, &fault);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_IO);
+  g_assert_cmpuint (fault.write_seen, ==, 1);
+  g_assert_cmpuint (fault.probe_seen, ==, 0);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_false (outcome.readback_still_sealed);
+  g_assert_false (outcome.admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  g_assert_true (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* The readback exists because the store's unseal reports OK for a lost
+ * compare-and-swap.  Re-seal the row from inside the seam and the readback
+ * finds it sealed: the graph must stay closed, because reopening a
+ * possibly-sealed graph is the one direction that produces "durably sealed
+ * and admitting".
+ *
+ * Kills dropping the readback entirely: without it the sequencer walks on to
+ * U5 and U6 and reopens a graph that is sealed on disk. */
+static void
+test_unseal_readback_that_is_still_sealed_keeps_the_barrier (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-lostcas-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+
+  UnsealPhaseFault fault = { 0 };
+  fault.reseal_at_probe = TRUE;
+  fault.policy = fixture.policy;
+  fault.manager = fixture.manager;
+  wyl_fact_graph_seal_set_test_hook (unseal_phase_fault, &fault);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (fault.write_seen, ==, 1);
+  g_assert_cmpuint (fault.probe_seen, ==, 1);
+  g_assert_cmpuint (fault.open_seen, ==, 0);
+  g_assert_true (outcome.readback_still_sealed);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_false (outcome.admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  g_assert_true (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* A readback that cannot run at all is a different case from one that runs
+ * and says sealed, and it reports differently: the durable bit really is
+ * clear here -- the write landed -- but nothing confirmed it, so the graph
+ * stays barred and readback_still_sealed stays FALSE. */
+static void
+test_unseal_readback_failure_leaves_the_graph_barred (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-probe-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+
+  UnsealPhaseFault fault = { 0 };
+  fault.fail_probe = TRUE;
+  fault.policy = fixture.policy;
+  fault.manager = fixture.manager;
+  wyl_fact_graph_seal_set_test_hook (unseal_phase_fault, &fault);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_IO);
+  g_assert_cmpuint (fault.probe_seen, ==, 1);
+  g_assert_cmpuint (fault.open_seen, ==, 0);
+  g_assert_false (outcome.readback_still_sealed);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_false (outcome.admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  /* The write is not rolled back, because there is no rollback: U3 is
+   * irreversible by construction.  A retry converges from here -- that is
+   * what /fact-graph-seal/unseal-converges-a-barred-graph proves. */
+  g_assert_false (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* U5 fails.  The durable clear stands -- it is past the linearization point
+ * -- and the graph is left barred rather than admitting with no engine.  A
+ * graph reserved through the authority but never constructed is what makes
+ * the build fail in both build configurations for the same reason. */
+static void
+test_unseal_engine_build_failure_leaves_a_barred_graph (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-build-XXXXXX", FALSE);
+  seal_the_orders_graph (&fixture);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), !=, WYRELOG_E_OK);
+  g_assert_true (outcome.unseal_committed);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  /* Durably unsealed and still barred: the state the converge case starts
+   * from, arrived at for real rather than staged by hand. */
+  g_assert_false (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* U6 fails.  The engine was published, so it is detached again -- and the
+ * report is read off the graph rather than off the intent, which is why both
+ * observed fields are FALSE here even though U5 succeeded. */
+static void
+test_unseal_reopen_failure_reports_a_graph_that_is_not_admitting (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-reopen-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+
+  UnsealPhaseFault fault = { 0 };
+  fault.shutdown_at_open = TRUE;
+  fault.policy = fixture.policy;
+  fault.manager = fixture.manager;
+  wyl_fact_graph_seal_set_test_hook (unseal_phase_fault, &fault);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (fault.open_seen, ==, 1);
+  /* U5 really did publish before the shutdown -- otherwise this case would
+   * be pinning a failure that happened earlier than it claims. */
+  g_assert_true (fault.open_saw_engine);
+  g_assert_true (outcome.unseal_committed);
+  g_assert_false (outcome.admission_open);
+  g_assert_false (outcome.engine_published);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  /* The durable half committed regardless; the next boot converges the
+   * runtime half. */
+  g_assert_false (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* An owed erasure survives a seal and an unseal.  evict_closed preserves
+ * forget_state where the sweepers clear it, and refresh_closed leaves it
+ * alone -- so a graph sealed with a verdict outstanding comes back still
+ * owing it, rather than reading CONVERGED over an erasure that never ran. */
+static void
+test_unseal_preserves_the_forget_verdict (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-forget-XXXXXX", TRUE);
+
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_set_forget_state
+        (fixture.manager, &key, WYL_FACT_GRAPH_FORGET_INCOMPLETE), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&key);
+
+  seal_the_orders_graph (&fixture);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (outcome.status.forget_state, ==,
+      WYL_FACT_GRAPH_FORGET_INCOMPLETE);
+  g_assert_true (outcome.admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* A graph sealed durably with its runtime entry left admitting.  Not a
+ * contrived state: the daemon's graph_seal_handler writes the durable bit
+ * under the policy write lease alone and never touches the runtime, so any
+ * graph sealed through that route sits exactly here until the next boot.
+ *
+ * U2 is what makes it work.  Without the close, U5 meets an OPEN entry and
+ * refresh_closed refuses it with WYRELOG_E_INVALID -- deleting the close
+ * leaves every other case in this file green, because they all reach U3
+ * through wyl_fact_graph_seal, which closed the axis on the way in. */
+static void
+test_unseal_closes_a_graph_sealed_out_of_band (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-oob-XXXXXX", TRUE);
+
+  g_assert_cmpint (wyl_policy_store_seal_fact_graph (fixture.policy,
+      "tenant-a", "orders"), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus before = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_cmpint (before.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&before);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.unseal_committed);
+  g_assert_false (outcome.already_unsealed);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_assert_false (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* U2 fails.  A manager shutdown racing the unseal is the only way to make
+ * close_admission refuse, and the whole point is where it lands: before U3,
+ * so the durable bit is untouched and the graph is still sealed on disk.
+ *
+ * It is also the case that shows the outcome fields are answers to "is it
+ * definitely admitting", not to "is it barred" -- the status cannot be read
+ * through a shut-down manager either, so both stay FALSE without observing
+ * anything. */
+static void
+test_unseal_refuses_when_the_manager_is_shutting_down (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-shutdown-XXXXXX", TRUE);
+  seal_the_orders_graph (&fixture);
+  wyl_fact_graph_runtime_manager_shutdown (fixture.manager);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_false (outcome.readback_still_sealed);
+  g_assert_false (outcome.admission_open);
+  g_assert_false (outcome.engine_published);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  g_assert_true (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
+/* The runtime holds no entry at all: a graph created and sealed after boot,
+ * which nothing has refreshed.  U2's close_admission answers NOT_FOUND and
+ * the sequencer treats that as success -- nothing can be admitted through an
+ * entry that does not exist -- then U5 mints the entry CLOSED and U6 opens it.
+ *
+ * Built without a replay pass on purpose; every other case here runs
+ * wyl_fact_replay_policy_graphs first, so the runtime always holds an entry
+ * and the NOT_FOUND tolerance is never the deciding branch.  Deleting
+ * "&& rc != WYRELOG_E_NOT_FOUND" from U2 leaves the rest of this file green
+ * and fails here. */
+static void
+test_unseal_tolerates_a_graph_the_runtime_never_held (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-graph-unseal-noentry-XXXXXX", &error);
+  g_assert_nonnull (root);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.db", NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_authority_graph (policy, root, "tenant-a", "orders", TRUE);
+  materialize_authority_graph_engine (policy, root, "tenant-a", "orders");
+  g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
+      "orders"), ==, WYRELOG_E_OK);
+
+  /* No wyl_fact_replay_policy_graphs: the manager is empty. */
+  g_autoptr (WylFactGraphRuntimeManager) manager = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&manager), ==,
+      WYRELOG_E_OK);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus absent = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &absent), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_graph_runtime_status_clear (&absent);
+  wyl_fact_graph_key_clear (&key);
+
+  SealFixture fixture = { root, policy, manager };
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.unseal_committed);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_assert_false (durable_seal_bit (policy, "orders"));
+
+  /* The fixture's fields are borrowed; g_autoptr owns them.  Close the store
+   * BEFORE unlinking the tree, the order seal_fixture_clear uses: removing
+   * policy.db out from under an open SQLite handle is benign on POSIX and
+   * fails on Windows, which would leave this one tree behind and reintroduce
+   * for a single test the leak seal_fixture_clear exists to close. */
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_clear_pointer (&manager, wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
+/* Admitting is not serving, and the fast path returns OK over the difference.
+ *
+ * retire_unseen rewrites an entry to EVICTED and leaves the admission axis
+ * alone, so a graph can admit with no engine published.  The header says the
+ * fast path returns OK there -- republishing an admitting graph is plain
+ * refresh's job -- and that a caller must read engine_published rather than
+ * the return code.  That was argued and not pinned; this pins it. */
+static void
+test_unseal_of_an_admitting_graph_with_no_engine_reports_it (void)
+{
+  SealFixture fixture = { 0 };
+  unseal_fixture_init (&fixture, "wyl-graph-unseal-evicted-XXXXXX", TRUE);
+
+  /* An empty seen set retires every entry: state EVICTED, axis untouched. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen
+        (fixture.manager, NULL, 0), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus retired = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_cmpint (retired.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
+  g_assert_cmpint (retired.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_false (retired.queryable);
+  wyl_fact_graph_runtime_status_clear (&retired);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.already_unsealed);
+  g_assert_false (outcome.unseal_committed);
+  /* OK, admitting, and NOT serving -- the three together are the contract. */
+  g_assert_true (outcome.admission_open);
+  g_assert_false (outcome.engine_published);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  seal_fixture_clear (&fixture);
+}
+
+/* The population with no inverse.  A legacy_unclassified graph can be sealed
+ * and cannot be unsealed: the schema allows sealed = 1 for that state and
+ * offers no transition out of it, so the store answers POLICY and the
+ * sequencer stops at U3 with the barrier intact.
+ *
+ * This is why every case above builds an authority-managed graph, and it is
+ * the reason worth pinning rather than leaving as a fixture detail: a reader
+ * who swaps in the ordinary seal fixture gets POLICY and no explanation. */
+static void
+test_unseal_refuses_a_legacy_unclassified_graph (void)
+{
+  SealFixture fixture = { 0 };
+  seal_fixture_init (&fixture, "wyl-graph-unseal-legacy-XXXXXX");
+  seal_the_orders_graph (&fixture);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (unseal_orders (&fixture, &outcome), ==, WYRELOG_E_POLICY);
+  g_assert_false (outcome.unseal_committed);
+  g_assert_false (outcome.already_unsealed);
+  g_assert_false (outcome.admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  g_assert_true (durable_seal_bit (fixture.policy, "orders"));
+
+  seal_fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1012,5 +1895,39 @@ main (int argc, char **argv)
       test_seal_writes_durably_inside_a_sealed_tenant);
   g_test_add_func ("/fact-graph-seal/abort-keeps-a-sealed-graph-closed",
       test_aborted_seal_does_not_reopen_an_already_sealed_graph);
+  g_test_add_func ("/fact-graph-seal/unseal-restores-a-sealed-graph",
+      test_unseal_restores_a_sealed_graph);
+  g_test_add_func ("/fact-graph-seal/unseal-refuses-an-absent-graph",
+      test_unseal_refuses_an_absent_graph);
+  g_test_add_func ("/fact-graph-seal/unseal-rejects-missing-arguments",
+      test_unseal_rejects_missing_arguments);
+  g_test_add_func ("/fact-graph-seal/unseal-of-an-admitting-graph-is-a-no-op",
+      test_unseal_of_an_admitting_graph_changes_nothing);
+  g_test_add_func ("/fact-graph-seal/unseal-converges-a-barred-graph",
+      test_unseal_converges_a_barred_but_unsealed_graph);
+  g_test_add_func ("/fact-graph-seal/unseal-publishes-before-reopening",
+      test_unseal_publishes_the_engine_before_it_reopens);
+  g_test_add_func ("/fact-graph-seal/unseal-write-failure-stays-sealed",
+      test_unseal_durable_write_failure_leaves_the_graph_sealed);
+  g_test_add_func ("/fact-graph-seal/unseal-readback-still-sealed",
+      test_unseal_readback_that_is_still_sealed_keeps_the_barrier);
+  g_test_add_func ("/fact-graph-seal/unseal-readback-failure-stays-barred",
+      test_unseal_readback_failure_leaves_the_graph_barred);
+  g_test_add_func ("/fact-graph-seal/unseal-build-failure-stays-barred",
+      test_unseal_engine_build_failure_leaves_a_barred_graph);
+  g_test_add_func ("/fact-graph-seal/unseal-reopen-failure",
+      test_unseal_reopen_failure_reports_a_graph_that_is_not_admitting);
+  g_test_add_func ("/fact-graph-seal/unseal-preserves-forget-verdict",
+      test_unseal_preserves_the_forget_verdict);
+  g_test_add_func ("/fact-graph-seal/unseal-closes-a-graph-sealed-out-of-band",
+      test_unseal_closes_a_graph_sealed_out_of_band);
+  g_test_add_func ("/fact-graph-seal/unseal-refuses-during-shutdown",
+      test_unseal_refuses_when_the_manager_is_shutting_down);
+  g_test_add_func ("/fact-graph-seal/unseal-tolerates-an-unheld-graph",
+      test_unseal_tolerates_a_graph_the_runtime_never_held);
+  g_test_add_func ("/fact-graph-seal/unseal-admitting-without-an-engine",
+      test_unseal_of_an_admitting_graph_with_no_engine_reports_it);
+  g_test_add_func ("/fact-graph-seal/unseal-refuses-a-legacy-graph",
+      test_unseal_refuses_a_legacy_unclassified_graph);
   return g_test_run ();
 }

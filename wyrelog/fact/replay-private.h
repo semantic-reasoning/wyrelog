@@ -105,4 +105,25 @@ wyrelog_error_t wyl_fact_replay_refresh_graph (wyl_policy_store_t * policy,
     WylFactGraphRuntimeManager * runtime_manager,
     WylFactGraphRuntimeStatus * out_status);
 
+/* The same one-graph refresh, published into a CLOSED runtime entry without
+ * reopening it (issue #548).  This is the step an unseal needs between its
+ * durable write and its open_admission: the engine is rebuilt while the
+ * barrier still holds, so the reopen is the only edge a reader observes.
+ *
+ * It differs from the call above by exactly the manager primitive it drives
+ * -- refresh_closed rather than refresh -- so it inherits that primitive's
+ * gate: WYRELOG_E_INVALID for a graph whose admission is OPEN, and a mint of
+ * a CLOSED entry for a key the runtime has never held.
+ *
+ * |graph_info| must describe the graph as it is DURABLY RECORDED NOW, with
+ * sealed FALSE.  wyl_fact_replay_open_graph_engine refuses a sealed info with
+ * WYRELOG_E_POLICY before it opens anything, so passing the row an unseal
+ * read before its durable write would fail the build for a graph that is no
+ * longer sealed.  Read the row back after the write and pass that. */
+wyrelog_error_t wyl_fact_replay_refresh_graph_closed
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * runtime_manager,
+    WylFactGraphRuntimeStatus * out_status);
+
 G_END_DECLS;
