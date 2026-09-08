@@ -1590,6 +1590,12 @@ test('fact-root-writer-lease-boundary', python3,
   env : python_strict_encoding_env,
 )
 
+test('fact-publication-lock-order-boundary', python3,
+  args : [files('test-fact-publication-lock-order-boundary.py'),
+    meson.project_source_root()],
+  env : python_strict_encoding_env,
+)
+
 test_fact_reconcile_move = executable('test-fact-reconcile-move',
   'test-fact-reconcile-move.c',
   'fact-test-support.c',
