@@ -429,6 +429,11 @@ typedef struct
   guint write_seen;
   guint probe_seen;
   gboolean fail_unseal_reseal;
+  const gchar *replace_path;
+  const gchar *replacement_path;
+  gboolean replacement_attempted;
+  gboolean replacement_blocked;
+  gboolean replacement_setup_failed;
 } SealPhaseFault;
 
 static wyrelog_error_t
@@ -451,6 +456,26 @@ seal_phase_fault (const gchar *phase, gpointer user_data)
   }
   if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL) == 0)
     return fault->fail_unseal_reseal ? WYRELOG_E_IO : WYRELOG_E_OK;
+  if (g_strcmp0 (phase,
+      WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION) == 0) {
+    fault->replacement_attempted = TRUE;
+    if (g_rename (fault->replace_path, fault->replacement_path) != 0) {
+      if (!g_file_test (fault->replace_path, G_FILE_TEST_IS_REGULAR))
+        fault->replacement_setup_failed = TRUE;
+      else
+        fault->replacement_blocked = TRUE;
+      return fault->replacement_setup_failed ? WYRELOG_E_IO : WYRELOG_E_OK;
+    }
+    g_autoptr (GError) error = NULL;
+    if (!g_file_set_contents (fault->replace_path, "foreign-artifact", -1,
+        &error)) {
+      (void) g_remove (fault->replace_path);
+      (void) g_rename (fault->replacement_path, fault->replace_path);
+      fault->replacement_setup_failed = TRUE;
+      return WYRELOG_E_IO;
+    }
+    return WYRELOG_E_OK;
+  }
   return WYRELOG_E_OK;
 }
 
@@ -1029,6 +1054,105 @@ test_unseal_rejects_graph_schema_mismatch (void)
   remove_tree (root);
 }
 
+static void
+test_unseal_replacement_after_validation_and_retry (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture,
+      "wyl-graph-unseal-replacement-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  GraphPathProbe path = { "tenant-a", "orders", NULL };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
+      "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
+  g_assert_nonnull (path.storage_path);
+  g_autofree gchar *fact_path = g_build_filename (path.storage_path,
+          "facts.duckdb", NULL);
+  g_autofree gchar *replacement_path = g_build_filename (path.storage_path,
+          "facts.duckdb.validated", NULL);
+  GStatBuf original_stat = { 0 };
+  g_assert_cmpint (g_stat (fact_path, &original_stat), ==, 0);
+
+  SealPhaseFault fault = {
+    .replace_path = fact_path,
+    .replacement_path = replacement_path,
+  };
+  wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_unseal_for_test (fixture.policy,
+          fixture.root, &info, fixture.manager, -1, &outcome);
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_assert_true (fault.replacement_attempted);
+
+  if (fault.replacement_setup_failed) {
+    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_true (g_file_test (fact_path, G_FILE_TEST_IS_REGULAR));
+    g_assert_false (outcome.engine_published);
+    g_assert_false (outcome.runtime_admission_open);
+    g_assert_cmpint (outcome.status.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  } else if (fault.replacement_blocked) {
+    /* A blocked replacement is only valid evidence when the original target
+     * is still present, the substitute was not created, and its physical
+     * identity is unchanged. */
+    GStatBuf blocked_stat = { 0 };
+    g_assert_true (g_file_test (fact_path, G_FILE_TEST_IS_REGULAR));
+    g_assert_false (g_file_test (replacement_path, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (g_stat (fact_path, &blocked_stat), ==, 0);
+    g_assert_cmpuint (blocked_stat.st_dev, ==, original_stat.st_dev);
+    g_assert_cmpuint (blocked_stat.st_ino, ==, original_stat.st_ino);
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    g_assert_true (outcome.engine_published);
+    g_assert_true (outcome.runtime_admission_open);
+    g_assert_true (outcome.status.queryable);
+    g_assert_cmpint (outcome.policy_result,
+        ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  } else {
+    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_true (outcome.durable_unseal_applied);
+    g_assert_true (outcome.durable_reseal_applied);
+    g_assert_false (outcome.engine_published);
+    g_assert_false (outcome.runtime_admission_open);
+    g_assert_cmpint (outcome.status.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        "tenant-a", "orders", &authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (authority);
+    g_assert_cmpint (authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    wyl_policy_graph_authority_record_free (authority);
+    g_assert_cmpint (g_remove (fact_path), ==, 0);
+    g_assert_cmpint (g_rename (replacement_path, fact_path), ==, 0);
+  }
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  if (!fault.replacement_blocked && !fault.replacement_setup_failed) {
+    WylFactGraphUnsealOutcome retry = { 0 };
+    g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+        fixture.root, &info, fixture.manager, -1, &retry), ==, WYRELOG_E_OK);
+    g_assert_true (retry.engine_published);
+    g_assert_true (retry.runtime_admission_open);
+    g_assert_true (retry.status.queryable);
+    g_assert_cmpint (retry.policy_result,
+        ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    g_assert_cmpint (retry.status.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_OPEN);
+    wyl_fact_graph_unseal_outcome_clear (&retry);
+  }
+
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
 /* S4's ambiguous durable write, sub-case one: the write fails and the
  * compensating re-read succeeds, reporting the graph unsealed.
  *
@@ -1602,5 +1726,7 @@ main (int argc, char **argv)
       test_unseal_reseal_failure_is_reported_and_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-schema-mismatch",
       test_unseal_rejects_graph_schema_mismatch);
+  g_test_add_func ("/fact-graph-seal/unseal-replacement-after-validation-and-retry",
+      test_unseal_replacement_after_validation_and_retry);
   return g_test_run ();
 }
