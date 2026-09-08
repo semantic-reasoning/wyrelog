@@ -21,6 +21,14 @@ typedef struct
 
 typedef struct
 {
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  wyrelog_error_t nested_rc;
+  gint64 marker;
+} RefreshFromBuild;
+
+typedef struct
+{
   GMutex mutex;
   GCond changed;
   gboolean completed;
@@ -133,6 +141,17 @@ build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
   if (rc != WYRELOG_E_OK)
     g_clear_object (out_engine);
   return rc;
+}
+
+static wyrelog_error_t
+build_refuses_recursive_refresh (const WylFactGraphKey *key,
+    WylEngine **out_engine, gpointer user_data)
+{
+  RefreshFromBuild *probe = user_data;
+  BuildSpec nested = {.marker = probe->marker};
+  probe->nested_rc = wyl_fact_graph_runtime_manager_refresh (probe->manager,
+          probe->key, build_marker_engine, &nested, NULL);
+  return build_marker_engine (key, out_engine, &nested);
 }
 
 typedef struct
@@ -1608,6 +1627,28 @@ test_drain_refuses_its_own_build_callback (void)
   wyl_fact_graph_key_clear (&a);
 }
 
+/* A publication build must refuse recursive refresh before it waits on its
+ * own writer lock.  The bounded assertion is deliberately direct: a missing
+ * guard would hang this test instead of producing a recoverable error. */
+static void
+test_refresh_refuses_its_own_build_callback (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec seed = {.marker = 301};
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+
+  RefreshFromBuild probe = {.manager = manager, .key = &key,
+                            .nested_rc = WYRELOG_E_INTERNAL, .marker = 302};
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_refuses_recursive_refresh, &probe, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (probe.nested_rc, ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_key_clear (&key);
+}
+
 /* The queued term.  A thread blocked on engine_call_lock has already passed
  * the admission check and will run, so the drain must wait for it too.  That
  * state -- no active call, one queued -- exists only in the instant between
@@ -2480,6 +2521,8 @@ main (int argc, char **argv)
       test_drain_waits_for_admitted_build);
   g_test_add_func ("/fact-runtime/drain-refuses-own-build-callback",
       test_drain_refuses_its_own_build_callback);
+  g_test_add_func ("/fact-runtime/refresh-refuses-own-build-callback",
+      test_refresh_refuses_its_own_build_callback);
   g_test_add_func ("/fact-runtime/drain-waits-for-queued-engine-call",
       test_drain_waits_for_queued_engine_call);
   g_test_add_func ("/fact-runtime/drain-refused-when-reopened-while-parked",

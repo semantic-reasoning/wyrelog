@@ -5,6 +5,11 @@
 
 typedef struct _WylFactGraphRuntimeEntry WylFactGraphRuntimeEntry;
 
+/* A build callback is user-controlled code.  Keep its entry in thread-local
+ * storage so a callback cannot recursively wait on the same entry's writer
+ * lock.  Different entries remain independent and may still be refreshed. */
+static GPrivate runtime_build_entry = G_PRIVATE_INIT (NULL);
+
 typedef struct
 {
   gatomicrefcount ref_count;
@@ -656,6 +661,21 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     }
   }
 
+  /* Two reentries end at the same self-deadlock on entry->writer_lock below,
+   * and they are set by different code paths, so both refusals are needed.
+   *
+   * ordered_writer_owner is stamped by the ordered lock-set acquisition,
+   * which already holds writer_lock for every entry in the set.  A caller
+   * refreshing an entry it locked that way has broken the contract, so it
+   * gets INVALID.
+   *
+   * runtime_build_entry is set around the build callback, which this function
+   * runs while holding writer_lock.  A build that re-enters refresh on the
+   * graph it is building is not a contract error but work already in flight,
+   * so it gets BUSY.
+   *
+   * They cannot both hold: owning the set refuses here before writer_lock is
+   * taken, so no build of this entry runs underneath one. */
   g_mutex_lock (&entry->state_lock);
   gboolean ordered_self_lock = entry->ordered_writer_owner == g_thread_self ();
   g_mutex_unlock (&entry->state_lock);
@@ -665,6 +685,13 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     runtime_entry_unref (entry);
     return WYRELOG_E_INVALID;
   }
+  if (g_private_get (&runtime_build_entry) == entry) {
+    if (out_status != NULL)
+      wyl_fact_graph_runtime_status_clear (out_status);
+    runtime_entry_unref (entry);
+    return WYRELOG_E_BUSY;
+  }
+
   g_mutex_lock (&entry->writer_lock);
   g_mutex_lock (&entry->state_lock);
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown)) {
@@ -728,7 +755,10 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
 #endif
 
   WylEngine *engine = NULL;
+  gpointer previous_build_entry = g_private_get (&runtime_build_entry);
+  g_private_set (&runtime_build_entry, entry);
   rc = build (&entry->key, &engine, user_data);
+  g_private_set (&runtime_build_entry, previous_build_entry);
   if (rc == WYRELOG_E_OK && (engine == NULL || !WYL_IS_ENGINE (engine)))
     rc = WYRELOG_E_INTERNAL;
   WylFactGraphEngineGeneration *replacement = NULL;
@@ -884,6 +914,11 @@ wyl_fact_graph_runtime_publication_refresh
             &out_status->key);
     if (rc != WYRELOG_E_OK)
       return rc;
+  }
+  if (g_private_get (&runtime_build_entry) == entry) {
+    if (out_status != NULL)
+      wyl_fact_graph_runtime_status_clear (out_status);
+    return WYRELOG_E_BUSY;
   }
   WylEngine *engine = NULL;
   wyrelog_error_t rc = build (&entry->key, &engine, user_data);
