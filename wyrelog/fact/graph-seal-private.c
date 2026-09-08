@@ -7,6 +7,9 @@
 #include "../wyl-handle-private.h"
 #include "graph-artifact-namespace-private.h"
 #include "graph-locator-private.h"
+#ifdef G_OS_WIN32
+#include "graph-artifact-windows-namespace-private.h"
+#endif
 
 void
 wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome *outcome)
@@ -428,7 +431,8 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
     return rc;
   gboolean provisioned = authority != NULL
       && authority->lifecycle_state
-      != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED;
+      != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED
+      && authority->has_store_identity;
   wyl_policy_graph_authority_record_free (authority);
   if (!provisioned)
     return WYRELOG_E_OK;
@@ -461,8 +465,13 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK)
     artifact_opened = TRUE;
   if (rc == WYRELOG_E_OK)
+#ifdef G_OS_WIN32
+    rc = wyl_fact_artifact_win_namespace_new_with_main (&directory, &main_file,
+            out_namespace);
+#else
     rc = wyl_fact_artifact_namespace_open (&directory, &main_file,
             out_namespace);
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_namespace_acquire_mutation_lease (*out_namespace,
             out_lease);
