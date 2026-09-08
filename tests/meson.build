@@ -1853,6 +1853,13 @@ if get_option('enable_fact_store').allowed()
   )
 
   test('fact-runtime', test_fact_runtime, timeout : 60)
+
+  test_fact_tenant_admission = executable('test-fact-tenant-admission',
+    'test-fact-tenant-admission.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+  test('fact-tenant-admission', test_fact_tenant_admission, timeout : 60)
 endif
 
 if get_option('enable_secure_duckdb_bridge').enabled()

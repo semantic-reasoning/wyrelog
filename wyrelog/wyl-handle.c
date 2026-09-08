@@ -121,6 +121,7 @@ struct _WylHandle
   gchar *fact_root;
   WylFactRootWriterLease *fact_root_writer_lease;
   WylFactGraphRuntimeManager *fact_graph_runtime;
+  WylFactTenantAdmissionManager *fact_tenant_admission;
   GMutex fact_replay_coordinator_lock;
 #endif
   gboolean login_skip_mfa_allowed;
@@ -1086,6 +1087,8 @@ wyl_handle_finalize (GObject *object)
   g_assert_null (self->fact_root_writer_lease);
   g_clear_pointer (&self->fact_graph_runtime,
       wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&self->fact_tenant_admission,
+      wyl_fact_tenant_admission_manager_unref);
   g_mutex_clear (&self->fact_replay_coordinator_lock);
 #endif
   g_clear_pointer (&self->template_dir, g_free);
@@ -1142,6 +1145,9 @@ wyl_handle_init (WylHandle *self)
   if (wyl_fact_graph_runtime_manager_new (&self->fact_graph_runtime)
       != WYRELOG_E_OK)
     g_error ("wyl_handle_init: failed to create fact graph runtime");
+  if (wyl_fact_tenant_admission_manager_new (&self->fact_tenant_admission)
+      != WYRELOG_E_OK)
+    g_error ("wyl_handle_init: failed to create tenant admission manager");
   g_mutex_init (&self->fact_replay_coordinator_lock);
 #endif
   self->pending_deltas = new_pending_delta_queue ();
@@ -1742,6 +1748,19 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
   while (handle->policy_store_active_operations > 0)
     g_cond_wait (&handle->policy_store_lifecycle_changed,
         &handle->policy_store_lifecycle_mutex);
+#ifdef WYL_HAS_FACT_STORE
+  rc = wyl_fact_tenant_admission_manager_shutdown
+        (handle->fact_tenant_admission);
+  if (rc != WYRELOG_E_OK) {
+    handle->policy_store_shutdown_pending = FALSE;
+    g_cond_broadcast (&handle->policy_store_lifecycle_changed);
+    g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+    g_clear_pointer (&engine_locker, g_rec_mutex_locker_free);
+    (void) wyl_service_auth_rank_leave (handle,
+        WYL_SERVICE_AUTH_RANK_ENGINE);
+    return rc;
+  }
+#endif
   detached_store = handle->policy_store;
   handle->policy_store = NULL;
   if (handle->policy_store_generation == G_MAXUINT64)
@@ -1771,6 +1790,8 @@ wyl_handle_complete_shutdown (WylHandle *handle,
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
 #ifdef WYL_HAS_FACT_STORE
+  wyl_fact_tenant_admission_manager_shutdown
+    (handle->fact_tenant_admission);
   wyl_fact_graph_runtime_manager_shutdown (handle->fact_graph_runtime);
 #endif
   handle->engine_pair_poisoned = FALSE;

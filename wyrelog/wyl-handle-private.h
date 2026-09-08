@@ -13,6 +13,7 @@
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/graph-seal-private.h"
 #include "fact/replay-private.h"
+#include "fact/tenant-admission-private.h"
 #endif
 
 #ifdef WYL_HAS_AUDIT
