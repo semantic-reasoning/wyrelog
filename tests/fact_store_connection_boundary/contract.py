@@ -132,6 +132,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "wyl_fact_replay_open_graph_engine_with_store_for_test",
     "wyl_fact_replay_policy_graphs",
     "wyl_fact_replay_refresh_graph",
+    "wyl_fact_replay_refresh_graph_closed",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
     "wyrelog/fact/compound.c": {"materialize_arg_unlocked"},
@@ -145,6 +146,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "wyl_fact_replay_open_graph_engine_with_store_for_test",
         "wyl_fact_replay_policy_graphs",
         "wyl_fact_replay_refresh_graph",
+        "wyl_fact_replay_refresh_graph_closed",
     },
     "wyrelog/fact/store.c": {
         "execute_forget_intent_unlocked",
