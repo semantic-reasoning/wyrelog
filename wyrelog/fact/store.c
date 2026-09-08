@@ -570,6 +570,14 @@ fact_identity_bind_param (duckdb_prepared_statement statement, idx_t index,
   return FALSE;
 }
 
+static duckdb_state
+bind_optional_varchar (duckdb_prepared_statement statement, idx_t index,
+    const gchar *value)
+{
+  return value == NULL ? duckdb_bind_null (statement, index) :
+         duckdb_bind_varchar (statement, index, value);
+}
+
 static wyrelog_error_t
 fact_identity_execute (gpointer context, const gchar *sql,
     const WylFactStoreIdentityCell *params, gsize n_params,
@@ -674,7 +682,10 @@ fact_identity_execute (gpointer context, const gchar *sql,
   "  state           VARCHAR NOT NULL " \
   "    CHECK (state IN ('PENDING', 'COMPLETED', 'QUARANTINED'))," \
   "  created_at_us   BIGINT NOT NULL," \
-  "  completed_at_us BIGINT"
+  "  completed_at_us BIGINT," \
+  "  actor_subject_id VARCHAR," \
+  "  request_id      VARCHAR," \
+  "  operator_annotation VARCHAR"
 
 /* Keep macro expansion outside the migration transaction's lexical scope.
  * The boundary tests also pin FACT_FORGET_INTENT_COLUMNS to string literals,
@@ -683,8 +694,16 @@ static const gchar fact_forget_intent_rebuild_sql[] =
     "DROP TABLE IF EXISTS fact_forget_intent_rebuild;"
     "CREATE TABLE fact_forget_intent_rebuild ("
     FACT_FORGET_INTENT_COLUMNS ");"
-    "INSERT INTO fact_forget_intent_rebuild"
-    "  SELECT * FROM fact_forget_intent;";
+    "INSERT INTO fact_forget_intent_rebuild ("
+    "op_uuid, batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+    "schema_version, projection_table, content_hash, idempotency_key, "
+    "operator, reason, rows_purged, state, created_at_us, completed_at_us, "
+    "actor_subject_id, request_id, operator_annotation) "
+    "SELECT op_uuid, batch_id, tenant_id, graph_id, namespace_id, "
+    "relation_name, schema_version, projection_table, content_hash, "
+    "idempotency_key, operator, reason, rows_purged, state, created_at_us, "
+    "completed_at_us, actor_subject_id, request_id, operator_annotation "
+    "FROM fact_forget_intent;";
 
 static void
 fact_identity_validation_barrier (gpointer context)
@@ -1225,7 +1244,10 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
             "  operator      VARCHAR NOT NULL,"
             "  reason        VARCHAR NOT NULL,"
             "  rows_purged   BIGINT NOT NULL,"
-            "  created_at_us BIGINT NOT NULL" ");"
+            "  created_at_us BIGINT NOT NULL,"
+            "  actor_subject_id VARCHAR,"
+            "  request_id VARCHAR,"
+            "  operator_annotation VARCHAR" ");"
             /*
              * Durable forget intention: the crash-convergence anchor.  A row is
              * committed PENDING before any destructive step and flipped
@@ -1238,6 +1260,26 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
              */
             "CREATE TABLE IF NOT EXISTS fact_forget_intent ("
             FACT_FORGET_INTENT_COLUMNS ");");
+  if (rc == WYRELOG_E_OK) {
+    WylFactStoreTransaction migration = { 0 };
+    rc = wyl_fact_store_transaction_begin (&session,
+            WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, &migration);
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (store->conn,
+              "ALTER TABLE fact_forget_audit ADD COLUMN IF NOT EXISTS "
+              "actor_subject_id VARCHAR;"
+              "ALTER TABLE fact_forget_audit ADD COLUMN IF NOT EXISTS "
+              "request_id VARCHAR;"
+              "ALTER TABLE fact_forget_audit ADD COLUMN IF NOT EXISTS "
+              "operator_annotation VARCHAR;"
+              "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
+              "actor_subject_id VARCHAR;"
+              "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
+              "request_id VARCHAR;"
+              "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
+              "operator_annotation VARCHAR;");
+    rc = wyl_fact_store_transaction_finish (&migration, rc);
+  }
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   wyl_fact_store_connection_session_end (&session);
@@ -2353,6 +2395,9 @@ typedef struct
   gchar *idempotency_key;
   gchar *operator_id;
   gchar *reason;
+  gchar *actor_subject_id;
+  gchar *request_id;
+  gchar *operator_annotation;
   gint64 rows_purged;
   gchar *state;
 } ForgetIntent;
@@ -2373,6 +2418,9 @@ forget_intent_clear (ForgetIntent *intent)
   g_free (intent->idempotency_key);
   g_free (intent->operator_id);
   g_free (intent->reason);
+  g_free (intent->actor_subject_id);
+  g_free (intent->request_id);
+  g_free (intent->operator_annotation);
   g_free (intent->state);
   memset (intent, 0, sizeof (*intent));
 }
@@ -2514,8 +2562,10 @@ insert_forget_intent_unlocked (wyl_fact_store_t *store,
       "INSERT INTO fact_forget_intent "
       "(op_uuid, batch_id, tenant_id, graph_id, namespace_id, relation_name, "
       " schema_version, projection_table, content_hash, idempotency_key, "
-      " operator, reason, rows_purged, state, created_at_us, completed_at_us) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NULL);";
+      " operator, reason, rows_purged, state, created_at_us, completed_at_us, "
+      " actor_subject_id, request_id, operator_annotation) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NULL, "
+      "?, ?, ?);";
   if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
     /* duckdb_prepare allocates the statement even when it fails: the
      * object carries the error text.  duckdb.h:1892 requires destroying
@@ -2536,7 +2586,10 @@ insert_forget_intent_unlocked (wyl_fact_store_t *store,
       | duckdb_bind_varchar (stmt, 11, intent->operator_id)
       | duckdb_bind_varchar (stmt, 12, intent->reason)
       | duckdb_bind_int64 (stmt, 13, intent->rows_purged)
-      | duckdb_bind_int64 (stmt, 14, created_at_us);
+      | duckdb_bind_int64 (stmt, 14, created_at_us)
+      | bind_optional_varchar (stmt, 15, intent->actor_subject_id)
+      | bind_optional_varchar (stmt, 16, intent->request_id)
+      | bind_optional_varchar (stmt, 17, intent->operator_annotation);
   if (ok != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -2592,9 +2645,10 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
   static const gchar *audit_sql =
       "INSERT INTO fact_forget_audit "
       "(id, batch_id, tenant_id, graph_id, operator, reason, rows_purged, "
-      " created_at_us) VALUES ("
+      " created_at_us, actor_subject_id, request_id, operator_annotation) "
+      "VALUES ("
       "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit), "
-      "?, ?, ?, ?, ?, ?, ?);";
+      "?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
   if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
@@ -2606,7 +2660,10 @@ complete_forget_intent_unlocked (wyl_fact_store_t *store,
       | duckdb_bind_varchar (stmt, 4, intent->operator_id)
       | duckdb_bind_varchar (stmt, 5, intent->reason)
       | duckdb_bind_int64 (stmt, 6, intent->rows_purged)
-      | duckdb_bind_int64 (stmt, 7, now_us);
+      | duckdb_bind_int64 (stmt, 7, now_us)
+      | bind_optional_varchar (stmt, 8, intent->actor_subject_id)
+      | bind_optional_varchar (stmt, 9, intent->request_id)
+      | bind_optional_varchar (stmt, 10, intent->operator_annotation);
   if (ok != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     rc = WYRELOG_E_IO;
@@ -2722,7 +2779,8 @@ load_pending_forget_intents_unlocked (wyl_fact_store_t *store, GPtrArray *out)
   static const gchar *sql =
       "SELECT op_uuid, batch_id, tenant_id, graph_id, namespace_id, "
       "relation_name, schema_version, projection_table, content_hash, "
-      "idempotency_key, operator, reason, rows_purged, state "
+      "idempotency_key, operator, reason, rows_purged, state, "
+      "actor_subject_id, request_id, operator_annotation "
       "FROM fact_forget_intent WHERE state = 'PENDING' "
       "ORDER BY created_at_us;";
   if (duckdb_query (store->conn, sql, &result) != DuckDBSuccess) {
@@ -2744,6 +2802,9 @@ load_pending_forget_intents_unlocked (wyl_fact_store_t *store, GPtrArray *out)
     gchar *operator_id = duckdb_value_varchar (&result, 10, r);
     gchar *reason = duckdb_value_varchar (&result, 11, r);
     gchar *state = duckdb_value_varchar (&result, 13, r);
+    gchar *actor_subject_id = duckdb_value_varchar (&result, 14, r);
+    gchar *request_id = duckdb_value_varchar (&result, 15, r);
+    gchar *operator_annotation = duckdb_value_varchar (&result, 16, r);
     intent->op_uuid = g_strdup (op_uuid);
     intent->batch_id = g_strdup (batch_id);
     intent->tenant_id = g_strdup (tenant_id);
@@ -2756,6 +2817,9 @@ load_pending_forget_intents_unlocked (wyl_fact_store_t *store, GPtrArray *out)
     intent->idempotency_key = g_strdup (idempotency_key);
     intent->operator_id = g_strdup (operator_id);
     intent->reason = g_strdup (reason);
+    intent->actor_subject_id = g_strdup (actor_subject_id);
+    intent->request_id = g_strdup (request_id);
+    intent->operator_annotation = g_strdup (operator_annotation);
     intent->rows_purged = duckdb_value_int64 (&result, 12, r);
     intent->state = g_strdup (state);
     duckdb_free (op_uuid);
@@ -2770,6 +2834,9 @@ load_pending_forget_intents_unlocked (wyl_fact_store_t *store, GPtrArray *out)
     duckdb_free (operator_id);
     duckdb_free (reason);
     duckdb_free (state);
+    duckdb_free (actor_subject_id);
+    duckdb_free (request_id);
+    duckdb_free (operator_annotation);
     g_ptr_array_add (out, intent);
   }
   duckdb_destroy_result (&result);
@@ -2846,6 +2913,9 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
   intent.idempotency_key = g_strdup (idempotency_key);
   intent.operator_id = g_strdup (opts->operator_id);
   intent.reason = g_strdup (opts->reason);
+  intent.actor_subject_id = g_strdup (opts->authenticated_actor_subject_id);
+  intent.request_id = g_strdup (opts->request_id);
+  intent.operator_annotation = g_strdup (opts->operator_annotation);
   intent.rows_purged = rows;
   intent.state = g_strdup ("PENDING");
 

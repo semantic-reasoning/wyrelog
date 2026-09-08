@@ -15,7 +15,7 @@ ROLE_OWNERS = {
     "wyrelog/fact/replay.c",
 }
 EXPECTED_RAW_INVENTORY = {
-    "wyrelog/fact/store.c": (44, 355, 4, 3),
+    "wyrelog/fact/store.c": (45, 363, 4, 3),
     "wyrelog/fact/compound.c": (0, 123, 14, 0),
     "wyrelog/fact/replay.c": (0, 32, 2, 0),
 }
@@ -46,7 +46,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "wyl_fact_store_close": 2,
         "wyl_fact_store_connection_session_begin": 2,
         "wyl_fact_store_connection_session_get": 1,
-        "wyl_fact_store_create_schema": 1,
+        "wyl_fact_store_create_schema": 2,
         "wyl_fact_store_ensure_projection": 1,
         "wyl_fact_store_open": 4,
         "wyl_fact_store_open_identified": 4,
@@ -74,6 +74,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
     },
     "wyrelog/fact/store.c": {
         "append_value": 5,
+        "bind_optional_varchar": 2,
         "complete_forget_intent_unlocked": 19,
         "count_projection_rows_unlocked": 10,
         "create_hardened_duckdb_config": 2,
@@ -88,7 +89,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "insert_event_unlocked": 15,
         "insert_forget_intent_unlocked": 19,
         "load_batch_forget_fingerprint_unlocked": 17,
-        "load_pending_forget_intents_unlocked": 30,
+        "load_pending_forget_intents_unlocked": 36,
         "lookup_batch_scope_unlocked": 24,
         "next_sequence_unlocked": 4,
         "open_duckdb_identified": 6,
