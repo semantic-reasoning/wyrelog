@@ -406,8 +406,9 @@ compensate_unseal (wyl_policy_store_t *policy, const gchar *tenant_id,
   return compensation_rc;
 }
 
-static wyrelog_error_t
+wyrelog_error_t
 wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome *out_outcome)
@@ -417,12 +418,18 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     out_outcome->policy_result =
         WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   }
+  wyrelog_error_t rc = WYRELOG_E_OK;
   if (policy == NULL || graph_info == NULL || manager == NULL
       || graph_info->tenant_id == NULL || graph_info->graph_id == NULL)
     return WYRELOG_E_INVALID;
+  if (root_lease != NULL) {
+    rc = wyl_fact_root_writer_lease_verify (root_lease);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   WylFactGraphKey key = { 0 };
-  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
+  rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
           graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -511,6 +518,13 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     clear_unseal_graph_info (&current);
     goto compensate;
   }
+  if (root_lease != NULL) {
+    rc = wyl_fact_root_writer_lease_verify (root_lease);
+    if (rc != WYRELOG_E_OK) {
+      clear_unseal_graph_info (&current);
+      goto compensate;
+    }
+  }
 
   rc = seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION);
   if (rc != WYRELOG_E_OK) {
@@ -534,6 +548,11 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
   if (rc != WYRELOG_E_OK)
     goto compensate;
   rc = wyl_policy_store_graph_publication_fence_commit (&fence);
+  if (root_lease != NULL) {
+    rc = wyl_fact_root_writer_lease_verify (root_lease);
+    if (rc != WYRELOG_E_OK)
+      goto compensate;
+  }
   if (rc != WYRELOG_E_OK) {
     /* A failed COMMIT may leave the transaction outcome uncertain.  Make the
      * runtime safe before releasing the fence: a closed, evicted entry is
@@ -640,7 +659,7 @@ wyl_fact_graph_unseal (wyl_policy_store_t *policy, WylHandle *handle,
   rc = wyl_service_auth_write_lease_validate_operation (write_lease, handle);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_fact_graph_unseal_core (policy, fact_root, graph_info, manager,
+  return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info, manager,
              drain_timeout_us, out_outcome);
 }
 
@@ -651,7 +670,21 @@ wyl_fact_graph_unseal_for_test (wyl_policy_store_t *policy,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome *out_outcome)
 {
-  return wyl_fact_graph_unseal_core (policy, fact_root, graph_info, manager,
+  return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info, manager,
              drain_timeout_us, out_outcome);
 }
 #endif
+
+wyrelog_error_t
+wyl_fact_graph_unseal_with_root_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome)
+{
+  if (root_lease == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_fact_graph_unseal_core (policy, fact_root, root_lease,
+             graph_info, manager, drain_timeout_us, out_outcome);
+}

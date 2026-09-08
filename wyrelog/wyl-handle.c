@@ -2496,6 +2496,19 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
       || self->fact_graph_runtime == NULL)
     return WYRELOG_E_INVALID;
 
+#ifdef WYL_HAS_FACT_STORE
+  /* The root writer lease is acquired with the handle and must remain valid
+   * for the complete validation/build/publication sequence.  Revalidate at
+   * this boundary so a replaced root is rejected before any policy mutation
+   * or runtime publication is attempted. */
+  if (self->fact_root_writer_lease == NULL)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t root_rc = wyl_fact_root_writer_lease_verify
+        (self->fact_root_writer_lease);
+  if (root_rc != WYRELOG_E_OK)
+    return root_rc;
+#endif
+
   wyl_policy_store_t *policy = NULL;
   wyl_policy_store_t *lease_policy = NULL;
   g_mutex_lock (&self->fact_replay_coordinator_lock);
@@ -2506,9 +2519,9 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
   if (rc == WYRELOG_E_OK && policy != lease_policy)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_graph_unseal (policy, self, write_lease, self->fact_root,
-            graph_info, self->fact_graph_runtime, drain_timeout_us,
-            out_outcome);
+    rc = wyl_fact_graph_unseal_with_root_lease (policy, self->fact_root,
+            self->fact_root_writer_lease, graph_info, self->fact_graph_runtime,
+            drain_timeout_us, out_outcome);
     wyl_handle_policy_store_unpin (self, policy);
   } else if (policy != NULL) {
     wyl_handle_policy_store_unpin (self, policy);
