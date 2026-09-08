@@ -2485,8 +2485,9 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
   if (rc == WYRELOG_E_OK && policy != lease_policy)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_graph_unseal (policy, self->fact_root, graph_info,
-            self->fact_graph_runtime, drain_timeout_us, out_outcome);
+    rc = wyl_fact_graph_unseal (policy, self, write_lease, self->fact_root,
+            graph_info, self->fact_graph_runtime, drain_timeout_us,
+            out_outcome);
     wyl_handle_policy_store_unpin (self, policy);
   } else if (policy != NULL) {
     wyl_handle_policy_store_unpin (self, policy);

@@ -134,6 +134,8 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "wyl_fact_replay_policy_graphs",
     "wyl_fact_replay_refresh_graph",
     "wyl_fact_replay_refresh_graph_closed",
+    "wyl_fact_replay_publish_graph_closed_and_open",
+    "wyl_fact_replay_refresh_graph_publication",
     "wyl_fact_replay_validate_graph",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
@@ -149,6 +151,8 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "wyl_fact_replay_policy_graphs",
         "wyl_fact_replay_refresh_graph",
         "wyl_fact_replay_refresh_graph_closed",
+        "wyl_fact_replay_publish_graph_closed_and_open",
+        "wyl_fact_replay_refresh_graph_publication",
         "wyl_fact_replay_validate_graph",
     },
     "wyrelog/fact/store.c": {

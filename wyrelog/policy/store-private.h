@@ -1538,6 +1538,37 @@ wyrelog_error_t wyl_policy_store_publication_transaction_commit
 wyrelog_error_t wyl_policy_store_publication_transaction_rollback_checked
   (wyl_policy_store_t * store);
 
+/* Same-thread graph publication fence.  The graph mutex and the SQLite
+ * transaction are held together so an authority snapshot remains valid while
+ * a closed runtime publication is built. */
+typedef struct
+{
+  wyl_policy_store_t *store;
+  GThread *owner;
+  gboolean active;
+  gboolean graph_locked;
+  guint64 initial_generation;
+  guint64 initial_reconciliation_generation;
+  gchar *initial_store_uuid;
+  guint64 initial_format_version;
+  guint64 initial_path_encoding_version;
+} WylPolicyGraphPublicationFence;
+
+#define WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT { 0 }
+
+wyrelog_error_t wyl_policy_store_graph_publication_fence_begin
+  (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, WylPolicyGraphPublicationFence *out_fence);
+wyrelog_error_t wyl_policy_store_graph_publication_fence_validate
+  (WylPolicyGraphPublicationFence *fence, const gchar *tenant_id,
+    const gchar *graph_id, WylPolicyGraphAuthorityRecord **out_record);
+wyrelog_error_t wyl_policy_store_graph_publication_fence_commit
+  (WylPolicyGraphPublicationFence *fence);
+void wyl_policy_store_graph_publication_fence_clear
+  (WylPolicyGraphPublicationFence *fence);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylPolicyGraphPublicationFence,
+    wyl_policy_store_graph_publication_fence_clear)
+
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 void wyl_policy_store_graph_authority_migration_fail_once
   (wyl_policy_store_t * store,

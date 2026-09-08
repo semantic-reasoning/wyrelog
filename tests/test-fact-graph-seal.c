@@ -565,7 +565,7 @@ test_unseal_rebuilds_before_reopening (void)
   wyl_fact_graph_seal_outcome_clear (&sealed);
 
   WylFactGraphUnsealOutcome unsealed = { 0 };
-  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &unsealed), ==, WYRELOG_E_OK);
   g_assert_true (unsealed.durable_unseal_applied);
   g_assert_true (unsealed.engine_published);
@@ -589,6 +589,48 @@ test_unseal_rebuilds_before_reopening (void)
   g_autofree gchar *root = g_strdup (fixture.root);
   seal_fixture_clear (&fixture);
   remove_tree (root);
+}
+
+typedef struct
+{
+  wyrelog_error_t open_rc;
+} PublicationOpenProbe;
+
+static void
+probe_publication_open (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, gpointer user_data)
+{
+  PublicationOpenProbe *probe = user_data;
+  probe->open_rc = wyl_fact_graph_runtime_manager_open_admission (manager,
+          key);
+}
+
+static void
+test_publication_blocks_external_open (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture,
+      "wyl-graph-publication-open-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  PublicationOpenProbe probe = { WYRELOG_E_INTERNAL };
+  wyl_fact_graph_runtime_set_publication_test_hook (probe_publication_open,
+      &probe);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_set_publication_test_hook (NULL, NULL);
+  g_assert_cmpint (probe.open_rc, ==, WYRELOG_E_BUSY);
+  g_assert_true (outcome.runtime_admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  seal_fixture_clear (&fixture);
 }
 
 static void
@@ -632,7 +674,7 @@ test_unseal_build_failure_reseals_and_stays_closed (void)
   g_assert_cmpint (g_remove (fact_path), ==, 0);
 
   WylFactGraphUnsealOutcome outcome = { 0 };
-  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &outcome), !=, WYRELOG_E_OK);
   g_assert_true (outcome.durable_unseal_applied);
   g_assert_true (outcome.durable_reseal_applied);
@@ -653,6 +695,20 @@ test_unseal_build_failure_reseals_and_stays_closed (void)
   g_autofree gchar *root = g_strdup (fixture.root);
   seal_fixture_clear (&fixture);
   remove_tree (root);
+}
+
+static void
+test_unseal_requires_handle_write_lease (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-lease-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, NULL, NULL, NULL,
+      &info, fixture.manager, -1, NULL), ==, WYRELOG_E_INVALID);
+  seal_fixture_clear (&fixture);
 }
 
 static void
@@ -683,7 +739,7 @@ test_unseal_reseal_failure_is_reported_and_stays_closed (void)
   fault.fail_unseal_reseal = TRUE;
   wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
   WylFactGraphUnsealOutcome outcome = { 0 };
-  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
   wyl_fact_graph_seal_set_test_hook (NULL, NULL);
 
@@ -753,7 +809,7 @@ test_unseal_rejects_graph_schema_mismatch (void)
       ==, SQLITE_OK);
 
   WylFactGraphUnsealOutcome outcome = { 0 };
-  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &outcome), !=, WYRELOG_E_OK);
   g_assert_true (outcome.durable_unseal_applied);
   g_assert_true (outcome.durable_reseal_applied);
@@ -1335,6 +1391,10 @@ main (int argc, char **argv)
       test_aborted_seal_does_not_reopen_an_already_sealed_graph);
   g_test_add_func ("/fact-graph-seal/unseal-rebuilds-before-reopening",
       test_unseal_rebuilds_before_reopening);
+  g_test_add_func ("/fact-graph-seal/publication-blocks-external-open",
+      test_publication_blocks_external_open);
+  g_test_add_func ("/fact-graph-seal/unseal-requires-handle-write-lease",
+      test_unseal_requires_handle_write_lease);
   g_test_add_func ("/fact-graph-seal/unseal-build-failure-reseals",
       test_unseal_build_failure_reseals_and_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-reseal-failure-reported",
