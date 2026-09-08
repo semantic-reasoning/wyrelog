@@ -61,6 +61,8 @@ wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
  * for security-sensitive provisioning. */
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
+typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
+typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 /* Open a live, secure handle on a retained provisioning pair.  Unlike the raw
  * path open, this binds by descriptor through the bounded secure filesystem, so
  * it serves the nlink-2 pair the regular open path refuses.  The returned handle
@@ -69,6 +71,14 @@ typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
 wyrelog_error_t wyl_fact_store_open_provisioned_pair
   (WylFactGraphProvisionedPair * pair, const WylFactStoreIdentity * identity,
     gboolean writable, wyl_fact_store_t ** out_store);
+/* Open a live store using an already-held artifact mutation lease.  The live
+ * bridge adopts |lease|, preventing a self-conflicting second reader/writer
+ * lease while the caller retains the namespace and lease for publication. */
+wyrelog_error_t wyl_fact_store_open_provisioned_namespace_with_lease
+  (WylFactArtifactNamespace * namespace_,
+    WylFactArtifactMutationLease * lease,
+    const WylFactStoreIdentity * identity, gboolean writable,
+    wyl_fact_store_t ** out_store);
 #endif
 void wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault
     fault);

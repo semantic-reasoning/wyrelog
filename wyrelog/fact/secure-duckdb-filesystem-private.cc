@@ -209,7 +209,8 @@ wyl_secure_duckdb_filesystem_take_test_fault (guint fault)
 }
 
 WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
-    *namespace_, bool read_only, bool create_temporary_storage)
+    *namespace_, bool read_only, bool create_temporary_storage,
+    WylFactArtifactMutationLease *adopted_lease)
   :
   lease_ (nullptr),
   temp_root_ (nullptr),
@@ -221,11 +222,18 @@ WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (WylFactArtifactNamespace
         "invalid namespace binding");
   require_ok (wyl_fact_artifact_namespace_revalidate (namespace_),
       "initial namespace revalidation");
-  const auto lease_result = read_only_
-      ? wyl_fact_artifact_namespace_acquire_reader_guard (namespace_, &lease_)
-      : wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,
-          &lease_);
-  require_ok (lease_result, "acquire storage lease");
+  if (adopted_lease != nullptr) {
+    require_ok (wyl_fact_artifact_mutation_lease_revalidate (adopted_lease),
+        "revalidate adopted storage lease");
+    lease_ = adopted_lease;
+  } else {
+    const auto lease_result = read_only_
+        ? wyl_fact_artifact_namespace_acquire_reader_guard (namespace_,
+            &lease_)
+        : wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,
+            &lease_);
+    require_ok (lease_result, "acquire storage lease");
+  }
   if (!read_only_ && create_temporary_storage) {
     WylFactDuckdbTempOrphanEvidence *evidence = nullptr;
     const auto result =
@@ -1288,8 +1296,9 @@ WylSecureDuckdbFileSystem::SupportsGlobExtended () const
 
 duckdb::unique_ptr < WylSecureDuckdbFileSystem >
 wyl_secure_duckdb_filesystem_new (WylFactArtifactNamespace *namespace_,
-    bool read_only, bool create_temporary_storage)
+    bool read_only, bool create_temporary_storage,
+    WylFactArtifactMutationLease *adopted_lease)
 {
   return duckdb::make_uniq < WylSecureDuckdbFileSystem > (namespace_,
-         read_only, create_temporary_storage);
+         read_only, create_temporary_storage, adopted_lease);
 }

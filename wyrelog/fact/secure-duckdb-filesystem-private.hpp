@@ -54,7 +54,8 @@ duckdb::FileSystem
 {
 public:
   WylSecureDuckdbFileSystem (WylFactArtifactNamespace *, bool read_only,
-      bool create_temporary_storage = true);
+      bool create_temporary_storage = true,
+      WylFactArtifactMutationLease *adopted_lease = nullptr);
   ~
   WylSecureDuckdbFileSystem ()
   override;
@@ -330,4 +331,5 @@ private:
 
 duckdb::unique_ptr < WylSecureDuckdbFileSystem >
 wyl_secure_duckdb_filesystem_new (WylFactArtifactNamespace *, bool read_only,
-    bool create_temporary_storage = true);
+    bool create_temporary_storage = true,
+    WylFactArtifactMutationLease *adopted_lease = nullptr);

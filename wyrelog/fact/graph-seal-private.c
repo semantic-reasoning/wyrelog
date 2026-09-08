@@ -638,7 +638,8 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * transient while the engine is being built. */
   WylFactGraphRuntimeStatus status = { 0 };
   rc = wyl_fact_replay_refresh_graph_publication (policy, fact_root,
-          &current, &publication, &status);
+          &current, &publication, artifact_namespace, artifact_lease,
+          &status);
   clear_unseal_graph_info (&current);
   if (out_outcome != NULL) {
     out_outcome->status = status;

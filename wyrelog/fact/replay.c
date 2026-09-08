@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "compound-private.h"
+#include "graph-artifact-namespace-private.h"
 #include "graph-locator-private.h"
 #include "wyrelog/wyl-engine-private.h"
 #include "wyrelog/wyl-log-private.h"
@@ -714,6 +715,8 @@ resolve_fact_db_path (wyl_policy_store_t *policy, const gchar *fact_root,
 static wyrelog_error_t
 open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
     const wyl_policy_fact_graph_info_t *graph_info, gboolean writable,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease,
     wyl_fact_store_t **out_store)
 {
   g_assert (out_store != NULL);
@@ -727,6 +730,20 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
         && authority != NULL && authority->lifecycle_state
         != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED)
       provisioned = TRUE;
+    if (provisioned && artifact_namespace != NULL && artifact_lease != NULL) {
+      WylFactStoreIdentity identity = { 0 };
+      identity.tenant_id = authority->tenant_id;
+      identity.graph_id = authority->graph_id;
+      identity.store_uuid = authority->store_uuid;
+      identity.format_version = authority->format_version;
+      identity.path_encoding_version = authority->path_encoding_version;
+      wyrelog_error_t lease_rc =
+          wyl_fact_store_open_provisioned_namespace_with_lease (
+        artifact_namespace, artifact_lease, &identity, writable,
+        out_store);
+      wyl_policy_graph_authority_record_free (authority);
+      return lease_rc;
+    }
     wyl_policy_graph_authority_record_free (authority);
   }
   if (provisioned)
@@ -735,6 +752,8 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
                out_store);
 #else
   (void) writable;
+  (void) artifact_namespace;
+  (void) artifact_lease;
 #endif
   g_autofree gchar *fact_db_path = NULL;
   wyrelog_error_t rc = resolve_fact_db_path (policy, fact_root, graph_info,
@@ -793,6 +812,27 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+open_graph_engine_with_artifact_lease (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease, WylEngine **out_engine)
+{
+  if (out_engine != NULL)
+    *out_engine = NULL;
+  if (policy == NULL || fact_root == NULL || graph_info == NULL
+      || out_engine == NULL)
+    return WYRELOG_E_INVALID;
+  if (graph_info->sealed)
+    return WYRELOG_E_POLICY;
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
+          artifact_namespace, artifact_lease, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return open_graph_engine_with_store (policy, store, graph_info, out_engine);
+}
+
 wyrelog_error_t
 wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
     const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info)
@@ -803,7 +843,7 @@ wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
 
   g_autoptr (wyl_fact_store_t) store = NULL;
   wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
-          &store);
+          NULL, NULL, &store);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -842,14 +882,8 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
         WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE))
     return WYRELOG_E_IO;
 #endif
-
-  g_autoptr (wyl_fact_store_t) store = NULL;
-  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info,
-          FALSE, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return open_graph_engine_with_store (policy, store, graph_info,
-             out_engine);
+  return open_graph_engine_with_artifact_lease (policy, fact_root, graph_info,
+             NULL, NULL, out_engine);
 }
 
 typedef struct
@@ -903,6 +937,8 @@ typedef struct
   wyl_policy_store_t *policy;
   const gchar *fact_root;
   const wyl_policy_fact_graph_info_t *info;
+  WylFactArtifactNamespace *artifact_namespace;
+  WylFactArtifactMutationLease *artifact_lease;
 } GraphBuildCtx;
 
 static wyrelog_error_t
@@ -913,8 +949,8 @@ build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
   if (g_strcmp0 (key->tenant_id, ctx->info->tenant_id) != 0
       || g_strcmp0 (key->graph_id, ctx->info->graph_id) != 0)
     return WYRELOG_E_INTERNAL;
-  return wyl_fact_replay_open_graph_engine (ctx->policy, ctx->fact_root,
-             ctx->info, out_engine);
+  return open_graph_engine_with_artifact_lease (ctx->policy, ctx->fact_root,
+             ctx->info, ctx->artifact_namespace, ctx->artifact_lease, out_engine);
 }
 
 /* Ask whether a graph has any pending forget intention without asking for
@@ -950,7 +986,7 @@ probe_graph_forgets (wyl_policy_store_t *policy, const gchar *fact_root,
 
   g_autoptr (wyl_fact_store_t) probe = NULL;
   wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
-          &probe);
+          NULL, NULL, &probe);
   /* A graph whose store has never been written has nothing to converge.  The
    * resolver reports that as NOT_FOUND. */
   if (rc == WYRELOG_E_NOT_FOUND)
@@ -1015,7 +1051,8 @@ reconcile_graph_forgets (wyl_policy_store_t *policy, const gchar *fact_root,
    * closed -- it never leaves probe_graph_forgets -- so this open cannot
    * contend with it. */
   g_autoptr (wyl_fact_store_t) store = NULL;
-  rc = open_graph_store (policy, fact_root, graph_info, TRUE, &store);
+  rc = open_graph_store (policy, fact_root, graph_info, TRUE, NULL, NULL,
+          &store);
   /* NOT_FOUND is not benign here.  The probe just read this store, so a
    * resolver that now reports it missing is an anomaly, not a graph that was
    * never written, and reporting it as convergence would claim an erasure
@@ -1107,7 +1144,7 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
               "for a pending forget: rc=%d", tenant, graph, (int) forget_rc);
       }
     }
-    GraphBuildCtx build = { policy, fact_root, &spec->info };
+    GraphBuildCtx build = { policy, fact_root, &spec->info, NULL, NULL };
     wyrelog_error_t graph_rc = wyl_fact_graph_runtime_manager_refresh
           (runtime_manager, &spec->key, build_graph_engine, &build, NULL);
     if (graph_rc == WYRELOG_E_OK)
@@ -1293,7 +1330,7 @@ wyl_fact_replay_refresh_graph (wyl_policy_store_t *policy,
    * leave every sibling graph's runtime entry and generation untouched
    * (issue #546 isolation), and retiring on a one-element seen set would
    * detach all other entries. */
-  GraphBuildCtx build = { policy, fact_root, graph_info };
+  GraphBuildCtx build = { policy, fact_root, graph_info, NULL, NULL };
   rc = wyl_fact_graph_runtime_manager_refresh (runtime_manager, &key,
           build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
@@ -1305,6 +1342,8 @@ wyl_fact_replay_refresh_graph_publication
   (wyl_policy_store_t *policy, const gchar *fact_root,
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimePublication *publication,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease,
     WylFactGraphRuntimeStatus *out_status)
 {
   if (out_status != NULL)
@@ -1317,15 +1356,18 @@ wyl_fact_replay_refresh_graph_publication
     if (rc != WYRELOG_E_OK)
       return rc;
   }
-  GraphBuildCtx build = { policy, fact_root, graph_info };
+  GraphBuildCtx build = { policy, fact_root, graph_info, artifact_namespace,
+                          artifact_lease };
   return wyl_fact_graph_runtime_publication_refresh
            (publication, build_graph_engine, &build, out_status);
 }
 
-wyrelog_error_t
-wyl_fact_replay_refresh_graph_closed (wyl_policy_store_t *policy,
+static wyrelog_error_t
+refresh_graph_closed_internal (wyl_policy_store_t *policy,
     const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *runtime_manager,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease,
     WylFactGraphRuntimeStatus *out_status)
 {
   if (out_status != NULL)
@@ -1345,7 +1387,8 @@ wyl_fact_replay_refresh_graph_closed (wyl_policy_store_t *policy,
           graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
-  GraphBuildCtx build = { policy, fact_root, graph_info };
+  GraphBuildCtx build = { policy, fact_root, graph_info, artifact_namespace,
+                          artifact_lease };
   rc = wyl_fact_graph_runtime_manager_refresh_closed (runtime_manager, &key,
           build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
@@ -1374,9 +1417,34 @@ wyl_fact_replay_publish_graph_closed_and_open
           graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
-  GraphBuildCtx build = { policy, fact_root, graph_info };
+  GraphBuildCtx build = { policy, fact_root, graph_info, NULL, NULL };
   rc = wyl_fact_graph_runtime_manager_publish_closed_and_open
         (runtime_manager, &key, build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_replay_refresh_graph_closed (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  return refresh_graph_closed_internal (policy, fact_root, graph_info,
+             runtime_manager, NULL, NULL, out_status);
+}
+
+wyrelog_error_t
+wyl_fact_replay_refresh_graph_closed_with_artifact_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (artifact_namespace == NULL || artifact_lease == NULL)
+    return WYRELOG_E_INVALID;
+  return refresh_graph_closed_internal (policy, fact_root, graph_info,
+             runtime_manager, artifact_namespace, artifact_lease, out_status);
 }
