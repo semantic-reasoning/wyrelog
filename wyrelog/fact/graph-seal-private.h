@@ -7,6 +7,7 @@
 #include "wyrelog/handle.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/fact/root-writer-lease-private.h"
 
 G_BEGIN_DECLS;
 
@@ -128,6 +129,15 @@ wyrelog_error_t wyl_fact_graph_unseal_for_test
     WylFactGraphRuntimeManager * manager, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome * out_outcome);
 #endif
+
+/* Handle-owned variant: the root writer lease remains held for the complete
+ * validate/build/publication sequence and is revalidated at each transition. */
+wyrelog_error_t wyl_fact_graph_unseal_with_root_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome);
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
 /*
