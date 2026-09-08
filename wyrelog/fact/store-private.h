@@ -10,6 +10,10 @@
 
 #include "mutation-outcome-private.h"
 
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && defined(G_OS_WIN32)
+#include "graph-artifact-namespace-private.h"
+#endif
+
 G_BEGIN_DECLS;
 
 typedef struct wyl_fact_store_t wyl_fact_store_t;
@@ -61,8 +65,10 @@ wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
  * for security-sensitive provisioning. */
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
+#ifndef G_OS_WIN32
 typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
+#endif
 /* Open a live, secure handle on a retained provisioning pair.  Unlike the raw
  * path open, this binds by descriptor through the bounded secure filesystem, so
  * it serves the nlink-2 pair the regular open path refuses.  The returned handle
