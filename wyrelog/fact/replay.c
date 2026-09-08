@@ -22,6 +22,25 @@
 
 #define WYL_FACT_REPLAY_MAX_ROWS G_MAXUINT32
 
+#if defined(WYL_TEST_HANDLE_SEAMS)
+static gint fact_replay_test_fault = WYL_FACT_REPLAY_TEST_FAULT_NONE;
+
+void
+wyl_fact_replay_set_test_fault (WylFactReplayTestFault fault)
+{
+  g_return_if_fail (fault >= WYL_FACT_REPLAY_TEST_FAULT_NONE
+      && fault <= WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE);
+  g_atomic_int_set (&fact_replay_test_fault, fault);
+}
+
+static gboolean
+take_fact_replay_test_fault (WylFactReplayTestFault fault)
+{
+  return g_atomic_int_compare_and_exchange (&fact_replay_test_fault, fault,
+             WYL_FACT_REPLAY_TEST_FAULT_NONE);
+}
+#endif
+
 typedef struct
 {
   gchar *namespace_id;
@@ -818,6 +837,11 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (take_fact_replay_test_fault (
+        WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE))
+    return WYRELOG_E_IO;
+#endif
 
   g_autoptr (wyl_fact_store_t) store = NULL;
   wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info,
