@@ -83,6 +83,10 @@ typedef struct
 {
   gboolean durable_unseal_applied;
   gboolean durable_reseal_applied;
+  /* TRUE when eviction or compensating reseal did not complete. */
+  gboolean compensation_failed;
+  /* The first non-benign compensation error, or WYRELOG_E_OK. */
+  wyrelog_error_t compensation_error;
   gboolean engine_published;
   gboolean engine_evicted;
   gboolean runtime_admission_open;
@@ -137,5 +141,6 @@ void wyl_fact_graph_seal_set_test_hook (WylFactGraphSealTestHook hook,
  * way to reach them. */
 #define WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE "durable_write"
 #define WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE  "reseal_probe"
+#define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL "unseal_reseal"
 
 G_END_DECLS;

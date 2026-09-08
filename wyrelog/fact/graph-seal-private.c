@@ -365,6 +365,46 @@ read_unsealed_graph_info (wyl_policy_store_t *policy, const gchar *tenant_id,
   return WYRELOG_E_OK;
 }
 
+/* Compensation is part of the unseal transition, not best-effort cleanup.
+ * Once the durable bit has been cleared, a failed eviction or reseal must be
+ * visible to the caller: silently returning the triggering build/open error
+ * strands an active graph behind a closed barrier and makes a retry look
+ * stale.  NOT_FOUND from eviction is benign because there was no publication
+ * to remove; every other failure is retained while the durable reseal is
+ * still attempted. */
+static wyrelog_error_t
+compensate_unseal (wyl_policy_store_t *policy, const gchar *tenant_id,
+    const gchar *graph_id, WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, WylFactGraphUnsealOutcome *outcome)
+{
+  gboolean evicted = FALSE;
+  wyrelog_error_t evict_rc =
+      wyl_fact_graph_runtime_manager_evict_closed (manager, key, &evicted);
+  wyrelog_error_t reseal_rc = seal_step_fault
+        (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL);
+  if (reseal_rc == WYRELOG_E_OK)
+    reseal_rc = wyl_policy_store_seal_fact_graph (policy, tenant_id, graph_id);
+
+  wyrelog_error_t compensation_rc = WYRELOG_E_OK;
+  if (evict_rc != WYRELOG_E_OK && evict_rc != WYRELOG_E_NOT_FOUND)
+    compensation_rc = evict_rc;
+  if (reseal_rc != WYRELOG_E_OK && compensation_rc == WYRELOG_E_OK)
+    compensation_rc = reseal_rc;
+
+  if (outcome != NULL) {
+    outcome->engine_evicted = evict_rc == WYRELOG_E_OK && evicted;
+    outcome->durable_reseal_applied = reseal_rc == WYRELOG_E_OK;
+    outcome->compensation_failed = compensation_rc != WYRELOG_E_OK;
+    outcome->compensation_error = compensation_rc;
+    WylFactGraphRuntimeStatus after = { 0 };
+    wyrelog_error_t status_rc =
+        wyl_fact_graph_runtime_manager_get_status (manager, key, &after);
+    outcome->engine_published = status_rc == WYRELOG_E_OK && after.queryable;
+    wyl_fact_graph_runtime_status_clear (&after);
+  }
+  return compensation_rc;
+}
+
 wyrelog_error_t
 wyl_fact_graph_unseal (wyl_policy_store_t *policy, const gchar *fact_root,
     const wyl_policy_fact_graph_info_t *graph_info,
@@ -457,21 +497,11 @@ wyl_fact_graph_unseal (wyl_policy_store_t *policy, const gchar *fact_root,
     /* Do not leave an active policy with a published engine that can never be
      * admitted.  Remove the closed publication, then restore the durable
      * seal while the runtime barrier remains closed. */
-    gboolean evicted = FALSE;
-    wyrelog_error_t evict_rc =
-        wyl_fact_graph_runtime_manager_evict_closed (manager, &key, &evicted);
-    wyrelog_error_t reseal_rc = wyl_policy_store_seal_fact_graph
-          (policy, graph_info->tenant_id, graph_info->graph_id);
-    if (out_outcome != NULL) {
-      WylFactGraphRuntimeStatus after = { 0 };
-      wyrelog_error_t status_rc =
-          wyl_fact_graph_runtime_manager_get_status (manager, &key, &after);
-      out_outcome->engine_evicted = evict_rc == WYRELOG_E_OK && evicted;
-      out_outcome->engine_published =
-          status_rc == WYRELOG_E_OK && after.queryable;
-      out_outcome->durable_reseal_applied = reseal_rc == WYRELOG_E_OK;
-      wyl_fact_graph_runtime_status_clear (&after);
-    }
+    wyrelog_error_t compensation_rc = compensate_unseal (policy,
+            graph_info->tenant_id, graph_info->graph_id, manager, &key,
+            out_outcome);
+    if (compensation_rc != WYRELOG_E_OK)
+      rc = compensation_rc;
   }
   if (out_outcome != NULL)
     out_outcome->runtime_admission_open = rc == WYRELOG_E_OK;
@@ -480,31 +510,14 @@ wyl_fact_graph_unseal (wyl_policy_store_t *policy, const gchar *fact_root,
 compensate:
   /* The durable transition is already committed but no usable engine is
    * available.  Evict any stale publication, then re-seal while admission is
-   * still closed; failure to compensate leaves the runtime closed and returns
-   * the original failure. */
-  gboolean evicted = FALSE;
-  wyrelog_error_t evict_rc =
-      wyl_fact_graph_runtime_manager_evict_closed (manager, &key, &evicted);
-  wyrelog_error_t reseal_rc;
-  if (out_outcome != NULL) {
-    reseal_rc = wyl_policy_store_seal_fact_graph
-          (policy, graph_info->tenant_id, graph_info->graph_id);
-    WylFactGraphRuntimeStatus after = { 0 };
-    wyrelog_error_t status_rc =
-        wyl_fact_graph_runtime_manager_get_status (manager, &key, &after);
-    out_outcome->engine_evicted = evict_rc == WYRELOG_E_OK && evicted;
-    out_outcome->engine_published =
-        status_rc == WYRELOG_E_OK && after.queryable;
-    out_outcome->durable_reseal_applied = reseal_rc == WYRELOG_E_OK;
-    wyl_fact_graph_runtime_status_clear (&after);
-  } else {
-    reseal_rc = wyl_policy_store_seal_fact_graph
-          (policy, graph_info->tenant_id, graph_info->graph_id);
-  }
-  if (out_outcome == NULL) {
-    (void) evict_rc;
-    (void) reseal_rc;
-  }
+   * still closed.  A compensation failure is retained in the outcome and is
+   * returned so callers cannot mistake an unreconciled transition for an
+   * ordinary replay failure. */
+  wyrelog_error_t compensation_rc = compensate_unseal (policy,
+          graph_info->tenant_id, graph_info->graph_id, manager, &key,
+          out_outcome);
+  if (compensation_rc != WYRELOG_E_OK)
+    rc = compensation_rc;
 finish:
   if (out_outcome != NULL) {
     (void) wyl_fact_graph_runtime_manager_get_status (manager, &key,
