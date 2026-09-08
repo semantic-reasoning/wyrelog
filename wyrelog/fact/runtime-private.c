@@ -103,6 +103,10 @@ runtime_writer_trylock (WylFactGraphRuntimeEntry *entry)
 static void
 runtime_writer_unlock (WylFactGraphRuntimeEntry *entry)
 {
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER,
+      WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASE_BEGIN);
+#endif
   g_mutex_unlock (&entry->writer_lock);
 #if defined(WYL_TEST_HANDLE_SEAMS)
   runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER,
@@ -123,6 +127,10 @@ runtime_state_lock (WylFactGraphRuntimeEntry *entry)
 static void
 runtime_state_unlock (WylFactGraphRuntimeEntry *entry)
 {
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_STATE,
+      WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASE_BEGIN);
+#endif
   g_mutex_unlock (&entry->state_lock);
 #if defined(WYL_TEST_HANDLE_SEAMS)
   runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_STATE,
@@ -992,7 +1000,10 @@ wyl_fact_graph_runtime_publication_refresh
     return WYRELOG_E_BUSY;
   }
   WylEngine *engine = NULL;
+  gpointer previous_build_entry = g_private_get (&runtime_build_entry);
+  g_private_set (&runtime_build_entry, entry);
   wyrelog_error_t rc = build (&entry->key, &engine, user_data);
+  g_private_set (&runtime_build_entry, previous_build_entry);
   if (rc == WYRELOG_E_OK && (engine == NULL || !WYL_IS_ENGINE (engine)))
     rc = WYRELOG_E_INTERNAL;
   WylFactGraphEngineGeneration *replacement = NULL;
