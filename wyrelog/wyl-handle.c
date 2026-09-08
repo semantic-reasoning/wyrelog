@@ -2619,15 +2619,19 @@ typedef struct
 static wyl_fact_graph_state_t
 legacy_fact_graph_state (const WylFactGraphRuntimeStatus *status)
 {
-  /* Closed admission outranks replay health, because it is the stronger
+  /* Non-open admission outranks replay health, because it is the stronger
    * statement about now: acquire_snapshot refuses on admission before it
    * looks at the published engine, so the query fails whatever
    * last_replay_class says.  Nothing is lost -- the seal never writes the
    * replay fields, so an unseal restores the health verdict from them.
    *
    * This sits downstream of the EVICTED/ABANDONED early return in the caller,
-   * which keeps ABANDONED outranking CLOSED.  Do not move it ahead of that. */
-  if (status->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED)
+   * which keeps ABANDONED outranking non-open admission.  Do not move it ahead
+   * of that. */
+  /* OPEN is the only serving admission.  Treat a future non-open phase as
+   * unavailable here rather than falling through to replay health and
+   * reporting the impossible-looking ready/queryable:false pair. */
+  if (status->admission != WYL_FACT_GRAPH_ADMISSION_OPEN)
     return WYL_FACT_GRAPH_STATE_SEALED;
   if (status->state == WYL_FACT_GRAPH_RUNTIME_READY
       || (status->state == WYL_FACT_GRAPH_RUNTIME_BUILDING
@@ -2686,7 +2690,7 @@ fact_graph_runtime_status_cb (const WylFactGraphRuntimeStatus *runtime_status,
      * keeps queryable describing the published engine so a close stays
      * reversible.  The operator-facing field has to mean what the runbook
      * promises it means -- that the graph is serving queries -- and a closed
-     * graph is not.  Only the closed case is narrowed; every other state
+     * graph is not.  Only the open case is queryable; every other state
      * reports exactly what the runtime said. */
     .queryable = runtime_status->queryable
         && runtime_status->admission == WYL_FACT_GRAPH_ADMISSION_OPEN,

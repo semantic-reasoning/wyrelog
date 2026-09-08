@@ -3491,6 +3491,16 @@ test('windows-ci-timeout-boundary-self-test', python3,
     meson.project_source_root(),
   ])
 
+test('fact-graph-status-boundary', python3,
+  args : [files('test-fact-graph-status-boundary.py'),
+    meson.project_source_root()],
+  env : python_strict_encoding_env)
+
+test('fact-graph-status-boundary-self-test', python3,
+  args : [files('test-fact-graph-status-boundary.py'), '--self-test',
+    meson.project_source_root()],
+  env : python_strict_encoding_env)
+
 test('windows-appverifier-wiring', python3,
   args : [files('test-windows-appverifier-wiring.py'),
     meson.project_source_root()])
