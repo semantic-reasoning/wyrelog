@@ -5,6 +5,8 @@
 
 #include "replay-private.h"
 #include "../wyl-handle-private.h"
+#include "graph-artifact-namespace-private.h"
+#include "graph-locator-private.h"
 
 void
 wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome *outcome)
@@ -406,6 +408,78 @@ compensate_unseal (wyl_policy_store_t *policy, const gchar *tenant_id,
   return compensation_rc;
 }
 
+/* The policy row and physical graph artifact are separate authorities. Keep
+ * the artifact mutation lease alive for the complete unseal sequence so a
+ * cooperative publisher cannot replace facts.duckdb between validation and
+ * engine publication. Legacy graphs retain their path-only behavior because
+ * they have no provisioned artifact namespace to fence. */
+static wyrelog_error_t
+acquire_graph_artifact_lease (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactArtifactNamespace **out_namespace,
+    WylFactArtifactMutationLease **out_lease)
+{
+  *out_namespace = NULL;
+  *out_lease = NULL;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_graph_authority (policy,
+          graph_info->tenant_id, graph_info->graph_id, &authority);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean provisioned = authority != NULL
+      && authority->lifecycle_state
+      != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED;
+  wyl_policy_graph_authority_record_free (authority);
+  if (!provisioned)
+    return WYRELOG_E_OK;
+
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphRegularFile main_file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_autofree gchar *relative_dir = NULL;
+  g_autofree gchar *relative_file = NULL;
+  rc = wyl_fact_graph_locator_init (&locator, graph_info->tenant_id,
+          graph_info->graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
+            graph_info->tenant_id, graph_info->graph_id, FALSE, &directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    relative_dir = wyl_fact_graph_locator_relative_dir (&locator);
+  if (rc == WYRELOG_E_OK && relative_dir == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    relative_file = g_strdup_printf ("%s/facts.duckdb", relative_dir);
+  if (rc == WYRELOG_E_OK && relative_file == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_relative_regular (&resolver,
+            relative_file, &main_file);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_namespace_open (&directory, &main_file,
+            out_namespace);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_namespace_acquire_mutation_lease (*out_namespace,
+            out_lease);
+  /* Some lifecycle fixtures intentionally have an authority row before the
+   * physical graph directory is provisioned. Preserve their existing
+   * unseal/compensation path; a present artifact is still fail-closed below. */
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_namespace_free (*out_namespace);
+    *out_namespace = NULL;
+    *out_lease = NULL;
+  }
+  wyl_fact_graph_regular_file_clear (&main_file);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_directory_clear (&directory);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactRootWriterLease *root_lease,
@@ -433,6 +507,13 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
           graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
+
+  WylFactArtifactNamespace *artifact_namespace = NULL;
+  WylFactArtifactMutationLease *artifact_lease = NULL;
+  rc = acquire_graph_artifact_lease (policy, fact_root, graph_info,
+          &artifact_namespace, &artifact_lease);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
 
   /* Close and drain before changing durable authority.  A pre-existing
    * runtime entry therefore cannot admit work while the engine is rebuilt;
@@ -525,6 +606,13 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
       goto compensate;
     }
   }
+  if (artifact_lease != NULL) {
+    rc = wyl_fact_artifact_mutation_lease_revalidate (artifact_lease);
+    if (rc != WYRELOG_E_OK) {
+      clear_unseal_graph_info (&current);
+      goto compensate;
+    }
+  }
 
   rc = seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION);
   if (rc != WYRELOG_E_OK) {
@@ -550,6 +638,11 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
   rc = wyl_policy_store_graph_publication_fence_commit (&fence);
   if (root_lease != NULL) {
     rc = wyl_fact_root_writer_lease_verify (root_lease);
+    if (rc != WYRELOG_E_OK)
+      goto compensate;
+  }
+  if (artifact_lease != NULL) {
+    rc = wyl_fact_artifact_mutation_lease_revalidate (artifact_lease);
     if (rc != WYRELOG_E_OK)
       goto compensate;
   }
@@ -641,6 +734,8 @@ finish:
         &out_outcome->status);
   }
   wyl_fact_graph_key_clear (&key);
+  wyl_fact_artifact_mutation_lease_free (artifact_lease);
+  wyl_fact_artifact_namespace_free (artifact_namespace);
   return rc;
 }
 
