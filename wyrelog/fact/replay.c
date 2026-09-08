@@ -774,6 +774,28 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info)
+{
+  if (policy == NULL || graph_info == NULL || graph_info->tenant_id == NULL
+      || graph_info->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
+          &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Opening the provisioned store performs the physical identity and
+   * metadata-schema validation.  Enumerating replay relations then checks
+   * that the durable policy schema is complete and type-valid before the
+   * caller asks the runtime to publish anything. */
+  g_autoptr (GPtrArray) relations = NULL;
+  return list_replay_relations (policy, store, graph_info, &relations);
+}
+
 #if defined(WYL_TEST_HANDLE_SEAMS)
 wyrelog_error_t
 wyl_fact_replay_open_graph_engine_with_store_for_test
