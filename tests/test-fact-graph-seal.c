@@ -710,6 +710,70 @@ test_unseal_reseal_failure_is_reported_and_stays_closed (void)
   remove_tree (root);
 }
 
+static void
+test_unseal_rejects_graph_schema_mismatch (void)
+{
+  SealFixture fixture = { 0 };
+  g_autoptr (GError) error = NULL;
+  fixture.root = wyl_test_make_secure_fact_root
+        ("wyl-graph-unseal-schema-mismatch-XXXXXX", &error);
+  g_assert_nonnull (fixture.root);
+  g_autofree gchar *policy_path = g_build_filename (fixture.root, "policy.db",
+          NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  create_authority_graph_with_schema (fixture.policy, fixture.root, "tenant-a",
+      "orders");
+  materialize_graph_engine (fixture.policy, "tenant-a", "orders");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (fixture.policy, fixture.root,
+      fixture.manager, &summary);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  /* Remove the policy-owned schema columns while leaving the authority row
+   * sealed and otherwise valid.  A preflight that only checks
+   * lifecycle/sealed would incorrectly proceed to publication. */
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (fixture.policy),
+      "PRAGMA foreign_keys=OFF;"
+      "DELETE FROM fact_relation_schema_columns "
+      "WHERE tenant_id='tenant-a' AND graph_id='orders';", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+      fixture.manager, -1, &outcome), !=, WYRELOG_E_OK);
+  g_assert_true (outcome.durable_unseal_applied);
+  g_assert_true (outcome.durable_reseal_applied);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.runtime_admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+  wyl_policy_graph_authority_record_free (authority);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
 /* S4's ambiguous durable write, sub-case one: the write fails and the
  * compensating re-read succeeds, reporting the graph unsealed.
  *
@@ -1275,5 +1339,7 @@ main (int argc, char **argv)
       test_unseal_build_failure_reseals_and_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-reseal-failure-reported",
       test_unseal_reseal_failure_is_reported_and_stays_closed);
+  g_test_add_func ("/fact-graph-seal/unseal-schema-mismatch",
+      test_unseal_rejects_graph_schema_mismatch);
   return g_test_run ();
 }

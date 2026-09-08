@@ -479,6 +479,17 @@ wyl_fact_graph_unseal (wyl_policy_store_t *policy, const gchar *fact_root,
     goto compensate;
   }
 
+  /* Keep the barrier closed while independently validating the physical
+   * store identity/metadata schema and the policy replay schema.  The engine
+   * builder repeats these checks, but making the sequencer's gate explicit
+   * prevents a future publication path from treating a mere authority
+   * readback as sufficient validation. */
+  rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
+  if (rc != WYRELOG_E_OK) {
+    clear_unseal_graph_info (&current);
+    goto compensate;
+  }
+
   WylFactGraphRuntimeStatus status = { 0 };
   rc = wyl_fact_replay_refresh_graph_closed (policy, fact_root, &current,
           manager, &status);
