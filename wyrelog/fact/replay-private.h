@@ -8,6 +8,7 @@
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
+#include "fact/graph-artifact-namespace-private.h"
 
 G_BEGIN_DECLS;
 
@@ -129,6 +130,13 @@ wyrelog_error_t wyl_fact_replay_refresh_graph_closed
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeManager * runtime_manager,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_fact_replay_refresh_graph_closed_with_artifact_lease
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * runtime_manager,
+    WylFactArtifactNamespace * artifact_namespace,
+    WylFactArtifactMutationLease * artifact_lease,
+    WylFactGraphRuntimeStatus * out_status);
 
 wyrelog_error_t wyl_fact_replay_publish_graph_closed_and_open
   (wyl_policy_store_t * policy, const gchar * fact_root,
@@ -140,6 +148,8 @@ wyrelog_error_t wyl_fact_replay_refresh_graph_publication
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimePublication * publication,
+    WylFactArtifactNamespace * artifact_namespace,
+    WylFactArtifactMutationLease * artifact_lease,
     WylFactGraphRuntimeStatus * out_status);
 
 G_END_DECLS;

@@ -49,6 +49,11 @@ wyrelog_error_t wyl_secure_duckdb_bridge_open_live_pair
   (WylFactArtifactNamespace * namespace_, gboolean writable,
     WylSecureDuckdbBridge ** out_bridge, duckdb_database * out_db,
     duckdb_connection * out_conn);
+wyrelog_error_t wyl_secure_duckdb_bridge_open_live_with_lease
+  (WylFactArtifactNamespace * namespace_,
+    WylFactArtifactMutationLease * adopted_lease, gboolean writable,
+    WylSecureDuckdbBridge ** out_bridge, duckdb_database * out_db,
+    duckdb_connection * out_conn);
 /* Observe health and release the authority lease of a live bridge, then free it.
  * Must be called only after the handle returned by open_live_pair has been
  * duckdb_close'd, so the shutdown checkpoint has already run under the lease. */

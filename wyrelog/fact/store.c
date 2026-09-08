@@ -837,6 +837,50 @@ wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
   wyl_fact_store_identity_process_guard_unlock ();
   return WYRELOG_E_OK;
 }
+
+wyrelog_error_t
+wyl_fact_store_open_provisioned_namespace_with_lease
+  (WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
+    const WylFactStoreIdentity *identity, gboolean writable,
+    wyl_fact_store_t **out_store)
+{
+  if (out_store != NULL)
+    *out_store = NULL;
+  if (namespace_ == NULL || lease == NULL || out_store == NULL
+      || !wyl_fact_store_identity_input_is_valid (identity))
+    return WYRELOG_E_INVALID;
+
+  wyl_fact_store_identity_process_guard_lock ();
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  wyrelog_error_t rc = wyl_secure_duckdb_bridge_open_live_with_lease (
+    namespace_, lease, writable, &bridge, &db, &conn);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
+
+  wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
+  self->db = db;
+  self->conn = conn;
+  self->provisioned_bridge = bridge;
+  g_mutex_init (&self->lock);
+  rc = reject_audit_database_unlocked (self);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_close (self);
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
+  self->identity_tenant_id = g_strdup (identity->tenant_id);
+  self->identity_graph_id = g_strdup (identity->graph_id);
+  self->identity_store_uuid = g_strdup (identity->store_uuid);
+  self->identity_format_version = identity->format_version;
+  self->identity_path_encoding_version = identity->path_encoding_version;
+  *out_store = self;
+  wyl_fact_store_identity_process_guard_unlock ();
+  return WYRELOG_E_OK;
+}
 #endif
 
 wyrelog_error_t

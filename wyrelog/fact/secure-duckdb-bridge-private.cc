@@ -157,14 +157,16 @@ namespace {
   void
   bridge_prepare_bounded_config (WylSecureDuckdbBridge *bridge,
       WylFactArtifactNamespace *namespace_, bool read_only,
-      bool allow_temporary_storage, duckdb::DBConfig *config)
+      bool allow_temporary_storage,
+      WylFactArtifactMutationLease *adopted_lease,
+      duckdb::DBConfig *config)
   {
     bridge->mode = read_only ? WYL_SECURE_DUCKDB_VALIDATE_ONLY
         : WYL_SECURE_DUCKDB_INIT_EMPTY;
     duckdb::unique_ptr<WylSecureDuckdbFileSystem> filesystem;
     try {
       filesystem = wyl_secure_duckdb_filesystem_new (namespace_, read_only,
-              allow_temporary_storage);
+              allow_temporary_storage, adopted_lease);
     } catch (const WylSecureDuckdbAuthorityException &)
     {
       /* The constructor has no health object to return when initial namespace
@@ -199,7 +201,7 @@ namespace {
   {
     duckdb::DBConfig config;
     bridge_prepare_bounded_config (bridge, namespace_, read_only,
-        allow_temporary_storage, &config);
+        allow_temporary_storage, nullptr, &config);
     bridge->database =
         std::make_unique<duckdb::DuckDB> ("facts.duckdb", &config);
     bridge->connection =
@@ -528,9 +530,10 @@ wyl_secure_duckdb_bridge_finalize (WylSecureDuckdbBridge *self)
   return bridge_finalize_storage (self, true);
 }
 
-extern "C" wyrelog_error_t
-wyl_secure_duckdb_bridge_open_live_pair (WylFactArtifactNamespace *namespace_,
-    gboolean writable, WylSecureDuckdbBridge **out_bridge,
+static wyrelog_error_t
+bridge_open_live_common (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactMutationLease *adopted_lease, gboolean writable,
+    WylSecureDuckdbBridge **out_bridge,
     duckdb_database *out_db, duckdb_connection *out_conn)
 {
   /* The C-API handoff reinterprets the bounded instance as duckdb's internal
@@ -552,7 +555,7 @@ wyl_secure_duckdb_bridge_open_live_pair (WylFactArtifactNamespace *namespace_,
     const bool read_only = writable == FALSE;
     duckdb::DBConfig config;
     bridge_prepare_bounded_config (bridge.get (), namespace_, read_only,
-        writable != FALSE, &config);
+        writable != FALSE, adopted_lease, &config);
 
     auto database =
         duckdb::make_shared_ptr<duckdb::DuckDB> ("facts.duckdb", &config);
@@ -577,6 +580,28 @@ wyl_secure_duckdb_bridge_open_live_pair (WylFactArtifactNamespace *namespace_,
   {
     return current_exception_error ();
   }
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_open_live_pair (WylFactArtifactNamespace *namespace_,
+    gboolean writable, WylSecureDuckdbBridge **out_bridge,
+    duckdb_database *out_db, duckdb_connection *out_conn)
+{
+  return bridge_open_live_common (namespace_, nullptr, writable, out_bridge,
+             out_db, out_conn);
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_open_live_with_lease
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactMutationLease *adopted_lease, gboolean writable,
+    WylSecureDuckdbBridge **out_bridge, duckdb_database *out_db,
+    duckdb_connection *out_conn)
+{
+  if (adopted_lease == nullptr)
+    return WYRELOG_E_INVALID;
+  return bridge_open_live_common (namespace_, adopted_lease, writable,
+             out_bridge, out_db, out_conn);
 }
 
 extern "C" wyrelog_error_t
