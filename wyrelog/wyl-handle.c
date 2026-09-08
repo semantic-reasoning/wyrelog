@@ -2580,6 +2580,31 @@ wyl_handle_get_fact_graph_runtime_status (WylHandle *self,
   return rc;
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t
+wyl_handle_set_fact_graph_admission_for_test (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id, gboolean open)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
+      || graph_id == NULL || self->fact_graph_runtime == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphKey key = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
+  if (rc == WYRELOG_E_OK) {
+    g_mutex_lock (&self->fact_replay_coordinator_lock);
+    rc = open
+        ? wyl_fact_graph_runtime_manager_open_admission
+          (self->fact_graph_runtime, &key)
+        : wyl_fact_graph_runtime_manager_close_admission
+          (self->fact_graph_runtime, &key);
+    g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  }
+  wyl_fact_graph_key_clear (&key);
+  return rc;
+}
+#endif
+
 typedef struct
 {
   WylEngine *engine;

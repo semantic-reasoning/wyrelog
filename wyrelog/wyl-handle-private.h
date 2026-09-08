@@ -280,6 +280,14 @@ wyrelog_error_t wyl_handle_unseal_fact_graph (WylHandle * self,
 wyrelog_error_t wyl_handle_get_fact_graph_runtime_status (WylHandle * self,
     const gchar * tenant_id, const gchar * graph_id,
     WylFactGraphRuntimeStatus * out_status);
+#ifdef WYL_TEST_HANDLE_SEAMS
+/* Test-only control of the graph runtime barrier.  This deliberately leaves
+ * durable policy untouched so HTTP tests can exercise a runtime barrier
+ * independently from the graph's durable seal bit. */
+wyrelog_error_t wyl_handle_set_fact_graph_admission_for_test
+  (WylHandle * self, const gchar * tenant_id, const gchar * graph_id,
+    gboolean open);
+#endif
 /*
  * Commit one fact mutation (append or retract) and refresh only the graph it
  * committed to (issue #546).  This is the single internal entry point for a

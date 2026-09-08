@@ -92,6 +92,14 @@ wyrelog_error_t wyl_fact_replay_validate_graph
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info);
 #if defined(WYL_TEST_HANDLE_SEAMS)
+typedef enum
+{
+  WYL_FACT_REPLAY_TEST_FAULT_NONE = 0,
+  WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE,
+} WylFactReplayTestFault;
+
+void wyl_fact_replay_set_test_fault (WylFactReplayTestFault fault);
+
 wyrelog_error_t wyl_fact_replay_open_graph_engine_with_store_for_test
   (wyl_policy_store_t * policy, wyl_fact_store_t * store,
     const wyl_policy_fact_graph_info_t * graph_info, WylEngine ** out_engine);

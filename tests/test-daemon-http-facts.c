@@ -12,6 +12,7 @@
 #include "wyrelog/client.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/store-test-seams-private.h"
+#include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -1504,6 +1505,179 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 403 || strstr (body, "\"fact_denied\"") == NULL)
     return 501;
+
+  /* Use a separate graph so the barrier assertion cannot alter the durable
+   * row counts and sealed-refusal checks above. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *barrier_create_query = g_strdup_printf
+        ("tenant=%s&graph=barrier&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+          barrier_create_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 502;
+  g_autofree gchar *barrier_schema_query = g_strdup_printf
+        ("tenant=%s&graph=barrier&namespace=shop&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          barrier_schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 503;
+  g_autofree gchar *barrier_append_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=barrier-1&"
+          "idempotency_key=barrier-key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/barrier/orders:append", barrier_append_query,
+          admin_token, "order_id\tamount\nbarrier-1\t43\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
+    return 504;
+
+  rc = wyl_handle_set_fact_graph_admission_for_test
+        (handle, WYL_TENANT_DEFAULT, "barrier", FALSE);
+  if (rc != WYRELOG_E_OK)
+    return 505;
+  gboolean barrier_graph_active = FALSE;
+  if (wyl_policy_store_fact_graph_is_active (store, WYL_TENANT_DEFAULT,
+      "barrier", &barrier_graph_active) != WYRELOG_E_OK
+      || !barrier_graph_active)
+    return 506;
+  WylFactGraphRuntimeStatus barrier_status = { 0 };
+  rc = wyl_handle_get_fact_graph_runtime_status (handle, WYL_TENANT_DEFAULT,
+          "barrier", &barrier_status);
+  if (rc != WYRELOG_E_OK || barrier_status.admission
+      != WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+    wyl_fact_graph_runtime_status_clear (&barrier_status);
+    return 507;
+  }
+  wyl_fact_graph_runtime_status_clear (&barrier_status);
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *barrier_mutation_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=barrier-2&"
+          "idempotency_key=barrier-key-2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/barrier/orders:append",
+          barrier_mutation_query, admin_token,
+          "order_id\tamount\nbarrier-2\t44\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200) {
+    g_printerr ("barrier mutation returned HTTP %u: %s\n", status, body);
+    return 508;
+  }
+  if (strstr (body, "\"mutation_class\":\"committed_barrier\"")
+      == NULL) {
+    g_printerr ("barrier mutation class was not committed_barrier: %s\n",
+        body);
+    return 509;
+  }
+  if (strstr (body, "\"reconcile\":true") == NULL) {
+    g_printerr ("barrier mutation omitted reconcile=true: %s\n", body);
+    return 510;
+  }
+  if (strstr (body, "\"degraded_class\"") != NULL) {
+    g_printerr ("barrier mutation exposed degraded_class: %s\n", body);
+    return 511;
+  }
+
+  rc = wyl_handle_set_fact_graph_admission_for_test
+        (handle, WYL_TENANT_DEFAULT, "barrier", TRUE);
+  if (rc != WYRELOG_E_OK)
+    return 512;
+  barrier_status = (WylFactGraphRuntimeStatus) { 0 };
+  rc = wyl_handle_get_fact_graph_runtime_status (handle, WYL_TENANT_DEFAULT,
+          "barrier", &barrier_status);
+  if (rc != WYRELOG_E_OK || barrier_status.admission
+      != WYL_FACT_GRAPH_ADMISSION_OPEN || !barrier_status.queryable) {
+    wyl_fact_graph_runtime_status_clear (&barrier_status);
+    return 513;
+  }
+  wyl_fact_graph_runtime_status_clear (&barrier_status);
+
+  gint64 rows_before_degraded = 0;
+  rc = read_fact_projection_row_count (fact_root, "barrier",
+          &rows_before_degraded);
+  if (rc != 0)
+    return rc;
+  wyl_fact_replay_set_test_fault (
+    WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE);
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *degraded_mutation_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=barrier-3&"
+          "idempotency_key=barrier-key-3&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/barrier/orders:append",
+          degraded_mutation_query, admin_token,
+          "order_id\tamount\nbarrier-3\t45\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200) {
+    g_printerr ("degraded mutation returned HTTP %u: %s\n", status, body);
+    return 514;
+  }
+  if (strstr (body, "\"committed\":true") == NULL) {
+    g_printerr ("degraded mutation omitted committed=true: %s\n", body);
+    return 515;
+  }
+  if (strstr (body, "\"inserted\":true") == NULL) {
+    g_printerr ("degraded mutation omitted inserted=true: %s\n", body);
+    return 516;
+  }
+  if (strstr (body, "\"mutation_class\":\"committed_degraded\"")
+      == NULL) {
+    g_printerr ("degraded mutation class was not committed_degraded: %s\n",
+        body);
+    return 517;
+  }
+  if (strstr (body, "\"degraded_class\":\"store_unavailable\"")
+      == NULL) {
+    g_printerr ("degraded mutation class was not store_unavailable: %s\n",
+        body);
+    return 518;
+  }
+  if (strstr (body, "\"reconcile\":true") == NULL) {
+    g_printerr ("degraded mutation omitted reconcile=true: %s\n", body);
+    return 519;
+  }
+  if (strstr (body, "\"mutation_class\":\"committed_barrier\"")
+      != NULL) {
+    g_printerr ("degraded mutation was also classified as barrier: %s\n",
+        body);
+    return 520;
+  }
+  gint64 rows_after_degraded = 0;
+  rc = read_fact_projection_row_count (fact_root, "barrier",
+          &rows_after_degraded);
+  if (rc != 0)
+    return rc;
+  if (rows_after_degraded != rows_before_degraded + 1)
+    return 521;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *recovered_mutation_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=barrier-4&"
+          "idempotency_key=barrier-key-4&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/barrier/orders:append",
+          recovered_mutation_query, admin_token,
+          "order_id\tamount\nbarrier-4\t46\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200) {
+    g_printerr ("recovered mutation returned HTTP %u: %s\n", status, body);
+    return 522;
+  }
+  if (strstr (body, "\"mutation_class\":\"committed_ready\"")
+      == NULL) {
+    g_printerr ("recovered mutation was not committed_ready: %s\n", body);
+    return 523;
+  }
 
   return 0;
 }
