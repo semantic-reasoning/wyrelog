@@ -47,8 +47,18 @@ struct _WylFactGraphRuntimeEntry
 };
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
+static WylFactGraphRuntimeLockEventFunc lock_event_hook;
+static gpointer lock_event_hook_data;
 static WylFactGraphRuntimePublicationTestHook publication_test_hook;
 static gpointer publication_test_hook_data;
+
+void
+wyl_fact_graph_runtime_set_lock_event_hook
+  (WylFactGraphRuntimeLockEventFunc hook, gpointer user_data)
+{
+  lock_event_hook = hook;
+  lock_event_hook_data = user_data;
+}
 
 void
 wyl_fact_graph_runtime_set_publication_test_hook
@@ -57,7 +67,68 @@ wyl_fact_graph_runtime_set_publication_test_hook
   publication_test_hook = hook;
   publication_test_hook_data = user_data;
 }
+
+static void
+runtime_lock_event (WylFactGraphRuntimeEntry *entry,
+    WylFactGraphRuntimeLockKind lock_kind,
+    WylFactGraphRuntimeLockEvent event)
+{
+  if (lock_event_hook != NULL)
+    lock_event_hook (&entry->key, lock_kind, event, lock_event_hook_data);
+}
 #endif
+
+static void
+runtime_writer_lock (WylFactGraphRuntimeEntry *entry)
+{
+  g_mutex_lock (&entry->writer_lock);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER,
+      WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED);
+#endif
+}
+
+static gboolean
+runtime_writer_trylock (WylFactGraphRuntimeEntry *entry)
+{
+  gboolean acquired = g_mutex_trylock (&entry->writer_lock);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (acquired)
+    runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER,
+        WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED);
+#endif
+  return acquired;
+}
+
+static void
+runtime_writer_unlock (WylFactGraphRuntimeEntry *entry)
+{
+  g_mutex_unlock (&entry->writer_lock);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER,
+      WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED);
+#endif
+}
+
+static void
+runtime_state_lock (WylFactGraphRuntimeEntry *entry)
+{
+  g_mutex_lock (&entry->state_lock);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_STATE,
+      WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED);
+#endif
+}
+
+static void
+runtime_state_unlock (WylFactGraphRuntimeEntry *entry)
+{
+  g_mutex_unlock (&entry->state_lock);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  runtime_lock_event (entry, WYL_FACT_GRAPH_RUNTIME_LOCK_STATE,
+      WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASED);
+#endif
+}
 
 struct _WylFactGraphRuntimeManager
 {
@@ -387,9 +458,9 @@ static wyrelog_error_t
 status_copy (WylFactGraphRuntimeEntry *entry,
     WylFactGraphRuntimeStatus *out_status)
 {
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   wyrelog_error_t rc = status_copy_locked (entry, out_status);
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   return rc;
 }
 
@@ -445,11 +516,11 @@ wyl_fact_graph_runtime_manager_shutdown (WylFactGraphRuntimeManager *manager)
 
   for (guint i = 0; i < entries->len; i++) {
     WylFactGraphRuntimeEntry *entry = g_ptr_array_index (entries, i);
-    g_mutex_lock (&entry->state_lock);
+    runtime_state_lock (entry);
     entry->abandoned = TRUE;
     entry->state = WYL_FACT_GRAPH_RUNTIME_ABANDONED;
     g_cond_broadcast (&entry->drain_cond);
-    g_mutex_unlock (&entry->state_lock);
+    runtime_state_unlock (entry);
   }
   g_hash_table_destroy (old_entries);
 }
@@ -692,11 +763,11 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     return WYRELOG_E_BUSY;
   }
 
-  g_mutex_lock (&entry->writer_lock);
-  g_mutex_lock (&entry->state_lock);
+  runtime_writer_lock (entry);
+  runtime_state_lock (entry);
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown)) {
-    g_mutex_unlock (&entry->state_lock);
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_state_unlock (entry);
+    runtime_writer_unlock (entry);
     if (out_status != NULL)
       wyl_fact_graph_runtime_status_clear (out_status);
     runtime_entry_unref (entry);
@@ -715,8 +786,8 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
   if (entry->admission == refuse_when) {
     if (out_status != NULL)
       status_fill_locked (entry, out_status);
-    g_mutex_unlock (&entry->state_lock);
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_state_unlock (entry);
+    runtime_writer_unlock (entry);
     runtime_entry_unref (entry);
     return refuse_rc;
   }
@@ -738,8 +809,8 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
       status_fill_locked (entry, out_status);
     if (publish_open)
       entry->publication_active = FALSE;
-    g_mutex_unlock (&entry->state_lock);
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_state_unlock (entry);
+    runtime_writer_unlock (entry);
     runtime_entry_unref (entry);
     return WYRELOG_E_INTERNAL;
   }
@@ -747,7 +818,7 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
   entry->operation_active = TRUE;
   entry->operation_owner = g_thread_self ();
   entry->state = WYL_FACT_GRAPH_RUNTIME_BUILDING;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
   if (publish_open && publication_test_hook != NULL)
@@ -771,7 +842,7 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     g_object_unref (engine);
 
   WylFactGraphEngineGeneration *old = NULL;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   entry->operation_active = FALSE;
   entry->operation_owner = NULL;
   g_cond_broadcast (&entry->drain_cond);
@@ -803,10 +874,10 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
   }
   if (out_status != NULL)
     status_fill_locked (entry, out_status);
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   engine_generation_unref (old);
   engine_generation_unref (replacement);
-  g_mutex_unlock (&entry->writer_lock);
+  runtime_writer_unlock (entry);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -859,8 +930,8 @@ wyl_fact_graph_runtime_publication_begin_closed
   wyrelog_error_t rc = manager_lookup_entry (manager, key, &closed, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_mutex_lock (&entry->writer_lock);
-  g_mutex_lock (&entry->state_lock);
+  runtime_writer_lock (entry);
+  runtime_state_lock (entry);
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown))
     rc = WYRELOG_E_BUSY;
   else if (entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN)
@@ -871,8 +942,8 @@ wyl_fact_graph_runtime_publication_begin_closed
       || entry->engine_generation == G_MAXUINT64)
     rc = WYRELOG_E_INTERNAL;
   if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&entry->state_lock);
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_state_unlock (entry);
+    runtime_writer_unlock (entry);
     runtime_entry_unref (entry);
     return rc;
   }
@@ -885,7 +956,7 @@ wyl_fact_graph_runtime_publication_begin_closed
   entry->operation_active = TRUE;
   entry->operation_owner = g_thread_self ();
   entry->state = WYL_FACT_GRAPH_RUNTIME_BUILDING;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   out_publication->manager = manager;
   out_publication->entry = entry;
   out_publication->owner = g_thread_self ();
@@ -933,7 +1004,7 @@ wyl_fact_graph_runtime_publication_refresh
   if (rc != WYRELOG_E_OK && engine != NULL)
     g_object_unref (engine);
   WylFactGraphEngineGeneration *old = NULL;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   entry->operation_active = FALSE;
   entry->operation_owner = NULL;
   g_cond_broadcast (&entry->drain_cond);
@@ -961,7 +1032,7 @@ wyl_fact_graph_runtime_publication_refresh
   publication->restore_state_on_abort = FALSE;
   if (out_status != NULL)
     status_fill_locked (entry, out_status);
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   engine_generation_unref (old);
   engine_generation_unref (replacement);
   return rc;
@@ -975,7 +1046,7 @@ wyl_fact_graph_runtime_publication_open
       || publication->owner != g_thread_self ())
     return WYRELOG_E_INVALID;
   WylFactGraphRuntimeEntry *entry = publication->entry;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   wyrelog_error_t rc = entry->abandoned
       || g_atomic_int_get (&publication->manager->shutdown)
       ? WYRELOG_E_BUSY : WYRELOG_E_OK;
@@ -986,16 +1057,16 @@ wyl_fact_graph_runtime_publication_open
     entry->publication_active = FALSE;
     g_cond_broadcast (&entry->drain_cond);
   }
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   if (rc == WYRELOG_E_OK) {
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_writer_unlock (entry);
     runtime_entry_unref (entry);
     *publication = (WylFactGraphRuntimePublication) { 0 };
   } else {
-    g_mutex_lock (&entry->state_lock);
+    runtime_state_lock (entry);
     entry->publication_active = FALSE;
-    g_mutex_unlock (&entry->state_lock);
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_state_unlock (entry);
+    runtime_writer_unlock (entry);
     runtime_entry_unref (entry);
     *publication = (WylFactGraphRuntimePublication) { 0 };
   }
@@ -1010,7 +1081,7 @@ wyl_fact_graph_runtime_publication_release_writer
       || publication->owner != g_thread_self () || !publication->writer_held)
     return;
   WylFactGraphRuntimeEntry *entry = publication->entry;
-  g_mutex_unlock (&entry->writer_lock);
+  runtime_writer_unlock (entry);
   publication->writer_held = FALSE;
 }
 
@@ -1022,7 +1093,7 @@ wyl_fact_graph_runtime_publication_abort
     return;
   g_assert (publication->owner == g_thread_self ());
   WylFactGraphRuntimeEntry *entry = publication->entry;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   entry->operation_active = FALSE;
   entry->operation_owner = NULL;
   g_cond_broadcast (&entry->drain_cond);
@@ -1033,9 +1104,9 @@ wyl_fact_graph_runtime_publication_abort
     entry->admission = publication->previous_admission;
   }
   entry->publication_active = FALSE;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   if (publication->writer_held)
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_writer_unlock (entry);
   runtime_entry_unref (entry);
   *publication = (WylFactGraphRuntimePublication) { 0 };
 }
@@ -1048,11 +1119,11 @@ wyl_fact_graph_runtime_publication_fail_closed
       || publication->owner != g_thread_self ())
     return;
   WylFactGraphRuntimeEntry *entry = publication->entry;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   entry->abandoned = TRUE;
   entry->state = WYL_FACT_GRAPH_RUNTIME_ABANDONED;
   entry->publication_active = FALSE;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
 }
 
 wyrelog_error_t
@@ -1068,7 +1139,7 @@ wyl_fact_graph_runtime_manager_set_forget_state
   wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   /* Refuse a tombstone, atomically with the write under the lock already
    * held.  This and the reset performed by try_evict and retire_unseen cover
    * disjoint orderings and neither is redundant: the reset clears a verdict
@@ -1091,7 +1162,7 @@ wyl_fact_graph_runtime_manager_set_forget_state
     rc = WYRELOG_E_BUSY;
   else
     entry->forget_state = forget_state;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -1110,7 +1181,7 @@ set_admission (WylFactGraphRuntimeManager *manager,
   wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   /* Argued, not proved: abandoned closes the window between the lookup
    * releasing map_lock and this taking state_lock, exactly as in
    * set_forget_state.  No test falsifies it -- the lookup already refuses a
@@ -1154,7 +1225,7 @@ set_admission (WylFactGraphRuntimeManager *manager,
      * on a closed graph by construction. */
     g_cond_broadcast (&entry->drain_cond);
   }
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -1227,7 +1298,7 @@ wyl_fact_graph_runtime_manager_drain
   if (timeout_us > 0) {
     deadline = timeout_us > G_MAXINT64 - now ? G_MAXINT64 : now + timeout_us;
   }
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   /* Refuse a drain issued from inside this entry's own engine callback or its
    * own build callback.  Either would wait on a term the calling frame is
    * itself holding -- active_engine_calls in the first case, operation_active
@@ -1294,7 +1365,7 @@ wyl_fact_graph_runtime_manager_drain
   }
   if (out_status != NULL)
     status_fill_locked (entry, out_status);
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -1376,12 +1447,12 @@ wyl_fact_graph_runtime_manager_try_evict
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  if (!g_mutex_trylock (&entry->writer_lock)) {
+  if (!runtime_writer_trylock (entry)) {
     runtime_entry_unref (entry);
     return WYRELOG_E_BUSY;
   }
   WylFactGraphEngineGeneration *old = NULL;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   if (entry->operation_active || entry->active_snapshots > 0) {
     rc = WYRELOG_E_BUSY;
   } else if (entry->abandoned) {
@@ -1394,9 +1465,9 @@ wyl_fact_graph_runtime_manager_try_evict
     entry->forget_state = WYL_FACT_GRAPH_FORGET_CONVERGED;
     *out_evicted = TRUE;
   }
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   engine_generation_unref (old);
-  g_mutex_unlock (&entry->writer_lock);
+  runtime_writer_unlock (entry);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -1419,9 +1490,9 @@ wyl_fact_graph_runtime_manager_evict_closed
    * writer lock for long; necessary because a seal that has already committed
    * durably cannot retry, and a spurious BUSY there would strand the graph
    * with its engine still published. */
-  g_mutex_lock (&entry->writer_lock);
+  runtime_writer_lock (entry);
   WylFactGraphEngineGeneration *old = NULL;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   if (entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN) {
     /* An eviction that is not part of a barrier is try_evict's job.  Refusing
      * here keeps the two primitives from being interchangeable: this one
@@ -1452,9 +1523,9 @@ wyl_fact_graph_runtime_manager_evict_closed
      * which is the over-report #547 removed in the other direction. */
     *out_evicted = TRUE;
   }
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   engine_generation_unref (old);
-  g_mutex_unlock (&entry->writer_lock);
+  runtime_writer_unlock (entry);
   runtime_entry_unref (entry);
   return rc;
 }
@@ -1502,8 +1573,8 @@ wyl_fact_graph_runtime_manager_retire_unseen
     WylFactGraphRuntimeEntry *entry = g_ptr_array_index (entries, i);
     if (key_is_seen (&entry->key, seen_keys, n_seen_keys))
       continue;
-    g_mutex_lock (&entry->writer_lock);
-    g_mutex_lock (&entry->state_lock);
+    runtime_writer_lock (entry);
+    runtime_state_lock (entry);
     WylFactGraphEngineGeneration *old = entry->current;
     entry->current = NULL;
     if (!entry->abandoned) {
@@ -1511,9 +1582,9 @@ wyl_fact_graph_runtime_manager_retire_unseen
       entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
       entry->forget_state = WYL_FACT_GRAPH_FORGET_CONVERGED;
     }
-    g_mutex_unlock (&entry->state_lock);
+    runtime_state_unlock (entry);
     engine_generation_unref (old);
-    g_mutex_unlock (&entry->writer_lock);
+    runtime_writer_unlock (entry);
   }
   return WYRELOG_E_OK;
 }
@@ -1537,7 +1608,7 @@ wyl_fact_graph_runtime_manager_acquire_snapshot
     g_free (snapshot);
     return rc;
   }
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   if (entry->abandoned
       || entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
     rc = WYRELOG_E_BUSY;
@@ -1548,7 +1619,7 @@ wyl_fact_graph_runtime_manager_acquire_snapshot
     snapshot->generation = engine_generation_ref (entry->current);
     entry->active_snapshots++;
   }
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   if (rc != WYRELOG_E_OK) {
     runtime_entry_unref (entry);
     g_free (snapshot);
@@ -1573,10 +1644,10 @@ wyl_fact_graph_snapshot_unref (WylFactGraphSnapshot *snapshot)
   if (snapshot == NULL || !g_atomic_ref_count_dec (&snapshot->ref_count))
     return;
   WylFactGraphRuntimeEntry *entry = snapshot->entry;
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   g_assert_cmpuint (entry->active_snapshots, >, 0);
   entry->active_snapshots--;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   engine_generation_unref (snapshot->generation);
   runtime_entry_unref (entry);
   g_free (snapshot);
@@ -1598,31 +1669,31 @@ wyl_fact_graph_snapshot_use (WylFactGraphSnapshot *snapshot,
   wyl_fact_graph_snapshot_ref (snapshot);
   WylFactGraphRuntimeEntry *entry = snapshot->entry;
   GThread *self = g_thread_self ();
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   if (entry->engine_call_owner == self) {
-    g_mutex_unlock (&entry->state_lock);
+    runtime_state_unlock (entry);
     wyl_fact_graph_snapshot_unref (snapshot);
     return WYRELOG_E_INVALID;
   }
   entry->waiting_engine_calls++;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
 
   g_mutex_lock (&entry->engine_call_lock);
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   g_assert_cmpuint (entry->waiting_engine_calls, >, 0);
   entry->waiting_engine_calls--;
   g_assert_null (entry->engine_call_owner);
   entry->engine_call_owner = self;
   entry->active_engine_calls++;
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   wyrelog_error_t rc = callback (snapshot->generation->engine, user_data);
-  g_mutex_lock (&entry->state_lock);
+  runtime_state_lock (entry);
   g_assert_true (entry->engine_call_owner == self);
   g_assert_cmpuint (entry->active_engine_calls, ==, 1);
   entry->active_engine_calls--;
   entry->engine_call_owner = NULL;
   g_cond_broadcast (&entry->drain_cond);
-  g_mutex_unlock (&entry->state_lock);
+  runtime_state_unlock (entry);
   g_mutex_unlock (&entry->engine_call_lock);
   wyl_fact_graph_snapshot_unref (snapshot);
   return rc;
