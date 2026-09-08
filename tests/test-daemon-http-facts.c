@@ -13,9 +13,11 @@
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/fact/graph-seal-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -186,6 +188,29 @@ find_graph (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
     probe->found = TRUE;
   return WYRELOG_E_OK;
 }
+
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+/* The storage directory a graph's rows live under, read back from the policy
+ * row.  Both create paths make the directory -- create_fact_graph and
+ * create_fact_graph_provisioning alike, through materialize_fact_graph_storage
+ * -- so this is only how a caller LOCATES it, never a signal that it must be
+ * created. */
+typedef struct
+{
+  const gchar *graph_id;
+  gchar *storage_path;
+} GraphStoragePathProbe;
+
+static wyrelog_error_t
+find_graph_storage_path (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
+{
+  GraphStoragePathProbe *probe = user_data;
+  if (g_strcmp0 (info->graph_id, probe->graph_id) == 0)
+    probe->storage_path = g_strdup (info->storage_path);
+  return WYRELOG_E_OK;
+}
+#endif
 
 static gboolean
 graph_state_matches (wyl_policy_store_t *store, const gchar *tenant,
@@ -1504,6 +1529,229 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 403 || strstr (body, "\"fact_denied\"") == NULL)
     return 501;
+
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  /* Forget case 4 (issue #963): the barrier classification, reached rather
+   * than refused.
+   *
+   * Off-bridge only, and the guard is load-bearing rather than tidy.  This
+   * builds an authority-managed graph and then relies on the route resolving
+   * its store through the legacy path.  With the bridge compiled in,
+   * open_http_fact_store sends any non-legacy graph to
+   * wyl_fact_store_open_provisioned_graph, which locates a RETAINED PAIR from
+   * the authority record's store_uuid -- gated on a provisioning record whose
+   * phase is ACTIVE -- and never looks at the facts.duckdb built below.  This
+   * fixture can produce no such record, because the provisioning run that
+   * would is itself bridge-only, so the append would fail and this case would
+   * report a fixture problem as if it were a product one.
+   *
+   * That makes the fixture a configuration neither shipping build produces:
+   * off-bridge, /graphs/create never makes an authority-managed graph at all;
+   * on-bridge, an ACTIVE graph never takes this store-open path.  It does not
+   * make the arm artificial -- everything from the request onward is the real
+   * route, and the arm is selected by a real refresh being refused by a real
+   * barrier -- but it is why the state has to be assembled rather than
+   * requested.
+   *
+   * No case above reaches WYL_FACT_MUTATION_COMMITTED_BARRIER -- the arm that
+   * says a mutation committed durably and could not republish because
+   * admission was closed.  Forget case 1 succeeds and takes the READY arm
+   * because its refresh succeeds; every other case stops at authorization or
+   * at the 409 a durable seal produces, before classification happens at all.
+   * Deleting the barrier arm from the forget route leaves the whole suite
+   * green (#948 part 1); this is the case that stops it.
+   *
+   * It needs the one state no single call produces: runtime admission CLOSED
+   * while the durable bit is CLEAR.  The "orders" graph above cannot host it.
+   * /graphs/create takes the legacy path off-bridge, and legacy is terminal
+   * in three independent places: wyl_policy_store_unseal_fact_graph refuses
+   * it, a database trigger refuses the equivalent UPDATE ("sealed legacy
+   * graph cannot be unsealed"), and the lifecycle table admits no transition
+   * out of legacy_unclassified.  So this builds a second, authority-managed
+   * graph -- PROVISIONING -> ACTIVE is legal -- and drives it through the
+   * ordinary routes.
+   *
+   * wyl_handle_seal_fact_graph then closes admission and evicts, and
+   * wyl_policy_store_unseal_fact_graph clears the durable bit without
+   * touching the runtime.  Building the state from those two halves is also
+   * what proves the axes are independently controlled.  The handle seal names
+   * a daemon policy write lease as its caller's precondition and this does
+   * not take one; nothing races it, because this test drives every request
+   * itself and none is in flight here. */
+  {
+    const wyl_policy_fact_graph_create_options_t barrier_opts = {
+      .tenant_id = WYL_TENANT_DEFAULT,
+      .graph_id = "barrier",
+      .fact_root = fact_root,
+      .schema_version = 1,
+      .owner_scope = WYL_TENANT_DEFAULT,
+    };
+    gchar barrier_op[WYL_ID_STRING_BUF] = { 0 };
+    if (wyl_policy_store_create_fact_graph_provisioning (store, &barrier_opts,
+        NULL, barrier_op) != WYRELOG_E_OK) {
+      g_printerr ("could not reserve the authority-managed barrier graph\n");
+      return 420;
+    }
+    WylPolicyAuthorityMutationResult barrier_mutation =
+        WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+    if (wyl_policy_store_transition_graph_authority (store,
+        WYL_TENANT_DEFAULT, "barrier",
+        WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+        &barrier_mutation) != WYRELOG_E_OK
+        || barrier_mutation != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
+      /* The result is checked, not just passed: the transition reports OK for
+       * a compare-and-swap that matched nothing, so a stale generation would
+       * otherwise leave the graph in PROVISIONING and the case would fail
+       * later for a reason that looks unrelated. */
+      g_printerr ("could not activate the barrier graph authority\n");
+      return 421;
+    }
+
+    GraphStoragePathProbe barrier_path = {.graph_id = "barrier" };
+    if (wyl_policy_store_foreach_fact_graph (store, WYL_TENANT_DEFAULT,
+        find_graph_storage_path, &barrier_path) != WYRELOG_E_OK
+        || barrier_path.storage_path == NULL) {
+      g_free (barrier_path.storage_path);
+      g_printerr ("could not read the barrier graph's storage path\n");
+      return 422;
+    }
+    g_autofree gchar *barrier_storage = barrier_path.storage_path;
+    /* create_fact_graph_provisioning reserves the row and the directory; the
+     * provisioning RUN that would create facts.duckdb inside it is compiled
+     * in only under the secure DuckDB bridge, so off-bridge the file has to
+     * be made here or the route's path resolution answers NOT_FOUND. */
+    {
+      g_autofree gchar *barrier_db = g_build_filename (barrier_storage,
+              "facts.duckdb", NULL);
+      g_autoptr (wyl_fact_store_t) barrier_seed = NULL;
+      if (wyl_fact_store_open (barrier_db, &barrier_seed) != WYRELOG_E_OK
+          || wyl_fact_store_create_schema (barrier_seed) != WYRELOG_E_OK) {
+        g_printerr ("could not materialize the barrier graph's store\n");
+        return 423;
+      }
+      g_clear_pointer (&barrier_seed, wyl_fact_store_close);
+      /* open_http_fact_store refuses a facts.duckdb that is not 0600 --
+       * the check is validate_regular_fd, reached through
+       * wyl_fact_graph_directory_open_file, not wyl_fact_store_open above,
+       * which performs no mode check.  The refusal is WYRELOG_E_POLICY, which
+       * the append branch renders as a batch conflict. */
+      if (g_chmod (barrier_db, 0600) != 0) {
+        g_printerr ("could not harden the barrier graph's store\n");
+        return 424;
+      }
+    }
+
+    g_clear_pointer (&body, g_free);
+    g_autofree gchar *barrier_schema_query = g_strdup_printf
+          ("tenant=%s&graph=barrier&namespace=shop&relation=orders&"
+            "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+    rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+            barrier_schema_query, admin_token, schema_body, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200) {
+      g_printerr ("barrier schema register failed: status=%u body=%s\n",
+          status, body != NULL ? body : "(null)");
+      return 425;
+    }
+
+    /* Append through the ordinary route, so the store is built the way
+     * production builds it and there is a real batch to forget. */
+    g_clear_pointer (&body, g_free);
+    g_autofree gchar *barrier_append_query = g_strdup_printf
+          ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-b1&"
+            "idempotency_key=key-b1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+    rc = send_raw (session, "POST", base_url,
+            "/facts/__wr_default/barrier/orders:append", barrier_append_query,
+            admin_token, fact_body, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200) {
+      g_printerr ("barrier append failed: status=%u body=%s\n", status,
+          body != NULL ? body : "(null)");
+      return 426;
+    }
+
+    const wyl_policy_fact_graph_info_t barrier_info = {
+      .tenant_id = WYL_TENANT_DEFAULT,
+      .graph_id = "barrier",
+    };
+    WylFactGraphSealOutcome barrier_seal = { 0 };
+    if (wyl_handle_seal_fact_graph (handle, &barrier_info,
+        5 * G_TIME_SPAN_SECOND, &barrier_seal) != WYRELOG_E_OK) {
+      wyl_fact_graph_seal_outcome_clear (&barrier_seal);
+      g_printerr ("could not close admission on the barrier graph\n");
+      return 427;
+    }
+    /* Assert the barrier rather than assume it, for attribution rather than
+     * for coverage: a broken fixture cannot yield a false pass here, because
+     * committed_barrier is precisely what it cannot produce.  What it yields
+     * is a LATE failure wearing the wrong clothes.  wyl_handle_seal_fact_graph
+     * returns OK with runtime_barrier_established FALSE when close_admission
+     * answered NOT_FOUND -- it still writes the durable bit and still
+     * succeeds -- and the run would then die at the classification assertion
+     * below, reading as a product defect instead of the fixture break it is.
+     * This turns that into an early failure with the right name. */
+    if (!barrier_seal.runtime_barrier_established) {
+      wyl_fact_graph_seal_outcome_clear (&barrier_seal);
+      g_printerr ("the seal left the barrier graph admitting\n");
+      return 428;
+    }
+    wyl_fact_graph_seal_outcome_clear (&barrier_seal);
+
+    if (wyl_policy_store_unseal_fact_graph (store, WYL_TENANT_DEFAULT,
+        "barrier") != WYRELOG_E_OK) {
+      g_printerr ("could not clear the barrier graph's durable bit\n");
+      return 429;
+    }
+    /* Independently controlled, demonstrated: is_active reads the durable
+     * side alone and now says active, while the runtime is still barred. */
+    if (!graph_state_matches (store, WYL_TENANT_DEFAULT, "barrier", TRUE,
+        TRUE)) {
+      g_printerr ("clearing the barrier graph's durable bit did not land\n");
+      return 430;
+    }
+
+    g_clear_pointer (&body, g_free);
+    g_autofree gchar *barrier_forget_query = g_strdup_printf
+          ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
+            FACT_GUARD);
+    rc = send_raw (session, "DELETE", base_url,
+            "/facts/__wr_default/barrier/orders:forget", barrier_forget_query,
+            admin_token, "{\"batch_id\":\"batch-b1\",\"operator\":\"admin\","
+            "\"reason\":\"gdpr-erasure\"}", &status, &body);
+    if (rc != 0)
+      return rc;
+    /* 200, not 409: the durable gate let it through.  A 409 means the bit was
+     * not cleared and nothing below is meaningful. */
+    if (status != 200) {
+      g_printerr ("barrier forget was refused: status=%u body=%s\n", status,
+          body != NULL ? body : "(null)");
+      return 431;
+    }
+    if (strstr (body, "\"mutation_class\":\"committed_barrier\"") == NULL) {
+      g_printerr ("barrier forget misclassified: body=%s\n",
+          body != NULL ? body : "(null)");
+      return 432;
+    }
+    /* reconcile follows needs_runtime_reconcile, which the barrier arm sets
+     * and which tells the caller the engine is behind the durable state. */
+    if (strstr (body, "\"reconcile\":true") == NULL) {
+      g_printerr ("barrier forget did not ask for reconciliation: body=%s\n",
+          body != NULL ? body : "(null)");
+      return 433;
+    }
+    /* The discriminator against the degraded arm.  Collapsing the two would
+     * name a replay failure that did not happen; the barrier arm leaves
+     * degraded_class unset and the renderer omits the key. */
+    if (strstr (body, "degraded_class") != NULL) {
+      g_printerr ("barrier forget invented a degraded class: body=%s\n",
+          body != NULL ? body : "(null)");
+      return 434;
+    }
+  }
+#endif
 
   return 0;
 }
