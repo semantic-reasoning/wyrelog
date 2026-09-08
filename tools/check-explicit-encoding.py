@@ -26,10 +26,12 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 
 
 MIN_UNIT_COUNT = 55
 REQUIRED_UNIT = Path("tools/format-c")
+MAX_EXACT_MAPPING_ENTRIES = 256
 
 PYTHON_SHEBANG = re.compile(
     rb"^#![^\r\n]*(?:^|[/ ])(?:python(?:3(?:\.[0-9]+)?)?)(?:[ \r\n]|$)"
@@ -63,6 +65,13 @@ class CallableValue:
     name: str
     mode_position: int | None
     encoding_position: int
+
+
+@dataclass(frozen=True)
+class CallableSetValue:
+    """A bounded lattice atom containing several protected callables."""
+
+    values: frozenset[CallableValue]
 
 
 UNKNOWN = object()
@@ -184,11 +193,13 @@ def has_value(value: object, expected: object) -> bool:
 
 
 def callable_values(value: object) -> tuple[CallableValue, ...]:
-    return tuple(
-        item
-        for item in alternatives(value)
-        if isinstance(item, CallableValue)
-    )
+    result: list[CallableValue] = []
+    for item in alternatives(value):
+        if isinstance(item, CallableValue):
+            result.append(item)
+        elif isinstance(item, CallableSetValue):
+            result.extend(item.values)
+    return tuple(result)
 
 
 def contains_path(value: object) -> bool:
@@ -308,15 +319,19 @@ def mapping_from_entries(
     complete: bool,
     origins: frozenset[tuple[int, int]],
 ) -> MappingValue:
+    exact_entries = tuple(
+        (bounded_value(key), bounded_value(value))
+        for key, value in entries
+    ) if complete and len(entries) <= MAX_EXACT_MAPPING_ENTRIES else ()
     return MappingValue(
-        merge_values(
+        bounded_value(merge_values(
             *(tuple(item[0] for item in entries) or (UNKNOWN,))
-        ),
-        merge_values(
+        )),
+        bounded_value(merge_values(
             *(tuple(item[1] for item in entries) or (UNKNOWN,))
-        ),
-        entries,
-        complete,
+        )),
+        exact_entries,
+        complete and len(entries) <= MAX_EXACT_MAPPING_ENTRIES,
         origins,
     )
 
@@ -333,18 +348,102 @@ def mapping_store(
                 entries[index] = (key, value)
                 break
         else:
-            entries.append((key, value))
+            # Appending a new literal key cannot invalidate the existing
+            # summaries.  Keep the entry list for exact lookup, but update
+            # the summaries incrementally so a large sequence of collection
+            # updates remains linear rather than repeatedly scanning all
+            # prior entries.  Replacements use the exact rebuild below:
+            # removing the old value from a merged summary is not reversible.
+            if len(entries) >= MAX_EXACT_MAPPING_ENTRIES:
+                return MappingValue(
+                    bounded_summary(mapping.key, key),
+                    bounded_summary(mapping.value, value),
+                    complete=False,
+                    origins=mapping.origins,
+                    ambiguous=mapping.ambiguous,
+                )
+            return MappingValue(
+                bounded_summary(mapping.key, key),
+                bounded_summary(mapping.value, value),
+                tuple(entries) + ((bounded_value(key), bounded_value(value)),),
+                complete=True,
+                origins=mapping.origins,
+                ambiguous=mapping.ambiguous,
+            )
         return mapping_from_entries(
             tuple(entries),
             complete=True,
             origins=mapping.origins,
         )
     return MappingValue(
-        merge_values(mapping.key, key),
-        merge_values(mapping.value, value),
+        bounded_summary(mapping.key, key),
+        bounded_summary(mapping.value, value),
         origins=mapping.origins,
         ambiguous=mapping.ambiguous,
     )
+
+
+def bounded_summary(left: object, right: object) -> object:
+    """Merge collection summaries without retaining unbounded literals.
+
+    Exact entries remain available below ``MAX_EXACT_MAPPING_ENTRIES``. Once
+    a mapping becomes summary-only, retaining every distinct literal key or
+    value would make each subsequent update copy a growing alternative set.
+    Structured values and sentinels remain, while literal-only noise collapses
+    to UNKNOWN. This preserves path provenance and keeps the fixed point
+    bounded.
+    """
+    merged = merge_values(bounded_value(left), bounded_value(right))
+    return bounded_value(merged)
+
+
+def bounded_value(value: object) -> object:
+    """Recursively apply the collection bound to a merged lattice value."""
+    if isinstance(value, MappingValue):
+        entries = tuple(
+            (bounded_value(key), bounded_value(item))
+            for key, item in value.entries
+        )
+        complete = value.complete and len(entries) <= MAX_EXACT_MAPPING_ENTRIES
+        if len(entries) > MAX_EXACT_MAPPING_ENTRIES:
+            entries = ()
+        return MappingValue(
+            bounded_value(value.key),
+            bounded_value(value.value),
+            entries,
+            complete=complete,
+            origins=value.origins,
+            ambiguous=value.ambiguous,
+        )
+    if isinstance(value, TupleValue):
+        return TupleValue(tuple(bounded_value(item) for item in value.elements))
+    if isinstance(value, IterableValue):
+        return IterableValue(bounded_value(value.element))
+    if not isinstance(value, PossibleValue):
+        return value
+    candidates = tuple(bounded_value(item) for item in value.alternatives)
+    unique = frozenset(candidates)
+    if len(unique) <= MAX_EXACT_MAPPING_ENTRIES:
+        return next(iter(unique)) if len(unique) == 1 else PossibleValue(unique)
+    callables = frozenset(
+        callable_value
+        for item in unique
+        for callable_value in (
+            item.values
+            if isinstance(item, CallableSetValue)
+            else (item,)
+        )
+        if isinstance(callable_value, CallableValue)
+    )
+    retained = tuple(
+        item for item in unique
+        if not isinstance(item, (LiteralValue, CallableValue, CallableSetValue))
+    )
+    if callables:
+        retained += (CallableSetValue(callables),)
+    if len(retained) > MAX_EXACT_MAPPING_ENTRIES:
+        retained = tuple(sorted(retained, key=repr)[:MAX_EXACT_MAPPING_ENTRIES])
+    return PossibleValue(frozenset(retained or (UNKNOWN,)))
 
 
 def mapping_union(
@@ -362,8 +461,8 @@ def mapping_union(
             combined = mapping_store(combined, key, value)
         return combined
     return MappingValue(
-        merge_values(left.key, right.key),
-        merge_values(left.value, right.value),
+        bounded_summary(left.key, right.key),
+        bounded_summary(left.value, right.value),
         origins=origins,
         ambiguous=left.ambiguous or right.ambiguous,
     )
@@ -2925,6 +3024,130 @@ dynamic = getattr(path, "read_text")
 
 def self_test() -> bool:
     try:
+        stress_entries = ",\n".join(
+            f'        "seed-{index}": Path("root-{index}")'
+            for index in range(16)
+        )
+        stress_updates = "\n".join(
+            f'    changed["path-{index}"] = Path("root-{index}")'
+            for index in range(384)
+        )
+        stress_source = (
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            "def repeated_mapping_updates():\n"
+            "    changed = {\n"
+            f"{stress_entries}\n"
+            "    }\n"
+            f"{stress_updates}\n"
+            "    return changed\n"
+        )
+        stress_elapsed = 0.0
+        for _run in range(3):
+            started = time.monotonic()
+            findings, errors = scan_python(
+                stress_source, Path("generated-mapping-stress.py")
+            )
+            stress_elapsed += time.monotonic() - started
+            require(
+                not findings and not errors,
+                "generated mapping-update stress case must remain clean",
+            )
+        require(
+            stress_elapsed < 20.0,
+            "three generated mapping-update stress runs exceeded 20 seconds",
+        )
+        union_left = mapping_from_entries(
+            tuple(
+                (LiteralValue(f"union-{index}"), PATH_VALUE)
+                for index in range(MAX_EXACT_MAPPING_ENTRIES - 1)
+            ),
+            complete=True,
+            origins=frozenset({(1, 0)}),
+        )
+        union_right = MappingValue(
+            LiteralValue("union-right"),
+            LiteralValue("clean"),
+            complete=False,
+        )
+        for _run in range(384):
+            union_left = mapping_union(
+                union_left,
+                union_right,
+                frozenset({(2, 0)}),
+            )
+            require(
+                len(alternatives(union_left.key))
+                <= MAX_EXACT_MAPPING_ENTRIES,
+                "mapping union key summary exceeded its bound",
+            )
+            require(
+                contains_path(union_left.value),
+                "mapping union lost path provenance while bounded",
+            )
+        callable_alternatives = merge_values(*(
+            CallableValue(f"protected-{index}", 1, 3)
+            for index in range(MAX_EXACT_MAPPING_ENTRIES + 128)
+        ))
+        bounded_callables = bounded_value(callable_alternatives)
+        require(
+            len(alternatives(bounded_callables)) <= MAX_EXACT_MAPPING_ENTRIES,
+            "callable summary exceeded its bound",
+        )
+        require(
+            len(callable_values(bounded_callables))
+            == MAX_EXACT_MAPPING_ENTRIES + 128,
+            "bounded callable summary lost protected callables",
+        )
+        nested_key = merge_values(*(
+            LiteralValue(f"nested-{index}")
+            for index in range(MAX_EXACT_MAPPING_ENTRIES * 2)
+        ))
+        nested_mapping = bounded_value(
+            MappingValue(nested_key, PATH_VALUE, complete=False)
+        )
+        require(
+            len(alternatives(nested_mapping.key))
+            <= MAX_EXACT_MAPPING_ENTRIES,
+            "nested mapping summary exceeded its bound",
+        )
+        require(
+            contains_path(nested_mapping),
+            "nested mapping summary lost path provenance",
+        )
+        replacement_mapping = mapping_from_entries(
+            ((LiteralValue("replacement"), callable_alternatives),),
+            complete=True,
+            origins=frozenset({(3, 0)}),
+        )
+        replaced_mapping = mapping_store(
+            replacement_mapping,
+            LiteralValue("replacement"),
+            callable_alternatives,
+        )
+        duplicate_union = mapping_union(
+            replacement_mapping,
+            replacement_mapping,
+            frozenset({(4, 0)}),
+        )
+        for mapping in (replacement_mapping, replaced_mapping, duplicate_union):
+            require(
+                len(alternatives(mapping.value))
+                <= MAX_EXACT_MAPPING_ENTRIES,
+                "mapping replacement exceeded its bound",
+            )
+            require(
+                len(callable_values(mapping.value))
+                == MAX_EXACT_MAPPING_ENTRIES + 128,
+                "mapping replacement lost protected callables",
+            )
+            require(
+                all(
+                    len(alternatives(value)) <= MAX_EXACT_MAPPING_ENTRIES
+                    for _key, value in mapping.entries
+                ),
+                "exact mapping entry exceeded its bound",
+            )
         require(
             len(HISTORICAL_PYTHON_UNITS) == 33
             and len(HISTORICAL_SHELL_UNITS) == 22,
