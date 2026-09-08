@@ -13507,16 +13507,10 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
  * would and the mutation lives.  Two tenants holding the same graph name,
  * both sealed at the moment of the call, is what makes it die.
  *
- * Like the seal, this reports OK without consulting sqlite3_changes, so a CAS
- * that matched nothing is indistinguishable from one that moved the row.  A
- * miss no longer implies the graph ended up unsealed: in the ABA case above
- * the row is durably sealed again, at a generation this call never saw, and
- * the caller still gets OK.  So a caller must not read OK as proof of
- * anything about the row.  No sequencer takes this as a linearization point
- * yet -- there is no caller outside the tests -- and the one that does will
- * have to re-read rather than assume.  authority_update_step consults
- * sqlite3_changes; the seal does not, and closing the gap belongs to a commit
- * that closes it for both.
+ * The result-bearing form below consults sqlite3_changes and classifies a
+ * no-op by reading the row again.  The compatibility wrapper retains the
+ * historical error mapping, while lifecycle sequencers must inspect the
+ * mutation result before treating unseal as their linearization point.
  *
  * One more survivor, for the same reason the others are named: restoring the
  * two-read classification leaves the suite green.  The single-read shape is
@@ -13524,12 +13518,16 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
  * needs a rival that moves the row between two reads inside one call, which
  * no test here can schedule. */
 wyrelog_error_t
-wyl_policy_store_unseal_fact_graph (wyl_policy_store_t *store,
-    const gchar *tenant_id, const gchar *graph_id)
+wyl_policy_store_unseal_fact_graph_with_result (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyAuthorityMutationResult *out_result)
 {
   sqlite3_stmt *stmt = NULL;
 
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   if (store == NULL || store->db == NULL
+      || out_result == NULL
       || !wyl_policy_store_tenant_id_is_valid (tenant_id)
       || !fact_graph_component_is_valid (tenant_id)
       || !fact_graph_customer_name_is_valid (graph_id))
@@ -13555,8 +13553,21 @@ wyl_policy_store_unseal_fact_graph (wyl_policy_store_t *store,
   guint64 seen_generation = authority->lifecycle_generation;
   wyl_policy_graph_authority_record_free (authority);
 
-  if (!sealed)
+  if (!sealed) {
+    /* There is no operation token in this API, so an already-active row does
+     * not prove that this caller (rather than a rival) performed the unseal.
+     * The compatibility wrapper still maps this no-op to its historical OK;
+     * lifecycle callers must treat the result as stale and avoid publishing
+     * on that basis. */
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
     return WYRELOG_E_OK;
+  }
+  if (seen_generation >= G_MAXINT64) {
+    /* The transition cannot represent a successor generation in SQLite's
+     * signed integer domain.  Refuse before preparing a wrapping UPDATE. */
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+    return WYRELOG_E_POLICY;
+  }
 
   const gchar *sql;
   if (state == WYL_POLICY_GRAPH_LIFECYCLE_SEALED) {
@@ -13568,7 +13579,8 @@ wyl_policy_store_unseal_fact_graph (wyl_policy_store_t *store,
         "AND lifecycle_state = 'sealed' AND sealed = 1 "
         "AND lifecycle_generation = ?;";
   } else {
-    return WYRELOG_E_POLICY;
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+    return WYRELOG_E_OK;
   }
   rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -13585,8 +13597,47 @@ wyl_policy_store_unseal_fact_graph (wyl_policy_store_t *store,
   }
 
   int step_rc = sqlite3_step (stmt);
+  int changed = step_rc == SQLITE_DONE ? sqlite3_changes (store->db) : 0;
   sqlite3_finalize (stmt);
-  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (changed == 1) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+    return WYRELOG_E_OK;
+  }
+
+  /* A zero-row CAS is never proof of this caller's success.  Even if a
+   * competing operation produced the expected active generation, this API
+   * has no operation token with which to distinguish that transition from
+   * the caller's own write.  Report STALE for every existing row, including
+   * an ABA that re-sealed the graph, and let the caller re-read authority. */
+  authority = NULL;
+  rc = wyl_policy_store_read_graph_authority (store, tenant_id, graph_id,
+          &authority);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+  wyl_policy_graph_authority_record_free (authority);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_unseal_fact_graph (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  WylPolicyAuthorityMutationResult result;
+  wyrelog_error_t rc = wyl_policy_store_unseal_fact_graph_with_result (store,
+          tenant_id, graph_id, &result);
+  /* Preserve the legacy API's rule-shaped error for an irreversible sealed
+   * legacy graph and its idempotent OK for an already-active graph. Callers
+   * that need to distinguish a lost CAS use the result-bearing form above. */
+  return rc == WYRELOG_E_OK
+         && result == WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION
+      ? WYRELOG_E_POLICY : rc;
 }
 
 wyrelog_error_t

@@ -973,9 +973,15 @@ check_store_unseals_only_the_reversible_population (void)
 
   /* Refused as a rule, not as an I/O failure.  Getting E_IO here would tell a
    * caller the store is broken when it is working exactly as designed. */
+  WylPolicyAuthorityMutationResult unseal_result =
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  if (wyl_policy_store_unseal_fact_graph_with_result (store, "tenant-a",
+      "graph-legacy", &unseal_result) != WYRELOG_E_OK
+      || unseal_result != WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION)
+    return 9707;
   if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-legacy")
       != WYRELOG_E_POLICY)
-    return 9707;
+    return 97071;
   if (count_rows (store,
       "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
       "AND graph_id='graph-legacy' AND sealed=1;", &count) != 0 || count != 1)
@@ -1008,8 +1014,9 @@ check_store_unseals_only_the_reversible_population (void)
       "AND sealed_at IS NOT NULL;", &count) != 0 || count != 1)
     return 9712;
 
-  if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-prov")
-      != WYRELOG_E_OK)
+  if (wyl_policy_store_unseal_fact_graph_with_result (store, "tenant-a",
+      "graph-prov", &unseal_result) != WYRELOG_E_OK
+      || unseal_result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
     return 9713;
 
   /* Back to active, the flag clear, and the timestamp gone with it.  The
@@ -1027,9 +1034,13 @@ check_store_unseals_only_the_reversible_population (void)
 
   /* Idempotent, like seal: unsealing an unsealed graph is not an error, and it
    * writes nothing -- the generation does not move again. */
+  if (wyl_policy_store_unseal_fact_graph_with_result (store, "tenant-a",
+      "graph-prov", &unseal_result) != WYRELOG_E_OK
+      || unseal_result != WYL_POLICY_AUTHORITY_MUTATION_STALE)
+    return 9716;
   if (wyl_policy_store_unseal_fact_graph (store, "tenant-a", "graph-prov")
       != WYRELOG_E_OK)
-    return 9716;
+    return 9718;
   if (count_rows (store,
       "SELECT COUNT(*) FROM fact_graphs WHERE tenant_id='tenant-a' "
       "AND graph_id='graph-prov' AND lifecycle_generation=4;", &count) != 0
@@ -1276,15 +1287,19 @@ check_store_unseal_loses_a_race_without_writing (void)
   UnsealRaceProbe probe = { rival, "graph-race", FALSE, FALSE };
   sqlite3_set_authorizer (wyl_policy_store_get_db (store),
       unseal_race_authorizer, &probe);
-  wyrelog_error_t race_rc = wyl_policy_store_unseal_fact_graph (store,
-          "tenant-a", "graph-race");
+  WylPolicyAuthorityMutationResult race_result =
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  wyrelog_error_t race_rc =
+      wyl_policy_store_unseal_fact_graph_with_result (store, "tenant-a",
+          "graph-race", &race_result);
   sqlite3_set_authorizer (wyl_policy_store_get_db (store), NULL, NULL);
   sqlite3_close (rival);
 
   /* The seam has to have fired, or this test proves nothing about a race. */
   if (!probe.fired)
     return 9749;
-  if (race_rc != WYRELOG_E_OK)
+  if (race_rc != WYRELOG_E_OK
+      || race_result != WYL_POLICY_AUTHORITY_MUTATION_STALE)
     return 9750;
 
   gint count = 0;
@@ -1329,14 +1344,18 @@ check_store_unseal_loses_a_race_without_writing (void)
   UnsealRaceProbe aba_probe = { aba_rival, "graph-aba", TRUE, FALSE };
   sqlite3_set_authorizer (wyl_policy_store_get_db (store),
       unseal_race_authorizer, &aba_probe);
-  wyrelog_error_t aba_rc = wyl_policy_store_unseal_fact_graph (store,
-          "tenant-a", "graph-aba");
+  WylPolicyAuthorityMutationResult aba_result =
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  wyrelog_error_t aba_rc =
+      wyl_policy_store_unseal_fact_graph_with_result (store, "tenant-a",
+          "graph-aba", &aba_result);
   sqlite3_set_authorizer (wyl_policy_store_get_db (store), NULL, NULL);
   sqlite3_close (aba_rival);
 
   if (!aba_probe.fired)
     return 9757;
-  if (aba_rc != WYRELOG_E_OK)
+  if (aba_rc != WYRELOG_E_OK
+      || aba_result != WYL_POLICY_AUTHORITY_MUTATION_STALE)
     return 9758;
   /* Still sealed.  The generation CAS refused the stale update; without it the
    * state CAS matches the re-sealed row and this comes back active. */
@@ -1345,6 +1364,29 @@ check_store_unseal_loses_a_race_without_writing (void)
       "AND graph_id='graph-aba' AND lifecycle_state='sealed' AND sealed=1;",
       &count) != 0 || count != 1)
     return 9759;
+
+  /* Exercise the integer ceiling before the UPDATE can wrap.  The normal
+   * authority trigger intentionally prevents manufacturing this state, so
+   * temporarily remove only that guard in this isolated test database.  The
+   * operation rejects at the integer ceiling before preparing an UPDATE, so
+   * the missing trigger cannot affect the assertion and the store is closed
+   * immediately afterward. */
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  if (sqlite3_exec (db, "DROP TRIGGER fact_graph_authority_update_guard;",
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 9760;
+  if (sqlite3_exec (db,
+      "UPDATE fact_graphs SET lifecycle_generation=9223372036854775807, "
+      "lifecycle_state='sealed', sealed=1, last_error_class='none' "
+      "WHERE tenant_id='tenant-a' AND graph_id='graph-aba';",
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 9761;
+  WylPolicyAuthorityMutationResult max_result =
+      WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  if (wyl_policy_store_unseal_fact_graph_with_result (store, "tenant-a",
+      "graph-aba", &max_result) != WYRELOG_E_POLICY
+      || max_result != WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION)
+    return 9763;
 
   g_clear_pointer (&store, wyl_policy_store_close);
   if (!cleanup_fact_graph_root (root))
