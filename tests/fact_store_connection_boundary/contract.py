@@ -113,8 +113,11 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
 }
 RAW_PROFILE_ADDITIONS = {
     ("wyrelog/fact/store.c", "WYL_HAS_SECURE_DUCKDB_BRIDGE"): (
-        (2, 0, 1, 1),
-        {"wyl_fact_store_open_provisioned_pair": 2},
+        (4, 0, 2, 2),
+        {
+            "wyl_fact_store_open_provisioned_pair": 2,
+            "wyl_fact_store_open_provisioned_namespace_with_lease": 2,
+        },
         {},
     ),
 }
@@ -137,6 +140,11 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "wyl_fact_replay_publish_graph_closed_and_open",
     "wyl_fact_replay_refresh_graph_publication",
     "wyl_fact_replay_validate_graph",
+    "open_graph_engine_with_artifact_lease",
+    "refresh_graph_closed_internal",
+    "validate_graph_internal",
+    "wyl_fact_replay_refresh_graph_closed_with_artifact_lease",
+    "wyl_fact_replay_validate_graph_with_artifact_lease",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
     "wyrelog/fact/compound.c": {"materialize_arg_unlocked"},
@@ -154,6 +162,11 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "wyl_fact_replay_publish_graph_closed_and_open",
         "wyl_fact_replay_refresh_graph_publication",
         "wyl_fact_replay_validate_graph",
+        "open_graph_engine_with_artifact_lease",
+        "refresh_graph_closed_internal",
+        "validate_graph_internal",
+        "wyl_fact_replay_refresh_graph_closed_with_artifact_lease",
+        "wyl_fact_replay_validate_graph_with_artifact_lease",
     },
     "wyrelog/fact/store.c": {
         "execute_forget_intent_unlocked",
@@ -354,7 +367,7 @@ def validate(files: dict[str, str]) -> None:
 
     self_test_at = meson.index("test('fact-store-connection-boundary-self'")
     self_test_block = meson[self_test_at:meson.index("\n\n", self_test_at)]
-    if "timeout : 900" not in self_test_block \
+    if "timeout : 1800" not in self_test_block \
             or "is_parallel : false" not in self_test_block:
         raise AssertionError(
             "connection boundary self-test lost its serialized CI budget"

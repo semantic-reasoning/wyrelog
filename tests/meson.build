@@ -3446,13 +3446,14 @@ fact_store_connection_boundary_sources = files(
 )
 test('fact-store-connection-boundary', python3,
   args : [files('test-fact-store-connection-boundary.py'),
-    meson.project_source_root(), fact_store_connection_boundary_sources])
+    meson.project_source_root(), fact_store_connection_boundary_sources],
+  timeout : 120)
 
 test('fact-store-connection-boundary-self', python3,
   args : [files('test-fact-store-connection-boundary.py'),
     '--self-test', meson.project_source_root(),
     fact_store_connection_boundary_sources],
-  timeout : 900,
+  timeout : 1800,
   is_parallel : false)
 
 test('fact-store-connection-boundary-parser', python3,

@@ -3948,7 +3948,7 @@ def self_test(files: dict[str, str]) -> None:
                 mutation_delta(files, case.files)
                 for case in cases
             ),
-            chunksize=1,
+            chunksize=32,
         )
         for case, error in zip(cases, errors):
             if error is None:
