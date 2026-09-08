@@ -1346,6 +1346,7 @@ test_policy_graph_authority = executable('test-policy-graph-authority',
 # in-flight set and runs the test alone, so the deadline measures the test
 # rather than the queue.  POSIX parallelism is untouched.
 test('policy-graph-authority', test_policy_graph_authority,
+  is_parallel : host_machine.system() != 'windows',
   timeout : 90,
   is_parallel : host_machine.system() != 'windows',
 )
@@ -1717,6 +1718,7 @@ if get_option('enable_fact_store').allowed()
   # after the policy test's step change -- so its one recorded overrun is a
   # contention sample, which is precisely what serialization addresses.
   test('fact-store', test_fact_store,
+    is_parallel : host_machine.system() != 'windows',
     timeout : 60,
     is_parallel : host_machine.system() != 'windows',
   )
