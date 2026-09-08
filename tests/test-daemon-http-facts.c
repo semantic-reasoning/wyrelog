@@ -1387,6 +1387,18 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"sealed\":true") == NULL)
     return 31;
+  /* The HTTP route must drive the handle lifecycle, not only flip the
+   * durable policy bit.  A direct policy-store write leaves the runtime
+   * admission barrier open, which is the regression covered by #973 AC6. */
+  WylFactGraphRuntimeStatus sealed_status = { 0 };
+  if (wyl_handle_get_fact_graph_runtime_status (handle, WYL_TENANT_DEFAULT,
+      "orders", &sealed_status) != WYRELOG_E_OK
+      || sealed_status.admission != WYL_FACT_GRAPH_ADMISSION_CLOSED
+      || sealed_status.queryable) {
+    wyl_fact_graph_runtime_status_clear (&sealed_status);
+    return 108;
+  }
+  wyl_fact_graph_runtime_status_clear (&sealed_status);
 #ifdef WYL_HAS_AUDIT
   /* Sealing is irreversible and closes the graph to every mutation, and it
    * emitted nothing.  wyl_decide does audit the authorization, but its record
