@@ -263,9 +263,11 @@ wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
 wyrelog_error_t wyl_handle_refresh_fact_graph (WylHandle * self,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeStatus * out_status);
-/* Caller must own the daemon policy write lease; the wrapper serializes this
- * graph lifecycle operation with targeted refreshes on this handle. */
+/* Activate one graph through the handle's replay coordinator. The caller
+ * supplies a daemon policy write lease; the wrapper verifies that its pinned
+ * store is this handle's current store before changing lifecycle state. */
 wyrelog_error_t wyl_handle_unseal_fact_graph (WylHandle * self,
+    WylServiceAuthWriteLease * write_lease,
     const wyl_policy_fact_graph_info_t * graph_info, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome * out_outcome);
 /* Capture one graph's runtime status without refreshing it (issue #546).
